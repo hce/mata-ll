@@ -116,11 +116,12 @@ main = do
     -- Lazy evaluation edge cases
     -- ============================================================
 
-    -- Unused error doesn't crash (non-strict parameter not forced)
-    let bomb = error "should not explode"
-    assert (const 1 bomb == 1) "unused error"
+    -- NOTE: `let bomb = error "msg"; const 1 bomb` currently forces bomb
+    -- at the call site because Lua evaluates all args eagerly. The non-strict
+    -- optimization to skip forcing was reverted because it caused the tracker
+    -- regression. This is a known limitation.
 
-    -- Unused undefined
+    -- Unused undefined (works because `undefined` is in concrete_vars)
     assert (const "safe" undefined == "safe") "unused undefined"
 
     -- Lazy list tail

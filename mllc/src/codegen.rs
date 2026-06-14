@@ -1485,20 +1485,8 @@ impl CodeGen {
                         if i > 0 { self.emit(", "); }
                         let is_strict = callee_strict.as_ref()
                             .map_or(false, |v| v.get(i).copied().unwrap_or(false));
-                        let known_nonstrict = callee_strict.is_some() && !is_strict;
                         let pass_eager = Self::is_cheap_arg(a) || is_strict;
-                        if pass_eager && known_nonstrict {
-                            // Callee doesn't need this arg — pass without forcing
-                            // so lazy values (thunks, undefined) stay unevaluated
-                            let sname = if let TExprKind::Var(name) = &a.kind {
-                                Some(sanitize_name(name))
-                            } else { None };
-                            if let Some(ref s) = sname {
-                                self.emit(&self.lua_ref(s));
-                            } else {
-                                self.gen_expr(a);
-                            }
-                        } else if pass_eager {
+                        if pass_eager {
                             self.gen_expr(a);
                         } else {
                             self.emit("__thunk(function() return ");
