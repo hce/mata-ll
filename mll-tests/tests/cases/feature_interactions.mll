@@ -32,8 +32,7 @@ treeDepth (Node l r) = 1 + max (treeDepth l) (treeDepth r)
 -- List comprehension + pattern matching + guards
 -- ============================================================
 
--- Pattern-matching generators in comprehensions not supported
--- Use explicit recursion instead
+-- Explicit recursion style (pattern-matching generators also work now)
 getOks :: [Result Integer] -> [Integer]
 getOks [] = []
 getOks (Ok x : rest) = x : getOks rest

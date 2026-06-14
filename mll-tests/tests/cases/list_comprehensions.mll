@@ -36,3 +36,24 @@ main = do
     let pairs = [(x, y) | x <- [1, 2, 3], y <- [1, 2, 3], x < y]
     assert (length pairs == 3) "dependent gen count"
     assert (fst (head pairs) == 1) "dependent gen first"
+
+    -- Pattern-matching generators
+    let rs = [Right 1, Left "err", Right 2, Left "bad", Right 3]
+    assert ([x | Right x <- rs] == [1, 2, 3]) "pattern gen: Right"
+    assert ([s | Left s <- rs] == ["err", "bad"]) "pattern gen: Left"
+
+    -- Wildcard pattern generator
+    assert ([1 | _ <- [10, 20, 30]] == [1, 1, 1]) "wildcard gen"
+
+    -- Tuple pattern generator
+    let kvs = [(1, "a"), (2, "b"), (3, "c")]
+    assert ([v | (_, v) <- kvs] == ["a", "b", "c"]) "tuple pattern gen: values"
+    assert ([k | (k, _) <- kvs] == [1, 2, 3]) "tuple pattern gen: keys"
+
+    -- Pattern generator with guard
+    assert ([x | Right x <- rs, x > 1] == [2, 3]) "pattern gen + guard"
+
+    -- Constructor pattern with multiple generators
+    let xs = [Right 10, Left "x", Right 20]
+    let ys = [Right 1, Right 2, Left "y"]
+    assert ([a + b | Right a <- xs, Right b <- ys] == [11, 12, 21, 22]) "multi pattern gen"

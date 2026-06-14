@@ -4,7 +4,7 @@ use crate::lexer::{Located, Token};
 
 /// List comprehension qualifier (internal to parser, desugared before AST)
 enum ListCompQual {
-    Generator { name: String, expr: Expr },
+    Generator { pattern: Pattern, expr: Expr },
     Guard(Expr),
 }
 
@@ -1226,21 +1226,23 @@ impl Parser {
     /// Only applies when `.` is adjacent to the preceding token (no space),
     /// to distinguish from function composition `f . g`.
     /// Parse list comprehension qualifiers: x <- xs, pred, y <- ys, ...
+    /// Supports pattern-matching generators: Ok x <- rs, (a, b) <- pairs, ...
     fn parse_list_comprehension_quals(&mut self) -> Result<Vec<ListCompQual>, String> {
         let mut quals = Vec::new();
         loop {
             self.skip_newlines_and_indent();
-            // Try generator: name <- expr
+            // Try generator: pattern <- expr
             let save = self.pos;
             let save_indent = self.current_indent;
-            if let Token::Ident(name) = self.peek().clone() {
-                self.advance();
-                if self.at(&Token::Bind) {
-                    self.advance();
-                    let expr = self.parse_expr()?;
-                    quals.push(ListCompQual::Generator { name, expr });
-                    if self.at(&Token::Comma) { self.advance(); continue; }
-                    break;
+            if self.is_pattern_start() {
+                if let Ok(pat) = self.parse_pattern() {
+                    if self.at(&Token::Bind) {
+                        self.advance();
+                        let expr = self.parse_expr()?;
+                        quals.push(ListCompQual::Generator { pattern: pat, expr });
+                        if self.at(&Token::Comma) { self.advance(); continue; }
+                        break;
+                    }
                 }
                 // Not a generator — backtrack and parse as guard
                 self.pos = save;
@@ -1256,10 +1258,11 @@ impl Parser {
     }
 
     /// Desugar [expr | quals] into concatMap / if chains
-    /// [e | x <- xs, rest] => concatMap (\x -> [e | rest]) xs
-    /// [e | pred, rest]    => if pred then [e | rest] else []
-    /// [e]                 => [e] (singleton)
-    fn desugar_list_comprehension(&self, body: Expr, quals: &[ListCompQual]) -> Expr {
+    /// [e | x <- xs, rest]    => concatMap (\x -> [e | rest]) xs
+    /// [e | Pat <- xs, rest]  => concatMap (\v -> case v of { Pat -> [e | rest]; _ -> [] }) xs
+    /// [e | pred, rest]       => if pred then [e | rest] else []
+    /// [e]                    => [e] (singleton)
+    fn desugar_list_comprehension(&self, body: Expr, quals: &[ListCompQual], counter: &mut usize) -> Expr {
         if quals.is_empty() {
             // Singleton list: [body]
             return Expr::App(
@@ -1271,23 +1274,57 @@ impl Parser {
             );
         }
         match &quals[0] {
-            ListCompQual::Generator { name, expr } => {
-                // concatMap (\name -> [body | rest]) expr
-                let rest = self.desugar_list_comprehension(body, &quals[1..]);
-                Expr::App(
-                    Box::new(Expr::App(
-                        Box::new(Expr::Var("concatMap".to_string())),
-                        Box::new(Expr::Lambda {
-                            params: vec![name.clone()],
-                            body: Box::new(rest),
-                        }),
-                    )),
-                    Box::new(expr.clone()),
-                )
+            ListCompQual::Generator { pattern, expr } => {
+                let rest = self.desugar_list_comprehension(body, &quals[1..], counter);
+                match pattern {
+                    // Simple variable: concatMap (\name -> rest) expr
+                    Pattern::Var(name) => {
+                        Expr::App(
+                            Box::new(Expr::App(
+                                Box::new(Expr::Var("concatMap".to_string())),
+                                Box::new(Expr::Lambda {
+                                    params: vec![name.clone()],
+                                    body: Box::new(rest),
+                                }),
+                            )),
+                            Box::new(expr.clone()),
+                        )
+                    }
+                    // Pattern: concatMap (\v -> case v of { pat -> rest; _ -> [] }) expr
+                    pat => {
+                        let var_name = format!("__comp{}", counter);
+                        *counter += 1;
+                        let case_expr = Expr::Case {
+                            scrutinee: Box::new(Expr::Var(var_name.clone())),
+                            branches: vec![
+                                CaseBranch {
+                                    pattern: pat.clone(),
+                                    guards: vec![],
+                                    body: rest,
+                                },
+                                CaseBranch {
+                                    pattern: Pattern::Wildcard,
+                                    guards: vec![],
+                                    body: Expr::Con("[]".to_string()),
+                                },
+                            ],
+                        };
+                        Expr::App(
+                            Box::new(Expr::App(
+                                Box::new(Expr::Var("concatMap".to_string())),
+                                Box::new(Expr::Lambda {
+                                    params: vec![var_name],
+                                    body: Box::new(case_expr),
+                                }),
+                            )),
+                            Box::new(expr.clone()),
+                        )
+                    }
+                }
             }
             ListCompQual::Guard(pred) => {
                 // if pred then [body | rest] else []
-                let rest = self.desugar_list_comprehension(body, &quals[1..]);
+                let rest = self.desugar_list_comprehension(body, &quals[1..], counter);
                 Expr::If {
                     cond: Box::new(pred.clone()),
                     then_branch: Box::new(rest),
@@ -1559,7 +1596,7 @@ impl Parser {
                     self.advance();
                     let quals = self.parse_list_comprehension_quals()?;
                     self.expect(&Token::RightBracket)?;
-                    return Ok(self.desugar_list_comprehension(first, &quals));
+                    return Ok(self.desugar_list_comprehension(first, &quals, &mut 0));
                 }
                 // Regular list literal
                 let mut items = vec![first];
