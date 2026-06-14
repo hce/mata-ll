@@ -41,6 +41,43 @@ macro_rules! mll_test {
     };
 }
 
+fn run_mll_file_with_lib(path: &Path) {
+    let path = path.to_path_buf();
+    let lib_path = Path::new("../lib").to_path_buf();
+    let result = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let source = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
+
+            let source_dir = path.parent().unwrap_or(Path::new("."));
+            let lua_code = match mllc::compile(&source, source_dir, &[&lib_path]) {
+                Ok(r) => r.lua_code,
+                Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
+            };
+
+            let lua = mlua::Lua::new();
+            match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
+                Ok(()) => {}
+                Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
+            }
+        })
+        .unwrap()
+        .join();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
+macro_rules! mll_lib_test {
+    ($name:ident, $file:expr) => {
+        #[test]
+        fn $name() {
+            run_mll_file_with_lib(Path::new(concat!("tests/cases/", $file)));
+        }
+    };
+}
+
 mll_test!(basics, "basics.mll");
 mll_test!(lists, "lists.mll");
 mll_test!(data_types, "data_types.mll");
@@ -81,6 +118,14 @@ mll_test!(scoping, "scoping.mll");
 mll_test!(type_aliases, "type_aliases.mll");
 mll_test!(edge_cases, "edge_cases.mll");
 mll_test!(feature_interactions, "feature_interactions.mll");
+
+// Library module tests (need lib/ search path)
+mll_lib_test!(lib_lstring, "lib_lstring.mll");
+mll_lib_test!(lib_lbit, "lib_lbit.mll");
+mll_lib_test!(lib_lmath, "lib_lmath.mll");
+mll_lib_test!(lib_json, "lib_json.mll");
+mll_lib_test!(lib_regex, "lib_regex.mll");
+mll_lib_test!(lib_los, "lib_los.mll");
 
 // Compile-error tests: these SHOULD fail to compile
 #[test]
