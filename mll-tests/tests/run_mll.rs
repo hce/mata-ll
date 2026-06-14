@@ -215,8 +215,6 @@ fn examples_compile() {
     // Examples expected to fail or skip
     let expected_fail: Vec<&str> = vec![
         "bench",              // show specialization gap on list display
-        "regex_test",         // deep typechecker recursion on CPS types needs larger stack
-        "jsontest",           // deep typechecker recursion on imported JSON module
         "aestest",            // 256-element S-box lists need large stack (runs via mll compiler)
         "bstest",             // needs large stack (runs via mll compiler)
         "rectype",            // legitimate type errors (Ord on tuples, String as [Char])
