@@ -791,6 +791,10 @@ impl CodeGen {
     /// in accumulator patterns while preserving laziness for expensive
     /// computations (user function calls).
     fn is_cheap(expr: &TExpr) -> bool {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::is_cheap_inner(expr))
+    }
+
+    fn is_cheap_inner(expr: &TExpr) -> bool {
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Var(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
@@ -854,6 +858,13 @@ impl CodeGen {
     }
 
     fn scan_call_sites(expr: &TExpr,
+        ever_thunked: &mut std::collections::HashMap<String, Vec<bool>>,
+        ever_called: &mut std::collections::HashMap<String, Vec<bool>>,
+    ) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::scan_call_sites_inner(expr, ever_thunked, ever_called))
+    }
+
+    fn scan_call_sites_inner(expr: &TExpr,
         ever_thunked: &mut std::collections::HashMap<String, Vec<bool>>,
         ever_called: &mut std::collections::HashMap<String, Vec<bool>>,
     ) {
@@ -938,6 +949,10 @@ impl CodeGen {
     /// These need special handling in gen_expr (e.g. : → __mll_cons) that
     /// gen_expr_subst doesn't replicate, so we skip inlining for them.
     fn body_has_constructors(expr: &TExpr) -> bool {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::body_has_constructors_inner(expr))
+    }
+
+    fn body_has_constructors_inner(expr: &TExpr) -> bool {
         match &expr.kind {
             TExprKind::Con(_) => true,
             TExprKind::App(f, a) => Self::body_has_constructors(f) || Self::body_has_constructors(a),
@@ -952,6 +967,10 @@ impl CodeGen {
     /// Only recurses into sub-expressions that might contain substitution
     /// variables; delegates to gen_expr for everything else.
     fn gen_expr_subst(&mut self, expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_subst_inner(expr, subst))
+    }
+
+    fn gen_expr_subst_inner(&mut self, expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) {
         // If no substitution vars appear in this expr, use normal gen_expr
         // (which handles cons, list literals, etc. correctly)
         let has_subst_vars = subst.keys().any(|k| expr_references_name(expr, k));
@@ -1038,6 +1057,10 @@ impl CodeGen {
     /// callee will force the value immediately — avoids thunk allocation
     /// for calls like fi(ch, fiVol) that compute simple values.
     fn is_cheap_arg(expr: &TExpr) -> bool {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::is_cheap_arg_inner(expr))
+    }
+
+    fn is_cheap_arg_inner(expr: &TExpr) -> bool {
         if Self::is_cheap(expr) { return true; }
         match &expr.kind {
             TExprKind::App(func, arg) => {
@@ -1092,6 +1115,10 @@ impl CodeGen {
     /// - pure/return → emit the value
     /// Falls back to __force(expr)() for unknown actions.
     fn gen_action(&mut self, expr: &TExpr) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_action_inner(expr))
+    }
+
+    fn gen_action_inner(&mut self, expr: &TExpr) {
         if !Self::is_nullary_action_type(&expr.ty) {
             self.gen_expr(expr);
             return;
@@ -1191,6 +1218,10 @@ impl CodeGen {
     }
 
     fn gen_bind_chain_inner(&mut self, expr: &TExpr, inside_action: bool) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_bind_chain_inner_impl(expr, inside_action))
+    }
+
+    fn gen_bind_chain_inner_impl(&mut self, expr: &TExpr, inside_action: bool) {
         match &expr.kind {
             TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
                 if let TExprKind::Lambda { params, body } = &rhs.kind {
@@ -1299,6 +1330,10 @@ impl CodeGen {
     /// Variables known to be concrete (already forced) are emitted bare.
     /// Unknown variables are forced — they may be let-bound thunks.
     fn gen_expr_raw(&mut self, expr: &TExpr) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_raw_inner(expr))
+    }
+
+    fn gen_expr_raw_inner(&mut self, expr: &TExpr) {
         if let TExprKind::Var(name) = &expr.kind {
             match name.as_str() {
                 "otherwise" => self.emit("true"),
@@ -1320,6 +1355,10 @@ impl CodeGen {
     }
 
     fn gen_expr(&mut self, expr: &TExpr) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_inner(expr))
+    }
+
+    fn gen_expr_inner(&mut self, expr: &TExpr) {
         match &expr.kind {
             TExprKind::Var(name) => {
                 match name.as_str() {
@@ -1883,6 +1922,10 @@ impl CodeGen {
     /// Generate an expression with lazy cons tails for self-referencing definitions.
     /// Cons operations wrap the tail in a thunk via __mll_lazy_cons.
     fn gen_expr_lazy(&mut self, expr: &TExpr, self_name: &str) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_lazy_inner(expr, self_name))
+    }
+
+    fn gen_expr_lazy_inner(&mut self, expr: &TExpr, self_name: &str) {
         // Check for infix cons: x : rest
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind {
             if op == ":" {
@@ -2025,6 +2068,10 @@ fn sanitize_name(name: &str) -> String {
 
 /// Check if a TExpr references a given name anywhere
 fn expr_references_name(expr: &TExpr, name: &str) -> bool {
+    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || expr_references_name_inner(expr, name))
+}
+
+fn expr_references_name_inner(expr: &TExpr, name: &str) -> bool {
     match &expr.kind {
         TExprKind::Var(n) => n == name,
         TExprKind::Con(_) | TExprKind::Lit(_) | TExprKind::OpFunc(_) => false,

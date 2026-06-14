@@ -175,6 +175,10 @@ fn demanded_guards(guards: &[TGuard], env: &HashMap<String, Vec<bool>>) -> HashS
 /// `env` contains known strictness info for other functions, enabling
 /// cross-function demand propagation.
 fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<String> {
+    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || demanded_vars_inner(expr, env))
+}
+
+fn demanded_vars_inner(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<String> {
     match &expr.kind {
         TExprKind::Var(x) => {
             let mut s = HashSet::new();

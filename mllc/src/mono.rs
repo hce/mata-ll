@@ -263,6 +263,10 @@ impl Monomorphizer {
     }
 
     fn mono_expr(&mut self, expr: TExpr) -> TExpr {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.mono_expr_inner(expr))
+    }
+
+    fn mono_expr_inner(&mut self, expr: TExpr) -> TExpr {
         let ty = expr.ty.clone();
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
@@ -986,6 +990,10 @@ impl Monomorphizer {
     }
 
     fn collect_expr_vars(expr: &TExpr, vars: &mut Vec<TyVar>) {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::collect_expr_vars_inner(expr, vars))
+    }
+
+    fn collect_expr_vars_inner(expr: &TExpr, vars: &mut Vec<TyVar>) {
         for v in expr.ty.free_vars() { if !vars.contains(&v) { vars.push(v); } }
         match &expr.kind {
             TExprKind::App(f, a) => { Self::collect_expr_vars(f, vars); Self::collect_expr_vars(a, vars); }
@@ -1042,6 +1050,10 @@ impl Monomorphizer {
 
     /// Rewrite an expression for dictionary-passing.
     fn rewrite_dict_expr(&self, expr: TExpr, func_name: &str, class_to_dict: &HashMap<String, String>) -> TExpr {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.rewrite_dict_expr_inner(expr, func_name, class_to_dict))
+    }
+
+    fn rewrite_dict_expr_inner(&self, expr: TExpr, func_name: &str, class_to_dict: &HashMap<String, String>) -> TExpr {
         let ty = expr.ty.clone();
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
@@ -1157,6 +1169,10 @@ impl Monomorphizer {
 
     /// Rewrite call sites to dict-passing functions.
     fn rewrite_dict_call_sites(&self, expr: TExpr) -> TExpr {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.rewrite_dict_call_sites_inner(expr))
+    }
+
+    fn rewrite_dict_call_sites_inner(&self, expr: TExpr) -> TExpr {
         let ty = expr.ty.clone();
         match expr.kind {
             TExprKind::App(_, _) => {

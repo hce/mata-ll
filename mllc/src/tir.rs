@@ -86,6 +86,10 @@ impl TExpr {
 
     /// Apply a substitution to all types in this expression tree
     pub fn apply_subst(self, subst: &Subst) -> Self {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.apply_subst_inner(subst))
+    }
+
+    fn apply_subst_inner(self, subst: &Subst) -> Self {
         let ty = self.ty.apply_subst(subst);
         let kind = match self.kind {
             TExprKind::App(f, a) => TExprKind::App(

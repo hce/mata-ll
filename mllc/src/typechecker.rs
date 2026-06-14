@@ -2068,6 +2068,10 @@ impl Checker {
     // --- Expression inference (returns typed expr) ---
 
     fn infer_expr(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), TypeErrorKind> {
+        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.infer_expr_inner(expr, env))
+    }
+
+    fn infer_expr_inner(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), TypeErrorKind> {
         match expr {
             Expr::Var(name) => {
                 if self.enforce_hidden && self.hidden_names.contains(name) {

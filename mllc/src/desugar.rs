@@ -43,6 +43,10 @@ fn desugar_clause(clause: &mut Clause) {
 }
 
 fn desugar_expr(expr: Expr) -> Expr {
+    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || desugar_expr_inner(expr))
+}
+
+fn desugar_expr_inner(expr: Expr) -> Expr {
     match expr {
         Expr::Do(stmts) => desugar_do(stmts),
         Expr::App(f, a) => Expr::App(
@@ -95,6 +99,10 @@ fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
 }
 
 fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
+    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || desugar_do_stmts_inner(stmts, idx))
+}
+
+fn desugar_do_stmts_inner(stmts: &[DoStmt], idx: usize) -> Expr {
     if idx >= stmts.len() {
         // Shouldn't happen with well-formed do blocks
         return Expr::Lit(Literal::Bool(false));
