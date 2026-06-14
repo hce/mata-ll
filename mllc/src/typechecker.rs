@@ -2068,10 +2068,6 @@ impl Checker {
     // --- Expression inference (returns typed expr) ---
 
     fn infer_expr(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), TypeErrorKind> {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.infer_expr_inner(expr, env))
-    }
-
-    fn infer_expr_inner(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), TypeErrorKind> {
         match expr {
             Expr::Var(name) => {
                 if self.enforce_hidden && self.hidden_names.contains(name) {
@@ -2112,6 +2108,12 @@ impl Checker {
                 ))
             }
             Expr::InfixApp { op, lhs, rhs } => {
+                // Detect bind chains (from do-blocks) and process iteratively
+                // to avoid stack overflow on deeply nested expressions.
+                if (op == ">>=" || op == ">>") && self.is_bind_chain(rhs) {
+                    return self.infer_bind_chain(expr, env);
+                }
+
                 // Desugar to App(App(op, lhs), rhs) for type inference
                 let op_expr = if env.lookup(op).is_some() {
                     Expr::Var(op.clone())
@@ -2325,6 +2327,178 @@ impl Checker {
                 Ok((TExpr::new(TExprKind::Tuple(telems), tuple_ty.clone()), tuple_ty, subst))
             }
         }
+    }
+
+    /// Check if an expression is part of a bind chain (from do-block desugaring).
+    fn is_bind_chain(&self, expr: &Expr) -> bool {
+        match expr {
+            Expr::Lambda { body, .. } => {
+                match body.as_ref() {
+                    Expr::InfixApp { op, .. } if op == ">>=" || op == ">>" => true,
+                    Expr::Let { body, .. } => matches!(body.as_ref(),
+                        Expr::InfixApp { op, .. } if op == ">>=" || op == ">>"),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Type-check a bind chain iteratively. Flattens the right-spine of
+    /// InfixApp(>>=)/InfixApp(>>)/Let into a heap-allocated Vec and processes
+    /// each statement in a loop, avoiding deep stack recursion.
+    fn infer_bind_chain(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), TypeErrorKind> {
+        // Flatten the bind chain into a list of statements
+        enum BindStmt<'a> {
+            Bind { op: &'a str, lhs: &'a Expr, param: &'a str, },
+            Let { binds: &'a [LocalDef] },
+        }
+
+        let mut stmts: Vec<BindStmt> = Vec::new();
+        let mut current = expr;
+
+        loop {
+            match current {
+                Expr::InfixApp { op, lhs, rhs } if op == ">>=" || op == ">>" => {
+                    if let Expr::Lambda { params, body } = rhs.as_ref() {
+                        stmts.push(BindStmt::Bind { op, lhs, param: &params[0] });
+                        current = body;
+                        continue;
+                    }
+                    // >>= without Lambda rhs — not a bind chain continuation
+                    stmts.push(BindStmt::Bind { op, lhs, param: "_" });
+                    current = rhs;
+                    break;
+                }
+                Expr::Let { binds, body } => {
+                    stmts.push(BindStmt::Let { binds });
+                    current = body;
+                    continue;
+                }
+                _ => break,
+            }
+        }
+
+        // Process each statement iteratively
+        let mut local_env = env.clone();
+        let mut subst = Subst::empty();
+        // Collect typed results to reconstruct bottom-up
+        struct TypedBind {
+            op: String,
+            lhs_te: TExpr,
+            param: String,
+            param_ty: Ty,
+            result_ty: Ty,
+        }
+        enum TypedStmt {
+            Bind(TypedBind),
+            Let(Vec<TLocalDef>),
+        }
+        let mut typed_stmts: Vec<TypedStmt> = Vec::new();
+
+        for stmt in &stmts {
+            match stmt {
+                BindStmt::Bind { op, lhs, param } => {
+                    // Type-check: lhs >>= \param -> rest
+                    // Desugar the single InfixApp to App(App(op, lhs), rhs_placeholder)
+                    let op_expr = if local_env.lookup(op).is_some() {
+                        Expr::Var(op.to_string())
+                    } else {
+                        Expr::OpFunc(op.to_string())
+                    };
+                    // Infer op type
+                    let (top, op_ty, s_op) = self.infer_expr(&op_expr, &local_env)?;
+                    subst = subst.compose(&s_op);
+                    local_env = local_env.apply_subst(&s_op);
+
+                    // Infer lhs type
+                    let (tlhs, lhs_ty, s_lhs) = self.infer_expr(lhs, &local_env)?;
+                    subst = subst.compose(&s_lhs);
+                    local_env = local_env.apply_subst(&s_lhs);
+
+                    // Unify: op_ty ~ lhs_ty -> (param_ty -> result_ty) -> result_ty
+                    let param_ty = self.fresh_var("_bp");
+                    let result_ty = self.fresh_var("_br");
+                    let op_ty = op_ty.apply_subst(&s_lhs);
+                    let expected_op = Ty::arrow(lhs_ty, Ty::arrow(
+                        Ty::arrow(param_ty.clone(), result_ty.clone()),
+                        result_ty.clone(),
+                    ));
+                    let s_unify = unify(&op_ty, &expected_op)?;
+                    subst = subst.compose(&s_unify);
+                    local_env = local_env.apply_subst(&s_unify);
+                    let bound_ty = param_ty.apply_subst(&s_unify);
+
+                    // Bind parameter
+                    if *param != "_" {
+                        local_env.insert(param.to_string(), Scheme::mono(bound_ty.clone()));
+                    }
+
+                    typed_stmts.push(TypedStmt::Bind(TypedBind {
+                        op: op.to_string(),
+                        lhs_te: tlhs,
+                        param: param.to_string(),
+                        param_ty: bound_ty,
+                        result_ty: result_ty.apply_subst(&s_unify),
+                    }));
+                }
+                BindStmt::Let { binds } => {
+                    let mut tbinds = Vec::new();
+                    for bind in *binds {
+                        let (te, bind_ty, s) = self.infer_expr(&bind.body, &local_env)?;
+                        subst = subst.compose(&s);
+                        let gen_env = local_env.apply_subst(&subst);
+                        let scheme = self.generalize(&gen_env, &bind_ty.apply_subst(&subst));
+                        local_env = gen_env;
+                        local_env.insert(bind.name.clone(), scheme);
+                        tbinds.push(TLocalDef { name: bind.name.clone(), patterns: vec![], body: te });
+                    }
+                    typed_stmts.push(TypedStmt::Let(tbinds));
+                }
+            }
+        }
+
+        // Type-check the terminal expression
+        let (te_terminal, terminal_ty, s_term) = self.infer_expr(current, &local_env)?;
+        subst = subst.compose(&s_term);
+
+        // Reconstruct the nested TExpr bottom-up
+        let mut result_te = te_terminal;
+        let mut result_ty = terminal_ty;
+
+        for tstmt in typed_stmts.into_iter().rev() {
+            match tstmt {
+                TypedStmt::Bind(tb) => {
+                    let lambda_ty = Ty::arrow(tb.param_ty.clone(), result_ty.clone());
+                    let lambda = TExpr::new(
+                        TExprKind::Lambda {
+                            params: vec![(tb.param, tb.param_ty)],
+                            body: Box::new(result_te),
+                        },
+                        lambda_ty.clone(),
+                    );
+                    let infix_ty = result_ty.clone();
+                    result_te = TExpr::new(
+                        TExprKind::InfixApp {
+                            op: tb.op,
+                            lhs: Box::new(tb.lhs_te),
+                            rhs: Box::new(lambda),
+                        },
+                        infix_ty.clone(),
+                    );
+                    result_ty = infix_ty;
+                }
+                TypedStmt::Let(binds) => {
+                    let let_ty = result_ty.clone();
+                    result_te = TExpr::new(
+                        TExprKind::Let { binds, body: Box::new(result_te) },
+                        let_ty,
+                    );
+                }
+            }
+        }
+
+        Ok((result_te, result_ty, subst))
     }
 
     fn check_expr_typed(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), TypeErrorKind> {

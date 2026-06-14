@@ -116,7 +116,7 @@ MATA-LL TODO
 
 ## Known limitations
 
-- [x] Typechecker stack overflow on CPS-heavy types (fixed: stacker crate for dynamic stack growth across all compiler phases)
+- [x] Typechecker stack overflow on CPS-heavy types (fixed: iterative right-spine processing for bind chains)
 - [x] Top-level let-in value bindings (thunked values removed from concrete_vars)
 - [x] Inliner captures free variables in lambda bodies (gen_expr_subst now handles Lambda)
 - [ ] `let bomb = error "msg"; const 1 bomb` forces bomb eagerly at call site (Lua evaluates all args; non-strict optimization reverted due to tracker regression from imprecise demand analysis)

@@ -263,10 +263,91 @@ impl Monomorphizer {
     }
 
     fn mono_expr(&mut self, expr: TExpr) -> TExpr {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.mono_expr_inner(expr))
+        // Iterative right-spine processing for bind chains
+        enum SpineFrame {
+            Bind { ty: Ty, op: String, lhs: TExpr, lambda_ty: Ty, params: Vec<(String, Ty)> },
+            Seq { ty: Ty, op: String, lhs: TExpr },
+            Let { ty: Ty, binds: Vec<TLocalDef> },
+        }
+
+        let mut spine: Vec<SpineFrame> = Vec::new();
+        let mut current = expr;
+
+        loop {
+            match &current.kind {
+                TExprKind::InfixApp { op, .. } if op == ">>=" || op == ">>" => {
+                    let ty = current.ty.clone();
+                    if let TExprKind::InfixApp { op, lhs, rhs } = current.kind {
+                        let rhs_ty = rhs.ty.clone();
+                        if op == ">>=" {
+                            if let TExprKind::Lambda { params, body } = rhs.kind {
+                                let lhs = self.mono_expr(*lhs);
+                                spine.push(SpineFrame::Bind {
+                                    ty, op,
+                                    lhs,
+                                    lambda_ty: rhs_ty,
+                                    params,
+                                });
+                                current = *body;
+                                continue;
+                            }
+                        }
+                        let lhs = self.mono_expr(*lhs);
+                        spine.push(SpineFrame::Seq { ty, op, lhs });
+                        current = *rhs;
+                        continue;
+                    }
+                    unreachable!();
+                }
+                TExprKind::Let { .. } if !spine.is_empty() => {
+                    let ty = current.ty.clone();
+                    if let TExprKind::Let { binds, body } = current.kind {
+                        let binds = binds.into_iter().map(|b| TLocalDef {
+                            name: b.name,
+                            patterns: b.patterns,
+                            body: self.mono_expr(b.body),
+                        }).collect();
+                        spine.push(SpineFrame::Let { ty, binds });
+                        current = *body;
+                        continue;
+                    }
+                    unreachable!();
+                }
+                _ => break,
+            }
+        }
+
+        // Process terminal node normally
+        let mut result = self.mono_expr_node(current);
+
+        // Reconstruct spine bottom-up
+        for frame in spine.into_iter().rev() {
+            result = match frame {
+                SpineFrame::Bind { ty, op, lhs, lambda_ty, params } => TExpr {
+                    kind: TExprKind::InfixApp {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(TExpr {
+                            kind: TExprKind::Lambda { params, body: Box::new(result) },
+                            ty: lambda_ty,
+                        }),
+                    },
+                    ty,
+                },
+                SpineFrame::Seq { ty, op, lhs } => TExpr {
+                    kind: TExprKind::InfixApp { op, lhs: Box::new(lhs), rhs: Box::new(result) },
+                    ty,
+                },
+                SpineFrame::Let { ty, binds } => TExpr {
+                    kind: TExprKind::Let { binds, body: Box::new(result) },
+                    ty,
+                },
+            };
+        }
+        result
     }
 
-    fn mono_expr_inner(&mut self, expr: TExpr) -> TExpr {
+    fn mono_expr_node(&mut self, expr: TExpr) -> TExpr {
         let ty = expr.ty.clone();
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
@@ -990,10 +1071,6 @@ impl Monomorphizer {
     }
 
     fn collect_expr_vars(expr: &TExpr, vars: &mut Vec<TyVar>) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::collect_expr_vars_inner(expr, vars))
-    }
-
-    fn collect_expr_vars_inner(expr: &TExpr, vars: &mut Vec<TyVar>) {
         for v in expr.ty.free_vars() { if !vars.contains(&v) { vars.push(v); } }
         match &expr.kind {
             TExprKind::App(f, a) => { Self::collect_expr_vars(f, vars); Self::collect_expr_vars(a, vars); }
@@ -1050,10 +1127,6 @@ impl Monomorphizer {
 
     /// Rewrite an expression for dictionary-passing.
     fn rewrite_dict_expr(&self, expr: TExpr, func_name: &str, class_to_dict: &HashMap<String, String>) -> TExpr {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.rewrite_dict_expr_inner(expr, func_name, class_to_dict))
-    }
-
-    fn rewrite_dict_expr_inner(&self, expr: TExpr, func_name: &str, class_to_dict: &HashMap<String, String>) -> TExpr {
         let ty = expr.ty.clone();
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
@@ -1169,10 +1242,6 @@ impl Monomorphizer {
 
     /// Rewrite call sites to dict-passing functions.
     fn rewrite_dict_call_sites(&self, expr: TExpr) -> TExpr {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.rewrite_dict_call_sites_inner(expr))
-    }
-
-    fn rewrite_dict_call_sites_inner(&self, expr: TExpr) -> TExpr {
         let ty = expr.ty.clone();
         match expr.kind {
             TExprKind::App(_, _) => {

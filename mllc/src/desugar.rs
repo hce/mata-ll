@@ -43,10 +43,6 @@ fn desugar_clause(clause: &mut Clause) {
 }
 
 fn desugar_expr(expr: Expr) -> Expr {
-    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || desugar_expr_inner(expr))
-}
-
-fn desugar_expr_inner(expr: Expr) -> Expr {
     match expr {
         Expr::Do(stmts) => desugar_do(stmts),
         Expr::App(f, a) => Expr::App(
@@ -99,60 +95,55 @@ fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
 }
 
 fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
-    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || desugar_do_stmts_inner(stmts, idx))
-}
-
-fn desugar_do_stmts_inner(stmts: &[DoStmt], idx: usize) -> Expr {
     if idx >= stmts.len() {
-        // Shouldn't happen with well-formed do blocks
         return Expr::Lit(Literal::Bool(false));
     }
 
-    let is_last = idx == stmts.len() - 1;
+    // Build bottom-up iteratively to avoid deep recursion.
+    // Start from the last statement (the result) and wrap backwards.
+    let last = stmts.len() - 1;
+    let mut result = match &stmts[last] {
+        DoStmt::Expr(expr) => desugar_expr(expr.clone()),
+        DoStmt::Bind { expr, .. } => desugar_expr(expr.clone()),
+        DoStmt::DoLet { expr, .. } => desugar_expr(expr.clone()),
+    };
 
-    match &stmts[idx] {
-        DoStmt::Expr(expr) => {
-            let expr = desugar_expr(expr.clone());
-            if is_last {
-                expr
-            } else {
-                // e; rest  =>  e >>= \_ -> rest
-                let rest = desugar_do_stmts(stmts, idx + 1);
-                Expr::InfixApp {
+    for i in (idx..last).rev() {
+        match &stmts[i] {
+            DoStmt::Expr(expr) => {
+                let expr = desugar_expr(expr.clone());
+                result = Expr::InfixApp {
                     op: ">>=".to_string(),
                     lhs: Box::new(expr),
                     rhs: Box::new(Expr::Lambda {
                         params: vec!["_".to_string()],
-                        body: Box::new(rest),
+                        body: Box::new(result),
                     }),
-                }
+                };
             }
-        }
-        DoStmt::Bind { name, expr } => {
-            let expr = desugar_expr(expr.clone());
-            let rest = desugar_do_stmts(stmts, idx + 1);
-            // x <- e; rest  =>  e >>= \x -> rest
-            Expr::InfixApp {
-                op: ">>=".to_string(),
-                lhs: Box::new(expr),
-                rhs: Box::new(Expr::Lambda {
-                    params: vec![name.clone()],
-                    body: Box::new(rest),
-                }),
+            DoStmt::Bind { name, expr } => {
+                let expr = desugar_expr(expr.clone());
+                result = Expr::InfixApp {
+                    op: ">>=".to_string(),
+                    lhs: Box::new(expr),
+                    rhs: Box::new(Expr::Lambda {
+                        params: vec![name.clone()],
+                        body: Box::new(result),
+                    }),
+                };
             }
-        }
-        DoStmt::DoLet { name, expr } => {
-            let expr = desugar_expr(expr.clone());
-            let rest = desugar_do_stmts(stmts, idx + 1);
-            // let x = e; rest  =>  let x = e in rest
-            Expr::Let {
-                binds: vec![LocalDef {
-                    name: name.clone(),
-                    patterns: vec![],
-                    body: expr,
-                }],
-                body: Box::new(rest),
+            DoStmt::DoLet { name, expr } => {
+                let expr = desugar_expr(expr.clone());
+                result = Expr::Let {
+                    binds: vec![LocalDef {
+                        name: name.clone(),
+                        patterns: vec![],
+                        body: expr,
+                    }],
+                    body: Box::new(result),
+                };
             }
         }
     }
+    result
 }

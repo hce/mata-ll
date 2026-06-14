@@ -84,12 +84,93 @@ impl TExpr {
         TExpr { kind, ty }
     }
 
-    /// Apply a substitution to all types in this expression tree
+    /// Apply a substitution to all types in this expression tree.
+    /// Uses iterative right-spine processing for bind chains (from do-blocks)
+    /// to avoid stack overflow on deeply nested expressions.
     pub fn apply_subst(self, subst: &Subst) -> Self {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.apply_subst_inner(subst))
+        // Walk the right spine of bind chains iteratively, collecting
+        // frames on the heap. Only recurse for non-spine children.
+        enum SpineFrame {
+            Bind { ty: Ty, op: String, lhs: TExpr, lambda_ty: Ty, params: Vec<(String, Ty)> },
+            Seq { ty: Ty, op: String, lhs: TExpr },
+            Let { ty: Ty, binds: Vec<TLocalDef> },
+        }
+
+        let mut spine: Vec<SpineFrame> = Vec::new();
+        let mut current = self;
+
+        loop {
+            match current.kind {
+                TExprKind::InfixApp { ref op, .. } if op == ">>=" || op == ">>" => {
+                    let ty = current.ty.apply_subst(subst);
+                    if let TExprKind::InfixApp { op, lhs, rhs } = current.kind {
+                        if op == ">>=" {
+                            let rhs_ty = rhs.ty.clone();
+                            if let TExprKind::Lambda { params, body } = rhs.kind {
+                                let lhs = lhs.apply_subst(subst);
+                                let lambda_ty = rhs_ty.apply_subst(subst);
+                                let params = params.into_iter().map(|(n, t)| (n, t.apply_subst(subst))).collect();
+                                spine.push(SpineFrame::Bind { ty, op, lhs, lambda_ty, params });
+                                current = *body;
+                                continue;
+                            }
+                        }
+                        // >> or >>= without Lambda rhs
+                        let lhs = lhs.apply_subst(subst);
+                        spine.push(SpineFrame::Seq { ty, op, lhs });
+                        current = *rhs;
+                        continue;
+                    }
+                    unreachable!();
+                }
+                TExprKind::Let { binds, body } if !spine.is_empty() => {
+                    let ty = current.ty.apply_subst(subst);
+                    let binds = binds.into_iter().map(|b| TLocalDef {
+                        name: b.name,
+                        patterns: b.patterns.into_iter().map(|p| p.apply_subst(subst)).collect(),
+                        body: b.body.apply_subst(subst),
+                    }).collect();
+                    spine.push(SpineFrame::Let { ty, binds });
+                    current = *body;
+                    continue;
+                }
+                _ => break,
+            }
+        }
+
+        // Process terminal node with normal recursion (bounded depth)
+        let mut result = current.apply_subst_node(subst);
+
+        // Reconstruct spine bottom-up
+        for frame in spine.into_iter().rev() {
+            result = match frame {
+                SpineFrame::Bind { ty, op, lhs, lambda_ty, params } => TExpr {
+                    kind: TExprKind::InfixApp {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(TExpr {
+                            kind: TExprKind::Lambda { params, body: Box::new(result) },
+                            ty: lambda_ty,
+                        }),
+                    },
+                    ty,
+                },
+                SpineFrame::Seq { ty, op, lhs } => TExpr {
+                    kind: TExprKind::InfixApp { op, lhs: Box::new(lhs), rhs: Box::new(result) },
+                    ty,
+                },
+                SpineFrame::Let { ty, binds } => TExpr {
+                    kind: TExprKind::Let { binds, body: Box::new(result) },
+                    ty,
+                },
+            };
+        }
+        result
     }
 
-    fn apply_subst_inner(self, subst: &Subst) -> Self {
+    /// Apply substitution to a single node (non-spine). Recurses for children
+    /// but these have bounded depth (not from bind chains).
+    fn apply_subst_node(self, subst: &Subst) -> Self {
         let ty = self.ty.apply_subst(subst);
         let kind = match self.kind {
             TExprKind::App(f, a) => TExprKind::App(
@@ -142,7 +223,7 @@ impl TExpr {
                 dict_args: dict_args.into_iter().map(|a| a.apply_subst(subst)).collect(),
                 value_args: value_args.into_iter().map(|a| a.apply_subst(subst)).collect(),
             },
-            other => other, // Var, Con, Lit, OpFunc, DictAccess — no nested types
+            other => other,
         };
         TExpr { kind, ty }
     }

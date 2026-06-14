@@ -791,10 +791,6 @@ impl CodeGen {
     /// in accumulator patterns while preserving laziness for expensive
     /// computations (user function calls).
     fn is_cheap(expr: &TExpr) -> bool {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::is_cheap_inner(expr))
-    }
-
-    fn is_cheap_inner(expr: &TExpr) -> bool {
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Var(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
@@ -861,13 +857,27 @@ impl CodeGen {
         ever_thunked: &mut std::collections::HashMap<String, Vec<bool>>,
         ever_called: &mut std::collections::HashMap<String, Vec<bool>>,
     ) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::scan_call_sites_inner(expr, ever_thunked, ever_called))
-    }
-
-    fn scan_call_sites_inner(expr: &TExpr,
-        ever_thunked: &mut std::collections::HashMap<String, Vec<bool>>,
-        ever_called: &mut std::collections::HashMap<String, Vec<bool>>,
-    ) {
+        // Iterative right-spine walk for bind chains
+        let mut expr = expr;
+        loop {
+            match &expr.kind {
+                TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" || op == ">>" => {
+                    Self::scan_call_sites(lhs, ever_thunked, ever_called);
+                    if let TExprKind::Lambda { body, .. } = &rhs.kind {
+                        expr = body;
+                        continue;
+                    }
+                    expr = rhs;
+                    continue;
+                }
+                TExprKind::Let { binds, body } => {
+                    for bind in binds { Self::scan_call_sites(&bind.body, ever_thunked, ever_called); }
+                    expr = body;
+                    continue;
+                }
+                _ => break,
+            }
+        }
         match &expr.kind {
             TExprKind::App(_, _) => {
                 let mut args: Vec<&TExpr> = vec![];
@@ -949,10 +959,6 @@ impl CodeGen {
     /// These need special handling in gen_expr (e.g. : → __mll_cons) that
     /// gen_expr_subst doesn't replicate, so we skip inlining for them.
     fn body_has_constructors(expr: &TExpr) -> bool {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::body_has_constructors_inner(expr))
-    }
-
-    fn body_has_constructors_inner(expr: &TExpr) -> bool {
         match &expr.kind {
             TExprKind::Con(_) => true,
             TExprKind::App(f, a) => Self::body_has_constructors(f) || Self::body_has_constructors(a),
@@ -967,10 +973,6 @@ impl CodeGen {
     /// Only recurses into sub-expressions that might contain substitution
     /// variables; delegates to gen_expr for everything else.
     fn gen_expr_subst(&mut self, expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_subst_inner(expr, subst))
-    }
-
-    fn gen_expr_subst_inner(&mut self, expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) {
         // If no substitution vars appear in this expr, use normal gen_expr
         // (which handles cons, list literals, etc. correctly)
         let has_subst_vars = subst.keys().any(|k| expr_references_name(expr, k));
@@ -1057,10 +1059,6 @@ impl CodeGen {
     /// callee will force the value immediately — avoids thunk allocation
     /// for calls like fi(ch, fiVol) that compute simple values.
     fn is_cheap_arg(expr: &TExpr) -> bool {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || Self::is_cheap_arg_inner(expr))
-    }
-
-    fn is_cheap_arg_inner(expr: &TExpr) -> bool {
         if Self::is_cheap(expr) { return true; }
         match &expr.kind {
             TExprKind::App(func, arg) => {
@@ -1115,10 +1113,6 @@ impl CodeGen {
     /// - pure/return → emit the value
     /// Falls back to __force(expr)() for unknown actions.
     fn gen_action(&mut self, expr: &TExpr) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_action_inner(expr))
-    }
-
-    fn gen_action_inner(&mut self, expr: &TExpr) {
         if !Self::is_nullary_action_type(&expr.ty) {
             self.gen_expr(expr);
             return;
@@ -1218,111 +1212,108 @@ impl CodeGen {
     }
 
     fn gen_bind_chain_inner(&mut self, expr: &TExpr, inside_action: bool) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_bind_chain_inner_impl(expr, inside_action))
-    }
-
-    fn gen_bind_chain_inner_impl(&mut self, expr: &TExpr, inside_action: bool) {
-        match &expr.kind {
-            TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
-                if let TExprKind::Lambda { params, body } = &rhs.kind {
-                    // x <- action  =>  local x = action  (or action() for zero-arg IO vars)
-                    let param_name = sanitize_name(&params[0].0);
-                    self.emit_indent();
-                    self.emit(&format!("local {} = ", param_name));
-                    self.gen_action(lhs);
-                    self.emit("\n");
-                    self.concrete_vars.insert(param_name);
-                    self.gen_bind_chain_inner(body, true);
-                    return;
-                }
-            }
-            TExprKind::InfixApp { op, lhs, rhs } if op == ">>" => {
-                // action >> rest  =>  action; rest
-                // Unwrap Paren to avoid Lua syntax issues with (expr) as statement
-                let lhs_unwrapped = if let TExprKind::Paren(inner) = &lhs.kind { inner.as_ref() } else { lhs.as_ref() };
-                self.emit_indent();
-                self.gen_action(lhs_unwrapped);
-                self.emit("\n");
-                self.gen_bind_chain_inner(rhs, true);
-                return;
-            }
-            TExprKind::Let { binds, body } => {
-                // let x = e in rest  =>  local x = e; rest
-                for bind in binds {
-                    if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind {
-                        // If-expression as statement: avoids IIFE closure allocation
-                        // local x; if cond then x = a else x = b end
-                        let bname = sanitize_name(&bind.name);
+        // Iterative loop for right-spine bind chains to avoid stack overflow
+        // on deeply nested do-blocks. Only recurses for non-spine children
+        // (individual expressions, if-branches) which have bounded depth.
+        let mut expr = expr;
+        let mut inside_action = inside_action;
+        loop {
+            match &expr.kind {
+                TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
+                    if let TExprKind::Lambda { params, body } = &rhs.kind {
+                        let param_name = sanitize_name(&params[0].0);
                         self.emit_indent();
-                        self.emit(&format!("local {}\n", bname));
-                        self.concrete_vars.insert(bname.clone());
-                        self.emit_indent();
-                        self.emit("if ");
-                        self.gen_expr(cond);
-                        self.emit(" then ");
-                        self.emit(&format!("{} = ", bname));
-                        self.gen_expr(then_branch);
-                        self.emit(" else ");
-                        self.emit(&format!("{} = ", bname));
-                        self.gen_expr(else_branch);
-                        self.emit(" end\n");
-                    } else if Self::is_nullary_action_type(&bind.body.ty) {
-                        let bname = sanitize_name(&bind.name);
-                        self.emit_indent();
-                        self.emit(&format!("local {} = function() return ", bname));
-                        self.gen_action(&bind.body);
-                        self.emit(" end\n");
-                    } else {
-                        let bname = sanitize_name(&bind.name);
-                        self.emit_indent();
-                        if Self::is_cheap(&bind.body) {
-                            self.emit(&format!("local {} = ", bname));
-                            self.gen_expr(&bind.body);
-                            self.emit("\n");
-                            self.concrete_vars.insert(bname);
-                        } else {
-                            self.emit(&format!("local {} = __thunk(function() return ", bname));
-                            self.gen_expr(&bind.body);
-                            self.emit(" end)\n");
-                        }
+                        self.emit(&format!("local {} = ", param_name));
+                        self.gen_action(lhs);
+                        self.emit("\n");
+                        self.concrete_vars.insert(param_name);
+                        expr = body;
+                        inside_action = true;
+                        continue;
                     }
                 }
-                self.gen_bind_chain_inner(body, inside_action);
-                return;
-            }
-            _ => {}
-        }
-        // Terminal expression — emit as statement when possible
-        match &expr.kind {
-            TExprKind::If { cond, then_branch, else_branch } => {
-                // Emit if/then/else as Lua statement instead of IIFE.
-                // Recursively apply gen_bind_chain to each branch so
-                // nested do-blocks in branches also flatten.
-                self.emit_indent();
-                self.emit("if ");
-                self.gen_expr(cond);
-                self.emit(" then\n");
-                self.indent += 1;
-                self.gen_bind_chain_inner(then_branch, inside_action);
-                self.indent -= 1;
-                self.emit_indent();
-                self.emit("else\n");
-                self.indent += 1;
-                self.gen_bind_chain_inner(else_branch, inside_action);
-                self.indent -= 1;
-                self.emit_indent();
-                self.emit("end\n");
-            }
-            _ => {
-                self.emit_indent();
-                self.emit("return ");
-                if inside_action {
-                    self.gen_action(expr);
-                } else {
-                    self.gen_expr(expr);
+                TExprKind::InfixApp { op, lhs, rhs } if op == ">>" => {
+                    let lhs_unwrapped = if let TExprKind::Paren(inner) = &lhs.kind { inner.as_ref() } else { lhs.as_ref() };
+                    self.emit_indent();
+                    self.gen_action(lhs_unwrapped);
+                    self.emit("\n");
+                    expr = rhs;
+                    inside_action = true;
+                    continue;
                 }
-                self.emit("\n");
+                TExprKind::Let { binds, body } => {
+                    for bind in binds {
+                        if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind {
+                            let bname = sanitize_name(&bind.name);
+                            self.emit_indent();
+                            self.emit(&format!("local {}\n", bname));
+                            self.concrete_vars.insert(bname.clone());
+                            self.emit_indent();
+                            self.emit("if ");
+                            self.gen_expr(cond);
+                            self.emit(" then ");
+                            self.emit(&format!("{} = ", bname));
+                            self.gen_expr(then_branch);
+                            self.emit(" else ");
+                            self.emit(&format!("{} = ", bname));
+                            self.gen_expr(else_branch);
+                            self.emit(" end\n");
+                        } else if Self::is_nullary_action_type(&bind.body.ty) {
+                            let bname = sanitize_name(&bind.name);
+                            self.emit_indent();
+                            self.emit(&format!("local {} = function() return ", bname));
+                            self.gen_action(&bind.body);
+                            self.emit(" end\n");
+                        } else {
+                            let bname = sanitize_name(&bind.name);
+                            self.emit_indent();
+                            if Self::is_cheap(&bind.body) {
+                                self.emit(&format!("local {} = ", bname));
+                                self.gen_expr(&bind.body);
+                                self.emit("\n");
+                                self.concrete_vars.insert(bname);
+                            } else {
+                                self.emit(&format!("local {} = __thunk(function() return ", bname));
+                                self.gen_expr(&bind.body);
+                                self.emit(" end)\n");
+                            }
+                        }
+                    }
+                    expr = body;
+                    continue;
+                }
+                _ => {}
             }
+            // Terminal expression
+            match &expr.kind {
+                TExprKind::If { cond, then_branch, else_branch } => {
+                    self.emit_indent();
+                    self.emit("if ");
+                    self.gen_expr(cond);
+                    self.emit(" then\n");
+                    self.indent += 1;
+                    self.gen_bind_chain_inner(then_branch, inside_action);
+                    self.indent -= 1;
+                    self.emit_indent();
+                    self.emit("else\n");
+                    self.indent += 1;
+                    self.gen_bind_chain_inner(else_branch, inside_action);
+                    self.indent -= 1;
+                    self.emit_indent();
+                    self.emit("end\n");
+                }
+                _ => {
+                    self.emit_indent();
+                    self.emit("return ");
+                    if inside_action {
+                        self.gen_action(expr);
+                    } else {
+                        self.gen_expr(expr);
+                    }
+                    self.emit("\n");
+                }
+            }
+            break;
         }
     }
 
@@ -1330,10 +1321,6 @@ impl CodeGen {
     /// Variables known to be concrete (already forced) are emitted bare.
     /// Unknown variables are forced — they may be let-bound thunks.
     fn gen_expr_raw(&mut self, expr: &TExpr) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_raw_inner(expr))
-    }
-
-    fn gen_expr_raw_inner(&mut self, expr: &TExpr) {
         if let TExprKind::Var(name) = &expr.kind {
             match name.as_str() {
                 "otherwise" => self.emit("true"),
@@ -1355,10 +1342,6 @@ impl CodeGen {
     }
 
     fn gen_expr(&mut self, expr: &TExpr) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_inner(expr))
-    }
-
-    fn gen_expr_inner(&mut self, expr: &TExpr) {
         match &expr.kind {
             TExprKind::Var(name) => {
                 match name.as_str() {
@@ -1922,10 +1905,6 @@ impl CodeGen {
     /// Generate an expression with lazy cons tails for self-referencing definitions.
     /// Cons operations wrap the tail in a thunk via __mll_lazy_cons.
     fn gen_expr_lazy(&mut self, expr: &TExpr, self_name: &str) {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.gen_expr_lazy_inner(expr, self_name))
-    }
-
-    fn gen_expr_lazy_inner(&mut self, expr: &TExpr, self_name: &str) {
         // Check for infix cons: x : rest
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind {
             if op == ":" {
@@ -2068,10 +2047,6 @@ fn sanitize_name(name: &str) -> String {
 
 /// Check if a TExpr references a given name anywhere
 fn expr_references_name(expr: &TExpr, name: &str) -> bool {
-    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || expr_references_name_inner(expr, name))
-}
-
-fn expr_references_name_inner(expr: &TExpr, name: &str) -> bool {
     match &expr.kind {
         TExprKind::Var(n) => n == name,
         TExprKind::Con(_) | TExprKind::Lit(_) | TExprKind::OpFunc(_) => false,
