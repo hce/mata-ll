@@ -117,6 +117,8 @@ MATA-LL TODO
 ## Known limitations
 
 - [ ] Typechecker stack overflow on CPS-heavy types (Regex library with many test functions overflows 256MB stack; needs iterative type inference)
+- [ ] Top-level let-in value bindings evaluate incorrectly (thunking issue with nested let expressions as top-level values)
+- [ ] Inliner captures free variables incorrectly when inlining closures assigned via do-let (e.g. `let add5 = makeAdder 5` inlines body with unbound `n`)
 
 ## Testing
 

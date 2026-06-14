@@ -73,6 +73,12 @@ mll_test!(poly_recursion, "poly_recursion.mll");
 mll_test!(non_strict, "non_strict.mll");
 mll_test!(io_actions, "io_actions.mll");
 mll_test!(haskell_compat, "haskell_compat.mll");
+mll_test!(pattern_matching, "pattern_matching.mll");
+mll_test!(typeclasses_full, "typeclasses_full.mll");
+mll_test!(do_notation, "do_notation.mll");
+mll_test!(list_comprehensions, "list_comprehensions.mll");
+mll_test!(scoping, "scoping.mll");
+mll_test!(type_aliases, "type_aliases.mll");
 
 // Compile-error tests: these SHOULD fail to compile
 #[test]
