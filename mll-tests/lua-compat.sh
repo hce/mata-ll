@@ -26,8 +26,8 @@ for src in "$CASES_DIR"/*.mll; do
     name="$(basename "$src" .mll)"
     lua_file="${src%.mll}.lua"
 
-    # Compile .mll to .lua
-    if ! "$MLL" -e "$src" 2>/dev/null; then
+    # Compile .mll to .lua (pass lib/ for tests that import library modules)
+    if ! "$MLL" -e -L "$SCRIPT_DIR/../lib" "$src" 2>/dev/null; then
         echo "SKIP $name (compile error)"
         skipped=$((skipped + 1))
         continue
