@@ -296,7 +296,8 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 "module" => Token::KwModule,
                 "import" => Token::Import,
                 "qualified" => Token::Qualified,
-                "as" => Token::As,
+                // "as" not reserved — usable as variable name (import parser checks Ident("as"))
+
                 "data" => Token::Data,
                 "newtype" => Token::Newtype,
                 "class" => Token::Class,

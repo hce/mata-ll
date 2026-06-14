@@ -392,7 +392,11 @@ impl Parser {
         }
 
         if qualified {
-            self.expect(&Token::As)?;
+            // 'as' is not a keyword — check for Ident("as")
+            match self.peek().clone() {
+                Token::Ident(ref s) if s == "as" => { self.advance(); }
+                _ => return Err("Expected 'as' in qualified import".into()),
+            }
             let alias = self.expect_upper_ident()?;
             return Ok(Decl::Import {
                 module_path,

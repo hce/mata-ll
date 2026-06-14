@@ -116,13 +116,12 @@ main = do
     -- Lazy evaluation edge cases
     -- ============================================================
 
-    -- NOTE: let bomb = error "..." in do-block currently forces eagerly
-    -- due to IO action wrapping. This is a known bug.
-    -- let bomb = error "should not explode"
-    -- assert (const 1 bomb == 1) "unused error"
+    -- Unused error doesn't crash (non-strict parameter not forced)
+    let bomb = error "should not explode"
+    assert (const 1 bomb == 1) "unused error"
 
-    -- Unused undefined in non-do context (verified in non_strict.mll)
-    assert (const "safe" undefined == "safe") "unused undefined inline"
+    -- Unused undefined
+    assert (const "safe" undefined == "safe") "unused undefined"
 
     -- Lazy list tail
     let xs = 1 : 2 : undefined
