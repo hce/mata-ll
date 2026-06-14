@@ -116,7 +116,7 @@ main = do
     -- Lazy evaluation edge cases
     -- ============================================================
 
-    -- NOTE: `let bomb = error "msg"; const 1 bomb` currently forces bomb
+    -- NOTE: `let bottom = error "msg"; const 1 bottom` currently forces bottom
     -- at the call site because Lua evaluates all args eagerly. The non-strict
     -- optimization to skip forcing was reverted because it caused the tracker
     -- regression. This is a known limitation.
