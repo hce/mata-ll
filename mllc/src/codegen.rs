@@ -1050,6 +1050,35 @@ impl CodeGen {
                 }
                 self.emit(")");
             }
+            TExprKind::If { cond, then_branch, else_branch } => {
+                self.emit("(function()\n");
+                self.indent += 1;
+                self.emit_indent(); self.emit("if ");
+                self.gen_expr_subst(cond, subst);
+                self.emit(" then\n");
+                self.indent += 1;
+                self.emit_indent(); self.emit("return ");
+                self.gen_expr_subst(then_branch, subst);
+                self.emit("\n");
+                self.indent -= 1;
+                self.emit_indent(); self.emit("else\n");
+                self.indent += 1;
+                self.emit_indent(); self.emit("return ");
+                self.gen_expr_subst(else_branch, subst);
+                self.emit("\n");
+                self.indent -= 1;
+                self.emit_indent(); self.emit("end\n");
+                self.indent -= 1;
+                self.emit_indent(); self.emit("end)()");
+            }
+            TExprKind::Tuple(elems) => {
+                self.emit("{");
+                for (i, elem) in elems.iter().enumerate() {
+                    if i > 0 { self.emit(", "); }
+                    self.gen_expr_subst(elem, subst);
+                }
+                self.emit("}");
+            }
             _ => self.gen_expr(expr),
         }
     }
