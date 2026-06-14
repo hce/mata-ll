@@ -118,6 +118,7 @@ mll_test!(scoping, "scoping.mll");
 mll_test!(type_aliases, "type_aliases.mll");
 mll_test!(edge_cases, "edge_cases.mll");
 mll_test!(feature_interactions, "feature_interactions.mll");
+mll_test!(demand_analysis, "demand_analysis.mll");
 
 // Library module tests (need lib/ search path)
 mll_lib_test!(lib_lstring, "lib_lstring.mll");
