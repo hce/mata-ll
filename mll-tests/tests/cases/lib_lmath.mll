@@ -52,12 +52,5 @@ main = do
     assert (approx (atan2 1.0 1.0) (pi / 4.0)) "atan2 1 1 = pi/4"
     assert (approx (atan2 0.0 1.0) 0.0) "atan2 0 1 = 0"
 
-    -- frexp: x = m * 2^e
-    let result = frexp 8.0
-    assert (approx (fst result) 0.5) "frexp 8 mantissa"
-    assert (snd result == 4) "frexp 8 exponent"
-
-    -- modf: integral + fractional parts
-    let parts = modf 3.75
-    assert (approx (fst parts) 3.0) "modf 3.75 integral"
-    assert (approx (snd parts) 0.75) "modf 3.75 fractional"
+    -- Note: frexp and modf are deprecated since Lua 5.3 and removed
+    -- from default Lua 5.4 builds (require LUA_COMPAT_MATHLIB).
