@@ -374,7 +374,12 @@ impl CodeGen {
             }
             self.emit_line("");
             self.concrete_vars = saved_concrete;
-            if is_concrete { self.concrete_vars.insert(lua_name); }
+            if is_concrete {
+                self.concrete_vars.insert(lua_name);
+            } else {
+                // Thunked value — must NOT be concrete (needs __force)
+                self.concrete_vars.remove(&lua_name);
+            }
             return;
         }
 
@@ -991,6 +996,21 @@ impl CodeGen {
                 self.emit("(-");
                 self.gen_expr_subst(inner, subst);
                 self.emit(")");
+            }
+            TExprKind::Lambda { params, body } => {
+                // Remove shadowed names from substitution
+                let mut inner_subst = subst.clone();
+                for (name, _) in params {
+                    inner_subst.remove(name.as_str());
+                }
+                let ps: Vec<&str> = params.iter().map(|(s, _)| s.as_str()).collect();
+                self.emit(&format!("function({})\n", ps.join(", ")));
+                self.indent += 1;
+                self.emit_indent(); self.emit("return ");
+                self.gen_expr_subst(body, &inner_subst);
+                self.emit("\n");
+                self.indent -= 1;
+                self.emit_indent(); self.emit("end");
             }
             TExprKind::App(_, _) => {
                 // Collect the application chain, substituting as we go

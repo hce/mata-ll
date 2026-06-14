@@ -117,8 +117,8 @@ MATA-LL TODO
 ## Known limitations
 
 - [ ] Typechecker stack overflow on CPS-heavy types (Regex library with many test functions overflows 256MB stack; needs iterative type inference)
-- [ ] Top-level let-in value bindings evaluate incorrectly (thunking issue with nested let expressions as top-level values)
-- [ ] Inliner captures free variables incorrectly when inlining closures assigned via do-let (e.g. `let add5 = makeAdder 5` inlines body with unbound `n`)
+- [x] Top-level let-in value bindings (thunked values removed from concrete_vars)
+- [x] Inliner captures free variables in lambda bodies (gen_expr_subst now handles Lambda)
 - [ ] `let bomb = error "msg"; const 1 bomb` forces bomb eagerly at call site (Lua evaluates all args; non-strict optimization reverted due to tracker regression from imprecise demand analysis)
 - [ ] Multi-line case in do-let can cause multi-line continuation to consume next statement as argument
 - [ ] Pattern-matching generators in list comprehensions (`[x | Ok x <- rs]`) not supported

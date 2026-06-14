@@ -1,6 +1,11 @@
 -- Comprehensive scoping tests
 
--- Let-in expressions (tested inline in main)
+-- Top-level let-in value bindings
+topLetVal :: Integer
+topLetVal = let x = 1 in let y = 2 in x + y
+
+topShadow :: Integer
+topShadow = let x = 1 in let x = 2 in x
 
 -- Where clause scoping
 addSquares :: Integer -> Integer -> Integer
@@ -36,7 +41,11 @@ applyTwice f x = f (f x)
 
 main :: IO ()
 main = do
-    -- Let-in (inline)
+    -- Top-level let-in values
+    assert (topLetVal == 3) "top-level let-in"
+    assert (topShadow == 2) "top-level shadow"
+
+    -- Inline let-in
     assert ((let x = 10 in x + 5) == 15) "inline let"
     assert ((let x = 1 in let y = 2 in x + y) == 3) "nested let"
     assert ((let x = 1 in let x = 2 in x) == 2) "let shadow"
@@ -51,8 +60,12 @@ main = do
     assert (isOdd' 3 == True) "mutual odd"
     assert (isEven' 5 == False) "mutual not even"
 
-    -- Closures (via direct call)
+    -- Closures
+    let add5 = makeAdder 5
+    assert (add5 10 == 15) "closure let-bound"
+    assert (add5 0 == 5) "closure reuse"
     assert (makeAdder 5 10 == 15) "closure direct"
+    assert (applyTwice (makeAdder 3) 0 == 6) "closure higher-order"
 
     -- Do-block shadowing
     let x = 1
