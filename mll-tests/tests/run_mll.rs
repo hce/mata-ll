@@ -79,6 +79,8 @@ mll_test!(do_notation, "do_notation.mll");
 mll_test!(list_comprehensions, "list_comprehensions.mll");
 mll_test!(scoping, "scoping.mll");
 mll_test!(type_aliases, "type_aliases.mll");
+mll_test!(edge_cases, "edge_cases.mll");
+mll_test!(feature_interactions, "feature_interactions.mll");
 
 // Compile-error tests: these SHOULD fail to compile
 #[test]

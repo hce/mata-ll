@@ -119,6 +119,9 @@ MATA-LL TODO
 - [ ] Typechecker stack overflow on CPS-heavy types (Regex library with many test functions overflows 256MB stack; needs iterative type inference)
 - [ ] Top-level let-in value bindings evaluate incorrectly (thunking issue with nested let expressions as top-level values)
 - [ ] Inliner captures free variables incorrectly when inlining closures assigned via do-let (e.g. `let add5 = makeAdder 5` inlines body with unbound `n`)
+- [ ] `let bomb = error "msg"` in do-blocks forces eagerly instead of staying lazy (IO action wrapping treats error as an action)
+- [ ] Multi-line case in do-let can cause multi-line continuation to consume next statement as argument
+- [ ] Pattern-matching generators in list comprehensions (`[x | Ok x <- rs]`) not supported
 
 ## Testing
 
