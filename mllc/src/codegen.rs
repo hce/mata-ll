@@ -1811,7 +1811,10 @@ impl CodeGen {
                     self.emit(")");
                 } else if let Some(lua_func) = specialized.strip_prefix("__mll_io:") {
                     // IO FFI: wrap in action thunk — only performed by >>= / >>
-                    self.emit("function() return ");
+                    // Zero-arg IO (e.g., os.clock): emit raw call without closure wrapper,
+                    // since the function definition already wraps in function()...end.
+                    let needs_wrapper = !args.is_empty();
+                    if needs_wrapper { self.emit("function() return "); }
                     if lua_func.starts_with(':') {
                         // Method call IO: handle:method(args)
                         let method = &lua_func[1..];
@@ -1837,7 +1840,7 @@ impl CodeGen {
                         }
                         self.emit(")");
                     }
-                    self.emit(" end");
+                    if needs_wrapper { self.emit(" end"); }
                 } else if let Some(rest) = specialized.strip_prefix("__mll_io_tup:") {
                     // IO FFI with multi-return: wrap in action thunk
                     let parts: Vec<&str> = rest.splitn(2, ':').collect();
