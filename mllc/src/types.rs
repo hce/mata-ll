@@ -128,10 +128,6 @@ impl Ty {
 
     /// Apply a substitution to this type
     pub fn apply_subst(&self, subst: &Subst) -> Ty {
-        stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || self.apply_subst_inner(subst))
-    }
-
-    fn apply_subst_inner(&self, subst: &Subst) -> Ty {
         match self {
             Ty::Con(_) | Ty::Unit => self.clone(),
             Ty::Var(v) => {
@@ -328,10 +324,6 @@ impl Subst {
 
 /// Unification: find a substitution that makes two types equal
 pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
-    stacker::maybe_grow(8 * 1024 * 1024, 8 * 1024 * 1024, || unify_inner(t1, t2))
-}
-
-fn unify_inner(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
     match (t1, t2) {
         (Ty::Con(a), Ty::Con(b)) if a == b => Ok(Subst::empty()),
         (Ty::Unit, Ty::Unit) => Ok(Subst::empty()),
