@@ -329,6 +329,11 @@ pub struct Constructor {
     /// When present, field types and result type are extracted from this
     /// instead of from `fields`.
     pub gadt_type: Option<Type>,
+    /// Existential type variables: `data ShowBox = forall a. MkShowBox a (a -> String)`
+    /// Here `a` is existential — it appears in field types but not in the data type's parameters.
+    pub existential_vars: Vec<String>,
+    /// Constraints on existential type variables: `forall a. Show a => MkShowBox a`
+    pub existential_constraints: Vec<Constraint>,
 }
 
 #[derive(Debug, Clone)]

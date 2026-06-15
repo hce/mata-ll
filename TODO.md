@@ -94,7 +94,7 @@ MATA-LL TODO
 ## Open
 
 - [x] Local variable table fallback: constructors, newtypes, and instance methods packed into `__mll_fn` table alongside functions; function-body `_v[N]` overflow slots when binding count exceeds 180
-- [ ] Existential types in data constructors (`data ShowBox = forall a. MkShowBox a (a -> String)` — parse error; rank-2 in function signatures already works)
+- [x] Existential types in data constructors (`data ShowBox = forall a. MkShowBox a (a -> String)` — parser, typechecker, and pattern matching support)
 - [ ] Deriving Functor (requires traversing constructor fields to find type parameter)
 
 ## Done

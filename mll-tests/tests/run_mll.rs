@@ -135,6 +135,7 @@ mll_test!(derive_enum, "derive_enum.mll");
 mll_test!(nested_eq, "nested_eq.mll");
 mll_test!(st_return, "st_return.mll");
 mll_test!(local_overflow, "local_overflow.mll");
+mll_test!(existentials, "existentials.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

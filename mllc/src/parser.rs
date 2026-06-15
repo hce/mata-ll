@@ -222,6 +222,8 @@ impl Parser {
                         name: con_name,
                         fields: ConstructorFields::Positional(vec![]),
                         gadt_type: Some(ty),
+                        existential_vars: vec![],
+                        existential_constraints: vec![],
                     });
                     self.skip_newlines_and_indent();
                 } else {
@@ -260,6 +262,32 @@ impl Parser {
     }
 
     fn parse_constructor(&mut self) -> Result<Constructor, String> {
+        // Check for existential quantification: `forall a b. [Constraint =>] ConName fields`
+        let mut existential_vars = Vec::new();
+        let mut existential_constraints = Vec::new();
+        if let Token::Ident(ref id) = self.peek().clone() {
+            if id == "forall" {
+                self.advance();
+                // Parse bound type variables until we see '.'
+                while !self.at(&Token::Operator(".".to_string())) {
+                    existential_vars.push(self.expect_ident()?);
+                }
+                self.expect(&Token::Operator(".".to_string()))?;
+                // Check for optional constraints: `Show a =>`
+                let save = self.pos;
+                if let Ok(constraints) = self.try_parse_constraints() {
+                    if self.at(&Token::FatArrow) {
+                        self.advance();
+                        existential_constraints = constraints;
+                    } else {
+                        self.pos = save;
+                    }
+                } else {
+                    self.pos = save;
+                }
+            }
+        }
+
         let name = self.expect_upper_ident()?;
 
         // Check for record syntax (may be on next line)
@@ -291,6 +319,8 @@ impl Parser {
                 name,
                 fields: ConstructorFields::Named(fields),
                 gadt_type: None,
+                existential_vars,
+                existential_constraints,
             });
         } else {
             // Not record syntax — backtrack
@@ -308,6 +338,8 @@ impl Parser {
             name,
             fields: ConstructorFields::Positional(fields),
             gadt_type: None,
+            existential_vars,
+            existential_constraints,
         })
     }
 

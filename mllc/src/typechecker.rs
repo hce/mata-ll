@@ -54,6 +54,8 @@ pub struct ConInfo {
     pub field_types: Vec<Ty>,
     pub type_vars: Vec<TyVar>,
     pub result_type: Ty,
+    /// Existential type variables (quantified per-constructor, not in the data type params)
+    pub existential_vars: Vec<TyVar>,
 }
 
 /// Typeclass info
@@ -518,8 +520,8 @@ impl Checker {
         self.env.insert("zipWith".into(), Scheme { vars: vec![a.clone(), b.clone(), c.clone()], ty: Ty::fun(&[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), Ty::list(ta.clone()), Ty::list(tb.clone())], Ty::list(tc.clone())) });
 
         // Maybe
-        self.constructors.insert("Just".into(), ConInfo { type_name: "Maybe".into(), variant_index: 1, total_variants: 2, field_types: vec![ta.clone()], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()) });
-        self.constructors.insert("Nothing".into(), ConInfo { type_name: "Maybe".into(), variant_index: 2, total_variants: 2, field_types: vec![], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()) });
+        self.constructors.insert("Just".into(), ConInfo { type_name: "Maybe".into(), variant_index: 1, total_variants: 2, field_types: vec![ta.clone()], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![] });
+        self.constructors.insert("Nothing".into(), ConInfo { type_name: "Maybe".into(), variant_index: 2, total_variants: 2, field_types: vec![], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![] });
         self.env.insert("Just".into(), Scheme { vars: vec![a.clone()], ty: Ty::arrow(ta.clone(), Ty::app(Ty::Con("Maybe".into()), ta.clone())) });
         self.env.insert("Nothing".into(), Scheme { vars: vec![a.clone()], ty: Ty::app(Ty::Con("Maybe".into()), ta.clone()) });
         self.env.insert("True".into(), Scheme::mono(Ty::Con("Bool".into())));
@@ -531,12 +533,14 @@ impl Checker {
             field_types: vec![ta.clone(), Ty::list(ta.clone())],
             type_vars: vec![a.clone()],
             result_type: Ty::list(ta.clone()),
+            existential_vars: vec![],
         });
         self.constructors.insert("[]".into(), ConInfo {
             type_name: "[]".into(), variant_index: 2, total_variants: 2,
             field_types: vec![],
             type_vars: vec![a.clone()],
             result_type: Ty::list(ta.clone()),
+            existential_vars: vec![],
         });
         // (:) :: a -> [a] -> [a]
         self.env.insert(":".into(), Scheme {
@@ -1183,6 +1187,11 @@ impl Checker {
         let result_type = tvars.iter().fold(Ty::Con(name.to_string()), |acc, tv| Ty::app(acc, Ty::Var(tv.clone())));
 
         for (i, con) in constructors.iter().enumerate() {
+            // Collect existential type variables for this constructor
+            let ex_tvars: Vec<TyVar> = con.existential_vars.iter()
+                .map(|n| TyVar { name: n.clone(), id: u32::MAX })
+                .collect();
+
             let (field_types, con_result_type) = if let Some(gadt_ty) = &con.gadt_type {
                 // GADT constructor: decompose type sig into args + return type
                 let full_ty = self.ast_type_to_ty(gadt_ty);
@@ -1204,11 +1213,16 @@ impl Checker {
 
             let con_type = if field_types.is_empty() { con_result_type.clone() } else { Ty::fun(&field_types, con_result_type.clone()) };
 
+            // Constructor scheme includes both universal (data type) and existential vars
+            let mut all_scheme_vars = tvars.clone();
+            all_scheme_vars.extend(ex_tvars.clone());
+
             self.constructors.insert(con.name.clone(), ConInfo {
                 type_name: name.to_string(), variant_index: i + 1, total_variants: constructors.len(),
                 field_types: field_types.clone(), type_vars: tvars.clone(), result_type: con_result_type.clone(),
+                existential_vars: ex_tvars,
             });
-            self.env.insert(con.name.clone(), Scheme { vars: tvars.clone(), ty: con_type });
+            self.env.insert(con.name.clone(), Scheme { vars: all_scheme_vars, ty: con_type });
 
             // Register record field accessors
             if let ConstructorFields::Named(fields) = &con.fields {
@@ -1250,6 +1264,7 @@ impl Checker {
             field_types: vec![inner_ty.clone()],
             type_vars: tvars.clone(),
             result_type: result_type.clone(),
+            existential_vars: vec![],
         });
         self.env.insert(name.to_string(), Scheme {
             vars: tvars,
@@ -2742,6 +2757,13 @@ impl Checker {
                 let mut tv_map = HashMap::new();
                 for tv in &con_info.type_vars {
                     if let Ty::Var(fresh) = self.fresh_var("_p") {
+                        tv_map.insert(tv.clone(), Ty::Var(fresh));
+                    }
+                }
+                // Existential type variables get fresh (skolem-like) variables
+                // that are local to this pattern match branch
+                for tv in &con_info.existential_vars {
+                    if let Ty::Var(fresh) = self.fresh_var("_ex") {
                         tv_map.insert(tv.clone(), Ty::Var(fresh));
                     }
                 }
