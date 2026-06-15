@@ -93,14 +93,15 @@ MATA-LL TODO
 
 ## Open
 
-- [ ] List-of-tuple equality broken (`[(1,2)] == [(1,2)]` fails — tuple element eq not generated for nested list comparisons)
-- [ ] `>>=`/`>>` on non-IO monads in let-bindings inside IO do-blocks don't resolve (monad type variable propagation through bind chains is incomplete)
-- [ ] Typeclass-constrained functions (Eq/Ord) in library modules can't be monomorphized (monomorphization happens at use-site, not library compilation time)
-- [ ] Higher-rank polymorphism (generalize beyond narrow rank-2 support for ST/LuaFunction)
-- [ ] Deriving for more typeclasses (Functor, Enum, Bounded)
+- [ ] Existential types in data constructors (`data ShowBox = forall a. MkShowBox a (a -> String)` — parse error; rank-2 in function signatures already works)
+- [ ] Deriving Functor (requires traversing constructor fields to find type parameter)
 
 ## Done
 
+- [x] List-of-tuple equality (recursive element eq generation for nested containers)
+- [x] `>>=`/`>>` on non-IO monads in let-bindings (spine walker now skips non-IO monads, bind_List added)
+- [x] Typeclass-constrained library functions work via source-merging compilation (not a bug with current model)
+- [x] Deriving Enum and Bounded for simple enum types (toEnum, fromEnum, succ, pred, range syntax)
 - [x] Cross-function demand propagation (if callee is strict in position j, propagate to caller)
 - [x] Full strictness analysis (demand-driven call-site decisions, is_cheap_arg retained for trivial expressions)
 - [x] Monad typeclass dispatch for >>= and >> (instances for IO, LuaIO, ST; proper error on missing instance)
