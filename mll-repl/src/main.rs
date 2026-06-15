@@ -7,13 +7,24 @@ struct ReplState {
     decls: Vec<String>,
     /// Library search paths
     lib_paths: Vec<String>,
+    /// Line index where the bare main slot starts (everything before is prelude/runtime)
+    baseline_main_line: usize,
 }
 
 impl ReplState {
     fn new(lib_paths: Vec<String>) -> Self {
+        // Compile a bare program to find where the main slot definition starts.
+        // Everything before that line is prelude/runtime boilerplate.
+        let baseline_source = "main :: IO ()\nmain = pure ()\n";
+        let lib_refs: Vec<&Path> = lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
+        let baseline_main_line = match mllc::compile(baseline_source, Path::new("."), &lib_refs) {
+            Ok(r) => find_main_slot_line(&r.lua_code),
+            Err(_) => 0,
+        };
         ReplState {
             decls: Vec::new(),
             lib_paths,
+            baseline_main_line,
         }
     }
 
@@ -209,10 +220,10 @@ fn main() {
                     if expr.is_empty() {
                         // Show lua for current accumulated state
                         let source = build_source(&state.decls, None);
-                        show_lua(&source, &state.lib_paths);
+                        show_lua(&source, &state.lib_paths, state.baseline_main_line);
                     } else {
                         let source = build_source(&state.decls, Some(expr));
-                        show_lua(&source, &state.lib_paths);
+                        show_lua(&source, &state.lib_paths, state.baseline_main_line);
                     }
                 }
                 "/source" => {
@@ -238,10 +249,46 @@ fn main() {
     }
 }
 
-fn show_lua(source: &str, lib_paths: &[String]) {
+/// Find the line index where the last __mll_fn[N] = definition starts,
+/// just before the "-- Entry point" comment. This is where main lives.
+fn find_main_slot_line(lua_code: &str) -> usize {
+    let lines: Vec<&str> = lua_code.lines().collect();
+    // Find "-- Entry point" and walk backwards to the slot definition
+    let entry_idx = lines.iter().rposition(|l| l.starts_with("-- Entry point"));
+    if let Some(idx) = entry_idx {
+        // Walk backwards past blank lines to find the start of the main fn
+        let mut i = idx.saturating_sub(1);
+        while i > 0 && lines[i].trim().is_empty() {
+            i -= 1;
+        }
+        // Now walk backwards to the start of this function (the __mll_fn[N] = line)
+        while i > 0 && !lines[i].starts_with("__mll_fn[") && !lines[i].starts_with("local ") {
+            i -= 1;
+        }
+        return i;
+    }
+    0
+}
+
+fn show_lua(source: &str, lib_paths: &[String], baseline_main_line: usize) {
     let lib_refs: Vec<&Path> = lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
     match mllc::compile(source, Path::new("."), &lib_refs) {
-        Ok(r) => println!("{}", r.lua_code),
+        Ok(r) => {
+            // Skip the runtime+prelude, show from where user code starts.
+            // Also strip the entry point boilerplate at the end.
+            let user_code: String = r.lua_code
+                .lines()
+                .skip(baseline_main_line)
+                .take_while(|l| !l.starts_with("-- Entry point"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let trimmed = user_code.trim();
+            if trimmed.is_empty() {
+                println!("(no user code generated)");
+            } else {
+                println!("{}", trimmed);
+            }
+        }
         Err(e) => eprintln!("{}", e),
     }
 }
