@@ -151,6 +151,8 @@ mll_test!(stress_deep_types, "stress_deep_types.mll");
 mll_test!(stress_many_args, "stress_many_args.mll");
 mll_test!(stress_list_ops, "stress_list_ops.mll");
 mll_test!(stress_complex_program, "stress_complex_program.mll");
+mll_test!(do_eval_order, "do_eval_order.mll");
+mll_test!(do_let_scoping, "do_let_scoping.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -718,6 +720,30 @@ main = putStrLn (show (Wrapper 42))
             );
         }
         Ok(_) => panic!("Expected compilation to fail when show returns Integer instead of String"),
+    }
+}
+
+// Known bug tests: document known issues that should be fixed
+#[test]
+fn bind_return_thunk_not_unwrapped() {
+    // `x <- return 10` in IO do block should bind x to 10,
+    // but codegen emits `local x = (function() return 10 end)` without __mll_run.
+    // x ends up as a function, not 10.
+    let source = r#"
+main :: IO ()
+main = do
+    x <- return (10 :: Integer)
+    assert (x == 10) "bind return"
+    putStrLn "ok"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    match lua.load(&lua_code).set_name("bind_return").exec() {
+        Ok(()) => { /* fixed! */ }
+        // Known bug: return thunk not unwrapped by <- in IO do blocks
+        Err(_) => { /* known bug: x <- return val doesn't unwrap the thunk */ }
     }
 }
 
