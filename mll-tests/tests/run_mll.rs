@@ -130,6 +130,10 @@ mll_test!(import_hiding, "import_hiding.mll");
 mll_test!(record_update, "record_update.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
+mll_test!(monad_nonio, "monad_nonio.mll");
+mll_test!(derive_enum, "derive_enum.mll");
+mll_test!(nested_eq, "nested_eq.mll");
+mll_test!(st_return, "st_return.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
