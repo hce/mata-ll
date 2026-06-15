@@ -119,7 +119,7 @@ MATA-LL TODO
 - [x] Typechecker stack overflow on CPS-heavy types (fixed: iterative right-spine processing for bind chains)
 - [x] Top-level let-in value bindings (thunked values removed from concrete_vars)
 - [x] Inliner captures free variables in lambda bodies (gen_expr_subst now handles Lambda)
-- [ ] `let bottom = error "msg"; const 1 bottom` forces bottom eagerly at call site (Lua evaluates all args; non-strict optimization reverted due to tracker regression from imprecise demand analysis)
+- [x] `let bottom = error "msg"; const 1 bottom` forces bottom eagerly at call site (fixed: callee-side strictness — call sites pass args without forcing, callee forces at entry based on demand analysis)
 - [ ] Multi-line case in do-let can cause multi-line continuation to consume next statement as argument
 - [x] Pattern-matching generators in list comprehensions (`[x | Ok x <- rs]`)
 

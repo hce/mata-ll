@@ -18,4 +18,9 @@ main = do
     let xs = 1 : 2 : undefined
     assert (head xs == 1) "head of partial list"
 
+    -- let-bound bottom passed to non-strict position
+    let bottom = error "boom"
+    assert (const 1 bottom == 1) "const discards let-bound bottom"
+    assert (const "safe" undefined == "safe") "const discards undefined"
+
     pure ()

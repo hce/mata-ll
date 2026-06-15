@@ -403,22 +403,14 @@ impl CodeGen {
 
             let all_simple = clause.patterns.iter().all(|p| matches!(p, TPattern::Var(_, _) | TPattern::Wildcard));
             if all_simple {
-                // Mark params concrete based on call-site and demand analysis:
-                // - If all callers pass cheap args, skip __force entirely.
-                // - If demand analysis says param is strict, force at entry.
-                // - Otherwise, stay lazy (param might never be used).
-                let call_site_cheap = self.params_always_cheap.get(&func.name).cloned();
+                // Callee-side strictness: force params the body demands,
+                // leave others lazy (may be thunks from the caller).
                 let demand_strict = self.demand_info.strict_params.get(&func.name).cloned();
                 for (i, pat) in clause.patterns.iter().enumerate() {
                     if let TPattern::Var(v, _) = pat {
                         let sname = sanitize_name(v);
-                        let always_cheap = call_site_cheap.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
                         let is_strict = demand_strict.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
-                        if always_cheap {
-                            // All callers pass concrete values — no __force needed
-                            self.emit_line(&format!("local {} = _arg{}", sname, i));
-                            self.concrete_vars.insert(sname);
-                        } else if is_strict {
+                        if is_strict {
                             // Demand analysis: body forces this param — force at entry
                             self.emit_line(&format!("local {} = __force(_arg{})", sname, i));
                             self.concrete_vars.insert(sname);
@@ -480,12 +472,9 @@ impl CodeGen {
         self.indent += 1;
         self.concrete_vars.insert(lua_name.clone());
         for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
-        // Force params that are destructured OR where call-site analysis
-        // shows all callers pass cheap args (so the value is already concrete).
-        let call_site_cheap = self.params_always_cheap.get(&func.name).cloned();
+        // Force params that are destructured (pattern matching requires concrete values).
         for (i, p) in params.iter().enumerate() {
             if i >= num_params { break; }
-            let always_cheap = call_site_cheap.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
             let needs_force = clauses.iter().any(|c| {
                 c.patterns.get(i).map_or(false, |pat| {
                     !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
@@ -494,9 +483,6 @@ impl CodeGen {
             if needs_force {
                 // Destructured param — must force for pattern matching
                 self.emit_line(&format!("{} = __force({})", p, p));
-                self.concrete_vars.insert(p.clone());
-            } else if always_cheap {
-                // All callers pass concrete values — mark concrete, no force needed
                 self.concrete_vars.insert(p.clone());
             }
         }
@@ -1370,6 +1356,25 @@ impl CodeGen {
         }
     }
 
+    /// Emit an expression as a function argument.
+    /// Bare variables are passed without __force — the callee decides
+    /// whether to force at function entry based on demand analysis.
+    fn gen_arg(&mut self, expr: &TExpr) {
+        match &expr.kind {
+            TExprKind::Var(name) => {
+                match name.as_str() {
+                    "otherwise" => self.emit("true"),
+                    _ => {
+                        let sname = sanitize_name(name);
+                        let lref = self.lua_ref(&sname);
+                        self.emit(&lref);
+                    }
+                }
+            }
+            _ => self.gen_expr(expr),
+        }
+    }
+
     fn gen_expr(&mut self, expr: &TExpr) {
         match &expr.kind {
             TExprKind::Var(name) => {
@@ -1397,10 +1402,13 @@ impl CodeGen {
             TExprKind::Lit(lit) => self.gen_literal(lit),
             TExprKind::App(func, arg) => {
                 // Record field accessor: inline as direct table indexing
+                // __force the field value since record fields may be thunks
+                // (callee-side strictness means constructor args aren't pre-forced)
                 if let TExprKind::Var(name) = &func.kind {
                     if let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
+                        self.emit("__force(");
                         self.gen_expr(arg);
-                        self.emit(&format!("[{}]", idx));
+                        self.emit(&format!("[{}])", idx));
                         return;
                     }
                 }
@@ -1528,7 +1536,7 @@ impl CodeGen {
                     self.emit("(");
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 { self.emit(", "); }
-                        self.gen_expr(a);
+                        self.gen_arg(a);
                     }
                     for p in &extra_params {
                         self.emit(", ");
@@ -1545,25 +1553,10 @@ impl CodeGen {
                     if needs_wrap { self.emit("("); }
                     self.gen_expr_raw(f);
                     if needs_wrap { self.emit(")"); }
-                    // Look up callee's demand info for strict positions.
-                    let callee_strict = if let TExprKind::Var(name) = &f.kind {
-                        self.demand_info.strict_params.get(name).cloned()
-                    } else {
-                        None
-                    };
                     self.emit("(");
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 { self.emit(", "); }
-                        let is_strict = callee_strict.as_ref()
-                            .map_or(false, |v| v.get(i).copied().unwrap_or(false));
-                        let pass_eager = Self::is_cheap_arg(a) || is_strict;
-                        if pass_eager {
-                            self.gen_expr(a);
-                        } else {
-                            self.emit("__thunk(function() return ");
-                            self.gen_expr(a);
-                            self.emit(" end)");
-                        }
+                        self.gen_arg(a);
                     }
                     self.emit(")");
                 }
