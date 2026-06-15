@@ -141,6 +141,13 @@ ghc_test!(ghc_t002_applicative, "T002_applicative.mll");
 ghc_test!(ghc_t003_maybe, "T003_do_maybe.mll");
 ghc_test!(ghc_t004_dollar_fmap, "T004_dollar_fmap.mll");
 ghc_test!(ghc_t005_list, "T005_list_monad.mll");
+ghc_test!(ghc_cgrun004, "ghc_cgrun004.mll");
+ghc_test!(ghc_cgrun007, "ghc_cgrun007.mll");
+ghc_test!(ghc_cgrun008, "ghc_cgrun008.mll");
+ghc_test!(ghc_cgrun010, "ghc_cgrun010.mll");
+ghc_test!(ghc_cgrun054, "ghc_cgrun054.mll");
+ghc_test!(ghc_cgrun058, "ghc_cgrun058.mll");
+ghc_test!(ghc_cgrun063, "ghc_cgrun063.mll");
 
 // Library module tests (need lib/ search path)
 mll_lib_test!(lib_lstring, "lib_lstring.mll");
