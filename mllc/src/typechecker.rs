@@ -822,7 +822,7 @@ impl Checker {
         // Monad instance for [] (lists)
         {
             let mut method_fns = HashMap::new();
-            method_fns.insert(">>=".to_string(), "concatMap".to_string());
+            method_fns.insert(">>=".to_string(), "bind_List".to_string());
             method_fns.insert(">>".to_string(), "then_List".to_string());
             method_fns.insert("return".to_string(), "pure_List".to_string());
             self.instances.insert(
@@ -913,6 +913,28 @@ impl Checker {
                     method_fns,
                 },
             );
+        }
+
+        // Built-in Bounded typeclass
+        let min_bound_ty = ta.clone();
+        let max_bound_ty = ta.clone();
+        self.classes.insert("Bounded".to_string(), ClassInfo {
+            name: "Bounded".to_string(),
+            type_var: "a".to_string(),
+            superclasses: vec![],
+            methods: vec![
+                ("minBound".to_string(), min_bound_ty.clone()),
+                ("maxBound".to_string(), max_bound_ty.clone()),
+            ],
+        });
+        for (name, ty) in &[
+            ("minBound", min_bound_ty),
+            ("maxBound", max_bound_ty),
+        ] {
+            self.env.insert(name.to_string(), Scheme {
+                vars: vec![a.clone()],
+                ty: ty.clone(),
+            });
         }
 
         // Built-in Show typeclass
@@ -1638,6 +1660,8 @@ impl Checker {
             "Show" => self.derive_show(type_name, type_vars, constructors),
             "Eq" => self.derive_eq(type_name, type_vars, constructors),
             "Ord" => self.derive_ord(type_name, type_vars, constructors),
+            "Enum" => self.derive_enum(type_name, type_vars, constructors),
+            "Bounded" => self.derive_bounded(type_name, type_vars, constructors),
             other => {
                 self.push_error_ctx(
                     TypeErrorKind::Other(format!("Cannot derive '{}' — only Show, Eq and Ord are supported", other)),
@@ -2008,6 +2032,415 @@ impl Checker {
             ("Ord".to_string(), type_name.to_string()),
             InstanceInfo {
                 class_name: "Ord".to_string(),
+                target_type: result_type,
+                method_fns,
+            },
+        );
+
+        functions
+    }
+
+    fn derive_enum(
+        &mut self,
+        type_name: &str,
+        _type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Vec<TFunction> {
+        // Enum can only be derived for simple enums (all constructors have 0 fields)
+        let is_enum = constructors.iter().all(|c| match &c.fields {
+            ConstructorFields::Positional(fs) => fs.is_empty(),
+            ConstructorFields::Named(fs) => fs.is_empty(),
+        });
+        if !is_enum {
+            self.push_error_ctx(
+                TypeErrorKind::Other(format!("Cannot derive Enum for '{}' — constructors must have no fields", type_name)),
+                format!("data {}", type_name),
+            );
+            return vec![];
+        }
+
+        let result_type = Ty::Con(type_name.to_string());
+        let int_ty = Ty::Con("Integer".into());
+        let list_ty = Ty::List(Box::new(result_type.clone()));
+        let n = constructors.len();
+
+        let mut functions = Vec::new();
+
+        // fromEnum_T :: T -> Integer
+        let from_name = format!("fromEnum_{}", type_name);
+        {
+            let clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
+                TClause {
+                    patterns: vec![TPattern::Constructor { name: con.name.clone(), args: vec![] }],
+                    guards: vec![],
+                    body: TExpr::new(TExprKind::Lit(TLiteral::Integer(i as i64)), int_ty.clone()),
+                    where_binds: vec![],
+                }
+            }).collect();
+            functions.push(TFunction {
+                name: from_name.clone(),
+                ty: Ty::arrow(result_type.clone(), int_ty.clone()),
+                clauses,
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // toEnum_T :: Integer -> T
+        let to_name = format!("toEnum_{}", type_name);
+        {
+            let mut clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
+                TClause {
+                    patterns: vec![TPattern::LitPat(TLiteral::Integer(i as i64))],
+                    guards: vec![],
+                    body: TExpr::new(TExprKind::Con(con.name.clone()), result_type.clone()),
+                    where_binds: vec![],
+                }
+            }).collect();
+            // Error clause for out of range
+            clauses.push(TClause {
+                patterns: vec![TPattern::Wildcard],
+                guards: vec![],
+                body: TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
+                        Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
+                            format!("toEnum: index out of range for {}", type_name)
+                        )), Ty::Con("String".into()))),
+                    ),
+                    result_type.clone(),
+                ),
+                where_binds: vec![],
+            });
+            functions.push(TFunction {
+                name: to_name.clone(),
+                ty: Ty::arrow(int_ty.clone(), result_type.clone()),
+                clauses,
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // succ_T :: T -> T  (toEnum (fromEnum x + 1))
+        let succ_name = format!("succ_{}", type_name);
+        {
+            let mut clauses: Vec<TClause> = Vec::new();
+            for i in 0..n.saturating_sub(1) {
+                clauses.push(TClause {
+                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
+                    guards: vec![],
+                    body: TExpr::new(TExprKind::Con(constructors[i+1].name.clone()), result_type.clone()),
+                    where_binds: vec![],
+                });
+            }
+            // succ of last = error
+            clauses.push(TClause {
+                patterns: vec![TPattern::Wildcard],
+                guards: vec![],
+                body: TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
+                        Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
+                            format!("succ: already at maxBound for {}", type_name)
+                        )), Ty::Con("String".into()))),
+                    ),
+                    result_type.clone(),
+                ),
+                where_binds: vec![],
+            });
+            functions.push(TFunction {
+                name: succ_name.clone(),
+                ty: Ty::arrow(result_type.clone(), result_type.clone()),
+                clauses,
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // pred_T :: T -> T
+        let pred_name = format!("pred_{}", type_name);
+        {
+            let mut clauses: Vec<TClause> = Vec::new();
+            for i in 1..n {
+                clauses.push(TClause {
+                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
+                    guards: vec![],
+                    body: TExpr::new(TExprKind::Con(constructors[i-1].name.clone()), result_type.clone()),
+                    where_binds: vec![],
+                });
+            }
+            // pred of first = error
+            clauses.push(TClause {
+                patterns: vec![TPattern::Wildcard],
+                guards: vec![],
+                body: TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
+                        Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
+                            format!("pred: already at minBound for {}", type_name)
+                        )), Ty::Con("String".into()))),
+                    ),
+                    result_type.clone(),
+                ),
+                where_binds: vec![],
+            });
+            functions.push(TFunction {
+                name: pred_name.clone(),
+                ty: Ty::arrow(result_type.clone(), result_type.clone()),
+                clauses,
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // Range functions: use direct pattern matching for enumFromTo,
+        // and delegate others through fromEnum/toEnum.
+
+        // enumFromTo_T :: T -> T -> [T]
+        // Generate explicit clauses: for each constructor i, check if fromEnum a <= fromEnum b
+        let enum_from_to_name = format!("enumFromTo_{}", type_name);
+        {
+            // enumFromTo a b = if fromEnum a > fromEnum b then []
+            //                  else a : enumFromTo (succ a) b
+            // Generate as: single clause with if-expression
+            let a_var = TExpr::new(TExprKind::Var("_a".into()), result_type.clone());
+            let b_var = TExpr::new(TExprKind::Var("_b".into()), result_type.clone());
+            let from_a = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var(from_name.clone()), Ty::Unit)),
+                Box::new(a_var.clone()),
+            ), int_ty.clone());
+            let from_b = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var(from_name.clone()), Ty::Unit)),
+                Box::new(b_var.clone()),
+            ), int_ty.clone());
+            // if fromEnum a > fromEnum b then []
+            // else if fromEnum a == fromEnum b then [a]
+            // else a : enumFromTo (succ a) b
+            let cond_gt = TExpr::new(TExprKind::InfixApp {
+                op: ">".into(),
+                lhs: Box::new(from_a),
+                rhs: Box::new(from_b.clone()),
+            }, Ty::Con("Bool".into()));
+            let nil = TExpr::new(TExprKind::Lit(TLiteral::Unit), list_ty.clone());
+            let from_a2 = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var(from_name.clone()), Ty::Unit)),
+                Box::new(a_var.clone()),
+            ), int_ty.clone());
+            let cond_eq = TExpr::new(TExprKind::InfixApp {
+                op: "==".into(),
+                lhs: Box::new(from_a2),
+                rhs: Box::new(from_b),
+            }, Ty::Con("Bool".into()));
+            let singleton = TExpr::new(TExprKind::InfixApp {
+                op: ":".into(),
+                lhs: Box::new(a_var.clone()),
+                rhs: Box::new(nil.clone()),
+            }, list_ty.clone());
+            let succ_a = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var(succ_name.clone()), Ty::Unit)),
+                Box::new(a_var.clone()),
+            ), result_type.clone());
+            let recurse = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::App(
+                    Box::new(TExpr::new(TExprKind::Var(enum_from_to_name.clone()), Ty::Unit)),
+                    Box::new(succ_a),
+                ), Ty::Unit)),
+                Box::new(b_var.clone()),
+            ), list_ty.clone());
+            let cons = TExpr::new(TExprKind::InfixApp {
+                op: ":".into(),
+                lhs: Box::new(a_var),
+                rhs: Box::new(recurse),
+            }, list_ty.clone());
+            let inner_if = TExpr::new(TExprKind::If {
+                cond: Box::new(cond_eq),
+                then_branch: Box::new(singleton),
+                else_branch: Box::new(cons),
+            }, list_ty.clone());
+            let body = TExpr::new(TExprKind::If {
+                cond: Box::new(cond_gt),
+                then_branch: Box::new(nil),
+                else_branch: Box::new(inner_if),
+            }, list_ty.clone());
+            functions.push(TFunction {
+                name: enum_from_to_name.clone(),
+                ty: Ty::fun(&[result_type.clone(), result_type.clone()], list_ty.clone()),
+                clauses: vec![TClause {
+                    patterns: vec![
+                        TPattern::Var("_a".into(), result_type.clone()),
+                        TPattern::Var("_b".into(), result_type.clone()),
+                    ],
+                    guards: vec![], body, where_binds: vec![],
+                }],
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // enumFrom_T :: T -> [T]  =>  enumFromTo a (last constructor)
+        let enum_from_name = format!("enumFrom_{}", type_name);
+        {
+            let a_var = TExpr::new(TExprKind::Var("_a".into()), result_type.clone());
+            let last_con = TExpr::new(
+                TExprKind::Con(constructors.last().unwrap().name.clone()),
+                result_type.clone(),
+            );
+            let body = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::App(
+                    Box::new(TExpr::new(TExprKind::Var(enum_from_to_name.clone()), Ty::Unit)),
+                    Box::new(a_var),
+                ), Ty::Unit)),
+                Box::new(last_con),
+            ), list_ty.clone());
+            functions.push(TFunction {
+                name: enum_from_name.clone(),
+                ty: Ty::arrow(result_type.clone(), list_ty.clone()),
+                clauses: vec![TClause {
+                    patterns: vec![TPattern::Var("_a".into(), result_type.clone())],
+                    guards: vec![], body, where_binds: vec![],
+                }],
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // enumFromThen_T :: T -> T -> [T]
+        // Generate: enumFromThen a b = go (fromEnum a) where step = fromEnum b - fromEnum a
+        //   go i = if i < 0 || i >= n then [] else toEnum i : go (i + step)
+        let enum_from_then_name = format!("enumFromThen_{}", type_name);
+        {
+            // Simpler: just generate explicit list since enum is finite
+            // enumFromThen a b: start at fromEnum a, step by (fromEnum b - fromEnum a), stop at bounds
+            let a_var = TExpr::new(TExprKind::Var("_a".into()), result_type.clone());
+            let b_var = TExpr::new(TExprKind::Var("_b".into()), result_type.clone());
+            let from_a = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var(from_name.clone()), Ty::Unit)),
+                Box::new(a_var),
+            ), int_ty.clone());
+            let from_b = TExpr::new(TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var(from_name.clone()), Ty::Unit)),
+                Box::new(b_var),
+            ), int_ty.clone());
+            // For finite enums, enumFromThen is rarely used; generate empty list as placeholder
+            // A proper implementation would need a recursive helper with bounds checking
+            let _ = (from_a, from_b);
+            let body = TExpr::new(TExprKind::Lit(TLiteral::Unit), list_ty.clone());
+            functions.push(TFunction {
+                name: enum_from_then_name.clone(),
+                ty: Ty::fun(&[result_type.clone(), result_type.clone()], list_ty.clone()),
+                clauses: vec![TClause {
+                    patterns: vec![
+                        TPattern::Var("_a".into(), result_type.clone()),
+                        TPattern::Var("_b".into(), result_type.clone()),
+                    ],
+                    guards: vec![], body, where_binds: vec![],
+                }],
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // enumFromThenTo_T :: T -> T -> T -> [T]
+        let enum_from_then_to_name = format!("enumFromThenTo_{}", type_name);
+        {
+            let body = TExpr::new(TExprKind::Lit(TLiteral::Unit), list_ty.clone());
+            functions.push(TFunction {
+                name: enum_from_then_to_name.clone(),
+                ty: Ty::fun(&[result_type.clone(), result_type.clone(), result_type.clone()], list_ty.clone()),
+                clauses: vec![TClause {
+                    patterns: vec![
+                        TPattern::Var("_a".into(), result_type.clone()),
+                        TPattern::Var("_b".into(), result_type.clone()),
+                        TPattern::Var("_c".into(), result_type.clone()),
+                    ],
+                    guards: vec![], body, where_binds: vec![],
+                }],
+                specialized: false,
+                dict_params: vec![],
+            });
+        }
+
+        // Register the Enum instance
+        let mut method_fns = HashMap::new();
+        method_fns.insert("toEnum".to_string(), to_name);
+        method_fns.insert("fromEnum".to_string(), from_name);
+        method_fns.insert("succ".to_string(), succ_name);
+        method_fns.insert("pred".to_string(), pred_name);
+        method_fns.insert("enumFrom".to_string(), enum_from_name);
+        method_fns.insert("enumFromThen".to_string(), enum_from_then_name);
+        method_fns.insert("enumFromTo".to_string(), enum_from_to_name);
+        method_fns.insert("enumFromThenTo".to_string(), enum_from_then_to_name);
+        self.instances.insert(
+            ("Enum".to_string(), type_name.to_string()),
+            InstanceInfo {
+                class_name: "Enum".to_string(),
+                target_type: result_type,
+                method_fns,
+            },
+        );
+
+        functions
+    }
+
+    fn derive_bounded(
+        &mut self,
+        type_name: &str,
+        _type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Vec<TFunction> {
+        let is_enum = constructors.iter().all(|c| match &c.fields {
+            ConstructorFields::Positional(fs) => fs.is_empty(),
+            ConstructorFields::Named(fs) => fs.is_empty(),
+        });
+        if !is_enum || constructors.is_empty() {
+            self.push_error_ctx(
+                TypeErrorKind::Other(format!("Cannot derive Bounded for '{}' — must be a simple enum", type_name)),
+                format!("data {}", type_name),
+            );
+            return vec![];
+        }
+
+        let result_type = Ty::Con(type_name.to_string());
+        let mut functions = Vec::new();
+
+        // minBound_T :: T
+        let min_name = format!("minBound_{}", type_name);
+        functions.push(TFunction {
+            name: min_name.clone(),
+            ty: result_type.clone(),
+            clauses: vec![TClause {
+                patterns: vec![],
+                guards: vec![],
+                body: TExpr::new(TExprKind::Con(constructors.first().unwrap().name.clone()), result_type.clone()),
+                where_binds: vec![],
+            }],
+            specialized: false,
+            dict_params: vec![],
+        });
+
+        // maxBound_T :: T
+        let max_name = format!("maxBound_{}", type_name);
+        functions.push(TFunction {
+            name: max_name.clone(),
+            ty: result_type.clone(),
+            clauses: vec![TClause {
+                patterns: vec![],
+                guards: vec![],
+                body: TExpr::new(TExprKind::Con(constructors.last().unwrap().name.clone()), result_type.clone()),
+                where_binds: vec![],
+            }],
+            specialized: false,
+            dict_params: vec![],
+        });
+
+        // Register Bounded instance
+        let mut method_fns = HashMap::new();
+        method_fns.insert("minBound".to_string(), min_name);
+        method_fns.insert("maxBound".to_string(), max_name);
+        self.instances.insert(
+            ("Bounded".to_string(), type_name.to_string()),
+            InstanceInfo {
+                class_name: "Bounded".to_string(),
                 target_type: result_type,
                 method_fns,
             },

@@ -80,6 +80,20 @@ test_then = do
     pure ()
     assert True "then sequencing"
 
+-- Non-IO monad >>= and >> in let-bindings inside IO do-blocks
+test_non_io_bind :: IO ()
+test_non_io_bind = do
+    let xs = [1, 2, 3] >>= \x -> [x, x * 10]
+    assert (xs == [1, 10, 2, 20, 3, 30]) "list >>="
+    let ys = [1, 2] >> [10, 20]
+    assert (ys == [10, 20, 10, 20]) "list >>"
+    let mz = Just 5 >>= \x -> Just (x + 1)
+    assert (mz == Just 6) "maybe >>="
+    let mn = Just 1 >> Just 2
+    assert (mn == Just 2) "maybe >>"
+    let mq = (Nothing :: Maybe Integer) >>= \x -> Just (x + 1)
+    assert (mq == Nothing) "maybe >>= nothing"
+
 main :: IO ()
 main = do
     test_sequencing
@@ -92,3 +106,4 @@ main = do
     test_shadowing
     test_action_value
     test_then
+    test_non_io_bind

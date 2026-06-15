@@ -109,7 +109,10 @@ then_Maybe :: Maybe a -> Maybe b -> Maybe b
 then_Maybe Nothing _ = Nothing
 then_Maybe (Just _) b = b
 
--- Monad instance for [] (list then)
+-- Monad instance for [] (list bind and then)
+bind_List :: [a] -> (a -> [b]) -> [b]
+bind_List xs f = concatMap f xs
+
 then_List :: [a] -> [b] -> [b]
 then_List xs ys = concatMap (\_ -> ys) xs
 
