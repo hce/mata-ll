@@ -457,12 +457,14 @@ impl CodeGen {
             let is_concrete;
             if is_io_action {
                 // Wrap in a function (IO action, needs to be called)
+                // Use gen_bind_chain_io to flatten do-block let/bind chains
+                // into sequential local statements instead of nested IIFEs.
                 self.emit_indent();
                 self.emit(&self.fn_decl(&lua_name, ""));
                 self.emit("\n");
                 self.indent += 1;
                 self.gen_where_binds(&clauses[0].where_binds);
-                self.emit_indent(); self.emit("return "); self.gen_expr(&clauses[0].body); self.emit("\n");
+                self.gen_bind_chain_io(&clauses[0].body);
                 self.indent -= 1;
                 self.emit_line("end");
                 is_concrete = true;
@@ -1286,6 +1288,14 @@ impl CodeGen {
     /// - pure/return → emit the value
     /// Falls back to __force(expr)() for unknown actions.
     fn gen_action(&mut self, expr: &TExpr) {
+        // Check pure/return FIRST — the monad type variable may be
+        // unresolved in bind chains, so we can't rely on the type alone.
+        if let TExprKind::App(func, arg) = &expr.kind {
+            if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
+                self.gen_expr(arg);
+                return;
+            }
+        }
         if !Self::is_nullary_action_type(&expr.ty) {
             self.gen_expr(expr);
             return;
@@ -1293,10 +1303,6 @@ impl CodeGen {
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => {
                 self.gen_expr(expr);
-            }
-            // pure(x) / return(x): performing it just returns x
-            TExprKind::App(func, arg) if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") => {
-                self.gen_expr(arg);
             }
             // IO SpecCall: inline the Lua call directly (skip closure)
             TExprKind::SpecCall { specialized, args, .. } if specialized.starts_with("__mll_io:") => {

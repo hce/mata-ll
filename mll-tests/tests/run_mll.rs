@@ -151,6 +151,7 @@ mll_test!(stress_deep_types, "stress_deep_types.mll");
 mll_test!(stress_many_args, "stress_many_args.mll");
 mll_test!(stress_list_ops, "stress_list_ops.mll");
 mll_test!(stress_complex_program, "stress_complex_program.mll");
+mll_test!(stress_long_do_200, "stress_long_do_200.mll");
 mll_test!(do_eval_order, "do_eval_order.mll");
 mll_test!(do_let_scoping, "do_let_scoping.mll");
 
@@ -723,12 +724,9 @@ main = putStrLn (show (Wrapper 42))
     }
 }
 
-// Known bug tests: document known issues that should be fixed
+// Regression test: x <- return val must unwrap the thunk (was a known bug)
 #[test]
-fn bind_return_thunk_not_unwrapped() {
-    // `x <- return 10` in IO do block should bind x to 10,
-    // but codegen emits `local x = (function() return 10 end)` without __mll_run.
-    // x ends up as a function, not 10.
+fn bind_return_unwraps_value() {
     let source = r#"
 main :: IO ()
 main = do
@@ -740,11 +738,8 @@ main = do
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
-    match lua.load(&lua_code).set_name("bind_return").exec() {
-        Ok(()) => { /* fixed! */ }
-        // Known bug: return thunk not unwrapped by <- in IO do blocks
-        Err(_) => { /* known bug: x <- return val doesn't unwrap the thunk */ }
-    }
+    lua.load(&lua_code).set_name("bind_return").exec()
+        .expect("x <- return val should bind x to the value");
 }
 
 // Runtime error tests: these should compile but fail at runtime
