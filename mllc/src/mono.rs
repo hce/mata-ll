@@ -248,8 +248,10 @@ impl Monomorphizer {
                 }
             }
             Ty::Arrow(from, to) => {
-                Self::extract_type_constructor(from)
-                    .or_else(|| Self::extract_type_constructor(to))
+                // Prefer return type: for methods like pure/return, the
+                // class variable (m) is in the return position, not the argument.
+                Self::extract_type_constructor(to)
+                    .or_else(|| Self::extract_type_constructor(from))
             }
             _ => None,
         }
@@ -433,6 +435,10 @@ impl Monomorphizer {
                             if let Some(mangled) = self.instance_methods.get(&key).cloned() {
                                 return TExpr { kind: TExprKind::Var(mangled), ty };
                             }
+                            // Parameterized lookup on return type (e.g. ST s [ByteString] → "ST")
+                            if let Some(mangled) = self.resolve_parameterized_instance(name, &ret_ty) {
+                                return TExpr { kind: TExprKind::Var(mangled), ty };
+                            }
                         }
                     }
                     // Standard: use first argument type
@@ -532,12 +538,24 @@ impl Monomorphizer {
                             let mut resolved = None;
                             // For methods where the class variable is in the return
                             // position (Read, toEnum), resolve against the result type
-                            if self.return_type_methods.contains(fname) && !self.is_polymorphic(&ty) {
-                                let ret_str = format!("{}", ty);
-                                let ret_key = (fname.clone(), ret_str);
-                                resolved = self.instance_methods.get(&ret_key).cloned();
-                            }
-                            if resolved.is_none() {
+                            if self.return_type_methods.contains(fname) {
+                                // For methods where the class variable is in the return
+                                // position (pure, return, toEnum), resolve using result
+                                // type — the arg type is the wrapped value, not the container.
+                                if !self.is_polymorphic(&ty) {
+                                    let ret_str = format!("{}", ty);
+                                    let ret_key = (fname.clone(), ret_str);
+                                    resolved = self.instance_methods.get(&ret_key).cloned();
+                                }
+                                // Parameterized lookup on result type
+                                // (handles ST s a where s is still a type variable)
+                                if resolved.is_none() {
+                                    resolved = self.resolve_parameterized_instance(fname, &ty);
+                                }
+                                // Do NOT fall through to arg_ty resolution for
+                                // return-type methods — the arg type would incorrectly
+                                // match the inner container (e.g. [a] inside ST s [a])
+                            } else if resolved.is_none() {
                                 let ty_str = format!("{}", arg_ty);
                                 let key = (fname.clone(), ty_str);
                                 resolved = self.instance_methods.get(&key).cloned()
