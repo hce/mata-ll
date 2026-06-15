@@ -128,6 +128,24 @@ return types cannot be inferred by Hindley-Milner alone — the
 bidirectional checker uses the known signature to validate the type
 equalities introduced by each branch.
 
+## Existential types
+
+Data constructors can quantify type variables that do not appear in
+the result type, hiding the concrete type behind an interface:
+
+    data ShowBox = forall a. MkShowBox a (a -> String)
+
+    showIt :: ShowBox -> String
+    showIt (MkShowBox x f) = f x
+
+The `forall a.` in the constructor declaration makes `a` existential:
+it is chosen at construction time and hidden from consumers. Pattern
+matching on `MkShowBox` brings `a` back into scope locally, but it
+cannot escape the branch.
+
+Runtime representation is identical to normal ADTs. The type erasure
+is purely compile-time.
+
 ## Function application
 
 Normal functions are defined like so:
@@ -637,6 +655,17 @@ Guards are supported on function definitions and case branches:
 
 `otherwise` is defined as `True` in the prelude.
 
+# List comprehensions
+
+Haskell-style list comprehensions are supported with generators,
+guards, and pattern-matching generators:
+
+    evens = [x | x <- [1..20], x `mod` 2 == 0]
+    pairs = [(x, y) | x <- [1..3], y <- [1..3], x /= y]
+    oks   = [v | Ok v <- results]
+
+Comprehensions desugar to `concatMap` and `filter`.
+
 # Literals
 
 Integer literals are `Integer`. Decimal literals are `Number`. There
@@ -713,10 +742,11 @@ exports to plain Lua are allowed that way.
 
 # Minimal prelude
 
-Functions: show, putStrLn, print, (++), ($), max, min, const, id,
-           (.), flip, map, filter, foldl, foldr, sqrt, not, (&&),
-           (||), error, otherwise, head, tail, take, zipWith, elem,
-           length, reverse, fst, snd, mapM_, when, assert, seq
+Functions: show, putStrLn, putStr, print, (++), ($), max, min,
+           const, id, (.), flip, map, filter, foldl, foldr, sqrt,
+           not, (&&), (||), error, undefined, otherwise, head, tail,
+           take, zipWith, elem, length, reverse, fst, snd, concatMap,
+           mapM_, when, assert, seq, getArgs, exit
 
     (++)  :: String -> String -> String
     ($)   :: (a -> b) -> a -> b
@@ -736,7 +766,8 @@ Comparison and equality operators are methods of Eq and Ord:
     compare :: Ord a => a -> a -> Ordering
     data Ordering = LT | EQ | GT
 
-Typeclasses: Show, Eq, Ord, Functor, Applicative, Monad
+Typeclasses: Show, Eq, Ord, Enum, Bounded, Read, Functor,
+             Applicative, Monad
 
 Types: Maybe (Just, Nothing), Either (Left, Right), IO, Ordering,
        ExitValue (Normal, Err), Any
@@ -755,12 +786,18 @@ is given.
 
 # Deriving
 
-Automatic instance generation is supported for Show and Eq:
+Automatic instance generation is supported for Show, Eq, Ord, Enum,
+Bounded, and Functor:
 
     data Color = Red | Green | Blue
-        deriving (Show, Eq)
+        deriving (Show, Eq, Ord, Enum, Bounded)
 
-The compiler generates the obvious structural instances.
+    data Tree a = Leaf a | Branch (Tree a) (Tree a)
+        deriving (Show, Eq, Functor)
+
+The compiler generates the obvious structural instances. Enum and
+Bounded are supported for simple enum types (constructors with no
+fields).
 
 # Export
 
@@ -859,7 +896,8 @@ parameters are marked concrete.
         ↓
     Code generator — Lua source with optimizations
                      (bind chain flattening, function inlining,
-                      cheapness analysis, concrete variable tracking)
+                      cheapness analysis, concrete variable tracking,
+                      cross-function demand analysis)
         ↓
     .lua output (standalone, no runtime needed)
 
@@ -872,11 +910,6 @@ parameters are marked concrete.
 Generalize beyond the current narrow rank-2 support (ST and
 LuaFunction scope sealing) to support general `forall` quantification
 in argument positions.
-
-### Deriving for more typeclasses
-
-Extend `deriving` beyond Show, Eq, Ord to include at minimum:
-Functor, Enum, Bounded.
 
 ### Standard library compatibility modules
 

@@ -77,7 +77,7 @@ MATA-LL TODO
 ## Codegen optimizations
 
 - [x] Prelude runtime functions seeded as concrete
-- [x] Monadic bind chain flattening (do-blocks → flat IIFEs)
+- [x] Monadic bind chain flattening (do-blocks → flat locals, no IIFEs)
 - [x] If-expressions as statements in bind chain terminals
 - [x] Small pure function inlining at call sites
 - [x] Typeclass methods inlined as Lua operators
@@ -90,8 +90,16 @@ MATA-LL TODO
 - [x] Forward-declared functions packed into __mll_fn table (eliminates 200-local limit)
 - [x] IO actions as proper closures (IO can't leak into pure code)
 - [x] ST primitive inlining in gen_action (zero-overhead in bind chains)
+- [x] Zero-arg IO action flattening (main/helpers use gen_bind_chain_io instead of nested IIFEs)
+- [x] pure/return unwrapping in gen_action before type guard (fixes unresolved monad type variables in bind chains)
 
 ## Open
+
+- [ ] Audit gen_action type guard for other matches unreachable due to unresolved type variables
+- [ ] Audit zero-arg IO helper functions for silently-passing tests (old codegen wrapped bind chains in uncalled closures)
+- [ ] Update do_eval_order/do_let_scoping tests to use `<-` bind syntax (was avoided due to now-fixed pure/return bug)
+
+## Recently completed
 
 - [x] Local variable table fallback: constructors, newtypes, and instance methods packed into `__mll_fn` table alongside functions; function-body `_v[N]` overflow slots when binding count exceeds 180
 - [x] Existential types in data constructors (`data ShowBox = forall a. MkShowBox a (a -> String)` — parser, typechecker, and pattern matching support)
@@ -136,6 +144,9 @@ MATA-LL TODO
 ## Testing
 
 - [x] Comprehensive test suites for each library module (Regex, JSON, LOS, LString, LBit, LMath)
+- [x] Stress tests for compiler limits (large ADTs, deep recursion, nested exprs, many functions/instances, long do-blocks, large patterns, deep types, many args, list ops, BST program)
+- [x] Do-notation regression tests (eval order, let scoping, bind return unwrapping)
+- [x] 220 tests passing (Lua 5.4 via mlua)
 
 ## Can defer
 
