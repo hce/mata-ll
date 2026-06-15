@@ -26,32 +26,15 @@ data Result a = Ok a | Err String
 
 -- Binary tree (recursive, multiple constructors)
 data Tree a = Leaf a | Branch (Tree a) (Tree a)
-    deriving Functor
-
--- Helper: manually show a Tree Integer
-showTree :: Tree Integer -> String
-showTree (Leaf n) = "Leaf " ++ show n
-showTree (Branch l r) = "Branch (" ++ showTree l ++ ") (" ++ showTree r ++ ")"
-
--- Helper: manually compare Tree Integer
-eqTree :: Tree Integer -> Tree Integer -> Bool
-eqTree (Leaf a) (Leaf b) = a == b
-eqTree (Branch l1 r1) (Branch l2 r2) = eqTree l1 l2 && eqTree r1 r2
-eqTree _ _ = False
+    deriving (Show, Eq, Functor)
 
 -- Nested functor: field contains [a]
 data WithList a = MkWithList [a]
-    deriving Functor
-
-getList :: WithList a -> [a]
-getList (MkWithList xs) = xs
+    deriving (Eq, Functor)
 
 -- Nested functor: field contains Maybe a
 data WithMaybe a = MkWithMaybe (Maybe a)
-    deriving Functor
-
-getMaybe :: WithMaybe a -> Maybe a
-getMaybe (MkWithMaybe m) = m
+    deriving (Eq, Functor)
 
 main :: IO ()
 main = do
@@ -78,17 +61,17 @@ main = do
     -- <$> operator alias
     assert ((+1) <$> MkBox 10 == MkBox 11) "<$> Box"
 
-    -- Binary tree (recursive, use manual helpers)
+    -- Binary tree (recursive, derived Eq works with the fix)
     let tree = Branch (Leaf 1) (Branch (Leaf 2) (Leaf 3))
     let result = fmap (+1) tree
-    assert (eqTree result (Branch (Leaf 2) (Branch (Leaf 3) (Leaf 4)))) "fmap Tree"
-    assert (showTree (fmap (*10) (Leaf 7)) == "Leaf 70") "fmap Tree Leaf"
+    assert (result == Branch (Leaf 2) (Branch (Leaf 3) (Leaf 4))) "fmap Tree"
+    assert (show (fmap (*10) (Leaf 7)) == "Leaf 70") "fmap Tree Leaf"
 
-    -- Nested: list field (extract and compare the list directly)
-    assert (getList (fmap (+1) (MkWithList [1, 2, 3])) == [2, 3, 4]) "fmap WithList"
+    -- Nested: list field (derived Eq calls eq_[] instead of Lua ==)
+    assert (fmap (+1) (MkWithList [1, 2, 3]) == MkWithList [2, 3, 4]) "fmap WithList"
 
-    -- Nested: Maybe field
-    assert (getMaybe (fmap (+1) (MkWithMaybe (Just 5))) == Just 6) "fmap WithMaybe Just"
-    assert (getMaybe (fmap (+1) (MkWithMaybe Nothing)) == Nothing) "fmap WithMaybe Nothing"
+    -- Nested: Maybe field (derived Eq calls eq_Maybe instead of Lua ==)
+    assert (fmap (+1) (MkWithMaybe (Just 5)) == MkWithMaybe (Just 6)) "fmap WithMaybe Just"
+    assert (fmap (+1) (MkWithMaybe Nothing) == MkWithMaybe Nothing) "fmap WithMaybe Nothing"
 
     putStrLn "all deriving Functor tests passed"

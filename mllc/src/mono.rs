@@ -606,34 +606,64 @@ impl Monomorphizer {
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // Check for typeclass method resolution on infix operators
-                if self.class_methods.contains(&op) && !self.is_polymorphic(&lhs.ty) {
-                    let ty_str = format!("{}", lhs.ty);
-                    let key = (op.clone(), ty_str.clone());
+                if self.class_methods.contains(&op) {
+                    #[allow(unused_assignments)]
+                    let mut resolved: Option<String> = None;
 
-                    // 1. Direct instance lookup
-                    let mut resolved = self.instance_methods.get(&key).cloned();
+                    if !self.is_polymorphic(&lhs.ty) {
+                        let ty_str = format!("{}", lhs.ty);
+                        let key = (op.clone(), ty_str.clone());
 
-                    // 2. Specialized eq/ne generation for containers and tuples
-                    if resolved.is_none() && (op == "==" || op == "/=") {
-                        if let Ty::List(elem_ty) = &lhs.ty {
-                            resolved = Some(self.generate_list_eq(elem_ty));
-                        } else if Self::is_maybe_type(&lhs.ty) {
-                            let inner_ty = Self::maybe_inner_type(&lhs.ty).unwrap();
-                            resolved = Some(self.generate_maybe_eq(&inner_ty));
-                        } else if let Ty::Tuple(elem_tys) = &lhs.ty {
-                            resolved = Some(self.generate_tuple_eq(elem_tys));
+                        // 1. Direct instance lookup
+                        resolved = self.instance_methods.get(&key).cloned();
+
+                        // 2. Specialized eq/ne generation for containers and tuples
+                        if resolved.is_none() && (op == "==" || op == "/=") {
+                            if let Ty::List(elem_ty) = &lhs.ty {
+                                resolved = Some(self.generate_list_eq(elem_ty));
+                            } else if Self::is_maybe_type(&lhs.ty) {
+                                let inner_ty = Self::maybe_inner_type(&lhs.ty).unwrap();
+                                resolved = Some(self.generate_maybe_eq(&inner_ty));
+                            } else if let Ty::Tuple(elem_tys) = &lhs.ty {
+                                resolved = Some(self.generate_tuple_eq(elem_tys));
+                            }
                         }
-                    }
 
-                    // 3. Parameterized instance resolution (extract type constructor from LHS)
-                    if resolved.is_none() {
-                        resolved = self.resolve_parameterized_instance(&op, &lhs.ty);
-                    }
+                        // 3. Parameterized instance resolution (extract type constructor from LHS)
+                        if resolved.is_none() {
+                            resolved = self.resolve_parameterized_instance(&op, &lhs.ty);
+                        }
 
-                    // 4. Higher-kinded fallback: extract type constructor from result type
-                    if resolved.is_none() {
-                        if let Some(tc) = Self::extract_type_constructor(&ty) {
-                            resolved = self.instance_methods.get(&(op.clone(), tc)).cloned();
+                        // 4. Higher-kinded fallback: extract type constructor from result type
+                        if resolved.is_none() {
+                            if let Some(tc) = Self::extract_type_constructor(&ty) {
+                                resolved = self.instance_methods.get(&(op.clone(), tc)).cloned();
+                            }
+                        }
+                    } else {
+                        // Polymorphic type: try to resolve by type constructor if known.
+                        // This handles derived instance methods (e.g. eq_Tree) where
+                        // field types like `Tree a` are polymorphic but the type
+                        // constructor has a registered instance.
+                        if (op == "==" || op == "/=") {
+                            if let Ty::List(elem_ty) = &lhs.ty {
+                                resolved = Some(self.generate_list_eq(elem_ty));
+                            } else if Self::is_maybe_type(&lhs.ty) {
+                                let inner_ty = Self::maybe_inner_type(&lhs.ty).unwrap();
+                                resolved = Some(self.generate_maybe_eq(&inner_ty));
+                            } else if let Ty::Tuple(elem_tys) = &lhs.ty {
+                                resolved = Some(self.generate_tuple_eq(elem_tys));
+                            }
+                        }
+                        if resolved.is_none() {
+                            let ty_str = format!("{}", lhs.ty);
+                            let key = (op.clone(), ty_str);
+                            resolved = self.instance_methods.get(&key).cloned();
+                        }
+                        if resolved.is_none() {
+                            if let Some(tc) = Self::extract_type_constructor(&lhs.ty) {
+                                resolved = self.instance_methods.get(&(op.clone(), tc)).cloned();
+                            }
                         }
                     }
 
@@ -743,6 +773,10 @@ impl Monomorphizer {
     /// Returns the mangled name if generated, None if not applicable.
     /// Resolve the eq function for a type, generating specialized eq if needed.
     fn resolve_elem_eq(&mut self, ty: &Ty) -> String {
+        // Type variables: use generic raw-equality function
+        if matches!(ty, Ty::Var(_)) {
+            return "__mll_eq".to_string();
+        }
         // Check if we already have an eq for this type
         if let Some(existing) = self.instance_methods.get(&("==".to_string(), format!("{}", ty))).cloned() {
             return existing;
@@ -759,7 +793,13 @@ impl Monomorphizer {
                 return self.generate_maybe_eq(&inner_ty);
             }
         }
-        "eq".to_string()
+        // Try type constructor for parameterized types
+        if let Some(tc) = Self::extract_type_constructor(ty) {
+            if let Some(existing) = self.instance_methods.get(&("==".to_string(), tc)).cloned() {
+                return existing;
+            }
+        }
+        "__mll_eq".to_string()
     }
 
     /// Generate a specialized eq function for a tuple type.

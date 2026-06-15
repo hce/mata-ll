@@ -216,7 +216,7 @@ impl CodeGen {
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList",
-            "__mll_show_list", "__mll_list_eq", "__mll_maybe_eq",
+            "__mll_show_list", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_iter", "getArgs", "exit_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
             "__mll_shl", "__mll_shr",
@@ -2473,6 +2473,7 @@ local function eq_Integer(a, b) a = __force(a); b = __force(b); return a == b en
 local function eq_Number(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_String(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Bool(a, b) a = __force(a); b = __force(b); return a == b end
+local function __mll_eq(a, b) a = __force(a); b = __force(b); return a == b end
 local function ord_lt__Integer(a, b) a = __force(a); b = __force(b); return a < b end
 local function ord_lt__Number(a, b) a = __force(a); b = __force(b); return a < b end
 local function ord_lt__String(a, b) a = __force(a); b = __force(b); return a < b end

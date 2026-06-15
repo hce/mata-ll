@@ -1863,6 +1863,9 @@ impl Checker {
             };
 
             // Build body: a0 == b0 && a1 == b1 && ...
+            // The monomorphizer resolves == to the appropriate eq function
+            // for each field type (including polymorphic types like Tree a
+            // where the type constructor has a known Eq instance).
             let mut body = TExpr::new(
                 TExprKind::Lit(TLiteral::Bool(true)),
                 Ty::Con("Bool".into()),
