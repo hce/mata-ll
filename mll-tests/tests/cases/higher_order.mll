@@ -23,3 +23,9 @@ main = do
                      b = 20
                  in a + b
     assert (result == 30) "let binding"
+
+    -- flip with partial application: param name 'f' must not resolve
+    -- to the top-level function 'f' in the fn_table
+    let f = flip take [1, 2, 3, 4, 5]
+    assert (f 3 == [1, 2, 3]) "flip take partial app"
+    assert (flip take [10, 20, 30] 2 == [10, 20]) "flip take inline"

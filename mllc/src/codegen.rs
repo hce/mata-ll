@@ -30,6 +30,9 @@ struct CodeGen {
     /// Used to pack all forward-declared functions into a single table,
     /// avoiding Lua's 200-local-variable limit.
     fn_table: std::collections::HashMap<String, usize>,
+    /// Locally-bound variable names (params, let-binds, pattern-binds).
+    /// These shadow fn_table entries — lua_ref returns the bare name.
+    local_vars: std::collections::HashSet<String>,
     /// Demand analysis: per-function parameter strictness.
     demand_info: DemandInfo,
     output: String,
@@ -47,6 +50,7 @@ impl CodeGen {
             top_level_names: std::collections::HashSet::new(),
             record_accessors: std::collections::HashMap::new(),
             fn_table: std::collections::HashMap::new(),
+            local_vars: std::collections::HashSet::new(),
             demand_info: DemandInfo { strict_params: std::collections::HashMap::new() },
             output: String::new(), indent: 0,
         }
@@ -61,7 +65,9 @@ impl CodeGen {
     /// Resolve a sanitized name to its Lua reference.
     /// Forward-declared names use __mll_fn[N], others use the name directly.
     fn lua_ref(&self, lua_name: &str) -> String {
-        if let Some(&slot) = self.fn_table.get(lua_name) {
+        if self.local_vars.contains(lua_name) {
+            lua_name.to_string()
+        } else if let Some(&slot) = self.fn_table.get(lua_name) {
             format!("__mll_fn[{}]", slot)
         } else {
             lua_name.to_string()
@@ -94,6 +100,7 @@ impl CodeGen {
         sub.concrete_vars = self.concrete_vars.clone();
         sub.record_accessors = self.record_accessors.clone();
         sub.top_level_names = self.top_level_names.clone();
+        sub.local_vars = self.local_vars.clone();
         sub
     }
 
@@ -318,8 +325,9 @@ impl CodeGen {
         let lua_name = sanitize_name(&func.name);
         let clauses = &func.clauses;
         let saved_concrete = self.concrete_vars.clone();
+        let saved_locals = self.local_vars.clone();
 
-        if clauses.is_empty() { self.concrete_vars = saved_concrete; return; }
+        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; return; }
 
         // Eta-expand: if the function has fewer patterns than type arrows,
         // add extra params so the Lua function matches the expected arity.
@@ -410,6 +418,7 @@ impl CodeGen {
                     if let TPattern::Var(v, _) = pat {
                         let sname = sanitize_name(v);
                         let is_strict = demand_strict.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
+                        self.local_vars.insert(sname.clone());
                         if is_strict {
                             // Demand analysis: body forces this param — force at entry
                             self.emit_line(&format!("local {} = __force(_arg{})", sname, i));
@@ -453,6 +462,7 @@ impl CodeGen {
             self.emit_line("end");
             self.emit_line("");
             self.concrete_vars = saved_concrete;
+            self.local_vars = saved_locals;
             self.concrete_vars.insert(lua_name);
             return;
         }
@@ -491,6 +501,7 @@ impl CodeGen {
         self.emit_line("end");
         self.emit_line("");
         self.concrete_vars = saved_concrete;
+        self.local_vars = saved_locals;
         self.concrete_vars.insert(lua_name);
     }
 
@@ -503,6 +514,7 @@ impl CodeGen {
                 // Simple value binding: local x = expr
                 let sname = sanitize_name(&bind.name);
                 self.emit_indent();
+                self.local_vars.insert(sname.clone());
                 if Self::is_cheap(&bind.body) {
                     self.emit(&format!("local {} = ", sname));
                     self.gen_expr(&bind.body);
@@ -599,6 +611,7 @@ impl CodeGen {
                     self.emit(&format!("{} {} then\n", keyword, conditions.join(" and ")));
                     self.indent += 1;
                     for (var, val) in &bindings {
+                        self.local_vars.insert(var.clone());
                         self.emit_line(&format!("local {} = {}", var, val));
                     }
                     self.gen_where_binds(&clause.where_binds);
@@ -618,6 +631,7 @@ impl CodeGen {
                 } else {
                     // No pattern conditions, just guards
                     for (var, val) in &bindings {
+                        self.local_vars.insert(var.clone());
                         self.emit_line(&format!("local {} = {}", var, val));
                     }
                     self.gen_where_binds(&clause.where_binds);
@@ -643,6 +657,7 @@ impl CodeGen {
                 if conditions.is_empty() {
                     if i > 0 { self.emit_indent(); self.emit("else\n"); self.indent += 1; }
                     for (var, val) in &bindings {
+                        self.local_vars.insert(var.clone());
                         self.emit_line(&format!("local {} = {}", var, val));
                     }
                     self.gen_where_binds(&clause.where_binds);
@@ -655,6 +670,7 @@ impl CodeGen {
                 self.emit(&format!("{} {} then\n", keyword, conditions.join(" and ")));
                 self.indent += 1;
                 for (var, val) in &bindings {
+                    self.local_vars.insert(var.clone());
                     self.emit_line(&format!("local {} = {}", var, val));
                 }
                 self.gen_where_binds(&clause.where_binds);
@@ -1007,8 +1023,10 @@ impl CodeGen {
             TExprKind::Lambda { params, body } => {
                 // Remove shadowed names from substitution
                 let mut inner_subst = subst.clone();
+                let saved_locals = self.local_vars.clone();
                 for (name, _) in params {
                     inner_subst.remove(name.as_str());
+                    self.local_vars.insert(sanitize_name(name));
                 }
                 let ps: Vec<&str> = params.iter().map(|(s, _)| s.as_str()).collect();
                 self.emit(&format!("function({})\n", ps.join(", ")));
@@ -1018,6 +1036,7 @@ impl CodeGen {
                 self.emit("\n");
                 self.indent -= 1;
                 self.emit_indent(); self.emit("end");
+                self.local_vars = saved_locals;
             }
             TExprKind::App(_, _) => {
                 // Collect the application chain, substituting as we go
@@ -1241,6 +1260,7 @@ impl CodeGen {
                         self.emit(&format!("local {} = ", param_name));
                         self.gen_action(lhs);
                         self.emit("\n");
+                        self.local_vars.insert(param_name.clone());
                         self.concrete_vars.insert(param_name);
                         expr = body;
                         inside_action = true;
@@ -1262,6 +1282,7 @@ impl CodeGen {
                             let bname = sanitize_name(&bind.name);
                             self.emit_indent();
                             self.emit(&format!("local {}\n", bname));
+                            self.local_vars.insert(bname.clone());
                             self.concrete_vars.insert(bname.clone());
                             self.emit_indent();
                             self.emit("if ");
@@ -1275,12 +1296,14 @@ impl CodeGen {
                             self.emit(" end\n");
                         } else if Self::is_nullary_action_type(&bind.body.ty) {
                             let bname = sanitize_name(&bind.name);
+                            self.local_vars.insert(bname.clone());
                             self.emit_indent();
                             self.emit(&format!("local {} = function() return ", bname));
                             self.gen_action(&bind.body);
                             self.emit(" end\n");
                         } else {
                             let bname = sanitize_name(&bind.name);
+                            self.local_vars.insert(bname.clone());
                             self.emit_indent();
                             if Self::is_cheap(&bind.body) {
                                 self.emit(&format!("local {} = ", bname));
@@ -1713,10 +1736,13 @@ impl CodeGen {
             }
             TExprKind::Lambda { params, body } => {
                 let ps: Vec<&str> = params.iter().map(|(s, _)| s.as_str()).collect();
+                let saved_locals = self.local_vars.clone();
+                for (p, _) in params { self.local_vars.insert(sanitize_name(p)); }
                 self.emit(&format!("function({})\n", ps.join(", ")));
                 self.indent += 1; self.emit_indent(); self.emit("return ");
                 self.gen_expr(body); self.emit("\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end");
+                self.local_vars = saved_locals;
             }
             TExprKind::Paren(inner) => {
                 self.emit("("); self.gen_expr(inner); self.emit(")");
