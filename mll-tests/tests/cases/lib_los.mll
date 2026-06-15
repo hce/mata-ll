@@ -1,20 +1,6 @@
 import LOS (clock, time, difftime, date, getenv, tmpname)
 import LString (strLen)
 
-testGetenv :: IO ()
-testGetenv = do
-    result <- getenv "PATH"
-    case result of
-        Right p -> assert (strLen p > 0) "PATH is non-empty"
-        Left _ -> assert False "PATH should exist"
-
-testGetenvMissing :: IO ()
-testGetenvMissing = do
-    result <- getenv "__MLL_NONEXISTENT_VAR__"
-    case result of
-        Left _ -> assert True "nonexistent env var returns Left"
-        Right _ -> assert False "nonexistent env var should fail"
-
 main :: IO ()
 main = do
     -- clock returns a non-negative number (CPU time)
@@ -41,6 +27,13 @@ main = do
     tmp <- tmpname
     assert (strLen tmp > 0) "tmpname non-empty"
 
-    -- getenv tests (in separate functions to avoid case-in-do parser issue)
-    testGetenv
-    testGetenvMissing
+    -- getenv tests (previously in separate functions to work around parser bug)
+    result <- getenv "PATH"
+    case result of
+        Right p -> assert (strLen p > 0) "PATH is non-empty"
+        Left _ -> assert False "PATH should exist"
+
+    result2 <- getenv "__MLL_NONEXISTENT_VAR__"
+    case result2 of
+        Left _ -> assert True "nonexistent env var returns Left"
+        Right _ -> assert False "nonexistent env var should fail"

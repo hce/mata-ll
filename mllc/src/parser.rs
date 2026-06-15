@@ -1663,9 +1663,16 @@ impl Parser {
                 let mut branches = Vec::new();
 
                 loop {
+                    let save_pos = self.pos;
+                    let save_indent = self.current_indent;
                     self.skip_newlines_and_indent();
                     if self.at_eof() || self.current_indent < case_indent
                         || self.at(&Token::Where) {
+                        // Restore position so the caller sees the
+                        // newline/indent tokens and doesn't accidentally
+                        // consume the next statement as an argument.
+                        self.pos = save_pos;
+                        self.current_indent = save_indent;
                         break;
                     }
                     let pattern = self.parse_pattern()?;
