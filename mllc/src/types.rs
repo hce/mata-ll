@@ -61,6 +61,14 @@ impl Ty {
     }
 
     pub fn app(f: Ty, a: Ty) -> Ty {
+        // Normalize: App(Con("[]"), a) → List(a), App(Con("IO"), a) → IO(a)
+        if let Ty::Con(ref name) = f {
+            match name.as_str() {
+                "[]" => return Ty::List(Box::new(a)),
+                "IO" => return Ty::IO(Box::new(a)),
+                _ => {}
+            }
+        }
         Ty::App(Box::new(f), Box::new(a))
     }
 
@@ -365,6 +373,13 @@ fn unify_inner(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
                 s = s.compose(&si);
             }
             Ok(s)
+        }
+
+        // Allow App(f, a) to unify with List(b) by treating [] as App(Con("[]"), ...)
+        (Ty::App(f, a), Ty::List(b)) | (Ty::List(b), Ty::App(f, a)) => {
+            let s1 = unify(f, &Ty::Con("[]".into()))?;
+            let s2 = unify(&a.apply_subst(&s1), &b.apply_subst(&s1))?;
+            Ok(s1.compose(&s2))
         }
 
         // Allow App(m, a) to unify with IO(b) by treating IO as App(Con("IO"), ...)

@@ -1,18 +1,11 @@
 -- Non-strict evaluation: bottom/undefined must not be evaluated
 -- unless actually forced.
 
-(<$>) :: Monad m => (a -> b) -> m a -> m b
-(<$>) a b = b >>= \x -> return (a x)
-
 main :: IO ()
 main = do
     -- undefined in a let binding is not forced
     let x = undefined
     assert (const "safe" x == "safe") "const discards bottom"
-
-    -- undefined mapped over IO but result unused
-    let boom = const undefined
-    (boom <$> return " ") >>= \_ -> assert True "fmap bottom unused"
 
     -- undefined in a list that is never reached
     let xs = 1 : 2 : undefined

@@ -60,6 +60,62 @@ concatMap f (x:xs) = prepend (f x) (concatMap f xs)
 
 
 
+-- Functor instances
+fmap_IO :: (a -> b) -> IO a -> IO b
+fmap_IO f action = action >>= \x -> pure (f x)
+
+fmap_Maybe :: (a -> b) -> Maybe a -> Maybe b
+fmap_Maybe _ Nothing = Nothing
+fmap_Maybe f (Just x) = Just (f x)
+
+fmap_Either :: (a -> b) -> Either c a -> Either c b
+fmap_Either _ (Left x) = Left x
+fmap_Either f (Right x) = Right (f x)
+
+-- Applicative instances
+ap_IO :: IO (a -> b) -> IO a -> IO b
+ap_IO mf mx = mf >>= \f -> mx >>= \x -> pure (f x)
+
+pure_Maybe :: a -> Maybe a
+pure_Maybe x = Just x
+
+ap_Maybe :: Maybe (a -> b) -> Maybe a -> Maybe b
+ap_Maybe (Just f) (Just x) = Just (f x)
+ap_Maybe _ _ = Nothing
+
+pure_List :: a -> [a]
+pure_List x = [x]
+
+ap_List :: [a -> b] -> [a] -> [b]
+ap_List [] _ = []
+ap_List (f:fs) xs = concatMap_ap (map f xs) (ap_List fs xs)
+    where concatMap_ap [] rest = rest
+          concatMap_ap (y:ys) rest = y : concatMap_ap ys rest
+
+pure_Either :: a -> Either c a
+pure_Either x = Right x
+
+ap_Either :: Either c (a -> b) -> Either c a -> Either c b
+ap_Either (Right f) (Right x) = Right (f x)
+ap_Either (Left e) _ = Left e
+ap_Either _ (Left e) = Left e
+
+-- Monad instances for Maybe
+bind_Maybe :: Maybe a -> (a -> Maybe b) -> Maybe b
+bind_Maybe Nothing _ = Nothing
+bind_Maybe (Just x) f = f x
+
+then_Maybe :: Maybe a -> Maybe b -> Maybe b
+then_Maybe Nothing _ = Nothing
+then_Maybe (Just _) b = b
+
+-- Monad instance for [] (list then)
+then_List :: [a] -> [b] -> [b]
+then_List xs ys = concatMap (\_ -> ys) xs
+
+infixl 4 <$>
+infixl 4 <*>
+
 -- Monadic combinators
 mapM_ :: (a -> IO ()) -> [a] -> IO ()
 mapM_ _ [] = pure ()

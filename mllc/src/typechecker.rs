@@ -414,10 +414,12 @@ impl Checker {
         let a = TyVar { name: "a".into(), id: u32::MAX };
         let b = TyVar { name: "b".into(), id: u32::MAX };
         let c = TyVar { name: "c".into(), id: u32::MAX };
+        let f = TyVar { name: "f".into(), id: u32::MAX };
         let m = TyVar { name: "m".into(), id: u32::MAX };
         let ta = Ty::Var(a.clone());
         let tb = Ty::Var(b.clone());
         let tc = Ty::Var(c.clone());
+        let tf = Ty::Var(f.clone());
         let tm = Ty::Var(m.clone());
 
         // Only register types for builtins that are NOT provided by Prelude.mll
@@ -433,12 +435,8 @@ impl Checker {
             ("undefined", vec![a.clone()], ta.clone()),
             ("otherwise", vec![], Ty::Con("Bool".into())),
             ("seq", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), tb.clone()], tb.clone())),
-            // Monadic operators are polymorphic over the monad (IO, LuaIO s, etc.)
-            // m is a type variable standing for the monadic wrapper (e.g. IO, LuaIO s)
-            ("pure", vec![a.clone(), m.clone()], Ty::arrow(ta.clone(), Ty::App(Box::new(tm.clone()), Box::new(ta.clone())))),
-            ("return", vec![a.clone(), m.clone()], Ty::arrow(ta.clone(), Ty::App(Box::new(tm.clone()), Box::new(ta.clone())))),
-            (">>=", vec![a.clone(), b.clone(), m.clone()], Ty::fun(&[Ty::App(Box::new(tm.clone()), Box::new(ta.clone())), Ty::arrow(ta.clone(), Ty::App(Box::new(tm.clone()), Box::new(tb.clone())))], Ty::App(Box::new(tm.clone()), Box::new(tb.clone())))),
-            (">>", vec![a.clone(), b.clone(), m.clone()], Ty::fun(&[Ty::App(Box::new(tm.clone()), Box::new(ta.clone())), Ty::App(Box::new(tm.clone()), Box::new(tb.clone()))], Ty::App(Box::new(tm.clone()), Box::new(tb.clone())))),
+            // pure/return, >>=, >> are now typeclass methods (Applicative/Monad)
+            // but keep env entries so type inference sees them as polymorphic
             ("getArgs", vec![], Ty::io(Ty::list(Ty::Con("String".into())))),
             ("exit", vec![], Ty::arrow(Ty::Con("ExitValue".into()), Ty::io(Ty::Unit))),
         ];
@@ -629,30 +627,188 @@ impl Checker {
             ty: Ty::arrow(sta_s.clone(), st_s(Ty::list(int.clone()))),
         });
 
-        // Built-in Monad typeclass
-        // >>=  :: m a -> (a -> m b) -> m b
-        // >>   :: m a -> m b -> m b
-        // pure :: a -> m a
+        // -- Functor → Applicative → Monad hierarchy --
+
+        // Type abbreviations for higher-kinded method types
+        let fa = Ty::App(Box::new(tf.clone()), Box::new(ta.clone()));
+        let fb = Ty::App(Box::new(tf.clone()), Box::new(tb.clone()));
         let ma = Ty::App(Box::new(tm.clone()), Box::new(ta.clone()));
         let mb = Ty::App(Box::new(tm.clone()), Box::new(tb.clone()));
+
+        // Built-in Functor typeclass
+        // fmap :: (a -> b) -> f a -> f b
+        let fmap_ty = Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), fa.clone()], fb.clone());
+        self.classes.insert("Functor".to_string(), ClassInfo {
+            name: "Functor".to_string(),
+            type_var: "f".to_string(),
+            superclasses: vec![],
+            methods: vec![
+                ("fmap".to_string(), fmap_ty.clone()),
+                ("<$>".to_string(), fmap_ty.clone()),
+            ],
+        });
+        self.env.insert("fmap".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), f.clone()],
+            ty: fmap_ty.clone(),
+        });
+        self.env.insert("<$>".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), f.clone()],
+            ty: fmap_ty,
+        });
+
+        // Functor instances (fmap and <$> map to same implementations)
+        for tc_name in &["IO", "LuaIO", "ST"] {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("fmap".to_string(), "fmap_IO".to_string());
+            method_fns.insert("<$>".to_string(), "fmap_IO".to_string());
+            self.instances.insert(
+                ("Functor".to_string(), tc_name.to_string()),
+                InstanceInfo {
+                    class_name: "Functor".to_string(),
+                    target_type: Ty::Con(tc_name.to_string()),
+                    method_fns,
+                },
+            );
+        }
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("fmap".to_string(), "map".to_string());
+            method_fns.insert("<$>".to_string(), "map".to_string());
+            self.instances.insert(
+                ("Functor".to_string(), "[]".to_string()),
+                InstanceInfo {
+                    class_name: "Functor".to_string(),
+                    target_type: Ty::Con("[]".to_string()),
+                    method_fns,
+                },
+            );
+        }
+        for tc_name in &["Maybe", "Either"] {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("fmap".to_string(), format!("fmap_{}", tc_name));
+            method_fns.insert("<$>".to_string(), format!("fmap_{}", tc_name));
+            self.instances.insert(
+                ("Functor".to_string(), tc_name.to_string()),
+                InstanceInfo {
+                    class_name: "Functor".to_string(),
+                    target_type: Ty::Con(tc_name.to_string()),
+                    method_fns,
+                },
+            );
+        }
+
+        // Built-in Applicative typeclass (superclass: Functor)
+        // pure  :: a -> f a
+        // (<*>) :: f (a -> b) -> f a -> f b
+        let pure_ty = Ty::arrow(ta.clone(), fa.clone());
+        let fab = Ty::App(Box::new(tf.clone()), Box::new(Ty::arrow(ta.clone(), tb.clone())));
+        let ap_ty = Ty::fun(&[fab, fa.clone()], fb.clone());
+        self.classes.insert("Applicative".to_string(), ClassInfo {
+            name: "Applicative".to_string(),
+            type_var: "f".to_string(),
+            superclasses: vec!["Functor".to_string()],
+            methods: vec![
+                ("pure".to_string(), pure_ty.clone()),
+                ("<*>".to_string(), ap_ty.clone()),
+            ],
+        });
+        self.env.insert("pure".to_string(), Scheme {
+            vars: vec![a.clone(), f.clone()],
+            ty: pure_ty.clone(),
+        });
+        self.env.insert("return".to_string(), Scheme {
+            vars: vec![a.clone(), f.clone()],
+            ty: pure_ty,
+        });
+        self.env.insert("<*>".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), f.clone()],
+            ty: ap_ty,
+        });
+
+        // Applicative instances
+        for tc_name in &["IO", "LuaIO", "ST"] {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("pure".to_string(), "pure".to_string());
+            method_fns.insert("<*>".to_string(), "ap_IO".to_string());
+            self.instances.insert(
+                ("Applicative".to_string(), tc_name.to_string()),
+                InstanceInfo {
+                    class_name: "Applicative".to_string(),
+                    target_type: Ty::Con(tc_name.to_string()),
+                    method_fns,
+                },
+            );
+        }
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("pure".to_string(), "pure_List".to_string());
+            method_fns.insert("<*>".to_string(), "ap_List".to_string());
+            self.instances.insert(
+                ("Applicative".to_string(), "[]".to_string()),
+                InstanceInfo {
+                    class_name: "Applicative".to_string(),
+                    target_type: Ty::Con("[]".to_string()),
+                    method_fns,
+                },
+            );
+        }
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("pure".to_string(), "pure_Maybe".to_string());
+            method_fns.insert("<*>".to_string(), "ap_Maybe".to_string());
+            self.instances.insert(
+                ("Applicative".to_string(), "Maybe".to_string()),
+                InstanceInfo {
+                    class_name: "Applicative".to_string(),
+                    target_type: Ty::Con("Maybe".to_string()),
+                    method_fns,
+                },
+            );
+        }
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("pure".to_string(), "pure_Either".to_string());
+            method_fns.insert("<*>".to_string(), "ap_Either".to_string());
+            self.instances.insert(
+                ("Applicative".to_string(), "Either".to_string()),
+                InstanceInfo {
+                    class_name: "Applicative".to_string(),
+                    target_type: Ty::Con("Either".to_string()),
+                    method_fns,
+                },
+            );
+        }
+
+        // Built-in Monad typeclass (superclass: Applicative)
+        // >>=    :: m a -> (a -> m b) -> m b
+        // >>     :: m a -> m b -> m b
+        // return :: a -> m a
         self.classes.insert("Monad".to_string(), ClassInfo {
             name: "Monad".to_string(),
             type_var: "m".to_string(),
-            superclasses: vec![],
+            superclasses: vec!["Applicative".to_string()],
             methods: vec![
                 (">>=".to_string(), Ty::fun(&[ma.clone(), Ty::arrow(ta.clone(), mb.clone())], mb.clone())),
                 (">>".to_string(), Ty::fun(&[ma.clone(), mb.clone()], mb.clone())),
+                ("return".to_string(), Ty::arrow(ta.clone(), ma.clone())),
             ],
         });
+        // >>= and >> env entries
+        self.env.insert(">>=".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), m.clone()],
+            ty: Ty::fun(&[ma.clone(), Ty::arrow(ta.clone(), mb.clone())], mb.clone()),
+        });
+        self.env.insert(">>".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), m.clone()],
+            ty: Ty::fun(&[ma.clone(), mb.clone()], mb.clone()),
+        });
 
-        // Monad instances for IO and LuaIO
-        // For IO: >>= and >> are compiled as bind-chain flattening (no runtime function needed).
-        // The instance method names match the operator names so the monomorphizer
-        // preserves them as InfixApp (no transformation).
+        // Monad instances for IO, LuaIO, ST
         for monad_name in &["IO", "LuaIO", "ST"] {
             let mut method_fns = HashMap::new();
             method_fns.insert(">>=".to_string(), ">>=".to_string());
             method_fns.insert(">>".to_string(), ">>".to_string());
+            method_fns.insert("return".to_string(), "pure".to_string());
             self.instances.insert(
                 ("Monad".to_string(), monad_name.to_string()),
                 InstanceInfo {
@@ -664,16 +820,32 @@ impl Checker {
         }
 
         // Monad instance for [] (lists)
-        // >>= is concatMap, >> is concatMap (\_ -> k)
         {
             let mut method_fns = HashMap::new();
             method_fns.insert(">>=".to_string(), "concatMap".to_string());
             method_fns.insert(">>".to_string(), "then_List".to_string());
+            method_fns.insert("return".to_string(), "pure_List".to_string());
             self.instances.insert(
                 ("Monad".to_string(), "[]".to_string()),
                 InstanceInfo {
                     class_name: "Monad".to_string(),
                     target_type: Ty::Con("[]".to_string()),
+                    method_fns,
+                },
+            );
+        }
+
+        // Monad instance for Maybe
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert(">>=".to_string(), "bind_Maybe".to_string());
+            method_fns.insert(">>".to_string(), "then_Maybe".to_string());
+            method_fns.insert("return".to_string(), "pure_Maybe".to_string());
+            self.instances.insert(
+                ("Monad".to_string(), "Maybe".to_string()),
+                InstanceInfo {
+                    class_name: "Monad".to_string(),
+                    target_type: Ty::Con("Maybe".to_string()),
                     method_fns,
                 },
             );
@@ -2264,7 +2436,9 @@ impl Checker {
                 let (te, inferred, subst) = self.infer_expr(inner, env)?;
                 let s = unify(&inferred, &expected)?;
                 let final_ty = inferred.apply_subst(&s);
-                Ok((te, final_ty, subst.compose(&s)))
+                let full_subst = subst.compose(&s);
+                let resolved_te = te.apply_subst(&full_subst);
+                Ok((resolved_te, final_ty, full_subst))
             }
             Expr::RecordCon { constructor, fields } => {
                 // Desugar to positional application by reordering fields
@@ -2462,17 +2636,20 @@ impl Checker {
         let (te_terminal, terminal_ty, s_term) = self.infer_expr(current, &local_env)?;
         subst = subst.compose(&s_term);
 
-        // Reconstruct the nested TExpr bottom-up
-        let mut result_te = te_terminal;
+        // Reconstruct the nested TExpr bottom-up, applying the final
+        // substitution to all stored expressions so that type variables
+        // resolved later in the chain are propagated back.
+        let mut result_te = te_terminal.apply_subst(&subst);
         let mut result_ty = terminal_ty;
 
         for tstmt in typed_stmts.into_iter().rev() {
             match tstmt {
                 TypedStmt::Bind(tb) => {
-                    let lambda_ty = Ty::arrow(tb.param_ty.clone(), result_ty.clone());
+                    let param_ty = tb.param_ty.apply_subst(&subst);
+                    let lambda_ty = Ty::arrow(param_ty.clone(), result_ty.clone());
                     let lambda = TExpr::new(
                         TExprKind::Lambda {
-                            params: vec![(tb.param, tb.param_ty)],
+                            params: vec![(tb.param, param_ty)],
                             body: Box::new(result_te),
                         },
                         lambda_ty.clone(),
@@ -2481,7 +2658,7 @@ impl Checker {
                     result_te = TExpr::new(
                         TExprKind::InfixApp {
                             op: tb.op,
-                            lhs: Box::new(tb.lhs_te),
+                            lhs: Box::new(tb.lhs_te.apply_subst(&subst)),
                             rhs: Box::new(lambda),
                         },
                         infix_ty.clone(),
@@ -2490,6 +2667,11 @@ impl Checker {
                 }
                 TypedStmt::Let(binds) => {
                     let let_ty = result_ty.clone();
+                    let binds = binds.into_iter().map(|b| TLocalDef {
+                        name: b.name,
+                        patterns: b.patterns.into_iter().map(|p| p.apply_subst(&subst)).collect(),
+                        body: b.body.apply_subst(&subst),
+                    }).collect();
                     result_te = TExpr::new(
                         TExprKind::Let { binds, body: Box::new(result_te) },
                         let_ty,
@@ -2505,7 +2687,12 @@ impl Checker {
         let (te, inferred, subst) = self.infer_expr(expr, env)?;
         let s = unify(&inferred.apply_subst(&subst), &expected.apply_subst(&subst))?;
         let final_ty = inferred.apply_subst(&subst).apply_subst(&s);
-        Ok((TExpr { kind: te.kind, ty: final_ty }, subst.compose(&s)))
+        // Apply the full composed substitution to inner types so that type
+        // variables resolved by the expected type (e.g. monad type from function
+        // sig) propagate into sub-expressions through variable chains
+        let full_subst = subst.compose(&s);
+        let resolved_te = te.apply_subst(&full_subst);
+        Ok((TExpr { kind: resolved_te.kind, ty: final_ty }, full_subst))
     }
 
     /// Generate a TIR function for an FFI declaration.

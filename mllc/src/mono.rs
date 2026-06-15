@@ -54,7 +54,7 @@ impl Monomorphizer {
             "&&", "||", "mod", "div", "map", "filter", "foldl", "foldr",
             "True", "False", "Just", "Nothing",
             ":", "[]", "head", "tail", "take", "zipWith", "length", "reverse",
-            "engage", "liftIO", ">>=", ">>", "return", "pure",
+            "engage", "liftIO",
             "hmEmpty", "hmInsert", "hmLookup", "hmDelete",
             "hmSize", "hmKeys", "hmValues", "hmMember",
             "bsEmpty", "bsLength", "bsIndex", "bsSub", "bsSingleton",
@@ -207,6 +207,32 @@ impl Monomorphizer {
             }
         }
         None
+    }
+
+    /// Extract a type constructor from anywhere in a type.
+    /// Used for higher-kinded class methods (Functor, Applicative) where
+    /// the class variable is a type constructor (f, m) applied to arguments.
+    fn extract_type_constructor(ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::IO(_) => Some("IO".to_string()),
+            Ty::LuaIO(_, _) => Some("LuaIO".to_string()),
+            Ty::List(_) => Some("[]".to_string()),
+            Ty::App(f, _) => {
+                let mut head = f.as_ref();
+                loop {
+                    match head {
+                        Ty::Con(name) => return Some(name.clone()),
+                        Ty::App(inner, _) => head = inner.as_ref(),
+                        _ => return None,
+                    }
+                }
+            }
+            Ty::Arrow(from, to) => {
+                Self::extract_type_constructor(from)
+                    .or_else(|| Self::extract_type_constructor(to))
+            }
+            _ => None,
+        }
     }
 
     fn is_polymorphic(&self, ty: &Ty) -> bool {
@@ -373,14 +399,21 @@ impl Monomorphizer {
                                 let mangled = self.generate_tuple_show(elem_tys);
                                 return TExpr { kind: TExprKind::Var(mangled), ty };
                             }
-                            self.errors.push(format!(
-                                "No instance for '{}' on type '{}'", name, ty_str
-                            ));
-                        } else {
-                            self.errors.push(format!(
-                                "No instance for '{}' on type '{}'", name, ty_str
-                            ));
                         }
+                    }
+                    // Fallback: for higher-kinded methods (Functor/Applicative),
+                    // extract the type constructor from any position in the type
+                    if let Some(tc) = Self::extract_type_constructor(&ty) {
+                        let key = (name.clone(), tc);
+                        if let Some(mangled) = self.instance_methods.get(&key).cloned() {
+                            return TExpr { kind: TExprKind::Var(mangled), ty };
+                        }
+                    }
+                    // No resolution found for a class method on a concrete type
+                    if let Some(arg_ty) = self.first_arg_type(&ty) {
+                        self.errors.push(format!(
+                            "No instance for '{}' on type '{}'", name, arg_ty
+                        ));
                     }
                 }
                 // 2. Check for polymorphic function specialization
@@ -456,6 +489,14 @@ impl Monomorphizer {
                                     }
                                 }
                             }
+                            // Fallback: extract type constructor from result type
+                            // (for higher-kinded methods like fmap, pure)
+                            if resolved.is_none() {
+                                if let Some(tc) = Self::extract_type_constructor(&ty) {
+                                    let key2 = (fname.clone(), tc.clone());
+                                    resolved = self.instance_methods.get(&key2).cloned();
+                                }
+                            }
                             if let Some(mangled) = resolved {
                                 let mono_arg = self.mono_expr(*arg);
                                 return TExpr {
@@ -479,55 +520,37 @@ impl Monomorphizer {
                 if self.class_methods.contains(&op) && !self.is_polymorphic(&lhs.ty) {
                     let ty_str = format!("{}", lhs.ty);
                     let key = (op.clone(), ty_str.clone());
-                    if let Some(mangled) = self.instance_methods.get(&key).cloned() {
-                        let mono_lhs = self.mono_expr(*lhs);
-                        let mono_rhs = self.mono_expr(*rhs);
-                        return TExpr {
-                            kind: TExprKind::App(
-                                Box::new(TExpr::new(
-                                    TExprKind::App(
-                                        Box::new(TExpr::new(TExprKind::Var(mangled), Ty::Unit)),
-                                        Box::new(mono_lhs),
-                                    ),
-                                    Ty::Unit,
-                                )),
-                                Box::new(mono_rhs),
-                            ),
-                            ty,
-                        };
-                    } else if let Ty::List(elem_ty) = &lhs.ty {
-                        if op == "==" || op == "/=" {
-                            let mangled = self.generate_list_eq(elem_ty);
-                            let mono_lhs = self.mono_expr(*lhs);
-                            let mono_rhs = self.mono_expr(*rhs);
-                            let eq_call = TExpr {
-                                kind: TExprKind::App(
-                                    Box::new(TExpr::new(
-                                        TExprKind::App(
-                                            Box::new(TExpr::new(TExprKind::Var(mangled), Ty::Unit)),
-                                            Box::new(mono_lhs),
-                                        ),
-                                        Ty::Unit,
-                                    )),
-                                    Box::new(mono_rhs),
-                                ),
-                                ty: ty.clone(),
-                            };
-                            if op == "/=" {
-                                return TExpr {
-                                    kind: TExprKind::App(
-                                        Box::new(TExpr::new(TExprKind::Var("not_".to_string()), Ty::Unit)),
-                                        Box::new(eq_call),
-                                    ),
-                                    ty,
-                                };
-                            }
-                            return eq_call;
-                        }
-                    } else if Self::is_maybe_type(&lhs.ty) {
-                        if op == "==" || op == "/=" {
+
+                    // 1. Direct instance lookup
+                    let mut resolved = self.instance_methods.get(&key).cloned();
+
+                    // 2. Specialized eq/ne generation for containers and tuples
+                    if resolved.is_none() && (op == "==" || op == "/=") {
+                        if let Ty::List(elem_ty) = &lhs.ty {
+                            resolved = Some(self.generate_list_eq(elem_ty));
+                        } else if Self::is_maybe_type(&lhs.ty) {
                             let inner_ty = Self::maybe_inner_type(&lhs.ty).unwrap();
-                            let mangled = self.generate_maybe_eq(&inner_ty);
+                            resolved = Some(self.generate_maybe_eq(&inner_ty));
+                        } else if let Ty::Tuple(elem_tys) = &lhs.ty {
+                            resolved = Some(self.generate_tuple_eq(elem_tys));
+                        }
+                    }
+
+                    // 3. Parameterized instance resolution (extract type constructor from LHS)
+                    if resolved.is_none() {
+                        resolved = self.resolve_parameterized_instance(&op, &lhs.ty);
+                    }
+
+                    // 4. Higher-kinded fallback: extract type constructor from result type
+                    if resolved.is_none() {
+                        if let Some(tc) = Self::extract_type_constructor(&ty) {
+                            resolved = self.instance_methods.get(&(op.clone(), tc)).cloned();
+                        }
+                    }
+
+                    if let Some(mangled) = resolved {
+                        // For /= operators, wrap in not
+                        if op == "/=" {
                             let mono_lhs = self.mono_expr(*lhs);
                             let mono_rhs = self.mono_expr(*rhs);
                             let eq_call = TExpr {
@@ -543,54 +566,19 @@ impl Monomorphizer {
                                 ),
                                 ty: ty.clone(),
                             };
-                            if op == "/=" {
-                                return TExpr {
-                                    kind: TExprKind::App(
-                                        Box::new(TExpr::new(TExprKind::Var("not_".to_string()), Ty::Unit)),
-                                        Box::new(eq_call),
-                                    ),
-                                    ty,
-                                };
-                            }
-                            return eq_call;
-                        }
-                    } else if let Ty::Tuple(elem_tys) = &lhs.ty {
-                        if op == "==" || op == "/=" {
-                            let mangled = self.generate_tuple_eq(elem_tys);
-                            let mono_lhs = self.mono_expr(*lhs);
-                            let mono_rhs = self.mono_expr(*rhs);
-                            let eq_call = TExpr {
+                            return TExpr {
                                 kind: TExprKind::App(
-                                    Box::new(TExpr::new(
-                                        TExprKind::App(
-                                            Box::new(TExpr::new(TExprKind::Var(mangled), Ty::Unit)),
-                                            Box::new(mono_lhs),
-                                        ),
-                                        Ty::Unit,
-                                    )),
-                                    Box::new(mono_rhs),
+                                    Box::new(TExpr::new(TExprKind::Var("not_".to_string()), Ty::Unit)),
+                                    Box::new(eq_call),
                                 ),
-                                ty: ty.clone(),
+                                ty,
                             };
-                            if op == "/=" {
-                                return TExpr {
-                                    kind: TExprKind::App(
-                                        Box::new(TExpr::new(TExprKind::Var("not_".to_string()), Ty::Unit)),
-                                        Box::new(eq_call),
-                                    ),
-                                    ty,
-                                };
-                            }
-                            return eq_call;
                         }
-                        self.errors.push(format!(
-                            "No instance for '{}' on type '{}'", op, ty_str
-                        ));
-                    } else if let Some(mangled) = self.resolve_parameterized_instance(&op, &lhs.ty) {
-                        // Parameterized instance found. If the mangled name differs
-                        // from the operator, transform to a function call. If it
-                        // matches (e.g. IO monad's >>= stays >>=), keep as InfixApp.
-                        if mangled != op {
+                        // If the mangled name matches the operator, keep as InfixApp
+                        // (e.g. IO monad's >>= stays >>=)
+                        if mangled == op {
+                            // fall through to normal InfixApp handling below
+                        } else {
                             let mono_lhs = self.mono_expr(*lhs);
                             let mono_rhs = self.mono_expr(*rhs);
                             return TExpr {
@@ -607,9 +595,10 @@ impl Monomorphizer {
                                 ty,
                             };
                         }
-                    } else {
+                    } else if !self.is_polymorphic(&lhs.ty) {
+                        // No resolution found for a class method on a concrete type
                         self.errors.push(format!(
-                            "No instance for '{}' on type '{}'", op, ty_str
+                            "No instance for '{}' on type '{}'", op, lhs.ty
                         ));
                     }
                 }
