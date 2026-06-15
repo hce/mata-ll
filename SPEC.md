@@ -66,6 +66,11 @@ Would translate to:
 
     local morpheus = { 1 = "Morpheus", 2 = nil, 3 = 4.2, 4 = true, 5 = 2 }
 
+Record update syntax creates a copy with specific fields changed:
+
+    olderMorpheus = morpheus { perAge = 5.0 }
+    renamedMorpheus = morpheus { perName = "Neo", perFirstName = Just "The One" }
+
 And also newtype:
 
     newtype A = A Integer
@@ -393,6 +398,26 @@ Monads are just like in haskell:
         (>>)   :: m a -> m b -> m b
         m >> k = m >>= \_ -> k
 
+    class Read a where
+        read :: String -> a
+        -- Instances: Integer, Number, Bool, String
+
+    class Enum a where
+        succ        :: a -> a
+        pred        :: a -> a
+        toEnum      :: Integer -> a
+        fromEnum    :: a -> Integer
+        enumFrom    :: a -> [a]          -- [n..]
+        enumFromThen :: a -> a -> [a]    -- [n,m..]
+        enumFromTo  :: a -> a -> [a]     -- [n..m]
+        enumFromThenTo :: a -> a -> a -> [a]  -- [n,m..z]
+
+    -- Range syntax desugars to Enum methods:
+    --   [1..10]   →  enumFromTo 1 10
+    --   [1,3..10] →  enumFromThenTo 1 3 10
+    --   [1..]     →  enumFrom 1
+    --   [1,3..]   →  enumFromThen 1 3
+
 # Type inference
 
 MATA-LL uses a combination of Hindley-Milner unification and
@@ -677,6 +702,7 @@ The README says each file is a module. But how do you import one?
 
     import Data.Tree
     import Data.Tree (depth, Tree(..))
+    import Data.Tree hiding (internalFn)
     import qualified Data.Tree as T
 
 That will look for Data/Tree.mll in the project's and the compiler's
@@ -841,54 +867,6 @@ parameters are marked concrete.
 
 ## High priority
 
-### Functor and Applicative typeclasses
-
-The full Functor → Applicative → Monad hierarchy must be implemented.
-Currently only Monad exists as a typeclass; Functor and Applicative
-are referenced in the spec but not implemented. This is the highest
-priority feature gap.
-
-    class Functor f where
-        fmap :: (a -> b) -> f a -> f b
-
-    class Functor f => Applicative f where
-        pure  :: a -> f a
-        (<*>) :: f (a -> b) -> f a -> f b
-
-    class Applicative m => Monad m where
-        (>>=) :: m a -> (a -> m b) -> m b
-
-### Record update syntax
-
-Haskell-style record updates:
-
-    foo { fieldName = newValue }
-
-This is high priority for ergonomics and Haskell compatibility.
-
-### import hiding
-
-    import Module hiding (foo, bar)
-
-Required for Haskell compatibility.
-
-### Enum typeclass and range syntax
-
-    class Enum a where
-        succ :: a -> a
-        pred :: a -> a
-        toEnum :: Integer -> a
-        fromEnum :: a -> Integer
-
-Range syntax: `[1..10]`, `[1,3..10]`, `[1..]`.
-
-### Read typeclass
-
-    class Read a where
-        read :: String -> a
-
-Parsing values from strings.
-
 ### Higher-rank polymorphism
 
 Generalize beyond the current narrow rank-2 support (ST and
@@ -902,16 +880,11 @@ Functor, Enum, Bounded.
 
 ### Standard library compatibility modules
 
-Add Haskell-compatible module names that re-export existing
-functionality and fill gaps:
-
-    Data.List     — list operations (map, filter, foldl, etc.)
-    Data.Map      — backed by HashMap
-    Data.Maybe    — Maybe utilities (fromMaybe, catMaybes, etc.)
-    Control.Monad — monadic combinators (mapM, forM, guard, etc.)
-
-These can largely be implemented as pure MATA-LL modules wrapping
-existing prelude functions plus new additions.
+Initial versions of `Data.List`, `Data.Maybe`, `Data.Map`, and
+`Control.Monad` are implemented. Functions requiring typeclass
+constraints (Eq/Ord) in library modules have limited support due to
+monomorphization occurring at use-site, not library compilation time.
+Callback-style variants (e.g. `sortBy`, `nubBy`) work.
 
 ## Medium priority
 

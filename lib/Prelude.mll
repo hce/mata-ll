@@ -113,6 +113,56 @@ then_Maybe (Just _) b = b
 then_List :: [a] -> [b] -> [b]
 then_List xs ys = concatMap (\_ -> ys) xs
 
+-- Enum instance for Integer
+succ_Integer :: Integer -> Integer
+succ_Integer n = n + 1
+
+pred_Integer :: Integer -> Integer
+pred_Integer n = n - 1
+
+toEnum_Integer :: Integer -> Integer
+toEnum_Integer n = n
+
+fromEnum_Integer :: Integer -> Integer
+fromEnum_Integer n = n
+
+enumFrom_Integer :: Integer -> [Integer]
+enumFrom_Integer n = n : enumFrom_Integer (n + 1)
+
+enumFromThen_Integer :: Integer -> Integer -> [Integer]
+enumFromThen_Integer n m = enumFromThenHelper_Integer n (m - n)
+
+enumFromThenHelper_Integer :: Integer -> Integer -> [Integer]
+enumFromThenHelper_Integer x step = x : enumFromThenHelper_Integer (x + step) step
+
+enumFromTo_Integer :: Integer -> Integer -> [Integer]
+enumFromTo_Integer n m = if n > m then [] else n : enumFromTo_Integer (n + 1) m
+
+enumFromThenTo_Integer :: Integer -> Integer -> Integer -> [Integer]
+enumFromThenTo_Integer n next m = enumFromThenToHelper_Integer n (next - n) m
+
+enumFromThenToHelper_Integer :: Integer -> Integer -> Integer -> [Integer]
+enumFromThenToHelper_Integer x step m =
+    if step > 0
+    then if x > m then [] else x : enumFromThenToHelper_Integer (x + step) step m
+    else if x < m then [] else x : enumFromThenToHelper_Integer (x + step) step m
+
+-- Read instances
+read_Integer :: String -> Integer
+read_Integer s = ffi_tonumber s
+
+read_Number :: String -> Number
+read_Number s = ffi_tonumber_float s
+
+read_Bool :: String -> Bool
+read_Bool s = if s == "True" then True else False
+
+read_String :: String -> String
+read_String s = s
+
+ffi_tonumber :: String -> LuaPure "tonumber" Integer
+ffi_tonumber_float :: String -> LuaPure "tonumber" Number
+
 infixl 4 <$>
 infixl 4 <*>
 
