@@ -127,6 +127,21 @@ mll_test!(bytestring, "bytestring.mll");
 mll_test!(operator_fixity, "operator_fixity.mll");
 mll_test!(export_module, "export_module.mll");
 
+// GHC-style compatibility tests
+macro_rules! ghc_test {
+    ($name:ident, $file:expr) => {
+        #[test]
+        fn $name() {
+            run_mll_file(Path::new(concat!("tests/ghc/", $file)));
+        }
+    };
+}
+ghc_test!(ghc_t001_fmap, "T001_fmap.mll");
+ghc_test!(ghc_t002_applicative, "T002_applicative.mll");
+ghc_test!(ghc_t003_maybe, "T003_do_maybe.mll");
+ghc_test!(ghc_t004_dollar_fmap, "T004_dollar_fmap.mll");
+ghc_test!(ghc_t005_list, "T005_list_monad.mll");
+
 // Library module tests (need lib/ search path)
 mll_lib_test!(lib_lstring, "lib_lstring.mll");
 mll_lib_test!(lib_lbit, "lib_lbit.mll");
