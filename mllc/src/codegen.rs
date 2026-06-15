@@ -354,7 +354,10 @@ impl CodeGen {
                 self.emit_line("end");
                 is_concrete = true;
             } else if expr_references_name(&clauses[0].body, &func.name) {
-                // Self-referencing value binding (e.g., infinite list)
+                // Self-referencing value binding (e.g., infinite list).
+                // Use the bare name (not fn_table slot) so self-references
+                // resolve to this local binding, not a potentially missing slot.
+                self.local_vars.insert(lua_name.clone());
                 if !self.forward_declared.contains(&lua_name) {
                     self.emit_line(&format!("local {}", lua_name));
                 }
