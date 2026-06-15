@@ -139,6 +139,19 @@ mll_test!(existentials, "existentials.mll");
 mll_test!(derive_functor, "derive_functor.mll");
 mll_test!(derive_eq, "derive_eq.mll");
 
+// Stress tests
+mll_test!(stress_large_adt, "stress_large_adt.mll");
+mll_test!(stress_deep_recursion, "stress_deep_recursion.mll");
+mll_test!(stress_nested_expr, "stress_nested_expr.mll");
+mll_test!(stress_many_functions, "stress_many_functions.mll");
+mll_test!(stress_many_instances, "stress_many_instances.mll");
+mll_test!(stress_long_do, "stress_long_do.mll");
+mll_test!(stress_large_pattern, "stress_large_pattern.mll");
+mll_test!(stress_deep_types, "stress_deep_types.mll");
+mll_test!(stress_many_args, "stress_many_args.mll");
+mll_test!(stress_list_ops, "stress_list_ops.mll");
+mll_test!(stress_complex_program, "stress_complex_program.mll");
+
 // GHC-style compatibility tests
 macro_rules! ghc_test {
     ($name:ident, $file:expr) => {
