@@ -33,6 +33,16 @@ struct CodeGen {
     /// Locally-bound variable names (params, let-binds, pattern-binds).
     /// These shadow fn_table entries — lua_ref returns the bare name.
     local_vars: std::collections::HashSet<String>,
+    /// Count of `local` declarations in the current function scope.
+    /// Used to detect when we're approaching Lua's 200-local limit.
+    local_count: usize,
+    /// When local_count exceeds the threshold, new locals go into a `_v` table.
+    /// Maps sanitized local name to 1-based index in the `_v` table.
+    var_slots: std::collections::HashMap<String, usize>,
+    /// Next available `_v` index (1-based).
+    var_slots_next: usize,
+    /// Whether `local _v = {}` has been emitted in the current scope.
+    var_table_emitted: bool,
     /// Demand analysis: per-function parameter strictness.
     demand_info: DemandInfo,
     output: String,
@@ -51,6 +61,10 @@ impl CodeGen {
             record_accessors: std::collections::HashMap::new(),
             fn_table: std::collections::HashMap::new(),
             local_vars: std::collections::HashSet::new(),
+            local_count: 0,
+            var_slots: std::collections::HashMap::new(),
+            var_slots_next: 0,
+            var_table_emitted: false,
             demand_info: DemandInfo { strict_params: std::collections::HashMap::new() },
             output: String::new(), indent: 0,
         }
@@ -66,7 +80,12 @@ impl CodeGen {
     /// Forward-declared names use __mll_fn[N], others use the name directly.
     fn lua_ref(&self, lua_name: &str) -> String {
         if self.local_vars.contains(lua_name) {
-            lua_name.to_string()
+            // Check if this local is in the _v table (overflow fallback)
+            if let Some(&idx) = self.var_slots.get(lua_name) {
+                format!("_v[{}]", idx)
+            } else {
+                lua_name.to_string()
+            }
         } else if let Some(&slot) = self.fn_table.get(lua_name) {
             format!("__mll_fn[{}]", slot)
         } else {
@@ -88,6 +107,58 @@ impl CodeGen {
             format!("__mll_fn[{}] = ", slot)
         } else {
             format!("local {} = ", lua_name)
+        }
+    }
+
+    /// Lua's per-function local variable limit.
+    const LOCAL_LIMIT: usize = 180;
+
+    /// Declare a local variable, returning the Lua lvalue to assign to.
+    /// When the local count is under the limit, returns `"local name"`.
+    /// When over the limit, allocates a `_v[N]` slot and returns `"_v[N]"`.
+    /// Also registers the name in `local_vars` (and `var_slots` if tabled).
+    fn declare_local(&mut self, name: &str) -> String {
+        self.local_vars.insert(name.to_string());
+        self.local_count += 1;
+        if self.local_count > Self::LOCAL_LIMIT {
+            if !self.var_table_emitted {
+                // Emit the _v table declaration (this itself is one local)
+                self.emit_line("local _v = {}");
+                self.var_table_emitted = true;
+            }
+            self.var_slots_next += 1;
+            self.var_slots.insert(name.to_string(), self.var_slots_next);
+            format!("_v[{}]", self.var_slots_next)
+        } else {
+            format!("local {}", name)
+        }
+    }
+
+    /// Declare a local without a name (forward declaration for later assignment).
+    /// Only used when the variable needs to exist before its value is known
+    /// (e.g., `local x; if ... then x = a else x = b end`).
+    fn declare_local_fwd(&mut self, name: &str) {
+        self.local_vars.insert(name.to_string());
+        self.local_count += 1;
+        if self.local_count > Self::LOCAL_LIMIT {
+            if !self.var_table_emitted {
+                self.emit_line("local _v = {}");
+                self.var_table_emitted = true;
+            }
+            self.var_slots_next += 1;
+            self.var_slots.insert(name.to_string(), self.var_slots_next);
+            // _v[N] slot exists implicitly (nil), no declaration needed
+        } else {
+            self.emit_line(&format!("local {}", name));
+        }
+    }
+
+    /// Get the Lua lvalue for an already-declared local (for assignment after fwd decl).
+    fn local_lvalue(&self, name: &str) -> String {
+        if let Some(&idx) = self.var_slots.get(name) {
+            format!("_v[{}]", idx)
+        } else {
+            name.to_string()
         }
     }
 
@@ -184,14 +255,69 @@ impl CodeGen {
         }
         self.newtypes = module.newtypes.clone();
 
-        // Emit constructors
+        // Record field accessors: inline as direct table indexing instead of
+        // emitting local functions (saves Lua local variable slots)
+        for (name, idx) in &module.record_accessors {
+            self.record_accessors.insert(sanitize_name(name), *idx);
+        }
+
+        // Forward-declare ALL module-level names in a single table to avoid
+        // Lua's 200-local-variable limit. Constructors, newtypes, instance
+        // methods, and user functions all get __mll_fn[N] slots.
+        let mut all_fn_names: Vec<String> = Vec::new();
+
+        // Data constructors
+        for def in &module.data_defs {
+            for con in &def.constructors {
+                if !self.concrete_vars.contains(&con.name) {
+                    all_fn_names.push(con.name.clone());
+                }
+            }
+        }
+        // Newtype constructors
+        for name in &module.newtypes {
+            if !self.concrete_vars.contains(name) {
+                all_fn_names.push(name.clone());
+            }
+        }
+        // Instance functions
+        for f in &module.instance_fns {
+            let n = sanitize_name(&f.name);
+            if !n.starts_with("__mll_") && !self.concrete_vars.contains(&n) {
+                all_fn_names.push(n);
+            }
+        }
+        // User functions
+        for f in &module.functions {
+            let n = sanitize_name(&f.name);
+            if !n.starts_with("__mll_") {
+                all_fn_names.push(n);
+            }
+        }
+
+        if !all_fn_names.is_empty() {
+            self.emit_line("local __mll_fn = {}");
+            for (i, name) in all_fn_names.iter().enumerate() {
+                let slot = i + 1; // 1-based Lua indexing
+                self.fn_table.insert(name.clone(), slot);
+                self.forward_declared.insert(name.clone());
+                self.concrete_vars.insert(name.clone());
+                self.top_level_names.insert(name.clone());
+            }
+        }
+
+        // Emit constructors (now using fn_table slots)
         for def in &module.data_defs {
             self.gen_data_constructors(def);
         }
 
-        // Emit newtype constructors (identity functions)
+        // Emit newtype constructors (identity functions, now using fn_table slots)
         for name in &module.newtypes {
-            self.emit_line(&format!("local function {}(_v) return _v end", name));
+            if let Some(&slot) = self.fn_table.get(name.as_str()) {
+                self.emit_line(&format!("__mll_fn[{}] = function(_v) return _v end", slot));
+            } else {
+                self.emit_line(&format!("local function {}(_v) return _v end", name));
+            }
         }
         if !module.newtypes.is_empty() {
             self.emit_line("");
@@ -203,29 +329,6 @@ impl CodeGen {
         }
         for func in &module.instance_fns {
             self.gen_function(func);
-        }
-
-        // Record field accessors: inline as direct table indexing instead of
-        // emitting local functions (saves Lua local variable slots)
-        for (name, idx) in &module.record_accessors {
-            self.record_accessors.insert(sanitize_name(name), *idx);
-        }
-
-        // Forward-declare all functions in a table to avoid Lua's
-        // 200-local-variable limit. Each function gets __mll_fn[N].
-        let all_fn_names: Vec<String> = module.functions.iter()
-            .map(|f| sanitize_name(&f.name))
-            .filter(|n| !n.starts_with("__mll_"))  // preamble builtins are already local
-            .collect();
-        if !all_fn_names.is_empty() {
-            self.emit_line("local __mll_fn = {}");
-            for (i, name) in all_fn_names.iter().enumerate() {
-                let slot = i + 1; // 1-based Lua indexing
-                self.fn_table.insert(name.clone(), slot);
-                self.forward_declared.insert(name.clone());
-                self.concrete_vars.insert(name.clone());
-                self.top_level_names.insert(name.clone());
-            }
         }
 
         // Whole-program call-site analysis: determine which function params
@@ -300,21 +403,23 @@ impl CodeGen {
                 TConFields::Named(f) => f.len(),
             };
 
+            let decl = self.var_decl(&con.name);
+
             if field_count == 0 {
                 if is_enum {
-                    self.emit_line(&format!("local {} = {}", con.name, tag));
+                    self.emit_line(&format!("{}{}", decl, tag));
                 } else {
-                    self.emit_line(&format!("local {} = {{{}}}", con.name, tag));
+                    self.emit_line(&format!("{}{{{}}}", decl, tag));
                 }
             } else {
                 let params: Vec<String> = (0..field_count).map(|i| format!("_p{}", i)).collect();
                 let params_str = params.join(", ");
                 if single {
-                    self.emit_line(&format!("local {} = function({}) return {{{}}} end", con.name, params_str, params_str));
+                    self.emit_line(&format!("{}function({}) return {{{}}} end", decl, params_str, params_str));
                 } else {
                     let mut entries = vec![format!("{}", tag)];
                     entries.extend(params.iter().cloned());
-                    self.emit_line(&format!("local {} = function({}) return {{{}}} end", con.name, params_str, entries.join(", ")));
+                    self.emit_line(&format!("{}function({}) return {{{}}} end", decl, params_str, entries.join(", ")));
                 }
             }
         }
@@ -326,8 +431,16 @@ impl CodeGen {
         let clauses = &func.clauses;
         let saved_concrete = self.concrete_vars.clone();
         let saved_locals = self.local_vars.clone();
+        let saved_local_count = self.local_count;
+        let saved_var_slots = self.var_slots.clone();
+        let saved_var_slots_next = self.var_slots_next;
+        let saved_var_table_emitted = self.var_table_emitted;
+        self.local_count = 0;
+        self.var_slots.clear();
+        self.var_slots_next = 0;
+        self.var_table_emitted = false;
 
-        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; return; }
+        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; self.local_count = saved_local_count; self.var_slots = saved_var_slots; self.var_slots_next = saved_var_slots_next; self.var_table_emitted = saved_var_table_emitted; return; }
 
         // Eta-expand: if the function has fewer patterns than type arrows,
         // add extra params so the Lua function matches the expected arity.
@@ -421,14 +534,14 @@ impl CodeGen {
                     if let TPattern::Var(v, _) = pat {
                         let sname = sanitize_name(v);
                         let is_strict = demand_strict.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
-                        self.local_vars.insert(sname.clone());
+                        let decl = self.declare_local(&sname);
                         if is_strict {
                             // Demand analysis: body forces this param — force at entry
-                            self.emit_line(&format!("local {} = __force(_arg{})", sname, i));
+                            self.emit_line(&format!("{} = __force(_arg{})", decl, i));
                             self.concrete_vars.insert(sname);
                         } else {
                             // Not demanded — stay lazy
-                            self.emit_line(&format!("local {} = _arg{}", sname, i));
+                            self.emit_line(&format!("{} = _arg{}", decl, i));
                         }
                     }
                 }
@@ -466,6 +579,10 @@ impl CodeGen {
             self.emit_line("");
             self.concrete_vars = saved_concrete;
             self.local_vars = saved_locals;
+            self.local_count = saved_local_count;
+            self.var_slots = saved_var_slots;
+            self.var_slots_next = saved_var_slots_next;
+            self.var_table_emitted = saved_var_table_emitted;
             self.concrete_vars.insert(lua_name);
             return;
         }
@@ -505,6 +622,10 @@ impl CodeGen {
         self.emit_line("");
         self.concrete_vars = saved_concrete;
         self.local_vars = saved_locals;
+        self.local_count = saved_local_count;
+        self.var_slots = saved_var_slots;
+        self.var_slots_next = saved_var_slots_next;
+        self.var_table_emitted = saved_var_table_emitted;
         self.concrete_vars.insert(lua_name);
     }
 
@@ -516,14 +637,14 @@ impl CodeGen {
             if bind.patterns.is_empty() {
                 // Simple value binding: local x = expr
                 let sname = sanitize_name(&bind.name);
+                let decl = self.declare_local(&sname);
                 self.emit_indent();
-                self.local_vars.insert(sname.clone());
                 if Self::is_cheap(&bind.body) {
-                    self.emit(&format!("local {} = ", sname));
+                    self.emit(&format!("{} = ", decl));
                     self.gen_expr(&bind.body);
                     self.concrete_vars.insert(sname);
                 } else {
-                    self.emit(&format!("local {} = __thunk(function() return ", sname));
+                    self.emit(&format!("{} = __thunk(function() return ", decl));
                     self.gen_expr(&bind.body);
                     self.emit(" end)");
                 }
@@ -548,9 +669,24 @@ impl CodeGen {
                     .map(|j| format!("_warg{}", j))
                     .collect();
                 let params_str = params.join(", ");
+                let sname = sanitize_name(name);
+                // Use `local function name(...)` for recursion support.
+                // In _v table mode, _v[N] is a table field so the function
+                // body can reference it — no forward declaration needed.
+                self.local_vars.insert(sname.clone());
+                self.local_count += 1;
                 self.emit_indent();
-                self.emit(&format!("local function {}({})\n",
-                    sanitize_name(name), params_str));
+                if self.local_count > Self::LOCAL_LIMIT {
+                    if !self.var_table_emitted {
+                        self.emit_line("local _v = {}");
+                        self.var_table_emitted = true;
+                    }
+                    self.var_slots_next += 1;
+                    self.var_slots.insert(sname.clone(), self.var_slots_next);
+                    self.emit(&format!("_v[{}] = function({})\n", self.var_slots_next, params_str));
+                } else {
+                    self.emit(&format!("local function {}({})\n", sname, params_str));
+                }
                 self.indent += 1;
 
                 if clauses.len() == 1 {
@@ -614,8 +750,8 @@ impl CodeGen {
                     self.emit(&format!("{} {} then\n", keyword, conditions.join(" and ")));
                     self.indent += 1;
                     for (var, val) in &bindings {
-                        self.local_vars.insert(var.clone());
-                        self.emit_line(&format!("local {} = {}", var, val));
+                        let decl = self.declare_local(var);
+                        self.emit_line(&format!("{} = {}", decl, val));
                     }
                     self.gen_where_binds(&clause.where_binds);
                     for (gi, guard) in clause.guards.iter().enumerate() {
@@ -634,8 +770,8 @@ impl CodeGen {
                 } else {
                     // No pattern conditions, just guards
                     for (var, val) in &bindings {
-                        self.local_vars.insert(var.clone());
-                        self.emit_line(&format!("local {} = {}", var, val));
+                        let decl = self.declare_local(var);
+                        self.emit_line(&format!("{} = {}", decl, val));
                     }
                     self.gen_where_binds(&clause.where_binds);
                     for (gi, guard) in clause.guards.iter().enumerate() {
@@ -660,8 +796,8 @@ impl CodeGen {
                 if conditions.is_empty() {
                     if i > 0 { self.emit_indent(); self.emit("else\n"); self.indent += 1; }
                     for (var, val) in &bindings {
-                        self.local_vars.insert(var.clone());
-                        self.emit_line(&format!("local {} = {}", var, val));
+                        let decl = self.declare_local(var);
+                        self.emit_line(&format!("{} = {}", decl, val));
                     }
                     self.gen_where_binds(&clause.where_binds);
                     self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
@@ -673,8 +809,8 @@ impl CodeGen {
                 self.emit(&format!("{} {} then\n", keyword, conditions.join(" and ")));
                 self.indent += 1;
                 for (var, val) in &bindings {
-                    self.local_vars.insert(var.clone());
-                    self.emit_line(&format!("local {} = {}", var, val));
+                    let decl = self.declare_local(var);
+                    self.emit_line(&format!("{} = {}", decl, val));
                 }
                 self.gen_where_binds(&clause.where_binds);
                 self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
@@ -1259,11 +1395,11 @@ impl CodeGen {
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
                     if let TExprKind::Lambda { params, body } = &rhs.kind {
                         let param_name = sanitize_name(&params[0].0);
+                        let decl = self.declare_local(&param_name);
                         self.emit_indent();
-                        self.emit(&format!("local {} = ", param_name));
+                        self.emit(&format!("{} = ", decl));
                         self.gen_action(lhs);
                         self.emit("\n");
-                        self.local_vars.insert(param_name.clone());
                         self.concrete_vars.insert(param_name);
                         expr = body;
                         inside_action = true;
@@ -1283,38 +1419,37 @@ impl CodeGen {
                     for bind in binds {
                         if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind {
                             let bname = sanitize_name(&bind.name);
-                            self.emit_indent();
-                            self.emit(&format!("local {}\n", bname));
-                            self.local_vars.insert(bname.clone());
+                            self.declare_local_fwd(&bname);
                             self.concrete_vars.insert(bname.clone());
+                            let lval = self.local_lvalue(&bname);
                             self.emit_indent();
                             self.emit("if ");
                             self.gen_expr(cond);
                             self.emit(" then ");
-                            self.emit(&format!("{} = ", bname));
+                            self.emit(&format!("{} = ", lval));
                             self.gen_expr(then_branch);
                             self.emit(" else ");
-                            self.emit(&format!("{} = ", bname));
+                            self.emit(&format!("{} = ", lval));
                             self.gen_expr(else_branch);
                             self.emit(" end\n");
                         } else if Self::is_nullary_action_type(&bind.body.ty) {
                             let bname = sanitize_name(&bind.name);
-                            self.local_vars.insert(bname.clone());
+                            let decl = self.declare_local(&bname);
                             self.emit_indent();
-                            self.emit(&format!("local {} = function() return ", bname));
+                            self.emit(&format!("{} = function() return ", decl));
                             self.gen_action(&bind.body);
                             self.emit(" end\n");
                         } else {
                             let bname = sanitize_name(&bind.name);
-                            self.local_vars.insert(bname.clone());
+                            let decl = self.declare_local(&bname);
                             self.emit_indent();
                             if Self::is_cheap(&bind.body) {
-                                self.emit(&format!("local {} = ", bname));
+                                self.emit(&format!("{} = ", decl));
                                 self.gen_expr(&bind.body);
                                 self.emit("\n");
                                 self.concrete_vars.insert(bname);
                             } else {
-                                self.emit(&format!("local {} = __thunk(function() return ", bname));
+                                self.emit(&format!("{} = __thunk(function() return ", decl));
                                 self.gen_expr(&bind.body);
                                 self.emit(" end)\n");
                             }
@@ -1422,7 +1557,10 @@ impl CodeGen {
             TExprKind::Con(name) => {
                 match name.as_str() {
                     "[]" => self.emit("nil"),
-                    _ => self.emit(name),
+                    _ => {
+                        let lref = self.lua_ref(name);
+                        self.emit(&lref);
+                    }
                 }
             }
             TExprKind::Lit(lit) => self.gen_literal(lit),
