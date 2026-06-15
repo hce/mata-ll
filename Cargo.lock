@@ -238,6 +238,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mll-repl"
+version = "0.1.0"
+dependencies = [
+ "mllc",
+ "mlua",
+]
+
+[[package]]
 name = "mll-tests"
 version = "0.1.0"
 dependencies = [
