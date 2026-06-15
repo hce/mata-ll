@@ -29,3 +29,17 @@ main = do
     let f = flip take [1, 2, 3, 4, 5]
     assert (f 3 == [1, 2, 3]) "flip take partial app"
     assert (flip take [10, 20, 30] 2 == [10, 20]) "flip take inline"
+
+    -- Self-referencing value binding: corecursive infinite list
+    -- must resolve self-reference to local name, not fn_table slot
+    assert (take 5 fibs == [1, 1, 2, 3, 5]) "fibs take 5"
+    assert (take 10 fibs == [1, 1, 2, 3, 5, 8, 13, 21, 34, 55]) "fibs take 10"
+
+    -- Combined: flip + self-referencing list
+    let g = flip take fibs
+    assert (g 7 == [1, 1, 2, 3, 5, 8, 13]) "flip take fibs"
+
+    putStrLn "."
+
+fibs :: [Integer]
+fibs = 1:1:zipWith (+) fibs (tail fibs)
