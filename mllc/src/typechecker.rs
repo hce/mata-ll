@@ -1677,9 +1677,10 @@ impl Checker {
             "Ord" => self.derive_ord(type_name, type_vars, constructors),
             "Enum" => self.derive_enum(type_name, type_vars, constructors),
             "Bounded" => self.derive_bounded(type_name, type_vars, constructors),
+            "Functor" => self.derive_functor(type_name, type_vars, constructors),
             other => {
                 self.push_error_ctx(
-                    TypeErrorKind::Other(format!("Cannot derive '{}' — only Show, Eq and Ord are supported", other)),
+                    TypeErrorKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord and Functor are supported", other)),
                     format!("data {}", type_name),
                 );
                 vec![]
@@ -2462,6 +2463,237 @@ impl Checker {
         );
 
         functions
+    }
+
+    /// Check if a type mentions a specific type variable name
+    fn ty_mentions_var(ty: &Ty, var_name: &str) -> bool {
+        match ty {
+            Ty::Var(tv) => tv.name == var_name,
+            Ty::Con(_) | Ty::Unit => false,
+            Ty::Arrow(a, b) | Ty::App(a, b) => {
+                Self::ty_mentions_var(a, var_name) || Self::ty_mentions_var(b, var_name)
+            }
+            Ty::List(a) | Ty::IO(a) => Self::ty_mentions_var(a, var_name),
+            Ty::LuaIO(_, a) => Self::ty_mentions_var(a, var_name),
+            Ty::Forall(_, a) => Self::ty_mentions_var(a, var_name),
+            Ty::Tuple(elems) => elems.iter().any(|e| Self::ty_mentions_var(e, var_name)),
+        }
+    }
+
+    /// Generate the expression to map a field value through the functor function.
+    /// For a field of type `t` in a Functor-derived constructor:
+    /// - If `t` doesn't mention the last type var: pass through unchanged
+    /// - If `t` IS the last type var: apply `_f x`
+    /// - Otherwise (e.g. `Tree a`, `[a]`): apply `resolved_fmap _f x`
+    /// The fmap_name is resolved at derive time to avoid polymorphic resolution issues.
+    fn functor_map_field(&self, field_ty: &Ty, last_var: &str, var_name: &str, b_ty: &Ty, self_fmap: &str) -> TExpr {
+        if !Self::ty_mentions_var(field_ty, last_var) {
+            // Field doesn't mention the functor parameter → pass through
+            TExpr::new(TExprKind::Var(var_name.to_string()), field_ty.clone())
+        } else if let Ty::Var(tv) = field_ty {
+            if tv.name == last_var {
+                // Field IS the functor parameter → apply _f
+                TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(
+                            TExprKind::Var("_f".to_string()),
+                            Ty::arrow(field_ty.clone(), b_ty.clone()),
+                        )),
+                        Box::new(TExpr::new(
+                            TExprKind::Var(var_name.to_string()),
+                            field_ty.clone(),
+                        )),
+                    ),
+                    b_ty.clone(),
+                )
+            } else {
+                TExpr::new(TExprKind::Var(var_name.to_string()), field_ty.clone())
+            }
+        } else {
+            // Complex type mentioning the var (e.g. Tree a, [a], Maybe a)
+            // Resolve the fmap function name at derive time
+            let fmap_resolved = self.resolve_functor_fmap(field_ty, self_fmap);
+            let a_ty = Ty::Var(TyVar { name: last_var.to_string(), id: u32::MAX });
+            let fmap_f = TExpr::new(
+                TExprKind::App(
+                    Box::new(TExpr::new(
+                        TExprKind::Var(fmap_resolved),
+                        Ty::arrow(Ty::arrow(a_ty.clone(), b_ty.clone()), Ty::arrow(field_ty.clone(), field_ty.clone())),
+                    )),
+                    Box::new(TExpr::new(
+                        TExprKind::Var("_f".to_string()),
+                        Ty::arrow(a_ty, b_ty.clone()),
+                    )),
+                ),
+                Ty::arrow(field_ty.clone(), field_ty.clone()),
+            );
+            TExpr::new(
+                TExprKind::App(
+                    Box::new(fmap_f),
+                    Box::new(TExpr::new(
+                        TExprKind::Var(var_name.to_string()),
+                        field_ty.clone(),
+                    )),
+                ),
+                field_ty.clone(),
+            )
+        }
+    }
+
+    /// Resolve the concrete fmap function for a type constructor at derive time.
+    /// Extracts the outermost type constructor and looks up the Functor instance.
+    fn resolve_functor_fmap(&self, ty: &Ty, self_fmap: &str) -> String {
+        let tc_name = match ty {
+            Ty::List(_) => Some("[]".to_string()),
+            Ty::IO(_) => Some("IO".to_string()),
+            Ty::App(f, _) => {
+                let mut head = f.as_ref();
+                loop {
+                    match head {
+                        Ty::Con(name) => break Some(name.clone()),
+                        Ty::App(inner, _) => head = inner.as_ref(),
+                        _ => break None,
+                    }
+                }
+            }
+            _ => None,
+        };
+        if let Some(tc) = tc_name {
+            let key = ("Functor".to_string(), tc);
+            if let Some(inst) = self.instances.get(&key) {
+                if let Some(name) = inst.method_fns.get("fmap") {
+                    return name.clone();
+                }
+            }
+            // Self-recursive: instance not yet registered, use self_fmap
+            return self_fmap.to_string();
+        }
+        // Fallback: use generic fmap (will need monomorphizer resolution)
+        "fmap".to_string()
+    }
+
+    /// Generate `fmap` for a data type.
+    /// For `data T a = C1 f1 f2 | C2 g1`, generates:
+    /// `fmap_T f (C1 x0 x1) = C1 (map x0) (map x1)`
+    /// where `map` applies `f` to fields mentioning the last type variable.
+    fn derive_functor(
+        &mut self,
+        type_name: &str,
+        type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Vec<TFunction> {
+        if type_vars.is_empty() {
+            self.push_error_ctx(
+                TypeErrorKind::Other(format!("Cannot derive Functor for '{}' — it has no type parameters", type_name)),
+                format!("data {}", type_name),
+            );
+            return vec![];
+        }
+
+        let last_tv_name = type_vars.last().unwrap().clone();
+
+        let tvars: Vec<TyVar> = type_vars.iter()
+            .map(|n| TyVar { name: n.clone(), id: u32::MAX })
+            .collect();
+
+        let a_tv = TyVar { name: last_tv_name.clone(), id: u32::MAX };
+        let b_tv = TyVar { name: "__b".to_string(), id: u32::MAX };
+
+        // Build T a (input type)
+        let input_type = tvars.iter().fold(
+            Ty::Con(type_name.to_string()),
+            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
+        );
+
+        // Build T b (output type) — last type var replaced with __b
+        let output_type = tvars.iter().fold(
+            Ty::Con(type_name.to_string()),
+            |acc, tv| {
+                if tv.name == last_tv_name {
+                    Ty::app(acc, Ty::Var(b_tv.clone()))
+                } else {
+                    Ty::app(acc, Ty::Var(tv.clone()))
+                }
+            },
+        );
+
+        let f_ty = Ty::arrow(Ty::Var(a_tv.clone()), Ty::Var(b_tv.clone()));
+        let fn_ty = Ty::fun(&[f_ty.clone(), input_type.clone()], output_type.clone());
+
+        let mangled = format!("fmap_{}", type_name);
+
+        let mut clauses = Vec::new();
+        for con in constructors {
+            let field_count = match &con.fields {
+                ConstructorFields::Positional(fs) => fs.len(),
+                ConstructorFields::Named(fs) => fs.len(),
+            };
+
+            let con_info = self.constructors.get(&con.name).cloned();
+            let field_tys: Vec<Ty> = con_info.as_ref()
+                .map(|ci| ci.field_types.clone())
+                .unwrap_or_default();
+
+            let param_names: Vec<String> = (0..field_count)
+                .map(|i| format!("_x{}", i))
+                .collect();
+
+            // Pattern: _f (Con x0 x1 ...)
+            let patterns = vec![
+                TPattern::Var("_f".to_string(), f_ty.clone()),
+                TPattern::Constructor {
+                    name: con.name.clone(),
+                    args: param_names.iter().enumerate().map(|(i, n)| {
+                        let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
+                        TPattern::Var(n.clone(), ty)
+                    }).collect(),
+                },
+            ];
+
+            // Body: Con (mapped_x0) (mapped_x1) ...
+            let mut body = TExpr::new(
+                TExprKind::Con(con.name.clone()),
+                output_type.clone(),
+            );
+
+            let b_ty_val = Ty::Var(b_tv.clone());
+            for (i, pname) in param_names.iter().enumerate() {
+                let field_ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
+                let mapped = self.functor_map_field(&field_ty, &last_tv_name, pname, &b_ty_val, &mangled);
+                body = TExpr::new(
+                    TExprKind::App(Box::new(body), Box::new(mapped)),
+                    output_type.clone(),
+                );
+            }
+
+            clauses.push(TClause {
+                patterns,
+                guards: vec![],
+                body,
+                where_binds: vec![],
+            });
+        }
+
+        // Register the Functor instance
+        let mut method_fns = HashMap::new();
+        method_fns.insert("fmap".to_string(), mangled.clone());
+        method_fns.insert("<$>".to_string(), mangled.clone());
+        self.instances.insert(
+            ("Functor".to_string(), type_name.to_string()),
+            InstanceInfo {
+                class_name: "Functor".to_string(),
+                target_type: Ty::Con(type_name.to_string()),
+                method_fns,
+            },
+        );
+
+        vec![TFunction {
+            name: mangled,
+            ty: fn_ty,
+            clauses,
+            specialized: false,
+            dict_params: vec![],
+        }]
     }
 
     // --- Exhaustiveness checking ---
