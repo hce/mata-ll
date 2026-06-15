@@ -378,8 +378,6 @@ Monads are just like in haskell:
         (<$) :: a -> f b -> f a
         (<$) = fmap . const
 
-    -- NOTE: Applicative is not yet implemented. The following is the
-    -- target definition for a future version.
     class Applicative m where
         pure  :: a -> m a
         (<*>) :: m (a -> b) -> m a -> m b
@@ -596,7 +594,7 @@ You get a lambda. Writing
 
 Shall be semantically equivalent to the first one.
 
-Pattern matching in lambda args is not necessary for now.
+Pattern matching in lambda arguments is supported.
 
 # Guards
 
@@ -839,16 +837,149 @@ parameters are marked concrete.
         ↓
     .lua output (standalone, no runtime needed)
 
-# Deferred / limitations
+# Planned features (by priority)
+
+## High priority
+
+### Functor and Applicative typeclasses
+
+The full Functor → Applicative → Monad hierarchy must be implemented.
+Currently only Monad exists as a typeclass; Functor and Applicative
+are referenced in the spec but not implemented. This is the highest
+priority feature gap.
+
+    class Functor f where
+        fmap :: (a -> b) -> f a -> f b
+
+    class Functor f => Applicative f where
+        pure  :: a -> f a
+        (<*>) :: f (a -> b) -> f a -> f b
+
+    class Applicative m => Monad m where
+        (>>=) :: m a -> (a -> m b) -> m b
+
+### Record update syntax
+
+Haskell-style record updates:
+
+    foo { fieldName = newValue }
+
+This is high priority for ergonomics and Haskell compatibility.
+
+### import hiding
+
+    import Module hiding (foo, bar)
+
+Required for Haskell compatibility.
+
+### Enum typeclass and range syntax
+
+    class Enum a where
+        succ :: a -> a
+        pred :: a -> a
+        toEnum :: Integer -> a
+        fromEnum :: a -> Integer
+
+Range syntax: `[1..10]`, `[1,3..10]`, `[1..]`.
+
+### Read typeclass
+
+    class Read a where
+        read :: String -> a
+
+Parsing values from strings.
+
+### Higher-rank polymorphism
+
+Generalize beyond the current narrow rank-2 support (ST and
+LuaFunction scope sealing) to support general `forall` quantification
+in argument positions.
+
+### Deriving for more typeclasses
+
+Extend `deriving` beyond Show, Eq, Ord to include at minimum:
+Functor, Enum, Bounded.
+
+### Standard library compatibility modules
+
+Add Haskell-compatible module names that re-export existing
+functionality and fill gaps:
+
+    Data.List     — list operations (map, filter, foldl, etc.)
+    Data.Map      — backed by HashMap
+    Data.Maybe    — Maybe utilities (fromMaybe, catMaybes, etc.)
+    Control.Monad — monadic combinators (mapM, forM, guard, etc.)
+
+These can largely be implemented as pure MATA-LL modules wrapping
+existing prelude functions plus new additions.
+
+## Medium priority
+
+### Default method implementations in class declarations
+
+    class Eq a where
+        (==) :: a -> a -> Bool
+        (/=) :: a -> a -> Bool
+        x /= y = not (x == y)    -- default implementation
+
+Currently class bodies can only contain type signatures, not
+definitions.
+
+## Low priority / deferred
+
+### Num typeclass and numeric tower
+
+A pure MATA-LL library providing:
+
+    class Num a where
+        (+) :: a -> a -> a
+        (-) :: a -> a -> a
+        (*) :: a -> a -> a
+        abs :: a -> a
+        signum :: a -> a
+        fromInteger :: Integer -> a
+
+This includes types like Float, Double, Word, Rational as pure
+MATA-LL wrappers. Performance will be poor compared to intrinsic
+arithmetic, but correctness and compatibility are the goals. Similarly
+for Integral and Fractional.
+
+### where blocks in class/instance declarations
+
+Complex local definitions in typeclass instance declarations.
+Deferred until default method implementations are done.
+
+## Architecture yet to be discussed
+
+### Exception handling
+
+Haskell-style try/catch/throw. The design for this needs discussion —
+Lua has pcall/xpcall which could serve as the backend, but the
+interaction with non-strict evaluation and IO needs careful thought.
+
+## Explicitly out of scope
+
+### Char type
+
+MATA-LL does not and will not have a `Char` type. Strings are Lua
+strings; there is no `[Char]` representation. Character-level
+operations use `LString` or `ByteString`.
+
+### Multi-parameter typeclasses
+
+Not supported. Single-parameter typeclasses cover the needed use
+cases for the Lua target.
+
+### IORef, MVar, STRef
+
+Lua has no preemptive threading, so concurrent mutable state
+primitives serve no purpose. `STArray` covers the scoped mutation
+use case.
+
+# Known limitations
 
 The following are known limitations of the current implementation:
 
-- Lambda pattern matching (patterns not supported in lambda args)
 - FFI varargs (e.g. Lua's string.format)
-- Multi-line function application (arguments on continuation lines)
-  needs layout rule refinement to distinguish from new declarations
-- Multi-binding `let` in `do` blocks (each binding needs its own `let`)
-- Guards combined with `where` clauses (parser returns early for
-  guarded clauses)
 - Zero-arg LuaIterator (e.g. stdinLines) needs IO wrapping to avoid
   eager evaluation
