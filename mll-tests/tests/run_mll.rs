@@ -137,6 +137,7 @@ mll_test!(st_return, "st_return.mll");
 mll_test!(local_overflow, "local_overflow.mll");
 mll_test!(existentials, "existentials.mll");
 mll_test!(derive_functor, "derive_functor.mll");
+mll_test!(derive_eq, "derive_eq.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

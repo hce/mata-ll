@@ -606,13 +606,16 @@ impl Monomorphizer {
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // Check for typeclass method resolution on infix operators
-                if self.class_methods.contains(&op) {
+                if self.class_methods.contains(&op) || (op == "/=" && self.class_methods.contains("==")) {
                     #[allow(unused_assignments)]
                     let mut resolved: Option<String> = None;
 
+                    // For /=, resolve via == (the registered method) and wrap in not later
+                    let lookup_op = if op == "/=" { "==".to_string() } else { op.clone() };
+
                     if !self.is_polymorphic(&lhs.ty) {
                         let ty_str = format!("{}", lhs.ty);
-                        let key = (op.clone(), ty_str.clone());
+                        let key = (lookup_op.clone(), ty_str.clone());
 
                         // 1. Direct instance lookup
                         resolved = self.instance_methods.get(&key).cloned();
@@ -631,13 +634,13 @@ impl Monomorphizer {
 
                         // 3. Parameterized instance resolution (extract type constructor from LHS)
                         if resolved.is_none() {
-                            resolved = self.resolve_parameterized_instance(&op, &lhs.ty);
+                            resolved = self.resolve_parameterized_instance(&lookup_op, &lhs.ty);
                         }
 
                         // 4. Higher-kinded fallback: extract type constructor from result type
                         if resolved.is_none() {
                             if let Some(tc) = Self::extract_type_constructor(&ty) {
-                                resolved = self.instance_methods.get(&(op.clone(), tc)).cloned();
+                                resolved = self.instance_methods.get(&(lookup_op.clone(), tc)).cloned();
                             }
                         }
                     } else {
@@ -645,7 +648,7 @@ impl Monomorphizer {
                         // This handles derived instance methods (e.g. eq_Tree) where
                         // field types like `Tree a` are polymorphic but the type
                         // constructor has a registered instance.
-                        if (op == "==" || op == "/=") {
+                        if op == "==" || op == "/=" {
                             if let Ty::List(elem_ty) = &lhs.ty {
                                 resolved = Some(self.generate_list_eq(elem_ty));
                             } else if Self::is_maybe_type(&lhs.ty) {
@@ -657,12 +660,12 @@ impl Monomorphizer {
                         }
                         if resolved.is_none() {
                             let ty_str = format!("{}", lhs.ty);
-                            let key = (op.clone(), ty_str);
+                            let key = (lookup_op.clone(), ty_str);
                             resolved = self.instance_methods.get(&key).cloned();
                         }
                         if resolved.is_none() {
                             if let Some(tc) = Self::extract_type_constructor(&lhs.ty) {
-                                resolved = self.instance_methods.get(&(op.clone(), tc)).cloned();
+                                resolved = self.instance_methods.get(&(lookup_op, tc)).cloned();
                             }
                         }
                     }
