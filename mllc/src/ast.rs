@@ -107,6 +107,7 @@ pub enum Assoc {
 pub enum ImportItems {
     All,
     Specific(Vec<ImportItem>),
+    Hiding(Vec<ImportItem>),
     Qualified(String),
 }
 
@@ -222,6 +223,11 @@ pub enum Expr {
     RecordCon {
         constructor: String,
         fields: Vec<(String, Expr)>,
+    },
+    /// Record update: expr { field = newVal, ... }
+    RecordUpdate {
+        expr: Box<Expr>,
+        updates: Vec<(String, Expr)>,
     },
     /// Parenthesized expression
     Paren(Box<Expr>),

@@ -139,6 +139,24 @@ impl ModuleLoader {
                                 }
                             }
                         }
+                        ImportItems::Hiding(items) => {
+                            let excluded: HashSet<String> = items.iter().map(|item| {
+                                match item {
+                                    ImportItem::Value(n) => n.clone(),
+                                    ImportItem::TypeAll(n) => n.clone(),
+                                    ImportItem::TypeOnly(n) => n.clone(),
+                                }
+                            }).collect();
+
+                            for d in &all_decls {
+                                imported_decls.push((*d).clone());
+                                if let Some(n) = decl_name(d) {
+                                    if excluded.contains(&n) {
+                                        hidden_names.insert(n);
+                                    }
+                                }
+                            }
+                        }
                         ImportItems::Qualified(alias) => {
                             for d in &all_decls {
                                 imported_decls.push(prefix_decl(d, alias));

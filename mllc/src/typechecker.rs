@@ -851,6 +851,70 @@ impl Checker {
             );
         }
 
+        // Built-in Enum typeclass
+        // succ :: a -> a
+        // pred :: a -> a
+        // toEnum :: Integer -> a
+        // fromEnum :: a -> Integer
+        // enumFrom :: a -> [a]
+        // enumFromThen :: a -> a -> [a]
+        // enumFromTo :: a -> a -> [a]
+        // enumFromThenTo :: a -> a -> a -> [a]
+        let succ_ty = Ty::arrow(ta.clone(), ta.clone());
+        let to_enum_ty = Ty::arrow(Ty::Con("Integer".into()), ta.clone());
+        let from_enum_ty = Ty::arrow(ta.clone(), Ty::Con("Integer".into()));
+        let enum_from_ty = Ty::arrow(ta.clone(), Ty::List(Box::new(ta.clone())));
+        let enum_from_then_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
+        let enum_from_to_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
+        let enum_from_then_to_ty = Ty::fun(&[ta.clone(), ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
+        self.classes.insert("Enum".to_string(), ClassInfo {
+            name: "Enum".to_string(),
+            type_var: "a".to_string(),
+            superclasses: vec![],
+            methods: vec![
+                ("succ".to_string(), succ_ty.clone()),
+                ("pred".to_string(), succ_ty.clone()),
+                ("toEnum".to_string(), to_enum_ty.clone()),
+                ("fromEnum".to_string(), from_enum_ty.clone()),
+                ("enumFrom".to_string(), enum_from_ty.clone()),
+                ("enumFromThen".to_string(), enum_from_then_ty.clone()),
+                ("enumFromTo".to_string(), enum_from_to_ty.clone()),
+                ("enumFromThenTo".to_string(), enum_from_then_to_ty.clone()),
+            ],
+        });
+        for (name, ty) in &[
+            ("succ", succ_ty.clone()), ("pred", succ_ty),
+            ("toEnum", to_enum_ty), ("fromEnum", from_enum_ty),
+            ("enumFrom", enum_from_ty), ("enumFromThen", enum_from_then_ty),
+            ("enumFromTo", enum_from_to_ty), ("enumFromThenTo", enum_from_then_to_ty),
+        ] {
+            self.env.insert(name.to_string(), Scheme {
+                vars: vec![a.clone()],
+                ty: ty.clone(),
+            });
+        }
+
+        // Enum instance for Integer
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("succ".to_string(), "succ_Integer".to_string());
+            method_fns.insert("pred".to_string(), "pred_Integer".to_string());
+            method_fns.insert("toEnum".to_string(), "toEnum_Integer".to_string());
+            method_fns.insert("fromEnum".to_string(), "fromEnum_Integer".to_string());
+            method_fns.insert("enumFrom".to_string(), "enumFrom_Integer".to_string());
+            method_fns.insert("enumFromThen".to_string(), "enumFromThen_Integer".to_string());
+            method_fns.insert("enumFromTo".to_string(), "enumFromTo_Integer".to_string());
+            method_fns.insert("enumFromThenTo".to_string(), "enumFromThenTo_Integer".to_string());
+            self.instances.insert(
+                ("Enum".to_string(), "Integer".to_string()),
+                InstanceInfo {
+                    class_name: "Enum".to_string(),
+                    target_type: Ty::Con("Integer".to_string()),
+                    method_fns,
+                },
+            );
+        }
+
         // Built-in Show typeclass
         let show_ty = Ty::arrow(ta.clone(), Ty::Con("String".into()));
         self.classes.insert("Show".to_string(), ClassInfo {
@@ -863,6 +927,32 @@ impl Checker {
             vars: vec![a.clone()],
             ty: show_ty,
         });
+
+        // Built-in Read typeclass
+        let read_ty = Ty::arrow(Ty::Con("String".into()), ta.clone());
+        self.classes.insert("Read".to_string(), ClassInfo {
+            name: "Read".to_string(),
+            type_var: "a".to_string(),
+            superclasses: vec![],
+            methods: vec![("read".to_string(), read_ty.clone())],
+        });
+        self.env.insert("read".to_string(), Scheme {
+            vars: vec![a.clone()],
+            ty: read_ty,
+        });
+        // Read instances for base types
+        for type_name in &["Integer", "Number", "Bool", "String"] {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("read".to_string(), format!("read_{}", type_name));
+            self.instances.insert(
+                ("Read".to_string(), type_name.to_string()),
+                InstanceInfo {
+                    class_name: "Read".to_string(),
+                    target_type: Ty::Con(type_name.to_string()),
+                    method_fns,
+                },
+            );
+        }
 
         // Built-in Eq typeclass
         let eq_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
@@ -1304,6 +1394,24 @@ impl Checker {
         for (name, ty) in &sigs {
             let scheme = self.generalize(&self.env.clone(), ty);
             self.env.insert(name.clone(), scheme);
+        }
+
+        // Local declarations that redefine a hidden name should shadow it
+        if !self.hidden_names.is_empty() && self.local_decl_start > 0 {
+            for decl in module.decls.iter().skip(self.local_decl_start) {
+                match decl {
+                    Decl::TypeSig { name, .. } | Decl::FunDef { name, .. } => {
+                        self.hidden_names.remove(name);
+                    }
+                    Decl::DataDef { name, constructors, .. } => {
+                        self.hidden_names.remove(name);
+                        for con in constructors {
+                            self.hidden_names.remove(&con.name);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // Pass 6: collect exports and check function definitions
@@ -2485,6 +2593,52 @@ impl Checker {
                     |acc, arg| Expr::App(Box::new(acc), Box::new(arg.unwrap().clone())),
                 );
                 self.infer_expr(&desugared, env)
+            }
+            Expr::RecordUpdate { expr, updates } => {
+                // Infer the record expression type
+                let (rec_te, rec_ty, mut subst) = self.infer_expr(expr, env)?;
+
+                // Determine the type name from the first update field
+                let first_field = &updates[0].0;
+                let (type_name, _) = self.record_fields.get(first_field)
+                    .ok_or_else(|| TypeErrorKind::Other(format!(
+                        "Unknown record field '{}'", first_field
+                    )))?.clone();
+
+                // Collect all fields for this type with their indices
+                let mut all_fields: Vec<(String, usize)> = Vec::new();
+                for (field_name, (tn, idx)) in &self.record_fields {
+                    if *tn == type_name {
+                        all_fields.push((field_name.clone(), *idx));
+                    }
+                }
+                let num_fields = all_fields.len();
+
+                // Process update expressions and verify fields
+                let mut typed_updates = Vec::new();
+                for (field_name, field_expr) in updates {
+                    let (field_tn, field_idx) = self.record_fields.get(field_name)
+                        .ok_or_else(|| TypeErrorKind::Other(format!(
+                            "Unknown record field '{}'", field_name
+                        )))?.clone();
+                    if field_tn != type_name {
+                        return Err(TypeErrorKind::Other(format!(
+                            "Field '{}' belongs to type '{}', not '{}'",
+                            field_name, field_tn, type_name
+                        )));
+                    }
+                    let env2 = env.apply_subst(&subst);
+                    let (te, _ty, s) = self.infer_expr(field_expr, &env2)?;
+                    subst = subst.compose(&s);
+                    typed_updates.push((field_name.clone(), field_idx, te));
+                }
+
+                let result_ty = rec_ty.apply_subst(&subst);
+                Ok((TExpr::new(TExprKind::RecordUpdate {
+                    record: Box::new(rec_te),
+                    updates: typed_updates,
+                    num_fields,
+                }, result_ty.clone()), result_ty, subst))
             }
             Expr::Tuple(elems) => {
                 let mut telems = Vec::new();

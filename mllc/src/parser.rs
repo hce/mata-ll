@@ -111,6 +111,7 @@ impl Parser {
                 }
             }
             // Parse optional export list
+            self.skip_newlines_and_indent();
             if self.at(&Token::LeftParen) {
                 self.advance();
                 let mut exports = Vec::new();
@@ -133,8 +134,10 @@ impl Parser {
                         Token::Operator(op) => { exports.push(op); self.advance(); }
                         _ => { self.advance(); } // skip unknown
                     }
+                    self.skip_newlines_and_indent();
                     if self.at(&Token::Comma) { self.advance(); } else { break; }
                 }
+                self.skip_newlines_and_indent();
                 if self.at(&Token::RightParen) { self.advance(); }
                 module_exports = Some(exports);
             }
@@ -404,6 +407,12 @@ impl Parser {
             });
         }
 
+        // Check for `hiding` keyword (context-sensitive, parsed as Ident)
+        let hiding = matches!(self.peek(), Token::Ident(s) if s == "hiding");
+        if hiding {
+            self.advance();
+        }
+
         if self.at(&Token::LeftParen) {
             self.advance();
             let mut items = Vec::new();
@@ -434,7 +443,7 @@ impl Parser {
             self.expect(&Token::RightParen)?;
             return Ok(Decl::Import {
                 module_path,
-                items: ImportItems::Specific(items),
+                items: if hiding { ImportItems::Hiding(items) } else { ImportItems::Specific(items) },
             });
         }
 
@@ -1131,6 +1140,9 @@ impl Parser {
 
             // Check for operator
             match self.peek().clone() {
+                Token::Operator(ref op) if op == ".." => {
+                    break; // '..' is range syntax, not an infix operator
+                }
                 Token::Operator(ref op) => {
                     let (lp, rp) = self.operator_precedence(op);
                     if lp < min_prec {
@@ -1363,7 +1375,57 @@ impl Parser {
             break;
         }
 
+        // Record update: expr { field = val, ... }
+        // Only parse if '{' is on the same line (to avoid conflict with do-blocks)
+        // Loop to allow chained updates: expr { x = 1 } { y = 2 }
+        while self.at(&Token::LeftBrace) && self.pos > 0 {
+            let prev_tok = &self.tokens[self.pos - 1];
+            let brace_tok = &self.tokens[self.pos];
+            if brace_tok.line != prev_tok.line {
+                break;
+            }
+            let save = self.pos;
+            if let Ok(updates) = self.try_parse_record_update() {
+                expr = Expr::RecordUpdate {
+                    expr: Box::new(expr),
+                    updates,
+                };
+            } else {
+                self.pos = save;
+                break;
+            }
+        }
+
         Ok(expr)
+    }
+
+    fn try_parse_record_update(&mut self) -> Result<Vec<(String, Expr)>, String> {
+        self.expect(&Token::LeftBrace)?;
+        let mut updates = Vec::new();
+        loop {
+            self.skip_newlines_and_indent();
+            if self.at(&Token::RightBrace) {
+                break;
+            }
+            let field_name = match self.peek().clone() {
+                Token::Ident(n) => { self.advance(); n }
+                _ => return Err("Expected field name".into()),
+            };
+            self.expect(&Token::Eq)?;
+            let value = self.parse_expr()?;
+            updates.push((field_name, value));
+            self.skip_newlines_and_indent();
+            if self.at(&Token::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        if updates.is_empty() {
+            return Err("Empty record update".into());
+        }
+        self.expect(&Token::RightBrace)?;
+        Ok(updates)
     }
 
     /// Check if the next token could start an expression atom,
@@ -1598,11 +1660,66 @@ impl Parser {
                     self.expect(&Token::RightBracket)?;
                     return Ok(self.desugar_list_comprehension(first, &quals, &mut 0));
                 }
-                // Regular list literal
-                let mut items = vec![first];
-                while self.at(&Token::Comma) {
+                // Check for range syntax: [x..], [x..y], [x,y..], [x,y..z]
+                if self.at(&Token::Operator("..".to_string())) {
                     self.advance();
-                    items.push(self.parse_expr()?);
+                    if self.at(&Token::RightBracket) {
+                        // [x..] → enumFrom x
+                        self.advance();
+                        return Ok(Expr::App(
+                            Box::new(Expr::Var("enumFrom".to_string())),
+                            Box::new(first),
+                        ));
+                    }
+                    // [x..y] → enumFromTo x y
+                    let end = self.parse_expr()?;
+                    self.expect(&Token::RightBracket)?;
+                    return Ok(Expr::App(
+                        Box::new(Expr::App(
+                            Box::new(Expr::Var("enumFromTo".to_string())),
+                            Box::new(first),
+                        )),
+                        Box::new(end),
+                    ));
+                }
+                // Regular list literal or range with step
+                let mut items = vec![first];
+                if self.at(&Token::Comma) {
+                    self.advance();
+                    let second = self.parse_expr()?;
+                    // Check for [x,y..] or [x,y..z]
+                    if self.at(&Token::Operator("..".to_string())) {
+                        self.advance();
+                        if self.at(&Token::RightBracket) {
+                            // [x,y..] → enumFromThen x y
+                            self.advance();
+                            return Ok(Expr::App(
+                                Box::new(Expr::App(
+                                    Box::new(Expr::Var("enumFromThen".to_string())),
+                                    Box::new(items.pop().unwrap()),
+                                )),
+                                Box::new(second),
+                            ));
+                        }
+                        // [x,y..z] → enumFromThenTo x y z
+                        let end = self.parse_expr()?;
+                        self.expect(&Token::RightBracket)?;
+                        return Ok(Expr::App(
+                            Box::new(Expr::App(
+                                Box::new(Expr::App(
+                                    Box::new(Expr::Var("enumFromThenTo".to_string())),
+                                    Box::new(items.pop().unwrap()),
+                                )),
+                                Box::new(second),
+                            )),
+                            Box::new(end),
+                        ));
+                    }
+                    items.push(second);
+                    while self.at(&Token::Comma) {
+                        self.advance();
+                        items.push(self.parse_expr()?);
+                    }
                 }
                 self.expect(&Token::RightBracket)?;
                 let mut list = Expr::Con("[]".to_string());

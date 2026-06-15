@@ -126,6 +126,10 @@ mll_test!(any_type, "any_type.mll");
 mll_test!(bytestring, "bytestring.mll");
 mll_test!(operator_fixity, "operator_fixity.mll");
 mll_test!(export_module, "export_module.mll");
+mll_test!(import_hiding, "import_hiding.mll");
+mll_test!(record_update, "record_update.mll");
+mll_test!(enum_range, "enum_range.mll");
+mll_test!(read_typeclass, "read_typeclass.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -156,6 +160,8 @@ mll_lib_test!(lib_lmath, "lib_lmath.mll");
 mll_lib_test!(lib_json, "lib_json.mll");
 mll_lib_test!(lib_regex, "lib_regex.mll");
 mll_lib_test!(lib_los, "lib_los.mll");
+mll_lib_test!(lib_data_list, "lib_data_list.mll");
+mll_lib_test!(lib_data_maybe, "lib_data_maybe.mll");
 
 // Compile-error tests: these SHOULD fail to compile
 #[test]
@@ -230,6 +236,24 @@ main = putStrLn (show (privateFn 5))
             assert!(msg.contains("not exported"), "Expected 'not exported' error, got: {}", msg);
         }
         Ok(_) => panic!("Expected compilation to fail for private function access"),
+    }
+}
+
+#[test]
+fn import_hiding_blocks_hidden_name() {
+    let source = r#"
+import ExportHelper hiding (publicFn)
+
+main :: IO ()
+main = putStrLn (show (publicFn 5))
+"#;
+    let cases_dir = Path::new("tests/cases");
+    match mllc::compile(source, cases_dir, &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("not exported"), "Expected 'not exported' error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for hidden import"),
     }
 }
 
