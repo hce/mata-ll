@@ -223,6 +223,11 @@ impl TExpr {
                 dict_args: dict_args.into_iter().map(|a| a.apply_subst(subst)).collect(),
                 value_args: value_args.into_iter().map(|a| a.apply_subst(subst)).collect(),
             },
+            TExprKind::RecordUpdate { record, updates, num_fields } => TExprKind::RecordUpdate {
+                record: Box::new(record.apply_subst(subst)),
+                updates: updates.into_iter().map(|(n, idx, e)| (n, idx, e.apply_subst(subst))).collect(),
+                num_fields,
+            },
             other => other,
         };
         TExpr { kind, ty }
@@ -310,6 +315,13 @@ pub enum TExprKind {
         func_name: String,
         dict_args: Vec<TExpr>,
         value_args: Vec<TExpr>,
+    },
+    /// Record update: copy record, overwrite specific fields
+    /// Fields are (field_name, lua_index, new_value)
+    RecordUpdate {
+        record: Box<TExpr>,
+        updates: Vec<(String, usize, TExpr)>,
+        num_fields: usize,
     },
 }
 

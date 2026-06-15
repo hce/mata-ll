@@ -343,6 +343,14 @@ fn demanded_vars_inner(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSe
         TExprKind::DictAccess { .. } => {
             HashSet::new()
         }
+
+        TExprKind::RecordUpdate { record, updates, .. } => {
+            let mut s = demanded_vars(record, env);
+            for (_, _, e) in updates {
+                s.extend(demanded_vars(e, env));
+            }
+            s
+        }
     }
 }
 

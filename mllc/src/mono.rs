@@ -29,6 +29,9 @@ pub struct Monomorphizer {
     counter: u32,
     /// Typeclass method -> set of class names it belongs to
     class_methods: HashSet<String>,
+    /// Methods where the class variable appears in the return type, not the first arg
+    /// (e.g., Read's `read :: String -> a`, Enum's `toEnum :: Integer -> a`)
+    return_type_methods: HashSet<String>,
     /// Instance resolution: (method_name, type_string) -> mangled function name
     instance_methods: HashMap<(String, String), String>,
     /// Errors collected during monomorphization
@@ -97,6 +100,22 @@ impl Monomorphizer {
             }
         }
 
+        // Build set of methods where class variable is in return position
+        let mut return_type_methods = HashSet::new();
+        for (_class_name, info) in checker.get_classes() {
+            let tv = &info.type_var;
+            for (method_name, method_ty) in &info.methods {
+                // Check if the class variable appears only in return position
+                let first_arg_has_tv = match method_ty {
+                    Ty::Arrow(a, _) => Self::ty_contains_var(a, tv),
+                    _ => false,
+                };
+                if !first_arg_has_tv {
+                    return_type_methods.insert(method_name.clone());
+                }
+            }
+        }
+
         Monomorphizer {
             poly_fns: HashMap::new(),
             builtins,
@@ -104,6 +123,7 @@ impl Monomorphizer {
             generated: Vec::new(),
             counter: 0,
             class_methods,
+            return_type_methods,
             instance_methods,
             errors: Vec::new(),
             dict_passing_fns: HashSet::new(),
@@ -240,9 +260,34 @@ impl Monomorphizer {
     }
 
     /// Extract the type of the first argument from a function type
+    fn ty_contains_var(ty: &Ty, var: &str) -> bool {
+        match ty {
+            Ty::Var(v) => v.name == var,
+            Ty::Arrow(a, b) => Self::ty_contains_var(a, var) || Self::ty_contains_var(b, var),
+            Ty::App(f, a) => Self::ty_contains_var(f, var) || Self::ty_contains_var(a, var),
+            Ty::List(t) | Ty::IO(t) => Self::ty_contains_var(t, var),
+            Ty::Tuple(ts) => ts.iter().any(|t| Self::ty_contains_var(t, var)),
+            _ => false,
+        }
+    }
+
     fn first_arg_type(&self, ty: &Ty) -> Option<Ty> {
         match ty {
             Ty::Arrow(a, _) => Some(*a.clone()),
+            _ => None,
+        }
+    }
+
+    fn return_type(&self, ty: &Ty) -> Option<Ty> {
+        match ty {
+            Ty::Arrow(_, b) => {
+                // Get the final return type (innermost non-arrow)
+                let mut current = b.as_ref();
+                while let Ty::Arrow(_, next) = current {
+                    current = next.as_ref();
+                }
+                Some(current.clone())
+            }
             _ => None,
         }
     }
@@ -379,15 +424,24 @@ impl Monomorphizer {
             TExprKind::Var(ref name) => {
                 // 1. Check for typeclass method resolution
                 if self.class_methods.contains(name) && !self.is_polymorphic(&ty) {
-                    // Extract the first argument type from the function type
+                    // For methods where the class variable is in the return position,
+                    // resolve using the return type
+                    if self.return_type_methods.contains(name) {
+                        if let Some(ret_ty) = self.return_type(&ty) {
+                            let ret_str = format!("{}", ret_ty);
+                            let key = (name.clone(), ret_str);
+                            if let Some(mangled) = self.instance_methods.get(&key).cloned() {
+                                return TExpr { kind: TExprKind::Var(mangled), ty };
+                            }
+                        }
+                    }
+                    // Standard: use first argument type
                     if let Some(arg_ty) = self.first_arg_type(&ty) {
                         let ty_str = format!("{}", arg_ty);
                         let key = (name.clone(), ty_str.clone());
                         if let Some(mangled) = self.instance_methods.get(&key).cloned() {
                             return TExpr { kind: TExprKind::Var(mangled), ty };
                         } else if let Some(mangled) = self.resolve_parameterized_instance(name, &arg_ty) {
-                            // For show on containers, generate a specialized version
-                            // that dispatches to the element's show instance
                             if name == "show" {
                                 if let Some(specialized) = self.generate_container_show(&arg_ty) {
                                     return TExpr { kind: TExprKind::Var(specialized), ty };
@@ -475,10 +529,20 @@ impl Monomorphizer {
                     if self.class_methods.contains(fname) {
                         let arg_ty = &arg.ty;
                         if !self.is_polymorphic(arg_ty) {
-                            let ty_str = format!("{}", arg_ty);
-                            let key = (fname.clone(), ty_str);
-                            let mut resolved = self.instance_methods.get(&key).cloned()
-                                .or_else(|| self.resolve_parameterized_instance(fname, arg_ty));
+                            let mut resolved = None;
+                            // For methods where the class variable is in the return
+                            // position (Read, toEnum), resolve against the result type
+                            if self.return_type_methods.contains(fname) && !self.is_polymorphic(&ty) {
+                                let ret_str = format!("{}", ty);
+                                let ret_key = (fname.clone(), ret_str);
+                                resolved = self.instance_methods.get(&ret_key).cloned();
+                            }
+                            if resolved.is_none() {
+                                let ty_str = format!("{}", arg_ty);
+                                let key = (fname.clone(), ty_str);
+                                resolved = self.instance_methods.get(&key).cloned()
+                                    .or_else(|| self.resolve_parameterized_instance(fname, arg_ty));
+                            }
                             // For show on containers/tuples, generate specialized instances
                             if fname == "show" {
                                 if let Ty::Tuple(elem_tys) = arg_ty {
@@ -640,6 +704,11 @@ impl Monomorphizer {
             }
             TExprKind::Paren(inner) => TExprKind::Paren(Box::new(self.mono_expr(*inner))),
             TExprKind::Tuple(elems) => TExprKind::Tuple(elems.into_iter().map(|e| self.mono_expr(e)).collect()),
+            TExprKind::RecordUpdate { record, updates, num_fields } => TExprKind::RecordUpdate {
+                record: Box::new(self.mono_expr(*record)),
+                updates: updates.into_iter().map(|(n, idx, e)| (n, idx, self.mono_expr(e))).collect(),
+                num_fields,
+            },
             other => other,
         };
         TExpr { kind, ty }
@@ -1080,6 +1149,10 @@ impl Monomorphizer {
             }
             TExprKind::Negate(e) | TExprKind::Paren(e) => Self::collect_expr_vars(e, vars),
             TExprKind::Tuple(es) => { for e in es { Self::collect_expr_vars(e, vars); } }
+            TExprKind::RecordUpdate { record, updates, .. } => {
+                Self::collect_expr_vars(record, vars);
+                for (_, _, e) in updates { Self::collect_expr_vars(e, vars); }
+            }
             _ => {}
         }
     }
@@ -1212,6 +1285,11 @@ impl Monomorphizer {
             TExprKind::Negate(e) => TExprKind::Negate(Box::new(self.rewrite_dict_expr(*e, func_name, class_to_dict))),
             TExprKind::Paren(e) => TExprKind::Paren(Box::new(self.rewrite_dict_expr(*e, func_name, class_to_dict))),
             TExprKind::Tuple(es) => TExprKind::Tuple(es.into_iter().map(|e| self.rewrite_dict_expr(e, func_name, class_to_dict)).collect()),
+            TExprKind::RecordUpdate { record, updates, num_fields } => TExprKind::RecordUpdate {
+                record: Box::new(self.rewrite_dict_expr(*record, func_name, class_to_dict)),
+                updates: updates.into_iter().map(|(n, idx, e)| (n, idx, self.rewrite_dict_expr(e, func_name, class_to_dict))).collect(),
+                num_fields,
+            },
             other => other,
         };
         TExpr { kind, ty }

@@ -1428,11 +1428,29 @@ impl CodeGen {
                                 self.emit("return _l end)()");
                                 return;
                             }
-                            self.emit("__mll_cons(");
-                            self.gen_expr(inner_arg);
-                            self.emit(", ");
-                            self.gen_expr(arg);
-                            self.emit(")");
+                            // If the tail is a non-trivial expression (function call,
+                            // infix op, etc.), wrap it in a thunk for lazy evaluation.
+                            // This is essential for infinite lists like [1..].
+                            let tail_needs_thunk = matches!(&arg.kind,
+                                TExprKind::App(_, _) |
+                                TExprKind::InfixApp { .. } |
+                                TExprKind::Case { .. } |
+                                TExprKind::If { .. } |
+                                TExprKind::SpecCall { .. }
+                            );
+                            if tail_needs_thunk {
+                                self.emit("__mll_lazy_cons(");
+                                self.gen_expr(inner_arg);
+                                self.emit(", function() return ");
+                                self.gen_expr(arg);
+                                self.emit(" end)");
+                            } else {
+                                self.emit("__mll_cons(");
+                                self.gen_expr(inner_arg);
+                                self.emit(", ");
+                                self.gen_expr(arg);
+                                self.emit(")");
+                            }
                             return;
                         }
                     }
@@ -1574,9 +1592,24 @@ impl CodeGen {
                     "++" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     "mod" => "%",
                     ":" => {
-                        self.emit("__mll_cons(");
-                        self.gen_expr(lhs); self.emit(", "); self.gen_expr(rhs);
-                        self.emit(")");
+                        let tail_needs_thunk = matches!(&rhs.kind,
+                            TExprKind::App(_, _) |
+                            TExprKind::InfixApp { .. } |
+                            TExprKind::Case { .. } |
+                            TExprKind::If { .. } |
+                            TExprKind::SpecCall { .. }
+                        );
+                        if tail_needs_thunk {
+                            self.emit("__mll_lazy_cons(");
+                            self.gen_expr(lhs);
+                            self.emit(", function() return ");
+                            self.gen_expr(rhs);
+                            self.emit(" end)");
+                        } else {
+                            self.emit("__mll_cons(");
+                            self.gen_expr(lhs); self.emit(", "); self.gen_expr(rhs);
+                            self.emit(")");
+                        }
                         return;
                     }
                     "$" => {
@@ -1924,6 +1957,23 @@ impl CodeGen {
                 }
                 self.emit(")");
             }
+            TExprKind::RecordUpdate { record, updates, num_fields } => {
+                // Generate: (function() local _r = __force(record)
+                //   local _u = {_r[1], _r[2], ...}; _u[i] = val; ...; return _u end)()
+                self.emit("(function() local _r = __force(");
+                self.gen_expr(record);
+                self.emit("); local _u = {");
+                for i in 1..=*num_fields {
+                    if i > 1 { self.emit(", "); }
+                    self.emit(&format!("_r[{}]", i));
+                }
+                self.emit("}");
+                for (_, idx, val) in updates {
+                    self.emit(&format!("; _u[{}] = ", idx));
+                    self.gen_expr(val);
+                }
+                self.emit("; return _u end)()");
+            }
         }
     }
 
@@ -2100,6 +2150,10 @@ fn expr_references_name(expr: &TExpr, name: &str) -> bool {
         TExprKind::DictCall { dict_args, value_args, .. } => {
             dict_args.iter().any(|a| expr_references_name(a, name)) ||
             value_args.iter().any(|a| expr_references_name(a, name))
+        }
+        TExprKind::RecordUpdate { record, updates, .. } => {
+            expr_references_name(record, name) ||
+            updates.iter().any(|(_, _, e)| expr_references_name(e, name))
         }
     }
 }

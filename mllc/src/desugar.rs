@@ -86,6 +86,10 @@ fn desugar_expr(expr: Expr) -> Expr {
             constructor,
             fields: fields.into_iter().map(|(n, e)| (n, desugar_expr(e))).collect(),
         },
+        Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
+            expr: Box::new(desugar_expr(*expr)),
+            updates: updates.into_iter().map(|(n, e)| (n, desugar_expr(e))).collect(),
+        },
         other => other,
     }
 }
