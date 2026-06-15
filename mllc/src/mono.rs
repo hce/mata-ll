@@ -261,6 +261,13 @@ impl Monomorphizer {
         !ty.free_vars().is_empty()
     }
 
+    /// Check if a type is an IO/ST/LuaIO action (monads handled by codegen's bind chain).
+    fn is_action_monad(ty: &Ty) -> bool {
+        matches!(ty, Ty::IO(_) | Ty::LuaIO(_, _))
+            || matches!(ty, Ty::App(f, _) if matches!(f.as_ref(),
+                Ty::App(c, _) if matches!(c.as_ref(), Ty::Con(n) if n == "ST")))
+    }
+
     /// Extract the type of the first argument from a function type
     fn ty_contains_var(ty: &Ty, var: &str) -> bool {
         match ty {
@@ -348,7 +355,7 @@ impl Monomorphizer {
 
         loop {
             match &current.kind {
-                TExprKind::InfixApp { op, .. } if op == ">>=" || op == ">>" => {
+                TExprKind::InfixApp { op, lhs, .. } if (op == ">>=" || op == ">>") && Self::is_action_monad(&lhs.ty) => {
                     let ty = current.ty.clone();
                     if let TExprKind::InfixApp { op, lhs, rhs } = current.kind {
                         let rhs_ty = rhs.ty.clone();
@@ -429,16 +436,16 @@ impl Monomorphizer {
                     // For methods where the class variable is in the return position,
                     // resolve using the return type
                     if self.return_type_methods.contains(name) {
-                        if let Some(ret_ty) = self.return_type(&ty) {
-                            let ret_str = format!("{}", ret_ty);
-                            let key = (name.clone(), ret_str);
-                            if let Some(mangled) = self.instance_methods.get(&key).cloned() {
-                                return TExpr { kind: TExprKind::Var(mangled), ty };
-                            }
-                            // Parameterized lookup on return type (e.g. ST s [ByteString] → "ST")
-                            if let Some(mangled) = self.resolve_parameterized_instance(name, &ret_ty) {
-                                return TExpr { kind: TExprKind::Var(mangled), ty };
-                            }
+                        // For nullary methods (minBound, maxBound), the type IS the result
+                        let ret_ty = self.return_type(&ty).unwrap_or_else(|| ty.clone());
+                        let ret_str = format!("{}", ret_ty);
+                        let key = (name.clone(), ret_str);
+                        if let Some(mangled) = self.instance_methods.get(&key).cloned() {
+                            return TExpr { kind: TExprKind::Var(mangled), ty };
+                        }
+                        // Parameterized lookup on return type (e.g. ST s [ByteString] → "ST")
+                        if let Some(mangled) = self.resolve_parameterized_instance(name, &ret_ty) {
+                            return TExpr { kind: TExprKind::Var(mangled), ty };
                         }
                     }
                     // Standard: use first argument type
@@ -734,6 +741,27 @@ impl Monomorphizer {
 
     /// Generate a specialized show for a container type (List, Maybe, etc.)
     /// Returns the mangled name if generated, None if not applicable.
+    /// Resolve the eq function for a type, generating specialized eq if needed.
+    fn resolve_elem_eq(&mut self, ty: &Ty) -> String {
+        // Check if we already have an eq for this type
+        if let Some(existing) = self.instance_methods.get(&("==".to_string(), format!("{}", ty))).cloned() {
+            return existing;
+        }
+        // Recursively generate specialized eq for containers/tuples
+        if let Ty::List(elem_ty) = ty {
+            return self.generate_list_eq(elem_ty);
+        }
+        if let Ty::Tuple(elem_tys) = ty {
+            return self.generate_tuple_eq(elem_tys);
+        }
+        if Self::is_maybe_type(ty) {
+            if let Some(inner_ty) = Self::maybe_inner_type(ty) {
+                return self.generate_maybe_eq(&inner_ty);
+            }
+        }
+        "eq".to_string()
+    }
+
     /// Generate a specialized eq function for a tuple type.
     fn generate_tuple_eq(&mut self, elem_tys: &[Ty]) -> String {
         let tuple_ty = Ty::Tuple(elem_tys.to_vec());
@@ -745,14 +773,11 @@ impl Monomorphizer {
         }
         self.instance_methods.insert(key, mangled.clone());
 
-        // Resolve eq for each element type
+        // Resolve eq for each element type (recursively generates specialized eq)
+        let elem_tys_owned: Vec<Ty> = elem_tys.to_vec();
         let mut elem_eq_names = Vec::new();
-        for et in elem_tys {
-            let eq_name = self.instance_methods
-                .get(&("==".to_string(), format!("{}", et)))
-                .cloned()
-                .unwrap_or_else(|| "eq".to_string());
-            elem_eq_names.push(eq_name);
+        for et in &elem_tys_owned {
+            elem_eq_names.push(self.resolve_elem_eq(et));
         }
 
         // Build body: eq_E1(a[1], b[1]) and eq_E2(a[2], b[2]) and ...
@@ -805,10 +830,8 @@ impl Monomorphizer {
         }
         self.instance_methods.insert(key, mangled.clone());
 
-        let elem_eq = self.instance_methods
-            .get(&("==".to_string(), format!("{}", elem_ty)))
-            .cloned()
-            .unwrap_or_else(|| "eq".to_string());
+        let elem_ty_owned = elem_ty.clone();
+        let elem_eq = self.resolve_elem_eq(&elem_ty_owned);
 
         let bool_ty = Ty::Con("Bool".to_string());
         let body = TExpr::new(
@@ -863,10 +886,8 @@ impl Monomorphizer {
         }
         self.instance_methods.insert(key, mangled.clone());
 
-        let elem_eq = self.instance_methods
-            .get(&("==".to_string(), format!("{}", inner_ty)))
-            .cloned()
-            .unwrap_or_else(|| "eq".to_string());
+        let inner_ty_owned = inner_ty.clone();
+        let elem_eq = self.resolve_elem_eq(&inner_ty_owned);
 
         let bool_ty = Ty::Con("Bool".to_string());
         let body = TExpr::new(

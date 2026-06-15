@@ -80,6 +80,11 @@ main = do
     assert ((1, 2) == (1, 2)) "tuple eq"
     assert ((1, 2) /= (1, 3)) "tuple neq"
 
+    -- Eq for lists of tuples (nested container equality)
+    assert ([(1, 2)] == [(1, 2)]) "list of tuple eq"
+    assert ([(1, 2), (3, 4)] == [(1, 2), (3, 4)]) "list of tuple eq multi"
+    assert ([(1, 2)] /= [(1, 3)]) "list of tuple neq"
+
     -- Show for lists
     assert (show [1, 2, 3] == "[1, 2, 3]") "show list"
     assert (show ([] :: [Integer]) == "[]") "show empty list"
