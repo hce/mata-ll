@@ -1288,13 +1288,19 @@ impl CodeGen {
     /// - pure/return → emit the value
     /// Falls back to __force(expr)() for unknown actions.
     fn gen_action(&mut self, expr: &TExpr) {
-        // Check pure/return FIRST — the monad type variable may be
+        // Structural checks FIRST — the monad type variable may be
         // unresolved in bind chains, so we can't rely on the type alone.
+        // pure(x) / return(x): performing it just returns x
         if let TExprKind::App(func, arg) = &expr.kind {
             if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
                 self.gen_expr(arg);
                 return;
             }
+        }
+        // ST primitive calls: perform directly (no closure needed)
+        if Self::is_st_primitive_call(expr) {
+            self.gen_expr(expr);
+            return;
         }
         if !Self::is_nullary_action_type(&expr.ty) {
             self.gen_expr(expr);
@@ -1331,12 +1337,6 @@ impl CodeGen {
                     }
                     self.emit(")");
                 }
-            }
-            // ST primitive calls: perform directly (no closure needed).
-            // Safe since gen_action is only called for immediately-consumed
-            // actions (>>= / >>), not let-bound actions (gen_expr → closure).
-            TExprKind::App(_, _) if Self::is_st_primitive_call(expr) => {
-                self.gen_expr(expr);
             }
             _ => {
                 // General IO/ST action: use __mll_run which handles both
