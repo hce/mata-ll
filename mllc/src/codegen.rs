@@ -381,7 +381,7 @@ impl CodeGen {
                 self.emit("for i = 1, args.n do if type(args[i]) == \"function\" then args[i] = __mll_wrap_callback(args[i]) end end\n");
                 self.emit_indent();
                 let fn_ref = self.lua_ref(&sname);
-                self.emit(&format!("local __result = {}(__unpack(args, 1, args.n))\n", fn_ref));
+                self.emit(&format!("local __result = __force({})(__unpack(args, 1, args.n))\n", fn_ref));
                 self.emit_indent();
                 self.emit("if type(__result) == \"function\" then __result = __result() end\n");
                 self.emit_indent();
