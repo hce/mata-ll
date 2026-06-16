@@ -1054,6 +1054,7 @@ impl Parser {
                 | Token::LeftParen
                 | Token::LeftBracket
                 | Token::StrLit(_)
+                | Token::Tick
         )
     }
 
@@ -1155,6 +1156,12 @@ impl Parser {
                 let inner = self.parse_type()?;
                 self.expect(&Token::RightBracket)?;
                 Ok(Type::List(Box::new(inner)))
+            }
+            Token::Tick => {
+                // Promoted data constructor (DataKinds): 'Empty, 'NonEmpty
+                self.advance();
+                let name = self.expect_upper_ident()?;
+                Ok(Type::Promoted(name))
             }
             Token::StrLit(s) => {
                 // Type-level string literal (Symbol kind)

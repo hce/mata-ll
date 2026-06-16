@@ -318,6 +318,7 @@ impl Monomorphizer {
             Ty::Forall(_, inner) => self.ty_to_suffix(inner),
             Ty::Unit => "Unit".to_string(),
             Ty::Tuple(elems) => format!("Tup{}", elems.iter().map(|e| self.ty_to_suffix(e)).collect::<Vec<_>>().join("_")),
+            Ty::Promoted(name) => format!("P{}", name),
         }
     }
 

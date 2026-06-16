@@ -225,6 +225,7 @@ impl Checker {
                 let inner = self.ast_type_to_ty(result);
                 Ty::io(Ty::app(Ty::app(Ty::Con("Either".into()), Ty::Con("String".into())), inner))
             }
+            Type::Promoted(name) => Ty::Promoted(name.clone()),
         }
     }
 
@@ -1225,6 +1226,16 @@ impl Checker {
             Type::Paren(inner) => self.check_type_kind(inner),
             Type::Forall { inner, .. } => self.check_type_kind(inner),
             Type::Constrained { ty, .. } => self.check_type_kind(ty),
+            Type::Promoted(name) => {
+                let key = format!("'{}", name);
+                if !self.kinds.contains_key(&key) {
+                    self.push_error_ctx(
+                        TypeErrorKind::Other(format!("Unknown promoted constructor '{}'", name)),
+                        "type expression".to_string(),
+                    );
+                }
+                Kind::Type
+            }
             _ => Kind::Type,
         }
     }
@@ -1246,6 +1257,11 @@ impl Checker {
             .map(|n| TyVar { name: n.clone(), id: u32::MAX })
             .collect();
         let result_type = tvars.iter().fold(Ty::Con(name.to_string()), |acc, tv| Ty::app(acc, Ty::Var(tv.clone())));
+
+        // DataKinds: register promoted constructors as type-level constants
+        for con in constructors {
+            self.kinds.insert(format!("'{}", con.name), Kind::Type);
+        }
 
         for (i, con) in constructors.iter().enumerate() {
             // Collect existential type variables for this constructor
@@ -2561,7 +2577,7 @@ impl Checker {
     fn ty_mentions_var(ty: &Ty, var_name: &str) -> bool {
         match ty {
             Ty::Var(tv) => tv.name == var_name,
-            Ty::Con(_) | Ty::Unit => false,
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => false,
             Ty::Arrow(a, b) | Ty::App(a, b) => {
                 Self::ty_mentions_var(a, var_name) || Self::ty_mentions_var(b, var_name)
             }

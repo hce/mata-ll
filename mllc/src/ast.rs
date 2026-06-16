@@ -304,6 +304,8 @@ pub enum Type {
         constraints: Vec<Constraint>,
         ty: Box<Type>,
     },
+    /// Promoted data constructor (DataKinds): `'Empty`, `'NonEmpty`
+    Promoted(String),
 }
 
 /// A type family equation: `Element [a] = a`

@@ -1,5 +1,5 @@
 -- Sir Humphrey's agenda: DataKinds version
--- (requires DataKinds for promoted constructors — not yet supported)
+-- Uses promoted constructors ('Empty, 'NonEmpty) as type-level state tags
 
 -- Type-level tags to mark the state of the document
 data AgendaState = Empty | NonEmpty

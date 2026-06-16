@@ -53,6 +53,8 @@ pub enum Ty {
     Forall(TyVar, Box<Ty>),
     /// Tuple type: (a, b, c)
     Tuple(Vec<Ty>),
+    /// Promoted data constructor (DataKinds): 'Empty, 'NonEmpty
+    Promoted(String),
 }
 
 impl Ty {
@@ -92,7 +94,7 @@ impl Ty {
     /// Collect all free type variables
     pub fn free_vars(&self) -> Vec<TyVar> {
         match self {
-            Ty::Con(_) | Ty::Unit => vec![],
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => vec![],
             Ty::Var(v) => vec![v.clone()],
             Ty::Arrow(a, b) | Ty::App(a, b) => {
                 let mut vars = a.free_vars();
@@ -129,7 +131,7 @@ impl Ty {
     /// Apply a substitution to this type
     pub fn apply_subst(&self, subst: &Subst) -> Ty {
         match self {
-            Ty::Con(_) | Ty::Unit => self.clone(),
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => self.clone(),
             Ty::Var(v) => {
                 // Follow substitution chain iteratively to avoid stack overflow
                 // from cyclic or long transitive mappings (e.g., a→b, b→c, c→Int)
@@ -173,7 +175,7 @@ impl Ty {
     /// Check if a type variable occurs in this type (for occurs check)
     pub fn occurs(&self, v: &TyVar) -> bool {
         match self {
-            Ty::Con(_) | Ty::Unit => false,
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => false,
             Ty::Var(w) => v == w,
             Ty::Arrow(a, b) | Ty::App(a, b) => a.occurs(v) || b.occurs(v),
             Ty::List(a) | Ty::IO(a) => a.occurs(v),
@@ -188,6 +190,7 @@ impl fmt::Display for Ty {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Ty::Con(name) => write!(f, "{}", name),
+            Ty::Promoted(name) => write!(f, "'{}", name),
             Ty::Var(v) => write!(f, "{}", v),
             Ty::Arrow(a, b) => {
                 match a.as_ref() {
@@ -326,6 +329,7 @@ impl Subst {
 pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
     match (t1, t2) {
         (Ty::Con(a), Ty::Con(b)) if a == b => Ok(Subst::empty()),
+        (Ty::Promoted(a), Ty::Promoted(b)) if a == b => Ok(Subst::empty()),
         (Ty::Unit, Ty::Unit) => Ok(Subst::empty()),
 
         (Ty::Var(v), t) | (t, Ty::Var(v)) => {

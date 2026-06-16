@@ -59,6 +59,7 @@ pub enum Token {
     RightBrace,  // }
     At,          // @
     Bind,        // <-
+    Tick,        // ' (DataKinds promoted constructor prefix)
 
     // Layout
     Indent(usize),  // indentation level at start of line
@@ -382,6 +383,11 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
             }
             '@' => {
                 tokens.push(Located { token: Token::At, line: tok_line, col: tok_col });
+                pos += 1; col += 1;
+            }
+            '\'' if pos + 1 < chars.len() && chars[pos + 1].is_uppercase() => {
+                // DataKinds promoted constructor prefix: 'Empty, 'NonEmpty
+                tokens.push(Located { token: Token::Tick, line: tok_line, col: tok_col });
                 pos += 1; col += 1;
             }
             _ if is_operator_char(ch) => {

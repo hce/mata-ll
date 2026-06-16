@@ -89,6 +89,7 @@ mll_test!(where_clauses, "where_clauses.mll");
 mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
+mll_test!(datakinds, "datakinds.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(guards, "guards.mll");
 mll_test!(lambdas, "lambdas.mll");
@@ -783,7 +784,6 @@ fn examples_compile() {
         "rectype",            // legitimate type errors (Ord on tuples, String as [Char])
         "match",              // experimental scratch file
         "experiments",        // experimental scratch file
-        "agenda1",            // aspirational GADT + DataKinds syntax (not yet supported)
     ];
 
     let mut failures = Vec::new();
