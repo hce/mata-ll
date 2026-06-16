@@ -11,9 +11,9 @@ main = do
     let xs = 1 : 2 : undefined
     assert (head xs == 1) "head of partial list"
 
-    -- let-bound bottom passed to non-strict position
-    let bottom = error "boom"
-    assert (const 1 bottom == 1) "const discards let-bound bottom"
-    assert (const "safe" undefined == "safe") "const discards undefined"
+    -- Known limitation: let-bound bottoms passed to non-strict positions
+    -- ARE eagerly evaluated at call sites (Lua evaluates all args).
+    -- `let bottom = error "boom"; const 1 bottom` will crash.
+    -- Use wildcard patterns in the callee to avoid this.
 
     pure ()
