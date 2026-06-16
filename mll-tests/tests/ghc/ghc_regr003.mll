@@ -21,9 +21,9 @@ instance Sizeable Color where
     size _ = 1
 
 instance Describable Widget where
-    describe (Button s)    = "button:" ++ s
-    describe (Label s)     = "label:" ++ s
-    describe (Container n) = "container:" ++ show n
+    describe (Button s)    = "button:" <> s
+    describe (Label s)     = "label:" <> s
+    describe (Container n) = "container:" <> show n
 
 instance Sizeable Widget where
     size (Button _)    = 1

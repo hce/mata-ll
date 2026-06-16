@@ -81,7 +81,7 @@ letTransitive ltn = ltdoubled + 1
 
 -- Body demands `lclabel` which demands `lcn` through show
 letChain :: Integer -> String
-letChain lcn = "value: " ++ lclabel
+letChain lcn = "value: " <> lclabel
     where lclabel = show lcn
 
 -- ============================================================

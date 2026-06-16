@@ -39,7 +39,7 @@ main = do
 
     -- Map preserves type
     assert (myMap (* 2) [1, 2, 3] == [2, 4, 6]) "map int"
-    assert (myMap (\s -> s ++ "!") ["hi", "bye"] == ["hi!", "bye!"]) "map string"
+    assert (myMap (\s -> s <> "!") ["hi", "bye"] == ["hi!", "bye!"]) "map string"
 
     -- Filter preserves type
     assert (myFilter (> 3) [1, 2, 3, 4, 5] == [4, 5]) "filter int"

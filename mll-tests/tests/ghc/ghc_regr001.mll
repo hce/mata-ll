@@ -14,9 +14,9 @@ data Wrapper a = Wrap (Maybe (Tagged a))
 
 colorTag :: Color -> String -> String
 colorTag c s
-    | c == Red   = "red-" ++ s
-    | c == Green = "green-" ++ s
-    | otherwise  = "blue-" ++ s
+    | c == Red   = "red-" <> s
+    | c == Green = "green-" <> s
+    | otherwise  = "blue-" <> s
 
 -- 3-level deep pattern match: Wrap -> Just -> Tag -> Color
 unwrap :: Wrapper Color -> String
@@ -27,11 +27,11 @@ unwrap (Wrap mx) = case mx of
 -- 3-level: nested constructors in function args using guards in top-level pattern
 describeShapeTag :: Tagged Shape -> String
 describeShapeTag (Tag lbl (Circle r))
-    | r > 5.0   = lbl ++ ":big-circle"
-    | otherwise = lbl ++ ":small-circle"
+    | r > 5.0   = lbl <> ":big-circle"
+    | otherwise = lbl <> ":small-circle"
 describeShapeTag (Tag lbl (Rect w h))
-    | w == h    = lbl ++ ":square"
-    | otherwise = lbl ++ ":rect"
+    | w == h    = lbl <> ":square"
+    | otherwise = lbl <> ":rect"
 
 -- 4-level: Maybe (Either (Tagged Color))
 data Nested = MkNested (Maybe (Either (Tagged Color) Integer))
@@ -39,13 +39,13 @@ data Nested = MkNested (Maybe (Either (Tagged Color) Integer))
 
 nestedColorTag :: Color -> String -> String
 nestedColorTag c s
-    | c == Red  = "left-red:" ++ s
-    | otherwise = "left-other:" ++ s
+    | c == Red  = "left-red:" <> s
+    | otherwise = "left-other:" <> s
 
 extractNested :: Nested -> String
 extractNested (MkNested mx) = case mx of
     Nothing        -> "nothing"
-    Just (Right n) -> "int:" ++ show n
+    Just (Right n) -> "int:" <> show n
     Just (Left (Tag s c)) -> nestedColorTag c s
 
 main :: IO ()

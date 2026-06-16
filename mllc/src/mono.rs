@@ -56,7 +56,7 @@ impl Monomorphizer {
             "+", "-", "*", "/", "==", "/=", "<", ">", "<=", ">=",
             "&&", "||", "mod", "div", "map", "filter", "foldl", "foldr",
             "True", "False", "Just", "Nothing",
-            ":", "[]", "head", "tail", "take", "zipWith", "length", "reverse",
+            ":", "[]", "head", "tail", "take", "drop", "zipWith", "length", "reverse",
             "engage", "liftIO",
             "hmEmpty", "hmInsert", "hmLookup", "hmDelete",
             "hmSize", "hmKeys", "hmValues", "hmMember",
@@ -1090,7 +1090,7 @@ impl Monomorphizer {
         let body = parts.into_iter().reduce(|acc, part| {
             TExpr::new(
                 TExprKind::InfixApp {
-                    op: "++".to_string(),
+                    op: "<>".to_string(),
                     lhs: Box::new(acc),
                     rhs: Box::new(part),
                 },

@@ -63,7 +63,7 @@ main = do
     -- ============================================================
     assert (map (\x -> x * x) [1, 2, 3] == [1, 4, 9]) "map lambda"
     assert (filter (\x -> x `mod` 2 == 0) [1, 2, 3, 4] == [2, 4]) "filter lambda"
-    assert (foldl (\acc x -> acc ++ show x) "" [1, 2, 3] == "123") "foldl string build"
+    assert (foldl (\acc x -> acc <> show x) "" [1, 2, 3] == "123") "foldl string build"
 
     -- ============================================================
     -- Case expression edge cases
@@ -83,9 +83,9 @@ main = do
     -- ============================================================
     -- String edge cases
     -- ============================================================
-    assert ("" ++ "" == "") "empty concat"
-    assert ("" ++ "a" == "a") "empty left concat"
-    assert ("a" ++ "" == "a") "empty right concat"
+    assert ("" <> "" == "") "empty concat"
+    assert ("" <> "a" == "a") "empty left concat"
+    assert ("a" <> "" == "a") "empty right concat"
     assert (show "" == "") "show empty string"
     assert (show 0 == "0") "show zero"
     assert (show (-42) == "-42") "show negative"

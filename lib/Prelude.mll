@@ -197,5 +197,5 @@ elem a (x:xs)
     | otherwise   = elem a xs
 elem _ []     = False
 
--- head, tail, map, filter, take, zipWith are implemented in the
+-- head, tail, map, filter, take, drop, zipWith are implemented in the
 -- Lua runtime to support lazy cons cells (infinite lists).

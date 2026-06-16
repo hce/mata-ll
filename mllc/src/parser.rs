@@ -2278,6 +2278,7 @@ fn default_operator_precedence(op: &str) -> (u8, u8) {
         "==" | "/=" | "<" | ">" | "<=" | ">=" => assoc_prec_to_binding(Assoc::None, 4),
         ":" => assoc_prec_to_binding(Assoc::Right, 5),
         "++" => assoc_prec_to_binding(Assoc::Right, 5),
+        "<>" => assoc_prec_to_binding(Assoc::Right, 6),
         "+" | "-" => assoc_prec_to_binding(Assoc::Left, 6),
         "*" | "/" => assoc_prec_to_binding(Assoc::Left, 7),
         "^" => assoc_prec_to_binding(Assoc::Right, 8),

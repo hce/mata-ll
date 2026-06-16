@@ -6,7 +6,7 @@ depth (NCons _ rest) = 1 + depth rest
 
 showNested :: Show a => Nested a -> String
 showNested NNil = "Nil"
-showNested (NCons x rest) = "Cons " ++ show x ++ " (" ++ showNested rest ++ ")"
+showNested (NCons x rest) = "Cons " <> show x <> " (" <> showNested rest <> ")"
 
 -- Deep nesting test: each level wraps in Box, creating polymorphic recursion.
 -- showDeep calls itself at progressively different types:

@@ -98,5 +98,5 @@ main = do
     putStrLn (show (fromMaybe 0 (lookup' "missing" d)))
     putStrLn (show (keys d))
     -- Height should be ~3 for 5 elements (not 5 as with unbalanced BST)
-    putStrLn ("height: " ++ show (height d))
-    putStrLn ("balanced: " ++ show (balance d))
+    putStrLn ("height: " <> show (height d))
+    putStrLn ("balanced: " <> show (balance d))

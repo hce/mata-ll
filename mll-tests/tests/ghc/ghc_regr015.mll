@@ -31,7 +31,7 @@ evalB (IfE c t f) = if evalB c then evalB t else evalB f
 
 evalS :: Expr String -> String
 evalS (LitS s)      = s
-evalS (AppendE a b) = evalS a ++ evalS b
+evalS (AppendE a b) = evalS a <> evalS b
 evalS (IfE c t f)   = if evalB c then evalS t else evalS f
 
 main :: IO ()

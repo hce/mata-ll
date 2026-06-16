@@ -16,7 +16,7 @@ data Student = Student
 
 -- Uses type alias in signature
 greet :: Name -> String
-greet n = "Hello, " ++ n
+greet n = "Hello, " <> n
 
 -- Returns type synonym
 findAge :: Name -> Roster -> Maybe Age

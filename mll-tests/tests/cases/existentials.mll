@@ -21,7 +21,7 @@ data Pair = forall a b. MkPair a b (a -> String) (b -> String)
 
 showPair :: Pair -> String
 showPair p = case p of
-    MkPair x y fx fy -> fx x ++ ", " ++ fy y
+    MkPair x y fx fy -> fx x <> ", " <> fy y
 
 -- Mix of existential and non-existential constructors
 data Tagged = TagInt Integer
@@ -44,7 +44,7 @@ data MaybeShow = forall a. JustShow a (a -> String) | NothingShow
 
 showMaybe :: MaybeShow -> String
 showMaybe ms = case ms of
-    JustShow x f -> "Just " ++ f x
+    JustShow x f -> "Just " <> f x
     NothingShow  -> "Nothing"
 
 -- Existential used as accumulator state

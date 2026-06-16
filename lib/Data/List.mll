@@ -25,7 +25,7 @@ module Data.List
 -- Most list functions are already in the Prelude.
 -- We add missing ones here.
 
--- List append (++ is string-only in MATA-LL)
+-- List append (++ is the built-in operator, this is the named version)
 append :: [a] -> [a] -> [a]
 append [] ys = ys
 append (x:xs) ys = x : append xs ys

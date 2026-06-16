@@ -54,7 +54,7 @@ colorBench n = go 0 0
 -- String concatenation
 buildString :: Integer -> String
 buildString 0 = ""
-buildString n = "x" ++ buildString (n - 1)
+buildString n = "x" <> buildString (n - 1)
 
 -- Higher-order function overhead
 applyN :: Integer -> (a -> a) -> a -> a
@@ -67,7 +67,7 @@ bench name action = do
     t1 <- clock
     action
     t2 <- clock
-    putStrLn (name ++ ": " ++ show (t2 - t1) ++ "s")
+    putStrLn (name <> ": " <> show (t2 - t1) <> "s")
 
 main :: IO ()
 main = do
@@ -75,32 +75,32 @@ main = do
 
     bench "sumTo 1000000" (do
         let r = sumTo 1000000
-        putStrLn ("  result: " ++ show r))
+        putStrLn ("  result: " <> show r))
 
     bench "buildList 10000 + sumList" (do
         let xs = buildList 10000
         let r = sumList xs
-        putStrLn ("  result: " ++ show r))
+        putStrLn ("  result: " <> show r))
 
     bench "pipeline (10000 elements)" (do
         let xs = buildList 10000
         let r = pipeline xs
-        putStrLn ("  result: " ++ show r))
+        putStrLn ("  result: " <> show r))
 
     bench "fib 30" (do
         let r = fib 30
-        putStrLn ("  result: " ++ show r))
+        putStrLn ("  result: " <> show r))
 
     bench "colorBench 100000" (do
         let r = colorBench 100000
-        putStrLn ("  result: " ++ show r))
+        putStrLn ("  result: " <> show r))
 
     bench "buildString 10000" (do
         let r = length (buildString 10000)
-        putStrLn ("  length: " ++ show r))
+        putStrLn ("  length: " <> show r))
 
     bench "applyN 1000000 (+1) 0" (do
         let r = applyN 1000000 (+1) 0
-        putStrLn ("  result: " ++ show r))
+        putStrLn ("  result: " <> show r))
 
     putStrLn "=== Done ==="

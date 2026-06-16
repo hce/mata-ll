@@ -1,8 +1,8 @@
 -- Test Functor and Applicative typeclasses
 
 showEither :: Either String Integer -> String
-showEither (Left s) = "Left " ++ s
-showEither (Right n) = "Right " ++ show n
+showEither (Left s) = "Left " <> s
+showEither (Right n) = "Right " <> show n
 
 main :: IO ()
 main = do

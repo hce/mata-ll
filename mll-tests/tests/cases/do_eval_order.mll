@@ -34,7 +34,7 @@ main = do
     let greeting = "hello"
     let space = " "
     let name = "world"
-    let msg = greeting ++ space ++ name
+    let msg = greeting <> space <> name
     assert (msg == "hello world") "string lets"
 
     -- Test 5: list operations in lets

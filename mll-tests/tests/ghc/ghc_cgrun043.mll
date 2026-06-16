@@ -31,7 +31,7 @@ main = do
     assert (total == 15) "let in do"
 
     -- mapM_ for side effects
-    mapM_ (\x -> putStr (show x ++ " ")) [10, 20, 30]
+    mapM_ (\x -> putStr (show x <> " ")) [10, 20, 30]
     putStrLn ""
 
     -- when conditional

@@ -23,7 +23,7 @@ instance MyShow Bool where
     myShow False = "no"
 
 showMyList :: MyShow a => [a] -> String
-showMyList xs = foldl (\acc x -> acc ++ myShow x ++ " ") "" xs
+showMyList xs = foldl (\acc x -> acc <> myShow x <> " ") "" xs
 
 main :: IO ()
 main = do

@@ -42,7 +42,7 @@ main = do
 
     -- myFlip at multiple types
     assert (myFlip (-) 3 10 == 7) "flip Integer"
-    assert (myFlip (\a b -> a ++ b) "world" "hello" == "helloworld") "flip String"
+    assert (myFlip (\a b -> a <> b) "world" "hello" == "helloworld") "flip String"
     assert (myFlip myConst "ignored" True == True) "flip const"
 
     -- myConst at multiple types
@@ -58,12 +58,12 @@ main = do
     -- foldMaybe at multiple types
     assert (foldMaybe 0 (\n -> n + 1) (Just (5 :: Integer)) == 6) "foldMaybe Just Int"
     assert (foldMaybe 0 (\n -> n + 1) (Nothing :: Maybe Integer) == 0) "foldMaybe Nothing Int"
-    assert (foldMaybe "no" (\s -> s ++ "!") (Just "hi") == "hi!") "foldMaybe Just String"
+    assert (foldMaybe "no" (\s -> s <> "!") (Just "hi") == "hi!") "foldMaybe Just String"
     assert (foldMaybe False not (Just True) == False) "foldMaybe Just Bool"
 
     -- myMap and myLength at different element types
     assert (myMap (\n -> n * 2) [1, 2, 3 :: Integer] == [2, 4, 6]) "map Int"
-    assert (myMap (\s -> s ++ "!") ["a", "b"] == ["a!", "b!"]) "map String"
+    assert (myMap (\s -> s <> "!") ["a", "b"] == ["a!", "b!"]) "map String"
     assert (myMap not [True, False, True] == [False, True, False]) "map Bool"
     assert (myLength [1, 2, 3 :: Integer] == 3) "length Int"
     assert (myLength ["a", "b"] == 2) "length String"

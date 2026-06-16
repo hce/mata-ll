@@ -27,7 +27,7 @@ main = do
     assert ([x | x <- [42]] == [42]) "single element"
 
     -- Expression body
-    assert ([x ++ "!" | x <- ["a", "b", "c"]] == ["a!", "b!", "c!"]) "string comp"
+    assert ([x <> "!" | x <- ["a", "b", "c"]] == ["a!", "b!", "c!"]) "string comp"
 
     -- Multiple guards
     assert ([x | x <- [1, 2, 3, 4, 5, 6], x > 2, x < 5] == [3, 4]) "multi guard"

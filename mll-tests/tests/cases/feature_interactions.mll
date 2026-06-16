@@ -13,9 +13,9 @@ data Result a = Ok a | Err String
 
 classifyTree :: Tree Integer -> String
 classifyTree (Leaf n)
-    | n < 0     = "negative leaf: " ++ label
+    | n < 0     = "negative leaf: " <> label
     | n == 0    = "zero leaf"
-    | otherwise = "positive leaf: " ++ label
+    | otherwise = "positive leaf: " <> label
     where label = show n
 classifyTree (Node l r)
     | dl > dr   = "left-heavy"
@@ -55,7 +55,7 @@ safeDiv a b = Ok (a `div` b)
 
 describeSafe :: Integer -> Integer -> String
 describeSafe a b
-    | isOk result = "ok: " ++ show (getVal result)
+    | isOk result = "ok: " <> show (getVal result)
     | otherwise   = "error"
     where result = safeDiv a b
 

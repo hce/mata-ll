@@ -8,7 +8,7 @@ data Person = Person
     deriving (Show)
 
 greet :: Person -> String
-greet p = "Hello, " ++ personName p ++ "! You are " ++ show (personAge p)
+greet p = "Hello, " <> personName p <> "! You are " <> show (personAge p)
 
 data Wrapper = Wrapper Integer
     deriving (Show, Eq)

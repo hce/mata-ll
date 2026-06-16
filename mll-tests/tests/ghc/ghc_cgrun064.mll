@@ -11,7 +11,7 @@ toRoman n = go n romanTable
   where
     go _ [] = ""
     go m (RomanPair val sym : rest)
-        | m >= val  = sym ++ go (m - val) (RomanPair val sym : rest)
+        | m >= val  = sym <> go (m - val) (RomanPair val sym : rest)
         | otherwise = go m rest
 
 main :: IO ()

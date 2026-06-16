@@ -4,13 +4,13 @@
 main :: IO ()
 main = do
     -- Concatenation
-    assert ("hello" ++ " " ++ "world" == "hello world") "concat"
-    assert ("" ++ "x" == "x") "concat empty left"
-    assert ("x" ++ "" == "x") "concat empty right"
+    assert ("hello" <> " " <> "world" == "hello world") "concat"
+    assert ("" <> "x" == "x") "concat empty left"
+    assert ("x" <> "" == "x") "concat empty right"
 
     -- Show embedding
-    assert ("value: " ++ show 42 == "value: 42") "show embed"
-    assert ("flag: " ++ show True == "flag: True") "show bool embed"
+    assert ("value: " <> show 42 == "value: 42") "show embed"
+    assert ("flag: " <> show True == "flag: True") "show bool embed"
 
     -- String comparison
     assert ("abc" == "abc") "eq"

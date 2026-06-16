@@ -74,88 +74,88 @@ bench1 = do
     putStrLn "-- 1. Accumulator loop (should NOT thunk) --"
     t0 <- clock
     let r = sumStrict 500000
-    putStrLn ("    sumStrict 500000 = " ++ show r)
+    putStrLn ("    sumStrict 500000 = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench2 :: IO ()
 bench2 = do
     putStrLn "-- 2. List sum via foldl --"
     t0 <- clock
     let r = sumList (buildList 50000)
-    putStrLn ("    sumList 50000 = " ++ show r)
+    putStrLn ("    sumList 50000 = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench3 :: IO ()
 bench3 = do
     putStrLn "-- 3. Infinite structures (lazy cons) --"
     t0 <- clock
     let r = foldl (+) 0 (take 1000 nats)
-    putStrLn ("    sum(take 1000 nats) = " ++ show r)
+    putStrLn ("    sum(take 1000 nats) = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench3b :: IO ()
 bench3b = do
     t0 <- clock
     let r = head (reverse (take 31 fibs))
-    putStrLn ("    fib(30) lazy list = " ++ show r)
+    putStrLn ("    fib(30) lazy list = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench4 :: IO ()
 bench4 = do
     putStrLn "-- 4. Pipeline (map/filter chain) --"
     t0 <- clock
     let r = deepPipeline (buildList 50000)
-    putStrLn ("    deepPipeline 50000 = " ++ show r)
+    putStrLn ("    deepPipeline 50000 = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench5 :: IO ()
 bench5 = do
     putStrLn "-- 5. Conditional eval (non-strict wins here) --"
     t0 <- clock
     let r = conditionalUse True (expensiveId 500000)
-    putStrLn ("    True branch (skip expensive) = " ++ show r)
+    putStrLn ("    True branch (skip expensive) = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench5b :: IO ()
 bench5b = do
     t0 <- clock
     let r = conditionalUse False (expensiveId 500000)
-    putStrLn ("    False branch (force expensive) = " ++ show r)
+    putStrLn ("    False branch (force expensive) = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench6 :: IO ()
 bench6 = do
     putStrLn "-- 6. Dead binding (non-strict wins here) --"
     t0 <- clock
     let r = deadBinding 500000
-    putStrLn ("    deadBinding 500000 = " ++ show r)
+    putStrLn ("    deadBinding 500000 = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench7 :: IO ()
 bench7 = do
     putStrLn "-- 7. ADT construction --"
     t0 <- clock
     let r = buildTriples 100000
-    putStrLn ("    buildTriples 100000 = " ++ show r)
+    putStrLn ("    buildTriples 100000 = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 bench8 :: IO ()
 bench8 = do
     putStrLn "-- 8. Recursive fib (baseline) --"
     t0 <- clock
     let r = fib 30
-    putStrLn ("    fib 30 = " ++ show r)
+    putStrLn ("    fib 30 = " <> show r)
     t1 <- clock
-    putStrLn ("  time: " ++ show (t1 - t0) ++ "s")
+    putStrLn ("  time: " <> show (t1 - t0) <> "s")
 
 main :: IO ()
 main = do

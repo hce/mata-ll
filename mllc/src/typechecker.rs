@@ -429,7 +429,7 @@ impl Checker {
         //   head, tail, map, filter, foldl, foldr, take, zipWith, length, reverse
         let entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
             ("print", vec![], Ty::arrow(Ty::Con("String".into()), Ty::io(Ty::Unit))),
-            ("++", vec![], Ty::fun(&[Ty::Con("String".into()), Ty::Con("String".into())], Ty::Con("String".into()))),
+            ("++", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::list(ta.clone())], Ty::list(ta.clone()))),
             ("$", vec![a.clone(), b.clone()], Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), ta.clone()], tb.clone())),
             (".", vec![a.clone(), b.clone(), c.clone()], Ty::fun(&[Ty::arrow(tb.clone(), tc.clone()), Ty::arrow(ta.clone(), tb.clone()), ta.clone()], tc.clone())),
             ("not", vec![], Ty::arrow(Ty::Con("Bool".into()), Ty::Con("Bool".into()))),
@@ -526,6 +526,7 @@ impl Checker {
         self.env.insert("map".into(), Scheme { vars: vec![a.clone(), b.clone()], ty: Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), Ty::list(ta.clone())], Ty::list(tb.clone())) });
         self.env.insert("filter".into(), Scheme { vars: vec![a.clone(), b.clone()], ty: Ty::fun(&[Ty::arrow(ta.clone(), Ty::Con("Bool".into())), Ty::list(ta.clone())], Ty::list(ta.clone())) });
         self.env.insert("take".into(), Scheme { vars: vec![a.clone()], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
+        self.env.insert("drop".into(), Scheme { vars: vec![a.clone()], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
         self.env.insert("zipWith".into(), Scheme { vars: vec![a.clone(), b.clone(), c.clone()], ty: Ty::fun(&[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), Ty::list(ta.clone()), Ty::list(tb.clone())], Ty::list(tc.clone())) });
 
         // Maybe
@@ -1055,6 +1056,45 @@ impl Checker {
                 InstanceInfo {
                     class_name: "Ord".to_string(),
                     target_type: target,
+                    method_fns,
+                },
+            );
+        }
+
+        // Built-in Semigroup typeclass
+        let semigroup_ty = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
+        self.classes.insert("Semigroup".to_string(), ClassInfo {
+            name: "Semigroup".to_string(),
+            type_var: "a".to_string(),
+            superclasses: vec![],
+            methods: vec![("<>".to_string(), semigroup_ty.clone())],
+        });
+        self.env.insert("<>".to_string(), Scheme {
+            vars: vec![a.clone()],
+            ty: semigroup_ty,
+        });
+
+        // Semigroup instances
+        {
+            // String: <> is string concatenation
+            let mut method_fns = HashMap::new();
+            method_fns.insert("<>".to_string(), "semigroup_String".to_string());
+            self.instances.insert(
+                ("Semigroup".to_string(), "String".to_string()),
+                InstanceInfo {
+                    class_name: "Semigroup".to_string(),
+                    target_type: Ty::Con("String".into()),
+                    method_fns,
+                },
+            );
+            // []: <> is list append (same as ++)
+            let mut method_fns = HashMap::new();
+            method_fns.insert("<>".to_string(), "semigroup_List".to_string());
+            self.instances.insert(
+                ("Semigroup".to_string(), "[]".to_string()),
+                InstanceInfo {
+                    class_name: "Semigroup".to_string(),
+                    target_type: Ty::list(ta.clone()),
                     method_fns,
                 },
             );
@@ -1757,10 +1797,10 @@ impl Checker {
                     TExprKind::Lit(TLiteral::Str(" ".into())),
                     Ty::Con("String".into()),
                 );
-                // concat body ++ " "
+                // concat body <> " "
                 body = TExpr::new(
                     TExprKind::InfixApp {
-                        op: "++".into(),
+                        op: "<>".into(),
                         lhs: Box::new(body),
                         rhs: Box::new(space),
                     },
@@ -1784,7 +1824,7 @@ impl Checker {
 
                 body = TExpr::new(
                     TExprKind::InfixApp {
-                        op: "++".into(),
+                        op: "<>".into(),
                         lhs: Box::new(body),
                         rhs: Box::new(field_shown),
                     },

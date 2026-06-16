@@ -23,7 +23,7 @@ instance Scored Player where
     score (Player _ s) = s
 
 instance Ranked Player where
-    rank x = name x ++ ":" ++ show (score x)
+    rank x = name x <> ":" <> show (score x)
 
 instance Named Team where
     name (Team n _) = n
@@ -32,7 +32,7 @@ instance Scored Team where
     score (Team _ s) = s
 
 instance Ranked Team where
-    rank x = name x ++ ":" ++ show (score x)
+    rank x = name x <> ":" <> show (score x)
 
 -- Each function uses exactly one typeclass constraint
 getName :: Named a => a -> String

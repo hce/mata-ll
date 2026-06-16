@@ -9,4 +9,4 @@ main = do
 
     -- Capture groups as tuples
     let pairs = gmatchPairs "name=Hans lang=MLL" "(%w+)=(%w+)"
-    mapM_ (\p -> putStrLn (fst p ++ " -> " ++ snd p)) pairs
+    mapM_ (\p -> putStrLn (fst p <> " -> " <> snd p)) pairs

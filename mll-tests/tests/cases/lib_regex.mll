@@ -2,7 +2,7 @@ import Regex
 
 tryCompile :: String -> (RE -> IO ()) -> IO ()
 tryCompile pat f = case compile pat of
-    Left err -> putStrLn ("FAIL: compile error for /" ++ pat ++ "/: " ++ err)
+    Left err -> putStrLn ("FAIL: compile error for /" <> pat <> "/: " <> err)
     Right re -> f re
 
 isLeft :: Either String RE -> Bool

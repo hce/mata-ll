@@ -185,7 +185,7 @@ test_tuples = do
 
 test_strings :: IO ()
 test_strings = do
-    assert ("hello" ++ " " ++ "world" == "hello world") "concat"
+    assert ("hello" <> " " <> "world" == "hello world") "concat"
     assert (show 42 == "42") "show int"
     assert (show True == "True") "show bool"
     assert (show [1, 2, 3] == "[1, 2, 3]") "show list"

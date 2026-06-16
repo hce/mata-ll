@@ -37,13 +37,13 @@ main = do
     -- Test 5: let in do with conditionals
     let n = 5
     let label = if n > 0 then "positive" else "non-positive"
-    let result = label ++ ": " ++ show (n * 2)
+    let result = label <> ": " <> show (n * 2)
     assert (result == "positive: 10") "conditional let"
 
     -- Test 6: negative case
     let neg = -3
     let nlabel = if neg > 0 then "positive" else "non-positive"
-    let nresult = nlabel ++ ": " ++ show (neg * 2)
+    let nresult = nlabel <> ": " <> show (neg * 2)
     assert (nresult == "non-positive: -6") "conditional negative"
 
     -- Test 7: let with function application
@@ -78,7 +78,7 @@ main = do
 
     -- Test 12: bind with string
     greeting <- pure "hello"
-    let msg = greeting ++ " world"
+    let msg = greeting <> " world"
     assert (msg == "hello world") "bind string"
 
     -- Test 13: bind between IO actions preserves scope

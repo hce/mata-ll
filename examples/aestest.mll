@@ -321,11 +321,11 @@ hexNibble :: Integer -> Integer
 hexNibble n = if n < 10 then n + 48 else n + 87
 
 hexByte :: Integer -> String
-hexByte b = strChar (hexNibble (shrB b 4)) ++ strChar (hexNibble (bandB b 15))
+hexByte b = strChar (hexNibble (shrB b 4)) <> strChar (hexNibble (bandB b 15))
 
 bytesToHex :: [Integer] -> String
 bytesToHex [] = ""
-bytesToHex (b:bs) = hexByte b ++ bytesToHex bs
+bytesToHex (b:bs) = hexByte b <> bytesToHex bs
 
 hexVal :: Integer -> Integer
 hexVal c = if c >= 48 && c <= 57 then c - 48 else if c >= 97 && c <= 102 then c - 87 else if c >= 65 && c <= 70 then c - 55 else 0
@@ -342,7 +342,7 @@ stringToBytes s = stbGo s 1 (strLen s)
 
 bytesToString :: [Integer] -> String
 bytesToString [] = ""
-bytesToString (b:bs) = strChar b ++ bytesToString bs
+bytesToString (b:bs) = strChar b <> bytesToString bs
 
 main :: IO ()
 main = do
@@ -352,7 +352,7 @@ main = do
     let rk  = getAllRoundKeys key
     let ct  = aesEncryptBlock pt rk
     let ctHex = bytesToHex ct
-    putStrLn $ "Ciphertext: " ++ ctHex
+    putStrLn $ "Ciphertext: " <> ctHex
     assert (ctHex == "3925841d02dc09fbdc118597196a0b32") "NIST AES-128 test vector"
     let dec = aesDecryptBlock ct rk
     assert (bytesToHex dec == "3243f6a8885a308d313198a2e0370734") "AES decrypt roundtrip"
@@ -363,7 +363,7 @@ main = do
     let cbcIv  = hexToBytes "000102030405060708090a0b0c0d0e0f"
     let cbcPt  = stringToBytes "Hello, AES-CBC!"
     let cbcCt  = cbcEncrypt cbcKey cbcIv cbcPt
-    putStrLn $ "CBC ciphertext: " ++ bytesToHex cbcCt
+    putStrLn $ "CBC ciphertext: " <> bytesToHex cbcCt
     let cbcDec = cbcDecrypt cbcKey cbcIv cbcCt
     assert (listEq cbcDec cbcPt) "CBC roundtrip"
     putStrLn "AES-128-CBC: PASS"
@@ -373,7 +373,7 @@ main = do
     let ctrNonce = hexToBytes "f0f1f2f3f4f5f6f7f8f9fafb00000000"
     let ctrPt    = stringToBytes "Hello, AES-CTR!"
     let ctrCt    = ctrEncrypt ctrKey ctrNonce ctrPt
-    putStrLn $ "CTR ciphertext: " ++ bytesToHex ctrCt
+    putStrLn $ "CTR ciphertext: " <> bytesToHex ctrCt
     let ctrDec   = ctrDecrypt ctrKey ctrNonce ctrCt
     assert (listEq ctrDec ctrPt) "CTR roundtrip"
     putStrLn "AES-128-CTR: PASS"
@@ -386,8 +386,8 @@ main = do
     let gcmResult = gcmEncrypt gcmKey gcmIv gcmAad gcmPt
     let gcmCt = fst gcmResult
     let gcmTag = snd gcmResult
-    putStrLn $ "GCM ciphertext: " ++ bytesToHex gcmCt
-    putStrLn $ "GCM tag: " ++ bytesToHex gcmTag
+    putStrLn $ "GCM ciphertext: " <> bytesToHex gcmCt
+    putStrLn $ "GCM tag: " <> bytesToHex gcmTag
     let gcmResult2 = gcmDecrypt gcmKey gcmIv gcmAad gcmCt
     let gcmDec = fst gcmResult2
     let gcmTag2 = snd gcmResult2

@@ -224,7 +224,7 @@ fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<Stri
                 // Arithmetic/comparison operators force both sides.
                 "+" | "-" | "*" | "/" | "div" | "mod"
                 | "==" | "/=" | "<" | ">" | "<=" | ">="
-                | "&&" | "||" | "++" => {
+                | "&&" | "||" | "++" | "<>" => {
                     let mut s = demanded_vars(lhs, env);
                     s.extend(demanded_vars(rhs, env));
                     s

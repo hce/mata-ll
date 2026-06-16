@@ -12,7 +12,7 @@ helper n = n * 10
 
 -- Export declaration (also serves as type signature)
 export greet :: String -> String
-greet name = "Hello, " ++ name ++ "!"
+greet name = "Hello, " <> name <> "!"
 
 export compute :: Integer -> Integer
 compute n = helper n + 1

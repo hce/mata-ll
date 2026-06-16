@@ -43,7 +43,7 @@ dispatchValue s pos len 34 = parseStringVal s pos len
 dispatchValue s pos len 91 = parseArray s pos len
 dispatchValue s pos len 123 = parseObject s pos len
 dispatchValue s pos len 45 = parseNumber s pos len
-dispatchValue s pos len c = if c >= 48 && c <= 57 then parseNumber s pos len else JErr ("Unexpected character at position " ++ show pos)
+dispatchValue s pos len c = if c >= 48 && c <= 57 then parseNumber s pos len else JErr ("Unexpected character at position " <> show pos)
 
 -- ================================================================
 -- Null, true, false
@@ -117,7 +117,7 @@ parseArrayElems s pos len acc = case parseValue s pos len of
     JOk val pos2 -> parseArrayNext s pos2 len (val : acc)
 
 parseArrayNext :: String -> Integer -> Integer -> [Json] -> JResult
-parseArrayNext s pos len acc = if pos > len then JErr "Unterminated array" else if strByte s pos == 93 then JOk (JArr (reverse acc)) (skipWS s (pos + 1) len) else if strByte s pos == 44 then parseArrayElems s (skipWS s (pos + 1) len) len acc else JErr ("Expected ',' or ']' at position " ++ show pos)
+parseArrayNext s pos len acc = if pos > len then JErr "Unterminated array" else if strByte s pos == 93 then JOk (JArr (reverse acc)) (skipWS s (pos + 1) len) else if strByte s pos == 44 then parseArrayElems s (skipWS s (pos + 1) len) len acc else JErr ("Expected ',' or ']' at position " <> show pos)
 
 -- ================================================================
 -- Objects
@@ -130,17 +130,17 @@ parseObjStart :: String -> Integer -> Integer -> JResult
 parseObjStart s pos len = if pos > len then JErr "Unterminated object" else if strByte s pos == 125 then JOk (JObj []) (skipWS s (pos + 1) len) else parseObjPairs s pos len []
 
 parseObjPairs :: String -> Integer -> Integer -> [(String, Json)] -> JResult
-parseObjPairs s pos len acc = if pos > len || strByte s pos /= 34 then JErr ("Expected string key at position " ++ show pos) else case parseStr s (pos + 1) len of
+parseObjPairs s pos len acc = if pos > len || strByte s pos /= 34 then JErr ("Expected string key at position " <> show pos) else case parseStr s (pos + 1) len of
     SErr e -> JErr e
     SOk key pos2 -> parseObjColon s key pos2 len acc
 
 parseObjColon :: String -> String -> Integer -> Integer -> [(String, Json)] -> JResult
-parseObjColon s key pos len acc = if pos > len || strByte s pos /= 58 then JErr ("Expected ':' at position " ++ show pos) else case parseValue s (skipWS s (pos + 1) len) len of
+parseObjColon s key pos len acc = if pos > len || strByte s pos /= 58 then JErr ("Expected ':' at position " <> show pos) else case parseValue s (skipWS s (pos + 1) len) len of
     JErr e -> JErr e
     JOk val pos2 -> parseObjNext s pos2 len ((key, val) : acc)
 
 parseObjNext :: String -> Integer -> Integer -> [(String, Json)] -> JResult
-parseObjNext s pos len acc = if pos > len then JErr "Unterminated object" else if strByte s pos == 125 then JOk (JObj (reverse acc)) (skipWS s (pos + 1) len) else if strByte s pos == 44 then parseObjPairs s (skipWS s (pos + 1) len) len acc else JErr ("Expected ',' or '}' at position " ++ show pos)
+parseObjNext s pos len acc = if pos > len then JErr "Unterminated object" else if strByte s pos == 125 then JOk (JObj (reverse acc)) (skipWS s (pos + 1) len) else if strByte s pos == 44 then parseObjPairs s (skipWS s (pos + 1) len) len acc else JErr ("Expected ',' or '}' at position " <> show pos)
 
 -- ================================================================
 -- Whitespace

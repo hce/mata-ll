@@ -2,7 +2,7 @@ import Regex
 
 tryCompile :: String -> (RE -> IO ()) -> IO ()
 tryCompile pat f = case compile pat of
-    Left err -> putStrLn ("FAIL: " ++ err)
+    Left err -> putStrLn ("FAIL: " <> err)
     Right re -> f re
 
 main :: IO ()

@@ -3,7 +3,7 @@ import Regex
 
 tryCompile :: String -> (RE -> IO ()) -> IO ()
 tryCompile pat f = case compile pat of
-    Left err -> putStrLn ("FAIL compile: " ++ err)
+    Left err -> putStrLn ("FAIL compile: " <> err)
     Right re -> f re
 
 test_literals :: IO ()

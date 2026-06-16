@@ -42,8 +42,8 @@ describeList :: [a] -> String
 describeList xs
     | n == 0    = "empty list"
     | n == 1    = "singleton list"
-    | n <= 5    = "short list of " ++ show n
-    | otherwise = "long list of " ++ show n
+    | n <= 5    = "short list of " <> show n
+    | otherwise = "long list of " <> show n
   where
     n = length xs
 

@@ -1,10 +1,10 @@
 -- Tests for the Any type (dynamic typing for Lua interop)
 
 describeAny :: Any -> String
-describeAny (AnyString s)  = "string:" ++ s
-describeAny (AnyInteger n) = "integer:" ++ show n
-describeAny (AnyNumber n)  = "number:" ++ show n
-describeAny (AnyBool b)    = "bool:" ++ show b
+describeAny (AnyString s)  = "string:" <> s
+describeAny (AnyInteger n) = "integer:" <> show n
+describeAny (AnyNumber n)  = "number:" <> show n
+describeAny (AnyBool b)    = "bool:" <> show b
 describeAny AnyNull        = "null"
 
 -- Extract integer or default

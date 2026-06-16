@@ -44,7 +44,7 @@ main = do
     assert (head (dropN 10 powersOf2) == 1024) "2^10"
 
     -- iterate with string growth
-    let strs = myIterate (\s -> s ++ "x") "a"
+    let strs = myIterate (\s -> s <> "x") "a"
     assert (head strs == "a") "iter str first"
     assert (head (dropN 3 strs) == "axxx") "iter str 4th"
 

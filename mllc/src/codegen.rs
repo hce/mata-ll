@@ -212,10 +212,11 @@ impl CodeGen {
             "ord_gt__Integer", "ord_gt__Number", "ord_gt__String",
             "ord_le__Integer", "ord_le__Number", "ord_le__String",
             "ord_ge__Integer", "ord_ge__Number", "ord_ge__String",
-            "head", "tail", "map", "filter", "take", "zipWith",
+            "head", "tail", "map", "filter", "take", "drop", "zipWith",
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList",
+            "__mll_list_append", "semigroup_String", "semigroup_List",
             "__mll_show_list", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
@@ -1142,8 +1143,16 @@ impl CodeGen {
                     self.emit(")");
                     return;
                 }
+                if op == "++" {
+                    self.emit("__mll_list_append(");
+                    self.gen_expr_subst(lhs, subst);
+                    self.emit(", function() return ");
+                    self.gen_expr_subst(rhs, subst);
+                    self.emit(" end)");
+                    return;
+                }
                 let lua_op = match op.as_str() {
-                    "++" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
+                    "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     "mod" => "%",
                     other => other,
                 };
@@ -1716,6 +1725,7 @@ impl CodeGen {
                             "ord_gt__Integer" | "ord_gt__Number" | "ord_gt__String" => Some(">"),
                             "ord_le__Integer" | "ord_le__Number" | "ord_le__String" => Some("<="),
                             "ord_ge__Integer" | "ord_ge__Number" | "ord_ge__String" => Some(">="),
+                            "semigroup_String" => Some(".."),
                             _ => None,
                         };
                         if let Some(op) = lua_op {
@@ -1724,6 +1734,20 @@ impl CodeGen {
                             self.emit(&format!(" {} ", op));
                             self.gen_expr(args[1]);
                             self.emit(")");
+                            return;
+                        }
+                    }
+                }
+
+                // semigroup_List → __mll_list_append
+                if args.len() == 2 {
+                    if let TExprKind::Var(name) = &f.kind {
+                        if name == "semigroup_List" {
+                            self.emit("__mll_list_append(");
+                            self.gen_expr(args[0]);
+                            self.emit(", function() return ");
+                            self.gen_expr(args[1]);
+                            self.emit(" end)");
                             return;
                         }
                     }
@@ -1799,8 +1823,16 @@ impl CodeGen {
                     self.emit(")");
                     return;
                 }
+                if op == "++" {
+                    self.emit("__mll_list_append(");
+                    self.gen_expr(lhs);
+                    self.emit(", function() return ");
+                    self.gen_expr(rhs);
+                    self.emit(" end)");
+                    return;
+                }
                 let lua_op = match op.as_str() {
-                    "++" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
+                    "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     "mod" => "%",
                     ":" => {
                         let tail_needs_thunk = matches!(&rhs.kind,
@@ -1936,8 +1968,12 @@ impl CodeGen {
                 self.emit("("); self.gen_expr(inner); self.emit(")");
             }
             TExprKind::OpFunc(op) => {
+                if op == "++" {
+                    self.emit("function(_a, _b) return __mll_list_append(_a, function() return _b end) end");
+                    return;
+                }
                 let lua_op = match op.as_str() {
-                    "++" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
+                    "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     other => other,
                 };
                 self.emit(&format!("function(_a, _b) return __force(_a) {} __force(_b) end", lua_op));
@@ -2385,7 +2421,7 @@ fn count_arrows(ty: &Ty) -> usize {
 
 fn is_builtin_op(op: &str) -> bool {
     matches!(op, "+" | "-" | "*" | "/" | "%" | "^" | "==" | "/=" | "~="
-        | "<" | ">" | "<=" | ">=" | "++" | "&&" | "||" | ".." | "$" | "."
+        | "<" | ">" | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ".." | "$" | "."
         | "div" | "mod")
 }
 
@@ -2426,6 +2462,15 @@ local function __mll_tail(l)
         l.__lazy = nil
     end
     return l[2]
+end
+
+-- List append (second arg is a thunk for laziness)
+local function __mll_list_append(xs, ys_thunk)
+    xs = __force(xs)
+    if xs == nil then return ys_thunk() end
+    return __mll_lazy_cons(__mll_head(xs), function()
+        return __mll_list_append(__mll_tail(xs), ys_thunk)
+    end)
 end
 
 -- Deep-force an MLL value for export to Lua.
@@ -2535,6 +2580,8 @@ local function ord_le__String(a, b) a = __force(a); b = __force(b); return a <= 
 local function ord_ge__Integer(a, b) a = __force(a); b = __force(b); return a >= b end
 local function ord_ge__Number(a, b) a = __force(a); b = __force(b); return a >= b end
 local function ord_ge__String(a, b) a = __force(a); b = __force(b); return a >= b end
+local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .. b end
+local function semigroup_List(a, b) return __mll_list_append(a, function() return __force(b) end) end
 local function head(xs) return __mll_head(xs) end
 local function tail(xs) return __mll_tail(xs) end
 local function map(f, xs)
@@ -2562,6 +2609,14 @@ local function take(n, xs)
     else
         return __mll_cons(__mll_head(xs), take(n - 1, __mll_tail(xs)))
     end
+end
+local function drop(n, xs)
+    n = __force(n); xs = __force(xs)
+    while n > 0 and xs ~= nil do
+        xs = __mll_tail(xs)
+        n = n - 1
+    end
+    return xs
 end
 local function zipWith(f, xs, ys)
     f = __force(f); xs = __force(xs); ys = __force(ys)

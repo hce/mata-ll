@@ -12,8 +12,8 @@ classifyNum n
     | otherwise = "large"
 
 classifyToken :: Token -> String
-classifyToken (TNum n)  = "number: " ++ classifyNum n
-classifyToken (TOp s)   = "op: " ++ s
+classifyToken (TNum n)  = "number: " <> classifyNum n
+classifyToken (TOp s)   = "op: " <> s
 classifyToken TEnd      = "end"
 
 main :: IO ()

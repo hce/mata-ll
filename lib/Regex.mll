@@ -79,7 +79,7 @@ compileLen pat len = finishCompile len (parseAlt pat 1 len)
 
 finishCompile :: Integer -> PResult -> Either String RE
 finishCompile len (PErr e) = Left e
-finishCompile len (POk re pos) = if pos > len then Right re else Left ("Unexpected character at position " ++ show pos)
+finishCompile len (POk re pos) = if pos > len then Right re else Left ("Unexpected character at position " <> show pos)
 
 parseAlt :: String -> Integer -> Integer -> PResult
 parseAlt pat pos len = altDone pat len (parseSeq pat pos len)
