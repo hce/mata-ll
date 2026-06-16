@@ -86,6 +86,7 @@ mll_test!(newtypes, "newtypes.mll");
 mll_test!(typeclasses, "typeclasses.mll");
 mll_test!(superclass, "superclass.mll");
 mll_test!(where_clauses, "where_clauses.mll");
+mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(guards, "guards.mll");
 mll_test!(lambdas, "lambdas.mll");

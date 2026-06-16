@@ -98,7 +98,7 @@ MATA-LL TODO
 ## Open
 
 - [ ] Default method implementations in class declarations (`x /= y = not (x == y)`)
-- [ ] Where-clause type unification: pre-registered fresh type variables not unified with inferred types (papered over in codegen with defensive __mll_run)
+- [x] Where-clause type unification: pre-registered fresh type variables now unified with inferred types
 - [ ] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
 - [ ] FFI varargs (e.g. Lua's string.format)
 

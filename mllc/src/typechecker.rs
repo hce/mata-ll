@@ -2960,22 +2960,26 @@ impl Checker {
             tbody = tb;
         }
 
-        // Type-check where bindings fully
-        let twhere: Vec<TLocalDef> = clause.where_binds.iter().map(|ld| {
+        // Type-check where bindings fully, accumulating substitutions
+        let mut twhere = Vec::new();
+        for ld in &clause.where_binds {
             if ld.patterns.is_empty() {
                 // Simple value binding: where x = expr
                 let (texpr, inferred_ty, s) = self.infer_expr(&ld.body, &local_env).unwrap_or_else(|_| {
                     (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
                 });
+                subst = subst.compose(&s);
                 // Unify with the pre-registered fresh type
                 if let Some(scheme) = local_env.lookup(&ld.name) {
-                    let _ = unify(&scheme.ty, &inferred_ty);
+                    if let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
+                        subst = subst.compose(&us);
+                    }
                 }
-                TLocalDef {
+                twhere.push(TLocalDef {
                     name: ld.name.clone(),
                     patterns: vec![],
                     body: texpr,
-                }
+                });
             } else {
                 // Local function: where go acc [] = ...
                 let mut fn_env = local_env.clone();
@@ -2994,13 +2998,23 @@ impl Checker {
                     (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
                 });
                 where_subst = where_subst.compose(&bs);
-                TLocalDef {
+                // Build the inferred function type and unify with pre-registered type
+                let mut inferred_fn_ty = body_ty.apply_subst(&where_subst);
+                for pty in param_tys.iter().rev() {
+                    inferred_fn_ty = Ty::arrow(pty.apply_subst(&where_subst), inferred_fn_ty);
+                }
+                if let Some(scheme) = local_env.lookup(&ld.name) {
+                    if let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
+                        subst = subst.compose(&us);
+                    }
+                }
+                twhere.push(TLocalDef {
                     name: ld.name.clone(),
                     patterns: tpatterns.into_iter().map(|p| p.apply_subst(&where_subst)).collect(),
                     body: texpr.apply_subst(&where_subst),
-                }
+                });
             }
-        }).collect();
+        }
 
         // Apply the accumulated substitution to the entire clause
         let raw_clause = TClause {
