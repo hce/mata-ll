@@ -33,6 +33,20 @@ Passing Lua callbacks to mata-ll:
 |---------------------|-----------------|
 | <pre>local wf = require "writefibs"<br>local writer = function(fibString)<br>    print("From mata-ll:", fibString)<br>end<br>wf.writeFibs(writer, 12)</pre> | <pre>export writeFibs :: (String -> LuaIO s ())<br>                 -> Integer -> LuaIO s ()<br>writeFibs writer = loop 1 1<br>  where<br>    loop _ _ 0 = return ()<br>    loop cur next count = do<br>      writer (show cur)<br>      loop next (cur+next) (count-1)</pre> |
 
+**Vararg Lua functions are not supported.** Lua functions like
+`string.format` that accept a variable number of arguments cannot be
+given a single type signature in mata-ll. Instead, declare multiple
+monomorphic FFI bindings for the arities you need:
+
+```haskell
+fmt1 :: String -> String -> LuaPure "string.format" String
+fmt2 :: String -> String -> String -> LuaPure "string.format" String
+```
+
+For dynamic formatting with a variable number of values or mixed types,
+prefer mata-ll native constructs (`<>`, `intercalate`, `show`) over
+`string.format`.
+
 ## Project goals
 
 Make available a useful subset of modern haskell to Lua. It is not
