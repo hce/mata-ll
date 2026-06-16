@@ -23,14 +23,6 @@ fWrite :: FileHandle -> String -> LuaIO ":write" ()
 fFlush :: FileHandle -> LuaIO ":flush" ()
 fSeek :: FileHandle -> String -> Integer -> LuaIO ":seek" Integer
 
--- Read all lines from a file handle (accumulator helper)
-fReadAllLines :: FileHandle -> [String] -> IO [String]
-fReadAllLines handle acc = do
-    line <- fReadLine handle
-    case line of
-        Nothing -> pure (reverse acc)
-        Just l  -> fReadAllLines handle (l : acc)
-
 -- Read all lines from a file (eagerly, no lazy IO)
 fileLines :: String -> IO [String]
 fileLines path = do
@@ -38,6 +30,12 @@ fileLines path = do
     case result of
         Left err -> error err
         Right handle -> do
-            lines <- fReadAllLines handle []
+            lines <- readAll handle []
             fClose handle
             pure lines
+  where
+    readAll handle acc = do
+        line <- fReadLine handle
+        case line of
+            Nothing -> pure (reverse acc)
+            Just l  -> readAll handle (l : acc)

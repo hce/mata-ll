@@ -1305,7 +1305,18 @@ impl CodeGen {
             return;
         }
         if !Self::is_nullary_action_type(&expr.ty) {
-            self.gen_expr(expr);
+            // If the type is concretely non-IO (resolved to a known type),
+            // emit as a plain expression. But if the type is unresolved
+            // (e.g. where-clause function with uninferred return type),
+            // defensively wrap with __mll_run since we may be in a bind chain
+            // where the expression must be an action.
+            if Self::is_definitely_not_action(&expr.ty) {
+                self.gen_expr(expr);
+            } else {
+                self.emit("__mll_run(");
+                self.gen_expr(expr);
+                self.emit(")");
+            }
             return;
         }
         match &expr.kind {
@@ -1369,6 +1380,15 @@ impl CodeGen {
         matches!(ty, Ty::IO(_) | Ty::LuaIO(_, _))
             || matches!(ty, Ty::App(f, _) if matches!(f.as_ref(),
                 Ty::App(c, _) if matches!(c.as_ref(), Ty::Con(n) if n == "ST")))
+    }
+
+    /// Returns true if the type is definitely NOT an IO/ST action.
+    /// Unresolved type variables and type applications with variable
+    /// heads return false (they might be actions).
+    fn is_definitely_not_action(ty: &Ty) -> bool {
+        matches!(ty,
+            Ty::Con(_) | Ty::Arrow(_, _) | Ty::List(_) | Ty::Unit
+            | Ty::Forall(_, _))
     }
 
     /// Check if a function type's return type is an IO/ST action.
