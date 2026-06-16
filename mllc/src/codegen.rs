@@ -1668,13 +1668,10 @@ impl CodeGen {
             TExprKind::Lit(lit) => self.gen_literal(lit),
             TExprKind::App(func, arg) => {
                 // Record field accessor: inline as direct table indexing
-                // __force the field value since record fields may be thunks
-                // (callee-side strictness means constructor args aren't pre-forced)
                 if let TExprKind::Var(name) = &func.kind {
                     if let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
-                        self.emit("__force(");
                         self.gen_expr(arg);
-                        self.emit(&format!("[{}])", idx));
+                        self.emit(&format!("[{}]", idx));
                         return;
                     }
                 }
