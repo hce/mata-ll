@@ -92,15 +92,22 @@ MATA-LL TODO
 - [x] ST primitive inlining in gen_action (zero-overhead in bind chains)
 - [x] Zero-arg IO action flattening (main/helpers use gen_bind_chain_io instead of nested IIFEs)
 - [x] pure/return unwrapping in gen_action before type guard (fixes unresolved monad type variables in bind chains)
+- [x] Defensive __mll_run for unresolved action types in gen_action (where-clause IO functions)
+- [x] try/catch codegen: IO action argument deferred into pcall closure
 
 ## Open
 
-- [x] Audit gen_action type guard for other matches unreachable due to unresolved type variables (found: ST primitive check; moved before guard)
-- [x] Audit zero-arg IO helper functions for silently-passing tests (28 helpers in 3 files were affected; all now execute correctly)
-- [x] Update do_eval_order/do_let_scoping tests to use `<-` bind syntax (added bind/pure/return tests)
+- [ ] Default method implementations in class declarations (`x /= y = not (x == y)`)
+- [ ] Where-clause type unification: pre-registered fresh type variables not unified with inferred types (papered over in codegen with defensive __mll_run)
+- [ ] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
+- [ ] FFI varargs (e.g. Lua's string.format)
 
 ## Recently completed
 
+- [x] try/catch exception handling (pcall-based, IO errors only)
+- [x] fileLines: eager IO with Maybe-returning fReadLine (no lazy IO, no LuaIterator for IO)
+- [x] gen_action hardened: pure/return, ST primitives, and unresolved types all before/around type guard
+- [x] Audit: 28 zero-arg IO helpers across 3 test files were silently not executing; all fixed
 - [x] Local variable table fallback: constructors, newtypes, and instance methods packed into `__mll_fn` table alongside functions; function-body `_v[N]` overflow slots when binding count exceeds 180
 - [x] Existential types in data constructors (`data ShowBox = forall a. MkShowBox a (a -> String)` — parser, typechecker, and pattern matching support)
 - [x] Deriving Functor (requires traversing constructor fields to find type parameter)
@@ -146,7 +153,7 @@ MATA-LL TODO
 - [x] Comprehensive test suites for each library module (Regex, JSON, LOS, LString, LBit, LMath)
 - [x] Stress tests for compiler limits (large ADTs, deep recursion, nested exprs, many functions/instances, long do-blocks, large patterns, deep types, many args, list ops, BST program)
 - [x] Do-notation regression tests (eval order, let scoping, bind return unwrapping)
-- [x] 220 tests passing (Lua 5.4 via mlua)
+- [x] 221 tests passing (Lua 5.4 via mlua)
 
 ## Can defer
 
