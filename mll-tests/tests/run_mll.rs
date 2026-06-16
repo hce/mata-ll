@@ -90,6 +90,7 @@ mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(datakinds, "datakinds.mll");
+mll_test!(type_level_nats, "type_level_nats.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(guards, "guards.mll");
 mll_test!(lambdas, "lambdas.mll");

@@ -100,8 +100,6 @@ MATA-LL TODO
 - [x] Default method implementations in class declarations (`x /= y = not (x == y)`)
 - [x] Where-clause type unification: pre-registered fresh type variables now unified with inferred types
 - [ ] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
-- [ ] FFI varargs (e.g. Lua's string.format)
-
 ## Recently completed
 
 - [x] try/catch exception handling (pcall-based, IO errors only)
@@ -112,6 +110,7 @@ MATA-LL TODO
 - [x] Existential types in data constructors (`data ShowBox = forall a. MkShowBox a (a -> String)` — parser, typechecker, and pattern matching support)
 - [x] Deriving Functor (requires traversing constructor fields to find type parameter)
 - [x] DataKinds: promoted data constructors as type-level tags ('Empty, 'NonEmpty)
+- [x] Type-level naturals: promoted constructors with arguments ('S 'Z, 'S ('S 'Z)) for length-indexed vectors
 
 ## Done
 

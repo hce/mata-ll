@@ -1228,13 +1228,15 @@ impl Checker {
             Type::Constrained { ty, .. } => self.check_type_kind(ty),
             Type::Promoted(name) => {
                 let key = format!("'{}", name);
-                if !self.kinds.contains_key(&key) {
+                if let Some(kind) = self.kinds.get(&key).cloned() {
+                    kind
+                } else {
                     self.push_error_ctx(
                         TypeErrorKind::Other(format!("Unknown promoted constructor '{}'", name)),
                         "type expression".to_string(),
                     );
+                    Kind::Type
                 }
-                Kind::Type
             }
             _ => Kind::Type,
         }
@@ -1258,9 +1260,19 @@ impl Checker {
             .collect();
         let result_type = tvars.iter().fold(Ty::Con(name.to_string()), |acc, tv| Ty::app(acc, Ty::Var(tv.clone())));
 
-        // DataKinds: register promoted constructors as type-level constants
+        // DataKinds: register promoted constructors with appropriate kinds
+        // Nullary constructors get Kind::Type; constructors with N fields
+        // get Kind::Arrow^N(Type, Type) so they can be applied at the type level.
         for con in constructors {
-            self.kinds.insert(format!("'{}", con.name), Kind::Type);
+            let field_count = match &con.fields {
+                crate::ast::ConstructorFields::Positional(fs) => fs.len(),
+                crate::ast::ConstructorFields::Named(fs) => fs.len(),
+            };
+            let mut kind = Kind::Type;
+            for _ in 0..field_count {
+                kind = Kind::Arrow(Box::new(Kind::Type), Box::new(kind));
+            }
+            self.kinds.insert(format!("'{}", con.name), kind);
         }
 
         for (i, con) in constructors.iter().enumerate() {
