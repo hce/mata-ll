@@ -1129,3 +1129,153 @@ main = pure ()
     let result: bool = between.call((3, 7)).unwrap();
     assert!(result, "between 3 7 == True");
 }
+
+#[test]
+fn ffi_export_deep_force() {
+    // Regression: lazy thunks (e.g. from map) must be fully forced across FFI
+    let source = r#"
+export mapDouble :: [Integer] -> [Integer]
+mapDouble xs = map (\x -> x * 2) xs
+
+export mapShow :: [Integer] -> [String]
+mapShow xs = map show xs
+
+export listOfStrings :: Integer -> [String]
+listOfStrings _ = ["hello", "world", "foo"]
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // map returning lazy thunks — must be deep-forced to Lua values
+    let map_double: mlua::Function = module.get("mapDouble").unwrap();
+    let result: Vec<i64> = map_double.call(vec![1, 2, 3]).unwrap();
+    assert_eq!(result, vec![2, 4, 6], "mapDouble [1,2,3]");
+
+    let map_show: mlua::Function = module.get("mapShow").unwrap();
+    let result: Vec<String> = map_show.call(vec![10, 20, 30]).unwrap();
+    assert_eq!(result, vec!["10", "20", "30"], "mapShow [10,20,30]");
+
+    // List of strings — previously broken because __mll_to_lua heuristic
+    // misidentified string-headed cons cells
+    let list_of_strings: mlua::Function = module.get("listOfStrings").unwrap();
+    let result: Vec<String> = list_of_strings.call(0).unwrap();
+    assert_eq!(result, vec!["hello", "world", "foo"], "listOfStrings");
+}
+
+#[test]
+fn ffi_export_lua_to_mll_lists() {
+    // Lua arrays passed as arguments must be converted to MLL cons lists
+    let source = r#"
+export sumList :: [Integer] -> Integer
+sumList xs = foldl (+) 0 xs
+
+export headOf :: [Integer] -> Integer
+headOf xs = head xs
+
+export lengthOf :: [Integer] -> Integer
+lengthOf [] = 0
+lengthOf (_:xs) = 1 + lengthOf xs
+
+export appendLists :: [Integer] -> [Integer] -> [Integer]
+appendLists xs ys = xs ++ ys
+
+export reverseList :: [Integer] -> [Integer]
+reverseList xs = foldl (flip (:)) [] xs
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Passing Lua arrays → MLL cons lists
+    let sum: mlua::Function = module.get("sumList").unwrap();
+    let result: i64 = sum.call(vec![1, 2, 3, 4, 5]).unwrap();
+    assert_eq!(result, 15, "sumList [1..5] == 15");
+
+    let head: mlua::Function = module.get("headOf").unwrap();
+    let result: i64 = head.call(vec![42, 99]).unwrap();
+    assert_eq!(result, 42, "headOf [42, 99] == 42");
+
+    let len: mlua::Function = module.get("lengthOf").unwrap();
+    let result: i64 = len.call(vec![10, 20, 30]).unwrap();
+    assert_eq!(result, 3, "lengthOf [10,20,30] == 3");
+
+    // Empty list
+    let result: i64 = sum.call(Vec::<i64>::new()).unwrap();
+    assert_eq!(result, 0, "sumList [] == 0");
+
+    // Two list arguments
+    let append: mlua::Function = module.get("appendLists").unwrap();
+    let result: Vec<i64> = append.call((vec![1, 2], vec![3, 4])).unwrap();
+    assert_eq!(result, vec![1, 2, 3, 4], "appendLists [1,2] [3,4]");
+
+    // List → List roundtrip
+    let rev: mlua::Function = module.get("reverseList").unwrap();
+    let result: Vec<i64> = rev.call(vec![1, 2, 3]).unwrap();
+    assert_eq!(result, vec![3, 2, 1], "reverseList [1,2,3]");
+}
+
+#[test]
+fn ffi_export_string_lists() {
+    // String lists: Lua string arrays → MLL [String] and back
+    let source = r#"
+export joinWith :: String -> [String] -> String
+joinWith _ [] = ""
+joinWith _ [x] = x
+joinWith sep (x:xs) = x <> sep <> joinWith sep xs
+
+export filterLong :: Integer -> [String] -> [String]
+filterLong n xs = filter (\s -> lengthS s > n) xs
+  where lengthS s = foldl (\acc c -> acc + 1) 0 (unpack s)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    let join: mlua::Function = module.get("joinWith").unwrap();
+    let result: String = join.call((",", vec!["a", "b", "c"])).unwrap();
+    assert_eq!(result, "a,b,c", "joinWith , [a,b,c]");
+
+    let result: String = join.call(("-", vec!["hello"])).unwrap();
+    assert_eq!(result, "hello", "joinWith - [hello]");
+
+    let result: String = join.call((",", Vec::<String>::new())).unwrap();
+    assert_eq!(result, "", "joinWith , []");
+}
+
+#[test]
+fn ffi_export_mixed_args() {
+    // Functions with both list and non-list arguments
+    let source = r#"
+export takeN :: Integer -> [Integer] -> [Integer]
+takeN n xs = take n xs
+
+export dropN :: Integer -> [Integer] -> [Integer]
+dropN n xs = drop n xs
+
+export replicate :: Integer -> Integer -> [Integer]
+replicate 0 _ = []
+replicate n x = x : replicate (n - 1) x
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Integer arg + list arg
+    let take_n: mlua::Function = module.get("takeN").unwrap();
+    let result: Vec<i64> = take_n.call((3, vec![10, 20, 30, 40, 50])).unwrap();
+    assert_eq!(result, vec![10, 20, 30], "takeN 3 [10..50]");
+
+    let drop_n: mlua::Function = module.get("dropN").unwrap();
+    let result: Vec<i64> = drop_n.call((2, vec![10, 20, 30, 40])).unwrap();
+    assert_eq!(result, vec![30, 40], "dropN 2 [10..40]");
+
+    // Generate list on MLL side, no conversion needed for args
+    let rep: mlua::Function = module.get("replicate").unwrap();
+    let result: Vec<i64> = rep.call((4, 7)).unwrap();
+    assert_eq!(result, vec![7, 7, 7, 7], "replicate 4 7");
+}

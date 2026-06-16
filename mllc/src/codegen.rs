@@ -201,7 +201,7 @@ impl CodeGen {
         // Seed concrete_vars so references skip __force throughout user code.
         for name in &[
             "__force", "__thunk", "__mll_cons", "__mll_lazy_cons", "__mll_head",
-            "__mll_tail", "__mll_to_lua", "__mll_wrap_callback", "__mll_run", "__mll_perform",
+            "__mll_tail", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_perform",
             "not_", "engage", "liftIO", "show", "error_", "max", "min", "undefined",
             "pure", "return_", "Just",
             "show_Integer", "show_Number", "show_String", "show_Bool",
@@ -365,6 +365,12 @@ impl CodeGen {
         // Generate module return table for exports
         // Wrap each export so return values are deep-forced for Lua consumption
         if !module.exports.is_empty() {
+            // Collect export function types for type-directed FFI conversion
+            let export_types: std::collections::HashMap<String, Ty> = module.functions.iter()
+                .filter(|f| module.exports.contains(&f.name))
+                .map(|f| (f.name.clone(), f.ty.clone()))
+                .collect();
+
             self.emit_line("");
             self.emit_line("-- Exports");
             self.emit_indent();
@@ -372,16 +378,51 @@ impl CodeGen {
             self.indent += 1;
             for name in &module.exports {
                 let sname = sanitize_name(name);
+                // Extract argument types from function type
+                let arg_tys = if let Some(ty) = export_types.get(name) {
+                    let mut args = Vec::new();
+                    let mut t = ty;
+                    while let Ty::Arrow(a, b) = t {
+                        args.push(a.as_ref().clone());
+                        t = b.as_ref();
+                    }
+                    args
+                } else {
+                    Vec::new()
+                };
+
+                let n_args = arg_tys.len();
+                let params: Vec<String> = (0..n_args).map(|i| format!("a{}", i + 1)).collect();
+                let params_str = if n_args > 0 { params.join(", ") } else { "...".to_string() };
+
                 self.emit_indent();
-                self.emit(&format!("{name} = function(...)\n"));
+                self.emit(&format!("{name} = function({params_str})\n"));
                 self.indent += 1;
-                self.emit_indent();
-                self.emit(&format!("local args = {{n = select('#', ...), ...}}\n"));
-                self.emit_indent();
-                self.emit("for i = 1, args.n do if type(args[i]) == \"function\" then args[i] = __mll_wrap_callback(args[i]) end end\n");
+
+                // Type-directed argument conversion
+                for (i, ty) in arg_tys.iter().enumerate() {
+                    let arg = &params[i];
+                    if matches!(ty, Ty::List(_)) {
+                        self.emit_indent();
+                        self.emit(&format!("{arg} = __lua_to_mll({arg})\n"));
+                    } else if matches!(ty, Ty::Arrow(_, _)) {
+                        self.emit_indent();
+                        self.emit(&format!("if type({arg}) == \"function\" then {arg} = __mll_wrap_callback({arg}) end\n"));
+                    }
+                }
+
+                if n_args == 0 {
+                    // Fallback for exports without type info
+                    self.emit_indent();
+                    self.emit(&format!("local args = {{n = select('#', ...), ...}}\n"));
+                    self.emit_indent();
+                    self.emit("for i = 1, args.n do args[i] = __lua_to_mll(args[i]) end\n");
+                }
+
                 self.emit_indent();
                 let fn_ref = self.lua_ref(&sname);
-                self.emit(&format!("local __result = __force({})(__unpack(args, 1, args.n))\n", fn_ref));
+                let call_args = if n_args > 0 { params.join(", ") } else { "__unpack(args, 1, args.n)".to_string() };
+                self.emit(&format!("local __result = __force({})({call_args})\n", fn_ref));
                 self.emit_indent();
                 self.emit("if type(__result) == \"function\" then __result = __result() end\n");
                 self.emit_indent();
@@ -1972,6 +2013,10 @@ impl CodeGen {
                     self.emit("function(_a, _b) return __mll_list_append(_a, function() return _b end) end");
                     return;
                 }
+                if op == ":" {
+                    self.emit("function(_a, _b) return __mll_cons(_a, _b) end");
+                    return;
+                }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     other => other,
@@ -2439,6 +2484,7 @@ local __unpack = table.unpack or unpack
 
 -- Thunk infrastructure (non-strict evaluation)
 local __thunk_mt = {}
+local __cons_mt = {}
 local function __thunk(f) return setmetatable({f, false}, __thunk_mt) end
 local function __force(x)
     if getmetatable(x) == __thunk_mt then
@@ -2452,8 +2498,8 @@ local function __force(x)
 end
 
 -- List primitives (internal)
-local function __mll_cons(h, t) return {h, t} end
-local function __mll_lazy_cons(h, thunk) return {h, thunk, __lazy = true} end
+local function __mll_cons(h, t) return setmetatable({h, t}, __cons_mt) end
+local function __mll_lazy_cons(h, thunk) return setmetatable({h, thunk, __lazy = true}, __cons_mt) end
 local function __mll_head(l) l = __force(l); return l[1] end
 local function __mll_tail(l)
     l = __force(l)
@@ -2478,18 +2524,17 @@ end
 local function __mll_to_lua(x)
     x = __force(x)
     if type(x) ~= "table" then return x end
-    -- Check if it's a cons list (2-element table, not tagged)
-    if x[2] ~= nil and type(x[1]) ~= "string" then
-        -- Could be a cons cell or a tuple; try to walk as a list
+    -- Cons list: identified by __cons_mt metatable
+    if getmetatable(x) == __cons_mt then
         local result = {}
         local cur = x
-        local is_list = true
         while cur ~= nil do
-            if type(cur) ~= "table" then is_list = false; break end
+            cur = __force(cur)
+            if getmetatable(cur) ~= __cons_mt then break end
             result[#result + 1] = __mll_to_lua(__force(cur[1]))
             cur = __mll_tail(cur)
         end
-        if is_list then return result end
+        return result
     end
     -- Tuple or ADT: force each element
     local result = {}
@@ -2497,13 +2542,28 @@ local function __mll_to_lua(x)
     return result
 end
 
+-- Forward declarations for mutual recursion
+local __lua_to_mll, __mll_wrap_callback
+
+-- Convert a Lua value to MLL representation at the FFI boundary.
+-- Lua arrays become cons lists, functions become wrapped callbacks.
+__lua_to_mll = function(x)
+    if type(x) == "function" then return __mll_wrap_callback(x) end
+    if type(x) ~= "table" then return x end
+    if getmetatable(x) == __cons_mt then return x end
+    local n = #x
+    local result = nil
+    for i = n, 1, -1 do result = __mll_cons(__lua_to_mll(x[i]), result) end
+    return result
+end
+
 -- Wrap a Lua callback so it deep-forces all arguments before forwarding.
 -- Used at the FFI boundary: Lua functions don't understand MLL thunks.
-local function __mll_wrap_callback(f)
+__mll_wrap_callback = function(f)
     return function(...)
         local args = {n = select('#', ...), ...}
         for i = 1, args.n do args[i] = __mll_to_lua(args[i]) end
-        return f(__unpack(args, 1, args.n))
+        return __lua_to_mll(f(__unpack(args, 1, args.n)))
     end
 end
 
