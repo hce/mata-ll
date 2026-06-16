@@ -805,3 +805,327 @@ fn examples_compile() {
         panic!("Examples failed to compile:\n{}", failures.join("\n"));
     }
 }
+
+// ============================================================
+// FFI tests: compile MLL modules with exports, then call
+// exported functions from Lua and verify return values.
+// ============================================================
+
+/// Helper: compile MLL source and return a Lua module table
+fn compile_ffi_module(source: &str) -> (mlua::Lua, mlua::Table) {
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("FFI module should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let table: mlua::Table = lua.load(&lua_code)
+        .set_name("ffi_test")
+        .eval()
+        .expect("FFI module should return a table");
+    (lua, table)
+}
+
+#[test]
+fn ffi_export_pure_functions() {
+    let source = r#"
+export add :: Integer -> Integer -> Integer
+add x y = x + y
+
+export double :: Integer -> Integer
+double n = n * 2
+
+export negate :: Integer -> Integer
+negate n = 0 - n
+
+export isEven :: Integer -> Bool
+isEven n = n `mod` 2 == 0
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Integer arithmetic
+    let add: mlua::Function = module.get("add").unwrap();
+    let result: i64 = add.call((3, 4)).unwrap();
+    assert_eq!(result, 7, "add 3 4 == 7");
+
+    let result: i64 = add.call((0, 0)).unwrap();
+    assert_eq!(result, 0, "add 0 0 == 0");
+
+    let result: i64 = add.call((-5, 3)).unwrap();
+    assert_eq!(result, -2, "add (-5) 3 == -2");
+
+    let double: mlua::Function = module.get("double").unwrap();
+    let result: i64 = double.call(21).unwrap();
+    assert_eq!(result, 42, "double 21 == 42");
+
+    let negate: mlua::Function = module.get("negate").unwrap();
+    let result: i64 = negate.call(5).unwrap();
+    assert_eq!(result, -5, "negate 5 == -5");
+
+    // Bool return
+    let is_even: mlua::Function = module.get("isEven").unwrap();
+    let result: bool = is_even.call(4).unwrap();
+    assert!(result, "isEven 4 == True");
+    let result: bool = is_even.call(7).unwrap();
+    assert!(!result, "isEven 7 == False");
+}
+
+#[test]
+fn ffi_export_string_functions() {
+    let source = r#"
+export greet :: String -> String
+greet name = "Hello, " <> name <> "!"
+
+export shout :: String -> String
+shout s = s <> "!!!"
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    let greet: mlua::Function = module.get("greet").unwrap();
+    let result: String = greet.call("world").unwrap();
+    assert_eq!(result, "Hello, world!");
+
+    let shout: mlua::Function = module.get("shout").unwrap();
+    let result: String = shout.call("wow").unwrap();
+    assert_eq!(result, "wow!!!");
+}
+
+#[test]
+fn ffi_export_list_functions() {
+    let source = r#"
+range :: Integer -> [Integer]
+range n = if n <= 0 then [] else go 1 n
+  where go i m = if i > m then [] else i : go (i + 1) m
+
+export getRange :: Integer -> [Integer]
+getRange n = range n
+
+export squares :: Integer -> [Integer]
+squares n = map (\x -> x * x) (range n)
+
+export countTo :: Integer -> Integer
+countTo n = foldl (+) 0 (range n)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // List returned as Lua array
+    let range: mlua::Function = module.get("getRange").unwrap();
+    let result: Vec<i64> = range.call(5).unwrap();
+    assert_eq!(result, vec![1, 2, 3, 4, 5], "range 5");
+
+    let result: mlua::Value = range.call(0).unwrap();
+    assert!(result.is_nil() || matches!(&result, mlua::Value::Table(t) if t.len().unwrap() == 0),
+            "range 0 is empty (nil or empty table)");
+
+    // List → List (map)
+    let squares: mlua::Function = module.get("squares").unwrap();
+    let result: Vec<i64> = squares.call(4).unwrap();
+    assert_eq!(result, vec![1, 4, 9, 16], "squares 4");
+
+    // List → Integer (fold)
+    let count: mlua::Function = module.get("countTo").unwrap();
+    let result: i64 = count.call(10).unwrap();
+    assert_eq!(result, 55, "countTo 10 == 55 (triangle number)");
+}
+
+#[test]
+fn ffi_export_maybe_either() {
+    let source = r#"
+export safeDiv :: Integer -> Integer -> Maybe Integer
+safeDiv _ 0 = Nothing
+safeDiv x y = Just (x `div` y)
+
+export classify :: Integer -> Either String Integer
+classify n = if n < 0 then Left "negative" else Right n
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Maybe: Just → value, Nothing → nil
+    let safe_div: mlua::Function = module.get("safeDiv").unwrap();
+    let result: Option<i64> = safe_div.call((10, 3)).unwrap();
+    assert_eq!(result, Some(3), "safeDiv 10 3 == Just 3");
+
+    let result: Option<i64> = safe_div.call((10, 0)).unwrap();
+    assert_eq!(result, None, "safeDiv 10 0 == Nothing");
+
+    // Either: Left {1, msg}, Right {2, val}
+    let classify: mlua::Function = module.get("classify").unwrap();
+    let result: Vec<mlua::Value> = classify.call(5).unwrap();
+    assert_eq!(result.len(), 2);
+    // Right tag = 2
+    if let mlua::Value::Integer(tag) = result[0] {
+        assert_eq!(tag, 2, "classify 5 is Right (tag 2)");
+    }
+
+    let result: Vec<mlua::Value> = classify.call(-3).unwrap();
+    if let mlua::Value::Integer(tag) = result[0] {
+        assert_eq!(tag, 1, "classify (-3) is Left (tag 1)");
+    }
+}
+
+#[test]
+fn ffi_export_higher_order() {
+    // MLL-side higher-order: partial application across FFI
+    let source = r#"
+applyTwice :: (a -> a) -> a -> a
+applyTwice f x = f (f x)
+
+double :: Integer -> Integer
+double x = x * 2
+
+inc :: Integer -> Integer
+inc x = x + 1
+
+export doubleDouble :: Integer -> Integer
+doubleDouble n = applyTwice double n
+
+export incInc :: Integer -> Integer
+incInc n = applyTwice inc n
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    let dd: mlua::Function = module.get("doubleDouble").unwrap();
+    let result: i64 = dd.call(3).unwrap();
+    assert_eq!(result, 12, "doubleDouble 3 == 12");
+
+    let ii: mlua::Function = module.get("incInc").unwrap();
+    let result: i64 = ii.call(5).unwrap();
+    assert_eq!(result, 7, "incInc 5 == 7");
+}
+
+#[test]
+fn ffi_export_tuples() {
+    let source = r#"
+export swap :: (Integer, Integer) -> (Integer, Integer)
+swap (a, b) = (b, a)
+
+export firstPlusSecond :: (Integer, Integer) -> Integer
+firstPlusSecond (a, b) = a + b
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Tuple returned as Lua array
+    let swap: mlua::Function = module.get("swap").unwrap();
+    let result: Vec<i64> = swap.call(vec![1, 2]).unwrap();
+    assert_eq!(result, vec![2, 1], "swap (1,2) == (2,1)");
+
+    let first_plus: mlua::Function = module.get("firstPlusSecond").unwrap();
+    let result: i64 = first_plus.call(vec![10, 20]).unwrap();
+    assert_eq!(result, 30, "firstPlusSecond (10,20) == 30");
+}
+
+#[test]
+fn ffi_export_thunked_values() {
+    // Regression: top-level values defined via point-free or partial
+    // application are thunks — export wrapper must __force before calling
+    let source = r#"
+export increment :: Integer -> Integer
+increment = (+1)
+
+fib :: [Integer]
+fib = 1 : 1 : zipWith (+) fib (drop 1 fib)
+
+export fibonacci :: Integer -> [Integer]
+fibonacci = flip take fib
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    let increment: mlua::Function = module.get("increment").unwrap();
+    let result: i64 = increment.call(41).unwrap();
+    assert_eq!(result, 42, "increment 41 == 42");
+
+    let fibonacci: mlua::Function = module.get("fibonacci").unwrap();
+    let result: Vec<i64> = fibonacci.call(8).unwrap();
+    assert_eq!(result, vec![1, 1, 2, 3, 5, 8, 13, 21], "fibonacci 8");
+}
+
+#[test]
+fn ffi_export_adt() {
+    let source = r#"
+data Color = Red | Green | Blue
+
+export colorCode :: Color -> Integer
+colorCode Red = 1
+colorCode Green = 2
+colorCode Blue = 3
+
+export mkRed :: Integer -> Color
+mkRed _ = Red
+
+export mkGreen :: Integer -> Color
+mkGreen _ = Green
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Pass enum value through: create on MLL side, inspect on MLL side
+    let mk_red: mlua::Function = module.get("mkRed").unwrap();
+    let color_code: mlua::Function = module.get("colorCode").unwrap();
+    let red_val: mlua::Value = mk_red.call(0).unwrap();
+    let result: i64 = color_code.call(red_val).unwrap();
+    assert_eq!(result, 1, "colorCode Red == 1");
+
+    let mk_green: mlua::Function = module.get("mkGreen").unwrap();
+    let green_val: mlua::Value = mk_green.call(0).unwrap();
+    let result: i64 = color_code.call(green_val).unwrap();
+    assert_eq!(result, 2, "colorCode Green == 2");
+}
+
+#[test]
+fn ffi_export_multi_arg() {
+    // Test multi-arg exported functions and string operations
+    let source = r#"
+export strRepeat :: String -> Integer -> String
+strRepeat _ 0 = ""
+strRepeat s n = s <> strRepeat s (n - 1)
+
+export clamp :: Integer -> Integer -> Integer -> Integer
+clamp lo hi x = if x < lo then lo else if x > hi then hi else x
+
+export between :: Integer -> Integer -> Bool
+between lo hi = lo < hi
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    let str_repeat: mlua::Function = module.get("strRepeat").unwrap();
+    let result: String = str_repeat.call(("ab", 3)).unwrap();
+    assert_eq!(result, "ababab", "strRepeat ab 3");
+
+    let result: String = str_repeat.call(("x", 0)).unwrap();
+    assert_eq!(result, "", "strRepeat x 0");
+
+    let clamp: mlua::Function = module.get("clamp").unwrap();
+    let result: i64 = clamp.call((0, 10, 15)).unwrap();
+    assert_eq!(result, 10, "clamp 0 10 15 == 10");
+
+    let result: i64 = clamp.call((0, 10, 5)).unwrap();
+    assert_eq!(result, 5, "clamp 0 10 5 == 5");
+
+    let between: mlua::Function = module.get("between").unwrap();
+    let result: bool = between.call((3, 7)).unwrap();
+    assert!(result, "between 3 7 == True");
+}
