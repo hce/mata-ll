@@ -67,6 +67,8 @@ pub struct ClassInfo {
     pub superclasses: Vec<String>,
     /// Method name -> method type (with type_var as placeholder)
     pub methods: Vec<(String, Ty)>,
+    /// Default method implementations (AST clauses, keyed by method name)
+    pub default_methods: HashMap<String, Vec<Clause>>,
 }
 
 /// Instance info
@@ -660,6 +662,7 @@ impl Checker {
                 ("fmap".to_string(), fmap_ty.clone()),
                 ("<$>".to_string(), fmap_ty.clone()),
             ],
+            default_methods: HashMap::new(),
         });
         self.env.insert("fmap".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), f.clone()],
@@ -725,6 +728,7 @@ impl Checker {
                 ("pure".to_string(), pure_ty.clone()),
                 ("<*>".to_string(), ap_ty.clone()),
             ],
+            default_methods: HashMap::new(),
         });
         self.env.insert("pure".to_string(), Scheme {
             vars: vec![a.clone(), f.clone()],
@@ -806,6 +810,7 @@ impl Checker {
                 (">>".to_string(), Ty::fun(&[ma.clone(), mb.clone()], mb.clone())),
                 ("return".to_string(), Ty::arrow(ta.clone(), ma.clone())),
             ],
+            default_methods: HashMap::new(),
         });
         // >>= and >> env entries
         self.env.insert(">>=".to_string(), Scheme {
@@ -895,6 +900,7 @@ impl Checker {
                 ("enumFromTo".to_string(), enum_from_to_ty.clone()),
                 ("enumFromThenTo".to_string(), enum_from_then_to_ty.clone()),
             ],
+            default_methods: HashMap::new(),
         });
         for (name, ty) in &[
             ("succ", succ_ty.clone()), ("pred", succ_ty),
@@ -940,6 +946,7 @@ impl Checker {
                 ("minBound".to_string(), min_bound_ty.clone()),
                 ("maxBound".to_string(), max_bound_ty.clone()),
             ],
+            default_methods: HashMap::new(),
         });
         for (name, ty) in &[
             ("minBound", min_bound_ty),
@@ -958,6 +965,7 @@ impl Checker {
             type_var: "a".to_string(),
             superclasses: vec![],
             methods: vec![("show".to_string(), show_ty.clone())],
+            default_methods: HashMap::new(),
         });
         self.env.insert("show".to_string(), Scheme {
             vars: vec![a.clone()],
@@ -971,6 +979,7 @@ impl Checker {
             type_var: "a".to_string(),
             superclasses: vec![],
             methods: vec![("read".to_string(), read_ty.clone())],
+            default_methods: HashMap::new(),
         });
         self.env.insert("read".to_string(), Scheme {
             vars: vec![a.clone()],
@@ -997,6 +1006,7 @@ impl Checker {
             type_var: "a".to_string(),
             superclasses: vec![],
             methods: vec![("==".to_string(), eq_ty.clone())],
+            default_methods: HashMap::new(),
         });
         self.env.insert("==".to_string(), Scheme {
             vars: vec![a.clone()],
@@ -1036,6 +1046,7 @@ impl Checker {
                 ("<=".to_string(), cmp_ty.clone()),
                 (">=".to_string(), cmp_ty.clone()),
             ],
+            default_methods: HashMap::new(),
         });
         for op in &["<", ">", "<=", ">="] {
             self.env.insert(op.to_string(), Scheme {
@@ -1068,6 +1079,7 @@ impl Checker {
             type_var: "a".to_string(),
             superclasses: vec![],
             methods: vec![("<>".to_string(), semigroup_ty.clone())],
+            default_methods: HashMap::new(),
         });
         self.env.insert("<>".to_string(), Scheme {
             vars: vec![a.clone()],
@@ -1549,6 +1561,7 @@ impl Checker {
     fn register_class(&mut self, name: &str, type_var: &str, superclasses: &[String], methods: &[ClassMethod]) {
         let tv = TyVar { name: type_var.to_string(), id: u32::MAX };
         let mut method_types = Vec::new();
+        let mut default_methods = HashMap::new();
 
         for method in methods {
             let ty = self.ast_type_to_ty(&method.ty);
@@ -1559,6 +1572,11 @@ impl Checker {
                 vars: vec![tv.clone()],
                 ty: ty,
             });
+
+            // Store default implementation if present
+            if let Some(clauses) = &method.default_clauses {
+                default_methods.insert(method.name.clone(), clauses.clone());
+            }
         }
 
         self.classes.insert(name.to_string(), ClassInfo {
@@ -1566,6 +1584,7 @@ impl Checker {
             type_var: type_var.to_string(),
             superclasses: superclasses.to_vec(),
             methods: method_types,
+            default_methods,
         });
     }
 
@@ -1640,6 +1659,8 @@ impl Checker {
         };
 
         let mut result_fns = Vec::new();
+        let provided_methods: std::collections::HashSet<String> =
+            methods.iter().map(|m| m.name.clone()).collect();
 
         for method_def in methods {
             // Find the class method's type
@@ -1671,6 +1692,25 @@ impl Checker {
             // Type-check the instance method against the specialized type
             if let Some(tfun) = self.check_function(&mangled_name, &method_def.clauses, &method_ty) {
                 result_fns.push(tfun);
+            }
+        }
+
+        // Fill in default method implementations for any methods not provided by the instance
+        for (method_name, method_ty) in &class_info.methods {
+            if provided_methods.contains(method_name) {
+                continue;
+            }
+            if let Some(default_clauses) = class_info.default_methods.get(method_name) {
+                let tv = TyVar { name: class_info.type_var.clone(), id: u32::MAX };
+                let subst = Subst::singleton(tv, target_ty.clone());
+                let specialized_ty = method_ty.apply_subst(&subst);
+
+                let mangled_name = format!("{}_{}", method_name, ty_str);
+                instance_info.method_fns.insert(method_name.clone(), mangled_name.clone());
+
+                if let Some(tfun) = self.check_function(&mangled_name, default_clauses, &specialized_ty) {
+                    result_fns.push(tfun);
+                }
             }
         }
 

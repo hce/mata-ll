@@ -531,6 +531,8 @@ impl Parser {
 
             // Parse method signature: name :: type
             // Could be an operator like (+) :: ...
+            let save_method = self.pos;
+            let save_method_indent = self.current_indent;
             let name = if self.at(&Token::LeftParen) {
                 self.advance();
                 let op = match self.peek().clone() {
@@ -546,9 +548,47 @@ impl Parser {
                 break;
             };
 
-            self.expect(&Token::DblColon)?;
-            let ty = self.parse_type()?;
-            methods.push(ClassMethod { name, ty });
+            // Check if this is a type signature (::) or a default method clause (patterns... =)
+            if self.at(&Token::DblColon) {
+                self.advance();
+                let ty = self.parse_type()?;
+                methods.push(ClassMethod { name, ty, default_clauses: None });
+            } else {
+                // This line is a default method definition — backtrack and parse as clause
+                self.pos = save_method;
+                self.current_indent = save_method_indent;
+
+                // Parse method name (again, consuming it for the clause parser)
+                let def_name = if self.at(&Token::LeftParen) {
+                    self.advance();
+                    let op = match self.peek().clone() {
+                        Token::Operator(op) => { self.advance(); op }
+                        _ => return Err("Expected operator in default method".into()),
+                    };
+                    self.expect(&Token::RightParen)?;
+                    op
+                } else if let Token::Ident(n) = self.peek().clone() {
+                    self.advance();
+                    n
+                } else {
+                    break;
+                };
+
+                let clause = self.parse_clause()?;
+
+                // Attach to the matching method signature
+                if let Some(m) = methods.iter_mut().find(|m| m.name == def_name) {
+                    match &mut m.default_clauses {
+                        Some(clauses) => clauses.push(clause),
+                        None => m.default_clauses = Some(vec![clause]),
+                    }
+                } else {
+                    return Err(format!(
+                        "Default implementation for '{}' has no preceding type signature in class '{}'",
+                        def_name, class_name
+                    ));
+                }
+            }
         }
 
         Ok(vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }])

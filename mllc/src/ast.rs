@@ -141,11 +141,12 @@ pub struct LocalDef {
     pub body: Expr,
 }
 
-/// A method signature in a class declaration
+/// A method signature (and optional default implementation) in a class declaration
 #[derive(Debug, Clone)]
 pub struct ClassMethod {
     pub name: String,
     pub ty: Type,
+    pub default_clauses: Option<Vec<Clause>>,
 }
 
 /// A method implementation in an instance declaration
