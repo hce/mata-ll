@@ -441,6 +441,15 @@ impl Checker {
             // but keep env entries so type inference sees them as polymorphic
             ("getArgs", vec![], Ty::io(Ty::list(Ty::Con("String".into())))),
             ("exit", vec![], Ty::arrow(Ty::Con("ExitValue".into()), Ty::io(Ty::Unit))),
+            // Exception handling: catch Lua-level IO errors
+            ("try", vec![a.clone()], Ty::arrow(
+                Ty::io(ta.clone()),
+                Ty::io(Ty::app(Ty::app(Ty::Con("Either".into()), Ty::Con("String".into())), ta.clone())),
+            )),
+            ("catch", vec![a.clone()], Ty::fun(&[
+                Ty::io(ta.clone()),
+                Ty::arrow(Ty::Con("String".into()), Ty::io(ta.clone())),
+            ], Ty::io(ta.clone()))),
         ];
         for (name, vars, ty) in entries {
             self.env.insert(name.into(), Scheme { vars, ty });

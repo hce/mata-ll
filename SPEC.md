@@ -746,7 +746,7 @@ Functions: show, putStrLn, putStr, print, (++), ($), max, min,
            const, id, (.), flip, map, filter, foldl, foldr, sqrt,
            not, (&&), (||), error, undefined, otherwise, head, tail,
            take, zipWith, elem, length, reverse, fst, snd, concatMap,
-           mapM_, when, assert, seq, getArgs, exit
+           mapM_, when, assert, seq, getArgs, exit, try, catch
 
     (++)  :: String -> String -> String
     ($)   :: (a -> b) -> a -> b
@@ -955,13 +955,36 @@ for Integral and Fractional.
 Complex local definitions in typeclass instance declarations.
 Deferred until default method implementations are done.
 
-## Architecture yet to be discussed
+## Exception handling
 
-### Exception handling
+MATA-LL provides `try` and `catch` for recovering from IO errors
+(Lua-level errors raised by file operations, network calls, etc.).
 
-Haskell-style try/catch/throw. The design for this needs discussion —
-Lua has pcall/xpcall which could serve as the backend, but the
-interaction with non-strict evaluation and IO needs careful thought.
+    try   :: IO a -> IO (Either String a)
+    catch :: IO a -> (String -> IO a) -> IO a
+
+`try` wraps an IO action in Lua's `pcall`. If the action succeeds,
+the result is `Right value`; if it raises a Lua error, the result is
+`Left errorMessage`.
+
+`catch` runs an IO action; if it raises, the handler function
+receives the error message and produces a recovery action.
+
+    main :: IO ()
+    main = do
+        result <- try (readFile "missing.txt")
+        case result of
+            Right contents -> putStrLn contents
+            Left err       -> putStrLn ("Error: " ++ err)
+
+Design decisions:
+- Only IO errors are catchable (category (a): Lua runtime errors).
+- `error` calls and non-exhaustive patterns (category (b): logic
+  errors) are also caught by `pcall` in practice, but programs should
+  not rely on catching these — they indicate bugs.
+- Compiler bugs (category (c)) should never be caught.
+- No `throw` — use `error` for deliberate failures. The error string
+  from `error` may include Lua source location information.
 
 ## Explicitly out of scope
 

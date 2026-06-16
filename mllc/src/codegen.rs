@@ -218,6 +218,7 @@ impl CodeGen {
             "hashmap_member", "hashmap_fromList",
             "__mll_show_list", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_iter", "getArgs", "exit_",
+            "try_", "catch_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
             "__mll_shl", "__mll_shr",
             "__mll_array_from_list", "__mll_array_index", "__mll_array_length",
@@ -246,6 +247,7 @@ impl CodeGen {
             "hmEmpty", "hmInsert", "hmLookup", "hmDelete", "hmSize",
             "hmKeys", "hmValues", "hmMember", "hmFromList",
             "return", "pure", "not", "print", "error", "show", "undefined",
+            "try", "catch",
         ] {
             self.top_level_names.insert(sanitize_name(name));
         }
@@ -1666,6 +1668,25 @@ impl CodeGen {
                 }
                 args.reverse();
 
+                // try/catch: wrap IO action argument in a closure so that
+                // errors are deferred into pcall rather than crashing eagerly.
+                if let TExprKind::Var(name) = &f.kind {
+                    if name == "try" && args.len() == 1 {
+                        self.emit("try_(function() return ");
+                        self.gen_action(&args[0]);
+                        self.emit(" end)");
+                        return;
+                    }
+                    if name == "catch" && args.len() == 2 {
+                        self.emit("catch_(function() return ");
+                        self.gen_action(&args[0]);
+                        self.emit(" end, ");
+                        self.gen_expr(&args[1]);
+                        self.emit(")");
+                        return;
+                    }
+                }
+
                 // Typeclass methods on primitive types → inline as Lua operators
                 if args.len() == 2 {
                     if let TExprKind::Var(name) = &f.kind {
@@ -2221,6 +2242,8 @@ fn sanitize_name(name: &str) -> String {
         "in" => "in_".to_string(),
         "or" => "or_".to_string(),
         "and" => "and_".to_string(),
+        "try" => "try_".to_string(),
+        "catch" => "catch_".to_string(),
         "bsEmpty" => "__mll_bs_empty".to_string(),
         "bsLength" => "__mll_bs[1]".to_string(),
         "bsIndex" => "__mll_bs[2]".to_string(),
@@ -2574,6 +2597,22 @@ end
 -- Success: Right val, Failure: Left errmsg
 local function __mll_try(val, err)
     if val == nil then return {1, err or "unknown error"} else return {2, val} end
+end
+-- Exception handling: try wraps an IO action in pcall, returning Either String a
+-- action is a closure (deferred by codegen) so errors happen inside pcall
+local function try_(action)
+    return function()
+        local ok, result = pcall(action)
+        if ok then return {2, result} else return {1, tostring(result)} end
+    end
+end
+-- catch runs an IO action; on error, passes the message to a handler
+local function catch_(action, handler)
+    return function()
+        local ok, result = pcall(action)
+        if ok then return result
+        else return __mll_run(__force(__force(handler)(tostring(result)))) end
+    end
 end
 
 -- Iterator-to-lazy-list: calls a Lua iterator factory and builds a lazy MLL list.

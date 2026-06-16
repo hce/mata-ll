@@ -154,6 +154,7 @@ mll_test!(stress_complex_program, "stress_complex_program.mll");
 mll_test!(stress_long_do_200, "stress_long_do_200.mll");
 mll_test!(do_eval_order, "do_eval_order.mll");
 mll_test!(do_let_scoping, "do_let_scoping.mll");
+mll_test!(exceptions, "exceptions.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
