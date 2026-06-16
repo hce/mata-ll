@@ -1,6 +1,5 @@
 -- Regression test: do-block evaluation order and let/bind interactions
 -- Ensures let flattening doesn't break IO sequencing or scoping
--- NOTE: avoids `x <- return val` pattern (known codegen bug: return thunk not unwrapped)
 
 main :: IO ()
 main = do
@@ -62,5 +61,29 @@ main = do
     putStrLn "phase 3 ok"
     let m2 = m1 + 1
     assert (m2 == 43) "let across IO"
+
+    -- Test 9: bind with pure (was a known bug: thunk not unwrapped)
+    v1 <- pure (99 :: Integer)
+    assert (v1 == 99) "bind pure integer"
+
+    -- Test 10: bind with return
+    v2 <- return (7 :: Integer)
+    assert (v2 == 7) "bind return integer"
+
+    -- Test 11: bind pure then use in let
+    v3 <- pure (50 :: Integer)
+    let v4 = v3 + 10
+    assert (v4 == 60) "bind pure then let"
+
+    -- Test 12: interleaved bind and let
+    let a1 = 100
+    b1 <- pure (a1 + 1)
+    let c1 = b1 + 1
+    d1 <- pure (c1 + 1)
+    assert (d1 == 103) "interleaved bind let"
+
+    -- Test 13: bind pure with expression
+    x1 <- pure (3 * 4 + 1)
+    assert (x1 == 13) "bind pure expr"
 
     putStrLn "ok"

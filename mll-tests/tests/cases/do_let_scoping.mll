@@ -1,7 +1,6 @@
 -- Regression test: let scoping rules in do blocks
 -- Ensures that let bindings are visible in subsequent statements
--- and interact correctly with IO actions
--- NOTE: avoids `x <- return val` pattern (known codegen bug)
+-- and interact correctly with IO actions and bind operations
 
 main :: IO ()
 main = do
@@ -60,5 +59,33 @@ main = do
     let step2 = step1 * step1
     let step3 = step2 * step2
     assert (step3 == 256) "power chain"
+
+    -- Test 9: bind scoping - bound var visible in subsequent lets
+    v <- pure (42 :: Integer)
+    let w = v + 8
+    assert (w == 50) "bind then let"
+
+    -- Test 10: bind shadowing - rebinding via <- shadows previous let
+    let q = 10
+    q <- pure (20 :: Integer)
+    assert (q == 20) "bind shadows let"
+
+    -- Test 11: let sees previous bind
+    r1 <- pure (5 :: Integer)
+    r2 <- pure (r1 * 2)
+    let r3 = r1 + r2
+    assert (r3 == 15) "let sees binds"
+
+    -- Test 12: bind with string
+    greeting <- pure "hello"
+    let msg = greeting ++ " world"
+    assert (msg == "hello world") "bind string"
+
+    -- Test 13: bind between IO actions preserves scope
+    putStrLn "scope check"
+    p <- pure (77 :: Integer)
+    putStrLn "scope check 2"
+    let p2 = p + 3
+    assert (p2 == 80) "bind across IO"
 
     putStrLn "ok"

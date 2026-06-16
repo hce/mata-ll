@@ -95,9 +95,9 @@ MATA-LL TODO
 
 ## Open
 
-- [ ] Audit gen_action type guard for other matches unreachable due to unresolved type variables
-- [ ] Audit zero-arg IO helper functions for silently-passing tests (old codegen wrapped bind chains in uncalled closures)
-- [ ] Update do_eval_order/do_let_scoping tests to use `<-` bind syntax (was avoided due to now-fixed pure/return bug)
+- [x] Audit gen_action type guard for other matches unreachable due to unresolved type variables (found: ST primitive check; moved before guard)
+- [x] Audit zero-arg IO helper functions for silently-passing tests (28 helpers in 3 files were affected; all now execute correctly)
+- [x] Update do_eval_order/do_let_scoping tests to use `<-` bind syntax (added bind/pure/return tests)
 
 ## Recently completed
 
