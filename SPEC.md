@@ -1010,5 +1010,12 @@ use case.
 The following are known limitations of the current implementation:
 
 - FFI varargs (e.g. Lua's string.format)
-- Zero-arg LuaIterator (e.g. stdinLines) needs IO wrapping to avoid
-  eager evaluation
+
+## Design constraints
+
+- `LuaIterator` is for pure Lua iterators only (e.g. `string.gmatch`).
+  IO-producing iterators like `io.lines` must use `IO` and read
+  eagerly — lazy IO is not supported. Use `fileLines :: String -> IO
+  [String]` from LIO for file reading.
+- No lazy IO. File and stream operations read eagerly into lists.
+  For streaming, a conduit-style approach may be added in the future.

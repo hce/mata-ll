@@ -18,10 +18,26 @@ fClose :: FileHandle -> LuaIO ":close" ()
 
 -- File methods (handle as first arg, colon-call in Lua)
 fRead :: FileHandle -> String -> LuaIO ":read" String
-fReadLine :: FileHandle -> LuaIO ":read" String
+fReadLine :: FileHandle -> LuaIO ":read" (Maybe String)
 fWrite :: FileHandle -> String -> LuaIO ":write" ()
 fFlush :: FileHandle -> LuaIO ":flush" ()
 fSeek :: FileHandle -> String -> Integer -> LuaIO ":seek" Integer
 
--- Iterate lines from a file path as a lazy list
-fileLines :: String -> LuaIterator "io.lines" String
+-- Read all lines from a file handle (accumulator helper)
+fReadAllLines :: FileHandle -> [String] -> IO [String]
+fReadAllLines handle acc = do
+    line <- fReadLine handle
+    case line of
+        Nothing -> pure (reverse acc)
+        Just l  -> fReadAllLines handle (l : acc)
+
+-- Read all lines from a file (eagerly, no lazy IO)
+fileLines :: String -> IO [String]
+fileLines path = do
+    result <- fOpen path "r"
+    case result of
+        Left err -> error err
+        Right handle -> do
+            lines <- fReadAllLines handle []
+            fClose handle
+            pure lines
