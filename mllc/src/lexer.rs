@@ -113,6 +113,12 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 pos += 1;
                 col += 1;
             }
+            if pos < chars.len() && chars[pos] == '\t' {
+                return Err(format!(
+                    "Tab character in indentation at {}:{}. Use spaces instead.",
+                    line, col
+                ));
+            }
             // Skip blank lines
             if pos < chars.len() && chars[pos] == '\n' {
                 pos += 1;
