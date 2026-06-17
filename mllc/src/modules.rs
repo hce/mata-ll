@@ -25,8 +25,12 @@ pub struct ResolvedModule {
 pub struct ModuleLoader {
     /// Search paths for modules
     search_paths: Vec<PathBuf>,
-    /// Already loaded modules (path -> declarations)
+    /// Already loaded (parsed) modules (key -> AST)
     loaded: HashMap<String, Module>,
+    /// Already resolved modules (key -> fully resolved module)
+    resolved: HashMap<String, Module>,
+    /// Modules currently being resolved (cycle detection)
+    in_progress: HashSet<String>,
 }
 
 impl ModuleLoader {
@@ -34,6 +38,8 @@ impl ModuleLoader {
         ModuleLoader {
             search_paths: vec![source_dir.to_path_buf()],
             loaded: HashMap::new(),
+            resolved: HashMap::new(),
+            in_progress: HashSet::new(),
         }
     }
 
@@ -93,9 +99,20 @@ impl ModuleLoader {
                     }
                     seen_imports.insert(key.clone());
 
-                    let imported = self.load_module(module_path)?.clone();
                     // Recursively resolve imports in the imported module
-                    let resolved = self.resolve_imports(&imported)?;
+                    let resolved = if self.resolved.contains_key(&key) {
+                        self.resolved.get(&key).unwrap().clone()
+                    } else if self.in_progress.contains(&key) {
+                        // Cycle: treat as a module with no declarations
+                        Module { decls: Vec::new(), exports: None, hidden: HashSet::new() }
+                    } else {
+                        self.in_progress.insert(key.clone());
+                        let imported = self.load_module(module_path)?.clone();
+                        let r = self.resolve_imports(&imported)?;
+                        self.in_progress.remove(&key);
+                        self.resolved.insert(key.clone(), r.clone());
+                        r
+                    };
 
                     // Include ALL non-import declarations for compilation
                     // (exported functions may depend on internal helpers).
@@ -105,7 +122,8 @@ impl ModuleLoader {
                         .collect();
 
                     // Compute hidden names: names in the module but not exported
-                    if let Some(ref exports) = imported.exports {
+                    let parsed_exports = self.loaded.get(&key).and_then(|m| m.exports.clone());
+                    if let Some(ref exports) = parsed_exports {
                         for d in &all_decls {
                             if let Some(name) = decl_name(d) {
                                 if !exports.contains(&name) {
