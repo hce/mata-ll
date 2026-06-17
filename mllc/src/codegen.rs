@@ -1228,6 +1228,18 @@ impl CodeGen {
                     self.emit(")");
                     return;
                 }
+                if op == "$" {
+                    // return $ x / pure $ x in action context: just emit x
+                    if matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
+                        self.gen_expr_subst(rhs, subst);
+                        return;
+                    }
+                    self.gen_expr_subst(lhs, subst);
+                    self.emit("(__thunk(function() return ");
+                    self.gen_expr_subst(rhs, subst);
+                    self.emit(" end))");
+                    return;
+                }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     "mod" => "%",
@@ -1382,6 +1394,13 @@ impl CodeGen {
         if let TExprKind::App(func, arg) = &expr.kind {
             if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
                 self.gen_expr(arg);
+                return;
+            }
+        }
+        // return $ x / pure $ x: same as return(x)
+        if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind {
+            if op == "$" && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
+                self.gen_expr(rhs);
                 return;
             }
         }
