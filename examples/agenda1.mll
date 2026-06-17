@@ -11,16 +11,17 @@ data TodaysActivity a state where
     -- An agendum has exactly one item
     Agendum     :: a -> TodaysActivity a 'NonEmpty
 
-    -- An agenda combines two components, ensuring at least one is non-empty
-    Agenda      :: TodaysActivity a 'NonEmpty -> TodaysActivity a s -> TodaysActivity a 'NonEmpty
+    -- An agenda has a non-empty list of items
+    Agenda      :: a -> TodaysActivity a 'NonEmpty -> TodaysActivity a 'NonEmpty
 
 describe :: TodaysActivity a s -> String
-describe AgendaVacua   = "Nothing to discuss. The ideal meeting."
-describe (Agendum _)   = "It's an agendum, Minister."
-describe (Agenda _ _)  = "The agenda, Minister."
+describe AgendaVacua       = "Nothing to discuss. The ideal meeting."
+describe (Agendum _)       = "It's an agendum, Minister."
+describe (Agenda _ _)      = "The agenda, Minister."
 
 main :: IO ()
 main = do
   putStrLn (describe AgendaVacua)
   putStrLn (describe (Agendum "Approve budget"))
-  putStrLn (describe (Agenda (Agendum "Approve budget") (Agendum "Blame predecessor")))
+  putStrLn (describe (Agenda "Approve budget" (Agendum "Blame predecessor")))
+  putStrLn (describe (Agenda "Approve budget" (Agenda "Blame predecessor" (Agendum "Reorganise the Civil Service"))))
