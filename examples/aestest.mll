@@ -1,15 +1,7 @@
--- AES-128 test: single-file to avoid import stack overflow
+-- AES-128 test
 -- Tests block cipher, CBC, CTR, and GCM against known vectors
 
--- List utilities not in Prelude (drop/replicate require Data.List import)
-drop_ :: Integer -> [Integer] -> [Integer]
-drop_ 0 xs = xs
-drop_ _ [] = []
-drop_ n (_:xs) = drop_ (n - 1) xs
-
-replicate_ :: Integer -> Integer -> [Integer]
-replicate_ 0 _ = []
-replicate_ n x = x : replicate_ (n - 1) x
+import Data.List (drop, replicate)
 
 -- Bitwise FFI
 xorB :: Integer -> Integer -> LuaPure "__mll_bxor" Integer
@@ -207,11 +199,11 @@ aesDecryptBlock ct rk = decRounds (addRoundKey ct (getNth rk 10)) 9
 -- Split into 16-byte blocks
 blocks16 :: [Integer] -> [[Integer]]
 blocks16 [] = []
-blocks16 xs = take 16 xs : blocks16 (drop_ 16 xs)
+blocks16 xs = take 16 xs : blocks16 (drop 16 xs)
 
 -- PKCS7 padding
 pkcs7Pad :: [Integer] -> [Integer]
-pkcs7Pad bytes = bytes ++ replicate_ padLen padLen
+pkcs7Pad bytes = bytes ++ replicate padLen padLen
   where
     padLen = 16 - (length bytes `mod` 16)
 
@@ -243,7 +235,7 @@ ctrEncrypt key nonce pt = ctrGo pt 0
   where
     rk = getAllRoundKeys key
     ctrGo [] _ = []
-    ctrGo pt ctr = let ks = aesEncryptBlock (ctrBlock nonce ctr) rk in let chunk = take 16 pt in let rest = drop_ 16 pt in zipWith xorB chunk ks ++ ctrGo rest (ctr + 1)
+    ctrGo pt ctr = let ks = aesEncryptBlock (ctrBlock nonce ctr) rk in let chunk = take 16 pt in let rest = drop 16 pt in zipWith xorB chunk ks ++ ctrGo rest (ctr + 1)
 
 ctrDecrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer]
 ctrDecrypt = ctrEncrypt
@@ -266,7 +258,7 @@ shiftBytesR xs = shiftBR xs 0
     shiftBR (b:bs) carry = borB (shrB b 1) (shlB carry 7) : shiftBR bs (bandB b 1)
 
 gfMul128 :: [Integer] -> [Integer] -> [Integer]
-gfMul128 x y = gfMul128Go x (replicate_ 16 0) 0
+gfMul128 x y = gfMul128Go x (replicate 16 0) 0
   where
     gfMul128Go x z 128 = z
     gfMul128Go x z i = let yi = getNth y (i `div` 8) in let bit = bandB (shrB yi (7 - (i `mod` 8))) 1 in let z' = if bit == 1 then zipWith xorB z x else z in gfMul128Go (gfShiftRight128 x) z' (i + 1)
@@ -274,7 +266,7 @@ gfMul128 x y = gfMul128Go x (replicate_ 16 0) 0
 ghashPad :: [Integer] -> [Integer]
 ghashPad xs
   | length xs `mod` 16 == 0 = xs
-  | otherwise = xs ++ replicate_ (16 - (length xs `mod` 16)) 0
+  | otherwise = xs ++ replicate (16 - (length xs `mod` 16)) 0
 
 intToBytes8 :: Integer -> [Integer]
 intToBytes8 n = [byt (shrB n 56), byt (shrB n 48), byt (shrB n 40), byt (shrB n 32), byt (shrB n 24), byt (shrB n 16), byt (shrB n 8), byt n]
@@ -287,17 +279,17 @@ ghashBlocks h [] y = y
 ghashBlocks h (x:xs) y = ghashBlocks h xs (gfMul128 (zipWith xorB y x) h)
 
 ghash :: [Integer] -> [Integer] -> [Integer] -> [Integer]
-ghash h aad ct = ghashBlocks h (blocks16 (ghashPad aad ++ ghashPad ct ++ lengthBlock (length aad) (length ct))) (replicate_ 16 0)
+ghash h aad ct = ghashBlocks h (blocks16 (ghashPad aad ++ ghashPad ct ++ lengthBlock (length aad) (length ct))) (replicate 16 0)
 
 gcmCtr :: [[Integer]] -> [Integer] -> [Integer] -> Integer -> [Integer]
 gcmCtr rk j0 [] _ = []
-gcmCtr rk j0 pt ctr = let cb = take 12 j0 ++ [byt (shrB ctr 24), byt (shrB ctr 16), byt (shrB ctr 8), byt ctr] in let ks = aesEncryptBlock cb rk in zipWith xorB (take 16 pt) ks ++ gcmCtr rk j0 (drop_ 16 pt) (ctr + 1)
+gcmCtr rk j0 pt ctr = let cb = take 12 j0 ++ [byt (shrB ctr 24), byt (shrB ctr 16), byt (shrB ctr 8), byt ctr] in let ks = aesEncryptBlock cb rk in zipWith xorB (take 16 pt) ks ++ gcmCtr rk j0 (drop 16 pt) (ctr + 1)
 
 gcmEncrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer] -> ([Integer], [Integer])
 gcmEncrypt key iv aad pt = (ct, tag)
   where
     rk = getAllRoundKeys key
-    h = aesEncryptBlock (replicate_ 16 0) rk
+    h = aesEncryptBlock (replicate 16 0) rk
     j0 = iv ++ [0, 0, 0, 1]
     ct = gcmCtr rk j0 pt 2
     s = ghash h aad ct
@@ -307,7 +299,7 @@ gcmDecrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer] -> ([Integer], [I
 gcmDecrypt key iv aad ct = (pt, tag)
   where
     rk = getAllRoundKeys key
-    h = aesEncryptBlock (replicate_ 16 0) rk
+    h = aesEncryptBlock (replicate 16 0) rk
     j0 = iv ++ [0, 0, 0, 1]
     pt = gcmCtr rk j0 ct 2
     s = ghash h aad ct
