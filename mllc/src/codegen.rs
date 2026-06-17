@@ -607,8 +607,19 @@ impl CodeGen {
                     self.emit(")(");
                     self.emit(&eta_params.join(", "));
                     self.emit(")\n");
+                } else if Self::returns_st(&func.ty) {
+                    // ST-returning function: wrap body in a closure so the
+                    // function returns an ST action (deferred computation).
+                    // The closure is called by __mll_run in bind chains.
+                    self.emit_indent();
+                    self.emit("return function()\n");
+                    self.indent += 1;
+                    self.gen_bind_chain_io(&clause.body);
+                    self.indent -= 1;
+                    self.emit_indent();
+                    self.emit("end\n");
                 } else if Self::returns_action(&func.ty) {
-                    // IO/ST-returning function: flatten bind chains, performing
+                    // IO-returning function: flatten bind chains, performing
                     // sub-actions directly. The function itself acts as the action
                     // closure — callers use gen_action to invoke it.
                     self.gen_bind_chain_io(&clause.body);
@@ -1404,11 +1415,7 @@ impl CodeGen {
                 return;
             }
         }
-        // ST primitive calls: perform directly (no closure needed)
-        if Self::is_st_primitive_call(expr) {
-            self.gen_expr(expr);
-            return;
-        }
+        // ST primitive calls now return closures — go through __mll_run like everything else
         if !Self::is_nullary_action_type(&expr.ty) {
             // If the type is concretely non-IO (resolved to a known type),
             // emit as a plain expression. But if the type is unresolved
@@ -1501,6 +1508,14 @@ impl CodeGen {
         match ty {
             Ty::Arrow(_, ret) => Self::returns_action(ret),
             _ => Self::is_nullary_action_type(ty),
+        }
+    }
+
+    /// Check if a function type's return type is specifically an ST action.
+    fn returns_st(ty: &Ty) -> bool {
+        match ty {
+            Ty::Arrow(_, ret) => Self::returns_st(ret),
+            _ => Self::is_st_type(ty),
         }
     }
 
@@ -1668,6 +1683,16 @@ impl CodeGen {
             self.emit("__thunk(function() return ");
             self.gen_expr(expr);
             self.emit(" end)");
+        }
+    }
+
+    fn is_st_type(ty: &Ty) -> bool {
+        match ty {
+            Ty::App(f, _) => match f.as_ref() {
+                Ty::App(c, _) => matches!(c.as_ref(), Ty::Con(n) if n == "ST"),
+                _ => false,
+            },
+            _ => false,
         }
     }
 
@@ -2983,24 +3008,38 @@ local function eq_ByteString(a, b) return __force(a) == __force(b) end
 -- ST array primitives: these run inside runST which provides scoping,
 -- so they perform directly (no action closure wrapping needed).
 local function __mll_ma_new(size, init)
-    size = __force(size); init = __force(init)
-    local t = {}; for i = 1, size do t[i] = init end; return t
+    return function()
+        size = __force(size); init = __force(init)
+        local t = {}; for i = 1, size do t[i] = init end; return t
+    end
 end
-local function __mll_ma_read(arr, idx) return __force(arr)[__force(idx) + 1] end
-local function __mll_ma_write(arr, idx, val) __force(arr)[__force(idx) + 1] = __force(val) end
+local function __mll_ma_read(arr, idx)
+    return function() return __force(arr)[__force(idx) + 1] end
+end
+local function __mll_ma_write(arr, idx, val)
+    return function() __force(arr)[__force(idx) + 1] = __force(val) end
+end
 local function __mll_ma_modify(arr, idx, f)
-    arr = __force(arr); idx = __force(idx) + 1; f = __force(f)
-    arr[idx] = __force(f)(arr[idx])
+    return function()
+        arr = __force(arr); idx = __force(idx) + 1; f = __force(f)
+        arr[idx] = __force(f)(arr[idx])
+    end
 end
-local function __mll_ma_length(arr) return #__force(arr) end
+local function __mll_ma_length(arr)
+    return function() return #__force(arr) end
+end
 local function __mll_ma_from_list(xs)
-    xs = __force(xs); local t = {}; local cur = xs
-    while cur ~= nil do t[#t+1] = __force(__mll_head(cur)); cur = __mll_tail(cur) end
-    return t
+    return function()
+        xs = __force(xs); local t = {}; local cur = xs
+        while cur ~= nil do t[#t+1] = __force(__mll_head(cur)); cur = __mll_tail(cur) end
+        return t
+    end
 end
 local function __mll_ma_to_list(arr)
-    arr = __force(arr); local r = nil
-    for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
-    return r
+    return function()
+        arr = __force(arr); local r = nil
+        for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
+        return r
+    end
 end
 "#;

@@ -248,8 +248,8 @@ trigNote :: ModInfo -> STArray s -> Integer -> Integer
 trigNote mi arr ch note ins vol cmd cmdVal
   | note == 254 = writeSTArray arr (fi ch fiAct) 0
   | otherwise   = do
-        if ins > 0 && ins <= mi.miNumSmp then loadSmp mi arr ch ins else return ()
-        if note < 120 then setNoteFreq arr ch note else return ()
+        when (ins > 0 && ins <= mi.miNumSmp) (loadSmp mi arr ch ins)
+        when (note < 120) (setNoteFreq arr ch note)
         applyVol arr ch vol
         applyEffect arr ch cmd cmdVal
 
@@ -354,7 +354,7 @@ advPos arr ch = do
     let leFP = le * 256
     let fPos = if hl == 1 && nPos >= leFP && leFP > lsFP then lsFP + ((nPos - lsFP) `mod` (leFP - lsFP)) else nPos
     writeSTArray arr (fi ch fiPos) fPos
-    if hl == 0 && nPos >= slFP then writeSTArray arr (fi ch fiAct) 0 else return ()
+    when (hl == 0 && nPos >= slFP) (writeSTArray arr (fi ch fiAct) 0)
 
 -- ========== Inner loop: decode + mix one pattern (pure, inside runST) ==========
 
