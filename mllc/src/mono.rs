@@ -316,6 +316,7 @@ impl Monomorphizer {
             Ty::IO(a) => format!("IO{}", self.ty_to_suffix(a)),
             Ty::LuaIO(s, a) => format!("LIO{}_{}", s.name, self.ty_to_suffix(a)),
             Ty::Forall(_, inner) => self.ty_to_suffix(inner),
+            Ty::Skolem(name, id) => format!("SK{}_{}", name, id),
             Ty::Unit => "Unit".to_string(),
             Ty::Tuple(elems) => format!("Tup{}", elems.iter().map(|e| self.ty_to_suffix(e)).collect::<Vec<_>>().join("_")),
             Ty::Promoted(name) => format!("P{}", name),

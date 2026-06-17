@@ -1500,7 +1500,7 @@ impl CodeGen {
     fn is_definitely_not_action(ty: &Ty) -> bool {
         matches!(ty,
             Ty::Con(_) | Ty::Arrow(_, _) | Ty::List(_) | Ty::Unit
-            | Ty::Forall(_, _))
+            | Ty::Forall(_, _) | Ty::Skolem(..))
     }
 
     /// Check if a function type's return type is an IO/ST action.

@@ -363,6 +363,23 @@ impl Checker {
         }
     }
 
+    /// Convert a forall type to a polymorphic scheme for rank-2 parameter binding.
+    /// `forall a b. T` becomes `Scheme { vars: [a, b], ty: T }`.
+    /// Non-forall types become monomorphic schemes.
+    fn forall_to_scheme(ty: &Ty) -> Scheme {
+        let mut vars = vec![];
+        let mut current = ty;
+        while let Ty::Forall(v, inner) = current {
+            vars.push(v.clone());
+            current = inner;
+        }
+        if vars.is_empty() {
+            Scheme::mono(ty.clone())
+        } else {
+            Scheme { vars, ty: current.clone() }
+        }
+    }
+
     fn freshen_sig_type(&mut self, ty: &Ty) -> Ty {
         // Strip forall and bind scope variables as rigid
         let inner = match ty {
@@ -2590,7 +2607,7 @@ impl Checker {
     fn ty_mentions_var(ty: &Ty, var_name: &str) -> bool {
         match ty {
             Ty::Var(tv) => tv.name == var_name,
-            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => false,
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => false,
             Ty::Arrow(a, b) | Ty::App(a, b) => {
                 Self::ty_mentions_var(a, var_name) || Self::ty_mentions_var(b, var_name)
             }
@@ -3102,7 +3119,9 @@ impl Checker {
     ) -> Result<(TPattern, Subst), TypeErrorKind> {
         match pattern {
             Pattern::Var(name) => {
-                env.insert(name.clone(), Scheme::mono(expected.clone()));
+                // Rank-2: if expected type is forall-quantified, bind as polymorphic scheme
+                let scheme = Self::forall_to_scheme(expected);
+                env.insert(name.clone(), scheme);
                 Ok((TPattern::Var(name.clone(), expected.clone()), Subst::empty()))
             }
             Pattern::Wildcard => Ok((TPattern::Wildcard, Subst::empty())),
@@ -3201,7 +3220,52 @@ impl Checker {
                 let (ta, arg_ty, s2) = self.infer_expr(arg, &env2)?;
                 let ret_ty = self.fresh_var("_r");
                 let func_ty = func_ty.apply_subst(&s2);
-                let s3 = unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?;
+
+                // Rank-2: if the function expects a forall-quantified argument,
+                // skolemize the quantified variable and check the argument against it
+                let s3 = if let Ty::Arrow(ref param_ty, ref func_ret) = func_ty {
+                    if let Ty::Forall(..) = **param_ty {
+                        // Collect all forall-bound variables (handles forall a b. T)
+                        let mut skolems = vec![];
+                        let mut current: &Ty = param_ty;
+                        let mut vars = vec![];
+                        while let Ty::Forall(v, inner) = current {
+                            vars.push(v.clone());
+                            current = inner;
+                        }
+                        // Create skolems for each bound variable, substitute into body
+                        let mut skolem_body = current.clone();
+                        for var in &vars {
+                            let sk_id = self.next_var;
+                            self.next_var += 1;
+                            skolems.push((var.name.clone(), sk_id));
+                            let sk = Ty::Skolem(var.name.clone(), sk_id);
+                            skolem_body = skolem_body.apply_subst(
+                                &Subst::singleton(var.clone(), sk),
+                            );
+                        }
+                        // Directly check the argument against the skolemized param type
+                        let s_arg = unify(&arg_ty, &skolem_body)?;
+                        // Connect return type
+                        let s_ret = unify(&ret_ty, &func_ret.apply_subst(&s_arg))?;
+                        let combined = s_arg.compose(&s_ret);
+                        // Escape check: skolems must not appear in the return type
+                        let final_ret = ret_ty.apply_subst(&combined);
+                        for (sk_name, sk_id) in &skolems {
+                            if final_ret.contains_skolem(sk_name, *sk_id) {
+                                return Err(TypeErrorKind::Other(format!(
+                                    "Rigid type variable '{}' escapes its scope", sk_name
+                                )));
+                            }
+                        }
+                        combined
+                    } else {
+                        unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
+                    }
+                } else {
+                    unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
+                };
+
                 let final_ty = ret_ty.apply_subst(&s3);
                 Ok((
                     TExpr::new(TExprKind::App(Box::new(tf), Box::new(ta)), final_ty.clone()),

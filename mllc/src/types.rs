@@ -49,8 +49,11 @@ pub enum Ty {
     LuaIO(TyVar, Box<Ty>),
     /// Unit type: ()
     Unit,
-    /// Rank-2 forall: forall s. ty (limited to scope variables)
+    /// Rank-2 forall: forall s. ty
     Forall(TyVar, Box<Ty>),
+    /// Rigid skolem constant — cannot unify with anything except itself.
+    /// Created during rank-2 type checking to enforce polymorphism requirements.
+    Skolem(String, u32),
     /// Tuple type: (a, b, c)
     Tuple(Vec<Ty>),
     /// Promoted data constructor (DataKinds): 'Empty, 'NonEmpty
@@ -94,7 +97,7 @@ impl Ty {
     /// Collect all free type variables
     pub fn free_vars(&self) -> Vec<TyVar> {
         match self {
-            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => vec![],
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => vec![],
             Ty::Var(v) => vec![v.clone()],
             Ty::Arrow(a, b) | Ty::App(a, b) => {
                 let mut vars = a.free_vars();
@@ -131,7 +134,7 @@ impl Ty {
     /// Apply a substitution to this type
     pub fn apply_subst(&self, subst: &Subst) -> Ty {
         match self {
-            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => self.clone(),
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => self.clone(),
             Ty::Var(v) => {
                 // Follow substitution chain iteratively to avoid stack overflow
                 // from cyclic or long transitive mappings (e.g., a→b, b→c, c→Int)
@@ -172,10 +175,23 @@ impl Ty {
         }
     }
 
+    /// Check if a specific skolem occurs in this type (for escape check)
+    pub fn contains_skolem(&self, name: &str, id: u32) -> bool {
+        match self {
+            Ty::Skolem(n, i) => n == name && *i == id,
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Var(_) => false,
+            Ty::Arrow(a, b) | Ty::App(a, b) => a.contains_skolem(name, id) || b.contains_skolem(name, id),
+            Ty::List(a) | Ty::IO(a) => a.contains_skolem(name, id),
+            Ty::LuaIO(_, a) => a.contains_skolem(name, id),
+            Ty::Forall(_, inner) => inner.contains_skolem(name, id),
+            Ty::Tuple(elems) => elems.iter().any(|e| e.contains_skolem(name, id)),
+        }
+    }
+
     /// Check if a type variable occurs in this type (for occurs check)
     pub fn occurs(&self, v: &TyVar) -> bool {
         match self {
-            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => false,
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => false,
             Ty::Var(w) => v == w,
             Ty::Arrow(a, b) | Ty::App(a, b) => a.occurs(v) || b.occurs(v),
             Ty::List(a) | Ty::IO(a) => a.occurs(v),
@@ -208,6 +224,7 @@ impl fmt::Display for Ty {
             Ty::IO(a) => write!(f, "IO {}", a),
             Ty::LuaIO(s, a) => write!(f, "LuaIO {} {}", s, a),
             Ty::Forall(v, inner) => write!(f, "forall {}. {}", v, inner),
+            Ty::Skolem(name, _) => write!(f, "{}", name),
             Ty::Unit => write!(f, "()"),
             Ty::Tuple(elems) => {
                 write!(f, "(")?;
@@ -401,6 +418,12 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
             unify(inner, t)
         }
 
+        // Skolem: rigid type constant, only unifies with itself
+        (Ty::Skolem(a, i), Ty::Skolem(b, j)) if a == b && i == j => Ok(Subst::empty()),
+        (Ty::Skolem(..), t) | (t, Ty::Skolem(..)) => {
+            Err(TypeErrorKind::RigidMismatch(t1.clone(), t2.clone()))
+        }
+
         _ => Err(TypeErrorKind::Mismatch(t1.clone(), t2.clone())),
     }
 }
@@ -426,6 +449,7 @@ impl TypeError {
 #[derive(Debug)]
 pub enum TypeErrorKind {
     Mismatch(Ty, Ty),
+    RigidMismatch(Ty, Ty),
     OccursCheck(TyVar, Ty),
     UnboundVariable(String),
     UnboundConstructor(String),
@@ -440,6 +464,8 @@ impl fmt::Display for TypeError {
         match &self.kind {
             TypeErrorKind::Mismatch(a, b) =>
                 write!(f, "Cannot unify '{}' with '{}'", a, b)?,
+            TypeErrorKind::RigidMismatch(a, b) =>
+                write!(f, "Cannot match '{}' with '{}': rank-2 polymorphism requires a polymorphic argument", a, b)?,
             TypeErrorKind::OccursCheck(v, ty) =>
                 write!(f, "Infinite type: {} occurs in {}", v, ty)?,
             TypeErrorKind::UnboundVariable(name) =>

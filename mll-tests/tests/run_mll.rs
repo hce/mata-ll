@@ -143,6 +143,7 @@ mll_test!(local_overflow, "local_overflow.mll");
 mll_test!(existentials, "existentials.mll");
 mll_test!(derive_functor, "derive_functor.mll");
 mll_test!(derive_eq, "derive_eq.mll");
+mll_test!(rank2, "rank2.mll");
 
 // Stress tests
 mll_test!(stress_large_adt, "stress_large_adt.mll");
