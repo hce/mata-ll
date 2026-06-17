@@ -9,14 +9,10 @@ outRate :: Integer
 outRate = 44100
 
 clamp :: Integer -> Integer -> Integer -> Integer
-clamp lo hi x =
-    if x < lo then lo
-    else if x > hi then hi
-    else x
-
-appI :: [Integer] -> [Integer] -> [Integer]
-appI [] ys = ys
-appI (x:xs) ys = x : appI xs ys
+clamp lo hi x
+  | x < lo    = lo
+  | x > hi    = hi
+  | otherwise = x
 
 -- ========== Module Info (parsed once, threaded read-only) ==========
 
@@ -56,11 +52,10 @@ getChanPan :: ByteString -> Integer -> Integer
 getChanPan bs ch = bsIndex bs (64 + ch)
 
 countActiveChans :: ByteString -> Integer -> Integer -> Integer
-countActiveChans bs n i =
-    if i >= 64 then n
-    else if getChanPan bs i < 128
-    then countActiveChans bs (n + 1) (i + 1)
-    else countActiveChans bs n (i + 1)
+countActiveChans bs n i
+  | i >= 64            = n
+  | getChanPan bs i < 128 = countActiveChans bs (n + 1) (i + 1)
+  | otherwise          = countActiveChans bs n (i + 1)
 
 -- ========== Sample Headers ==========
 
@@ -98,11 +93,11 @@ smpHasLoop :: Integer -> Bool
 smpHasLoop flags = (flags `div` 16) `mod` 2 == 1
 
 readSmp :: ByteString -> Integer -> Integer -> Bool -> Integer
-readSmp bs dPtr pos is16 =
-    if is16
-    then bsGetI16LE bs (dPtr + pos * 2)
-    else let v = bsIndex bs (dPtr + pos)
-         in if v >= 128 then v - 256 else v
+readSmp bs dPtr pos is16
+  | is16      = bsGetI16LE bs (dPtr + pos * 2)
+  | v >= 128  = v - 256
+  | otherwise = v
+  where v = bsIndex bs (dPtr + pos)
 
 -- ========== Pattern Headers ==========
 
@@ -184,12 +179,12 @@ mkChan :: Integer -> [Integer]
 mkChan pan = [0, 0, 0, 0, 0, 0, pan, 0, 0, 0, 0, 0, 0, 8363]
 
 initChans :: ByteString -> Integer -> Integer -> [Integer]
-initChans fd n i =
-    if i >= n
-    then []
-    else let p  = getChanPan fd i
-             pv = if p >= 128 then 32 else p
-         in appI (mkChan pv) (initChans fd n (i + 1))
+initChans fd n i
+  | i >= n    = []
+  | otherwise = mkChan pv ++ initChans fd n (i + 1)
+  where
+    p  = getChanPan fd i
+    pv = if p >= 128 then 32 else p
 
 -- ========== Pattern Decoding (ST monad — O(1) array access) ==========
 
@@ -242,28 +237,25 @@ decRowLoop mi off arr masks lv jump =
 trigNote :: ModInfo -> STArray s -> Integer -> Integer
     -> Integer -> Integer -> Integer -> Integer
     -> ST s ()
-trigNote mi arr ch note ins vol cmd cmdVal =
-    if note == 254
-    then writeSTArray arr (fi ch fiAct) 0
-    else do
+trigNote mi arr ch note ins vol cmd cmdVal
+  | note == 254 = writeSTArray arr (fi ch fiAct) 0
+  | otherwise   = do
         if ins > 0 && ins <= mi.miNumSmp then loadSmp mi arr ch ins else return ()
         if note < 120 then setNoteFreq arr ch note else return ()
         applyVol arr ch vol
         applyEffect arr ch cmd cmdVal
 
 applyVol :: STArray s -> Integer -> Integer -> ST s ()
-applyVol arr ch vol =
-    if vol <= 64 then writeSTArray arr (fi ch fiVol) vol
-    else if vol >= 128 && vol <= 192 then writeSTArray arr (fi ch fiPan) (vol - 128)
-    else return ()
+applyVol arr ch vol
+  | vol <= 64              = writeSTArray arr (fi ch fiVol) vol
+  | vol >= 128 && vol <= 192 = writeSTArray arr (fi ch fiPan) (vol - 128)
+  | otherwise              = return ()
 
 applyEffect :: STArray s -> Integer -> Integer -> Integer -> ST s ()
-applyEffect arr ch cmd val =
-    if cmd == 8
-    then writeSTArray arr (fi ch fiPan) (val `div` 4)
-    else if cmd == 19 && (val `div` 16) == 8
-    then writeSTArray arr (fi ch fiPan) (((val `mod` 16) * 17) `div` 4)
-    else return ()
+applyEffect arr ch cmd val
+  | cmd == 8                         = writeSTArray arr (fi ch fiPan) (val `div` 4)
+  | cmd == 19 && (val `div` 16) == 8 = writeSTArray arr (fi ch fiPan) (((val `mod` 16) * 17) `div` 4)
+  | otherwise                        = return ()
 
 setNoteFreq :: STArray s -> Integer -> Integer -> ST s ()
 setNoteFreq arr ch note = do
@@ -310,9 +302,7 @@ mixFrames :: ModInfo -> STArray s -> Integer
     -> [ByteString] -> ST s ByteString
 mixFrames mi arr 0 acc = return (bsConcatList (reverse acc))
 mixFrames mi arr n acc = do
-    frame <- mixFrame mi arr 0 0 0
-    let l   = fst frame
-    let r   = snd frame
+    (l, r) <- mixFrame mi arr 0 0 0
     let ml  = (l * 48) `div` (128 * 3)
     let mr  = (r * 48) `div` (128 * 3)
     let pcm = bsConcat (bsPutI16LE (clamp (0 - 32768) 32767 ml)) (bsPutI16LE (clamp (0 - 32768) 32767 mr))
@@ -320,10 +310,9 @@ mixFrames mi arr n acc = do
 
 mixFrame :: ModInfo -> STArray s -> Integer
     -> Integer -> Integer -> ST s (Integer, Integer)
-mixFrame mi arr ch la ra =
-    if ch >= mi.miNumCh
-    then return (la, ra)
-    else do
+mixFrame mi arr ch la ra
+  | ch >= mi.miNumCh = return (la, ra)
+  | otherwise = do
         act <- readSTArray arr (fi ch fiAct)
         if act == 0
         then mixFrame mi arr (ch + 1) la ra
@@ -357,9 +346,7 @@ advPos arr ch = do
     let leFP = le * 256
     let fPos = if hl == 1 && nPos >= leFP && leFP > lsFP then lsFP + ((nPos - lsFP) `mod` (leFP - lsFP)) else nPos
     writeSTArray arr (fi ch fiPos) fPos
-    if hl == 0 && nPos >= slFP
-    then writeSTArray arr (fi ch fiAct) 0
-    else return ()
+    if hl == 0 && nPos >= slFP then writeSTArray arr (fi ch fiAct) 0 else return ()
 
 -- ========== Inner loop: decode + mix one pattern (pure, inside runST) ==========
 
@@ -381,17 +368,12 @@ doTickLoop mi arr spt tick chunks =
 doRows :: ModInfo -> STArray s -> ByteString -> ByteString
     -> Integer -> Integer -> Integer
     -> [ByteString] -> ST s ([ByteString], ([Integer], Integer))
-doRows mi arr masks lv dataOff row numRows chunks =
-    if row >= numRows
-    then do
+doRows mi arr masks lv dataOff row numRows chunks
+  | row >= numRows = do
         st2 <- stArrayToList arr
         return (chunks, (st2, 0 - 1))
-    else do
-        rr <- decodeRow mi dataOff arr masks lv
-        let masks2  = fst rr
-        let lv2     = fst (snd rr)
-        let nextOff = fst (snd (snd rr))
-        let jump    = snd (snd (snd rr))
+  | otherwise = do
+        (masks2, (lv2, (nextOff, jump))) <- decodeRow mi dataOff arr masks lv
         let spt     = (outRate * 60) `div` (mi.miTempo * 24)
         chunks2 <- doTicks mi arr spt chunks
         if jump >= 0 || jump == (0 - 2)
@@ -426,46 +408,39 @@ findNextPos playedPositions maxPosition n
 
 handleEnd :: ModInfo -> (ByteString -> LuaIO s ()) -> [Integer]
     -> Bool -> [Integer] -> LuaIO s ()
-handleEnd mi sw st noLoop playedPositions =
-    if noLoop
-    then case findNextPos playedPositions mi.miOrdNum 0 of
+handleEnd mi sw st noLoop playedPositions
+  | noLoop    = case findNextPos playedPositions mi.miOrdNum 0 of
         Nothing -> return ()
         Just newPos -> doOrders mi sw st newPos noLoop (newPos:playedPositions)
-    else return ()
+  | otherwise = return ()
 
 doOrders :: ModInfo -> (ByteString -> LuaIO s ()) -> [Integer]
     -> Integer -> Bool -> [Integer] -> LuaIO s ()
-doOrders mi sw st idx noLoop playedPositions =
-    if idx >= mi.miOrdNum
-    then return ()
-    else let pat = getOrder mi.miFd idx
-         in if pat == 254
-            then doOrders mi sw st (idx + 1) noLoop (idx:playedPositions)
-            else if pat == 255
-            then handleEnd mi sw st noLoop playedPositions
-            else let pOff   = patOffset mi.miFd pat
-                     nRows  = patRows mi.miFd pOff
-                     result = processPattern mi st pOff nRows
-                     chunks = fst result
-                     st2    = fst (snd result)
-                     jump   = snd (snd result)
-                     nextIdx = if jump >= 0 then jump
-                               else if jump == (0 - 2) then idx + 1
-                               else idx + 1
-                     played2 = idx:playedPositions
-                 in emitChunks sw (reverse chunks)
-                        >> if jump >= 0 && noLoop && jump `elem` played2
-                           then handleEnd mi sw st2 noLoop played2
-                           else doOrders mi sw st2 nextIdx noLoop played2
+doOrders mi sw st idx noLoop playedPositions
+  | idx >= mi.miOrdNum = return ()
+  | pat == 254         = doOrders mi sw st (idx + 1) noLoop (idx:playedPositions)
+  | pat == 255         = handleEnd mi sw st noLoop playedPositions
+  | otherwise          =
+        case processPattern mi st pOff nRows of
+            (chunks, (st2, jump)) ->
+                let nextIdx = if jump >= 0 then jump else idx + 1
+                    played2 = idx:playedPositions
+                in emitChunks sw (reverse chunks)
+                    >> if jump >= 0 && noLoop && jump `elem` played2
+                       then handleEnd mi sw st2 noLoop played2
+                       else doOrders mi sw st2 nextIdx noLoop played2
+  where
+    pat   = getOrder mi.miFd idx
+    pOff  = patOffset mi.miFd pat
+    nRows = patRows mi.miFd pOff
 
 -- Find IMPM magic to skip UMX/container headers.
 -- Returns the offset of 'I' in 'IMPM', or 0 if the file starts with it.
 findIMPM :: ByteString -> Integer -> Integer
-findIMPM bs i =
-    if i + 3 >= bsLength bs then 0
-    else if bsIndex bs i == 73 && bsIndex bs (i + 1) == 77 && bsIndex bs (i + 2) == 80 && bsIndex bs (i + 3) == 77
-    then i
-    else findIMPM bs (i + 1)
+findIMPM bs i
+  | i + 3 >= bsLength bs = 0
+  | bsIndex bs i == 73 && bsIndex bs (i + 1) == 77 && bsIndex bs (i + 2) == 80 && bsIndex bs (i + 3) == 77 = i
+  | otherwise = findIMPM bs (i + 1)
 
 export play :: (ByteString -> LuaIO s ()) -> ByteString -> Bool -> LuaIO s ()
 play swallower fd noLoop =
