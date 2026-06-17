@@ -126,6 +126,7 @@ mll_test!(type_aliases, "type_aliases.mll");
 mll_test!(edge_cases, "edge_cases.mll");
 mll_test!(feature_interactions, "feature_interactions.mll");
 mll_test!(demand_analysis, "demand_analysis.mll");
+mll_test!(ffi_strictness, "ffi_strictness.mll");
 mll_test!(seq_when_putstr, "seq_when_putstr.mll");
 mll_test!(any_type, "any_type.mll");
 mll_test!(bytestring, "bytestring.mll");
