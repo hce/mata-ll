@@ -319,7 +319,7 @@ impl CodeGen {
             if let Some(&slot) = self.fn_table.get(name.as_str()) {
                 self.emit_line(&format!("__mll_fn[{}] = function(_v) return _v end", slot));
             } else {
-                self.emit_line(&format!("local function {}(_v) return _v end", name));
+                self.emit_line(&format!("local function {}(_v) return _v end", sanitize_name(name)));
             }
         }
         if !module.newtypes.is_empty() {
@@ -396,7 +396,7 @@ impl CodeGen {
                 let params_str = if n_args > 0 { params.join(", ") } else { "...".to_string() };
 
                 self.emit_indent();
-                self.emit(&format!("{name} = function({params_str})\n"));
+                self.emit(&format!("{} = function({params_str})\n", sanitize_name(name)));
                 self.indent += 1;
 
                 // Type-directed argument conversion
@@ -447,7 +447,7 @@ impl CodeGen {
                 TConFields::Named(f) => f.len(),
             };
 
-            let decl = self.var_decl(&con.name);
+            let decl = self.var_decl(&sanitize_name(&con.name));
 
             if field_count == 0 {
                 if is_enum {
@@ -757,7 +757,7 @@ impl CodeGen {
                     if all_simple {
                         for (j, pat) in clause.patterns.iter().enumerate() {
                             if let TPattern::Var(v, _) = pat {
-                                self.emit_line(&format!("local {} = _warg{}", v, j));
+                                self.emit_line(&format!("local {} = _warg{}", sanitize_name(v), j));
                             }
                         }
                         self.emit_indent();
@@ -1249,7 +1249,7 @@ impl CodeGen {
                     inner_subst.remove(name.as_str());
                     self.local_vars.insert(sanitize_name(name));
                 }
-                let ps: Vec<&str> = params.iter().map(|(s, _)| s.as_str()).collect();
+                let ps: Vec<String> = params.iter().map(|(s, _)| sanitize_name(s)).collect();
                 self.emit(&format!("function({})\n", ps.join(", ")));
                 self.indent += 1;
                 self.emit_indent(); self.emit("return ");
@@ -1660,7 +1660,7 @@ impl CodeGen {
                 match name.as_str() {
                     "[]" => self.emit("nil"),
                     _ => {
-                        let lref = self.lua_ref(name);
+                        let lref = self.lua_ref(&sanitize_name(name));
                         self.emit(&lref);
                     }
                 }
@@ -2015,12 +2015,13 @@ impl CodeGen {
                 self.emit("(function()\n"); self.indent += 1;
                 for bind in binds {
                     self.emit_indent();
+                    let sname = sanitize_name(&bind.name);
                     if Self::is_cheap(&bind.body) {
-                        self.emit(&format!("local {} = ", bind.name));
+                        self.emit(&format!("local {} = ", sname));
                         self.gen_expr(&bind.body); self.emit("\n");
-                        self.concrete_vars.insert(bind.name.clone());
+                        self.concrete_vars.insert(sname);
                     } else {
-                        self.emit(&format!("local {} = __thunk(function() return ", bind.name));
+                        self.emit(&format!("local {} = __thunk(function() return ", sname));
                         self.gen_expr(&bind.body); self.emit(" end)\n");
                     }
                 }
@@ -2028,7 +2029,7 @@ impl CodeGen {
                 self.indent -= 1; self.emit_indent(); self.emit("end)()");
             }
             TExprKind::Lambda { params, body } => {
-                let ps: Vec<&str> = params.iter().map(|(s, _)| s.as_str()).collect();
+                let ps: Vec<String> = params.iter().map(|(s, _)| sanitize_name(s)).collect();
                 let saved_locals = self.local_vars.clone();
                 for (p, _) in params { self.local_vars.insert(sanitize_name(p)); }
                 self.emit(&format!("function({})\n", ps.join(", ")));
@@ -2265,7 +2266,7 @@ impl CodeGen {
                 self.emit("}");
             }
             TExprKind::DictAccess { dict_param, method_name } => {
-                self.emit(&format!("{}.{}", dict_param, sanitize_name(method_name)));
+                self.emit(&format!("{}.{}", sanitize_name(dict_param), sanitize_name(method_name)));
             }
             TExprKind::DictCall { func_name, dict_args, value_args } => {
                 let sfn = sanitize_name(func_name);
