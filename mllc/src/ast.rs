@@ -254,6 +254,10 @@ pub enum DoStmt {
     Expr(Expr),
     /// `let x = expr`
     DoLet { name: String, expr: Expr },
+    /// `(a, b) <- expr` (pattern bind)
+    PatternBind { pattern: Pattern, expr: Expr },
+    /// `let (a, b) = expr` (pattern let)
+    PatternDoLet { pattern: Pattern, expr: Expr },
 }
 
 /// Literal values.

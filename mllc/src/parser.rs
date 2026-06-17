@@ -1910,6 +1910,9 @@ impl Parser {
                 self.skip_newlines_and_indent();
                 let mut binds = Vec::new();
                 let let_indent = self.current_indent;
+                // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
+                let mut tuple_binds: Vec<(String, Pattern)> = Vec::new();
+                let mut fresh_counter = 0usize;
 
                 loop {
                     self.skip_newlines_and_indent();
@@ -1918,6 +1921,20 @@ impl Parser {
                     }
                     if self.at(&Token::In) {
                         break;
+                    }
+                    // Tuple pattern: let (a, b) = expr
+                    if matches!(self.peek(), Token::LeftParen) {
+                        let pat = self.parse_pattern_atom()?;
+                        if matches!(pat, Pattern::Tuple(_)) {
+                            self.expect(&Token::Eq)?;
+                            let rhs = self.parse_expr()?;
+                            let fresh = format!("__tup_{}", fresh_counter);
+                            fresh_counter += 1;
+                            binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
+                            tuple_binds.push((fresh, pat));
+                            continue;
+                        }
+                        return Err(format!("Expected tuple pattern or identifier in let binding"));
                     }
                     if !matches!(self.peek(), Token::Ident(_)) {
                         break;
@@ -1935,7 +1952,19 @@ impl Parser {
                 self.skip_newlines_and_indent();
                 self.expect(&Token::In)?;
                 self.skip_newlines_and_indent();
-                let body = self.parse_expr()?;
+                let mut body = self.parse_expr()?;
+
+                // Wrap body in case expressions for tuple patterns (innermost last)
+                for (fresh, pat) in tuple_binds.into_iter().rev() {
+                    body = Expr::Case {
+                        scrutinee: Box::new(Expr::Var(fresh)),
+                        branches: vec![CaseBranch {
+                            pattern: pat,
+                            guards: vec![],
+                            body,
+                        }],
+                    };
+                }
 
                 Ok(Expr::Let {
                     binds,
@@ -1955,10 +1984,21 @@ impl Parser {
                         break;
                     }
 
-                    // Check for `let name = expr` (possibly multiple bindings)
+                    // Check for `let name = expr` or `let (a, b) = expr`
                     if self.at(&Token::Let) {
                         self.advance();
                         let let_indent = self.current_indent;
+                        // Tuple pattern: let (a, b) = expr
+                        if matches!(self.peek(), Token::LeftParen) {
+                            let pat = self.parse_pattern_atom()?;
+                            if matches!(pat, Pattern::Tuple(_)) {
+                                self.expect(&Token::Eq)?;
+                                let expr = self.parse_expr()?;
+                                stmts.push(DoStmt::PatternDoLet { pattern: pat, expr });
+                                continue;
+                            }
+                            return Err("Expected tuple pattern or identifier in let binding".to_string());
+                        }
                         let name = self.expect_ident()?;
                         // Collect optional patterns: let f x y = expr => let f = \x y -> expr
                         let mut params = Vec::new();
@@ -2030,6 +2070,22 @@ impl Parser {
                             break;
                         }
                         continue;
+                    }
+
+                    // Check for `(a, b) <- expr` (pattern bind)
+                    if matches!(self.peek(), Token::LeftParen) {
+                        let save_tup = self.pos;
+                        let save_tup_indent = self.current_indent;
+                        if let Ok(pat) = self.parse_pattern_atom() {
+                            if matches!(pat, Pattern::Tuple(_)) && self.at(&Token::Bind) {
+                                self.advance();
+                                let expr = self.parse_expr()?;
+                                stmts.push(DoStmt::PatternBind { pattern: pat, expr });
+                                continue;
+                            }
+                        }
+                        self.pos = save_tup;
+                        self.current_indent = save_tup_indent;
                     }
 
                     // Check for `name <- expr` (bind)

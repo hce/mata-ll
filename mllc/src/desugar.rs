@@ -110,6 +110,8 @@ fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
         DoStmt::Expr(expr) => desugar_expr(expr.clone()),
         DoStmt::Bind { expr, .. } => desugar_expr(expr.clone()),
         DoStmt::DoLet { expr, .. } => desugar_expr(expr.clone()),
+        DoStmt::PatternBind { expr, .. } => desugar_expr(expr.clone()),
+        DoStmt::PatternDoLet { expr, .. } => desugar_expr(expr.clone()),
     };
 
     for i in (idx..last).rev() {
@@ -145,6 +147,46 @@ fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
                         body: expr,
                     }],
                     body: Box::new(result),
+                };
+            }
+            DoStmt::PatternDoLet { pattern, expr } => {
+                // let (a, b) = expr => let __tup = expr in case __tup of { (a, b) -> rest }
+                let expr = desugar_expr(expr.clone());
+                let fresh = format!("__tup_{}", i);
+                result = Expr::Let {
+                    binds: vec![LocalDef {
+                        name: fresh.clone(),
+                        patterns: vec![],
+                        body: expr,
+                    }],
+                    body: Box::new(Expr::Case {
+                        scrutinee: Box::new(Expr::Var(fresh)),
+                        branches: vec![CaseBranch {
+                            pattern: pattern.clone(),
+                            guards: vec![],
+                            body: result,
+                        }],
+                    }),
+                };
+            }
+            DoStmt::PatternBind { pattern, expr } => {
+                // (a, b) <- expr => expr >>= \__tup -> case __tup of { (a, b) -> rest }
+                let expr = desugar_expr(expr.clone());
+                let fresh = format!("__tup_{}", i);
+                result = Expr::InfixApp {
+                    op: ">>=".to_string(),
+                    lhs: Box::new(expr),
+                    rhs: Box::new(Expr::Lambda {
+                        params: vec![fresh.clone()],
+                        body: Box::new(Expr::Case {
+                            scrutinee: Box::new(Expr::Var(fresh)),
+                            branches: vec![CaseBranch {
+                                pattern: pattern.clone(),
+                                guards: vec![],
+                                body: result,
+                            }],
+                        }),
+                    }),
                 };
             }
         }
