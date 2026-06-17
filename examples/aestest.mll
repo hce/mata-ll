@@ -1,15 +1,7 @@
 -- AES-128 test: single-file to avoid import stack overflow
 -- Tests block cipher, CBC, CTR, and GCM against known vectors
 
--- List utilities not in Prelude
-append :: [Integer] -> [Integer] -> [Integer]
-append [] ys = ys
-append (x:xs) ys = x : append xs ys
-
-appendW :: [[Integer]] -> [[Integer]] -> [[Integer]]
-appendW [] ys = ys
-appendW (x:xs) ys = x : appendW xs ys
-
+-- List utilities not in Prelude (drop/replicate require Data.List import)
 drop_ :: Integer -> [Integer] -> [Integer]
 drop_ 0 xs = xs
 drop_ _ [] = []
@@ -18,12 +10,6 @@ drop_ n (_:xs) = drop_ (n - 1) xs
 replicate_ :: Integer -> Integer -> [Integer]
 replicate_ 0 _ = []
 replicate_ n x = x : replicate_ (n - 1) x
-
-listEq :: [Integer] -> [Integer] -> Bool
-listEq [] [] = True
-listEq [] _ = False
-listEq _ [] = False
-listEq (x:xs) (y:ys) = if x == y then listEq xs ys else False
 
 -- Bitwise FFI
 xorB :: Integer -> Integer -> LuaPure "__mll_bxor" Integer
@@ -43,7 +29,9 @@ byt x = bandB x 255
 
 -- GF(2^8) multiplication
 gfMul2 :: Integer -> Integer
-gfMul2 b = if bandB b 128 == 128 then xorB (bandB (shlB b 1) 255) 27 else bandB (shlB b 1) 255
+gfMul2 b
+  | bandB b 128 == 128 = xorB (bandB (shlB b 1) 255) 27
+  | otherwise           = bandB (shlB b 1) 255
 
 gfMul3 :: Integer -> Integer
 gfMul3 b = xorB (gfMul2 b) b
@@ -52,7 +40,7 @@ gfMul :: Integer -> Integer -> Integer
 gfMul a b = gfMulGo a b 0
   where
     gfMulGo _ 0 acc = acc
-    gfMulGo a b acc = gfMulGo (if bandB a 128 == 128 then xorB (bandB (shlB a 1) 255) 27 else bandB (shlB a 1) 255) (shrB b 1) (if bandB b 1 == 1 then xorB acc a else acc)
+    gfMulGo a b acc = let nacc = if bandB b 1 == 1 then xorB acc a else acc in gfMulGo (gfMul2 a) (shrB b 1) nacc
 
 -- S-Box as HashMap for O(1) lookup
 -- Split into 64-element chunks to avoid Lua's 255 register limit
@@ -65,7 +53,7 @@ sbox2 = [205, 12, 19, 236, 95, 151, 68, 23, 196, 167, 126, 61, 100, 93, 25, 115,
 sbox3 :: [Integer]
 sbox3 = [186, 120, 37, 46, 28, 166, 180, 198, 232, 221, 116, 31, 75, 189, 139, 138, 112, 62, 181, 102, 72, 3, 246, 14, 97, 53, 87, 185, 134, 193, 29, 158, 225, 248, 152, 17, 105, 217, 142, 148, 155, 30, 135, 233, 206, 85, 40, 223, 140, 161, 137, 13, 191, 230, 66, 104, 65, 153, 45, 15, 176, 84, 187, 22]
 sboxList :: [Integer]
-sboxList = append sbox0 (append sbox1 (append sbox2 sbox3))
+sboxList = sbox0 ++ sbox1 ++ sbox2 ++ sbox3
 
 isbox0 :: [Integer]
 isbox0 = [82, 9, 106, 213, 48, 54, 165, 56, 191, 64, 163, 158, 129, 243, 215, 251, 124, 227, 57, 130, 155, 47, 255, 135, 52, 142, 67, 68, 196, 222, 233, 203, 84, 123, 148, 50, 166, 194, 35, 61, 238, 76, 149, 11, 66, 250, 195, 78, 8, 46, 161, 102, 40, 217, 36, 178, 118, 91, 162, 73, 109, 139, 209, 37]
@@ -76,7 +64,7 @@ isbox2 = [58, 145, 17, 65, 79, 103, 220, 234, 151, 242, 207, 206, 240, 180, 230,
 isbox3 :: [Integer]
 isbox3 = [31, 221, 168, 51, 136, 7, 199, 49, 177, 18, 16, 89, 39, 128, 236, 95, 96, 81, 127, 169, 25, 181, 74, 13, 45, 229, 122, 159, 147, 201, 156, 239, 160, 224, 59, 77, 174, 42, 245, 176, 200, 235, 187, 60, 131, 83, 153, 97, 23, 43, 4, 126, 186, 119, 214, 38, 225, 105, 20, 99, 85, 33, 12, 125]
 invSboxList :: [Integer]
-invSboxList = append isbox0 (append isbox1 (append isbox2 isbox3))
+invSboxList = isbox0 ++ isbox1 ++ isbox2 ++ isbox3
 
 buildTable :: [Integer] -> Integer -> HashMap Integer Integer
 buildTable [] _ = hmEmpty
@@ -148,19 +136,19 @@ mixColumn :: Integer -> Integer -> Integer -> Integer -> [Integer]
 mixColumn a0 a1 a2 a3 = [xorB (xorB (gfMul2 a0) (gfMul3 a1)) (xorB a2 a3), xorB (xorB a0 (gfMul2 a1)) (xorB (gfMul3 a2) a3), xorB (xorB a0 a1) (xorB (gfMul2 a2) (gfMul3 a3)), xorB (xorB (gfMul3 a0) a1) (xorB a2 (gfMul2 a3))]
 
 mixColumns :: [Integer] -> [Integer]
-mixColumns st = mixColGo st 0
+mixColumns st = mixColGo 0
   where
-    mixColGo st 4 = []
-    mixColGo st c = append (mixColumn (stGet st 0 c) (stGet st 1 c) (stGet st 2 c) (stGet st 3 c)) (mixColGo st (c + 1))
+    mixColGo 4 = []
+    mixColGo c = mixColumn (stGet st 0 c) (stGet st 1 c) (stGet st 2 c) (stGet st 3 c) ++ mixColGo (c + 1)
 
 invMixColumn :: Integer -> Integer -> Integer -> Integer -> [Integer]
 invMixColumn a0 a1 a2 a3 = [xorB (xorB (gfMul 14 a0) (gfMul 11 a1)) (xorB (gfMul 13 a2) (gfMul 9 a3)), xorB (xorB (gfMul 9 a0) (gfMul 14 a1)) (xorB (gfMul 11 a2) (gfMul 13 a3)), xorB (xorB (gfMul 13 a0) (gfMul 9 a1)) (xorB (gfMul 14 a2) (gfMul 11 a3)), xorB (xorB (gfMul 11 a0) (gfMul 13 a1)) (xorB (gfMul 9 a2) (gfMul 14 a3))]
 
 invMixColumns :: [Integer] -> [Integer]
-invMixColumns st = invMixColGo st 0
+invMixColumns st = invMixColGo 0
   where
-    invMixColGo st 4 = []
-    invMixColGo st c = append (invMixColumn (stGet st 0 c) (stGet st 1 c) (stGet st 2 c) (stGet st 3 c)) (invMixColGo st (c + 1))
+    invMixColGo 4 = []
+    invMixColGo c = invMixColumn (stGet st 0 c) (stGet st 1 c) (stGet st 2 c) (stGet st 3 c) ++ invMixColGo (c + 1)
 
 -- AddRoundKey
 addRoundKey :: [Integer] -> [Integer] -> [Integer]
@@ -181,7 +169,7 @@ xorRcon (a:rest) rc = xorB a rc : rest
 xorRcon xs _ = xs
 
 expandRound :: [Integer] -> Integer -> [Integer]
-expandRound prev round = append w0 (append w1 (append w2 w3))
+expandRound prev round = w0 ++ w1 ++ w2 ++ w3
   where
     p = splitWords prev
     lastW = getNth p 3
@@ -223,7 +211,7 @@ blocks16 xs = take 16 xs : blocks16 (drop_ 16 xs)
 
 -- PKCS7 padding
 pkcs7Pad :: [Integer] -> [Integer]
-pkcs7Pad bytes = append bytes (replicate_ padLen padLen)
+pkcs7Pad bytes = bytes ++ replicate_ padLen padLen
   where
     padLen = 16 - (length bytes `mod` 16)
 
@@ -233,36 +221,43 @@ pkcs7Unpad bytes = take (length bytes - getNth bytes (length bytes - 1)) bytes
 
 -- CBC mode
 cbcEncrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer]
-cbcEncrypt key iv pt = cbcEncGo (getAllRoundKeys key) iv (blocks16 (pkcs7Pad pt))
+cbcEncrypt key iv pt = cbcEncGo iv (blocks16 (pkcs7Pad pt))
   where
-    cbcEncGo rk prev [] = []
-    cbcEncGo rk prev (b:bs) = let cipher = aesEncryptBlock (zipWith xorB prev b) rk in append cipher (cbcEncGo rk cipher bs)
+    rk = getAllRoundKeys key
+    cbcEncGo prev [] = []
+    cbcEncGo prev (b:bs) = let cipher = aesEncryptBlock (zipWith xorB prev b) rk in cipher ++ cbcEncGo cipher bs
 
 cbcDecrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer]
-cbcDecrypt key iv ct = pkcs7Unpad (cbcDecGo (getAllRoundKeys key) iv (blocks16 ct))
+cbcDecrypt key iv ct = pkcs7Unpad (cbcDecGo iv (blocks16 ct))
   where
-    cbcDecGo rk prev [] = []
-    cbcDecGo rk prev (b:bs) = append (zipWith xorB prev (aesDecryptBlock b rk)) (cbcDecGo rk b bs)
+    rk = getAllRoundKeys key
+    cbcDecGo prev [] = []
+    cbcDecGo prev (b:bs) = zipWith xorB prev (aesDecryptBlock b rk) ++ cbcDecGo b bs
 
 -- CTR mode
 ctrBlock :: [Integer] -> Integer -> [Integer]
-ctrBlock nonce ctr = append (take 12 nonce) [byt (shrB ctr 24), byt (shrB ctr 16), byt (shrB ctr 8), byt ctr]
+ctrBlock nonce ctr = take 12 nonce ++ [byt (shrB ctr 24), byt (shrB ctr 16), byt (shrB ctr 8), byt ctr]
 
 ctrEncrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer]
-ctrEncrypt key nonce pt = ctrGo (getAllRoundKeys key) nonce pt 0
+ctrEncrypt key nonce pt = ctrGo pt 0
   where
-    ctrGo rk n [] _ = []
-    ctrGo rk n pt ctr = let ks = aesEncryptBlock (ctrBlock n ctr) rk in let chunk = take 16 pt in let rest = drop_ 16 pt in append (zipWith xorB chunk ks) (ctrGo rk n rest (ctr + 1))
+    rk = getAllRoundKeys key
+    ctrGo [] _ = []
+    ctrGo pt ctr = let ks = aesEncryptBlock (ctrBlock nonce ctr) rk in let chunk = take 16 pt in let rest = drop_ 16 pt in zipWith xorB chunk ks ++ ctrGo rest (ctr + 1)
 
 ctrDecrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer]
 ctrDecrypt = ctrEncrypt
 
 -- GCM mode
 gfShiftRight128 :: [Integer] -> [Integer]
-gfShiftRight128 xs = let carry = bandB (getNth xs 15) 1 in let shifted = shiftBytesR xs in if carry == 1 then xorFirst shifted else shifted
+gfShiftRight128 xs
+  | carry == 1 = xorFirst shifted
+  | otherwise  = shifted
   where
+    carry = bandB (getNth xs 15) 1
+    shifted = shiftBytesR xs
     xorFirst (h:t) = xorB h 225 : t
-    xorFirst xs = xs
+    xorFirst ys = ys
 
 shiftBytesR :: [Integer] -> [Integer]
 shiftBytesR xs = shiftBR xs 0
@@ -271,37 +266,39 @@ shiftBytesR xs = shiftBR xs 0
     shiftBR (b:bs) carry = borB (shrB b 1) (shlB carry 7) : shiftBR bs (bandB b 1)
 
 gfMul128 :: [Integer] -> [Integer] -> [Integer]
-gfMul128 x y = gfMul128Go x y (replicate_ 16 0) 0
+gfMul128 x y = gfMul128Go x (replicate_ 16 0) 0
   where
-    gfMul128Go x y z 128 = z
-    gfMul128Go x y z i = let yi = getNth y (i `div` 8) in let bit = bandB (shrB yi (7 - (i `mod` 8))) 1 in let z2 = if bit == 1 then zipWith xorB z x else z in gfMul128Go (gfShiftRight128 x) y z2 (i + 1)
+    gfMul128Go x z 128 = z
+    gfMul128Go x z i = let yi = getNth y (i `div` 8) in let bit = bandB (shrB yi (7 - (i `mod` 8))) 1 in let nz = if bit == 1 then zipWith xorB z x else z in gfMul128Go (gfShiftRight128 x) nz (i + 1)
 
 ghashPad :: [Integer] -> [Integer]
-ghashPad xs = if (length xs `mod` 16) == 0 then xs else append xs (replicate_ (16 - (length xs `mod` 16)) 0)
+ghashPad xs
+  | length xs `mod` 16 == 0 = xs
+  | otherwise = xs ++ replicate_ (16 - (length xs `mod` 16)) 0
 
 intToBytes8 :: Integer -> [Integer]
 intToBytes8 n = [byt (shrB n 56), byt (shrB n 48), byt (shrB n 40), byt (shrB n 32), byt (shrB n 24), byt (shrB n 16), byt (shrB n 8), byt n]
 
 lengthBlock :: Integer -> Integer -> [Integer]
-lengthBlock aadLen ctLen = append (intToBytes8 (aadLen * 8)) (intToBytes8 (ctLen * 8))
+lengthBlock aadLen ctLen = intToBytes8 (aadLen * 8) ++ intToBytes8 (ctLen * 8)
 
 ghashBlocks :: [Integer] -> [[Integer]] -> [Integer] -> [Integer]
 ghashBlocks h [] y = y
 ghashBlocks h (x:xs) y = ghashBlocks h xs (gfMul128 (zipWith xorB y x) h)
 
 ghash :: [Integer] -> [Integer] -> [Integer] -> [Integer]
-ghash h aad ct = ghashBlocks h (blocks16 (append (ghashPad aad) (append (ghashPad ct) (lengthBlock (length aad) (length ct))))) (replicate_ 16 0)
+ghash h aad ct = ghashBlocks h (blocks16 (ghashPad aad ++ ghashPad ct ++ lengthBlock (length aad) (length ct))) (replicate_ 16 0)
 
 gcmCtr :: [[Integer]] -> [Integer] -> [Integer] -> Integer -> [Integer]
 gcmCtr rk j0 [] _ = []
-gcmCtr rk j0 pt ctr = let cb = append (take 12 j0) [byt (shrB ctr 24), byt (shrB ctr 16), byt (shrB ctr 8), byt ctr] in let ks = aesEncryptBlock cb rk in append (zipWith xorB (take 16 pt) ks) (gcmCtr rk j0 (drop_ 16 pt) (ctr + 1))
+gcmCtr rk j0 pt ctr = let cb = take 12 j0 ++ [byt (shrB ctr 24), byt (shrB ctr 16), byt (shrB ctr 8), byt ctr] in let ks = aesEncryptBlock cb rk in zipWith xorB (take 16 pt) ks ++ gcmCtr rk j0 (drop_ 16 pt) (ctr + 1)
 
 gcmEncrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer] -> ([Integer], [Integer])
 gcmEncrypt key iv aad pt = (ct, tag)
   where
     rk = getAllRoundKeys key
     h = aesEncryptBlock (replicate_ 16 0) rk
-    j0 = append iv [0, 0, 0, 1]
+    j0 = iv ++ [0, 0, 0, 1]
     ct = gcmCtr rk j0 pt 2
     s = ghash h aad ct
     tag = zipWith xorB s (aesEncryptBlock j0 rk)
@@ -311,14 +308,16 @@ gcmDecrypt key iv aad ct = (pt, tag)
   where
     rk = getAllRoundKeys key
     h = aesEncryptBlock (replicate_ 16 0) rk
-    j0 = append iv [0, 0, 0, 1]
+    j0 = iv ++ [0, 0, 0, 1]
     pt = gcmCtr rk j0 ct 2
     s = ghash h aad ct
     tag = zipWith xorB s (aesEncryptBlock j0 rk)
 
 -- Hex conversion
 hexNibble :: Integer -> Integer
-hexNibble n = if n < 10 then n + 48 else n + 87
+hexNibble n
+  | n < 10    = n + 48
+  | otherwise = n + 87
 
 hexByte :: Integer -> String
 hexByte b = strChar (hexNibble (shrB b 4)) <> strChar (hexNibble (bandB b 15))
@@ -328,17 +327,27 @@ bytesToHex [] = ""
 bytesToHex (b:bs) = hexByte b <> bytesToHex bs
 
 hexVal :: Integer -> Integer
-hexVal c = if c >= 48 && c <= 57 then c - 48 else if c >= 97 && c <= 102 then c - 87 else if c >= 65 && c <= 70 then c - 55 else 0
+hexVal c
+  | c >= 48 && c <= 57  = c - 48
+  | c >= 97 && c <= 102 = c - 87
+  | c >= 65 && c <= 70  = c - 55
+  | otherwise            = 0
 
 hexToBytes :: String -> [Integer]
-hexToBytes s = hexGo s 1 (strLen s)
+hexToBytes s = hexGo 1
   where
-    hexGo s i len = if i + 1 > len then [] else borB (shlB (hexVal (strByte s i)) 4) (hexVal (strByte s (i + 1))) : hexGo s (i + 2) len
+    len = strLen s
+    hexGo i
+      | i + 1 > len = []
+      | otherwise    = borB (shlB (hexVal (strByte s i)) 4) (hexVal (strByte s (i + 1))) : hexGo (i + 2)
 
 stringToBytes :: String -> [Integer]
-stringToBytes s = stbGo s 1 (strLen s)
+stringToBytes s = stbGo 1
   where
-    stbGo s i len = if i > len then [] else strByte s i : stbGo s (i + 1) len
+    len = strLen s
+    stbGo i
+      | i > len   = []
+      | otherwise = strByte s i : stbGo (i + 1)
 
 bytesToString :: [Integer] -> String
 bytesToString [] = ""
@@ -365,7 +374,7 @@ main = do
     let cbcCt  = cbcEncrypt cbcKey cbcIv cbcPt
     putStrLn $ "CBC ciphertext: " <> bytesToHex cbcCt
     let cbcDec = cbcDecrypt cbcKey cbcIv cbcCt
-    assert (listEq cbcDec cbcPt) "CBC roundtrip"
+    assert (cbcDec == cbcPt) "CBC roundtrip"
     putStrLn "AES-128-CBC: PASS"
 
     -- CTR roundtrip
@@ -375,7 +384,7 @@ main = do
     let ctrCt    = ctrEncrypt ctrKey ctrNonce ctrPt
     putStrLn $ "CTR ciphertext: " <> bytesToHex ctrCt
     let ctrDec   = ctrDecrypt ctrKey ctrNonce ctrCt
-    assert (listEq ctrDec ctrPt) "CTR roundtrip"
+    assert (ctrDec == ctrPt) "CTR roundtrip"
     putStrLn "AES-128-CTR: PASS"
 
     -- GCM roundtrip
@@ -391,8 +400,8 @@ main = do
     let gcmResult2 = gcmDecrypt gcmKey gcmIv gcmAad gcmCt
     let gcmDec = fst gcmResult2
     let gcmTag2 = snd gcmResult2
-    assert (listEq gcmDec gcmPt) "GCM roundtrip"
-    assert (listEq gcmTag gcmTag2) "GCM tags match"
+    assert (gcmDec == gcmPt) "GCM roundtrip"
+    assert (gcmTag == gcmTag2) "GCM tags match"
     putStrLn "AES-128-GCM: PASS"
 
     putStrLn "All AES tests passed!"
