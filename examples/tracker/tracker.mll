@@ -202,7 +202,7 @@ decodeRow :: ModInfo -> Integer -> STArray s -> ByteString
     -> ByteString
     -> ST s (ByteString, (ByteString, (Integer, Integer)))
 decodeRow mi off arr masks lv =
-    decRowLoop mi off arr masks lv (0 - 1)
+    decRowLoop mi off arr masks lv (-1)
 
 decRowLoop :: ModInfo -> Integer -> STArray s -> ByteString
     -> ByteString -> Integer
@@ -237,7 +237,7 @@ decRowLoop mi off arr masks lv jump =
                 lv3 = if hasIns  then bsSetByte lv2 (ch * 4 + 1) ins  else lv2
                 lv4 = if hasVol  then bsSetByte lv3 (ch * 4 + 2) vol  else lv3
                 jump2 = if cmd == 2 then cmdVal
-                         else if cmd == 3 then 0 - 2
+                         else if cmd == 3 then -2
                          else jump
             in trigNote mi arr ch note ins vol cmd cmdVal
                 >> decRowLoop mi off7 arr msk2 lv4 jump2
@@ -379,12 +379,12 @@ doRows :: ModInfo -> STArray s -> ByteString -> ByteString
 doRows mi arr masks lv dataOff row numRows chunks
   | row >= numRows = do
         st2 <- stArrayToList arr
-        return (chunks, (st2, 0 - 1))
+        return (chunks, (st2, -1))
   | otherwise = do
         (masks2, (lv2, (nextOff, jump))) <- decodeRow mi dataOff arr masks lv
         let spt     = (outRate * 60) `div` (mi.miTempo * 24)
         chunks2 <- doTicks mi arr spt chunks
-        if jump >= 0 || jump == (0 - 2)
+        if jump >= 0 || jump == (-2)
         then do
             st2 <- stArrayToList arr
             return (chunks2, (st2, jump))
