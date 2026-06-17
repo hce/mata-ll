@@ -94,12 +94,7 @@ rcon _ = 0
 
 -- State: list of 16 bytes, column-major: state[row + 4*col]
 stGet :: [Integer] -> Integer -> Integer -> Integer
-stGet st row col = getNth st (row + col * 4)
-
-getNth :: [a] -> Integer -> a
-getNth (x:_) 0 = x
-getNth (_:xs) n = getNth xs (n - 1)
-getNth [] _ = error "getNth: out of bounds"
+stGet st row col = st !! (row + col * 4)
 
 -- Build 16-byte state from function
 stBuild :: (Integer -> Integer -> Integer) -> [Integer]
@@ -164,14 +159,14 @@ expandRound :: [Integer] -> Integer -> [Integer]
 expandRound prev round = w0 ++ w1 ++ w2 ++ w3
   where
     p = splitWords prev
-    lastW = getNth p 3
+    lastW = p !! 3
     rotated = rotWord lastW
     subbed = map sb rotated
     rconXored = xorRcon subbed (rcon round)
-    w0 = zipWith xorB (getNth p 0) rconXored
-    w1 = zipWith xorB (getNth p 1) w0
-    w2 = zipWith xorB (getNth p 2) w1
-    w3 = zipWith xorB (getNth p 3) w2
+    w0 = zipWith xorB (p !! 0) rconXored
+    w1 = zipWith xorB (p !! 1) w0
+    w2 = zipWith xorB (p !! 2) w1
+    w3 = zipWith xorB (p !! 3) w2
 
 keyExpansion :: [Integer] -> [[Integer]]
 keyExpansion key = keyExpGo key 0
@@ -184,17 +179,17 @@ getAllRoundKeys key = key : keyExpansion key
 
 -- AES-128 encrypt block
 aesEncryptBlock :: [Integer] -> [[Integer]] -> [Integer]
-aesEncryptBlock pt rk = encRounds (addRoundKey pt (getNth rk 0)) 1
+aesEncryptBlock pt rk = encRounds (addRoundKey pt (rk !! 0)) 1
   where
-    encRounds st 10 = addRoundKey (shiftRows (subBytes st)) (getNth rk 10)
-    encRounds st r = encRounds (addRoundKey (mixColumns (shiftRows (subBytes st))) (getNth rk r)) (r + 1)
+    encRounds st 10 = addRoundKey (shiftRows (subBytes st)) (rk !! 10)
+    encRounds st r = encRounds (addRoundKey (mixColumns (shiftRows (subBytes st))) (rk !! r)) (r + 1)
 
 -- AES-128 decrypt block
 aesDecryptBlock :: [Integer] -> [[Integer]] -> [Integer]
-aesDecryptBlock ct rk = decRounds (addRoundKey ct (getNth rk 10)) 9
+aesDecryptBlock ct rk = decRounds (addRoundKey ct (rk !! 10)) 9
   where
-    decRounds st 0 = addRoundKey (invSubBytes (invShiftRows st)) (getNth rk 0)
-    decRounds st r = decRounds (invMixColumns (addRoundKey (invSubBytes (invShiftRows st)) (getNth rk r))) (r - 1)
+    decRounds st 0 = addRoundKey (invSubBytes (invShiftRows st)) (rk !! 0)
+    decRounds st r = decRounds (invMixColumns (addRoundKey (invSubBytes (invShiftRows st)) (rk !! r))) (r - 1)
 
 -- Split into 16-byte blocks
 blocks16 :: [Integer] -> [[Integer]]
@@ -209,7 +204,7 @@ pkcs7Pad bytes = bytes ++ replicate padLen padLen
 
 pkcs7Unpad :: [Integer] -> [Integer]
 pkcs7Unpad [] = []
-pkcs7Unpad bytes = take (length bytes - getNth bytes (length bytes - 1)) bytes
+pkcs7Unpad bytes = take (length bytes - bytes !! (length bytes - 1)) bytes
 
 -- CBC mode
 cbcEncrypt :: [Integer] -> [Integer] -> [Integer] -> [Integer]
@@ -246,7 +241,7 @@ gfShiftRight128 xs
   | carry == 1 = xorFirst shifted
   | otherwise  = shifted
   where
-    carry = bandB (getNth xs 15) 1
+    carry = bandB (xs !! 15) 1
     shifted = shiftBytesR xs
     xorFirst (h:t) = xorB h 225 : t
     xorFirst ys = ys
@@ -261,7 +256,7 @@ gfMul128 :: [Integer] -> [Integer] -> [Integer]
 gfMul128 x y = gfMul128Go x (replicate 16 0) 0
   where
     gfMul128Go x z 128 = z
-    gfMul128Go x z i = let yi = getNth y (i `div` 8) in let bit = bandB (shrB yi (7 - (i `mod` 8))) 1 in let z' = if bit == 1 then zipWith xorB z x else z in gfMul128Go (gfShiftRight128 x) z' (i + 1)
+    gfMul128Go x z i = let yi = y !! (i `div` 8) in let bit = bandB (shrB yi (7 - (i `mod` 8))) 1 in let z' = if bit == 1 then zipWith xorB z x else z in gfMul128Go (gfShiftRight128 x) z' (i + 1)
 
 ghashPad :: [Integer] -> [Integer]
 ghashPad xs
@@ -384,14 +379,10 @@ main = do
     let gcmIv  = hexToBytes "cafebabefacedbaddecaf888"
     let gcmAad = hexToBytes "feedfacedeadbeeffeedfacedeadbeefabaddad2"
     let gcmPt  = stringToBytes "Hello, AES-GCM!"
-    let gcmResult = gcmEncrypt gcmKey gcmIv gcmAad gcmPt
-    let gcmCt = fst gcmResult
-    let gcmTag = snd gcmResult
+    let (gcmCt, gcmTag) = gcmEncrypt gcmKey gcmIv gcmAad gcmPt
     putStrLn $ "GCM ciphertext: " <> bytesToHex gcmCt
     putStrLn $ "GCM tag: " <> bytesToHex gcmTag
-    let gcmResult2 = gcmDecrypt gcmKey gcmIv gcmAad gcmCt
-    let gcmDec = fst gcmResult2
-    let gcmTag2 = snd gcmResult2
+    let (gcmDec, gcmTag2) = gcmDecrypt gcmKey gcmIv gcmAad gcmCt
     assert (gcmDec == gcmPt) "GCM roundtrip"
     assert (gcmTag == gcmTag2) "GCM tags match"
     putStrLn "AES-128-GCM: PASS"
