@@ -15,17 +15,17 @@ strByte :: String -> Integer -> LuaPure "string.byte" Integer
 strLen :: String -> LuaPure "string.len" Integer
 strChar :: Integer -> LuaPure "string.char" String
 
--- 32-bit mask (forces thunks through FFI)
+-- 32-bit mask
 u32 :: Integer -> Integer
 u32 x = bandB x 4294967295
 
--- Addition mod 2^32: force through borB before raw +
+-- Addition mod 2^32
 add32 :: Integer -> Integer -> Integer
-add32 a b = u32 (borB a 0 + borB b 0)
+add32 a b = bandB (a + b) 4294967295
 
 -- Rotate left (32-bit)
 rotL :: Integer -> Integer -> Integer
-rotL x n = let m = u32 x in u32 (borB (shlB m n) (shrB m (32 - n)))
+rotL x n = let m = u32 x in bandB (borB (shlB m n) (shrB m (32 - n))) 4294967295
 
 -- List index (manual, since !! is not built-in)
 idx :: [Integer] -> Integer -> Integer
