@@ -1531,7 +1531,7 @@ impl Parser {
     }
 
     fn is_expr_atom_start(&self) -> bool {
-        matches!(
+        if matches!(
             self.peek(),
             Token::Ident(_)
                 | Token::UpperIdent(_)
@@ -1540,10 +1540,46 @@ impl Parser {
                 | Token::StrLit(_)
                 | Token::LeftParen
                 | Token::LeftBracket
-        )
+        ) {
+            return true;
+        }
+        // Negative literal: -N where - is not preceded by an expression-ending token
+        if let Token::Operator(op) = self.peek() {
+            if op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
+                return matches!(self.tokens[self.pos + 1].token, Token::IntLit(_) | Token::NumLit(_));
+            }
+        }
+        false
+    }
+
+    /// Check if a `-` at the current position should be treated as a negative literal prefix.
+    /// Returns true when `-` is NOT preceded by an expression-ending token (number, ident, `)`, `]`).
+    fn is_neg_literal_context(&self) -> bool {
+        if self.pos == 0 { return true; }
+        let prev = &self.tokens[self.pos - 1].token;
+        !matches!(prev,
+            Token::IntLit(_) | Token::NumLit(_) | Token::StrLit(_)
+            | Token::Ident(_) | Token::UpperIdent(_)
+            | Token::RightParen | Token::RightBracket)
     }
 
     fn parse_expr_atom(&mut self) -> Result<Expr, String> {
+        // Negative literal: -N where - is not preceded by an expression-ending token
+        if let Token::Operator(op) = self.peek() {
+            if op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
+                match self.tokens[self.pos + 1].token {
+                    Token::IntLit(n) => {
+                        self.advance(); self.advance();
+                        return Ok(Expr::Lit(Literal::Integer(-n)));
+                    }
+                    Token::NumLit(n) => {
+                        self.advance(); self.advance();
+                        return Ok(Expr::Lit(Literal::Number(-n)));
+                    }
+                    _ => {}
+                }
+            }
+        }
         match self.peek().clone() {
             Token::IntLit(n) => {
                 self.advance();
@@ -2227,7 +2263,7 @@ impl Parser {
     }
 
     fn is_pattern_atom_start(&self) -> bool {
-        matches!(
+        if matches!(
             self.peek(),
             Token::Ident(_)
                 | Token::Underscore
@@ -2236,10 +2272,34 @@ impl Parser {
                 | Token::StrLit(_)
                 | Token::LeftParen
                 | Token::LeftBracket
-        )
+        ) {
+            return true;
+        }
+        if let Token::Operator(op) = self.peek() {
+            if op == "-" && self.pos + 1 < self.tokens.len() {
+                return matches!(self.tokens[self.pos + 1].token, Token::IntLit(_) | Token::NumLit(_));
+            }
+        }
+        false
     }
 
     fn parse_pattern_atom(&mut self) -> Result<Pattern, String> {
+        // Negative literal pattern: -N
+        if let Token::Operator(op) = self.peek() {
+            if op == "-" && self.pos + 1 < self.tokens.len() {
+                match self.tokens[self.pos + 1].token {
+                    Token::IntLit(n) => {
+                        self.advance(); self.advance();
+                        return Ok(Pattern::LitPat(Literal::Integer(-n)));
+                    }
+                    Token::NumLit(n) => {
+                        self.advance(); self.advance();
+                        return Ok(Pattern::LitPat(Literal::Number(-n)));
+                    }
+                    _ => {}
+                }
+            }
+        }
         match self.peek().clone() {
             Token::Ident(name) => {
                 self.advance();
