@@ -2330,6 +2330,7 @@ fn default_operator_precedence(op: &str) -> (u8, u8) {
         "*" | "/" => assoc_prec_to_binding(Assoc::Left, 7),
         "^" => assoc_prec_to_binding(Assoc::Right, 8),
         "." => assoc_prec_to_binding(Assoc::Right, 9),
+        "!!" => assoc_prec_to_binding(Assoc::Left, 9),
         _ => assoc_prec_to_binding(Assoc::Left, 9), // default high precedence
     }
 }

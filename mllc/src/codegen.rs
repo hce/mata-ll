@@ -216,7 +216,7 @@ impl CodeGen {
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList",
-            "__mll_list_append", "semigroup_String", "semigroup_List",
+            "__mll_list_append", "__mll_list_index", "semigroup_String", "semigroup_List",
             "__mll_show_list", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
@@ -1220,6 +1220,14 @@ impl CodeGen {
                     self.emit(" end)");
                     return;
                 }
+                if op == "!!" {
+                    self.emit("__mll_list_index(");
+                    self.gen_expr_subst(lhs, subst);
+                    self.emit(", ");
+                    self.gen_expr_subst(rhs, subst);
+                    self.emit(")");
+                    return;
+                }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     "mod" => "%",
@@ -1904,6 +1912,14 @@ impl CodeGen {
                     self.emit(" end)");
                     return;
                 }
+                if op == "!!" {
+                    self.emit("__mll_list_index(");
+                    self.gen_expr(lhs);
+                    self.emit(", ");
+                    self.gen_expr(rhs);
+                    self.emit(")");
+                    return;
+                }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     "mod" => "%",
@@ -2044,6 +2060,10 @@ impl CodeGen {
             TExprKind::OpFunc(op) => {
                 if op == "++" {
                     self.emit("function(_a, _b) return __mll_list_append(_a, function() return _b end) end");
+                    return;
+                }
+                if op == "!!" {
+                    self.emit("function(_a, _b) return __mll_list_index(_a, __force(_b)) end");
                     return;
                 }
                 if op == ":" {
@@ -2550,6 +2570,18 @@ local function __mll_list_append(xs, ys_thunk)
     return __mll_lazy_cons(__mll_head(xs), function()
         return __mll_list_append(__mll_tail(xs), ys_thunk)
     end)
+end
+
+local function __mll_list_index(xs, n)
+    n = __force(n)
+    xs = __force(xs)
+    while n > 0 do
+        if xs == nil then error("(!!): index too large") end
+        xs = __force(__mll_tail(xs))
+        n = n - 1
+    end
+    if xs == nil then error("(!!): index too large") end
+    return __mll_head(xs)
 end
 
 -- Deep-force an MLL value for export to Lua.
