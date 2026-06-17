@@ -26,11 +26,33 @@ pub fn analyze(module: &TModule) -> DemandInfo {
         .chain(module.instance_fns.iter())
         .collect();
 
-    // Initial pass: analyze each function without cross-function info.
+    // Seed FFI functions as strict in all parameters.
+    // FFI functions (LuaPure/LuaIO) always force their arguments via __force()
+    // in the generated Lua code, so they are strict by construction.
+    // An FFI function is identified by having a single clause whose body is a
+    // SpecCall referencing the function's own name (the typechecker generates
+    // these synthetic bodies for type signatures with LuaPure/LuaIO return types).
     let mut strict_params: HashMap<String, Vec<bool>> = HashMap::new();
+    for func in &functions {
+        if func.clauses.len() == 1 {
+            let clause = &func.clauses[0];
+            if let TExprKind::SpecCall { original, .. } = &clause.body.kind {
+                if original == &func.name && !clause.patterns.is_empty() {
+                    strict_params.insert(func.name.clone(), vec![true; clause.patterns.len()]);
+                    continue;
+                }
+            }
+        }
+    }
+
+    // Initial pass: analyze each function without cross-function info
+    // (but with FFI strictness already seeded above).
     for func in &functions {
         if func.clauses.is_empty() {
             continue;
+        }
+        if strict_params.contains_key(&func.name) {
+            continue; // already seeded as FFI
         }
         let strictness = analyze_function(func, &strict_params);
         strict_params.insert(func.name.clone(), strictness);

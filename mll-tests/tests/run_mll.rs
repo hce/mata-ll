@@ -783,6 +783,7 @@ fn examples_compile() {
         "bench",              // show specialization gap on list display
         "aestest",            // 256-element S-box lists need large stack (runs via mll compiler)
         "bstest",             // needs large stack (runs via mll compiler)
+        "salsa",              // large literal lists need large stack (runs via mll compiler)
         "rectype",            // legitimate type errors (Ord on tuples, String as [Char])
         "match",              // experimental scratch file
         "experiments",        // experimental scratch file
