@@ -2,6 +2,14 @@
 -- Decodes IT modules to raw 16-bit stereo PCM via callback
 -- All channel state lives in a single STArray across decode + mix
 
+-- Bitwise FFI
+bandB :: Integer -> Integer -> LuaPure "__mll_band" Integer
+shrB :: Integer -> Integer -> LuaPure "__mll_shr" Integer
+
+-- Test if bit N is set (0-indexed)
+testBit :: Integer -> Integer -> Bool
+testBit x n = bandB (shrB x n) 1 == 1
+
 bsSetByte :: ByteString -> Integer -> Integer -> ByteString
 bsSetByte bs idx val = bsConcat (bsSub bs 0 idx) (bsConcat (bsSingleton val) (bsSub bs (idx + 1) (bsLength bs - idx - 1)))
 
@@ -87,10 +95,10 @@ smpFlags :: ByteString -> Integer -> Integer
 smpFlags bs off = bsIndex bs (off + 18)
 
 smpIs16Bit :: Integer -> Bool
-smpIs16Bit flags = (flags `div` 2) `mod` 2 == 1
+smpIs16Bit flags = testBit flags 1
 
 smpHasLoop :: Integer -> Bool
-smpHasLoop flags = (flags `div` 16) `mod` 2 == 1
+smpHasLoop flags = testBit flags 4
 
 readSmp :: ByteString -> Integer -> Integer -> Bool -> Integer
 readSmp bs dPtr pos is16
@@ -203,31 +211,31 @@ decRowLoop mi off arr masks lv jump =
     let marker = bsIndex mi.miFd off
     in if marker == 0
        then return (masks, (lv, (off + 1, jump)))
-       else let ch   = (marker - 1) `mod` 64
-                hmb  = marker `div` 128
+       else let ch   = bandB (marker - 1) 63
+                hmb  = testBit marker 7
                 off2 = off + 1
-                mask = if hmb == 1 then bsIndex mi.miFd off2 else bsIndex masks ch
-                msk2 = if hmb == 1 then bsSetByte masks ch mask else masks
-                off3 = if hmb == 1 then off2 + 1 else off2
-                b0 = mask `mod` 2
-                b1 = (mask `div` 2) `mod` 2
-                b2 = (mask `div` 4) `mod` 2
-                b3 = (mask `div` 8) `mod` 2
-                b4 = (mask `div` 16) `mod` 2
-                b5 = (mask `div` 32) `mod` 2
-                b6 = (mask `div` 64) `mod` 2
-                note = if b0 == 1 then bsIndex mi.miFd off3 else if b4 == 1 then bsIndex lv (ch * 4) else 255
-                off4 = off3 + b0
-                ins  = if b1 == 1 then bsIndex mi.miFd off4 else if b5 == 1 then bsIndex lv (ch * 4 + 1) else 0
-                off5 = off4 + b1
-                vol  = if b2 == 1 then bsIndex mi.miFd off5 else if b6 == 1 then bsIndex lv (ch * 4 + 2) else 255
-                off6 = off5 + b2
-                cmd    = if b3 == 1 then bsIndex mi.miFd off6 else 0
-                cmdVal = if b3 == 1 then bsIndex mi.miFd (off6 + 1) else 0
-                off7 = off6 + (if b3 == 1 then 2 else 0)
-                lv2 = if b0 == 1 then bsSetByte lv  (ch * 4)     note else lv
-                lv3 = if b1 == 1 then bsSetByte lv2 (ch * 4 + 1) ins  else lv2
-                lv4 = if b2 == 1 then bsSetByte lv3 (ch * 4 + 2) vol  else lv3
+                mask = if hmb then bsIndex mi.miFd off2 else bsIndex masks ch
+                msk2 = if hmb then bsSetByte masks ch mask else masks
+                off3 = if hmb then off2 + 1 else off2
+                hasNote = testBit mask 0
+                hasIns  = testBit mask 1
+                hasVol  = testBit mask 2
+                hasCmd  = testBit mask 3
+                useLvN  = testBit mask 4
+                useLvI  = testBit mask 5
+                useLvV  = testBit mask 6
+                note = if hasNote then bsIndex mi.miFd off3 else if useLvN then bsIndex lv (ch * 4) else 255
+                off4 = if hasNote then off3 + 1 else off3
+                ins  = if hasIns then bsIndex mi.miFd off4 else if useLvI then bsIndex lv (ch * 4 + 1) else 0
+                off5 = if hasIns then off4 + 1 else off4
+                vol  = if hasVol then bsIndex mi.miFd off5 else if useLvV then bsIndex lv (ch * 4 + 2) else 255
+                off6 = if hasVol then off5 + 1 else off5
+                cmd    = if hasCmd then bsIndex mi.miFd off6 else 0
+                cmdVal = if hasCmd then bsIndex mi.miFd (off6 + 1) else 0
+                off7 = if hasCmd then off6 + 2 else off6
+                lv2 = if hasNote then bsSetByte lv  (ch * 4)     note else lv
+                lv3 = if hasIns  then bsSetByte lv2 (ch * 4 + 1) ins  else lv2
+                lv4 = if hasVol  then bsSetByte lv3 (ch * 4 + 2) vol  else lv3
                 jump2 = if cmd == 2 then cmdVal
                          else if cmd == 3 then 0 - 2
                          else jump
