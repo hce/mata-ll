@@ -9,7 +9,7 @@ module Control.Monad
 forM_ :: [a] -> (a -> IO ()) -> IO ()
 forM_ xs f = mapM_ f xs
 
-unless :: Bool -> IO () -> IO ()
+unless :: Applicative f => Bool -> f () -> f ()
 unless cond action = if cond then pure () else action
 
 guard :: Bool -> [()]

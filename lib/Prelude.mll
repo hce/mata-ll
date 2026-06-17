@@ -176,7 +176,7 @@ mapM_ f (x:xs) = f x >> mapM_ f xs
 
 -- Conditional execution (non-strict evaluation makes this safe:
 -- the action is thunked and only forced when the condition is true)
-when :: Bool -> IO () -> IO ()
+when :: Applicative f => Bool -> f () -> f ()
 when cond action = if cond then action else pure ()
 
 -- Convenience
