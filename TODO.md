@@ -100,6 +100,8 @@ MATA-LL TODO
 - [x] Default method implementations in class declarations (`x /= y = not (x == y)`)
 - [x] Where-clause type unification: pre-registered fresh type variables now unified with inferred types
 - [ ] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
+- [ ] Reject bare type signatures with no definition (currently silently compiles to nil at runtime)
+- [ ] `$` operator emitted literally in Lua when inlined into ST action codegen path (should always desugar to function application)
 ## Recently completed
 
 - [x] try/catch exception handling (pcall-based, IO errors only)

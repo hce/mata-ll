@@ -1522,9 +1522,15 @@ impl CodeGen {
                 }
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>" => {
                     let lhs_unwrapped = if let TExprKind::Paren(inner) = &lhs.kind { inner.as_ref() } else { lhs.as_ref() };
-                    self.emit_indent();
-                    self.gen_action(lhs_unwrapped);
-                    self.emit("\n");
+                    // return/pure on the LHS of >> is a no-op (pure value discarded)
+                    let is_pure_discard = matches!(&lhs_unwrapped.kind,
+                        TExprKind::App(func, _) if matches!(&func.kind,
+                            TExprKind::Var(n) if n == "pure" || n == "return"));
+                    if !is_pure_discard {
+                        self.emit_indent();
+                        self.gen_action(lhs_unwrapped);
+                        self.emit("\n");
+                    }
                     expr = rhs;
                     inside_action = true;
                     continue;
