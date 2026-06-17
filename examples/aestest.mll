@@ -40,7 +40,7 @@ gfMul :: Integer -> Integer -> Integer
 gfMul a b = gfMulGo a b 0
   where
     gfMulGo _ 0 acc = acc
-    gfMulGo a b acc = let nacc = if bandB b 1 == 1 then xorB acc a else acc in gfMulGo (gfMul2 a) (shrB b 1) nacc
+    gfMulGo a b acc = let acc' = if bandB b 1 == 1 then xorB acc a else acc in gfMulGo (gfMul2 a) (shrB b 1) acc'
 
 -- S-Box as HashMap for O(1) lookup
 -- Split into 64-element chunks to avoid Lua's 255 register limit
@@ -269,7 +269,7 @@ gfMul128 :: [Integer] -> [Integer] -> [Integer]
 gfMul128 x y = gfMul128Go x (replicate_ 16 0) 0
   where
     gfMul128Go x z 128 = z
-    gfMul128Go x z i = let yi = getNth y (i `div` 8) in let bit = bandB (shrB yi (7 - (i `mod` 8))) 1 in let nz = if bit == 1 then zipWith xorB z x else z in gfMul128Go (gfShiftRight128 x) nz (i + 1)
+    gfMul128Go x z i = let yi = getNth y (i `div` 8) in let bit = bandB (shrB yi (7 - (i `mod` 8))) 1 in let z' = if bit == 1 then zipWith xorB z x else z in gfMul128Go (gfShiftRight128 x) z' (i + 1)
 
 ghashPad :: [Integer] -> [Integer]
 ghashPad xs
