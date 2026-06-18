@@ -61,8 +61,11 @@ w64Not (h, l) = (xorB h 4294967295, xorB l 4294967295)
 
 w64Add :: W64 -> W64 -> W64
 w64Add (ah, al) (bh, bl) =
-    let lo = bandB (borB al 0 + borB bl 0) 4294967295
-        hi = bandB (borB ah 0 + borB bh 0 + shrB (borB al 0 + borB bl 0) 32) 4294967295
+    let lo16 = bandB al 65535 + bandB bl 65535
+        hi16 = shrB al 16 + shrB bl 16 + shrB lo16 16
+        carry = shrB hi16 16
+        lo = borB (shlB (bandB hi16 65535) 16) (bandB lo16 65535)
+        hi = bandB (borB ah 0 + borB bh 0 + carry) 4294967295
     in (hi, lo)
 
 w64Add4 :: W64 -> W64 -> W64 -> W64 -> W64
@@ -209,7 +212,8 @@ sha512Pad msg = blocks (msg ++ [128] ++ replicate padLen 0 ++ lenBytes)
     padLen = (111 - len) `mod` 128
     -- length in bits as 16 bytes big-endian (only low 8 bytes matter for < 2^53)
     bitLen = len * 8
-    lenBytes = [0, 0, 0, 0, 0, 0, 0, 0, bandB (shrB bitLen 56) 255, bandB (shrB bitLen 48) 255, bandB (shrB bitLen 40) 255, bandB (shrB bitLen 32) 255, bandB (shrB bitLen 24) 255, bandB (shrB bitLen 16) 255, bandB (shrB bitLen 8) 255, bandB bitLen 255]
+    bitLenHi = bitLen `div` 4294967296
+    lenBytes = [0, 0, 0, 0, 0, 0, 0, 0, bandB (shrB bitLenHi 24) 255, bandB (shrB bitLenHi 16) 255, bandB (shrB bitLenHi 8) 255, bandB bitLenHi 255, bandB (shrB bitLen 24) 255, bandB (shrB bitLen 16) 255, bandB (shrB bitLen 8) 255, bandB bitLen 255]
     blocks [] = []
     blocks xs = take 128 xs : blocks (drop 128 xs)
 
