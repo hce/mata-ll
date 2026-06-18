@@ -374,12 +374,20 @@ pow2523 z =
 gfP :: [Integer]
 gfP = [65517, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 32767]
 
--- Try subtracting p; if result is negative (top bit set after carry), keep original
+-- Try subtracting p; if borrow propagates out the top, keep original
 gfCondSub :: [Integer] -> [Integer]
 gfCondSub t =
-    let m = gfCarry (gfSub t gfP)
-        topBit = shrB (idx m 15) 15
-    in if topBit == 1 then t else m
+    let diff = gfSub t gfP
+        borrow = gfBorrow diff 0 0
+    in if borrow < 0 then t else gfCarry diff
+
+-- Compute the borrow (final carry) from propagating carries through limbs
+gfBorrow :: [Integer] -> Integer -> Integer -> Integer
+gfBorrow _ 16 carry = carry
+gfBorrow xs i carry =
+    let val = idx xs i + carry
+        c = val `div` 65536
+    in gfBorrow xs (i + 1) c
 
 -- Pack GF to 32 bytes (little-endian), fully reduced mod p
 gfPack :: [Integer] -> [Integer]
