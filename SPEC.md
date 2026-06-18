@@ -860,6 +860,10 @@ are imported explicitly:
     import LBit          -- bitwise operations
     import Regex         -- CPS-based regex matcher
     import JSON          -- hand-written JSON parser
+    import Data.List     -- sortBy, nubBy, groupBy, intercalate, etc.
+    import Data.Maybe    -- fromMaybe, catMaybes, mapMaybe, etc.
+    import Control.Monad -- mapM, forM, sequence, etc.
+    import Crypto.Ed25519 -- Ed25519 sign/verify (RFC 8032)
 
 # Evaluation strategy
 
@@ -901,35 +905,7 @@ parameters are marked concrete.
         ↓
     .lua output (standalone, no runtime needed)
 
-# Planned features (by priority)
-
-## High priority
-
-### Higher-rank polymorphism
-
-Generalize beyond the current narrow rank-2 support (ST and
-LuaFunction scope sealing) to support general `forall` quantification
-in argument positions.
-
-### Standard library compatibility modules
-
-Initial versions of `Data.List`, `Data.Maybe`, `Data.Map`, and
-`Control.Monad` are implemented. Functions requiring typeclass
-constraints (Eq/Ord) in library modules have limited support due to
-monomorphization occurring at use-site, not library compilation time.
-Callback-style variants (e.g. `sortBy`, `nubBy`) work.
-
-## Medium priority
-
-### Default method implementations in class declarations
-
-    class Eq a where
-        (==) :: a -> a -> Bool
-        (/=) :: a -> a -> Bool
-        x /= y = not (x == y)    -- default implementation
-
-Currently class bodies can only contain type signatures, not
-definitions.
+# Planned features
 
 ## Low priority / deferred
 

@@ -58,7 +58,7 @@ possible with Lua without breaking boundaries to Lua.
 Specifically:
 
 * Add the expressiveness, fun and safety of haskell to Lua
-* Target the Lua 5.4+ VM; compile to Lua source for safe loading via mlua
+* Target Lua 5.4 and LuaJIT; compile to Lua source for safe loading via mlua
 * Non-strict evaluation with cheapness analysis (thunk only what's worth thunking)
 * No need for a separate runtime, use zero-cost abstractions
 * If zero-cost abstractions don't fully work, use library functions

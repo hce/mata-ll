@@ -56,8 +56,7 @@ MATA-LL TODO
 - [x] `putStr` (io.write FFI)
 - [x] Skip main when loaded via require
 - [x] Multi-line record syntax in data declarations
-- [x] Lua compat CI (5.1, 5.4, LuaJIT) and performance benchmark
-- [x] Lua 5.1 compat: graceful bitwise library fallback
+- [x] Lua compat CI (5.4, LuaJIT) and performance benchmark
 - [x] IO action semantics test suite
 
 ## Typeclasses and dispatch
@@ -156,7 +155,7 @@ MATA-LL TODO
 - [x] Comprehensive test suites for each library module (Regex, JSON, LOS, LString, LBit, LMath)
 - [x] Stress tests for compiler limits (large ADTs, deep recursion, nested exprs, many functions/instances, long do-blocks, large patterns, deep types, many args, list ops, BST program)
 - [x] Do-notation regression tests (eval order, let scoping, bind return unwrapping)
-- [x] 221 tests passing (Lua 5.4 via mlua)
+- [x] 246 tests passing (Lua 5.4 via mlua)
 
 ## Can defer
 

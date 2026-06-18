@@ -121,7 +121,7 @@ containing the mangled method names (e.g., `eq_Integer`, `show_String`,
 Orphan instances (where neither the class nor the type is defined in
 the current module) are rejected.
 
-Deriving is supported for `Show` and `Eq` only.
+Deriving is supported for `Show`, `Eq`, `Ord`, `Enum`, `Bounded`, and `Functor`.
 
 ### GADTs
 
