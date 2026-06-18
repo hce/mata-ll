@@ -554,69 +554,70 @@ scL = [237, 211, 245, 92, 26, 99, 18, 88, 214, 156, 247, 162, 222, 249, 222, 20,
 
 -- Reduce 64-byte little-endian integer mod L (TweetNaCl's modL)
 scReduce :: [Integer] -> [Integer]
-scReduce x = srFinish (srGo (map borB0 x) 63)
-  where
-    borB0 v = borB v 0
-    srGo xs i
-      | i < 32 = xs
-      | otherwise =
-          let carry = idx xs i
-              xs1 = listSet xs i 0
-          in srGo (srSubMul xs1 carry (i - 32)) (i - 1)
+scReduce x = take 32 (scFinal1 (scOuter (map (\v -> borB v 0) x) 63))
 
-    srSubMul xs carry off = ssmGo xs carry off 0
+-- Outer loop: i from 63 down to 32
+scOuter :: [Integer] -> Integer -> [Integer]
+scOuter xs i
+  | i < 32   = xs
+  | otherwise = scOuter (scInner xs (idx xs i) (i - 32) 0) (i - 1)
 
-    ssmGo xs carry off 32 =
-        let v = idx xs (off + 32) + carry
-        in listSet xs (off + 32) v
-    ssmGo xs carry off j =
-        let v = idx xs (off + j) - carry * idx scL j
-            lo = bandB v 255
-            borrow = 0 - ((v - lo) `div` 256)
-        in ssmGo (listSet xs (off + j) lo) borrow off (j + 1)
+-- Inner loop: j from (i-32) to (i-13), then set x[i]=0
+scInner :: [Integer] -> Integer -> Integer -> Integer -> [Integer]
+scInner xs xi base carry = scInnerGo xs xi base carry 0
 
-    srFinish xs = srFinish2 (srCarry xs 0)
+scInnerGo :: [Integer] -> Integer -> Integer -> Integer -> Integer -> [Integer]
+scInnerGo xs xi base carry 20 =
+    let xs1 = listSet xs (base + 20) (borB (idx xs (base + 20) + carry) 0)
+    in listSet xs1 (base + 32) 0
+scInnerGo xs xi base carry j =
+    let v = borB (idx xs (base + j) + carry - 16 * borB xi 0 * idx scL j) 0
+        c = (v + 128) `div` 256
+        lo = borB (v - borB c 0 * 256) 0
+    in scInnerGo (listSet xs (base + j) lo) xi base (borB c 0) (j + 1)
 
-    srCarry xs 32 = xs
-    srCarry xs i =
-        let v = idx xs i
-            c = v `div` 256
-            lo = v - c * 256
-        in srCarry (listSet (listSet xs i lo) (i + 1) (idx xs (i + 1) + c)) (i + 1)
+-- Final reduction pass 1: subtract (x[31]>>4) * L and normalize
+scFinal1 :: [Integer] -> [Integer]
+scFinal1 xs =
+    let top = borB (idx xs 31) 0 `div` 16
+    in scF1Go xs top 0 0
 
-    srFinish2 xs =
-        let borrow = srSubL xs 0 0
-        in srApplyBorrow xs borrow 0
+scF1Go :: [Integer] -> Integer -> Integer -> Integer -> [Integer]
+scF1Go xs _ carry 32 = scF2Go xs carry 0
+scF1Go xs top carry j =
+    let v = borB (idx xs j + carry - top * idx scL j) 0
+        c = v `div` 256
+        lo = borB (v - c * 256) 0
+    in scF1Go (listSet xs j lo) top c (j + 1)
 
-    srSubL xs borrow 32 = borrow
-    srSubL xs borrow i =
-        let v = idx xs i - idx scL i + borrow
-        in if v < 0 then srSubL xs (-1) (i + 1) else srSubL xs 0 (i + 1)
-
-    srApplyBorrow xs borrow i
-      | i >= 32 = take 32 xs
-      | otherwise =
-          let v = idx xs i + borrow * idx scL i
-              lo = bandB v 255
-              c = (v - lo) `div` 256
-          in srApplyBorrow (listSet xs i lo) c (i + 1)
+-- Final reduction pass 2: subtract carry * L
+scF2Go :: [Integer] -> Integer -> Integer -> [Integer]
+scF2Go xs _ 32 = xs
+scF2Go xs carry j =
+    let lo = bandB (borB (idx xs j - carry * idx scL j) 0) 255
+    in scF2Go (listSet xs j lo) carry (j + 1)
 
 -- Scalar multiply-add: (a * b + c) mod L
 -- a, b, c are 32-byte scalars; result is 32 bytes
 scMulAdd :: [Integer] -> [Integer] -> [Integer] -> [Integer]
-scMulAdd a b c = scReduce product
-  where
-    product = foldl' addMulByte (replicate 64 0 `addBytes` c) allPairs
-    allPairs = [(i, j) | i <- [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-                               16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31],
-                         j <- [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15,
-                               16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31]]
-    addMulByte acc (i, j) =
-        let v = idx acc (i + j) + idx a i * idx b j
-        in listSet acc (i + j) v
-    addBytes xs ys = abGo xs ys 0
-    abGo xs [] _ = xs
-    abGo xs (y:ys) i = abGo (listSet xs i (idx xs i + y)) ys (i + 1)
+scMulAdd a b c = scReduce (smaOuter (smaAddC (replicate 64 0) c 0) a b 0)
+
+-- Add c bytes into accumulator
+smaAddC :: [Integer] -> [Integer] -> Integer -> [Integer]
+smaAddC acc [] _ = acc
+smaAddC acc (y:ys) i = smaAddC (listSet acc i (borB (idx acc i + y) 0)) ys (i + 1)
+
+-- Outer loop over a's bytes
+smaOuter :: [Integer] -> [Integer] -> [Integer] -> Integer -> [Integer]
+smaOuter acc _ _ 32 = acc
+smaOuter acc a b i = smaOuter (smaInner acc (idx a i) b i 0) a b (i + 1)
+
+-- Inner loop: accumulate a[i] * b[j] at position i+j
+smaInner :: [Integer] -> Integer -> [Integer] -> Integer -> Integer -> [Integer]
+smaInner acc _ _ _ 32 = acc
+smaInner acc ai b i j =
+    let v = borB (idx acc (i + j) + ai * idx b j) 0
+    in smaInner (listSet acc (i + j) v) ai b i (j + 1)
 
 -- ================================================================
 -- Ed25519 API
