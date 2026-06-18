@@ -343,7 +343,7 @@ sqrN :: [Integer] -> Integer -> [Integer]
 sqrN x 0 = x
 sqrN x n = sqrN (gfSqr x) (n - 1)
 
--- z^((p+3)/8) = z^(2^252 - 3) used for sqrt in point decompression
+-- z^((p+3)/8) = z^(2^252 - 2) used for sqrt in point decompression
 pow2523 :: [Integer] -> [Integer]
 pow2523 z =
     let t0 = gfSqr z
@@ -368,7 +368,7 @@ pow2523 z =
         t3e = sqrN t3d 50
         t3f = gfMul t3e t2f
         t4 = sqrN t3f 2
-    in gfMul t4 z
+    in gfMul t4 t0
 
 -- p as limbs (2^255 - 19)
 gfP :: [Integer]
@@ -523,24 +523,25 @@ pointDecode bs =
         x2den = gfAdd (gfMul gfD y2) gfOne
         x2 = gfMul x2num (gfInv x2den)
         -- x = x2^((p+3)/8) mod p
-        x0 = pow2523 x2
+        x0 = gfCarry (pow2523 x2)
         -- Check: if x0^2 != x2, multiply by sqrt(-1)
         check = gfSub (gfSqr x0) x2
-        x1 = if gfIsZero (gfCarry check) then x0 else gfMul x0 gfI
+        x1 = if gfIsZero check then x0 else gfCarry (gfMul x0 gfI)
         -- Adjust sign
         xPacked = gfPack x1
         needFlip = bandB (idx xPacked 0) 1
-        x2final = if needFlip /= xSign then gfSub gfZero x1 else x1
+        x2final = if needFlip /= xSign then gfCarry (gfSub gfZero x1) else x1
         t = gfMul x2final y
     in ExtPoint x2final y gfOne t
 
--- Check if a field element is zero (after carry)
+-- Check if a field element is zero mod p (fully reduce and check)
 gfIsZero :: [Integer] -> Bool
-gfIsZero xs = gfizGo xs
-  where
-    gfizGo [] = True
-    gfizGo (0:rest) = gfizGo rest
-    gfizGo _ = False
+gfIsZero xs = allZero (gfPack xs)
+
+allZero :: [Integer] -> Bool
+allZero [] = True
+allZero (0:rest) = allZero rest
+allZero _ = False
 
 -- ================================================================
 -- Scalar arithmetic mod L
