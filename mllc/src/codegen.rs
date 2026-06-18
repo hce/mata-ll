@@ -525,21 +525,36 @@ impl CodeGen {
                 self.gen_expr_lazy(&clauses[0].body, &func.name);
                 self.emit("\n");
                 is_concrete = true;
-            } else if Self::is_cheap(&clauses[0].body) {
-                // Cheap value binding — evaluate eagerly
+            } else if clauses[0].where_binds.is_empty() && Self::is_cheap(&clauses[0].body) {
+                // Cheap value binding with no where clause — evaluate eagerly
                 self.emit_indent();
                 self.emit(&self.var_decl(&lua_name));
                 self.gen_expr(&clauses[0].body);
                 self.emit("\n");
                 is_concrete = true;
-            } else {
-                // Expensive value binding — thunk for lazy evaluation
+            } else if clauses[0].where_binds.is_empty() {
+                // Expensive value binding with no where clause — thunk
                 self.emit_indent();
                 self.emit(&self.var_decl(&lua_name));
                 self.emit("__thunk(function() return ");
                 self.gen_expr(&clauses[0].body);
                 self.emit(" end)");
                 self.emit("\n");
+                is_concrete = false;
+            } else {
+                // Value binding with where clause — wrap in thunked IIFE to scope the locals
+                self.emit_indent();
+                self.emit(&self.var_decl(&lua_name));
+                self.emit("__thunk(function()\n");
+                self.indent += 1;
+                self.gen_where_binds(&clauses[0].where_binds);
+                self.emit_indent();
+                self.emit("return ");
+                self.gen_expr(&clauses[0].body);
+                self.emit("\n");
+                self.indent -= 1;
+                self.emit_indent();
+                self.emit("end)\n");
                 is_concrete = false;
             }
             self.emit_line("");
@@ -701,31 +716,53 @@ impl CodeGen {
     }
 
     fn gen_where_binds(&mut self, binds: &[TLocalDef]) {
-        // Emit function definitions (bindings with patterns) before value
-        // bindings (no patterns) so that values can reference local functions.
-        // Collect the start indices of each binding group.
-        let mut func_groups: Vec<usize> = Vec::new();
-        let mut value_indices: Vec<usize> = Vec::new();
+        // Forward-declare all function names so that value bindings can
+        // reference functions defined later in source order, and functions
+        // can reference each other (mutual recursion).
+        let mut func_names: Vec<String> = Vec::new();
+        {
+            let mut i = 0;
+            while i < binds.len() {
+                if !binds[i].patterns.is_empty() {
+                    let sname = sanitize_name(&binds[i].name);
+                    if !self.local_vars.contains(&sname) {
+                        func_names.push(sname);
+                    }
+                    let name = &binds[i].name;
+                    while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        if !func_names.is_empty() {
+            self.emit_indent();
+            self.emit("local ");
+            self.emit(&func_names.join(", "));
+            self.emit("\n");
+            for name in &func_names {
+                self.local_vars.insert(name.clone());
+                self.local_count += 1;
+            }
+        }
+
+        // Now emit all bindings in source order — functions and values
+        // interleaved as written. Function forward-declarations above
+        // ensure references resolve regardless of order.
         let mut i = 0;
         while i < binds.len() {
             if binds[i].patterns.is_empty() {
-                value_indices.push(i);
+                self.gen_where_value(&binds[i]);
                 i += 1;
             } else {
-                func_groups.push(i);
+                self.gen_where_func_group_assign(binds, i);
                 let name = &binds[i].name;
                 while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
                     i += 1;
                 }
             }
-        }
-        // First pass: emit all function definitions
-        for &start in &func_groups {
-            self.gen_where_func_group(binds, start);
-        }
-        // Second pass: emit all value bindings
-        for &idx in &value_indices {
-            self.gen_where_value(&binds[idx]);
         }
     }
 
@@ -745,7 +782,16 @@ impl CodeGen {
         self.emit("\n");
     }
 
+    fn gen_where_func_group_assign(&mut self, binds: &[TLocalDef], start: usize) {
+        // Emit as assignment (name already forward-declared)
+        self.gen_where_func_group_impl(binds, start, true);
+    }
+
     fn gen_where_func_group(&mut self, binds: &[TLocalDef], start: usize) {
+        self.gen_where_func_group_impl(binds, start, false);
+    }
+
+    fn gen_where_func_group_impl(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) {
         let name = &binds[start].name;
         let mut clauses = Vec::new();
         let num_params = binds[start].patterns.len();
@@ -765,10 +811,16 @@ impl CodeGen {
             .collect();
         let params_str = params.join(", ");
         let sname = sanitize_name(name);
-        self.local_vars.insert(sname.clone());
-        self.local_count += 1;
+        if !pre_declared {
+            self.local_vars.insert(sname.clone());
+            self.local_count += 1;
+        }
         self.emit_indent();
-        if self.local_count > Self::LOCAL_LIMIT {
+        if pre_declared {
+            // Name was forward-declared; use assignment form
+            let lref = self.lua_ref(&sname);
+            self.emit(&format!("{} = function({})\n", lref, params_str));
+        } else if self.local_count > Self::LOCAL_LIMIT {
             if !self.var_table_emitted {
                 self.emit_line("local _v = {}");
                 self.var_table_emitted = true;
