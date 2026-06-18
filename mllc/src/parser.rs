@@ -1763,6 +1763,7 @@ impl Parser {
             }
             Token::LeftBracket => {
                 self.advance();
+                self.skip_newlines_and_indent();
                 if self.at(&Token::RightBracket) {
                     self.advance();
                     return Ok(Expr::Con("[]".to_string()));
@@ -1799,8 +1800,10 @@ impl Parser {
                 }
                 // Regular list literal or range with step
                 let mut items = vec![first];
+                self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) {
                     self.advance();
+                    self.skip_newlines_and_indent();
                     let second = self.parse_expr()?;
                     // Check for [x,y..] or [x,y..z]
                     if self.at(&Token::Operator("..".to_string())) {
@@ -1831,11 +1834,15 @@ impl Parser {
                         ));
                     }
                     items.push(second);
-                    while self.at(&Token::Comma) {
+                    loop {
+                        self.skip_newlines_and_indent();
+                        if !self.at(&Token::Comma) { break; }
                         self.advance();
+                        self.skip_newlines_and_indent();
                         items.push(self.parse_expr()?);
                     }
                 }
+                self.skip_newlines_and_indent();
                 self.expect(&Token::RightBracket)?;
                 let mut list = Expr::Con("[]".to_string());
                 for item in items.into_iter().rev() {
