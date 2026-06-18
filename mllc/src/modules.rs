@@ -140,6 +140,9 @@ impl ModuleLoader {
                             }
                         }
                         ImportItems::Specific(items) => {
+                            // Include ALL declarations (internal helpers are
+                            // needed for type checking), but hide names that
+                            // weren't explicitly requested.
                             let wanted: HashSet<String> = items.iter().map(|item| {
                                 match item {
                                     ImportItem::Value(n) => n.clone(),
@@ -149,10 +152,10 @@ impl ModuleLoader {
                             }).collect();
 
                             for d in &all_decls {
-                                let name = decl_name(d);
-                                if let Some(n) = name {
-                                    if wanted.contains(&n) {
-                                        imported_decls.push((*d).clone());
+                                imported_decls.push((*d).clone());
+                                if let Some(n) = decl_name(d) {
+                                    if !wanted.contains(&n) {
+                                        hidden_names.insert(n);
                                     }
                                 }
                             }
