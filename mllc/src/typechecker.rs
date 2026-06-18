@@ -1431,7 +1431,14 @@ impl Checker {
         // Register hidden names from import export control
         self.hidden_names.extend(module.hidden.iter().cloned());
 
-        // Pass 1: register data types and newtypes
+        // Pass 1: register type aliases, data types, and newtypes
+        // Type aliases must be registered first so that data constructors
+        // referencing aliases (e.g. `data Foo = Foo MyAlias`) expand correctly.
+        for decl in &module.decls {
+            if let Decl::TypeAlias { name, params, ty } = decl {
+                self.type_aliases.insert(name.clone(), (params.clone(), ty.clone()));
+            }
+        }
         for decl in &module.decls {
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
