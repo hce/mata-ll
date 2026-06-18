@@ -701,108 +701,125 @@ impl CodeGen {
     }
 
     fn gen_where_binds(&mut self, binds: &[TLocalDef]) {
-        // Group bindings by name to merge multi-clause local functions
+        // Emit function definitions (bindings with patterns) before value
+        // bindings (no patterns) so that values can reference local functions.
+        // Collect the start indices of each binding group.
+        let mut func_groups: Vec<usize> = Vec::new();
+        let mut value_indices: Vec<usize> = Vec::new();
         let mut i = 0;
         while i < binds.len() {
-            let bind = &binds[i];
-            if bind.patterns.is_empty() {
-                // Simple value binding: local x = expr
-                let sname = sanitize_name(&bind.name);
-                let decl = self.declare_local(&sname);
-                self.emit_indent();
-                if Self::is_cheap(&bind.body) {
-                    self.emit(&format!("{} = ", decl));
-                    self.gen_expr(&bind.body);
-                    self.concrete_vars.insert(sname);
-                } else {
-                    self.emit(&format!("{} = __thunk(function() return ", decl));
-                    self.gen_expr(&bind.body);
-                    self.emit(" end)");
-                }
-                self.emit("\n");
+            if binds[i].patterns.is_empty() {
+                value_indices.push(i);
                 i += 1;
             } else {
-                // Collect all consecutive clauses with the same name
-                let name = &bind.name;
-                let mut clauses = Vec::new();
-                let num_params = bind.patterns.len();
+                func_groups.push(i);
+                let name = &binds[i].name;
                 while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
-                    clauses.push(TClause {
-                        patterns: binds[i].patterns.clone(),
-                        guards: vec![],
-                        body: binds[i].body.clone(),
-                        where_binds: vec![],
-                    });
                     i += 1;
                 }
-
-                let params: Vec<String> = (0..num_params)
-                    .map(|j| format!("_warg{}", j))
-                    .collect();
-                let params_str = params.join(", ");
-                let sname = sanitize_name(name);
-                // Use `local function name(...)` for recursion support.
-                // In _v table mode, _v[N] is a table field so the function
-                // body can reference it — no forward declaration needed.
-                self.local_vars.insert(sname.clone());
-                self.local_count += 1;
-                self.emit_indent();
-                if self.local_count > Self::LOCAL_LIMIT {
-                    if !self.var_table_emitted {
-                        self.emit_line("local _v = {}");
-                        self.var_table_emitted = true;
-                    }
-                    self.var_slots_next += 1;
-                    self.var_slots.insert(sname.clone(), self.var_slots_next);
-                    self.emit(&format!("_v[{}] = function({})\n", self.var_slots_next, params_str));
-                } else {
-                    self.emit(&format!("local function {}({})\n", sname, params_str));
-                }
-                self.indent += 1;
-
-                if clauses.len() == 1 {
-                    let clause = &clauses[0];
-                    let all_simple = clause.patterns.iter().all(|p|
-                        matches!(p, TPattern::Var(_, _) | TPattern::Wildcard));
-
-                    if all_simple {
-                        for (j, pat) in clause.patterns.iter().enumerate() {
-                            if let TPattern::Var(v, _) = pat {
-                                self.emit_line(&format!("local {} = _warg{}", sanitize_name(v), j));
-                            }
-                        }
-                        self.emit_indent();
-                        self.emit("return ");
-                        self.gen_expr(&clause.body);
-                        self.emit("\n");
-                    } else {
-                        // Force params that are pattern-matched (not just var/wildcard)
-                        for (j, pat) in clause.patterns.iter().enumerate() {
-                            if !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard) {
-                                self.emit_line(&format!("_warg{} = __force(_warg{})", j, j));
-                            }
-                        }
-                        self.gen_pattern_match(&params, &clauses);
-                    }
-                } else {
-                    // Force params that are pattern-matched in any clause
-                    for j in 0..num_params {
-                        let needs_force = clauses.iter().any(|c| {
-                            c.patterns.get(j).map_or(false, |pat| {
-                                !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
-                            })
-                        });
-                        if needs_force {
-                            self.emit_line(&format!("_warg{} = __force(_warg{})", j, j));
-                        }
-                    }
-                    self.gen_pattern_match(&params, &clauses);
-                }
-
-                self.indent -= 1;
-                self.emit_line("end");
             }
         }
+        // First pass: emit all function definitions
+        for &start in &func_groups {
+            self.gen_where_func_group(binds, start);
+        }
+        // Second pass: emit all value bindings
+        for &idx in &value_indices {
+            self.gen_where_value(&binds[idx]);
+        }
+    }
+
+    fn gen_where_value(&mut self, bind: &TLocalDef) {
+        let sname = sanitize_name(&bind.name);
+        let decl = self.declare_local(&sname);
+        self.emit_indent();
+        if Self::is_cheap(&bind.body) {
+            self.emit(&format!("{} = ", decl));
+            self.gen_expr(&bind.body);
+            self.concrete_vars.insert(sname);
+        } else {
+            self.emit(&format!("{} = __thunk(function() return ", decl));
+            self.gen_expr(&bind.body);
+            self.emit(" end)");
+        }
+        self.emit("\n");
+    }
+
+    fn gen_where_func_group(&mut self, binds: &[TLocalDef], start: usize) {
+        let name = &binds[start].name;
+        let mut clauses = Vec::new();
+        let num_params = binds[start].patterns.len();
+        let mut i = start;
+        while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
+            clauses.push(TClause {
+                patterns: binds[i].patterns.clone(),
+                guards: vec![],
+                body: binds[i].body.clone(),
+                where_binds: vec![],
+            });
+            i += 1;
+        }
+
+        let params: Vec<String> = (0..num_params)
+            .map(|j| format!("_warg{}", j))
+            .collect();
+        let params_str = params.join(", ");
+        let sname = sanitize_name(name);
+        self.local_vars.insert(sname.clone());
+        self.local_count += 1;
+        self.emit_indent();
+        if self.local_count > Self::LOCAL_LIMIT {
+            if !self.var_table_emitted {
+                self.emit_line("local _v = {}");
+                self.var_table_emitted = true;
+            }
+            self.var_slots_next += 1;
+            self.var_slots.insert(sname.clone(), self.var_slots_next);
+            self.emit(&format!("_v[{}] = function({})\n", self.var_slots_next, params_str));
+        } else {
+            self.emit(&format!("local function {}({})\n", sname, params_str));
+        }
+        self.indent += 1;
+
+        if clauses.len() == 1 {
+            let clause = &clauses[0];
+            let all_simple = clause.patterns.iter().all(|p|
+                matches!(p, TPattern::Var(_, _) | TPattern::Wildcard));
+
+            if all_simple {
+                for (j, pat) in clause.patterns.iter().enumerate() {
+                    if let TPattern::Var(v, _) = pat {
+                        self.emit_line(&format!("local {} = _warg{}", sanitize_name(v), j));
+                    }
+                }
+                self.emit_indent();
+                self.emit("return ");
+                self.gen_expr(&clause.body);
+                self.emit("\n");
+            } else {
+                for (j, pat) in clause.patterns.iter().enumerate() {
+                    if !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard) {
+                        self.emit_line(&format!("_warg{} = __force(_warg{})", j, j));
+                    }
+                }
+                self.gen_pattern_match(&params, &clauses);
+            }
+        } else {
+            for j in 0..num_params {
+                let needs_force = clauses.iter().any(|c| {
+                    c.patterns.get(j).map_or(false, |pat| {
+                        !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
+                    })
+                });
+                if needs_force {
+                    self.emit_line(&format!("_warg{} = __force(_warg{})", j, j));
+                }
+            }
+            self.gen_pattern_match(&params, &clauses);
+        }
+
+        self.indent -= 1;
+        self.emit_line("end");
     }
 
     fn gen_pattern_match(&mut self, params: &[String], clauses: &[TClause]) {
