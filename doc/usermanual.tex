@@ -88,13 +88,14 @@ generated Lua requires no runtime library and runs on Lua~5.4 or LuaJIT.
 
 \subsection{Installation}
 
-Build from source with Cargo:
+Install from source with Cargo:
 
 \begin{lstlisting}[language={}]
-cargo build --release
+cargo install --path .
 \end{lstlisting}
 
-This produces the \texttt{mll} binary in \texttt{target/release/}.
+This builds an optimized binary and places it in \texttt{\textasciitilde/.cargo/bin/},
+which is normally already on your \texttt{PATH}.
 
 \subsection{Hello World}
 
