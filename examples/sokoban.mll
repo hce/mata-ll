@@ -21,68 +21,87 @@ readKey = do
 -- ── Types ────────────────────────────────────────────────
 
 data Pos = Pos Integer Integer
+    deriving (Eq)
 
 data Game = Game [String] Pos [Pos] [Pos]
 -- static map (walls/floors/goals), player, boxes, goals
 
+gameBoxes :: Game -> [Pos]
+gameBoxes (Game _ _ bs _) = bs
+
+gameGoals :: Game -> [Pos]
+gameGoals (Game _ _ _ gs) = gs
+
 data Action = Move Integer Integer | Quit | Restart | NoOp
 
--- ── List / position helpers ──────────────────────────────
+-- ── Sokoban tile codes ───────────────────────────────────
+
+chWall :: Integer
+chWall = 35            -- '#'
+
+chGoal :: Integer
+chGoal = 46            -- '.'
+
+chPlayer :: Integer
+chPlayer = 64          -- '@'
+
+chBox :: Integer
+chBox = 36             -- '$'
+
+chBoxOnGoal :: Integer
+chBoxOnGoal = 42       -- '*'
+
+chPlayerOnGoal :: Integer
+chPlayerOnGoal = 43    -- '+'
+
+-- ── Helpers ──────────────────────────────────────────────
 
 listAt :: [a] -> Integer -> a
 listAt (x:_)  1 = x
 listAt (_:xs) n = listAt xs (n - 1)
 listAt []     _ = error "listAt: index out of range"
 
-posEq :: Pos -> Pos -> Bool
-posEq (Pos x1 y1) (Pos x2 y2) = x1 == x2 && y1 == y2
-
-posInList :: Pos -> [Pos] -> Bool
-posInList _ []     = False
-posInList p (q:qs) = if posEq p q then True else posInList p qs
-
-hasBoxXY :: [Pos] -> Integer -> Integer -> Bool
-hasBoxXY []               _ _ = False
-hasBoxXY (Pos bx by : bs) x y =
-    if bx == x && by == y then True else hasBoxXY bs x y
+hasBoxAt :: [Pos] -> Integer -> Integer -> Bool
+hasBoxAt boxes x y = elem (Pos x y) boxes
 
 -- ── Map queries ──────────────────────────────────────────
 
 isWall :: [String] -> Integer -> Integer -> Bool
-isWall smap x y =
-    if y < 1 || y > length smap then True
-    else let row = listAt smap y
-         in if x < 1 || x > strLen row then True
-            else strByte row x == 35
+isWall smap x y
+    | y < 1 || y > length smap = True
+    | x < 1 || x > strLen row  = True
+    | otherwise                 = strByte row x == chWall
+  where row = listAt smap y
 
 -- ── Movement ─────────────────────────────────────────────
 
-moveBox :: [Pos] -> Integer -> Integer -> Integer -> Integer -> [Pos]
-moveBox []               _  _  _  _  = []
-moveBox (Pos bx by : bs) fx fy tx ty =
-    if bx == fx && by == fy
-    then Pos tx ty : bs
-    else Pos bx by : moveBox bs fx fy tx ty
+moveBox :: [Pos] -> Pos -> Pos -> [Pos]
+moveBox []     _    _  = []
+moveBox (b:bs) from to =
+    if b == from then to : bs
+    else b : moveBox bs from to
 
 tryMove :: Game -> Integer -> Integer -> Game
 tryMove (Game smap (Pos px py) boxes goals) dx dy =
-    let tx = px + dx
-        ty = py + dy
-        bx = tx + dx
-        by = ty + dy
-    in if isWall smap tx ty
-       then Game smap (Pos px py) boxes goals
-       else if hasBoxXY boxes tx ty
-            then if isWall smap bx by || hasBoxXY boxes bx by
-                 then Game smap (Pos px py) boxes goals
-                 else Game smap (Pos tx ty) (moveBox boxes tx ty bx by) goals
-            else Game smap (Pos tx ty) boxes goals
+    let tx     = px + dx
+        ty     = py + dy
+        bx     = tx + dx
+        by     = ty + dy
+        stay   = Game smap (Pos px py) boxes goals
+        target = Pos tx ty
+        beyond = Pos bx by
+    in if isWall smap tx ty then stay
+       else if hasBoxAt boxes tx ty
+            then if isWall smap bx by || hasBoxAt boxes bx by
+                 then stay
+                 else Game smap target (moveBox boxes target beyond) goals
+            else Game smap target boxes goals
 
 -- ── Win check ────────────────────────────────────────────
 
 isWin :: [Pos] -> [Pos] -> Bool
 isWin []     _     = True
-isWin (g:gs) boxes = if posInList g boxes then isWin gs boxes else False
+isWin (g:gs) boxes = elem g boxes && isWin gs boxes
 
 -- ── Input ────────────────────────────────────────────────
 
@@ -109,12 +128,11 @@ clearScreen :: IO ()
 clearScreen = putStr (esc <> "[2J" <> esc <> "[H")
 
 cellChar :: String -> Integer -> Pos -> [Pos] -> Integer -> String
-cellChar row y (Pos px py) boxes x =
-    if px == x && py == y
-    then if strByte row x == 46 then "+" else "@"
-    else if hasBoxXY boxes x y
-    then if strByte row x == 46 then "*" else "$"
-    else strChar (strByte row x)
+cellChar row y (Pos px py) boxes x
+    | px == x && py == y = if onGoal then "+" else "@"
+    | hasBoxAt boxes x y = if onGoal then "*" else "$"
+    | otherwise          = strChar (strByte row x)
+  where onGoal = strByte row x == chGoal
 
 buildRow :: String -> Integer -> Pos -> [Pos] -> Integer -> String
 buildRow row y player boxes x =
@@ -141,11 +159,10 @@ render (Game smap player boxes _) lvl moves = do
 
 -- Strip player/boxes from a cell, leaving the underlying floor or goal
 staticChar :: Integer -> Integer
-staticChar 64 = 32     -- @ -> space
-staticChar 36 = 32     -- $ -> space
-staticChar 43 = 46     -- + -> .
-staticChar 42 = 46     -- * -> .
-staticChar c  = c
+staticChar c
+    | c == chPlayer || c == chBox            = 32   -- floor
+    | c == chPlayerOnGoal || c == chBoxOnGoal = chGoal
+    | otherwise                              = c
 
 buildStaticRow :: String -> Integer -> String
 buildStaticRow s i =
@@ -156,12 +173,29 @@ buildStaticMap :: [String] -> [String]
 buildStaticMap []     = []
 buildStaticMap (r:rs) = buildStaticRow r 1 : buildStaticMap rs
 
+-- Scan a row for positions whose character code satisfies a predicate
+findInRow :: String -> Integer -> Integer -> (Integer -> Bool) -> [Pos]
+findInRow s y x match =
+    if x > strLen s then []
+    else let rest = findInRow s y (x + 1) match
+         in if match (strByte s x) then Pos x y : rest else rest
+
+findAll :: [String] -> Integer -> (Integer -> Bool) -> [Pos]
+findAll []         _ _     = []
+findAll (row:rest) y match = findInRow row y 1 match ++ findAll rest (y + 1) match
+
+isBoxChar :: Integer -> Bool
+isBoxChar c = c == chBox || c == chBoxOnGoal
+
+isGoalChar :: Integer -> Bool
+isGoalChar c = c == chGoal || c == chBoxOnGoal || c == chPlayerOnGoal
+
 findPlayerRow :: String -> Integer -> Maybe Integer
-findPlayerRow s x =
-    if x > strLen s then Nothing
-    else let ch = strByte s x
-         in if ch == 64 || ch == 43 then Just x    -- @ or +
-            else findPlayerRow s (x + 1)
+findPlayerRow s x
+    | x > strLen s                          = Nothing
+    | ch == chPlayer || ch == chPlayerOnGoal = Just x
+    | otherwise                             = findPlayerRow s (x + 1)
+  where ch = strByte s x
 
 findPlayer :: [String] -> Integer -> Pos
 findPlayer []         _ = Pos 1 1
@@ -170,34 +204,11 @@ findPlayer (row:rest) y =
         Just x  -> Pos x y
         Nothing -> findPlayer rest (y + 1)
 
-findBoxesRow :: String -> Integer -> Integer -> [Pos]
-findBoxesRow s y x =
-    if x > strLen s then []
-    else let ch  = strByte s x
-             more = findBoxesRow s y (x + 1)
-         in if ch == 36 || ch == 42 then Pos x y : more else more
-
-findBoxes :: [String] -> Integer -> [Pos]
-findBoxes []         _ = []
-findBoxes (row:rest) y = findBoxesRow row y 1 ++ findBoxes rest (y + 1)
-
-findGoalsRow :: String -> Integer -> Integer -> [Pos]
-findGoalsRow s y x =
-    if x > strLen s then []
-    else let ch   = strByte s x
-             more = findGoalsRow s y (x + 1)
-         in if ch == 46 || ch == 42 || ch == 43   -- . * +
-            then Pos x y : more else more
-
-findGoals :: [String] -> Integer -> [Pos]
-findGoals []         _ = []
-findGoals (row:rest) y = findGoalsRow row y 1 ++ findGoals rest (y + 1)
-
 parseLevel :: [String] -> Game
 parseLevel rows = Game (buildStaticMap rows)
                        (findPlayer rows 1)
-                       (findBoxes rows 1)
-                       (findGoals rows 1)
+                       (findAll rows 1 isBoxChar)
+                       (findAll rows 1 isGoalChar)
 
 -- ── Game loop ────────────────────────────────────────────
 
@@ -214,17 +225,10 @@ playLevel initial current lvl moves = do
     else do
         ch <- readKey
         case charToAction (strByte ch 1) of
-            Quit    -> return False
-            Restart -> playLevel initial initial lvl 0
-            NoOp   -> playLevel initial current lvl moves
-            Move dx dy ->
-                playLevel initial (tryMove current dx dy) lvl (moves + 1)
-
-gameGoals :: Game -> [Pos]
-gameGoals (Game _ _ _ gs) = gs
-
-gameBoxes :: Game -> [Pos]
-gameBoxes (Game _ _ bs _) = bs
+            Quit       -> return False
+            Restart    -> playLevel initial initial lvl 0
+            NoOp       -> playLevel initial current lvl moves
+            Move dx dy -> playLevel initial (tryMove current dx dy) lvl (moves + 1)
 
 playLevels :: [Game] -> Integer -> IO ()
 playLevels []     _ = do
