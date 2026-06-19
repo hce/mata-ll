@@ -49,12 +49,17 @@ pfail = Parser (\_ _ -> Nothing)
 
 infixl 3 <|>
 
+-- Consume one character satisfying a predicate
+satisfy :: (Integer -> Bool) -> Parser String
+satisfy pred = Parser (\s i ->
+    if i > strLen s then Nothing
+    else let c = strByte s i
+         in if pred c then Just (strChar c, i + 1)
+            else Nothing)
+
 -- Consume a specific character (by ASCII code)
 char :: Integer -> Parser String
-char expected = Parser (\s i ->
-    if i > strLen s then Nothing
-    else if strByte s i == expected then Just (strChar expected, i + 1)
-         else Nothing)
+char expected = satisfy (\c -> c == expected)
 
 -- Consume a specific string literal
 string :: String -> Parser String
@@ -87,27 +92,15 @@ optional p = (fmap Just p) <|> pure Nothing
 
 -- Digit (ASCII 48-57)
 digit :: Parser String
-digit = Parser (\s i ->
-    if i > strLen s then Nothing
-    else let c = strByte s i
-         in if c >= 48 && c <= 57 then Just (strChar c, i + 1)
-            else Nothing)
+digit = satisfy (\c -> c >= 48 && c <= 57)
 
 -- Letter (uppercase ASCII 65-90)
 upper :: Parser String
-upper = Parser (\s i ->
-    if i > strLen s then Nothing
-    else let c = strByte s i
-         in if c >= 65 && c <= 90 then Just (strChar c, i + 1)
-            else Nothing)
+upper = satisfy (\c -> c >= 65 && c <= 90)
 
 -- Any non-space character
 nonSpace :: Parser String
-nonSpace = Parser (\s i ->
-    if i > strLen s then Nothing
-    else let c = strByte s i
-         in if c /= 32 then Just (strChar c, i + 1)
-            else Nothing)
+nonSpace = satisfy (\c -> c /= 32)
 
 -- Parse a natural number (sequence of digits)
 number :: Parser Integer
