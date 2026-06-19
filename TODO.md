@@ -161,6 +161,14 @@ MATA-LL TODO
 
 - [x] Lambda pattern matching
 
+## Example programs (compiler stress tests)
+
+- [ ] Scheme interpreter — recursive sum type for values (VNum | VStr | VFunc Env ...), closures-as-values, environment chaining, deep pattern matching; stresses monomorphizer with Value appearing at many types
+- [ ] Red-black tree — balancing cases are deeply nested constructor patterns (Branch R (Branch R a x b) y c); stresses exhaustiveness checking and overlapping pattern compilation
+- [ ] Type inference engine — unification, substitution maps, occurs check, HashMap with custom key types; exercises typeclass dictionary passing through Eq/Ord on user-defined types
+- [ ] Ray tracer — heavy Number arithmetic, record-heavy vector/color types with field access and update, deeply nested let bindings; tests cheapness analysis on floating-point expressions
+- [ ] Huffman coding — priority queue, binary tree traversal, ByteString I/O, LBit bitwise operations; end-to-end encode/decode roundtrip gives a correctness oracle for free
+
 ## String types (design decision)
 
 String = Lua string permanently. ByteString = Lua string with explicit byte semantics (same runtime representation, type-level distinction only). Text = future UTF-8 type over ByteString, if/when Unicode support is needed.
