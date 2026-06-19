@@ -1,0 +1,1038 @@
+% MATA-LL User's Manual
+% Compile with: lualatex usermanual.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmainfont{Latin Modern Roman}
+\setmonofont{Latin Modern Mono}[Scale=0.88]
+\setmathfont{Latin Modern Math}
+
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black}
+
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{framed}
+
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries}{\thesubsubsection}{1em}{}
+
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{keyword}{HTML}{7B3294}
+\definecolor{strcolor}{HTML}{2E7D32}
+\definecolor{comment}{HTML}{757575}
+\definecolor{notebg}{HTML}{FFF8E1}
+
+\lstdefinelanguage{MLL}{
+  keywords={data,where,let,in,case,of,if,then,else,do,import,module,
+            class,instance,deriving,newtype,type,export,infixl,infixr,infix,
+            forall,hiding,qualified,as},
+  sensitive=true,
+  morecomment=[l]{--},
+  morecomment=[n]{\{-}{-\}},
+  morestring=[b]",
+}
+
+\lstset{
+  language=MLL,
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  framerule=0pt,
+  rulecolor=\color{codebg},
+  keywordstyle=\color{keyword}\bfseries,
+  stringstyle=\color{strcolor},
+  commentstyle=\color{comment}\itshape,
+  breaklines=true,
+  showstringspaces=false,
+  tabsize=2,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  aboveskip=8pt,
+  belowskip=8pt,
+}
+
+\newenvironment{note}{%
+  \def\FrameCommand{\fboxsep=3mm \colorbox{notebg}}%
+  \MakeFramed{\advance\hsize-\width \FrameRestore}%
+  \noindent\textbf{Note:} }%
+  {\endMakeFramed}
+
+\title{\textbf{MATA-LL User's Manual}\\[6pt]
+  \large A Haskell-Inspired Language Targeting Lua}
+\author{MATA-LL Project}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\clearpage
+
+%======================================================================
+\section{Getting Started}
+
+\subsection{What is MATA-LL?}
+
+MATA-LL (Modest Attempt at Typesystem Augmenting the Lua Language) is a
+statically-typed, non-strict functional language that compiles to standalone
+Lua files.  If you know Haskell, you will feel at home immediately.  The
+generated Lua requires no runtime library and runs on Lua~5.4 or LuaJIT.
+
+\subsection{Installation}
+
+Build from source with Cargo:
+
+\begin{lstlisting}[language={}]
+cargo build --release
+\end{lstlisting}
+
+This produces the \texttt{mll} binary in \texttt{target/release/}.
+
+\subsection{Hello World}
+
+Create \texttt{hello.mll}:
+
+\begin{lstlisting}
+main :: IO ()
+main = putStrLn "Hello, world!"
+\end{lstlisting}
+
+Compile and run:
+
+\begin{lstlisting}[language={}]
+mll hello.mll --run
+\end{lstlisting}
+
+Or emit a Lua file:
+
+\begin{lstlisting}[language={}]
+mll hello.mll --emit-lua      # writes hello.lua
+lua5.4 hello.lua               # runs standalone
+\end{lstlisting}
+
+\subsection{Command-Line Usage}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Command} & \textbf{Effect} \\
+\midrule
+\texttt{mll file.mll}            & Compile, print Lua to stdout \\
+\texttt{mll file.mll -{}-run}     & Compile and execute immediately \\
+\texttt{mll file.mll -{}-emit-lua} & Write \texttt{file.lua} \\
+\texttt{mll file.mll -L ./lib}   & Add library search path \\
+\bottomrule
+\end{tabular}
+
+\subsection{The REPL}
+
+Start with \texttt{mll-repl}:
+
+\begin{lstlisting}[language={}]
+mll> let x = 42
+mll> x * 2 + 1
+85
+mll> :t map
+map :: (a -> b) -> [a] -> [b]
+\end{lstlisting}
+
+REPL commands: \texttt{/clear}, \texttt{/decls}, \texttt{/lua EXPR},
+\texttt{/source}, \texttt{/drop}, \texttt{/help}, \texttt{/quit}.
+Multi-line input: end a line with \texttt{\textbackslash}.
+
+%======================================================================
+\section{Basic Syntax}
+
+\subsection{Comments}
+
+\begin{lstlisting}
+-- Single-line comment
+{- Block comment
+   can span lines
+   {- and nest -}
+-}
+\end{lstlisting}
+
+\subsection{Layout Rule}
+
+MATA-LL uses indentation-sensitive layout, like Haskell or Python.
+Continuation lines must be indented past the start column of their
+definition:
+
+\begin{lstlisting}
+longExpression :: Integer
+longExpression = 1 + 2
+    + 3 + 4    -- continuation: indented past 'l'
+\end{lstlisting}
+
+\subsection{Type Signatures}
+
+All top-level definitions require explicit type signatures.  Local bindings
+(\texttt{let}, \texttt{where}) are inferred automatically.
+
+\begin{lstlisting}
+double :: Integer -> Integer
+double x = x * 2
+\end{lstlisting}
+
+%======================================================================
+\section{Types and Data}
+
+\subsection{Primitive Types}
+
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Type} & \textbf{Lua type} & \textbf{Examples} \\
+\midrule
+\texttt{Integer} & integer     & \texttt{42}, \texttt{-7}, \texttt{0} \\
+\texttt{Number}  & float       & \texttt{3.14}, \texttt{-0.5} \\
+\texttt{String}  & string      & \texttt{"hello\textbackslash n"} \\
+\texttt{Bool}    & boolean     & \texttt{True}, \texttt{False} \\
+\bottomrule
+\end{tabular}
+
+\begin{note}
+There is no \texttt{Char} type.  Strings are native Lua strings, not
+\texttt{[Char]}.  Use \texttt{<>} for string concatenation (not \texttt{++}).
+\end{note}
+
+\subsection{Lists}
+
+Lists are cons-cell linked lists (not Lua arrays):
+
+\begin{lstlisting}
+nums :: [Integer]
+nums = [1, 2, 3, 4, 5]
+
+-- Equivalent to:
+nums' :: [Integer]
+nums' = 1 : 2 : 3 : 4 : 5 : []
+\end{lstlisting}
+
+\subsection{Tuples}
+
+\begin{lstlisting}
+pair :: (String, Integer)
+pair = ("age", 30)
+
+triple :: (Bool, Integer, String)
+triple = (True, 42, "hello")
+\end{lstlisting}
+
+\subsection{Algebraic Data Types}
+
+\begin{lstlisting}
+data Shape = Circle Number
+           | Rectangle Number Number
+           | Point
+
+area :: Shape -> Number
+area (Circle r)      = 3.14159 * r * r
+area (Rectangle w h) = w * h
+area Point           = 0.0
+\end{lstlisting}
+
+\subsection{Records}
+
+Named fields with accessor functions:
+
+\begin{lstlisting}
+data Person = Person { name :: String
+                     , age  :: Integer }
+
+greet :: Person -> String
+greet p = "Hello, " <> name p <> "!"
+
+-- Record construction
+alice :: Person
+alice = Person { name = "Alice", age = 30 }
+
+-- Record update (creates a copy)
+olderAlice :: Person
+olderAlice = alice { age = 31 }
+\end{lstlisting}
+
+\subsection{Newtypes}
+
+Zero-cost wrappers:
+
+\begin{lstlisting}
+newtype Metres = Metres Number
+newtype UserId = UserId Integer
+\end{lstlisting}
+
+\subsection{Type Aliases}
+
+\begin{lstlisting}
+type Pair a = (a, a)
+type Name = String
+\end{lstlisting}
+
+\subsection{Maybe and Either}
+
+\begin{lstlisting}
+safeDivide :: Integer -> Integer -> Maybe Integer
+safeDivide _ 0 = Nothing
+safeDivide a b = Just (a `div` b)
+
+parseAge :: String -> Either String Integer
+parseAge s = let n = read s
+             in if n >= 0 then Right n
+                else Left "negative age"
+\end{lstlisting}
+
+%======================================================================
+\section{Functions}
+
+\subsection{Definition and Application}
+
+\begin{lstlisting}
+add :: Integer -> Integer -> Integer
+add a b = a + b
+
+-- Application (no parentheses needed)
+result :: Integer
+result = add 3 4    -- 7
+
+-- Partial application
+inc :: Integer -> Integer
+inc = add 1
+\end{lstlisting}
+
+\subsection{Lambda Expressions}
+
+\begin{lstlisting}
+double :: Integer -> Integer
+double = \x -> x * 2
+
+-- Multi-parameter
+add :: Integer -> Integer -> Integer
+add = \a b -> a + b
+
+-- Pattern matching in lambdas
+fstOf :: (a, b) -> a
+fstOf = \(x, _) -> x
+\end{lstlisting}
+
+\subsection{Operators}
+
+\begin{lstlisting}
+-- Operators are binary functions
+result = 1 + 2 * 3
+
+-- Prefix form with parentheses
+result = (+) 1 2
+
+-- Functions as infix with backticks
+result = 10 `div` 3
+
+-- Sections
+double = (* 2)
+inc    = (+ 1)
+halve  = (`div` 2)
+\end{lstlisting}
+
+\subsubsection{Operator Precedence}
+
+Declare fixity with \texttt{infixl}, \texttt{infixr}, or \texttt{infix}
+(levels 0--9):
+
+\begin{lstlisting}
+infixl 6 +
+infixl 6 -
+infixl 7 *
+infixr 5 :
+infixr 0 $
+\end{lstlisting}
+
+Standard Haskell fixities are the defaults.
+
+\subsection{Guards}
+
+\begin{lstlisting}
+abs :: Integer -> Integer
+abs n | n < 0     = -n
+      | otherwise = n
+
+classify :: Integer -> String
+classify n
+    | n == 0    = "zero"
+    | n > 0     = "positive"
+    | otherwise = "negative"
+\end{lstlisting}
+
+\subsection{Where Clauses}
+
+\begin{lstlisting}
+circleArea :: Number -> Number
+circleArea r = pi * r * r
+    where pi = 3.14159265
+
+bmi :: Number -> Number -> String
+bmi weight height
+    | b < 18.5  = "underweight"
+    | b < 25.0  = "normal"
+    | otherwise = "overweight"
+    where b = weight / (height * height)
+\end{lstlisting}
+
+\subsection{Let/In Expressions}
+
+\begin{lstlisting}
+cylinderVolume :: Number -> Number -> Number
+cylinderVolume r h =
+    let pi = 3.14159265
+        baseArea = pi * r * r
+    in baseArea * h
+\end{lstlisting}
+
+%======================================================================
+\section{Pattern Matching}
+
+\subsection{Function Definitions}
+
+\begin{lstlisting}
+factorial :: Integer -> Integer
+factorial 0 = 1
+factorial n = n * factorial (n - 1)
+
+head :: [a] -> a
+head (x:_) = x
+
+fst :: (a, b) -> a
+fst (a, _) = a
+\end{lstlisting}
+
+\subsection{Case Expressions}
+
+\begin{lstlisting}
+describe :: [a] -> String
+describe xs = case xs of
+    []    -> "empty"
+    [_]   -> "singleton"
+    _:_:_ -> "multiple"
+\end{lstlisting}
+
+\subsection{Guards in Case}
+
+\begin{lstlisting}
+eval :: Expr -> Integer
+eval e = case e of
+    Lit n      -> n
+    Add a b    -> eval a + eval b
+    Neg n | n < 0 -> eval (Neg (Lit (-n)))
+          | otherwise -> -(eval n)
+\end{lstlisting}
+
+%======================================================================
+\section{Typeclasses}
+
+\subsection{Defining a Class}
+
+\begin{lstlisting}
+class Printable a where
+    display :: a -> String
+\end{lstlisting}
+
+\subsection{Instances}
+
+\begin{lstlisting}
+instance Printable Integer where
+    display n = show n
+
+instance Printable Bool where
+    display True  = "yes"
+    display False = "no"
+\end{lstlisting}
+
+\subsection{Superclass Constraints}
+
+\begin{lstlisting}
+instance Show a => Printable [a] where
+    display xs = "[" <> intercalate ", " (map show xs) <> "]"
+\end{lstlisting}
+
+\subsection{Deriving}
+
+Automatic instance generation for common classes:
+
+\begin{lstlisting}
+data Color = Red | Green | Blue
+    deriving (Show, Eq, Ord, Enum, Bounded)
+
+data Tree a = Leaf a | Branch (Tree a) (Tree a)
+    deriving (Show, Eq, Functor)
+\end{lstlisting}
+
+Supported: \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
+\texttt{Bounded}, \texttt{Functor}.
+
+\subsection{Built-in Classes}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Class} & \textbf{Methods} \\
+\midrule
+\texttt{Show}        & \texttt{show :: a -> String} \\
+\texttt{Eq}          & \texttt{(==), (/=) :: a -> a -> Bool} \\
+\texttt{Ord}         & \texttt{compare, (<), (>), (<=), (>=)} \\
+\texttt{Enum}        & \texttt{succ, pred, toEnum, fromEnum, enumFrom, \ldots} \\
+\texttt{Bounded}     & \texttt{minBound, maxBound} \\
+\texttt{Read}        & \texttt{read :: String -> a} \\
+\texttt{Functor}     & \texttt{fmap :: (a -> b) -> f a -> f b} \\
+\texttt{Applicative} & \texttt{pure, (<*>)} \\
+\texttt{Monad}       & \texttt{(>>=), return} \\
+\bottomrule
+\end{tabular}
+
+%======================================================================
+\section{Monads and IO}
+
+\subsection{IO Actions}
+
+Programs with a \texttt{main :: IO ()} are standalone executables:
+
+\begin{lstlisting}
+main :: IO ()
+main = do
+    putStrLn "What is your name?"
+    name <- getLine
+    putStrLn ("Hello, " <> name <> "!")
+\end{lstlisting}
+
+\subsection{Do-Notation}
+
+Do-notation desugars to monadic bind:
+
+\begin{lstlisting}
+-- These are equivalent:
+example1 :: IO ()
+example1 = do
+    x <- getLine
+    let y = x <> "!"
+    putStrLn y
+
+example2 :: IO ()
+example2 = getLine >>= \x ->
+           let y = x <> "!" in
+           putStrLn y
+\end{lstlisting}
+
+\subsection{Common IO Functions}
+
+\begin{lstlisting}
+putStrLn :: String -> IO ()     -- print with newline
+putStr   :: String -> IO ()     -- print without newline
+getLine  :: IO String           -- read a line
+getArgs  :: IO [String]         -- command-line arguments
+exit     :: ExitValue -> IO ()  -- exit process
+error    :: String -> a         -- abort with message
+\end{lstlisting}
+
+\subsection{Exception Handling}
+
+\begin{lstlisting}
+main :: IO ()
+main = do
+    result <- try (readFile "data.txt")
+    case result of
+        Right contents -> putStrLn contents
+        Left err       -> putStrLn ("Error: " <> err)
+
+-- Or with catch:
+safeRead :: String -> IO String
+safeRead path = catch (readFile path)
+                      (\err -> return "")
+\end{lstlisting}
+
+%======================================================================
+\section{Evaluation Strategy}
+
+MATA-LL is non-strict: function arguments are not evaluated until needed.
+Values are memoized once forced.
+
+\begin{lstlisting}
+-- Infinite list -- only computed as needed
+nats :: [Integer]
+nats = [1..]
+
+fibs :: [Integer]
+fibs = 1 : 1 : zipWith (+) fibs (tail fibs)
+
+-- take 10 fibs evaluates only 10 elements
+first10 :: [Integer]
+first10 = take 10 fibs
+\end{lstlisting}
+
+\subsection{Explicit Forcing}
+
+Use \texttt{seq} to force evaluation:
+
+\begin{lstlisting}
+seq :: a -> b -> b
+-- Forces first argument, returns second
+
+strictSum :: [Integer] -> Integer
+strictSum = go 0
+    where go acc []     = acc
+          go acc (x:xs) = seq acc (go (acc + x) xs)
+\end{lstlisting}
+
+\begin{note}
+The compiler performs demand analysis and cheapness analysis automatically.
+Cheap expressions (literals, variables, simple arithmetic) are never
+thunked.  Most programs do not need manual \texttt{seq}.
+\end{note}
+
+%======================================================================
+\section{List Comprehensions}
+
+\begin{lstlisting}
+-- Generators and guards
+evens :: [Integer]
+evens = [x | x <- [1..20], x `mod` 2 == 0]
+
+-- Multiple generators (nested loops)
+pairs :: [(Integer, Integer)]
+pairs = [(x, y) | x <- [1..3], y <- [1..3], x /= y]
+
+-- Pattern-matching generators
+successes :: [Result a] -> [a]
+successes results = [v | Ok v <- results]
+\end{lstlisting}
+
+%======================================================================
+\section{Modules}
+
+\subsection{Importing}
+
+\begin{lstlisting}
+-- Import everything from a module
+import Data.List
+
+-- Import specific items
+import Data.List (sortBy, groupBy)
+
+-- Import hiding specific items
+import Data.List hiding (head, tail)
+
+-- Qualified import
+import qualified Data.Map as M
+\end{lstlisting}
+
+Modules map to file paths: \texttt{Data.List} resolves to
+\texttt{Data/List.mll} relative to source or library directories.
+
+\subsection{Available Library Modules}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Import} & \textbf{Provides} \\
+\midrule
+\texttt{ByteString}      & Byte sequence operations \\
+\texttt{LIO}             & File I/O (\texttt{fOpen}, \texttt{fRead}, \texttt{fWrite}, \ldots) \\
+\texttt{LMath}           & \texttt{math.*} bindings (sin, cos, random, \ldots) \\
+\texttt{LOS}             & OS functions \\
+\texttt{LString}         & String utilities \\
+\texttt{LBit}            & Bitwise operations \\
+\texttt{Regex}           & CPS-based regex matching \\
+\texttt{JSON}            & JSON parsing and generation \\
+\texttt{Data.List}       & sortBy, nubBy, groupBy, intercalate, \ldots \\
+\texttt{Data.Maybe}      & fromMaybe, catMaybes, mapMaybe, \ldots \\
+\texttt{Data.Map}        & HashMap operations \\
+\texttt{Control.Monad}   & mapM, forM, sequence, \ldots \\
+\texttt{Crypto.Ed25519}  & Ed25519 sign/verify (RFC~8032) \\
+\bottomrule
+\end{tabular}
+
+The Prelude is imported automatically into every module.
+
+%======================================================================
+\section{Foreign Function Interface}
+
+MATA-LL interoperates with Lua through type families.
+
+\subsection{Pure FFI}
+
+For Lua functions with no side effects:
+
+\begin{lstlisting}
+sin :: Number -> LuaPure "math.sin" Number
+cos :: Number -> LuaPure "math.cos" Number
+strlen :: String -> LuaPure "string.len" Integer
+\end{lstlisting}
+
+\texttt{LuaPure "name" T} reduces to \texttt{T} --- the function is
+callable as a pure expression.
+
+\subsection{Effectful FFI}
+
+For Lua functions that perform I/O or have side effects:
+
+\begin{lstlisting}
+rnd :: Integer -> Integer -> LuaIO "math.random" Integer
+clock :: LuaIO "os.clock" Number
+\end{lstlisting}
+
+\texttt{LuaIO "name" T} reduces to \texttt{IO T}.
+
+\subsection{Method-Call Syntax}
+
+Colon prefix generates Lua method calls (\texttt{obj:method()}):
+
+\begin{lstlisting}
+fileWrite :: Handle -> String -> LuaIO ":write" ()
+fileClose :: Handle -> LuaIO ":close" ()
+\end{lstlisting}
+
+\subsection{Optional Parameters}
+
+\texttt{Maybe} arguments become optional Lua parameters:
+
+\begin{lstlisting}
+rnd :: Number -> Maybe Number -> LuaIO "math.random" Number
+-- rnd 1.0 Nothing     => math.random(1.0)
+-- rnd 1.0 (Just 6.0)  => math.random(1.0, 6.0)
+\end{lstlisting}
+
+\subsection{Iterators}
+
+Wrap Lua iterator protocols:
+
+\begin{lstlisting}
+gmatch :: String -> String -> LuaIterator "string.gmatch" String
+\end{lstlisting}
+
+\subsection{Exporting to Lua}
+
+Use \texttt{export} to make functions callable from Lua:
+
+\begin{lstlisting}
+fib :: [Integer]
+fib = 1 : 1 : zipWith (+) fib (tail fib)
+
+export fibonacci :: Integer -> [Integer]
+fibonacci = flip take fib
+\end{lstlisting}
+
+From Lua:
+\begin{lstlisting}[language={}]
+local mll = require("fib")
+local fibs = mll.fibonacci(10)
+-- fibs is a plain Lua array: {1, 1, 2, 3, 5, 8, 13, 21, 34, 55}
+\end{lstlisting}
+
+Exported functions automatically convert MLL values to Lua values
+(forces thunks, converts cons-lists to arrays).
+
+%======================================================================
+\section{Advanced Types}
+
+\subsection{GADTs}
+
+Generalized Algebraic Data Types allow constructors to refine type
+parameters:
+
+\begin{lstlisting}
+data Expr a where
+    LitI :: Integer -> Expr Integer
+    LitB :: Bool -> Expr Bool
+    Add  :: Expr Integer -> Expr Integer -> Expr Integer
+    If   :: Expr Bool -> Expr a -> Expr a -> Expr a
+
+eval :: Expr a -> a
+eval (LitI n)     = n
+eval (LitB b)     = b
+eval (Add x y)    = eval x + eval y
+eval (If c t e)   = if eval c then eval t else eval e
+\end{lstlisting}
+
+\subsection{Existential Types}
+
+Hide a type behind an interface:
+
+\begin{lstlisting}
+data ShowBox = forall a. MkShowBox a (a -> String)
+
+showIt :: ShowBox -> String
+showIt (MkShowBox x f) = f x
+
+boxes :: [ShowBox]
+boxes = [MkShowBox 42 show, MkShowBox "hi" id]
+\end{lstlisting}
+
+\subsection{DataKinds}
+
+Promote data constructors to the type level for compile-time safety:
+
+\begin{lstlisting}
+data AgendaState = Empty | NonEmpty
+
+data Agenda a (s :: AgendaState) where
+    Nil   :: Agenda a 'Empty
+    One   :: a -> Agenda a 'NonEmpty
+    Cons  :: a -> Agenda a 'NonEmpty -> Agenda a 'NonEmpty
+
+-- Only non-empty agendas can be submitted
+submit :: Agenda String 'NonEmpty -> IO ()
+submit agenda = putStrLn "Submitted!"
+\end{lstlisting}
+
+\subsection{Type Families}
+
+User-defined type-level computation:
+
+\begin{lstlisting}
+type family Element container where
+    Element [a]           = a
+    Element (HashMap k v) = v
+\end{lstlisting}
+
+\subsection{Rank-2 Types and Scoped Mutation}
+
+The \texttt{ST} monad provides mutable arrays inside pure computations:
+
+\begin{lstlisting}
+import Data.List (replicate)
+
+sumList :: [Integer] -> Integer
+sumList xs = runST (do
+    acc <- newSTArrayFromList [0]
+    go acc xs
+    readSTArray acc 0)
+
+go :: STArray s -> [Integer] -> ST s ()
+go acc []     = return ()
+go acc (x:rest) = do
+    cur <- readSTArray acc 0
+    writeSTArray acc 0 (cur + x)
+    go acc rest
+\end{lstlisting}
+
+The \texttt{forall s.} in \texttt{runST}'s type prevents mutable state
+from escaping.
+
+\subsection{Scoped Lua Callbacks}
+
+When exporting functions that receive Lua callbacks:
+
+\begin{lstlisting}
+export processEvent :: forall s. (Integer -> Integer -> LuaIO s Integer)
+                    -> Integer -> LuaIO s Integer
+processEvent f n = do
+    (liftIO . putStrLn) $ "Called with " <> show n
+    f n (n + 1)
+\end{lstlisting}
+
+The \texttt{forall s.} scope parameter prevents the callback from being
+stored or used outside its invocation.
+
+%======================================================================
+\section{HashMap}
+
+A built-in dictionary type backed by Lua tables:
+
+\begin{lstlisting}
+import Data.Map
+
+main :: IO ()
+main = do
+    let m = hashmap_fromList [("a", 1), ("b", 2), ("c", 3)]
+    putStrLn (show (hashmap_lookup "b" m))  -- Just 2
+    let m2 = hashmap_insert "d" 4 m
+    putStrLn (show (hashmap_keys m2))
+    putStrLn (show (hashmap_member "x" m))  -- False
+\end{lstlisting}
+
+Operations: \texttt{hashmap\_lookup}, \texttt{hashmap\_insert},
+\texttt{hashmap\_delete}, \texttt{hashmap\_keys}, \texttt{hashmap\_values},
+\texttt{hashmap\_member}, \texttt{hashmap\_fromList}.
+
+%======================================================================
+\section{Ranges and Enumerations}
+
+Range syntax desugars to \texttt{Enum} methods:
+
+\begin{lstlisting}
+[1..10]       -- enumFromTo 1 10       => [1,2,...,10]
+[1,3..10]     -- enumFromThenTo 1 3 10 => [1,3,5,7,9]
+[1..]         -- enumFrom 1            => [1,2,3,...] (infinite)
+[1,3..]       -- enumFromThen 1 3      => [1,3,5,...] (infinite)
+\end{lstlisting}
+
+Works with any type that has an \texttt{Enum} instance, including
+user-defined types with \texttt{deriving Enum}.
+
+%======================================================================
+\section{Differences from Haskell}
+
+If you are coming from Haskell, keep these differences in mind:
+
+\begin{enumerate}[nosep]
+  \item \textbf{String is not \texttt{[Char]}}.  It is a native Lua string.
+        Use \texttt{<>} for concatenation; \texttt{++} is list-append only.
+  \item \textbf{No \texttt{Num} class}.  Arithmetic operators work directly
+        on \texttt{Integer} and \texttt{Number}.  Numeric literals are not
+        polymorphic.
+  \item \textbf{No \texttt{Char} type}.  Character operations use string
+        functions from \texttt{LString}.
+  \item \textbf{No multi-parameter typeclasses}.
+  \item \textbf{No lazy I/O}.  File operations read eagerly.
+  \item \textbf{No \texttt{IORef}/\texttt{MVar}/\texttt{STRef}}.
+        Use \texttt{STArray} for scoped mutation.
+  \item \textbf{All top-level bindings need type signatures}.
+  \item \textbf{Single-file modules}.  Each \texttt{.mll} file is one module.
+\end{enumerate}
+
+%======================================================================
+\section{Complete Example: AVL Dictionary}
+
+\begin{lstlisting}
+data Dict k v = Empty
+              | Node Integer k v (Dict k v) (Dict k v)
+
+empty :: Dict k v
+empty = Empty
+
+height :: Dict k v -> Integer
+height Empty = 0
+height (Node h _ _ _ _) = h
+
+node :: k -> v -> Dict k v -> Dict k v -> Dict k v
+node k v l r = Node (1 + max (height l) (height r)) k v l r
+
+insert :: k -> v -> Dict k v -> Dict k v
+insert k v Empty = node k v Empty Empty
+insert k v (Node h nk nv left right)
+    | k < nk    = rebalance (node nk nv (insert k v left) right)
+    | k > nk    = rebalance (node nk nv left (insert k v right))
+    | otherwise = Node h k v left right
+
+lookup' :: k -> Dict k v -> Maybe v
+lookup' _ Empty = Nothing
+lookup' k (Node _ nk nv left right)
+    | k < nk    = lookup' k left
+    | k > nk    = lookup' k right
+    | otherwise = Just nv
+
+main :: IO ()
+main = do
+    let d = insert "c" 3 $ insert "b" 2 $ insert "a" 1 $ empty
+    putStrLn (show (lookup' "b" d))   -- Just 2
+    putStrLn (show (lookup' "z" d))   -- Nothing
+\end{lstlisting}
+
+(Full rebalancing omitted for brevity --- see \texttt{examples/dict.mll}.)
+
+%======================================================================
+\section{Complete Example: Lazy Fibonacci Export}
+
+A library module that exports an efficient Fibonacci function to Lua:
+
+\begin{lstlisting}
+fib :: [Integer]
+fib = 1 : 1 : zipWith (+) fib (tail fib)
+
+export fibonacci :: Integer -> [Integer]
+fibonacci = flip take fib
+\end{lstlisting}
+
+Usage from Lua:
+
+\begin{lstlisting}[language={}]
+local m = require("fib")
+for i, v in ipairs(m.fibonacci(20)) do
+    print(i, v)
+end
+\end{lstlisting}
+
+The infinite list is computed lazily; only the requested elements are
+evaluated.
+
+%======================================================================
+\section{Prelude Reference}
+
+\subsection{Functions}
+
+\begin{lstlisting}
+-- Output
+putStrLn :: String -> IO ()
+putStr   :: String -> IO ()
+
+-- Conversion
+show :: Show a => a -> String
+read :: Read a => String -> a
+
+-- Combinators
+id    :: a -> a
+const :: a -> b -> a
+flip  :: (a -> b -> c) -> b -> a -> c
+(.)   :: (b -> c) -> (a -> b) -> a -> c
+($)   :: (a -> b) -> a -> b
+
+-- Arithmetic (work on Integer and Number)
+(+), (-), (*) :: ...
+div, mod      :: Integer -> Integer -> Integer
+(/)           :: Number -> Number -> Number
+
+-- Comparison (require Eq/Ord instances)
+(==), (/=) :: Eq a  => a -> a -> Bool
+(<), (>), (<=), (>=) :: Ord a => a -> a -> Bool
+max, min   :: Ord a => a -> a -> a
+compare    :: Ord a => a -> a -> Ordering
+
+-- Boolean
+(&&), (||) :: Bool -> Bool -> Bool
+not        :: Bool -> Bool
+otherwise  :: Bool    -- = True
+
+-- List operations
+map       :: (a -> b) -> [a] -> [b]
+filter    :: (a -> Bool) -> [a] -> [a]
+foldl     :: (b -> a -> b) -> b -> [a] -> b
+foldr     :: (a -> b -> b) -> b -> [a] -> b
+head      :: [a] -> a
+tail      :: [a] -> [a]
+take      :: Integer -> [a] -> [a]
+drop      :: Integer -> [a] -> [a]
+length    :: [a] -> Integer
+reverse   :: [a] -> [a]
+elem      :: Eq a => a -> [a] -> Bool
+zipWith   :: (a -> b -> c) -> [a] -> [b] -> [c]
+concatMap :: (a -> [b]) -> [a] -> [b]
+(++)      :: [a] -> [a] -> [a]
+
+-- String
+(<>)      :: String -> String -> String
+
+-- Tuple
+fst :: (a, b) -> a
+snd :: (a, b) -> b
+
+-- Control
+seq       :: a -> b -> b
+error     :: String -> a
+undefined :: a
+
+-- Monadic
+when   :: Bool -> IO () -> IO ()
+mapM_  :: (a -> IO ()) -> [a] -> IO ()
+\end{lstlisting}
+
+\subsection{Types}
+
+\begin{lstlisting}
+data Maybe a = Nothing | Just a
+data Either a b = Left a | Right b
+data Ordering = LT | EQ | GT
+data ExitValue = Normal | Err Integer
+\end{lstlisting}
+
+\end{document}
