@@ -3,3 +3,8 @@ examples/*.lua
 examples/tracker/*.wav
 examples/tracker/*.it
 lib/*.lua
+doc/*.pdf
+doc/*.aux
+doc/*.log
+doc/*.out
+doc/*.toc
