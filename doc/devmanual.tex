@@ -1,0 +1,486 @@
+% MATA-LL Developer's Manual
+% Compile with: lualatex devmanual.tex
+\documentclass[11pt,a4paper]{article}
+
+\usepackage{fontspec}
+\usepackage{unicode-math}
+\setmainfont{Latin Modern Roman}
+\setmonofont{Latin Modern Mono}[Scale=0.88]
+\setmathfont{Latin Modern Math}
+
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+
+\usepackage{hyperref}
+\hypersetup{colorlinks=true, linkcolor=blue!60!black, urlcolor=blue!60!black}
+
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{titlesec}
+
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+
+\definecolor{codebg}{HTML}{F5F5F5}
+\definecolor{keyword}{HTML}{7B3294}
+\definecolor{strcolor}{HTML}{2E7D32}
+\definecolor{comment}{HTML}{757575}
+
+\lstdefinelanguage{MLL}{
+  keywords={data,where,let,in,case,of,if,then,else,do,import,module,
+            class,instance,deriving,newtype,type,export,infixl,infixr,infix,forall},
+  sensitive=true,
+  morecomment=[l]{--},
+  morecomment=[n]{\{-}{-\}},
+  morestring=[b]",
+}
+
+\lstset{
+  basicstyle=\ttfamily\small,
+  backgroundcolor=\color{codebg},
+  frame=single,
+  framerule=0pt,
+  rulecolor=\color{codebg},
+  keywordstyle=\color{keyword}\bfseries,
+  stringstyle=\color{strcolor},
+  commentstyle=\color{comment}\itshape,
+  breaklines=true,
+  showstringspaces=false,
+  tabsize=2,
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  aboveskip=8pt,
+  belowskip=8pt,
+}
+
+\lstdefinelanguage{Rust}{
+  keywords={fn,pub,struct,enum,impl,let,mut,use,mod,match,if,else,
+            return,self,Self,trait,where,type,const,for,in,loop,while},
+  sensitive=true,
+  morecomment=[l]{//},
+  morecomment=[n]{/*}{*/},
+  morestring=[b]",
+}
+
+\title{\textbf{MATA-LL Developer's Manual}\\[6pt]
+  \large Modest Attempt at Typesystem Augmenting the Lua Language}
+\author{MATA-LL Project}
+\date{June 2026}
+
+\begin{document}
+\maketitle
+\tableofcontents
+\clearpage
+
+%----------------------------------------------------------------------
+\section{Introduction}
+
+MATA-LL is a Haskell-inspired language that compiles to standalone Lua files with
+no runtime dependencies.  The compiler is written in Rust (\textasciitilde15\,000
+lines) and targets both Lua~5.4 and LuaJIT.
+
+\begin{itemize}[nosep]
+  \item File extension: \texttt{.mll}
+  \item Output: a single self-contained \texttt{.lua} file
+  \item Non-strict evaluation with memoizing thunks
+  \item Full Hindley--Milner type inference with typeclasses, GADTs, rank-2 types
+  \item Zero external Rust dependencies in the core compiler library
+\end{itemize}
+
+%----------------------------------------------------------------------
+\section{Repository Layout}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Path} & \textbf{Purpose} \\
+\midrule
+\texttt{mllc/}       & Compiler library (core) \\
+\texttt{mll/}        & CLI binary \\
+\texttt{mll-repl/}   & Interactive REPL \\
+\texttt{mll-tests/}  & Test harness (246 tests) \\
+\texttt{mllc-wasm/}  & WASM binding for browser playground \\
+\texttt{lib/}        & Standard library (\texttt{.mll} files) \\
+\texttt{examples/}   & Example programs \\
+\texttt{doc/}        & This manual \\
+\bottomrule
+\end{tabular}
+
+%----------------------------------------------------------------------
+\section{Building}
+
+\begin{lstlisting}[language=bash]
+cargo build --release        # all crates
+cargo test                   # run 246 tests (needs 32 MB stack)
+cargo run -- file.mll --run  # compile and execute
+\end{lstlisting}
+
+The CLI binary (\texttt{mll}) embeds \texttt{mlua} with vendored Lua~5.4 for
+\texttt{-{}-run} mode.  The REPL uses LuaJIT via \texttt{mlua}.
+
+%----------------------------------------------------------------------
+\section{Compilation Pipeline}
+
+The compiler transforms source through seven distinct phases:
+
+\begin{enumerate}[nosep]
+  \item \textbf{Lexing} --- layout-sensitive tokenization
+  \item \textbf{Parsing} --- recursive descent with operator-precedence climbing
+  \item \textbf{Import resolution} --- module loading and cycle detection
+  \item \textbf{Desugaring} --- do-notation to monadic bind chains
+  \item \textbf{Type checking} --- HM unification + bidirectional checking
+  \item \textbf{Monomorphization} --- specialization + typeclass dispatch
+  \item \textbf{Demand analysis} --- strictness inference
+  \item \textbf{Code generation} --- Lua source emission
+\end{enumerate}
+
+The public API is a single function:
+\begin{lstlisting}[language=Rust]
+pub fn compile(
+    source: &str,
+    source_dir: &Path,
+    lib_paths: &[&Path],
+) -> Result<CompileResult, CompileError>
+\end{lstlisting}
+
+Returning \texttt{CompileResult \{ lua\_code, has\_main, exports \}}.
+
+%----------------------------------------------------------------------
+\subsection{Lexer (\texttt{mllc/src/lexer.rs})}
+
+The lexer is layout-sensitive.  It emits \texttt{Indent(n)} at the start of each
+indented line and \texttt{Newline} tokens between logical lines.  Block comments
+\texttt{\{- \ldots\ -\}} nest correctly.  Operators are maximal sequences of
+symbol characters.
+
+%----------------------------------------------------------------------
+\subsection{Parser (\texttt{mllc/src/parser.rs})}
+
+A hand-written recursive-descent parser with operator-precedence climbing for
+infix expressions.  Fixity is tracked in a \texttt{HashMap<String, (Assoc, u8)>}
+and respects user \texttt{infixl}/\texttt{infixr}/\texttt{infix} declarations.
+
+Layout handling: continuation lines indented past the definition's start column
+are merged into the same declaration.
+
+Declaration forms: \texttt{TypeSig}, \texttt{FunDef}, \texttt{DataDef},
+\texttt{NewtypeDef}, \texttt{ClassDecl}, \texttt{InstanceDecl},
+\texttt{TypeFamily}, \texttt{TypeAlias}, \texttt{FixityDecl}, \texttt{Import},
+\texttt{ExportSig}.
+
+%----------------------------------------------------------------------
+\subsection{Import Resolution (\texttt{mllc/src/modules.rs})}
+
+Module paths map dots to directories: \texttt{Data.Map} resolves to
+\texttt{Data/Map.mll}.  Search order: source directory, then each path supplied
+via \texttt{-L}.  Loaded modules are cached and cycles are detected.
+
+The Prelude is embedded in the binary via \texttt{include\_str!} and
+prepended automatically before desugaring.
+
+%----------------------------------------------------------------------
+\subsection{Desugarer (\texttt{mllc/src/desugar.rs})}
+
+Eliminates do-notation:
+\begin{lstlisting}[language=MLL]
+do { x <- action; rest }   -- becomes: action >>= \x -> rest
+do { action; rest }         -- becomes: action >>= \_ -> rest
+do { let x = e; rest }     -- becomes: let x = e in rest
+\end{lstlisting}
+
+%----------------------------------------------------------------------
+\subsection{Type Checker (\texttt{mllc/src/typechecker.rs})}
+
+Robinson unification with bidirectional checking.  Top-level definitions require
+explicit type signatures; local bindings are inferred.  Errors accumulate rather
+than aborting on the first failure.
+
+Key capabilities:
+\begin{itemize}[nosep]
+  \item Kind system: \texttt{Type}, \texttt{Symbol}, \texttt{Arrow(k1, k2)}
+  \item Typeclasses with superclass constraints and default methods
+  \item GADTs with local type equalities introduced by pattern matching
+  \item Rank-2 types (\texttt{forall s.}) for scoped resources
+  \item Existential types in data constructors
+  \item Type families (intrinsic and user-defined, closed)
+  \item DataKinds (promoted constructors as type-level tags)
+  \item Deriving: \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
+        \texttt{Bounded}, \texttt{Functor}
+\end{itemize}
+
+%----------------------------------------------------------------------
+\subsection{Monomorphizer (\texttt{mllc/src/mono.rs})}
+
+Collects \texttt{(function\_name, concrete\_type)} pairs and generates
+specialized copies with mangled names.  Typeclass method calls are resolved to
+concrete instance functions.
+
+When specialization count for a function exceeds 16, the monomorphizer falls back
+to dictionary-passing: the function receives a Lua table of method
+implementations as a parameter.
+
+%----------------------------------------------------------------------
+\subsection{Demand Analysis (\texttt{mllc/src/demand.rs})}
+
+A fixed-point analysis with cross-function propagation.  Determines which
+parameters are forced on every code path.  Strict parameters skip thunk
+allocation at call sites and \texttt{\_\_force} at use sites.  FFI functions are
+seeded as strict in all parameters.
+
+%----------------------------------------------------------------------
+\subsection{Code Generator (\texttt{mllc/src/codegen.rs})}
+
+Emits Lua source.  Key design decisions:
+\begin{itemize}[nosep]
+  \item Forward declarations packed into an \texttt{\_\_mll\_fn} table (avoids
+        Lua's 200-local limit)
+  \item Local overflow uses a \texttt{\_v = \{\}} table when count exceeds
+        \textasciitilde180
+  \item Cheapness analysis determines whether expressions become thunks or
+        are evaluated eagerly
+  \item Small pure single-clause non-recursive functions are inlined
+  \item Bind chains (do-blocks) are flattened to sequential locals
+  \item Record field accessors become \texttt{\_r[N]} inline access
+\end{itemize}
+
+%----------------------------------------------------------------------
+\section{Runtime Representation}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{MLL construct} & \textbf{Lua representation} \\
+\midrule
+Multi-constructor ADT \texttt{Con x y}  & \texttt{\{tag, x, y\}} \\
+Single-constructor, single-field        & Unwrapped (no table) \\
+Newtype                                 & Identity (zero-cost) \\
+Pure enum (\texttt{Red | Green | Blue}) & Integers 1, 2, 3 \\
+\texttt{Nothing}                        & \texttt{nil} \\
+\texttt{Just x}                         & \texttt{x} directly \\
+Tuple \texttt{(a, b, c)}                & \texttt{\{a, b, c\}} (no tag) \\
+List \texttt{x : xs}                    & \texttt{\{x, xs\}} cons cell; \texttt{[]} = \texttt{nil} \\
+Thunk                                   & \texttt{\{fn, false\}} with \texttt{\_\_thunk\_mt} \\
+\texttt{HashMap}                        & Native Lua table \\
+\bottomrule
+\end{tabular}
+
+\medskip
+
+Thunk forcing is handled by a runtime preamble embedded in every generated file:
+\begin{lstlisting}[language={}]
+local function __thunk(f)
+  return setmetatable({f, false}, __thunk_mt)
+end
+local function __force(x)
+  if getmetatable(x) == __thunk_mt then
+    if x[2] then return x[1] end
+    local val = x[1](); x[1] = val; x[2] = true
+    return val
+  end
+  return x
+end
+\end{lstlisting}
+
+%----------------------------------------------------------------------
+\section{Type System}
+
+\subsection{Core System}
+
+Hindley--Milner with let-generalization.  Unification variables are \texttt{u32}
+IDs; skolem/rigid variables use \texttt{u32::MAX} range.  Substitutions are
+applied iteratively (not recursively) to avoid stack overflow on deeply nested
+bind chains.
+
+\subsection{Typeclasses}
+
+Single-parameter typeclasses with superclass constraints.  Built-in classes:
+\texttt{Monad}, \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
+\texttt{Bounded}, \texttt{Read}, \texttt{Functor}, \texttt{Applicative}.
+
+Instance resolution key: \texttt{(class\_name, type\_name)} mapping to method
+function names.  Orphan instances are rejected.
+
+\subsection{GADTs}
+
+Constructors carry full return types.  Pattern matching introduces local type
+equalities via unification.  Exhaustiveness checking accounts for GADT
+refinement.
+
+\subsection{Rank-2 Types}
+
+\texttt{forall s.} quantification specifically for:
+\begin{itemize}[nosep]
+  \item \texttt{LuaFunction s} --- scope safety for Lua callbacks
+  \item \texttt{runST :: (forall s. ST s a) -> a} --- scoped mutation
+\end{itemize}
+
+\subsection{Type Families}
+
+Intrinsic type families for FFI:
+\begin{itemize}[nosep]
+  \item \texttt{LuaPure "name" a} --- pure foreign function
+  \item \texttt{LuaIO "name" a} --- effectful foreign function
+  \item \texttt{LuaIterator "name" a} --- Lua iterator protocol
+  \item \texttt{LuaTry "name" a} --- pcall-wrapped call
+\end{itemize}
+
+User-defined closed type families (equation-based reduction) are also supported.
+
+\subsection{DataKinds}
+
+Promoted constructors serve as type-level tags:
+\begin{lstlisting}[language=MLL]
+data Safety = Safe | Unsafe
+data Handle (s :: Safety) = MkHandle String
+
+lock :: Handle 'Unsafe -> Handle 'Safe
+\end{lstlisting}
+
+%----------------------------------------------------------------------
+\section{FFI}
+
+Foreign functions are declared via type families:
+\begin{lstlisting}[language=MLL]
+sin :: LuaPure "math.sin" (Number -> Number)
+randomInt :: LuaIO "math.random" (Integer -> Integer -> Integer)
+\end{lstlisting}
+
+Method-call syntax uses a colon prefix:
+\begin{lstlisting}[language=MLL]
+fileWrite :: LuaIO ":write" (Handle -> String -> IO ())
+\end{lstlisting}
+
+\texttt{Maybe} parameters become optional Lua arguments.  The \texttt{export}
+keyword wraps return values via \texttt{\_\_mll\_to\_lua} (deep-forces thunks,
+converts cons lists to Lua arrays) and incoming callbacks via
+\texttt{\_\_mll\_wrap\_callback}.
+
+%----------------------------------------------------------------------
+\section{Standard Library}
+
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Module} & \textbf{File} \\
+\midrule
+Prelude (auto-imported) & \texttt{lib/Prelude.mll} \\
+\texttt{ByteString}     & \texttt{lib/ByteString.mll} \\
+\texttt{LIO}            & \texttt{lib/LIO.mll} \\
+\texttt{LMath}          & \texttt{lib/LMath.mll} \\
+\texttt{LOS}            & \texttt{lib/LOS.mll} \\
+\texttt{LString}        & \texttt{lib/LString.mll} \\
+\texttt{LBit}           & \texttt{lib/LBit.mll} \\
+\texttt{Regex}          & \texttt{lib/Regex.mll} \\
+\texttt{JSON}           & \texttt{lib/JSON.mll} \\
+\texttt{Data.List}      & \texttt{lib/Data/List.mll} \\
+\texttt{Data.Maybe}     & \texttt{lib/Data/Maybe.mll} \\
+\texttt{Data.Map}       & \texttt{lib/Data/Map.mll} \\
+\texttt{Control.Monad}  & \texttt{lib/Control/Monad.mll} \\
+\texttt{Crypto.Ed25519} & \texttt{lib/Crypto/Ed25519.mll} \\
+\bottomrule
+\end{tabular}
+
+%----------------------------------------------------------------------
+\section{Deviations from Haskell}
+
+Key intentional differences:
+\begin{itemize}[nosep]
+  \item \texttt{String} is a native Lua string, not \texttt{[Char]}.
+        No \texttt{Char} type exists.
+  \item No \texttt{Num} typeclass --- arithmetic uses built-in operators on
+        \texttt{Integer} and \texttt{Number} directly.
+  \item No multi-parameter typeclasses.
+  \item No lazy I/O --- file operations read eagerly.
+  \item No \texttt{IORef}, \texttt{MVar}, \texttt{STRef} ---
+        \texttt{STArray} covers scoped mutation.
+  \item String concatenation uses \texttt{<>} (Semigroup), not \texttt{++}
+        (which is list append).
+\end{itemize}
+
+%----------------------------------------------------------------------
+\section{Testing}
+
+Tests live in \texttt{mll-tests/tests/cases/} (171 case files) and
+\texttt{mll-tests/tests/ghc/} (GHC compatibility tests).
+
+\begin{lstlisting}[language=Rust]
+mll_test!(basics, "basics.mll");            // no lib path
+mll_lib_test!(json_parse, "json.mll");      // with ../lib
+\end{lstlisting}
+
+Each test file uses an \texttt{assert :: Bool -> String -> IO ()} that prints
+\texttt{"."} on success or calls \texttt{error} on failure.
+
+Run all tests:
+\begin{lstlisting}[language=bash]
+cargo test -p mll-tests
+\end{lstlisting}
+
+Tests run on 32\,MB stack threads (deeply nested ASTs from large list literals).
+
+%----------------------------------------------------------------------
+\section{Adding a New Feature: Checklist}
+
+\begin{enumerate}[nosep]
+  \item \textbf{Lexer}: add new tokens if needed (\texttt{lexer.rs})
+  \item \textbf{AST}: add node variants (\texttt{ast.rs})
+  \item \textbf{Parser}: handle new syntax (\texttt{parser.rs})
+  \item \textbf{Desugarer}: add rewrite if the feature is syntactic sugar
+  \item \textbf{Type checker}: extend inference/checking (\texttt{typechecker.rs})
+  \item \textbf{TIR}: add typed IR node if needed (\texttt{tir.rs})
+  \item \textbf{Monomorphizer}: handle new TIR node (\texttt{mono.rs})
+  \item \textbf{Demand analysis}: propagate strictness if relevant
+  \item \textbf{Codegen}: emit Lua (\texttt{codegen.rs})
+  \item \textbf{Tests}: add case file + \texttt{mll\_test!} entry
+\end{enumerate}
+
+%----------------------------------------------------------------------
+\section{Source Map}
+
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\textbf{File} & \textbf{Lines} & \textbf{Purpose} \\
+\midrule
+\texttt{mllc/src/lib.rs}          & 126  & Public API, pipeline orchestration \\
+\texttt{mllc/src/lexer.rs}        & 443  & Layout-sensitive tokenizer \\
+\texttt{mllc/src/ast.rs}          & 352  & AST type definitions \\
+\texttt{mllc/src/parser.rs}       & 2481 & Recursive-descent parser \\
+\texttt{mllc/src/modules.rs}      & 237  & Import resolution \\
+\texttt{mllc/src/desugar.rs}      & 195  & Do-notation desugaring \\
+\texttt{mllc/src/typechecker.rs}  & 3944 & Type inference and checking \\
+\texttt{mllc/src/types.rs}        & 496  & Internal type representation \\
+\texttt{mllc/src/tir.rs}          & 356  & Typed intermediate representation \\
+\texttt{mllc/src/mono.rs}         & 1534 & Monomorphization \\
+\texttt{mllc/src/demand.rs}       & 394  & Demand/strictness analysis \\
+\texttt{mllc/src/codegen.rs}      & 3120 & Lua code generation \\
+\bottomrule
+\end{tabular}
+
+%----------------------------------------------------------------------
+\section{CLI Reference}
+
+\begin{lstlisting}[language=bash]
+mll file.mll              # compile, print Lua to stdout
+mll file.mll --run        # compile and execute
+mll file.mll --emit-lua   # write file.lua
+mll file.mll -L ./lib     # add library search path
+\end{lstlisting}
+
+REPL commands:
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Command} & \textbf{Effect} \\
+\midrule
+\texttt{/clear}  & Reset all accumulated state \\
+\texttt{/decls}  & Show current declarations \\
+\texttt{/lua EXPR} & Evaluate raw Lua expression \\
+\texttt{/source} & Show generated Lua source \\
+\texttt{/drop}   & Remove last declaration \\
+\texttt{/help}   & Show help \\
+\texttt{/quit}   & Exit \\
+\bottomrule
+\end{tabular}
+
+\medskip
+Multi-line input: end a line with \texttt{\textbackslash} to continue on the next line.
+
+\end{document}
