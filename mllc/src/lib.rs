@@ -4,6 +4,7 @@ pub mod ast;
 pub mod codegen;
 pub mod demand;
 pub mod desugar;
+pub mod fold;
 pub mod lexer;
 pub mod modules;
 pub mod mono;
@@ -114,6 +115,9 @@ pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<C
     if !mono_pass.errors.is_empty() {
         return Err(CompileError::Type(mono_pass.errors));
     }
+
+    // Constant folding
+    let mono_module = fold::fold_module(mono_module);
 
     // Generate Lua
     let lua_code = codegen::generate(&mono_module);
