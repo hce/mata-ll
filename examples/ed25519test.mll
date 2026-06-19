@@ -1,7 +1,7 @@
 -- Ed25519 test suite
 -- Tests SHA-512, field arithmetic, and Ed25519 sign/verify against RFC 8032 vectors
 
-import Crypto.Ed25519
+import Ed25519
 
 strByte2 :: String -> Integer -> LuaPure "string.byte" Integer
 strLen2 :: String -> LuaPure "string.len" Integer

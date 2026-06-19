@@ -863,7 +863,6 @@ are imported explicitly:
     import Data.List     -- sortBy, nubBy, groupBy, intercalate, etc.
     import Data.Maybe    -- fromMaybe, catMaybes, mapMaybe, etc.
     import Control.Monad -- mapM, forM, sequence, etc.
-    import Crypto.Ed25519 -- Ed25519 sign/verify (RFC 8032)
 
 # Evaluation strategy
 
