@@ -44,6 +44,9 @@ pub struct Monomorphizer {
     classes: HashMap<String, ClassInfo>,
     /// Method name -> class name (reverse lookup)
     method_to_class: HashMap<String, String>,
+    /// Locally-bound names (lambda params, let binds, case pattern vars)
+    /// that should NOT be resolved as typeclass methods
+    locals: HashSet<String>,
 }
 
 impl Monomorphizer {
@@ -130,6 +133,7 @@ impl Monomorphizer {
             fn_constraints: checker.get_fn_constraints().clone(),
             classes: checker.get_classes().clone(),
             method_to_class,
+            locals: HashSet::new(),
         }
     }
 
@@ -331,6 +335,17 @@ impl Monomorphizer {
     }
 
     fn mono_clause(&mut self, mut clause: TClause) -> TClause {
+        // Add clause pattern-bound variables to locals
+        let mut pat_vars = Vec::new();
+        for pat in &clause.patterns {
+            pat_vars.extend(Self::pattern_vars(pat));
+        }
+        let new_vars: Vec<_> = pat_vars.iter()
+            .filter(|n| !self.locals.contains(*n))
+            .cloned().collect();
+        for name in &pat_vars {
+            self.locals.insert(name.clone());
+        }
         clause.body = self.mono_expr(clause.body);
         clause.guards = clause.guards.into_iter().map(|g| TGuard {
             condition: self.mono_expr(g.condition),
@@ -341,7 +356,22 @@ impl Monomorphizer {
             patterns: ld.patterns,
             body: self.mono_expr(ld.body),
         }).collect();
+        for name in &new_vars {
+            self.locals.remove(name);
+        }
         clause
+    }
+
+    fn pattern_vars(pat: &TPattern) -> Vec<String> {
+        match pat {
+            TPattern::Var(name, _) => vec![name.clone()],
+            TPattern::Wildcard | TPattern::LitPat(_) => vec![],
+            TPattern::Constructor { args, .. } => {
+                args.iter().flat_map(|p| Self::pattern_vars(p)).collect()
+            }
+            TPattern::Paren(p) => Self::pattern_vars(p),
+            TPattern::Tuple(ps) => ps.iter().flat_map(|p| Self::pattern_vars(p)).collect(),
+        }
     }
 
     fn mono_expr(&mut self, expr: TExpr) -> TExpr {
@@ -434,7 +464,8 @@ impl Monomorphizer {
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
                 // 1. Check for typeclass method resolution
-                if self.class_methods.contains(name) && !self.is_polymorphic(&ty) {
+                // Skip if the name is a locally-bound variable (parameter, let, case pattern)
+                if self.class_methods.contains(name) && !self.locals.contains(name) && !self.is_polymorphic(&ty) {
                     // For methods where the class variable is in the return position,
                     // resolve using the return type
                     if self.return_type_methods.contains(name) {
@@ -540,8 +571,9 @@ impl Monomorphizer {
             TExprKind::App(func, arg) => {
                 // Check for class method application: describe arg
                 // where describe is a class method and arg has a concrete type
+                // Skip if the name is a locally-bound variable (parameter, let, case pattern)
                 if let TExprKind::Var(ref fname) = func.kind {
-                    if self.class_methods.contains(fname) {
+                    if self.class_methods.contains(fname) && !self.locals.contains(fname) {
                         let arg_ty = &arg.ty;
                         if !self.is_polymorphic(arg_ty) {
                             let mut resolved = None;
@@ -608,7 +640,8 @@ impl Monomorphizer {
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // Check for typeclass method resolution on infix operators
-                if self.class_methods.contains(&op) || (op == "/=" && self.class_methods.contains("==")) {
+                if (self.class_methods.contains(&op) || (op == "/=" && self.class_methods.contains("==")))
+                    && !self.locals.contains(&op) {
                     #[allow(unused_assignments)]
                     let mut resolved: Option<String> = None;
 
@@ -734,7 +767,18 @@ impl Monomorphizer {
             }
             TExprKind::Negate(inner) => TExprKind::Negate(Box::new(self.mono_expr(*inner))),
             TExprKind::Lambda { params, body } => {
-                TExprKind::Lambda { params, body: Box::new(self.mono_expr(*body)) }
+                let saved_locals: Vec<_> = params.iter()
+                    .filter(|(name, _)| !self.locals.contains(name))
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for (name, _) in &params {
+                    self.locals.insert(name.clone());
+                }
+                let body = Box::new(self.mono_expr(*body));
+                for name in &saved_locals {
+                    self.locals.remove(name);
+                }
+                TExprKind::Lambda { params, body }
             }
             TExprKind::If { cond, then_branch, else_branch } => {
                 TExprKind::If {
@@ -746,21 +790,43 @@ impl Monomorphizer {
             TExprKind::Case { scrutinee, branches } => {
                 TExprKind::Case {
                     scrutinee: Box::new(self.mono_expr(*scrutinee)),
-                    branches: branches.into_iter().map(|b| TCaseBranch {
-                        pattern: b.pattern,
-                        guards: b.guards,
-                        body: self.mono_expr(b.body),
+                    branches: branches.into_iter().map(|b| {
+                        let pat_vars = Self::pattern_vars(&b.pattern);
+                        let new_vars: Vec<_> = pat_vars.iter()
+                            .filter(|n| !self.locals.contains(*n))
+                            .cloned().collect();
+                        for name in &pat_vars {
+                            self.locals.insert(name.clone());
+                        }
+                        let result = TCaseBranch {
+                            pattern: b.pattern,
+                            guards: b.guards,
+                            body: self.mono_expr(b.body),
+                        };
+                        for name in &new_vars {
+                            self.locals.remove(name);
+                        }
+                        result
                     }).collect(),
                 }
             }
             TExprKind::Let { binds, body } => {
-                TExprKind::Let {
-                    binds: binds.into_iter().map(|b| TLocalDef {
-                        name: b.name, patterns: b.patterns,
-                        body: self.mono_expr(b.body),
-                    }).collect(),
-                    body: Box::new(self.mono_expr(*body)),
+                let new_names: Vec<_> = binds.iter()
+                    .filter(|b| !self.locals.contains(&b.name))
+                    .map(|b| b.name.clone())
+                    .collect();
+                for b in &binds {
+                    self.locals.insert(b.name.clone());
                 }
+                let binds = binds.into_iter().map(|b| TLocalDef {
+                    name: b.name, patterns: b.patterns,
+                    body: self.mono_expr(b.body),
+                }).collect();
+                let body = Box::new(self.mono_expr(*body));
+                for name in &new_names {
+                    self.locals.remove(name);
+                }
+                TExprKind::Let { binds, body }
             }
             TExprKind::Paren(inner) => TExprKind::Paren(Box::new(self.mono_expr(*inner))),
             TExprKind::Tuple(elems) => TExprKind::Tuple(elems.into_iter().map(|e| self.mono_expr(e)).collect()),
