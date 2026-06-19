@@ -25,6 +25,16 @@ jobs:
   lua-compat:
     needs: test
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - lua: lua5_4
+            bin: lua
+          - lua: lua5_5
+            bin: lua
+          - lua: luajit
+            bin: luajit
+    name: "compat (${{ matrix.lua }})"
     steps:
       - uses: actions/checkout@v4
 
@@ -32,19 +42,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: cachix/install-nix-action@v31
+
       - name: Build compiler
         run: cargo build --release
 
-      - name: Install Lua versions
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lua5.4 luajit
-
-      - name: Test Lua 5.4
-        run: ./mll-tests/lua-compat.sh lua5.4
-
-      - name: Test LuaJIT
-        run: ./mll-tests/lua-compat.sh luajit
+      - name: Run compat tests
+        run: nix shell nixpkgs#${{ matrix.lua }} -c ./mll-tests/lua-compat.sh ${{ matrix.bin }}
 
   perf:
     needs: test
@@ -56,16 +60,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - uses: cachix/install-nix-action@v31
+
       - name: Build compiler
         run: cargo build --release
 
-      - name: Install Lua
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y lua5.4
-
-      - name: Performance test (Lua 5.4)
-        run: ./mll-tests/perf-test.sh lua5.4
+      - name: Performance test (LuaJIT)
+        run: nix shell nixpkgs#luajit -c ./mll-tests/perf-test.sh luajit
 
   merge:
     needs: [test, lua-compat, perf]
