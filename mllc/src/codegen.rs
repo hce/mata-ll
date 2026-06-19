@@ -646,7 +646,9 @@ impl CodeGen {
             } else {
                 // Force only args that are destructured
                 for (i, p) in params.iter().enumerate() {
-                    if !matches!(&clause.patterns[i], TPattern::Var(_, _) | TPattern::Wildcard) {
+                    if i < clause.patterns.len()
+                        && !matches!(&clause.patterns[i], TPattern::Var(_, _) | TPattern::Wildcard)
+                    {
                         self.emit_line(&format!("{} = __force({})", p, p));
                         self.concrete_vars.insert(p.clone());
                     }

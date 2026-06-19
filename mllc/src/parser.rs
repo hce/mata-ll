@@ -1183,8 +1183,10 @@ impl Parser {
     fn parse_expr(&mut self) -> Result<Expr, String> {
         // Skip leading indent/newlines to find the actual expression start
         self.skip_newlines_and_indent();
+        let saved_expr_min_indent = self.expr_min_indent;
         self.expr_min_indent = self.current_indent;
         let expr = self.parse_expr_infix(0)?;
+        self.expr_min_indent = saved_expr_min_indent;
 
         // Type ascription: expr :: Type
         if self.at(&Token::DblColon) {
@@ -1202,10 +1204,10 @@ impl Parser {
         loop {
             // Try to consume indentation for continuation lines
             // Only if the next real token after indent is an operator
-            // and the indent is deeper than the expression start
+            // and the indent is at or deeper than the expression start
             if let Token::Indent(n) = self.peek() {
                 let n = *n;
-                if n > self.expr_min_indent {
+                if n >= self.expr_min_indent {
                     let save = self.pos;
                     self.advance(); // consume indent
                     self.current_indent = n;
@@ -1520,11 +1522,13 @@ impl Parser {
         if !self.is_expr_atom_start() {
             return false;
         }
-        // If current_indent dropped to at or below expression start,
-        // and the next token is at the start of a line (col 1),
-        // don't consume it — it's a new declaration
         let loc = self.peek_loc();
-        if self.current_indent <= self.expr_min_indent && loc.col == 1 {
+        // If current_indent is at or below expr start and the token is at
+        // the beginning of its line (col == current_indent + 1), it's a new
+        // statement/declaration, not a continuation argument.
+        if self.current_indent <= self.expr_min_indent
+            && loc.col as usize == self.current_indent + 1
+        {
             return false;
         }
         true
@@ -1906,7 +1910,10 @@ impl Parser {
                     let save_indent = self.current_indent;
                     self.skip_newlines_and_indent();
                     if self.at_eof() || self.current_indent < case_indent
-                        || self.at(&Token::Where) {
+                        || self.at(&Token::Where)
+                        || self.at(&Token::RightParen)
+                        || self.at(&Token::RightBracket)
+                        || self.at(&Token::RightBrace) {
                         // Restore position so the caller sees the
                         // newline/indent tokens and doesn't accidentally
                         // consume the next statement as an argument.
@@ -2131,6 +2138,19 @@ impl Parser {
                         self.current_indent = save_tup_indent;
                     }
 
+                    // Check for `_ <- expr` (discard bind)
+                    if self.at(&Token::Underscore) {
+                        let save_u = self.pos;
+                        self.advance();
+                        if self.at(&Token::Bind) {
+                            self.advance();
+                            let expr = self.parse_expr()?;
+                            stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
+                            continue;
+                        }
+                        self.pos = save_u;
+                    }
+
                     // Check for `name <- expr` (bind)
                     let save = self.pos;
                     if let Token::Ident(name) = self.peek().clone() {
@@ -2191,22 +2211,25 @@ impl Parser {
                     self.current_indent = save_indent;
                 }
                 let mut params = Vec::new();
-                while let Token::Ident(name) = self.peek().clone() {
-                    params.push(name);
-                    self.advance();
+                loop {
+                    match self.peek().clone() {
+                        Token::Ident(name) => {
+                            params.push(name);
+                            self.advance();
+                        }
+                        Token::Underscore => {
+                            params.push("_".to_string());
+                            self.advance();
+                        }
+                        _ => break,
+                    }
                 }
                 if params.is_empty() {
-                    // Could be \_ ->
-                    if self.at(&Token::Underscore) {
-                        self.advance();
-                        params.push("_".to_string());
-                    } else {
-                        let loc = self.peek_loc();
-                        return Err(format!(
-                            "Expected lambda parameter at {}:{}",
-                            loc.line, loc.col
-                        ));
-                    }
+                    let loc = self.peek_loc();
+                    return Err(format!(
+                        "Expected lambda parameter at {}:{}",
+                        loc.line, loc.col
+                    ));
                 }
                 self.expect(&Token::Arrow)?;
                 let body = self.parse_expr()?;

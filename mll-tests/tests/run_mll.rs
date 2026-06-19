@@ -790,9 +790,12 @@ fn examples_compile() {
         "aestest",            // 256-element S-box lists need large stack (runs via mll compiler)
         "bstest",             // needs large stack (runs via mll compiler)
         "salsa",              // large literal lists need large stack (runs via mll compiler)
+        "Ed25519",            // large literal lists need large stack (runs via mll compiler)
+        "ed25519test",        // depends on Ed25519 which needs large stack
         "rectype",            // legitimate type errors (Ord on tuples, String as [Char])
         "match",              // experimental scratch file
         "experiments",        // experimental scratch file
+        "metar",              // WIP: parser combinator example
     ];
 
     let mut failures = Vec::new();
