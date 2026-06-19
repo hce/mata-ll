@@ -20,7 +20,7 @@ readKey = do
 
 -- ── Types ────────────────────────────────────────────────
 
-data Pos = Pos Integer Integer
+data Pos = Pos { posCol :: Integer, posRow :: Integer }
     deriving (Eq)
 
 data Game = Game [String] Pos [Pos] [Pos]
