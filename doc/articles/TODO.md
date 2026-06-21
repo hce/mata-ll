@@ -75,6 +75,11 @@ MATA-LL TODO
 - [x] Any type (Lua interop: String | Integer | Number | Bool | Null | ...)
 - [x] getArgs :: IO [String]
 - [x] exit :: IO ExitValue (data ExitValue = Normal | Err Integer)
+- [x] takeWhile, dropWhile (prelude)
+- [ ] More prelude list functions: null, sum, product, maximum, minimum,
+      all, any, zip, unzip, concat, span, break, splitAt, lookup,
+      replicate, iterate, last, init (see HASKDIFF "The Prelude is a
+      curated subset")
 
 ## Codegen optimizations
 

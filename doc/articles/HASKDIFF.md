@@ -99,3 +99,24 @@ typeclass dictionaries at runtime like GHC. This means:
 - Polymorphic recursion needs special handling (the compiler falls back
   to dictionary passing when it detects it)
 - Code size can grow if a polymorphic function is used at many types
+
+## The Prelude is a curated subset
+
+There is no implicit access to the full GHC `Prelude`, and no `Data.List`,
+`Data.Char`, `Data.Maybe`, etc. What you get is a small, hand-maintained
+prelude (`lib/Prelude.mll` plus a few compiler builtins), auto-imported into
+every module.
+
+List functions that *are* available:
+
+    map  filter  foldl  foldr  length  reverse  head  tail
+    take  drop  takeWhile  dropWhile  zipWith  concatMap  elem
+
+Common Haskell list functions that are *not* (yet) provided — define them
+yourself or add them to the prelude:
+
+    null  sum  product  maximum  minimum  all  any  zip  unzip
+    concat  span  break  splitAt  lookup  replicate  iterate  last  init
+
+All of the lazy list functions stream properly over infinite lists, so e.g.
+`takeWhile (< 100) [1 ..]` and `take 10 (filter even [1 ..])` terminate.
