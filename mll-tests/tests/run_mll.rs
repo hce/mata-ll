@@ -1024,6 +1024,11 @@ fn example_typeinfer_checks() {
     run_mll_file_with_lib(Path::new("../examples/typeinfer.mll"));
 }
 
+#[test]
+fn example_listcomp() {
+    run_mll_file_with_lib(Path::new("../examples/listcomp.mll"));
+}
+
 // ============================================================
 // FFI tests: compile MLL modules with exports, then call
 // exported functions from Lua and verify return values.
