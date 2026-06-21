@@ -1,10 +1,10 @@
-/// Module resolution and loading
-///
-/// Each .mll file is a module. Module names map to file paths:
-///   import Data.Tree  =>  Data/Tree.mll
-///
-/// When compiling a module, imported .mll files are parsed, type-checked,
-/// and their declarations are merged into the current module's environment.
+//! Module resolution and loading
+//!
+//! Each .mll file is a module. Module names map to file paths:
+//!   import Data.Tree  =>  Data/Tree.mll
+//!
+//! When compiling a module, imported .mll files are parsed, type-checked,
+//! and their declarations are merged into the current module's environment.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -125,11 +125,10 @@ impl ModuleLoader {
                     let parsed_exports = self.loaded.get(&key).and_then(|m| m.exports.clone());
                     if let Some(ref exports) = parsed_exports {
                         for d in &all_decls {
-                            if let Some(name) = decl_name(d) {
-                                if !exports.contains(&name) {
+                            if let Some(name) = decl_name(d)
+                                && !exports.contains(&name) {
                                     hidden_names.insert(name);
                                 }
-                            }
                         }
                     }
 
@@ -153,11 +152,10 @@ impl ModuleLoader {
 
                             for d in &all_decls {
                                 imported_decls.push((*d).clone());
-                                if let Some(n) = decl_name(d) {
-                                    if !wanted.contains(&n) {
+                                if let Some(n) = decl_name(d)
+                                    && !wanted.contains(&n) {
                                         hidden_names.insert(n);
                                     }
-                                }
                             }
                         }
                         ImportItems::Hiding(items) => {
@@ -171,11 +169,10 @@ impl ModuleLoader {
 
                             for d in &all_decls {
                                 imported_decls.push((*d).clone());
-                                if let Some(n) = decl_name(d) {
-                                    if excluded.contains(&n) {
+                                if let Some(n) = decl_name(d)
+                                    && excluded.contains(&n) {
                                         hidden_names.insert(n);
                                     }
-                                }
                             }
                         }
                         ImportItems::Qualified(alias) => {

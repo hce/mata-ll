@@ -1,7 +1,7 @@
-/// Typed Intermediate Representation
-///
-/// Like the AST but every expression carries its resolved type.
-/// Produced by the type checker, consumed by the monomorphizer and codegen.
+//! Typed Intermediate Representation
+//!
+//! Like the AST but every expression carries its resolved type.
+//! Produced by the type checker, consumed by the monomorphizer and codegen.
 
 use crate::types::{Ty, Subst};
 

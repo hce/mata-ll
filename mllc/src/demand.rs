@@ -1,12 +1,12 @@
-/// Demand analysis: determines which function parameters are always
-/// forced on every code path through the body.
-///
-/// A parameter marked strict can be passed eagerly at call sites
-/// (no thunk allocation) and forced at function entry.
-///
-/// Cross-function propagation: if callee `g` is strict in position j,
-/// then `f(... g(x) ...)` where x is a parameter of f propagates
-/// strictness — x is demanded because g will force it.
+//! Demand analysis: determines which function parameters are always
+//! forced on every code path through the body.
+//!
+//! A parameter marked strict can be passed eagerly at call sites
+//! (no thunk allocation) and forced at function entry.
+//!
+//! Cross-function propagation: if callee `g` is strict in position j,
+//! then `f(... g(x) ...)` where x is a parameter of f propagates
+//! strictness — x is demanded because g will force it.
 
 use std::collections::{HashMap, HashSet};
 use crate::tir::*;
@@ -36,12 +36,11 @@ pub fn analyze(module: &TModule) -> DemandInfo {
     for func in &functions {
         if func.clauses.len() == 1 {
             let clause = &func.clauses[0];
-            if let TExprKind::SpecCall { original, .. } = &clause.body.kind {
-                if original == &func.name && !clause.patterns.is_empty() {
+            if let TExprKind::SpecCall { original, .. } = &clause.body.kind
+                && original == &func.name && !clause.patterns.is_empty() {
                     strict_params.insert(func.name.clone(), vec![true; clause.patterns.len()]);
                     continue;
                 }
-            }
         }
     }
 
@@ -157,11 +156,10 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
 
     // Mark parameters whose names appear in the demanded set.
     for (i, name) in param_names.iter().enumerate() {
-        if let Some(n) = name {
-            if demanded.contains(n) {
+        if let Some(n) = name
+            && demanded.contains(n) {
                 strict[i] = true;
             }
-        }
     }
 
     strict
@@ -228,15 +226,14 @@ fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<Stri
 
             // Cross-function propagation: if callee is a known function
             // and is strict in position i, demand that argument's vars.
-            if let TExprKind::Var(name) = &f.kind {
-                if let Some(callee_strict) = env.get(name) {
+            if let TExprKind::Var(name) = &f.kind
+                && let Some(callee_strict) = env.get(name) {
                     for (i, arg) in args_rev.iter().enumerate() {
                         if callee_strict.get(i).copied().unwrap_or(false) {
                             s.extend(demanded_vars(arg, env));
                         }
                     }
                 }
-            }
 
             s
         }

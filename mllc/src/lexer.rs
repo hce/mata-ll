@@ -97,7 +97,7 @@ pub struct Located {
 
 pub fn lex(source: &str) -> Result<Vec<Located>, String> {
     let mut tokens = Vec::new();
-    let mut chars: Vec<char> = source.chars().collect();
+    let chars: Vec<char> = source.chars().collect();
     let mut pos = 0;
     let mut line = 1;
     let mut col = 1;
@@ -106,7 +106,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
     while pos < chars.len() {
         // Track indentation at start of line
         if at_line_start {
-            let indent_start = pos;
+            let _indent_start = pos;
             let mut indent = 0;
             while pos < chars.len() && chars[pos] == ' ' {
                 indent += 1;

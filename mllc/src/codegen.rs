@@ -414,7 +414,7 @@ impl CodeGen {
                 if n_args == 0 {
                     // Fallback for exports without type info
                     self.emit_indent();
-                    self.emit(&format!("local args = {{n = select('#', ...), ...}}\n"));
+                    self.emit(&"local args = {n = select('#', ...), ...}\n".to_string());
                     self.emit_indent();
                     self.emit("for i = 1, args.n do args[i] = __lua_to_mll(args[i]) end\n");
                 }
@@ -491,7 +491,7 @@ impl CodeGen {
         // This handles point-free definitions like: f x = g x  (written as f = g)
         let type_arity = count_arrows(&func.ty);
         let pat_arity = if clauses[0].patterns.is_empty() { 0 } else { clauses[0].patterns.len() };
-        let eta_count = if type_arity > pat_arity { type_arity - pat_arity } else { 0 };
+        let eta_count = type_arity.saturating_sub(pat_arity);
 
         if clauses.len() == 1 && clauses[0].patterns.is_empty() && clauses[0].guards.is_empty() {
             // Check if this is a value binding (non-function type) or a
@@ -597,8 +597,8 @@ impl CodeGen {
                 for (i, pat) in clause.patterns.iter().enumerate() {
                     if let TPattern::Var(v, _) = pat {
                         let sname = sanitize_name(v);
-                        let always_cheap = call_site_cheap.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
-                        let is_strict = demand_strict.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
+                        let always_cheap = call_site_cheap.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
+                        let is_strict = demand_strict.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
                         let decl = self.declare_local(&sname);
                         if always_cheap {
                             // All callers pass concrete values — no __force needed
@@ -689,9 +689,9 @@ impl CodeGen {
         let call_site_cheap = self.params_always_cheap.get(&func.name).cloned();
         for (i, p) in params.iter().enumerate() {
             if i >= num_params { break; }
-            let always_cheap = call_site_cheap.as_ref().map_or(false, |v| v.get(i).copied().unwrap_or(false));
+            let always_cheap = call_site_cheap.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
             let needs_force = clauses.iter().any(|c| {
-                c.patterns.get(i).map_or(false, |pat| {
+                c.patterns.get(i).is_some_and(|pat| {
                     !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
                 })
             });
@@ -789,10 +789,6 @@ impl CodeGen {
         self.gen_where_func_group_impl(binds, start, true);
     }
 
-    fn gen_where_func_group(&mut self, binds: &[TLocalDef], start: usize) {
-        self.gen_where_func_group_impl(binds, start, false);
-    }
-
     fn gen_where_func_group_impl(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) {
         let name = &binds[start].name;
         let mut clauses = Vec::new();
@@ -861,7 +857,7 @@ impl CodeGen {
         } else {
             for j in 0..num_params {
                 let needs_force = clauses.iter().any(|c| {
-                    c.patterns.get(j).map_or(false, |pat| {
+                    c.patterns.get(j).is_some_and(|pat| {
                         !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
                     })
                 });
@@ -1024,7 +1020,7 @@ impl CodeGen {
                         ":" => {
                             // Cons pattern: x:xs
                             conditions.push(format!("{} ~= nil", scrutinee));
-                            if args.len() >= 1 {
+                            if !args.is_empty() {
                                 self.collect_pattern_conditions(
                                     &format!("__mll_head({})", scrutinee),
                                     &args[0], conditions, bindings);
@@ -1057,21 +1053,19 @@ impl CodeGen {
     /// Collect elements of a literal list (cons chain ending in nil).
     /// Returns Some(vec![elem1, elem2, ...]) if the list has >= 8 literal elements,
     /// None otherwise (let normal cons generation handle short lists).
-    fn collect_list_literal<'a>(expr: &'a TExpr) -> Option<Vec<&'a TExpr>> {
+    fn collect_list_literal(expr: &TExpr) -> Option<Vec<&TExpr>> {
         let mut elems = Vec::new();
         let mut cur = expr;
         loop {
             match &cur.kind {
                 TExprKind::App(func, tail) => {
-                    if let TExprKind::App(inner_f, elem) = &func.kind {
-                        if let TExprKind::Con(name) = &inner_f.kind {
-                            if name == ":" {
+                    if let TExprKind::App(inner_f, elem) = &func.kind
+                        && let TExprKind::Con(name) = &inner_f.kind
+                            && name == ":" {
                                 elems.push(elem.as_ref());
                                 cur = tail.as_ref();
                                 continue;
                             }
-                        }
-                    }
                     return None;
                 }
                 TExprKind::Con(name) if name == "[]" => {
@@ -1092,7 +1086,7 @@ impl CodeGen {
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Var(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap(inner),
-            TExprKind::Tuple(elems) => elems.iter().all(|e| Self::is_cheap(e)),
+            TExprKind::Tuple(elems) => elems.iter().all(Self::is_cheap),
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // Builtin ops (arithmetic, comparison, concat) are cheap
                 // if their operands are cheap
@@ -1184,8 +1178,8 @@ impl CodeGen {
                     f = inner_f.as_ref();
                 }
                 args.reverse();
-                if let TExprKind::Var(name) = &f.kind {
-                    if let Some(thunked) = ever_thunked.get_mut(name.as_str()) {
+                if let TExprKind::Var(name) = &f.kind
+                    && let Some(thunked) = ever_thunked.get_mut(name.as_str()) {
                         let called = ever_called.get_mut(name.as_str()).unwrap();
                         for (i, arg) in args.iter().enumerate() {
                             if i < thunked.len() {
@@ -1196,7 +1190,6 @@ impl CodeGen {
                             }
                         }
                     }
-                }
                 for arg in &args {
                     Self::scan_call_sites(arg, ever_thunked, ever_called);
                 }
@@ -1261,7 +1254,7 @@ impl CodeGen {
             TExprKind::App(f, a) => Self::body_has_constructors(f) || Self::body_has_constructors(a),
             TExprKind::InfixApp { lhs, rhs, .. } => Self::body_has_constructors(lhs) || Self::body_has_constructors(rhs),
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::body_has_constructors(inner),
-            TExprKind::Tuple(elems) => elems.iter().any(|e| Self::body_has_constructors(e)),
+            TExprKind::Tuple(elems) => elems.iter().any(Self::body_has_constructors),
             _ => false,
         }
     }
@@ -1435,28 +1428,6 @@ impl CodeGen {
     /// Check if an expression contains a function call where the function
     /// is NOT a known top-level/prelude name. Such calls could be to
     /// arbitrary function parameters and may be expensive.
-    fn has_unknown_call(&self, expr: &TExpr) -> bool {
-        match &expr.kind {
-            TExprKind::App(func, arg) => {
-                // Find the outermost function in this application chain
-                let mut f = func.as_ref();
-                while let TExprKind::App(inner_f, _) = &f.kind {
-                    f = inner_f.as_ref();
-                }
-                // If the function is a variable not in top_level_names, it's unknown
-                if let TExprKind::Var(name) = &f.kind {
-                    if !Self::is_con_app(expr) && !self.top_level_names.contains(&sanitize_name(name)) {
-                        return true;
-                    }
-                }
-                // Recurse into sub-expressions
-                self.has_unknown_call(func) || self.has_unknown_call(arg)
-            }
-            TExprKind::Paren(inner) => self.has_unknown_call(inner),
-            _ => false,
-        }
-    }
-
     /// Check if an expression is a constructor application (Con applied to args)
     fn is_con_app(expr: &TExpr) -> bool {
         match &expr.kind {
@@ -1479,19 +1450,17 @@ impl CodeGen {
         // Structural checks FIRST — the monad type variable may be
         // unresolved in bind chains, so we can't rely on the type alone.
         // pure(x) / return(x): performing it just returns x
-        if let TExprKind::App(func, arg) = &expr.kind {
-            if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
+        if let TExprKind::App(func, arg) = &expr.kind
+            && matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
                 self.gen_expr(arg);
                 return;
             }
-        }
         // return $ x / pure $ x: same as return(x)
-        if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind {
-            if op == "$" && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
+        if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
+            && op == "$" && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
                 self.gen_expr(rhs);
                 return;
             }
-        }
         // ST primitive calls now return closures — go through __mll_run like everything else
         if !Self::is_nullary_action_type(&expr.ty) {
             // If the type is concretely non-IO (resolved to a known type),
@@ -1515,8 +1484,7 @@ impl CodeGen {
             // IO SpecCall: inline the Lua call directly (skip closure)
             TExprKind::SpecCall { specialized, args, .. } if specialized.starts_with("__mll_io:") => {
                 let lua_func = &specialized["__mll_io:".len()..];
-                if lua_func.starts_with(':') {
-                    let method = &lua_func[1..];
+                if let Some(method) = lua_func.strip_prefix(':') {
                     self.emit("__force(");
                     self.gen_expr(&args[0]);
                     self.emit(&format!("):{}", method));
@@ -1548,21 +1516,6 @@ impl CodeGen {
                 self.emit(")");
             }
         }
-    }
-
-    fn is_st_primitive(name: &str) -> bool {
-        matches!(name,
-            "newSTArray" | "readSTArray" | "writeSTArray"
-            | "modifySTArray" | "stArrayLength" | "newSTArrayFromList"
-            | "stArrayToList"
-        )
-    }
-
-    /// Check if an expression is a fully-applied call to an ST primitive.
-    fn is_st_primitive_call(expr: &TExpr) -> bool {
-        let mut f = expr;
-        while let TExprKind::App(func, _) = &f.kind { f = func; }
-        matches!(&f.kind, TExprKind::Var(name) if Self::is_st_primitive(name))
     }
 
     fn is_nullary_action_type(ty: &Ty) -> bool {
@@ -1803,18 +1756,17 @@ impl CodeGen {
             TExprKind::Lit(lit) => self.gen_literal(lit),
             TExprKind::App(func, arg) => {
                 // Record field accessor: inline as direct table indexing
-                if let TExprKind::Var(name) = &func.kind {
-                    if let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
+                if let TExprKind::Var(name) = &func.kind
+                    && let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
                         self.gen_expr(arg);
                         self.emit(&format!("[{}]", idx));
                         return;
                     }
-                }
 
                 // Check for cons application: (:) x xs => __mll_cons(x, xs)
-                if let TExprKind::App(inner_f, inner_arg) = &func.kind {
-                    if let TExprKind::Con(name) = &inner_f.kind {
-                        if name == ":" {
+                if let TExprKind::App(inner_f, inner_arg) = &func.kind
+                    && let TExprKind::Con(name) = &inner_f.kind
+                        && name == ":" {
                             // Try to collect a literal list and emit compactly
                             if let Some(elems) = Self::collect_list_literal(expr) {
                                 self.emit("(function() local _l = nil; ");
@@ -1851,13 +1803,11 @@ impl CodeGen {
                             }
                             return;
                         }
-                    }
-                }
 
                 // seq a b => force a, return b
-                if let TExprKind::App(seq_f, seq_a) = &func.kind {
-                    if let TExprKind::Var(name) = &seq_f.kind {
-                        if name == "seq" {
+                if let TExprKind::App(seq_f, seq_a) = &func.kind
+                    && let TExprKind::Var(name) = &seq_f.kind
+                        && name == "seq" {
                             self.emit("(function() __force(");
                             self.gen_expr(seq_a);
                             self.emit("); return ");
@@ -1865,8 +1815,6 @@ impl CodeGen {
                             self.emit(" end)()");
                             return;
                         }
-                    }
-                }
 
                 // return/pure are identity — emit the argument directly.
                 // Thunk arguments that contain calls to unknown functions
@@ -1876,14 +1824,13 @@ impl CodeGen {
                 // Calls to known top-level/prelude functions are safe to
                 // evaluate eagerly.
                 // return/pure wrap their argument in an IO action closure.
-                if let TExprKind::Var(name) = &func.kind {
-                    if name == "return" || name == "pure" {
+                if let TExprKind::Var(name) = &func.kind
+                    && (name == "return" || name == "pure") {
                         self.emit("(function() return ");
                         self.gen_expr(arg);
                         self.emit(" end)");
                         return;
                     }
-                }
 
                 // Collect all applied arguments
                 let mut args = vec![arg.as_ref()];
@@ -1899,23 +1846,23 @@ impl CodeGen {
                 if let TExprKind::Var(name) = &f.kind {
                     if name == "try" && args.len() == 1 {
                         self.emit("try_(function() return ");
-                        self.gen_action(&args[0]);
+                        self.gen_action(args[0]);
                         self.emit(" end)");
                         return;
                     }
                     if name == "catch" && args.len() == 2 {
                         self.emit("catch_(function() return ");
-                        self.gen_action(&args[0]);
+                        self.gen_action(args[0]);
                         self.emit(" end, ");
-                        self.gen_expr(&args[1]);
+                        self.gen_expr(args[1]);
                         self.emit(")");
                         return;
                     }
                 }
 
                 // Typeclass methods on primitive types → inline as Lua operators
-                if args.len() == 2 {
-                    if let TExprKind::Var(name) = &f.kind {
+                if args.len() == 2
+                    && let TExprKind::Var(name) = &f.kind {
                         let lua_op = match name.as_str() {
                             "eq_Integer" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
                             "ord_lt__Integer" | "ord_lt__Number" | "ord_lt__String" => Some("<"),
@@ -1934,12 +1881,11 @@ impl CodeGen {
                             return;
                         }
                     }
-                }
 
                 // semigroup_List → __mll_list_append
-                if args.len() == 2 {
-                    if let TExprKind::Var(name) = &f.kind {
-                        if name == "semigroup_List" {
+                if args.len() == 2
+                    && let TExprKind::Var(name) = &f.kind
+                        && name == "semigroup_List" {
                             self.emit("__mll_list_append(");
                             self.gen_expr(args[0]);
                             self.emit(", function() return ");
@@ -1947,13 +1893,11 @@ impl CodeGen {
                             self.emit(" end)");
                             return;
                         }
-                    }
-                }
 
                 // Inline small pure functions at call site
-                if let TExprKind::Var(name) = &f.kind {
-                    if let Some((params, body)) = self.inline_fns.get(name).cloned() {
-                        if args.len() == params.len() {
+                if let TExprKind::Var(name) = &f.kind
+                    && let Some((params, body)) = self.inline_fns.get(name).cloned()
+                        && args.len() == params.len() {
                             let mut subst = std::collections::HashMap::new();
                             for (param, arg) in params.iter().zip(args.iter()) {
                                 subst.insert(param.clone(), *arg);
@@ -1963,8 +1907,6 @@ impl CodeGen {
                             self.emit(")");
                             return;
                         }
-                    }
-                }
 
                 // Look up callee's demand info for call-site strictness decisions
                 let callee_strict = if let TExprKind::Var(name) = &f.kind {
@@ -1994,7 +1936,7 @@ impl CodeGen {
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 { self.emit(", "); }
                         let is_strict = callee_strict.as_ref()
-                            .map_or(false, |v| v.get(i).copied().unwrap_or(false));
+                            .is_some_and(|v| v.get(i).copied().unwrap_or(false));
                         self.gen_arg(a, is_strict);
                     }
                     for p in &extra_params {
@@ -2016,7 +1958,7 @@ impl CodeGen {
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 { self.emit(", "); }
                         let is_strict = callee_strict.as_ref()
-                            .map_or(false, |v| v.get(i).copied().unwrap_or(false));
+                            .is_some_and(|v| v.get(i).copied().unwrap_or(false));
                         self.gen_arg(a, is_strict);
                     }
                     self.emit(")");
@@ -2299,9 +2241,8 @@ impl CodeGen {
                 } else if let Some(lua_func) = specialized.strip_prefix("__mll_try:") {
                     // Try FFI: wrap result in Either via __mll_try
                     self.emit("__mll_try(");
-                    if lua_func.starts_with(':') {
+                    if let Some(method) = lua_func.strip_prefix(':') {
                         // Method call try: handle:method(args)
-                        let method = &lua_func[1..];
                         self.emit("__force(");
                         self.gen_expr(&args[0]);
                         self.emit(&format!("):{}", method));
@@ -2345,9 +2286,8 @@ impl CodeGen {
                     // since the function definition already wraps in function()...end.
                     let needs_wrapper = !args.is_empty();
                     if needs_wrapper { self.emit("function() return "); }
-                    if lua_func.starts_with(':') {
+                    if let Some(method) = lua_func.strip_prefix(':') {
                         // Method call IO: handle:method(args)
-                        let method = &lua_func[1..];
                         self.emit("__force(");
                         self.gen_expr(&args[0]);
                         self.emit(&format!("):{}", method));
@@ -2456,8 +2396,8 @@ impl CodeGen {
     /// Cons operations wrap the tail in a thunk via __mll_lazy_cons.
     fn gen_expr_lazy(&mut self, expr: &TExpr, self_name: &str) {
         // Check for infix cons: x : rest
-        if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind {
-            if op == ":" {
+        if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
+            && op == ":" {
                 self.emit("__mll_lazy_cons(");
                 self.gen_expr(lhs);
                 self.emit(", function() return ");
@@ -2465,12 +2405,11 @@ impl CodeGen {
                 self.emit(" end)");
                 return;
             }
-        }
         // Check for App(App(Con(":"), head), tail)
-        if let TExprKind::App(func, tail) = &expr.kind {
-            if let TExprKind::App(con, head) = &func.kind {
-                if let TExprKind::Con(name) = &con.kind {
-                    if name == ":" {
+        if let TExprKind::App(func, tail) = &expr.kind
+            && let TExprKind::App(con, head) = &func.kind
+                && let TExprKind::Con(name) = &con.kind
+                    && name == ":" {
                         self.emit("__mll_lazy_cons(");
                         self.gen_expr(head);
                         self.emit(", function() return ");
@@ -2478,9 +2417,6 @@ impl CodeGen {
                         self.emit(" end)");
                         return;
                     }
-                }
-            }
-        }
         // Not a cons — fall through to normal gen
         self.gen_expr(expr);
     }

@@ -1,9 +1,9 @@
-/// Desugaring pass: transforms do-notation into >>= chains.
-///
-/// do { x <- e; rest }     =>  e >>= \x -> do { rest }
-/// do { e; rest }          =>  e >>= \_ -> do { rest }
-/// do { let x = e; rest }  =>  let x = e in do { rest }
-/// do { e }                =>  e
+//! Desugaring pass: transforms do-notation into >>= chains.
+//!
+//! do { x <- e; rest }     =>  e >>= \x -> do { rest }
+//! do { e; rest }          =>  e >>= \_ -> do { rest }
+//! do { let x = e; rest }  =>  let x = e in do { rest }
+//! do { e }                =>  e
 
 use crate::ast::*;
 

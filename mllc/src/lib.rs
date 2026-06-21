@@ -1,5 +1,3 @@
-#![allow(dead_code, unused_variables, unused_mut, unused_imports)]
-
 pub mod ast;
 pub mod codegen;
 pub mod demand;
@@ -87,7 +85,7 @@ pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<C
     let hidden = module.hidden.clone();
     let mut module = ast::Module {
         decls: prelude_decls.into_iter()
-            .chain(module.decls.into_iter())
+            .chain(module.decls)
             .collect(),
         exports: None,
         hidden,

@@ -1,13 +1,13 @@
-/// Constant folding pass
-///
-/// Runs after monomorphization on the TIR.  Reduces compile-time-known
-/// arithmetic, comparisons, boolean logic, string concatenation, and
-/// negation of literals to their result literals.
-///
-/// After monomorphization, typeclass methods (==, <, >, <>, etc.) are
-/// resolved to concrete functions like `eq_Integer`, `ord_gt__Number`,
-/// `semigroup_String`.  We recognize these App(App(Var(name), lhs), rhs)
-/// patterns and fold them too.
+//! Constant folding pass
+//!
+//! Runs after monomorphization on the TIR.  Reduces compile-time-known
+//! arithmetic, comparisons, boolean logic, string concatenation, and
+//! negation of literals to their result literals.
+//!
+//! After monomorphization, typeclass methods (==, <, >, <>, etc.) are
+//! resolved to concrete functions like `eq_Integer`, `ord_gt__Number`,
+//! `semigroup_String`.  We recognize these App(App(Var(name), lhs), rhs)
+//! patterns and fold them too.
 
 use crate::tir::*;
 use crate::types::Ty;
@@ -119,15 +119,12 @@ fn fold_expr(expr: TExpr) -> TExpr {
             let f = fold_expr(*f);
             let a = fold_expr(*a);
             // Recognize App(App(Var(method), lhs), rhs) from resolved typeclass methods
-            if let TExprKind::App(ff, lhs) = &f.kind {
-                if let TExprKind::Var(name) = &ff.kind {
-                    if let Some(op) = resolved_method_to_op(name) {
-                        if let Some(folded) = try_fold_infix(op, lhs, &a, &ty) {
+            if let TExprKind::App(ff, lhs) = &f.kind
+                && let TExprKind::Var(name) = &ff.kind
+                    && let Some(op) = resolved_method_to_op(name)
+                        && let Some(folded) = try_fold_infix(op, lhs, &a, &ty) {
                             return folded;
                         }
-                    }
-                }
-            }
             TExpr::new(TExprKind::App(Box::new(f), Box::new(a)), ty)
         }
         TExprKind::Lambda { params, body } => {

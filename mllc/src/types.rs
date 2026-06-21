@@ -411,7 +411,7 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
         }
 
         // Forall: instantiate the quantified variable and unify the body
-        (Ty::Forall(v, inner), t) | (t, Ty::Forall(v, inner)) => {
+        (Ty::Forall(_v, inner), t) | (t, Ty::Forall(_v, inner)) => {
             // The forall-bound variable is already a rigid skolem (id=MAX).
             // Unify the body directly — the variable will unify with whatever
             // the concrete type provides, enforcing that it can't escape.
@@ -420,7 +420,7 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
 
         // Skolem: rigid type constant, only unifies with itself
         (Ty::Skolem(a, i), Ty::Skolem(b, j)) if a == b && i == j => Ok(Subst::empty()),
-        (Ty::Skolem(..), t) | (t, Ty::Skolem(..)) => {
+        (Ty::Skolem(..), _t) | (_t, Ty::Skolem(..)) => {
             Err(TypeErrorKind::RigidMismatch(t1.clone(), t2.clone()))
         }
 

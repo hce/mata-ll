@@ -11,8 +11,6 @@ enum ListCompQual {
 pub struct Parser {
     tokens: Vec<Located>,
     pos: usize,
-    /// Stack of indentation levels for layout tracking
-    indent_stack: Vec<usize>,
     /// Current line's indentation
     current_indent: usize,
     /// Minimum indentation for current expression context
@@ -26,7 +24,6 @@ impl Parser {
         Parser {
             tokens,
             pos: 0,
-            indent_stack: vec![0],
             current_indent: 0,
             expr_min_indent: 0,
             fixities: HashMap::new(),
@@ -91,10 +88,6 @@ impl Parser {
     }
 
     /// Check if the current token is at or beyond a given indentation level
-    fn at_indent_ge(&self, level: usize) -> bool {
-        self.current_indent >= level
-    }
-
     fn parse_module(&mut self) -> Result<Module, String> {
         let mut decls = Vec::new();
         self.skip_indent();
@@ -156,14 +149,12 @@ impl Parser {
         // Merge consecutive FunDef declarations with the same name
         let mut merged: Vec<Decl> = Vec::new();
         for decl in decls {
-            if let Decl::FunDef { name, clauses } = &decl {
-                if let Some(Decl::FunDef { name: prev_name, clauses: prev_clauses }) = merged.last_mut() {
-                    if prev_name == name {
+            if let Decl::FunDef { name, clauses } = &decl
+                && let Some(Decl::FunDef { name: prev_name, clauses: prev_clauses }) = merged.last_mut()
+                    && prev_name == name {
                         prev_clauses.extend(clauses.clone());
                         continue;
                     }
-                }
-            }
             merged.push(decl);
         }
 
@@ -265,8 +256,8 @@ impl Parser {
         // Check for existential quantification: `forall a b. [Constraint =>] ConName fields`
         let mut existential_vars = Vec::new();
         let mut existential_constraints = Vec::new();
-        if let Token::Ident(ref id) = self.peek().clone() {
-            if id == "forall" {
+        if let Token::Ident(ref id) = self.peek().clone()
+            && id == "forall" {
                 self.advance();
                 // Parse bound type variables until we see '.'
                 while !self.at(&Token::Operator(".".to_string())) {
@@ -286,7 +277,6 @@ impl Parser {
                     self.pos = save;
                 }
             }
-        }
 
         let name = self.expect_upper_ident()?;
 
@@ -395,11 +385,10 @@ impl Parser {
         self.expect(&Token::Eq)?;
         // Skip optional constructor name (Haskell-style: newtype Rad = Rad Number)
         // MLL newtypes always use the type name as the constructor name.
-        if let Token::UpperIdent(con) = self.peek() {
-            if *con == name {
+        if let Token::UpperIdent(con) = self.peek()
+            && *con == name {
                 self.advance();
             }
-        }
         let inner = self.parse_type()?;
 
         Ok(Decl::NewtypeDef {
@@ -599,9 +588,8 @@ impl Parser {
 
         // Parse optional constraints: Eq a => or (Eq a, Show a) =>
         // Then: ClassName TargetType where
-        // Strategy: save position, try to find =>, backtrack if not found
-        let save = self.pos;
-        let save_indent = self.current_indent;
+        // Strategy: speculatively parse a type var after the first name; if no
+        // `=>` follows, backtrack (see save2 below) and treat it as the target.
         let class_name;
         let target_type;
 
@@ -972,8 +960,8 @@ impl Parser {
 
     fn parse_type(&mut self) -> Result<Type, String> {
         // Check for forall: `forall s. type`
-        if let Token::Ident(ref name) = self.peek().clone() {
-            if name == "forall" {
+        if let Token::Ident(ref name) = self.peek().clone()
+            && name == "forall" {
                 self.advance();
                 let var = self.expect_ident()?;
                 self.expect(&Token::Operator(".".to_string()))?;
@@ -983,12 +971,11 @@ impl Parser {
                     inner: Box::new(inner),
                 });
             }
-        }
 
         // Check for constraints: `Show a => ...`
         let save = self.pos;
-        if let Ok(constraints) = self.try_parse_constraints() {
-            if self.at(&Token::FatArrow) {
+        if let Ok(constraints) = self.try_parse_constraints()
+            && self.at(&Token::FatArrow) {
                 self.advance();
                 let ty = self.parse_type_arrow()?;
                 return Ok(Type::Constrained {
@@ -996,7 +983,6 @@ impl Parser {
                     ty: Box::new(ty),
                 });
             }
-        }
         self.pos = save;
         self.parse_type_arrow()
     }
@@ -1262,20 +1248,19 @@ impl Parser {
 
     fn parse_expr_prefix(&mut self) -> Result<Expr, String> {
         // Negation
-        if let Token::Operator(ref op) = self.peek().clone() {
-            if op == "-" {
+        if let Token::Operator(ref op) = self.peek().clone()
+            && op == "-" {
                 self.advance();
                 let expr = self.parse_expr_app()?;
                 return Ok(Expr::Negate(Box::new(expr)));
             }
-        }
         self.parse_expr_app()
     }
 
     fn parse_expr_app(&mut self) -> Result<Expr, String> {
         // Record the column of the function being applied — continuation
         // lines must be indented past this column, not just past the line indent.
-        let app_col = self.peek_loc().col as usize;
+        let app_col = self.peek_loc().col;
         let mut func = self.parse_expr_atom_dotted()?;
         let mut has_args = false;
 
@@ -1328,15 +1313,14 @@ impl Parser {
             let save = self.pos;
             let save_indent = self.current_indent;
             if self.is_pattern_start() {
-                if let Ok(pat) = self.parse_pattern() {
-                    if self.at(&Token::Bind) {
+                if let Ok(pat) = self.parse_pattern()
+                    && self.at(&Token::Bind) {
                         self.advance();
                         let expr = self.parse_expr()?;
                         quals.push(ListCompQual::Generator { pattern: pat, expr });
                         if self.at(&Token::Comma) { self.advance(); continue; }
                         break;
                     }
-                }
                 // Not a generator — backtrack and parse as guard
                 self.pos = save;
                 self.current_indent = save_indent;
@@ -1443,8 +1427,8 @@ impl Parser {
             if dot_tok.col != prev_end {
                 break; // there's a gap — this is composition, not field access
             }
-            if self.pos + 1 < self.tokens.len() {
-                if let Token::Ident(_) = &self.tokens[self.pos + 1].token {
+            if self.pos + 1 < self.tokens.len()
+                && let Token::Ident(_) = &self.tokens[self.pos + 1].token {
                     self.advance(); // consume '.'
                     if let Token::Ident(field) = self.peek().clone() {
                         self.advance(); // consume field name
@@ -1452,7 +1436,6 @@ impl Parser {
                         continue;
                     }
                 }
-            }
             break;
         }
 
@@ -1514,11 +1497,10 @@ impl Parser {
     /// a line at or below the expression's starting indentation.
     fn is_expr_atom_start_in_context(&self) -> bool {
         // If there's an Indent token next, check indentation
-        if let Token::Indent(n) = self.peek() {
-            if *n <= self.expr_min_indent {
+        if let Token::Indent(n) = self.peek()
+            && *n <= self.expr_min_indent {
                 return false;
             }
-        }
         if !self.is_expr_atom_start() {
             return false;
         }
@@ -1527,7 +1509,7 @@ impl Parser {
         // the beginning of its line (col == current_indent + 1), it's a new
         // statement/declaration, not a continuation argument.
         if self.current_indent <= self.expr_min_indent
-            && loc.col as usize == self.current_indent + 1
+            && loc.col == self.current_indent + 1
         {
             return false;
         }
@@ -1548,11 +1530,10 @@ impl Parser {
             return true;
         }
         // Negative literal: -N where - is not preceded by an expression-ending token
-        if let Token::Operator(op) = self.peek() {
-            if op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
+        if let Token::Operator(op) = self.peek()
+            && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
                 return matches!(self.tokens[self.pos + 1].token, Token::IntLit(_) | Token::NumLit(_));
             }
-        }
         false
     }
 
@@ -1569,8 +1550,8 @@ impl Parser {
 
     fn parse_expr_atom(&mut self) -> Result<Expr, String> {
         // Negative literal: -N where - is not preceded by an expression-ending token
-        if let Token::Operator(op) = self.peek() {
-            if op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
+        if let Token::Operator(op) = self.peek()
+            && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
                 match self.tokens[self.pos + 1].token {
                     Token::IntLit(n) => {
                         self.advance(); self.advance();
@@ -1583,7 +1564,6 @@ impl Parser {
                     _ => {}
                 }
             }
-        }
         match self.peek().clone() {
             Token::IntLit(n) => {
                 self.advance();
@@ -1703,8 +1683,8 @@ impl Parser {
                 if let Token::Operator(op) = self.peek().clone() {
                     {
                         let after_op = self.pos + 1;
-                        if after_op < self.tokens.len() {
-                            if self.tokens[after_op].token == Token::RightParen {
+                        if after_op < self.tokens.len()
+                            && self.tokens[after_op].token == Token::RightParen {
                                 // (expr op) — left section: \x -> expr op x
                                 self.advance(); // consume operator
                                 self.advance(); // consume )
@@ -1717,16 +1697,15 @@ impl Parser {
                                     }),
                                 });
                             }
-                        }
                     }
                 }
 
                 // (expr `name`) — backtick left section: \x -> expr `name` x
                 if self.at(&Token::Backtick) {
                     let after_bt = self.pos + 1;
-                    if after_bt + 1 < self.tokens.len() {
-                        if let Token::Ident(_) = &self.tokens[after_bt].token {
-                            if self.tokens[after_bt + 1].token == Token::Backtick
+                    if after_bt + 1 < self.tokens.len()
+                        && let Token::Ident(_) = &self.tokens[after_bt].token
+                            && self.tokens[after_bt + 1].token == Token::Backtick
                                 && after_bt + 2 < self.tokens.len()
                                 && self.tokens[after_bt + 2].token == Token::RightParen
                             {
@@ -1743,8 +1722,6 @@ impl Parser {
                                     }),
                                 });
                             }
-                        }
-                    }
                 }
 
                 // Not a section — backtrack and parse full expression
@@ -1984,7 +1961,7 @@ impl Parser {
                             tuple_binds.push((fresh, pat));
                             continue;
                         }
-                        return Err(format!("Expected tuple pattern or identifier in let binding"));
+                        return Err("Expected tuple pattern or identifier in let binding".to_string());
                     }
                     if !matches!(self.peek(), Token::Ident(_)) {
                         break;
@@ -2077,8 +2054,8 @@ impl Parser {
                             let save_pos = self.pos;
                             let save_indent = self.current_indent;
                             self.skip_newlines_and_indent();
-                            if self.current_indent >= let_indent {
-                                if let Token::Ident(_) = self.peek() {
+                            if self.current_indent >= let_indent
+                                && let Token::Ident(_) = self.peek() {
                                     // Peek ahead for `name [patterns] =`
                                     let save2 = self.pos;
                                     let save2_indent = self.current_indent;
@@ -2113,7 +2090,6 @@ impl Parser {
                                     self.pos = save2;
                                     self.current_indent = save2_indent;
                                 }
-                            }
                             // Not a continuation binding — backtrack
                             self.pos = save_pos;
                             self.current_indent = save_indent;
@@ -2126,14 +2102,13 @@ impl Parser {
                     if matches!(self.peek(), Token::LeftParen) {
                         let save_tup = self.pos;
                         let save_tup_indent = self.current_indent;
-                        if let Ok(pat) = self.parse_pattern_atom() {
-                            if matches!(pat, Pattern::Tuple(_)) && self.at(&Token::Bind) {
+                        if let Ok(pat) = self.parse_pattern_atom()
+                            && matches!(pat, Pattern::Tuple(_)) && self.at(&Token::Bind) {
                                 self.advance();
                                 let expr = self.parse_expr()?;
                                 stmts.push(DoStmt::PatternBind { pattern: pat, expr });
                                 continue;
                             }
-                        }
                         self.pos = save_tup;
                         self.current_indent = save_tup_indent;
                     }
@@ -2179,8 +2154,8 @@ impl Parser {
                     let save = self.pos;
                     let save_indent = self.current_indent;
                     // Try parsing as pattern
-                    if let Ok(pat) = self.parse_pattern() {
-                        if self.at(&Token::Arrow) {
+                    if let Ok(pat) = self.parse_pattern()
+                        && self.at(&Token::Arrow) {
                             self.advance();
                             let body = self.parse_expr()?;
                             let mut branches = vec![CaseBranch {
@@ -2205,7 +2180,6 @@ impl Parser {
                                 }),
                             });
                         }
-                    }
                     // Not a pattern lambda — backtrack
                     self.pos = save;
                     self.current_indent = save_indent;
@@ -2274,8 +2248,8 @@ impl Parser {
         };
 
         // Check for infix cons pattern: x : xs
-        if let Token::Operator(ref op) = self.peek().clone() {
-            if op == ":" {
+        if let Token::Operator(ref op) = self.peek().clone()
+            && op == ":" {
                 self.advance();
                 let rhs = self.parse_pattern()?;
                 return Ok(Pattern::Constructor {
@@ -2283,7 +2257,6 @@ impl Parser {
                     args: vec![lhs, rhs],
                 });
             }
-        }
 
         Ok(lhs)
     }
@@ -2305,18 +2278,17 @@ impl Parser {
         ) {
             return true;
         }
-        if let Token::Operator(op) = self.peek() {
-            if op == "-" && self.pos + 1 < self.tokens.len() {
+        if let Token::Operator(op) = self.peek()
+            && op == "-" && self.pos + 1 < self.tokens.len() {
                 return matches!(self.tokens[self.pos + 1].token, Token::IntLit(_) | Token::NumLit(_));
             }
-        }
         false
     }
 
     fn parse_pattern_atom(&mut self) -> Result<Pattern, String> {
         // Negative literal pattern: -N
-        if let Token::Operator(op) = self.peek() {
-            if op == "-" && self.pos + 1 < self.tokens.len() {
+        if let Token::Operator(op) = self.peek()
+            && op == "-" && self.pos + 1 < self.tokens.len() {
                 match self.tokens[self.pos + 1].token {
                     Token::IntLit(n) => {
                         self.advance(); self.advance();
@@ -2329,7 +2301,6 @@ impl Parser {
                     _ => {}
                 }
             }
-        }
         match self.peek().clone() {
             Token::Ident(name) => {
                 self.advance();

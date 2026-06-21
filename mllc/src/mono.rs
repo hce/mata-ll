@@ -1,8 +1,8 @@
-/// Monomorphization pass
-///
-/// Walks the typed IR and collects all concrete type instantiations
-/// of polymorphic functions. For each unique instantiation, generates
-/// a specialized copy with a mangled name and rewrites call sites.
+//! Monomorphization pass
+//!
+//! Walks the typed IR and collects all concrete type instantiations
+//! of polymorphic functions. For each unique instantiation, generates
+//! a specialized copy with a mangled name and rewrites call sites.
 
 use std::collections::{HashMap, HashSet};
 use crate::tir::*;
@@ -25,8 +25,6 @@ pub struct Monomorphizer {
     specializations: HashMap<SpecKey, String>,
     /// Generated specialized functions
     generated: Vec<TFunction>,
-    /// Counter for unique names
-    counter: u32,
     /// Typeclass method -> set of class names it belongs to
     class_methods: HashSet<String>,
     /// Methods where the class variable appears in the return type, not the first arg
@@ -105,7 +103,7 @@ impl Monomorphizer {
 
         // Build set of methods where class variable is in return position
         let mut return_type_methods = HashSet::new();
-        for (_class_name, info) in checker.get_classes() {
+        for info in checker.get_classes().values() {
             let tv = &info.type_var;
             for (method_name, method_ty) in &info.methods {
                 // Check if the class variable appears only in return position
@@ -124,7 +122,6 @@ impl Monomorphizer {
             builtins,
             specializations: HashMap::new(),
             generated: Vec::new(),
-            counter: 0,
             class_methods,
             return_type_methods,
             instance_methods,
@@ -159,7 +156,7 @@ impl Monomorphizer {
         // as fallbacks for calls inside other polymorphic contexts where types
         // aren't resolved). Append generated specializations after.
         let mut result_fns: Vec<TFunction> = functions;
-        result_fns.extend(self.generated.drain(..));
+        result_fns.append(&mut self.generated);
 
         // Rewrite dict-passing functions and their call sites
         if !self.dict_passing_fns.is_empty() {
@@ -367,10 +364,10 @@ impl Monomorphizer {
             TPattern::Var(name, _) => vec![name.clone()],
             TPattern::Wildcard | TPattern::LitPat(_) => vec![],
             TPattern::Constructor { args, .. } => {
-                args.iter().flat_map(|p| Self::pattern_vars(p)).collect()
+                args.iter().flat_map(Self::pattern_vars).collect()
             }
             TPattern::Paren(p) => Self::pattern_vars(p),
-            TPattern::Tuple(ps) => ps.iter().flat_map(|p| Self::pattern_vars(p)).collect(),
+            TPattern::Tuple(ps) => ps.iter().flat_map(Self::pattern_vars).collect(),
         }
     }
 
@@ -391,8 +388,8 @@ impl Monomorphizer {
                     let ty = current.ty.clone();
                     if let TExprKind::InfixApp { op, lhs, rhs } = current.kind {
                         let rhs_ty = rhs.ty.clone();
-                        if op == ">>=" {
-                            if let TExprKind::Lambda { params, body } = rhs.kind {
+                        if op == ">>="
+                            && let TExprKind::Lambda { params, body } = rhs.kind {
                                 let lhs = self.mono_expr(*lhs);
                                 spine.push(SpineFrame::Bind {
                                     ty, op,
@@ -403,7 +400,6 @@ impl Monomorphizer {
                                 current = *body;
                                 continue;
                             }
-                        }
                         let lhs = self.mono_expr(*lhs);
                         spine.push(SpineFrame::Seq { ty, op, lhs });
                         current = *rhs;
@@ -488,18 +484,16 @@ impl Monomorphizer {
                         if let Some(mangled) = self.instance_methods.get(&key).cloned() {
                             return TExpr { kind: TExprKind::Var(mangled), ty };
                         } else if let Some(mangled) = self.resolve_parameterized_instance(name, &arg_ty) {
-                            if name == "show" {
-                                if let Some(specialized) = self.generate_container_show(&arg_ty) {
+                            if name == "show"
+                                && let Some(specialized) = self.generate_container_show(&arg_ty) {
                                     return TExpr { kind: TExprKind::Var(specialized), ty };
                                 }
-                            }
                             return TExpr { kind: TExprKind::Var(mangled), ty };
-                        } else if let Ty::Tuple(elem_tys) = &arg_ty {
-                            if name == "show" {
+                        } else if let Ty::Tuple(elem_tys) = &arg_ty
+                            && name == "show" {
                                 let mangled = self.generate_tuple_show(elem_tys);
                                 return TExpr { kind: TExprKind::Var(mangled), ty };
                             }
-                        }
                     }
                     // Fallback: for higher-kinded methods (Functor/Applicative),
                     // extract the type constructor from any position in the type
@@ -572,8 +566,8 @@ impl Monomorphizer {
                 // Check for class method application: describe arg
                 // where describe is a class method and arg has a concrete type
                 // Skip if the name is a locally-bound variable (parameter, let, case pattern)
-                if let TExprKind::Var(ref fname) = func.kind {
-                    if self.class_methods.contains(fname) && !self.locals.contains(fname) {
+                if let TExprKind::Var(ref fname) = func.kind
+                    && self.class_methods.contains(fname) && !self.locals.contains(fname) {
                         let arg_ty = &arg.ty;
                         if !self.is_polymorphic(arg_ty) {
                             let mut resolved = None;
@@ -606,20 +600,18 @@ impl Monomorphizer {
                             if fname == "show" {
                                 if let Ty::Tuple(elem_tys) = arg_ty {
                                     resolved = Some(self.generate_tuple_show(elem_tys));
-                                } else if resolved.is_some() {
-                                    if let Some(specialized) = self.generate_container_show(arg_ty) {
+                                } else if resolved.is_some()
+                                    && let Some(specialized) = self.generate_container_show(arg_ty) {
                                         resolved = Some(specialized);
                                     }
-                                }
                             }
                             // Fallback: extract type constructor from result type
                             // (for higher-kinded methods like fmap, pure)
-                            if resolved.is_none() {
-                                if let Some(tc) = Self::extract_type_constructor(&ty) {
+                            if resolved.is_none()
+                                && let Some(tc) = Self::extract_type_constructor(&ty) {
                                     let key2 = (fname.clone(), tc.clone());
                                     resolved = self.instance_methods.get(&key2).cloned();
                                 }
-                            }
                             if let Some(mangled) = resolved {
                                 let mono_arg = self.mono_expr(*arg);
                                 return TExpr {
@@ -632,7 +624,6 @@ impl Monomorphizer {
                             }
                         }
                     }
-                }
                 TExprKind::App(
                     Box::new(self.mono_expr(*func)),
                     Box::new(self.mono_expr(*arg)),
@@ -673,11 +664,10 @@ impl Monomorphizer {
                         }
 
                         // 4. Higher-kinded fallback: extract type constructor from result type
-                        if resolved.is_none() {
-                            if let Some(tc) = Self::extract_type_constructor(&ty) {
+                        if resolved.is_none()
+                            && let Some(tc) = Self::extract_type_constructor(&ty) {
                                 resolved = self.instance_methods.get(&(lookup_op.clone(), tc)).cloned();
                             }
-                        }
                     } else {
                         // Polymorphic type: try to resolve by type constructor if known.
                         // This handles derived instance methods (e.g. eq_Tree) where
@@ -698,11 +688,10 @@ impl Monomorphizer {
                             let key = (lookup_op.clone(), ty_str);
                             resolved = self.instance_methods.get(&key).cloned();
                         }
-                        if resolved.is_none() {
-                            if let Some(tc) = Self::extract_type_constructor(&lhs.ty) {
+                        if resolved.is_none()
+                            && let Some(tc) = Self::extract_type_constructor(&lhs.ty) {
                                 resolved = self.instance_methods.get(&(lookup_op, tc)).cloned();
                             }
-                        }
                     }
 
                     if let Some(mangled) = resolved {
@@ -859,17 +848,15 @@ impl Monomorphizer {
         if let Ty::Tuple(elem_tys) = ty {
             return self.generate_tuple_eq(elem_tys);
         }
-        if Self::is_maybe_type(ty) {
-            if let Some(inner_ty) = Self::maybe_inner_type(ty) {
+        if Self::is_maybe_type(ty)
+            && let Some(inner_ty) = Self::maybe_inner_type(ty) {
                 return self.generate_maybe_eq(&inner_ty);
             }
-        }
         // Try type constructor for parameterized types
-        if let Some(tc) = Self::extract_type_constructor(ty) {
-            if let Some(existing) = self.instance_methods.get(&("==".to_string(), tc)).cloned() {
+        if let Some(tc) = Self::extract_type_constructor(ty)
+            && let Some(existing) = self.instance_methods.get(&("==".to_string(), tc)).cloned() {
                 return existing;
             }
-        }
         "__mll_eq".to_string()
     }
 
@@ -979,11 +966,10 @@ impl Monomorphizer {
     }
 
     fn maybe_inner_type(ty: &Ty) -> Option<Ty> {
-        if let Ty::App(f, inner) = ty {
-            if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") {
+        if let Ty::App(f, inner) = ty
+            && matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") {
                 return Some(*inner.clone());
             }
-        }
         None
     }
 
@@ -1082,12 +1068,11 @@ impl Monomorphizer {
         if let Ty::Tuple(elems) = ty {
             return self.generate_tuple_show(elems);
         }
-        if let Ty::List(_) = ty {
-            if let Some(mangled) = self.generate_container_show(ty) {
+        if let Ty::List(_) = ty
+            && let Some(mangled) = self.generate_container_show(ty) {
                 return mangled;
             }
-        }
-        if let Some(_) = self.resolve_parameterized_instance("show", ty) {
+        if self.resolve_parameterized_instance("show", ty).is_some() {
             // Has a generic instance — generate container show
             if let Some(mangled) = self.generate_container_show(ty) {
                 return mangled;
@@ -1342,9 +1327,9 @@ impl Monomorphizer {
         let ty = expr.ty.clone();
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
-                if let Some(class_name) = self.method_to_class.get(name) {
-                    if let Some(dict_param) = class_to_dict.get(class_name) {
-                        if self.is_polymorphic(&ty) {
+                if let Some(class_name) = self.method_to_class.get(name)
+                    && let Some(dict_param) = class_to_dict.get(class_name)
+                        && self.is_polymorphic(&ty) {
                             return TExpr {
                                 kind: TExprKind::DictAccess {
                                     dict_param: dict_param.clone(),
@@ -1353,14 +1338,12 @@ impl Monomorphizer {
                                 ty,
                             };
                         }
-                    }
-                }
                 return expr;
             }
             TExprKind::App(_, _) => {
                 let (head, _) = Self::collect_app_chain(&expr);
-                if let TExprKind::Var(ref call_name) = head.kind {
-                    if call_name == func_name {
+                if let TExprKind::Var(ref call_name) = head.kind
+                    && call_name == func_name {
                         let (_, args) = Self::collect_app_chain(&expr);
                         let dict_args: Vec<TExpr> = class_to_dict.values().map(|dp| {
                             TExpr::new(TExprKind::Var(dp.clone()), Ty::Unit)
@@ -1377,7 +1360,6 @@ impl Monomorphizer {
                             ty,
                         };
                     }
-                }
                 if let TExprKind::App(func, arg) = expr.kind {
                     TExprKind::App(
                         Box::new(self.rewrite_dict_expr(*func, func_name, class_to_dict)),
@@ -1386,9 +1368,9 @@ impl Monomorphizer {
                 } else { unreachable!() }
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                if let Some(class_name) = self.method_to_class.get(&op) {
-                    if let Some(dict_param) = class_to_dict.get(class_name) {
-                        if self.is_polymorphic(&lhs.ty) {
+                if let Some(class_name) = self.method_to_class.get(&op)
+                    && let Some(dict_param) = class_to_dict.get(class_name)
+                        && self.is_polymorphic(&lhs.ty) {
                             let dict_access = TExpr::new(
                                 TExprKind::DictAccess { dict_param: dict_param.clone(), method_name: op.clone() },
                                 Ty::Unit,
@@ -1398,8 +1380,6 @@ impl Monomorphizer {
                             let app1 = TExpr::new(TExprKind::App(Box::new(dict_access), Box::new(lhs)), Ty::Unit);
                             return TExpr::new(TExprKind::App(Box::new(app1), Box::new(rhs)), ty);
                         }
-                    }
-                }
                 TExprKind::InfixApp {
                     op,
                     lhs: Box::new(self.rewrite_dict_expr(*lhs, func_name, class_to_dict)),
@@ -1463,10 +1443,10 @@ impl Monomorphizer {
         match expr.kind {
             TExprKind::App(_, _) => {
                 let (head, _) = Self::collect_app_chain(&expr);
-                if let TExprKind::Var(ref call_name) = head.kind {
-                    if self.dict_passing_fns.contains(call_name) && !self.is_polymorphic(&ty) {
-                        if let Some(constraints) = self.fn_constraints.get(call_name).cloned() {
-                            let (head, args) = Self::collect_app_chain(&expr);
+                if let TExprKind::Var(ref call_name) = head.kind
+                    && self.dict_passing_fns.contains(call_name) && !self.is_polymorphic(&ty)
+                        && let Some(constraints) = self.fn_constraints.get(call_name).cloned() {
+                            let (_head, args) = Self::collect_app_chain(&expr);
                             let poly_fn_ty = self.poly_fns.get(call_name).map(|f| &f.ty);
                             let dict_args: Vec<TExpr> = constraints.iter().map(|c| {
                                 let concrete = self.resolve_constraint_type(
@@ -1485,8 +1465,6 @@ impl Monomorphizer {
                                 ty,
                             };
                         }
-                    }
-                }
                 if let TExprKind::App(func, arg) = expr.kind {
                     TExpr {
                         kind: TExprKind::App(
@@ -1548,9 +1526,8 @@ impl Monomorphizer {
             Self::match_fn_args(fn_ty, args, &mut subst);
             if let Some(ty) = subst.get(type_var) { return ty.clone(); }
         }
-        if !args.is_empty() {
-            if let Some(inner) = Self::extract_inner_type(&args[0].ty) { return inner; }
-        }
+        if !args.is_empty()
+            && let Some(inner) = Self::extract_inner_type(&args[0].ty) { return inner; }
         Ty::Con("_".into())
     }
 
