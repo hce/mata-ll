@@ -1,7 +1,14 @@
 target/
 examples/*.lua
 examples/tracker/*.wav
-examples/tracker/*.it
+# Copyrighted tracker modules must never be committed. benchmark.it is our
+# own non-copyrighted test fixture, so it is explicitly re-allowed below.
+*.it
+*.umx
+*.mod
+*.xm
+*.s3m
+!mll-tests/tests/benchmark.it
 lib/*.lua
 doc/*.pdf
 doc/*.aux
