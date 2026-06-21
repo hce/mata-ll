@@ -1029,6 +1029,11 @@ fn example_listcomp() {
     run_mll_file_with_lib(Path::new("../examples/listcomp.mll"));
 }
 
+#[test]
+fn example_lambda_reduction() {
+    run_mll_file_with_lib(Path::new("../examples/lambda.mll"));
+}
+
 // ============================================================
 // FFI tests: compile MLL modules with exports, then call
 // exported functions from Lua and verify return values.
