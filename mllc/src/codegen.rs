@@ -357,12 +357,15 @@ impl CodeGen {
             self.gen_function(func);
         }
 
+        // Identify small pure functions eligible for inlining. Must run before
+        // analyze_call_sites: cheapness of a call argument depends on whether
+        // the callee is inlinable (a saturated call to an inlinable function is
+        // cheap to evaluate eagerly).
+        self.find_inline_candidates(module);
+
         // Whole-program call-site analysis: determine which function params
         // are always passed cheap (non-thunk) arguments at every call site.
         self.analyze_call_sites(module);
-
-        // Identify small pure functions eligible for inlining
-        self.find_inline_candidates(module);
 
         // Emit functions (main last, so specializations are defined before use)
         let mut main_fn = None;
@@ -1171,9 +1174,18 @@ impl CodeGen {
         // Scan all function bodies (and where-clause bodies) for call sites
         for func in module.functions.iter().chain(module.instance_fns.iter()) {
             for clause in &func.clauses {
-                Self::scan_call_sites(&clause.body, &mut ever_thunked, &mut ever_called);
+                self.scan_call_sites(&clause.body, &mut ever_thunked, &mut ever_called);
+                // Guard conditions and bodies are call sites too — without
+                // scanning them, a recursive call that appears only inside a
+                // guard (e.g. `f n | ... = f (g n)`) is missed, and the
+                // parameter is wrongly judged always-cheap (concrete) while the
+                // actual emission thunks the argument.
+                for g in &clause.guards {
+                    self.scan_call_sites(&g.condition, &mut ever_thunked, &mut ever_called);
+                    self.scan_call_sites(&g.body, &mut ever_thunked, &mut ever_called);
+                }
                 for wb in &clause.where_binds {
-                    Self::scan_call_sites(&wb.body, &mut ever_thunked, &mut ever_called);
+                    self.scan_call_sites(&wb.body, &mut ever_thunked, &mut ever_called);
                 }
             }
         }
@@ -1189,7 +1201,7 @@ impl CodeGen {
         }
     }
 
-    fn scan_call_sites(expr: &TExpr,
+    fn scan_call_sites(&self, expr: &TExpr,
         ever_thunked: &mut std::collections::HashMap<String, Vec<bool>>,
         ever_called: &mut std::collections::HashMap<String, Vec<bool>>,
     ) {
@@ -1198,7 +1210,7 @@ impl CodeGen {
         loop {
             match &expr.kind {
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" || op == ">>" => {
-                    Self::scan_call_sites(lhs, ever_thunked, ever_called);
+                    self.scan_call_sites(lhs, ever_thunked, ever_called);
                     if let TExprKind::Lambda { body, .. } = &rhs.kind {
                         expr = body;
                         continue;
@@ -1207,7 +1219,7 @@ impl CodeGen {
                     continue;
                 }
                 TExprKind::Let { binds, body } => {
-                    for bind in binds { Self::scan_call_sites(&bind.body, ever_thunked, ever_called); }
+                    for bind in binds { self.scan_call_sites(&bind.body, ever_thunked, ever_called); }
                     expr = body;
                     continue;
                 }
@@ -1229,40 +1241,40 @@ impl CodeGen {
                         for (i, arg) in args.iter().enumerate() {
                             if i < thunked.len() {
                                 called[i] = true;
-                                if !Self::is_cheap_arg(arg) {
+                                if !Self::is_cheap_arg(arg, &self.inline_fns) {
                                     thunked[i] = true;
                                 }
                             }
                         }
                     }
                 for arg in &args {
-                    Self::scan_call_sites(arg, ever_thunked, ever_called);
+                    self.scan_call_sites(arg, ever_thunked, ever_called);
                 }
                 if !matches!(&f.kind, TExprKind::Var(_) | TExprKind::Con(_)) {
-                    Self::scan_call_sites(f, ever_thunked, ever_called);
+                    self.scan_call_sites(f, ever_thunked, ever_called);
                 }
             }
             TExprKind::InfixApp { lhs, rhs, .. } => {
-                Self::scan_call_sites(lhs, ever_thunked, ever_called);
-                Self::scan_call_sites(rhs, ever_thunked, ever_called);
+                self.scan_call_sites(lhs, ever_thunked, ever_called);
+                self.scan_call_sites(rhs, ever_thunked, ever_called);
             }
-            TExprKind::Lambda { body, .. } => Self::scan_call_sites(body, ever_thunked, ever_called),
+            TExprKind::Lambda { body, .. } => self.scan_call_sites(body, ever_thunked, ever_called),
             TExprKind::If { cond, then_branch, else_branch } => {
-                Self::scan_call_sites(cond, ever_thunked, ever_called);
-                Self::scan_call_sites(then_branch, ever_thunked, ever_called);
-                Self::scan_call_sites(else_branch, ever_thunked, ever_called);
+                self.scan_call_sites(cond, ever_thunked, ever_called);
+                self.scan_call_sites(then_branch, ever_thunked, ever_called);
+                self.scan_call_sites(else_branch, ever_thunked, ever_called);
             }
             TExprKind::Let { binds, body } => {
-                for bind in binds { Self::scan_call_sites(&bind.body, ever_thunked, ever_called); }
-                Self::scan_call_sites(body, ever_thunked, ever_called);
+                for bind in binds { self.scan_call_sites(&bind.body, ever_thunked, ever_called); }
+                self.scan_call_sites(body, ever_thunked, ever_called);
             }
             TExprKind::Case { scrutinee, branches } => {
-                Self::scan_call_sites(scrutinee, ever_thunked, ever_called);
-                for b in branches { Self::scan_call_sites(&b.body, ever_thunked, ever_called); }
+                self.scan_call_sites(scrutinee, ever_thunked, ever_called);
+                for b in branches { self.scan_call_sites(&b.body, ever_thunked, ever_called); }
             }
-            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::scan_call_sites(inner, ever_thunked, ever_called),
-            TExprKind::Tuple(elems) => { for e in elems { Self::scan_call_sites(e, ever_thunked, ever_called); } }
-            TExprKind::SpecCall { args, .. } => { for a in args { Self::scan_call_sites(a, ever_thunked, ever_called); } }
+            TExprKind::Paren(inner) | TExprKind::Negate(inner) => self.scan_call_sites(inner, ever_thunked, ever_called),
+            TExprKind::Tuple(elems) => { for e in elems { self.scan_call_sites(e, ever_thunked, ever_called); } }
+            TExprKind::SpecCall { args, .. } => { for a in args { self.scan_call_sites(a, ever_thunked, ever_called); } }
             _ => {}
         }
     }
@@ -1326,9 +1338,9 @@ impl CodeGen {
             TExprKind::InfixApp { op, lhs, rhs } => {
                 if op == "div" {
                     self.emit("math.floor(");
-                    self.gen_expr_subst(lhs, subst);
+                    self.gen_operand_subst(lhs, subst);
                     self.emit(" / ");
-                    self.gen_expr_subst(rhs, subst);
+                    self.gen_operand_subst(rhs, subst);
                     self.emit(")");
                     return;
                 }
@@ -1365,11 +1377,18 @@ impl CodeGen {
                     "mod" => "%",
                     other => other,
                 };
-                self.emit("(");
-                self.gen_expr_subst(lhs, subst);
-                self.emit(&format!(" {} ", lua_op));
-                self.gen_expr_subst(rhs, subst);
-                self.emit(")");
+                if is_builtin_op(op) {
+                    self.emit("(");
+                    self.gen_operand_subst(lhs, subst);
+                    self.emit(&format!(" {} ", lua_op));
+                    self.gen_operand_subst(rhs, subst);
+                    self.emit(")");
+                } else {
+                    let sop = sanitize_name(op);
+                    self.emit(&self.lua_ref(&sop)); self.emit("(");
+                    self.gen_expr_subst(lhs, subst); self.emit(", ");
+                    self.gen_expr_subst(rhs, subst); self.emit(")");
+                }
             }
             TExprKind::Paren(inner) => {
                 self.emit("(");
@@ -1385,9 +1404,16 @@ impl CodeGen {
                 // Remove shadowed names from substitution
                 let mut inner_subst = subst.clone();
                 let saved_locals = self.local_vars.clone();
+                let saved_concrete = self.concrete_vars.clone();
+                // A lambda parameter is NOT guaranteed forced (it may receive a
+                // thunk through a higher-order call), so drop it from
+                // concrete_vars — a same-named outer binding may be concrete —
+                // to force its uses in the body. See the gen_expr Lambda arm.
                 for (name, _) in params {
                     inner_subst.remove(name.as_str());
-                    self.local_vars.insert(sanitize_name(name));
+                    let sp = sanitize_name(name);
+                    self.local_vars.insert(sp.clone());
+                    self.concrete_vars.remove(&sp);
                 }
                 let ps: Vec<String> = params.iter().map(|(s, _)| sanitize_name(s)).collect();
                 self.emit(&format!("function({})\n", ps.join(", ")));
@@ -1398,6 +1424,7 @@ impl CodeGen {
                 self.indent -= 1;
                 self.emit_indent(); self.emit("end");
                 self.local_vars = saved_locals;
+                self.concrete_vars = saved_concrete;
             }
             TExprKind::App(_, _) => {
                 // Collect the application chain, substituting as we go
@@ -1450,22 +1477,47 @@ impl CodeGen {
     }
 
     /// Check if an expression is cheap enough to pass without thunking.
-    /// Constructor applications and simple function calls with cheap args
-    /// are cheap. Nested user-defined function calls like f(g(x)) are NOT
-    /// cheap — they must be thunked to preserve sharing.
-    fn is_cheap_arg(expr: &TExpr) -> bool {
+    /// Whether an argument is cheap enough to evaluate eagerly rather than
+    /// wrap in a thunk.
+    ///
+    /// Cheap: literals, variables, lambdas (see is_cheap); constructor
+    /// applications with cheap fields; and a *saturated call to an inlinable
+    /// function* — inline candidates are non-recursive with a cheap (plain
+    /// arithmetic) body, so calling one is O(1) and terminates.
+    ///
+    /// NOT cheap: a general or recursive function call. Even a single-level
+    /// call can be expensive or non-terminating (e.g. a recursive call that
+    /// streams an infinite list), so it must be thunked to preserve non-strict
+    /// semantics. Treating every one-level call as cheap forced such arguments
+    /// eagerly and diverged on lazy code like `concatMap` / list comprehensions
+    /// over `[n..]`.
+    fn is_cheap_arg(
+        expr: &TExpr,
+        inline_fns: &std::collections::HashMap<String, (Vec<String>, TExpr)>,
+    ) -> bool {
         if Self::is_cheap(expr) { return true; }
         match &expr.kind {
-            TExprKind::App(func, arg) => {
-                // Constructor applications are always cheap
-                if Self::is_con_app(expr) {
-                    return Self::is_cheap_arg(func) && Self::is_cheap_arg(arg);
+            TExprKind::App(_, _) => {
+                // Peel the application spine, requiring every argument cheap.
+                let mut argc = 0usize;
+                let mut f = expr;
+                while let TExprKind::App(func, arg) = &f.kind {
+                    if !Self::is_cheap_arg(arg, inline_fns) { return false; }
+                    argc += 1;
+                    f = func;
                 }
-                // Simple function calls (one level) with cheap args are ok,
-                // but NOT nested calls like f(g(x)) where g(x) is itself a call.
-                Self::is_cheap_arg(func) && Self::is_cheap(arg)
+                // Constructor application: cheap (O(1) WHNF).
+                if matches!(&f.kind, TExprKind::Con(_)) {
+                    return true;
+                }
+                // Saturated call to an inlinable function: cheap.
+                if let TExprKind::Var(name) = &f.kind
+                    && let Some((params, _)) = inline_fns.get(name) {
+                        return params.len() == argc;
+                    }
+                false
             }
-            TExprKind::Paren(inner) => Self::is_cheap_arg(inner),
+            TExprKind::Paren(inner) => Self::is_cheap_arg(inner, inline_fns),
             _ => false,
         }
     }
@@ -1812,13 +1864,107 @@ impl CodeGen {
         }
     }
 
+    /// Emit an operand of a strict primitive (arithmetic, comparison) so the
+    /// emitted Lua yields a forced scalar rather than a thunk.
+    ///
+    /// gen_expr emits "concrete" variables bare, on the assumption the caller
+    /// already forced them (the strict-parameter convention). That assumption
+    /// can fail: a parameter reaches a function as an unevaluated thunk when
+    /// the strictness analysis is incomplete, or when the function is invoked
+    /// through a higher-order position the caller could not specialize. A
+    /// strict operator must see a value, so force variables (even concrete
+    /// ones) and any other potentially-thunk expression. Literals, negations
+    /// and nested primitive operations already denote values and are emitted
+    /// directly.
+    fn gen_operand(&mut self, expr: &TExpr) {
+        match &expr.kind {
+            TExprKind::Lit(_) | TExprKind::Negate(_) => self.gen_expr(expr),
+            TExprKind::InfixApp { op, .. }
+                if is_builtin_op(op) || op == "div" || op == "mod" => self.gen_expr(expr),
+            TExprKind::Paren(inner) => self.gen_operand(inner),
+            TExprKind::Var(name) if name == "otherwise" => self.emit("true"),
+            TExprKind::Var(name) => {
+                // Trust the concrete marking: a genuinely-concrete variable is
+                // already a forced value, so emitting it bare (as gen_expr does)
+                // avoids a redundant __force on the arithmetic hot path. A
+                // non-concrete variable is forced.
+                let sname = sanitize_name(name);
+                let lref = self.lua_ref(&sname);
+                if self.concrete_vars.contains(&sname) {
+                    self.emit(&lref);
+                } else {
+                    self.emit("__force(");
+                    self.emit(&lref);
+                    self.emit(")");
+                }
+            }
+            _ => {
+                self.emit("__force(");
+                self.gen_expr(expr);
+                self.emit(")");
+            }
+        }
+    }
+
+    /// Substituting counterpart of gen_operand, for the inline path.
+    fn gen_operand_subst(
+        &mut self,
+        expr: &TExpr,
+        subst: &std::collections::HashMap<String, &TExpr>,
+    ) {
+        match &expr.kind {
+            TExprKind::Lit(_) | TExprKind::Negate(_) => self.gen_expr_subst(expr, subst),
+            TExprKind::InfixApp { op, .. }
+                if is_builtin_op(op) || op == "div" || op == "mod" => {
+                    self.gen_expr_subst(expr, subst)
+                }
+            TExprKind::Paren(inner) => self.gen_operand_subst(inner, subst),
+            TExprKind::Var(name) if name == "otherwise" => self.emit("true"),
+            TExprKind::Var(name) => {
+                self.emit("__force(");
+                if let Some(repl) = subst.get(name.as_str()) {
+                    self.gen_expr(repl);
+                } else {
+                    let lref = self.lua_ref(&sanitize_name(name));
+                    self.emit(&lref);
+                }
+                self.emit(")");
+            }
+            _ => {
+                self.emit("__force(");
+                self.gen_expr_subst(expr, subst);
+                self.emit(")");
+            }
+        }
+    }
+
+    /// Emit a variable or nullary constructor as a raw reference WITHOUT
+    /// forcing it — for lazy positions such as a cons tail, where forcing
+    /// would eagerly evaluate the rest of the spine. A non-concrete variable
+    /// already holds a thunk-or-value; the runtime forces it when read.
+    fn gen_lazy_ref(&mut self, expr: &TExpr) {
+        match &expr.kind {
+            TExprKind::Var(name) if name == "otherwise" => self.emit("true"),
+            TExprKind::Var(name) => {
+                let lref = self.lua_ref(&sanitize_name(name));
+                self.emit(&lref);
+            }
+            TExprKind::Con(name) if name == "[]" => self.emit("nil"),
+            TExprKind::Con(name) => {
+                let lref = self.lua_ref(&sanitize_name(name));
+                self.emit(&lref);
+            }
+            _ => self.gen_expr(expr),
+        }
+    }
+
     /// Emit a function argument expression.
     /// Cheap args (vars, literals, constructor applications) are emitted via
     /// gen_expr which forces non-concrete variables. Expensive args for strict
     /// positions are also emitted via gen_expr. Expensive args for non-strict
     /// positions are wrapped in thunks to preserve non-strict semantics.
     fn gen_arg(&mut self, expr: &TExpr, strict: bool) {
-        if Self::is_cheap_arg(expr) || strict {
+        if Self::is_cheap_arg(expr, &self.inline_fns) || strict {
             self.gen_expr(expr);
         } else {
             self.emit("__thunk(function() return ");
@@ -1895,28 +2041,35 @@ impl CodeGen {
                                 self.emit("return _l end)()");
                                 return;
                             }
-                            // If the tail is a non-trivial expression (function call,
-                            // infix op, etc.), wrap it in a thunk for lazy evaluation.
-                            // This is essential for infinite lists like [1..].
-                            let tail_needs_thunk = matches!(&arg.kind,
-                                TExprKind::App(_, _) |
-                                TExprKind::InfixApp { .. } |
-                                TExprKind::Case { .. } |
-                                TExprKind::If { .. } |
-                                TExprKind::SpecCall { .. }
-                            );
-                            if tail_needs_thunk {
+                            // Keep the cons tail lazy. A bare reference — a
+                            // variable or a nullary constructor like [] —
+                            // already denotes a thunk-or-value, so emit it raw:
+                            // forcing it here (gen_expr forces non-concrete
+                            // vars) would evaluate the rest of the spine eagerly
+                            // and diverge on infinite or self-referential lists
+                            // (e.g. `cons x rest = x : rest`). Any tail that
+                            // requires computation is wrapped in a thunk. The
+                            // runtime forces the cell when read (__mll_head /
+                            // __mll_tail), so an unforced tail is safe to store.
+                            let tail = {
+                                let mut t = arg.as_ref();
+                                while let TExprKind::Paren(inner) = &t.kind { t = inner.as_ref(); }
+                                t
+                            };
+                            let tail_is_ref = matches!(&tail.kind,
+                                TExprKind::Var(_) | TExprKind::Con(_));
+                            if tail_is_ref {
+                                self.emit("__mll_cons(");
+                                self.gen_expr(inner_arg);
+                                self.emit(", ");
+                                self.gen_lazy_ref(tail);
+                                self.emit(")");
+                            } else {
                                 self.emit("__mll_lazy_cons(");
                                 self.gen_expr(inner_arg);
                                 self.emit(", function() return ");
                                 self.gen_expr(arg);
                                 self.emit(" end)");
-                            } else {
-                                self.emit("__mll_cons(");
-                                self.gen_expr(inner_arg);
-                                self.emit(", ");
-                                self.gen_expr(arg);
-                                self.emit(")");
                             }
                             return;
                         }
@@ -1991,9 +2144,9 @@ impl CodeGen {
                         };
                         if let Some(op) = lua_op {
                             self.emit("(");
-                            self.gen_expr(args[0]);
+                            self.gen_operand(args[0]);
                             self.emit(&format!(" {} ", op));
-                            self.gen_expr(args[1]);
+                            self.gen_operand(args[1]);
                             self.emit(")");
                             return;
                         }
@@ -2084,9 +2237,9 @@ impl CodeGen {
             TExprKind::InfixApp { op, lhs, rhs } => {
                 if op == "div" {
                     self.emit("math.floor(");
-                    self.gen_expr(lhs);
+                    self.gen_operand(lhs);
                     self.emit(" / ");
-                    self.gen_expr(rhs);
+                    self.gen_operand(rhs);
                     self.emit(")");
                     return;
                 }
@@ -2102,7 +2255,7 @@ impl CodeGen {
                     self.emit("__mll_list_index(");
                     self.gen_expr(lhs);
                     self.emit(", ");
-                    self.gen_expr(rhs);
+                    self.gen_operand(rhs);
                     self.emit(")");
                     return;
                 }
@@ -2110,23 +2263,30 @@ impl CodeGen {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     "mod" => "%",
                     ":" => {
-                        let tail_needs_thunk = matches!(&rhs.kind,
-                            TExprKind::App(_, _) |
-                            TExprKind::InfixApp { .. } |
-                            TExprKind::Case { .. } |
-                            TExprKind::If { .. } |
-                            TExprKind::SpecCall { .. }
-                        );
-                        if tail_needs_thunk {
+                        // Keep the cons tail lazy. A bare reference (variable
+                        // or []) already denotes a thunk-or-value, so emit it
+                        // raw — forcing it would evaluate the rest of the spine
+                        // eagerly and diverge on infinite/self-referential
+                        // lists (e.g. `cons x rest = x : rest`). Any tail that
+                        // requires computation is wrapped in a thunk; the
+                        // runtime forces the cell when read. See gen_lazy_ref.
+                        let tail = {
+                            let mut t = rhs.as_ref();
+                            while let TExprKind::Paren(inner) = &t.kind { t = inner.as_ref(); }
+                            t
+                        };
+                        let tail_is_ref = matches!(&tail.kind,
+                            TExprKind::Var(_) | TExprKind::Con(_));
+                        if tail_is_ref {
+                            self.emit("__mll_cons(");
+                            self.gen_expr(lhs); self.emit(", "); self.gen_lazy_ref(tail);
+                            self.emit(")");
+                        } else {
                             self.emit("__mll_lazy_cons(");
                             self.gen_expr(lhs);
                             self.emit(", function() return ");
                             self.gen_expr(rhs);
                             self.emit(" end)");
-                        } else {
-                            self.emit("__mll_cons(");
-                            self.gen_expr(lhs); self.emit(", "); self.gen_expr(rhs);
-                            self.emit(")");
                         }
                         return;
                     }
@@ -2168,10 +2328,12 @@ impl CodeGen {
                     other => other,
                 };
                 if is_builtin_op(op) {
-                    // Lua-native operator: emit as infix
-                    self.emit("("); self.gen_expr(lhs);
+                    // Lua-native operator: emit as infix. Operands are forced —
+                    // a thunk is a table, which would corrupt arithmetic and
+                    // comparison, and is truthy under `and`/`or`.
+                    self.emit("("); self.gen_operand(lhs);
                     self.emit(&format!(" {} ", lua_op));
-                    self.gen_expr(rhs); self.emit(")");
+                    self.gen_operand(rhs); self.emit(")");
                 } else {
                     // User-defined or non-Lua operator: emit as function call
                     let sop = sanitize_name(op);
@@ -2249,12 +2411,23 @@ impl CodeGen {
             TExprKind::Lambda { params, body } => {
                 let ps: Vec<String> = params.iter().map(|(s, _)| sanitize_name(s)).collect();
                 let saved_locals = self.local_vars.clone();
-                for (p, _) in params { self.local_vars.insert(sanitize_name(p)); }
+                let saved_concrete = self.concrete_vars.clone();
+                // A lambda parameter is NOT guaranteed forced: when the lambda
+                // is invoked through a higher-order position the caller cannot
+                // see its strictness and may pass a thunk. Drop the params from
+                // concrete_vars (a same-named outer binding may be concrete) so
+                // their uses in the body are forced rather than emitted bare.
+                for (p, _) in params {
+                    let sp = sanitize_name(p);
+                    self.local_vars.insert(sp.clone());
+                    self.concrete_vars.remove(&sp);
+                }
                 self.emit(&format!("function({})\n", ps.join(", ")));
                 self.indent += 1; self.emit_indent(); self.emit("return ");
                 self.gen_expr(body); self.emit("\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end");
                 self.local_vars = saved_locals;
+                self.concrete_vars = saved_concrete;
             }
             TExprKind::Paren(inner) => {
                 self.emit("("); self.gen_expr(inner); self.emit(")");
@@ -2756,7 +2929,17 @@ local function __mll_tail(l)
         l[2] = l[2]()
         l.__lazy = nil
     end
-    return l[2]
+    -- The tail may be an unforced thunk: a recursive cons whose tail is a
+    -- variable (e.g. `x : rest`) stores it raw so the spine is not forced
+    -- eagerly at construction (which would diverge on infinite lists). Force
+    -- it to WHNF here — one spine step, on demand — and memoize, so the cell
+    -- meets the "tail is WHNF" invariant that show/eq/append rely on.
+    local t = l[2]
+    if getmetatable(t) == __thunk_mt then
+        t = __force(t)
+        l[2] = t
+    end
+    return t
 end
 
 -- List append (second arg is a thunk for laziness)

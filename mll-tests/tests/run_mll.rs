@@ -1024,6 +1024,69 @@ main = do
         .expect("recursive lazy where/let/do bindings should evaluate correctly");
 }
 
+// Regression: non-strict argument passing must keep lazy code productive.
+// A user's prime sieve (a self-referential list filtered via a comprehension)
+// diverged because several strict shortcuts leaked into lazy positions:
+//   - a one-level function call passed as an argument (concatMap's recursion,
+//     list comprehensions desugar to concatMap) was evaluated eagerly;
+//   - `x : rest` force-evaluated a variable tail, collapsing the spine;
+//   - lambda parameters were emitted bare and broke when a higher-order call
+//     passed a thunk;
+//   - a recursive call inside a guard was missed by the strictness analysis,
+//     marking the parameter concrete while the call site thunked it.
+// Each is exercised below. (Calls to inlinable helpers like makeAdder stay
+// eager, so this must not regress arithmetic-heavy code.)
+#[test]
+fn lazy_arguments_and_infinite_lists() {
+    let source = r#"
+-- infinite list comprehension (desugars to concatMap) must stream
+evens :: [Integer]
+evens = [x | x <- [1..], x `mod` 2 == 0]
+
+-- a recursive call passed as a function argument must stay lazy
+consit :: a -> [a] -> [a]
+consit x rest = x : rest
+
+countFrom :: Integer -> [Integer]
+countFrom n = consit n (countFrom (n + 1))
+
+-- foldr building a list: cons whose tail is a variable
+copyList :: [Integer] -> [Integer]
+copyList = foldr (\x acc -> x : acc) []
+
+-- guard recursion with a thunked argument (the param is used strictly)
+digitalRoot :: Integer -> Integer
+digitalRoot n
+  | n < 10    = n
+  | otherwise = digitalRoot (digitSum n)
+  where
+    digitSum 0 = 0
+    digitSum m = m `mod` 10 + digitSum (m `div` 10)
+
+-- higher-order: a lambda param may arrive as a thunk and must be forced
+makeAdder :: Integer -> Integer -> Integer
+makeAdder n = \x -> x + n
+
+applyTwice :: (a -> a) -> a -> a
+applyTwice f x = f (f x)
+
+main :: IO ()
+main = do
+  assert (take 5 evens == [2, 4, 6, 8, 10]) "infinite list comprehension streams"
+  assert (take 4 (countFrom 1) == [1, 2, 3, 4]) "recursive call as argument stays lazy"
+  assert (copyList [1, 2, 3] == [1, 2, 3]) "foldr cons over a variable tail"
+  assert (digitalRoot 493 == 7) "guard recursion with a thunked argument"
+  assert (applyTwice (makeAdder 3) 0 == 6) "higher-order lambda param is forced"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("lazy-argument program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("lazy_arguments_and_infinite_lists").exec()
+        .expect("lazy arguments and infinite lists should evaluate correctly");
+}
+
 // Regression: a `case` matching a nested pattern under a constructor whose
 // payload is a thunk (built from a non-cheap expression) must force the field
 // before destructuring it. Previously the inner pattern indexed into the raw
