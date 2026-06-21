@@ -58,6 +58,17 @@ concatMap f (x:xs) = prepend (f x) (concatMap f xs)
     where prepend [] rest = rest
           prepend (y:ys) rest = y : prepend ys rest
 
+-- Longest prefix of elements satisfying the predicate. Lazy in the spine,
+-- so it works on infinite lists (e.g. `takeWhile (< 5) [1..]`).
+takeWhile :: (a -> Bool) -> [a] -> [a]
+takeWhile _ [] = []
+takeWhile p (x:xs) = if p x then x : takeWhile p xs else []
+
+-- The remainder after takeWhile.
+dropWhile :: (a -> Bool) -> [a] -> [a]
+dropWhile _ [] = []
+dropWhile p (x:xs) = if p x then dropWhile p xs else x : xs
+
 
 
 -- Functor instances

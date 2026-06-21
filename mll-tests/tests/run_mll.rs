@@ -1087,6 +1087,29 @@ main = do
         .expect("lazy arguments and infinite lists should evaluate correctly");
 }
 
+// Prelude takeWhile / dropWhile, including the lazy case over an infinite list
+// (takeWhile must stop without forcing the whole spine).
+#[test]
+fn prelude_take_while_drop_while() {
+    let source = r#"
+main :: IO ()
+main = do
+  assert (takeWhile (\x -> x < 4) [1, 2, 3, 4, 5] == [1, 2, 3]) "takeWhile finite"
+  assert (takeWhile (\x -> x < 4) [1 ..] == [1, 2, 3]) "takeWhile infinite"
+  assert (takeWhile (\x -> x < 10) [1, 2, 3] == [1, 2, 3]) "takeWhile exhausts"
+  assert (takeWhile (\x -> x > 9) [1, 2, 3] == ([] :: [Integer])) "takeWhile none"
+  assert (dropWhile (\x -> x < 3) [1, 2, 3, 4, 5] == [3, 4, 5]) "dropWhile finite"
+  assert (dropWhile (\x -> x > 9) [1, 2, 3] == [1, 2, 3]) "dropWhile none"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("takeWhile/dropWhile program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("prelude_take_while_drop_while").exec()
+        .expect("takeWhile/dropWhile should evaluate correctly");
+}
+
 // Regression: a `case` matching a nested pattern under a constructor whose
 // payload is a thunk (built from a non-cheap expression) must force the field
 // before destructuring it. Previously the inner pattern indexed into the raw
