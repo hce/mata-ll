@@ -106,16 +106,16 @@ The auto-imported `Prelude` is a small, hand-maintained subset
 (`lib/Prelude.mll` plus a few compiler builtins), not the full GHC `Prelude`.
 The list functions it provides without any import are:
 
-    map  filter  foldl  foldr  length  reverse  head  tail
-    take  drop  takeWhile  dropWhile  zipWith  concatMap  elem
+    map  filter  foldl  foldr  length  reverse  head  tail  elem
+    take  drop  takeWhile  dropWhile  zipWith  concatMap
+    null  last  init  concat  span  zip  unzip  replicate  iterate
+    and  or  any  all  sum  product
 
-Many more list functions live in `Data.List` and must be imported explicitly
-(`import Data.List`):
+`Data.List` (explicit `import Data.List`) adds the less common helpers and
+re-exports the Prelude ones, so existing imports keep working:
 
-    null  last  init  append  concat  drop  span  break'  zip  unzip
-    any  all  and  or  find  sum  product  replicate  iterate  unfoldr
-    scanl  scanr  intersperse  intercalate  partition  nubBy  groupBy
-    sortBy  foldl'
+    append  break'  find  unfoldr  scanl  scanr  intersperse  intercalate
+    partition  nubBy  groupBy  sortBy  foldl'
 
 Other bundled modules, also explicitly imported: `Data.Map`, `Data.Maybe`,
 `Control.Monad`, `ByteString`, plus `LString`, `LMath`, `LIO`, `LOS`, `LBit`,

@@ -76,13 +76,12 @@ MATA-LL TODO
 - [x] getArgs :: IO [String]
 - [x] exit :: IO ExitValue (data ExitValue = Normal | Err Integer)
 - [x] takeWhile, dropWhile (prelude)
-- [x] Broader list functions (null, last, init, concat, sum, product, any,
-      all, zip, unzip, span, replicate, iterate, scanl, partition, ...) —
-      these already live in Data.List; import it. Not duplicated in the
-      auto-prelude (that collides with `import Data.List`).
-- [ ] Maybe move the most common Data.List helpers into the auto-prelude
-      (would require de-duplicating Data.List, since the prelude is always
-      imported)
+- [x] Common list helpers in the auto-prelude: null, last, init, concat, span,
+      zip, unzip, replicate, iterate, and, or, any, all, sum, product. Defined
+      once in Prelude; Data.List re-exports them (so `import Data.List (...)`
+      still works) and keeps the less common helpers (sortBy, nubBy, groupBy,
+      intersperse, intercalate, partition, unfoldr, scanl, scanr, find, foldl',
+      append, break').
 
 ## Codegen optimizations
 

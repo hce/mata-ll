@@ -1148,6 +1148,41 @@ main = do
         .expect("local bindings should shadow prelude functions");
 }
 
+// The common Data.List helpers now live in the auto-imported Prelude, so they
+// work with no `import Data.List`. (Data.List re-exports them, so explicit
+// imports still work too — covered by lib_data_list and the examples.)
+#[test]
+fn prelude_list_helpers_without_import() {
+    let source = r#"
+main :: IO ()
+main = do
+  assert (null ([] :: [Integer])) "null"
+  assert (last [1, 2, 3] == 3) "last"
+  assert (init [1, 2, 3] == [1, 2]) "init"
+  assert (concat [[1, 2], [3]] == [1, 2, 3]) "concat"
+  assert (replicate 3 7 == [7, 7, 7]) "replicate"
+  assert (take 5 (iterate (\x -> x * 2) 1) == [1, 2, 4, 8, 16]) "iterate"
+  assert (span (\x -> x < 3) [1, 2, 3, 4] == ([1, 2], [3, 4])) "span"
+  assert (zip [1, 2, 3] [10, 20] == [(1, 10), (2, 20)]) "zip"
+  assert (fst (unzip [(1, 10), (2, 20)]) == [1, 2]) "unzip fst"
+  assert (and [True, True]) "and"
+  assert (or [False, True]) "or"
+  assert (any (\x -> x > 3) [1, 2, 4]) "any"
+  assert (all (\x -> x > 0) [1, 2, 3]) "all"
+  assert (sum [1, 2, 3, 4] == 10) "sum"
+  assert (product [1, 2, 3, 4] == 24) "product"
+  -- lazy over an infinite list (fst forces only the takeWhile half)
+  assert (take 3 (fst (span (\x -> x < 100) [1 ..])) == [1, 2, 3]) "span lazy prefix"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("prelude list helpers should compile without import")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("prelude_list_helpers_without_import").exec()
+        .expect("prelude list helpers should evaluate correctly");
+}
+
 // Regression: show must distinguish a tuple from a cons list by the cons
 // metatable, not by shape. A 2-tuple whose second element is a list (e.g.
 // `(1, [2, 3])`) was previously rendered as a cons cell, `[1, 2, 3]`.

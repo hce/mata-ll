@@ -69,10 +69,78 @@ dropWhile :: (a -> Bool) -> [a] -> [a]
 dropWhile _ [] = []
 dropWhile p (x:xs) = if p x then dropWhile p xs else x : xs
 
--- NOTE: further list functions (null, last, init, concat, replicate, iterate,
--- splitAt, span, break, all, any, zip, unzip, lookup, sum, product, maximum,
--- minimum) live in Data.List, not here — defining them in the auto-imported
--- prelude as well collides with `import Data.List`.
+-- True for the empty list.
+null :: [a] -> Bool
+null [] = True
+null _  = False
+
+-- Last element / everything but the last. Both error on the empty list.
+last :: [a] -> a
+last []       = error "last: empty list"
+last [x]      = x
+last (_ : xs) = last xs
+
+init :: [a] -> [a]
+init []       = error "init: empty list"
+init [_]      = []
+init (x : xs) = x : init xs
+
+-- Flatten a list of lists.
+concat :: [[a]] -> [a]
+concat []         = []
+concat (xs : xss) = xs ++ concat xss
+
+-- n copies of x (empty when n <= 0).
+replicate :: Integer -> a -> [a]
+replicate n x = if n <= 0 then [] else x : replicate (n - 1) x
+
+-- The infinite list [x, f x, f (f x), ...]. Lazy in the spine.
+iterate :: (a -> a) -> a -> [a]
+iterate f x = x : iterate f (f x)
+
+-- Longest prefix satisfying p, paired with the remainder. Defined via
+-- takeWhile/dropWhile to avoid `let (..) = .. in (fst.., snd..)`, which fails
+-- the occurs-check at this polymorphic signature.
+span :: (a -> Bool) -> [a] -> ([a], [a])
+span p xs = (takeWhile p xs, dropWhile p xs)
+
+-- Pair up two lists element-wise, stopping at the shorter. Lazy in the spine.
+zip :: [a] -> [b] -> [(a, b)]
+zip [] _ = []
+zip _ [] = []
+zip (x : xs) (y : ys) = (x, y) : zip xs ys
+
+-- Inverse of zip.
+unzip :: [(a, b)] -> ([a], [b])
+unzip []         = ([], [])
+unzip (p : rest) = case unzip rest of
+    (as, bs) -> (fst p : as, snd p : bs)
+
+-- Conjunction / disjunction of a Bool list. Short-circuiting.
+and :: [Bool] -> Bool
+and []       = True
+and (x : xs) = if x then and xs else False
+
+or :: [Bool] -> Bool
+or []       = False
+or (x : xs) = if x then True else or xs
+
+-- Do any / all elements satisfy p? Short-circuiting and lazy:
+-- `any (\x -> x > 3) [1 ..]` terminates.
+any :: (a -> Bool) -> [a] -> Bool
+any _ []       = False
+any p (x : xs) = if p x then True else any p xs
+
+all :: (a -> Bool) -> [a] -> Bool
+all _ []       = True
+all p (x : xs) = if p x then all p xs else False
+
+-- Sum and product of an integer list.
+sum :: [Integer] -> Integer
+sum = foldl (\acc x -> acc + x) 0
+
+product :: [Integer] -> Integer
+product = foldl (\acc x -> acc * x) 1
 
 
 
