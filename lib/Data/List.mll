@@ -151,8 +151,8 @@ find p (x:xs) = if p x then Just x else find p xs
 sortBy :: (a -> a -> Ordering) -> [a] -> [a]
 sortBy _ [] = []
 sortBy cmp (x:xs) = let less = filter (\y -> cmp y x == LT || cmp y x == EQ) xs
-                         greater = filter (\y -> cmp y x == GT) xs
-                     in append (sortBy cmp less) (x : sortBy cmp greater)
+                        greater = filter (\y -> cmp y x == GT) xs
+                    in append (sortBy cmp less) (x : sortBy cmp greater)
 
 foldl' :: (b -> a -> b) -> b -> [a] -> b
 foldl' _ acc [] = acc

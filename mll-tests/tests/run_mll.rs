@@ -911,6 +911,30 @@ main = print (dot (scaleV 2.0 (V 5.0 7.0)))
         .expect("projecting a thunk-valued field in arithmetic should force it");
 }
 
+// Layout: a multi-line application-argument continuation indented past the
+// enclosing block (but not necessarily past the function column) is now
+// accepted, matching Haskell. Previously it required indentation past the
+// function and was rejected as "Unexpected token at top level".
+#[test]
+fn shallow_multiline_continuation() {
+    let source = r#"
+import Data.List (foldl')
+
+total :: Integer
+total = foldl' (\a b -> a + b) 0
+  [1, 2, 3, 4, 5]
+
+main :: IO ()
+main = print total
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("shallow multi-line continuation should parse");
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code.lua_code).set_name("shallow_cont").exec()
+        .expect("should run");
+}
+
 // Compiler stress tests: larger, self-checking example programs that assert
 // their own correctness at runtime (a failed roundtrip -> error -> test fail).
 #[test]

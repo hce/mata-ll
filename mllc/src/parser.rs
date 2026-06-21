@@ -15,6 +15,12 @@ pub struct Parser {
     current_indent: usize,
     /// Minimum indentation for current expression context
     expr_min_indent: usize,
+    /// Column of the current layout block's items (0 at top level; the item
+    /// column inside where/let/do/case). A cross-line application-argument
+    /// continuation is only consumed when indented strictly past this, which
+    /// is exactly the Haskell rule: deeper than the block = continuation,
+    /// at the block column = a new item.
+    block_indent: usize,
     /// User-defined operator fixity: op -> (assoc, precedence)
     fixities: HashMap<String, (Assoc, u8)>,
 }
@@ -26,6 +32,7 @@ impl Parser {
             pos: 0,
             current_indent: 0,
             expr_min_indent: 0,
+            block_indent: 0,
             fixities: HashMap::new(),
         }
     }
@@ -842,6 +849,11 @@ impl Parser {
     fn parse_clause(&mut self) -> Result<Clause, String> {
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
+        // The clause's column is the layout block for its RHS: continuation
+        // lines must be indented past it; a line at this column is the next
+        // clause/binding. Covers top-level defs and class/instance methods.
+        let saved_block = self.block_indent;
+        self.block_indent = self.current_indent;
 
         let mut patterns = Vec::new();
         while self.is_pattern_atom_start() || matches!(self.peek(), Token::UpperIdent(_)) {
@@ -889,6 +901,7 @@ impl Parser {
         // where clause
         let where_binds = self.parse_where()?;
 
+        self.block_indent = saved_block;
         Ok(Clause {
             patterns,
             guards,
@@ -908,6 +921,8 @@ impl Parser {
 
         let mut binds = Vec::new();
         let where_indent = self.current_indent;
+        let saved_block = self.block_indent;
+        self.block_indent = self.peek_loc().col.saturating_sub(1);
 
         loop {
             self.skip_newlines_and_indent();
@@ -952,6 +967,7 @@ impl Parser {
                 binds.push(LocalDef { name, patterns, body });
             }
         }
+        self.block_indent = saved_block;
 
         Ok(binds)
     }
@@ -1258,9 +1274,6 @@ impl Parser {
     }
 
     fn parse_expr_app(&mut self) -> Result<Expr, String> {
-        // Record the column of the function being applied — continuation
-        // lines must be indented past this column, not just past the line indent.
-        let app_col = self.peek_loc().col;
         let mut func = self.parse_expr_atom_dotted()?;
         let mut has_args = false;
 
@@ -1273,15 +1286,17 @@ impl Parser {
                 continue;
             }
 
-            // Cross-line continuation: if the next line is indented strictly
-            // past the function's column, treat atoms as more arguments.
-            // Only applies when we already have at least one same-line argument
-            // (bare values like `10` don't get continuation args).
+            // Cross-line continuation: a line indented strictly past the
+            // current layout block's column is a continuation (more arguments),
+            // not a new item. This is the Haskell layout rule (deeper than the
+            // block = continuation; at the block column = next clause/binding/
+            // statement). Only applies once we already have a same-line argument
+            // so bare values like `10` don't grab the following line.
             if has_args && matches!(self.peek(), Token::Newline | Token::Indent(_)) {
                 let save_pos = self.pos;
                 let save_indent = self.current_indent;
                 self.skip_newlines_and_indent();
-                if self.current_indent > app_col
+                if self.current_indent > self.block_indent
                     && self.is_expr_atom_start()
                 {
                     let arg = self.parse_expr_atom_dotted()?;
@@ -1881,6 +1896,8 @@ impl Parser {
                 self.skip_newlines_and_indent();
                 let case_indent = self.current_indent;
                 let mut branches = Vec::new();
+                let saved_block = self.block_indent;
+                self.block_indent = self.peek_loc().col.saturating_sub(1);
 
                 loop {
                     let save_pos = self.pos;
@@ -1926,6 +1943,7 @@ impl Parser {
                         });
                     }
                 }
+                self.block_indent = saved_block;
 
                 Ok(Expr::Case {
                     scrutinee: Box::new(scrutinee),
@@ -1937,6 +1955,8 @@ impl Parser {
                 self.skip_newlines_and_indent();
                 let mut binds = Vec::new();
                 let let_indent = self.current_indent;
+                let saved_block = self.block_indent;
+                self.block_indent = self.peek_loc().col.saturating_sub(1);
                 // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
                 let mut tuple_binds: Vec<(String, Pattern)> = Vec::new();
                 let mut fresh_counter = 0usize;
@@ -1977,6 +1997,7 @@ impl Parser {
                 }
 
                 self.skip_newlines_and_indent();
+                self.block_indent = saved_block;
                 self.expect(&Token::In)?;
                 self.skip_newlines_and_indent();
                 let mut body = self.parse_expr()?;
@@ -2003,6 +2024,8 @@ impl Parser {
                 self.skip_newlines_and_indent();
                 let do_indent = self.current_indent;
                 let mut stmts = Vec::new();
+                let saved_block = self.block_indent;
+                self.block_indent = self.peek_loc().col.saturating_sub(1);
 
                 loop {
                     self.skip_newlines_and_indent();
@@ -2026,6 +2049,11 @@ impl Parser {
                             }
                             return Err("Expected tuple pattern or identifier in let binding".to_string());
                         }
+                        // The binding column is the layout block for the
+                        // binding RHS(s), so a following sibling binding at the
+                        // same column is not swallowed as a continuation arg.
+                        let saved_do_block = self.block_indent;
+                        self.block_indent = self.peek_loc().col.saturating_sub(1);
                         let name = self.expect_ident()?;
                         // Collect optional patterns: let f x y = expr => let f = \x y -> expr
                         let mut params = Vec::new();
@@ -2095,6 +2123,7 @@ impl Parser {
                             self.current_indent = save_indent;
                             break;
                         }
+                        self.block_indent = saved_do_block;
                         continue;
                     }
 
@@ -2144,6 +2173,7 @@ impl Parser {
                     stmts.push(DoStmt::Expr(expr));
                 }
 
+                self.block_indent = saved_block;
                 Ok(Expr::Do(stmts))
             }
             Token::Backslash => {
