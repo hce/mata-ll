@@ -164,7 +164,7 @@ MATA-LL TODO
 ## Example programs (compiler stress tests)
 
 - [ ] Scheme interpreter — recursive sum type for values (VNum | VStr | VFunc Env ...), closures-as-values, environment chaining, deep pattern matching; stresses monomorphizer with Value appearing at many types
-- [ ] Red-black tree — balancing cases are deeply nested constructor patterns (Branch R (Branch R a x b) y c); stresses exhaustiveness checking and overlapping pattern compilation
+- [x] Red-black tree — examples/redblack.mll; Okasaki balance with doubly-nested constructor patterns, RB-invariant + in-order-sorted oracles (test: example_redblack_invariants). Surfaced and fixed a parser bug: nullary constructors were rejected as pattern arguments (`Box R n`).
 - [ ] Type inference engine — unification, substitution maps, occurs check, HashMap with custom key types; exercises typeclass dictionary passing through Eq/Ord on user-defined types
 - [ ] Ray tracer — heavy Number arithmetic, record-heavy vector/color types with field access and update, deeply nested let bindings; tests cheapness analysis on floating-point expressions
 - [x] Huffman coding — examples/huffman.mll; recursive HTree ADT, sortBy-based tree build, code-table DFS, LBit bit-packing, ByteString roundtrip; self-checking via assert (test: example_huffman_roundtrip)

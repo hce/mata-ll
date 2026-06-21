@@ -858,11 +858,43 @@ fn examples_compile() {
     }
 }
 
+// Regression: a nullary constructor used as an argument of another pattern
+// (e.g. `Box R n`, or the nested `T R (T R a x b) y c` in a red-black tree's
+// balance) must parse. Previously the pattern-atom predicate omitted
+// UpperIdent, so such arguments were rejected at parse time.
+#[test]
+fn nullary_constructor_as_pattern_argument() {
+    let source = r#"
+data Color = R | B
+data Box = Box Color Integer
+
+unwrap :: Box -> Integer
+unwrap (Box R n) = n
+unwrap (Box B n) = 0 - n
+
+main :: IO ()
+main = do
+  print (unwrap (Box R 5))
+  print (unwrap (Box B 5))
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("nullary constructor as pattern arg should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("nullary_con_arg").exec()
+        .expect("should run without error");
+}
+
 // Compiler stress tests: larger, self-checking example programs that assert
 // their own correctness at runtime (a failed roundtrip -> error -> test fail).
 #[test]
 fn example_huffman_roundtrip() {
     run_mll_file_with_lib(Path::new("../examples/huffman.mll"));
+}
+
+#[test]
+fn example_redblack_invariants() {
+    run_mll_file_with_lib(Path::new("../examples/redblack.mll"));
 }
 
 // ============================================================

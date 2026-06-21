@@ -2275,6 +2275,11 @@ impl Parser {
                 | Token::StrLit(_)
                 | Token::LeftParen
                 | Token::LeftBracket
+                // A bare constructor (e.g. `R`) is a nullary-constructor atom
+                // when it appears as an argument of another pattern, as in
+                // `T R (T R a x b) y c`. Constructors with arguments must be
+                // parenthesized in argument position.
+                | Token::UpperIdent(_)
         ) {
             return true;
         }
@@ -2369,12 +2374,16 @@ impl Parser {
                 }
                 Ok(pat)
             }
+            // A constructor in atom position is nullary; True/False are literal
+            // patterns. Constructors with arguments must be parenthesized to
+            // appear in argument position, e.g. `(T R a x b)`.
             Token::UpperIdent(name) => {
                 self.advance();
-                Ok(Pattern::Constructor {
-                    name,
-                    args: vec![],
-                })
+                match name.as_str() {
+                    "True" => Ok(Pattern::LitPat(Literal::Bool(true))),
+                    "False" => Ok(Pattern::LitPat(Literal::Bool(false))),
+                    _ => Ok(Pattern::Constructor { name, args: vec![] }),
+                }
             }
             _ => {
                 let loc = self.peek_loc();
