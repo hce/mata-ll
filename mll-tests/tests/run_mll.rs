@@ -885,6 +885,32 @@ main = do
         .expect("should run without error");
 }
 
+// Regression: a record field constructed from a non-cheap expression is stored
+// as a thunk; projecting it in a strict (arithmetic) context must force it.
+// Previously the accessor inlined to `v[idx]` without __force, so the thunk
+// (a Lua table) reached arithmetic -> "arithmetic on a table value".
+#[test]
+fn record_field_projection_is_forced() {
+    let source = r#"
+data V = V { va :: Number, vb :: Number }
+
+scaleV :: Number -> V -> V
+scaleV s v = V (s * va v) (s * vb v)
+
+dot :: V -> Number
+dot v = va v * vb v
+
+main :: IO ()
+main = print (dot (scaleV 2.0 (V 5.0 7.0)))
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("record_field_force").exec()
+        .expect("projecting a thunk-valued field in arithmetic should force it");
+}
+
 // Compiler stress tests: larger, self-checking example programs that assert
 // their own correctness at runtime (a failed roundtrip -> error -> test fail).
 #[test]
@@ -900,6 +926,11 @@ fn example_redblack_invariants() {
 #[test]
 fn example_scheme_eval() {
     run_mll_file_with_lib(Path::new("../examples/scheme.mll"));
+}
+
+#[test]
+fn example_raytracer_renders() {
+    run_mll_file_with_lib(Path::new("../examples/raytracer.mll"));
 }
 
 // ============================================================

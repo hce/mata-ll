@@ -1755,11 +1755,17 @@ impl CodeGen {
             }
             TExprKind::Lit(lit) => self.gen_literal(lit),
             TExprKind::App(func, arg) => {
-                // Record field accessor: inline as direct table indexing
+                // Record field accessor: inline as direct table indexing.
+                // The field may hold a thunk (lazy construction), so force the
+                // projected value. The container is forced by gen_expr(arg) when
+                // it is a non-concrete variable; __force is idempotent on values.
+                // Laziness is preserved because non-strict argument positions
+                // thunk-wrap the whole projection (see gen_arg).
                 if let TExprKind::Var(name) = &func.kind
                     && let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
+                        self.emit("__force(");
                         self.gen_expr(arg);
-                        self.emit(&format!("[{}]", idx));
+                        self.emit(&format!("[{}])", idx));
                         return;
                     }
 
