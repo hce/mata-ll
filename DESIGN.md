@@ -231,12 +231,11 @@ Record field accessors are generated as simple index functions:
 
     local function perName(_r) return _r[1] end
 
-#### Record update (not yet implemented)
+#### Record update
 
-Record update syntax (`foo { x = 3 }`) requires producing a new table
-that shares all fields with the original except the updated ones. This
-should be a **shallow copy**: iterate the table slots and patch the
-changed fields.
+Record update syntax (`foo { x = 3 }`) produces a new table that shares
+all fields with the original except the updated ones. This is a
+**shallow copy**: iterate the table slots and patch the changed fields.
 
 A shallow copy is correct because:
 

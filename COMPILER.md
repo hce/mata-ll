@@ -247,4 +247,4 @@ list for fixing them solo:
   reading the emitted Lua.
 - **Import not found / wrong merge** → `modules.rs`.
 - Reproduce any of these against the test suite in `mll-tests/tests/run_mll.rs`
-  (246 tests; each compiles and runs an `.mll`).
+  (261 tests; each compiles and runs an `.mll`).
