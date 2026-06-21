@@ -297,6 +297,15 @@ impl CodeGen {
                 all_fn_names.push(n);
             }
         }
+        // Record field accessors also get a real first-class function (in
+        // addition to the inline fast-path), so they work as values
+        // (`map field xs`) and when over-applied (`fnField r x`).
+        for (name, _idx) in &module.record_accessors {
+            let n = sanitize_name(name);
+            if !self.fn_table.contains_key(&n) && !all_fn_names.contains(&n) {
+                all_fn_names.push(n);
+            }
+        }
 
         if !all_fn_names.is_empty() {
             self.emit_line("local __mll_fn = {}");
@@ -320,6 +329,20 @@ impl CodeGen {
                 self.emit_line(&format!("__mll_fn[{}] = function(_v) return _v end", slot));
             } else {
                 self.emit_line(&format!("local function {}(_v) return _v end", sanitize_name(name)));
+            }
+        }
+
+        // Emit record field accessors as real functions (the inline fast-path
+        // at the application site handles the common `field r` case; this makes
+        // the accessor first-class for higher-order and over-applied uses).
+        // Extra args are forwarded so an over-applied function-typed field
+        // (`fnField r x`) applies the projected function to them.
+        for (name, idx) in &module.record_accessors {
+            let n = sanitize_name(name);
+            if let Some(&slot) = self.fn_table.get(&n) {
+                self.emit_line(&format!(
+                    "__mll_fn[{}] = function(_v, ...) local _f = __force(__force(_v)[{}]); if select(\"#\", ...) == 0 then return _f else return _f(...) end end",
+                    slot, idx));
             }
         }
         if !module.newtypes.is_empty() {

@@ -3,6 +3,8 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] Forcing-gap audit: a thunk-valued field reached by projection/destructuring must be forced before structural use. Fixed two cases (record accessor result; nested case-pattern fields) and verified the rest force at the consumer (tuple-get via show, tuple/struct Eq, cons elements, newtype-in-arithmetic, if-conditions, ==). Audit also found that record accessors were not first-class.
+- [x] Record field accessors are first-class — emitted as real functions (with varargs forwarding) in addition to the inline `field r` fast-path, so `map field xs` and over-applied function-typed fields (`fnField r x`) work. Test: record_accessor_first_class.
 - [x] Record field accessors (person.name)
 - [x] newtype codegen (zero-cost wrapping)
 - [x] Exhaustiveness checking for pattern matches

@@ -963,6 +963,40 @@ main = case mkPair 3 of
         .expect("nested pattern under a thunked constructor payload should work");
 }
 
+// Regression: record field accessors are first-class. Previously they were
+// only inlined at a direct `field r` application, so using one as a value
+// (`map field xs`) or over-applying a function-typed field (`fnField r x`)
+// referenced a non-existent global and failed.
+#[test]
+fn record_accessor_first_class() {
+    let source = r#"
+data R = R { rfn :: Integer -> Integer, rval :: Integer }
+
+applyAcc :: (R -> Integer) -> R -> Integer
+applyAcc f r = f r
+
+main :: IO ()
+main = do
+  let r = R (\y -> y + 1) 42
+  -- accessor used as a higher-order value
+  assert (applyAcc rval r == 42) "accessor passed as a value"
+  -- accessor mapped over a list
+  assert (sumList (map rval [R (\y -> y) 1, R (\y -> y) 2, R (\y -> y) 3]) == 6) "accessor mapped"
+  -- over-applied function-typed field accessor: (rfn r) 10
+  assert (rfn r 10 == 11) "over-applied function field accessor"
+
+sumList :: [Integer] -> Integer
+sumList [] = 0
+sumList (x:xs) = x + sumList xs
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("first-class accessors should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("accessor_first_class").exec()
+        .expect("first-class accessor uses should work");
+}
+
 // Compiler stress tests: larger, self-checking example programs that assert
 // their own correctness at runtime (a failed roundtrip -> error -> test fail).
 #[test]
