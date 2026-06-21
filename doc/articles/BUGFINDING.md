@@ -11,6 +11,11 @@ author, a few idioms repeated at scale, all sampling the same corner of the
 language. A short program written from a different angle reaches somewhere the
 suite never did. Complexity is not coverage.
 
+The last entry is a different blind spot again: a *performance* regression that
+passed every test. There the suite was silent not because it missed a corner of
+the language, but because it only ever checked what the program computes, never
+how fast.
+
 ## Recursive lazy value in a `where` / `let` binding
 
 This program printed `(1, 1, 144, 233)` instead of the expected
@@ -70,3 +75,34 @@ eager.
 
 Why the suite missed it: none of the generated tests exercised laziness over an
 infinite structure. They all worked on finite, fully forced data.
+
+## A regression that passed every test (performance)
+
+The two bugs above are correctness bugs found by short programs. This one is
+neither — it is a *performance* regression, and the test suite sailed straight
+through it. It belongs here because it exposes the same lesson from another
+side: a green suite proves less than it looks.
+
+Making the ST monad semantically correct — actions became closures that
+`__mll_run` invokes, rather than eager in-place mutations — wrapped every ST
+array operation in a per-action closure plus a dispatch. On the tracker's hot
+loop (four `STArray` writes per note, 22 channels, every audio frame) that was
+a ~2.3× slowdown: roughly 85% of a regression that left the decoder running
+well over twice as slowly as a previously documented figure.
+
+Every test still passed, and the decoded audio was *byte-for-byte identical*
+before and after. That is precisely why nothing caught it: the correctness the
+change bought — actions that can be discarded, reordered, or duplicated without
+running — is never used by this program. The tracker runs each action exactly
+once, in order, so it paid a per-frame allocation for a guarantee it does not
+need. The regression was found only by benchmarking against a remembered
+baseline, not by any assertion.
+
+The fix (see `examples/tracker/PERF-REGRESSION.md`) fuses the ST intrinsics at
+their run-once call sites in codegen: where an action is built and immediately
+run, the closure is skipped and the effect emitted directly. Output stays
+byte-identical and the hot loop recovers most of the lost time.
+
+Why the suite missed it: tests assert *what* a program computes, not *how fast*.
+A 2× slowdown is invisible to a green suite. Catching it needs a tracked
+performance baseline, not more correctness tests.
