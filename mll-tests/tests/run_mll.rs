@@ -897,6 +897,11 @@ fn example_redblack_invariants() {
     run_mll_file_with_lib(Path::new("../examples/redblack.mll"));
 }
 
+#[test]
+fn example_scheme_eval() {
+    run_mll_file_with_lib(Path::new("../examples/scheme.mll"));
+}
+
 // ============================================================
 // FFI tests: compile MLL modules with exports, then call
 // exported functions from Lua and verify return values.

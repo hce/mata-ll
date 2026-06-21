@@ -101,6 +101,7 @@ MATA-LL TODO
 - [x] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
 - [x] Reject bare type signatures with no definition (was silently compiling to nil at runtime; now a compile error, FFI sigs still allowed body-less)
 - [ ] Strict ST monad variant (LuaStrictArray or similar) for performance-critical code — to be discussed; current closure-based ST is only ~4% slower than direct mutations
+- [ ] Layout: shallow multi-line expression continuations are mis-parsed. A continuation line indented past column 1 but not past the column where the RHS expression begins is treated as a new top-level declaration (e.g. `f = foldr g 0` then `  [1,2,3]` at col 3 → "Unexpected token at top level"). Continuations indented past the RHS start parse fine. Found while writing examples/scheme.mll. Workaround: indent continuations deeper or keep on one line.
 - [x] `$` operator emitted literally in Lua when inlined into ST action codegen path (should always desugar to function application)
 ## Recently completed
 
@@ -163,7 +164,7 @@ MATA-LL TODO
 
 ## Example programs (compiler stress tests)
 
-- [ ] Scheme interpreter — recursive sum type for values (VNum | VStr | VFunc Env ...), closures-as-values, environment chaining, deep pattern matching; stresses monomorphizer with Value appearing at many types
+- [x] Scheme interpreter — examples/scheme.mll; recursive Value/Expr/Env ADTs, closures-as-values, environment chaining, eval/apply, recursion via self-application; asserts results against known answers (test: example_scheme_eval). Monomorphizer handled it cleanly with no bugs.
 - [x] Red-black tree — examples/redblack.mll; Okasaki balance with doubly-nested constructor patterns, RB-invariant + in-order-sorted oracles (test: example_redblack_invariants). Surfaced and fixed a parser bug: nullary constructors were rejected as pattern arguments (`Box R n`).
 - [ ] Type inference engine — unification, substitution maps, occurs check, HashMap with custom key types; exercises typeclass dictionary passing through Eq/Ord on user-defined types
 - [ ] Ray tracer — heavy Number arithmetic, record-heavy vector/color types with field access and update, deeply nested let bindings; tests cheapness analysis on floating-point expressions
