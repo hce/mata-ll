@@ -99,7 +99,7 @@ MATA-LL TODO
 - [x] Default method implementations in class declarations (`x /= y = not (x == y)`)
 - [x] Where-clause type unification: pre-registered fresh type variables now unified with inferred types
 - [x] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
-- [ ] Reject bare type signatures with no definition (currently silently compiles to nil at runtime)
+- [x] Reject bare type signatures with no definition (was silently compiling to nil at runtime; now a compile error, FFI sigs still allowed body-less)
 - [ ] Strict ST monad variant (LuaStrictArray or similar) for performance-critical code — to be discussed; current closure-based ST is only ~4% slower than direct mutations
 - [x] `$` operator emitted literally in Lua when inlined into ST action codegen path (should always desugar to function application)
 ## Recently completed

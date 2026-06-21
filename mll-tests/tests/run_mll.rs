@@ -340,6 +340,42 @@ main = putStrLn (show (Secret 42))
 }
 
 #[test]
+fn bare_signature_without_definition_rejected() {
+    // A type signature with no accompanying definition (and not an FFI binding)
+    // used to silently compile to a nil value. It must now be rejected.
+    let source = r#"
+foo :: Integer
+
+main :: IO ()
+main = print foo
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("no accompanying definition"),
+                "Expected 'no accompanying definition' error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for bare signature without definition"),
+    }
+}
+
+#[test]
+fn ffi_signature_without_body_accepted() {
+    // FFI signatures are legitimately body-less; the bare-signature check must
+    // not reject them.
+    let source = r#"
+sqrtNum :: Number -> LuaPure "math.sqrt" Number
+
+main :: IO ()
+main = print (sqrtNum 4.0)
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Ok(_) => {}
+        Err(e) => panic!("FFI signature without body should compile, got error: {}", e),
+    }
+}
+
+#[test]
 fn orphan_instance_rejected() {
     // Show and Integer are both defined in the prelude, not locally.
     // Defining an instance for them here is an orphan instance.

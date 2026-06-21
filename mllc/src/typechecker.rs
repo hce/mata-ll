@@ -9,6 +9,12 @@ pub struct TypeEnv {
     bindings: HashMap<String, Scheme>,
 }
 
+impl Default for TypeEnv {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TypeEnv {
     pub fn new() -> Self {
         TypeEnv { bindings: HashMap::new() }
@@ -115,6 +121,12 @@ pub struct Checker {
     fn_constraints: HashMap<String, Vec<TyConstraint>>,
 }
 
+impl Default for Checker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Checker {
     pub fn new() -> Self {
         let mut checker = Checker {
@@ -176,15 +188,14 @@ impl Checker {
         match ast_ty {
             Type::Con(name) => {
                 // Check for type alias expansion
-                if let Some((params, alias_ty)) = self.type_aliases.get(name).cloned() {
-                    if params.is_empty() {
+                if let Some((params, alias_ty)) = self.type_aliases.get(name).cloned()
+                    && params.is_empty() {
                         if name == "Int" {
                             eprintln!("Warning: Int is treated as Integer (Lua has no fixed-width integers)");
                         }
                         return self.ast_type_to_ty(&alias_ty);
                     }
                     // Parameterized alias used without args — treat as constructor
-                }
                 Ty::Con(name.clone())
             }
             Type::Var(name) => Ty::Var(TyVar { name: name.clone(), id: u32::MAX }),
@@ -1205,13 +1216,13 @@ impl Checker {
                 if ka != Kind::Type {
                     self.push_error_ctx(
                         TypeErrorKind::Other(format!("Kind error: argument of '->' has kind {}, expected Type", ka)),
-                        format!("type expression"),
+                        "type expression".to_string(),
                     );
                 }
                 if kb != Kind::Type {
                     self.push_error_ctx(
                         TypeErrorKind::Other(format!("Kind error: result of '->' has kind {}, expected Type", kb)),
-                        format!("type expression"),
+                        "type expression".to_string(),
                     );
                 }
                 Kind::Type
@@ -1224,17 +1235,16 @@ impl Checker {
                     Kind::Type => {
                         // Applying a Type-kinded thing — this is a kind error
                         // but only report if it's a known constructor
-                        if let Type::Con(name) = f.as_ref() {
-                            if self.kinds.contains_key(name) {
+                        if let Type::Con(name) = f.as_ref()
+                            && self.kinds.contains_key(name) {
                                 self.push_error_ctx(
                                     TypeErrorKind::Other(format!(
                                         "Kind error: '{}' has kind Type and cannot be applied to an argument",
                                         name
                                     )),
-                                    format!("type expression"),
+                                    "type expression".to_string(),
                                 );
                             }
-                        }
                         Kind::Type
                     }
                     _ => Kind::Type,
@@ -1529,15 +1539,14 @@ impl Checker {
         let mut has_main = false;
 
         for (name, (lua_name, ffi_kind)) in &ffi_info {
-            if !defined_fns.contains(name) {
-                if let Some(ty) = sigs.get(name) {
+            if !defined_fns.contains(name)
+                && let Some(ty) = sigs.get(name) {
                     let ffi_fn = self.generate_ffi_function(name, lua_name, *ffi_kind, ty);
                     functions.push(ffi_fn);
                     // Register in env
                     let scheme = self.generalize(&self.env.clone(), ty);
                     self.env.insert(name.clone(), scheme);
                 }
-            }
         }
 
         // Pre-register all function signatures so mutually recursive
@@ -1563,6 +1572,24 @@ impl Checker {
                     _ => {}
                 }
             }
+        }
+
+        // Reject type signatures that have no accompanying definition and are
+        // not FFI bindings. Without this, `foo :: Integer` with no body silently
+        // compiles to a nil value that errors only when forced at runtime — a
+        // soundness hole (the type promises a value the program never provides).
+        // Body-less signatures are legitimate only for FFI declarations
+        // (LuaPure/LuaIO/LuaIterator/LuaTry), which `ffi_info` tracks.
+        let mut undefined_sigs: Vec<&String> = sigs.keys()
+            .filter(|name| !defined_fns.contains(*name) && !ffi_info.contains_key(*name))
+            .collect();
+        undefined_sigs.sort();
+        for name in undefined_sigs {
+            self.push_error_ctx(
+                TypeErrorKind::Other(format!(
+                    "Type signature for '{}' has no accompanying definition", name)),
+                format!("signature '{}'", name),
+            );
         }
 
         // Pass 6: collect exports and check function definitions
@@ -1623,7 +1650,7 @@ impl Checker {
             // Register class method in env as polymorphic
             self.env.insert(method.name.clone(), Scheme {
                 vars: vec![tv.clone()],
-                ty: ty,
+                ty,
             });
 
             // Store default implementation if present
@@ -1668,7 +1695,7 @@ impl Checker {
         if self.orphan_check_enabled {
             let type_head = Self::type_head_name(target_type);
             let class_is_local = self.local_classes.contains(class_name);
-            let type_is_local = type_head.as_ref().map_or(false, |t| self.local_types.contains(t));
+            let type_is_local = type_head.as_ref().is_some_and(|t| self.local_types.contains(t));
             if !class_is_local && !type_is_local {
                 self.push_error_ctx(
                     TypeErrorKind::Other(format!(
@@ -2705,11 +2732,10 @@ impl Checker {
         };
         if let Some(tc) = tc_name {
             let key = ("Functor".to_string(), tc);
-            if let Some(inst) = self.instances.get(&key) {
-                if let Some(name) = inst.method_fns.get("fmap") {
+            if let Some(inst) = self.instances.get(&key)
+                && let Some(name) = inst.method_fns.get("fmap") {
                     return name.clone();
                 }
-            }
             // Self-recursive: instance not yet registered, use self_fmap
             return self_fmap.to_string();
         }
@@ -2996,7 +3022,7 @@ impl Checker {
         })
     }
 
-    fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, ctx: &str) -> Result<(TClause, Subst), TypeErrorKind> {
+    fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, _ctx: &str) -> Result<(TClause, Subst), TypeErrorKind> {
         let mut local_env = self.env.clone();
         let mut remaining_ty = fun_ty.clone();
         let mut subst = Subst::empty();
@@ -3063,11 +3089,10 @@ impl Checker {
                 });
                 subst = subst.compose(&s);
                 // Unify with the pre-registered fresh type
-                if let Some(scheme) = local_env.lookup(&ld.name) {
-                    if let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
+                if let Some(scheme) = local_env.lookup(&ld.name)
+                    && let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
                         subst = subst.compose(&us);
                     }
-                }
                 twhere.push(TLocalDef {
                     name: ld.name.clone(),
                     patterns: vec![],
@@ -3096,11 +3121,10 @@ impl Checker {
                 for pty in param_tys.iter().rev() {
                     inferred_fn_ty = Ty::arrow(pty.apply_subst(&where_subst), inferred_fn_ty);
                 }
-                if let Some(scheme) = local_env.lookup(&ld.name) {
-                    if let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
+                if let Some(scheme) = local_env.lookup(&ld.name)
+                    && let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
                         subst = subst.compose(&us);
                     }
-                }
                 twhere.push(TLocalDef {
                     name: ld.name.clone(),
                     patterns: tpatterns.into_iter().map(|p| p.apply_subst(&where_subst)).collect(),
@@ -3299,8 +3323,8 @@ impl Checker {
                 );
                 let (te, ty, subst) = self.infer_expr(&desugared, env)?;
                 // Reconstruct as InfixApp in the TIR for codegen
-                if let TExprKind::App(f, rhs_t) = te.kind {
-                    if let TExprKind::App(_, lhs_t) = f.kind {
+                if let TExprKind::App(f, rhs_t) = te.kind
+                    && let TExprKind::App(_, lhs_t) = f.kind {
                         return Ok((
                             TExpr::new(TExprKind::InfixApp {
                                 op: op.clone(), lhs: lhs_t, rhs: rhs_t,
@@ -3308,7 +3332,6 @@ impl Checker {
                             ty, subst,
                         ));
                     }
-                }
                 // Fallback: just return the desugared form
                 let (te2, ty2, subst2) = self.infer_expr(&desugared, env)?;
                 Ok((te2, ty2, subst2))
@@ -3609,7 +3632,6 @@ impl Checker {
             lhs_te: TExpr,
             param: String,
             param_ty: Ty,
-            result_ty: Ty,
         }
         enum TypedStmt {
             Bind(TypedBind),
@@ -3628,7 +3650,7 @@ impl Checker {
                         Expr::OpFunc(op.to_string())
                     };
                     // Infer op type
-                    let (top, op_ty, s_op) = self.infer_expr(&op_expr, &local_env)?;
+                    let (_top, op_ty, s_op) = self.infer_expr(&op_expr, &local_env)?;
                     subst = subst.compose(&s_op);
                     local_env = local_env.apply_subst(&s_op);
 
@@ -3660,7 +3682,6 @@ impl Checker {
                         lhs_te: tlhs,
                         param: param.to_string(),
                         param_ty: bound_ty,
-                        result_ty: result_ty.apply_subst(&s_unify),
                     }));
                 }
                 BindStmt::Let { binds } => {
