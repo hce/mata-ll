@@ -515,7 +515,7 @@ impl Monomorphizer {
                 // polymorphic but we have specialization(s) for this function
                 // name, use the most recent one (the recursive/sibling call
                 // shares the same concrete type as the enclosing specialization)
-                if self.poly_fns.contains_key(name) && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty) {
+                if self.poly_fns.contains_key(name) && !self.locals.contains(name) && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty) {
                     let specs: Vec<_> = self.specializations.iter()
                         .filter(|(k, _)| k.name == *name)
                         .map(|(_, v)| v.clone())
@@ -524,7 +524,7 @@ impl Monomorphizer {
                         return TExpr { kind: TExprKind::Var(specs.last().unwrap().clone()), ty };
                     }
                 }
-                if self.poly_fns.contains_key(name) && !self.dict_passing_fns.contains(name) && !self.is_polymorphic(&ty) {
+                if self.poly_fns.contains_key(name) && !self.locals.contains(name) && !self.dict_passing_fns.contains(name) && !self.is_polymorphic(&ty) {
                     let key = SpecKey { name: name.clone(), ty: format!("{}", ty) };
                     let mangled = if let Some(existing) = self.specializations.get(&key) {
                         existing.clone()

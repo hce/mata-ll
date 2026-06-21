@@ -1110,6 +1110,65 @@ main = do
         .expect("takeWhile/dropWhile should evaluate correctly");
 }
 
+// Regression: a locally-bound name (function parameter, case-pattern var, or
+// let-bound var) must shadow a same-named top-level/prelude function. The
+// monomorphizer's specialization paths and the codegen Let/Case arms used to
+// ignore locals, so e.g. `f elem = elem + 1` resolved `elem` to the prelude
+// function instead of the parameter ("arithmetic on a function value").
+#[test]
+fn local_binding_shadows_prelude_function() {
+    let source = r#"
+-- parameter named like a prelude function (multi-clause, not inlined)
+fParam :: Integer -> Integer
+fParam 0 = 0
+fParam elem = elem + 1
+
+-- case-pattern variable named like a prelude function
+fCase :: Maybe Integer -> Integer
+fCase m = case m of
+  Just reverse -> reverse + 1
+  Nothing -> 0
+
+-- let-bound variable named like a prelude function
+fLet :: Integer
+fLet = let length = 41 in length + 1
+
+main :: IO ()
+main = do
+  assert (fParam 10 == 11) "param shadows prelude fn"
+  assert (fCase (Just 20) == 21) "case var shadows prelude fn"
+  assert (fLet == 42) "let var shadows prelude fn"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("shadowing program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("local_binding_shadows_prelude_function").exec()
+        .expect("local bindings should shadow prelude functions");
+}
+
+// Regression: show must distinguish a tuple from a cons list by the cons
+// metatable, not by shape. A 2-tuple whose second element is a list (e.g.
+// `(1, [2, 3])`) was previously rendered as a cons cell, `[1, 2, 3]`.
+#[test]
+fn show_tuple_with_list_element() {
+    let source = r#"
+main :: IO ()
+main = do
+  assert (show (1, [2, 3]) == "(1, [2, 3])") "tuple with list as second element"
+  assert (show ([1, 2], [3, 4]) == "([1, 2], [3, 4])") "tuple of two lists"
+  assert (show ([1, 2], 3) == "([1, 2], 3)") "tuple with list as first element"
+  assert (show (1, 2) == "(1, 2)") "plain tuple"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("show_tuple_with_list_element").exec()
+        .expect("show should distinguish tuples from lists");
+}
+
 // Regression: a `case` matching a nested pattern under a constructor whose
 // payload is a thunk (built from a non-cheap expression) must force the field
 // before destructuring it. Previously the inner pattern indexed into the raw

@@ -102,21 +102,24 @@ typeclass dictionaries at runtime like GHC. This means:
 
 ## The Prelude is a curated subset
 
-There is no implicit access to the full GHC `Prelude`, and no `Data.List`,
-`Data.Char`, `Data.Maybe`, etc. What you get is a small, hand-maintained
-prelude (`lib/Prelude.mll` plus a few compiler builtins), auto-imported into
-every module.
-
-List functions that *are* available:
+The auto-imported `Prelude` is a small, hand-maintained subset
+(`lib/Prelude.mll` plus a few compiler builtins), not the full GHC `Prelude`.
+The list functions it provides without any import are:
 
     map  filter  foldl  foldr  length  reverse  head  tail
     take  drop  takeWhile  dropWhile  zipWith  concatMap  elem
 
-Common Haskell list functions that are *not* (yet) provided — define them
-yourself or add them to the prelude:
+Many more list functions live in `Data.List` and must be imported explicitly
+(`import Data.List`):
 
-    null  sum  product  maximum  minimum  all  any  zip  unzip
-    concat  span  break  splitAt  lookup  replicate  iterate  last  init
+    null  last  init  append  concat  drop  span  break'  zip  unzip
+    any  all  and  or  find  sum  product  replicate  iterate  unfoldr
+    scanl  scanr  intersperse  intercalate  partition  nubBy  groupBy
+    sortBy  foldl'
 
-All of the lazy list functions stream properly over infinite lists, so e.g.
+Other bundled modules, also explicitly imported: `Data.Map`, `Data.Maybe`,
+`Control.Monad`, `ByteString`, plus `LString`, `LMath`, `LIO`, `LOS`, `LBit`,
+`JSON`, `Regex`. There is no `Data.Char` (there is no `Char` type — see above).
+
+The lazy list functions stream properly over infinite lists, so e.g.
 `takeWhile (< 100) [1 ..]` and `take 10 (filter even [1 ..])` terminate.

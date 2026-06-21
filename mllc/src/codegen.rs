@@ -2358,25 +2358,33 @@ impl CodeGen {
                     let mut conditions = Vec::new();
                     let mut bindings = Vec::new();
                     self.collect_pattern_conditions("_s", &branch.pattern, &mut conditions, &mut bindings);
+                    // Register pattern-bound names as locals (scoped to this
+                    // branch) so references resolve to them rather than a
+                    // same-named top-level/prelude function.
+                    let saved_locals = self.local_vars.clone();
                     if conditions.is_empty() {
                         if i > 0 { self.emit_indent(); self.emit("else\n"); self.indent += 1; }
-                        for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); }
+                        for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); self.local_vars.insert(var.clone()); }
                         self.emit_indent(); self.emit("return "); self.gen_expr(&branch.body); self.emit("\n");
                         if i > 0 { self.indent -= 1; self.emit_line("end"); }
+                        self.local_vars = saved_locals;
                         break;
                     }
                     let kw = if i == 0 { "if" } else { "elseif" };
                     self.emit_indent(); self.emit(&format!("{} {} then\n", kw, conditions.join(" and ")));
                     self.indent += 1;
-                    for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); }
+                    for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); self.local_vars.insert(var.clone()); }
                     self.emit_indent(); self.emit("return "); self.gen_expr(&branch.body); self.emit("\n");
                     self.indent -= 1;
                     if i == branches.len() - 1 { self.emit_line("end"); }
+                    self.local_vars = saved_locals;
                 }
                 self.indent -= 1; self.emit_indent(); self.emit("end)()");
             }
             TExprKind::Let { binds, body } => {
                 self.emit("(function()\n"); self.indent += 1;
+                let saved_locals = self.local_vars.clone();
+                let saved_concrete = self.concrete_vars.clone();
                 // Forward-declare all names before assigning, so let bindings
                 // can be self- and mutually recursive. Lua locals are not in
                 // scope within their own initializer, so `local x = ...x...`
@@ -2392,6 +2400,10 @@ impl CodeGen {
                         self.emit_indent();
                         self.emit(&format!("local {}\n", names.join(", ")));
                     }
+                    // Register the names as locals so references in the bodies
+                    // resolve to these bindings, not a same-named top-level or
+                    // prelude function (e.g. a let-bound `sum` or `last`).
+                    for n in &names { self.local_vars.insert(n.clone()); }
                 }
                 for bind in binds {
                     self.emit_indent();
@@ -2407,6 +2419,8 @@ impl CodeGen {
                 }
                 self.emit_indent(); self.emit("return "); self.gen_expr(body); self.emit("\n");
                 self.indent -= 1; self.emit_indent(); self.emit("end)()");
+                self.local_vars = saved_locals;
+                self.concrete_vars = saved_concrete;
             }
             TExprKind::Lambda { params, body } => {
                 let ps: Vec<String> = params.iter().map(|(s, _)| sanitize_name(s)).collect();
@@ -3036,16 +3050,18 @@ local function show(x)
         if x then return "True" else return "False" end
     elseif type(x) == "nil" then return "Nothing"
     elseif type(x) == "table" then
-        if x[2] ~= nil or (x[1] ~= nil and type(x[2]) == "nil") then
+        -- A non-empty list is exactly a cons cell, identified by __cons_mt.
+        -- Tuples and constructor tables are plain tables; distinguishing by
+        -- shape instead (does x[2] look list-like?) misrenders a tuple whose
+        -- second element happens to be a list, e.g. show (1, [2, 3]).
+        if getmetatable(x) == __cons_mt then
             local parts = {}
             local cur = x
-            local is_list = true
             while cur ~= nil do
-                if type(cur) ~= "table" then is_list = false; break end
                 parts[#parts + 1] = show(__force(cur[1]))
                 cur = __mll_tail(cur)
             end
-            if is_list then return "[" .. table.concat(parts, ", ") .. "]" end
+            return "[" .. table.concat(parts, ", ") .. "]"
         end
         local parts = {}
         for i, v in ipairs(x) do parts[i] = show(v) end

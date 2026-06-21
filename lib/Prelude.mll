@@ -69,6 +69,11 @@ dropWhile :: (a -> Bool) -> [a] -> [a]
 dropWhile _ [] = []
 dropWhile p (x:xs) = if p x then dropWhile p xs else x : xs
 
+-- NOTE: further list functions (null, last, init, concat, replicate, iterate,
+-- splitAt, span, break, all, any, zip, unzip, lookup, sum, product, maximum,
+-- minimum) live in Data.List, not here — defining them in the auto-imported
+-- prelude as well collides with `import Data.List`.
+
 
 
 -- Functor instances
