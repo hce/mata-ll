@@ -167,7 +167,7 @@ MATA-LL TODO
 - [ ] Red-black tree — balancing cases are deeply nested constructor patterns (Branch R (Branch R a x b) y c); stresses exhaustiveness checking and overlapping pattern compilation
 - [ ] Type inference engine — unification, substitution maps, occurs check, HashMap with custom key types; exercises typeclass dictionary passing through Eq/Ord on user-defined types
 - [ ] Ray tracer — heavy Number arithmetic, record-heavy vector/color types with field access and update, deeply nested let bindings; tests cheapness analysis on floating-point expressions
-- [ ] Huffman coding — priority queue, binary tree traversal, ByteString I/O, LBit bitwise operations; end-to-end encode/decode roundtrip gives a correctness oracle for free
+- [x] Huffman coding — examples/huffman.mll; recursive HTree ADT, sortBy-based tree build, code-table DFS, LBit bit-packing, ByteString roundtrip; self-checking via assert (test: example_huffman_roundtrip)
 
 ## String types (design decision)
 

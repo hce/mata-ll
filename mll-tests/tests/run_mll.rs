@@ -858,6 +858,13 @@ fn examples_compile() {
     }
 }
 
+// Compiler stress tests: larger, self-checking example programs that assert
+// their own correctness at runtime (a failed roundtrip -> error -> test fail).
+#[test]
+fn example_huffman_roundtrip() {
+    run_mll_file_with_lib(Path::new("../examples/huffman.mll"));
+}
+
 // ============================================================
 // FFI tests: compile MLL modules with exports, then call
 // exported functions from Lua and verify return values.
