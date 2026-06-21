@@ -911,6 +911,35 @@ main = print (dot (scaleV 2.0 (V 5.0 7.0)))
         .expect("projecting a thunk-valued field in arithmetic should force it");
 }
 
+// Layout: a function whose first argument is on the next line (no same-line
+// argument) is consumed as an application. Previously the cross-line
+// continuation required at least one same-line arg, so this failed inside
+// parenthesized multi-line constructor application.
+#[test]
+fn first_argument_on_next_line() {
+    let source = r#"
+data T = L Integer | N T T
+
+deep :: T
+deep = N (N (L 1)
+            (L 2))
+         (L 3)
+
+size :: T -> Integer
+size (L _) = 1
+size (N a b) = size a + size b
+
+main :: IO ()
+main = assert (size deep == 3) "function with first arg on next line"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("first arg on next line should parse")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("first_arg_next_line").exec()
+        .expect("should run");
+}
+
 // Layout: a multi-line application-argument continuation indented past the
 // enclosing block (but not necessarily past the function column) is now
 // accepted, matching Haskell. Previously it required indentation past the

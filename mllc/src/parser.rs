@@ -1275,14 +1275,12 @@ impl Parser {
 
     fn parse_expr_app(&mut self) -> Result<Expr, String> {
         let mut func = self.parse_expr_atom_dotted()?;
-        let mut has_args = false;
 
         loop {
             // Same-line arguments (existing behavior)
             if self.is_expr_atom_start_in_context() {
                 let arg = self.parse_expr_atom_dotted()?;
                 func = Expr::App(Box::new(func), Box::new(arg));
-                has_args = true;
                 continue;
             }
 
@@ -1290,9 +1288,10 @@ impl Parser {
             // current layout block's column is a continuation (more arguments),
             // not a new item. This is the Haskell layout rule (deeper than the
             // block = continuation; at the block column = next clause/binding/
-            // statement). Only applies once we already have a same-line argument
-            // so bare values like `10` don't grab the following line.
-            if has_args && matches!(self.peek(), Token::Newline | Token::Indent(_)) {
+            // statement). The block-column check alone keeps siblings from being
+            // grabbed, so this works even for a function whose first argument is
+            // on the next line (e.g. inside explicit brackets).
+            if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
                 let save_pos = self.pos;
                 let save_indent = self.current_indent;
                 self.skip_newlines_and_indent();
