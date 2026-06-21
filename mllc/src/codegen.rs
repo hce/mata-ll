@@ -1553,6 +1553,21 @@ impl CodeGen {
                     self.emit(")");
                 }
             }
+            // Fully-applied ST intrinsic in run-once position: emit the
+            // effect directly, skipping the action-closure allocation and
+            // the __mll_run dispatch. gen_action is only reached where an
+            // action runs exactly once, in order, so this is safe by
+            // construction. See st_intrinsic_fused.
+            _ if Self::st_intrinsic_fused(expr).is_some() => {
+                let (fused, fargs) = Self::st_intrinsic_fused(expr).unwrap();
+                self.emit(fused);
+                self.emit("(");
+                for (i, a) in fargs.iter().enumerate() {
+                    if i > 0 { self.emit(", "); }
+                    self.gen_arg(a, false);
+                }
+                self.emit(")");
+            }
             _ => {
                 // General IO/ST action: use __mll_run which handles both
                 // direct values and action closures (function or value).
@@ -1576,6 +1591,49 @@ impl CodeGen {
         matches!(ty,
             Ty::Con(_) | Ty::Arrow(_, _) | Ty::List(_) | Ty::Unit
             | Ty::Forall(_, _) | Ty::Skolem(..))
+    }
+
+    /// If `expr` is a *fully applied* call to a known ST array intrinsic,
+    /// return the closure-free runtime function name and the argument list.
+    ///
+    /// In run-once position (a do-block bind chain), `readSTArray arr i`
+    /// compiles to `__mll_run(__mll_ma_read(arr, i))`, where `__mll_ma_read`
+    /// allocates an action closure that `__mll_run` immediately calls. The
+    /// fused `__mll_st_*` functions perform the effect directly and return
+    /// the value, so the caller can emit a single direct call — no closure
+    /// allocation, no `__mll_run` dispatch. See
+    /// examples/tracker/PERF-REGRESSION.md.
+    ///
+    /// Returns None for partial applications (an Arrow, never in action
+    /// position), first-class action references (`__mll_run(<var>)`), and
+    /// non-intrinsics — all of which keep the closure form.
+    fn st_intrinsic_fused(expr: &TExpr) -> Option<(&'static str, Vec<&TExpr>)> {
+        let mut args: Vec<&TExpr> = Vec::new();
+        let mut f = expr;
+        while let TExprKind::App(inner_f, inner_arg) = &f.kind {
+            args.push(inner_arg.as_ref());
+            f = inner_f.as_ref();
+        }
+        args.reverse();
+        let name = match &f.kind {
+            TExprKind::Var(n) => n.as_str(),
+            _ => return None,
+        };
+        let (fused, arity) = match name {
+            "newSTArray" => ("__mll_st_new", 2),
+            "readSTArray" => ("__mll_st_read", 2),
+            "writeSTArray" => ("__mll_st_write", 3),
+            "modifySTArray" => ("__mll_st_modify", 3),
+            "stArrayLength" => ("__mll_st_length", 1),
+            "newSTArrayFromList" => ("__mll_st_from_list", 1),
+            "stArrayToList" => ("__mll_st_to_list", 1),
+            _ => return None,
+        };
+        if args.len() == arity {
+            Some((fused, args))
+        } else {
+            None
+        }
     }
 
     /// Check if a function type's return type is an IO/ST action.
@@ -3129,5 +3187,36 @@ local function __mll_ma_to_list(arr)
         for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
         return r
     end
+end
+-- Fused ST array ops: identical effects to __mll_ma_* but performed
+-- immediately (no action-closure allocation, no __mll_run dispatch). The
+-- codegen emits these only in run-once do-block position; first-class ST
+-- actions keep the __mll_ma_* closure form. See st_intrinsic_fused.
+local function __mll_st_new(size, init)
+    size = __force(size); init = __force(init)
+    local t = {}; for i = 1, size do t[i] = init end; return t
+end
+local function __mll_st_read(arr, idx)
+    return __force(arr)[__force(idx) + 1]
+end
+local function __mll_st_write(arr, idx, val)
+    __force(arr)[__force(idx) + 1] = __force(val)
+end
+local function __mll_st_modify(arr, idx, f)
+    arr = __force(arr); idx = __force(idx) + 1
+    arr[idx] = __force(f)(arr[idx])
+end
+local function __mll_st_length(arr)
+    return #__force(arr)
+end
+local function __mll_st_from_list(xs)
+    xs = __force(xs); local t = {}; local cur = xs
+    while cur ~= nil do t[#t+1] = __force(__mll_head(cur)); cur = __mll_tail(cur) end
+    return t
+end
+local function __mll_st_to_list(arr)
+    arr = __force(arr); local r = nil
+    for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
+    return r
 end
 "#;
