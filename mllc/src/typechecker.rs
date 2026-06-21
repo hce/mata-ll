@@ -3143,6 +3143,61 @@ impl Checker {
         Ok((raw_clause.apply_subst(&subst), subst))
     }
 
+    /// Infer a `let` / do-`let` binding group as **mutually recursive**, then
+    /// generalize each binding over the outer environment (let-polymorphism).
+    ///
+    /// Every name is pre-registered with a fresh monomorphic type variable
+    /// before any body is inferred, so a binding may reference itself and its
+    /// siblings (e.g. `fib = [1,1] ++ zipWith (+) fib (drop 1 fib)`). This
+    /// mirrors the recursive `where`/top-level handling; the difference is the
+    /// final generalization step, which `where` omits but `let` needs to keep
+    /// `let i = \x -> x in (i 1, i True)` working.
+    ///
+    /// Returns the typed bindings, the environment extended with the
+    /// generalized schemes (for the body / subsequent statements), and the
+    /// accumulated substitution. Only value bindings (no parameters) are
+    /// supported, matching the rest of the `let` pipeline; bindings with
+    /// parameters are inferred as-is and will surface the same errors as before.
+    fn infer_let_group(
+        &mut self,
+        binds: &[LocalDef],
+        env: &TypeEnv,
+        mut subst: Subst,
+    ) -> Result<(Vec<TLocalDef>, TypeEnv, Subst), TypeErrorKind> {
+        // Pre-register fresh monomorphic vars for the whole group so bindings
+        // can see themselves and each other during inference.
+        let mut rec_env = env.clone();
+        let mut fresh_tys: Vec<Ty> = Vec::with_capacity(binds.len());
+        for bind in binds {
+            let fv = self.fresh_var("_let");
+            fresh_tys.push(fv.clone());
+            rec_env.insert(bind.name.clone(), Scheme::mono(fv));
+        }
+
+        // Infer each body in the recursive environment and unify its type with
+        // the pre-registered variable.
+        let mut tbinds = Vec::new();
+        for (i, bind) in binds.iter().enumerate() {
+            let env_i = rec_env.apply_subst(&subst);
+            let (te, bind_ty, s) = self.infer_expr(&bind.body, &env_i)?;
+            subst = subst.compose(&s);
+            let us = unify(&fresh_tys[i].apply_subst(&subst), &bind_ty.apply_subst(&subst))?;
+            subst = subst.compose(&us);
+            tbinds.push(TLocalDef { name: bind.name.clone(), patterns: vec![], body: te });
+        }
+
+        // Generalize each binding over the outer environment (excluding the
+        // group's own monomorphic vars), then extend the environment.
+        let outer_env = env.apply_subst(&subst);
+        let mut out_env = outer_env.clone();
+        for (i, bind) in binds.iter().enumerate() {
+            let scheme = self.generalize(&outer_env, &fresh_tys[i].apply_subst(&subst));
+            out_env.insert(bind.name.clone(), scheme);
+        }
+
+        Ok((tbinds, out_env, subst))
+    }
+
     // --- Pattern checking (returns typed pattern) ---
 
     fn check_pattern(
@@ -3421,21 +3476,9 @@ impl Checker {
                 ))
             }
             Expr::Let { binds, body } => {
-                let mut local_env = env.clone();
-                let mut subst = Subst::empty();
-                let mut tbinds = Vec::new();
-
-                for bind in binds {
-                    let (te, bind_ty, s) = self.infer_expr(&bind.body, &local_env)?;
-                    subst = subst.compose(&s);
-                    let gen_env = local_env.apply_subst(&subst);
-                    let scheme = self.generalize(&gen_env, &bind_ty.apply_subst(&subst));
-                    local_env = gen_env;
-                    local_env.insert(bind.name.clone(), scheme);
-                    tbinds.push(TLocalDef { name: bind.name.clone(), patterns: vec![], body: te });
-                }
-
-                let (tbody, body_ty, s) = self.infer_expr(body, &local_env)?;
+                let (tbinds, body_env, subst) =
+                    self.infer_let_group(binds, env, Subst::empty())?;
+                let (tbody, body_ty, s) = self.infer_expr(body, &body_env)?;
                 Ok((
                     TExpr::new(TExprKind::Let { binds: tbinds, body: Box::new(tbody) }, body_ty.clone()),
                     body_ty, subst.compose(&s),
@@ -3685,16 +3728,10 @@ impl Checker {
                     }));
                 }
                 BindStmt::Let { binds } => {
-                    let mut tbinds = Vec::new();
-                    for bind in *binds {
-                        let (te, bind_ty, s) = self.infer_expr(&bind.body, &local_env)?;
-                        subst = subst.compose(&s);
-                        let gen_env = local_env.apply_subst(&subst);
-                        let scheme = self.generalize(&gen_env, &bind_ty.apply_subst(&subst));
-                        local_env = gen_env;
-                        local_env.insert(bind.name.clone(), scheme);
-                        tbinds.push(TLocalDef { name: bind.name.clone(), patterns: vec![], body: te });
-                    }
+                    let (tbinds, new_env, new_subst) =
+                        self.infer_let_group(binds, &local_env, subst)?;
+                    subst = new_subst;
+                    local_env = new_env;
                     typed_stmts.push(TypedStmt::Let(tbinds));
                 }
             }

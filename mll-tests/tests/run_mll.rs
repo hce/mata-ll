@@ -964,6 +964,66 @@ main = print total
         .expect("should run");
 }
 
+// Regression: a self-referential lazy value bound in a `where` clause, an
+// expression `let`, or a do-block `let` must close over itself. Two bugs
+// combined here:
+//   1. Codegen emitted `local x = __thunk(... x ...)`, but a Lua local is not
+//      in scope within its own initializer, so the inner `x` resolved to a nil
+//      global. The classic `fib = [1,1] ++ zipWith (+) fib (drop 1 fib)`
+//      collapsed to `[1,1]`, so `fib !! 11` read as 1 instead of 144. Fixed by
+//      forward-declaring the name (`local x`) before assigning it.
+//   2. The typechecker treated `let`/do-`let` as sequential (let*), rejecting
+//      self- and forward-references ("Unbound variable: fib"). Fixed by
+//      inferring let groups as mutually recursive (pre-register fresh vars,
+//      then generalize) — like `where`/top-level, but keeping let-polymorphism.
+#[test]
+fn recursive_lazy_value_in_where_let_and_do() {
+    let source = r#"
+fibTop :: [Integer]
+fibTop = [1, 1] ++ zipWith (+) fibTop (drop 1 fibTop)
+
+nthWhere :: Integer -> Integer
+nthWhere k = fib !! k
+  where
+    fib = [1, 1] ++ zipWith (+) fib (drop 1 fib)
+
+nthLet :: Integer -> Integer
+nthLet k =
+  let fib = [1, 1] ++ zipWith (+) fib (drop 1 fib)
+  in fib !! k
+
+-- mutually recursive let bindings
+isEven :: Integer -> Bool
+isEven n =
+  let ev = \m -> if m == 0 then True else od (m - 1)
+      od = \m -> if m == 0 then False else ev (m - 1)
+  in ev n
+
+-- let-polymorphism must survive the recursive-let change
+polyPair :: (Integer, Bool)
+polyPair = let idf = \x -> x in (idf 5, idf True)
+
+main :: IO ()
+main = do
+  let fibDo = [1, 1] ++ zipWith (+) fibDo (drop 1 fibDo)
+  assert (fibTop !! 11 == 144) "top-level recursive list (12th fib)"
+  assert (nthWhere 11 == 144) "where-bound recursive list (12th fib)"
+  assert (nthWhere 12 == 233) "where-bound recursive list (13th fib)"
+  assert (nthLet 11 == 144) "let-bound recursive list (12th fib)"
+  assert (nthLet 12 == 233) "let-bound recursive list (13th fib)"
+  assert (fibDo !! 11 == 144) "do-block let recursive list (12th fib)"
+  assert (isEven 10) "mutually recursive let"
+  assert (polyPair == (5, True)) "let-polymorphism preserved"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("recursive lazy where/let values should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("recursive_lazy_value").exec()
+        .expect("recursive lazy where/let/do bindings should evaluate correctly");
+}
+
 // Regression: a `case` matching a nested pattern under a constructor whose
 // payload is a thunk (built from a non-cheap expression) must force the field
 // before destructuring it. Previously the inner pattern indexed into the raw

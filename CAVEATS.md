@@ -60,6 +60,21 @@ Use `seq` to force intermediate values, or prefer strict accumulator patterns.
 The demand analysis pass eliminates many unnecessary thunks, but it cannot
 catch every case.
 
+## `let` binds values, not functions
+
+`let` and do-block `let` bind values only. A binding with parameters, e.g.
+
+    let f x = x + 1 in f 10
+
+is not supported and fails type checking with `Unbound variable: x` (the
+parameter is never brought into scope). Value bindings are mutually recursive,
+including self-referential lazy values:
+
+    let fib = [1, 1] ++ zipWith (+) fib (drop 1 fib) in fib !! 11   -- 144
+
+For a local function, bind a lambda (`let f = \x -> x + 1`) or use a `where`
+clause, which does support multi-clause local functions.
+
 ## Lua errors from FFI calls are not wrapped
 
 When a Lua function called via the FFI raises an error (e.g. `io.open` on a

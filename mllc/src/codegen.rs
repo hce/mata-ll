@@ -741,18 +741,24 @@ impl CodeGen {
     }
 
     fn gen_where_binds(&mut self, binds: &[TLocalDef]) {
-        // Forward-declare all function names so that value bindings can
-        // reference functions defined later in source order, and functions
-        // can reference each other (mutual recursion).
-        let mut func_names: Vec<String> = Vec::new();
+        // Forward-declare ALL where-bound names — values as well as functions —
+        // before emitting any definition. A where/let group is mutually
+        // recursive in Haskell, and a value may reference itself (e.g. a
+        // self-referential lazy list `fib = ... fib ...`). Lua locals are not
+        // in scope within their own initializer, so `local x = ...x...` binds
+        // the inner `x` to an outer/global, not the new local. Declaring every
+        // name first, then assigning, makes self- and mutual references resolve
+        // to the locals.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         {
             let mut i = 0;
             while i < binds.len() {
-                if !binds[i].patterns.is_empty() {
-                    let sname = sanitize_name(&binds[i].name);
-                    if !self.local_vars.contains(&sname) {
-                        func_names.push(sname);
-                    }
+                let is_func = !binds[i].patterns.is_empty();
+                let sname = sanitize_name(&binds[i].name);
+                if !self.local_vars.contains(&sname) && seen.insert(sname.clone()) {
+                    self.declare_local_fwd(&sname);
+                }
+                if is_func {
                     let name = &binds[i].name;
                     while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
                         i += 1;
@@ -762,20 +768,10 @@ impl CodeGen {
                 }
             }
         }
-        if !func_names.is_empty() {
-            self.emit_indent();
-            self.emit("local ");
-            self.emit(&func_names.join(", "));
-            self.emit("\n");
-            for name in &func_names {
-                self.local_vars.insert(name.clone());
-                self.local_count += 1;
-            }
-        }
 
         // Now emit all bindings in source order — functions and values
-        // interleaved as written. Function forward-declarations above
-        // ensure references resolve regardless of order.
+        // interleaved as written. The forward declarations above ensure
+        // references resolve regardless of order.
         let mut i = 0;
         while i < binds.len() {
             if binds[i].patterns.is_empty() {
@@ -793,14 +789,17 @@ impl CodeGen {
 
     fn gen_where_value(&mut self, bind: &TLocalDef) {
         let sname = sanitize_name(&bind.name);
-        let decl = self.declare_local(&sname);
+        // The name was forward-declared in gen_where_binds; assign to it
+        // (rather than re-declaring) so the binding's own body can refer to
+        // itself and to its mutually-recursive siblings.
+        let lref = self.lua_ref(&sname);
         self.emit_indent();
         if Self::is_cheap(&bind.body) {
-            self.emit(&format!("{} = ", decl));
+            self.emit(&format!("{} = ", lref));
             self.gen_expr(&bind.body);
             self.concrete_vars.insert(sname);
         } else {
-            self.emit(&format!("{} = __thunk(function() return ", decl));
+            self.emit(&format!("{} = __thunk(function() return ", lref));
             self.gen_expr(&bind.body);
             self.emit(" end)");
         }
@@ -1646,12 +1645,24 @@ impl CodeGen {
                     continue;
                 }
                 TExprKind::Let { binds, body } => {
-                    for bind in binds {
-                        if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind {
+                    // Forward-declare all names before assigning so do-block let
+                    // bindings can be self- and mutually recursive. Lua locals
+                    // are not in scope within their own initializer (see
+                    // gen_where_binds for the rationale).
+                    {
+                        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                        for bind in binds {
                             let bname = sanitize_name(&bind.name);
-                            self.declare_local_fwd(&bname);
+                            if !self.local_vars.contains(&bname) && seen.insert(bname.clone()) {
+                                self.declare_local_fwd(&bname);
+                            }
+                        }
+                    }
+                    for bind in binds {
+                        let bname = sanitize_name(&bind.name);
+                        let lval = self.local_lvalue(&bname);
+                        if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind {
                             self.concrete_vars.insert(bname.clone());
-                            let lval = self.local_lvalue(&bname);
                             self.emit_indent();
                             self.emit("if ");
                             self.gen_expr(cond);
@@ -1663,23 +1674,19 @@ impl CodeGen {
                             self.gen_expr(else_branch);
                             self.emit(" end\n");
                         } else if Self::is_nullary_action_type(&bind.body.ty) {
-                            let bname = sanitize_name(&bind.name);
-                            let decl = self.declare_local(&bname);
                             self.emit_indent();
-                            self.emit(&format!("{} = function() return ", decl));
+                            self.emit(&format!("{} = function() return ", lval));
                             self.gen_action(&bind.body);
                             self.emit(" end\n");
                         } else {
-                            let bname = sanitize_name(&bind.name);
-                            let decl = self.declare_local(&bname);
                             self.emit_indent();
                             if Self::is_cheap(&bind.body) {
-                                self.emit(&format!("{} = ", decl));
+                                self.emit(&format!("{} = ", lval));
                                 self.gen_expr(&bind.body);
                                 self.emit("\n");
                                 self.concrete_vars.insert(bname);
                             } else {
-                                self.emit(&format!("{} = __thunk(function() return ", decl));
+                                self.emit(&format!("{} = __thunk(function() return ", lval));
                                 self.gen_expr(&bind.body);
                                 self.emit(" end)\n");
                             }
@@ -2150,15 +2157,31 @@ impl CodeGen {
             }
             TExprKind::Let { binds, body } => {
                 self.emit("(function()\n"); self.indent += 1;
+                // Forward-declare all names before assigning, so let bindings
+                // can be self- and mutually recursive. Lua locals are not in
+                // scope within their own initializer, so `local x = ...x...`
+                // would bind the inner `x` to an outer/global. See
+                // gen_where_binds for the same rationale.
+                {
+                    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+                    let names: Vec<String> = binds.iter()
+                        .map(|b| sanitize_name(&b.name))
+                        .filter(|n| seen.insert(n.clone()))
+                        .collect();
+                    if !names.is_empty() {
+                        self.emit_indent();
+                        self.emit(&format!("local {}\n", names.join(", ")));
+                    }
+                }
                 for bind in binds {
                     self.emit_indent();
                     let sname = sanitize_name(&bind.name);
                     if Self::is_cheap(&bind.body) {
-                        self.emit(&format!("local {} = ", sname));
+                        self.emit(&format!("{} = ", sname));
                         self.gen_expr(&bind.body); self.emit("\n");
                         self.concrete_vars.insert(sname);
                     } else {
-                        self.emit(&format!("local {} = __thunk(function() return ", sname));
+                        self.emit(&format!("{} = __thunk(function() return ", sname));
                         self.gen_expr(&bind.body); self.emit(" end)\n");
                     }
                 }
