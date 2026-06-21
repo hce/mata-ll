@@ -973,6 +973,29 @@ impl CodeGen {
         self.emit_line("error(\"Non-exhaustive patterns\")");
     }
 
+    /// A sub-pattern that inspects its value (matches a tag, compares a
+    /// literal, or destructures further) needs that value forced first;
+    /// a Var/Wildcard just binds/ignores it and can stay lazy.
+    fn pattern_inspects_value(pattern: &TPattern) -> bool {
+        match pattern {
+            TPattern::Var(..) | TPattern::Wildcard => false,
+            TPattern::Paren(inner) => Self::pattern_inspects_value(inner),
+            _ => true,
+        }
+    }
+
+    /// Build an indexing path into a field, forcing it when the sub-pattern
+    /// will inspect it. The field may hold a thunk (lazy construction), so
+    /// indexing into it (`field[1]`, `field == tag`, ...) requires forcing.
+    fn field_path(scrutinee: &str, idx: usize, child: &TPattern) -> String {
+        let path = format!("{}[{}]", scrutinee, idx);
+        if Self::pattern_inspects_value(child) {
+            format!("__force({})", path)
+        } else {
+            path
+        }
+    }
+
     fn collect_pattern_conditions(&self, scrutinee: &str, pattern: &TPattern, conditions: &mut Vec<String>, bindings: &mut Vec<(String, String)>) {
         match pattern {
             TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.to_string())); }
@@ -999,11 +1022,13 @@ impl CodeGen {
                     } else if total > 1 {
                         conditions.push(format!("{}[1] == {}", scrutinee, tag));
                         for (i, arg) in args.iter().enumerate() {
-                            self.collect_pattern_conditions(&format!("{}[{}]", scrutinee, i + 2), arg, conditions, bindings);
+                            let path = Self::field_path(scrutinee, i + 2, arg);
+                            self.collect_pattern_conditions(&path, arg, conditions, bindings);
                         }
                     } else {
                         for (i, arg) in args.iter().enumerate() {
-                            self.collect_pattern_conditions(&format!("{}[{}]", scrutinee, i + 1), arg, conditions, bindings);
+                            let path = Self::field_path(scrutinee, i + 1, arg);
+                            self.collect_pattern_conditions(&path, arg, conditions, bindings);
                         }
                     }
                 } else {
@@ -1039,10 +1064,8 @@ impl CodeGen {
             TPattern::Tuple(pats) => {
                 // Tuple fields are at [1], [2], etc. (no tag)
                 for (i, p) in pats.iter().enumerate() {
-                    self.collect_pattern_conditions(
-                        &format!("{}[{}]", scrutinee, i + 1),
-                        p, conditions, bindings,
-                    );
+                    let path = Self::field_path(scrutinee, i + 1, p);
+                    self.collect_pattern_conditions(&path, p, conditions, bindings);
                 }
             }
         }

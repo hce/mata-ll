@@ -935,6 +935,34 @@ main = print total
         .expect("should run");
 }
 
+// Regression: a `case` matching a nested pattern under a constructor whose
+// payload is a thunk (built from a non-cheap expression) must force the field
+// before destructuring it. Previously the inner pattern indexed into the raw
+// thunk table, reading its internals (the `false` flag, a nil) as field values.
+#[test]
+fn case_nested_pattern_forces_thunked_field() {
+    let source = r#"
+data Pair = Pair (Integer, Integer)
+
+slow :: Integer -> Integer
+slow 0 = 0
+slow n = slow (n - 1) + 1
+
+mkPair :: Integer -> Pair
+mkPair x = Pair (slow x, slow x + 1)
+
+main :: IO ()
+main = case mkPair 3 of
+         Pair (a, b) -> assert (a + b == 7) "nested pattern forces thunked field"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("nested_thunk_pat").exec()
+        .expect("nested pattern under a thunked constructor payload should work");
+}
+
 // Compiler stress tests: larger, self-checking example programs that assert
 // their own correctness at runtime (a failed roundtrip -> error -> test fail).
 #[test]
@@ -955,6 +983,11 @@ fn example_scheme_eval() {
 #[test]
 fn example_raytracer_renders() {
     run_mll_file_with_lib(Path::new("../examples/raytracer.mll"));
+}
+
+#[test]
+fn example_typeinfer_checks() {
+    run_mll_file_with_lib(Path::new("../examples/typeinfer.mll"));
 }
 
 // ============================================================
