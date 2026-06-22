@@ -228,6 +228,11 @@ impl TExpr {
                 updates: updates.into_iter().map(|(n, idx, e)| (n, idx, e.apply_subst(subst))).collect(),
                 num_fields,
             },
+            TExprKind::OutgoingCallback { callee, arity, marshal_args, run_io, marshal_ret } =>
+                TExprKind::OutgoingCallback {
+                    callee: Box::new(callee.apply_subst(subst)),
+                    arity, marshal_args, run_io, marshal_ret,
+                },
             other => other,
         };
         TExpr { kind, ty }
@@ -322,6 +327,24 @@ pub enum TExprKind {
         record: Box<TExpr>,
         updates: Vec<(String, usize, TExpr)>,
         num_fields: usize,
+    },
+    /// An mata-ll callback passed *out* to a Lua FFI function. Lowers to an
+    /// n-ary Lua function that uncurries `callee`, marshals each argument and
+    /// the result, and (for effectful callbacks) runs the returned action.
+    /// Flags are computed before monomorphization (where the threaded state is
+    /// still a type variable) and must be copied verbatim by later passes.
+    OutgoingCallback {
+        callee: Box<TExpr>,
+        /// Number of positional arguments the Lua host will pass.
+        arity: usize,
+        /// Per-argument: convert across the FFI boundary (lists/nested fns)
+        /// rather than passing the raw value (opaque polymorphic state).
+        marshal_args: Vec<bool>,
+        /// The callback returns an action that must be run for its effect.
+        run_io: bool,
+        /// Convert the result for the host rather than returning it raw
+        /// (raw = opaque polymorphic state, must round-trip untouched).
+        marshal_ret: bool,
     },
 }
 

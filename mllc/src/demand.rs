@@ -366,6 +366,11 @@ fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<Stri
             }
             s
         }
+
+        TExprKind::OutgoingCallback { callee, .. } => {
+            // The wrapped callback is invoked by the host, so it is demanded.
+            demanded_vars(callee, env)
+        }
     }
 }
 

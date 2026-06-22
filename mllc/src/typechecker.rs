@@ -1541,6 +1541,7 @@ impl Checker {
         for (name, (lua_name, ffi_kind)) in &ffi_info {
             if !defined_fns.contains(name)
                 && let Some(ty) = sigs.get(name) {
+                    self.validate_ffi_callbacks(name, ty);
                     let ffi_fn = self.generate_ffi_function(name, lua_name, *ffi_kind, ty);
                     functions.push(ffi_fn);
                     // Register in env
@@ -3851,9 +3852,26 @@ impl Checker {
             .map(|(n, t)| TPattern::Var(n.clone(), t.clone()))
             .collect();
 
-        // Build the call expression: lua_func(_ffi0, _ffi1, ...)
+        // Build the call expression: lua_func(_ffi0, _ffi1, ...). Function-typed
+        // (callback) parameters are wrapped so the Lua host can call them with
+        // positional arguments — see OutgoingCallback. Flags are computed here,
+        // before monomorphization, while the threaded state is still a type var.
         let call_args: Vec<TExpr> = params.iter()
-            .map(|(n, t)| TExpr::new(TExprKind::Var(n.clone()), t.clone()))
+            .map(|(n, t)| {
+                let var = TExpr::new(TExprKind::Var(n.clone()), t.clone());
+                if matches!(t, Ty::Arrow(_, _)) {
+                    let (arity, marshal_args, run_io, marshal_ret) = outgoing_cb_flags(t);
+                    TExpr::new(
+                        TExprKind::OutgoingCallback {
+                            callee: Box::new(var),
+                            arity, marshal_args, run_io, marshal_ret,
+                        },
+                        t.clone(),
+                    )
+                } else {
+                    var
+                }
+            })
             .collect();
 
         // Check if return type is a tuple (multi-return from Lua)
@@ -3962,6 +3980,71 @@ impl Checker {
             }
         }
     }
+
+    /// Strict soundness check for FFI declarations that pass an mata-ll callback
+    /// out to a Lua function and thread a polymorphic state through it (the
+    /// fold pattern). The state must round-trip through Lua opaquely, which is
+    /// only sound when it is one shared polymorphic type variable across the
+    /// callback's accumulator argument, the callback's result, the FFI's
+    /// initial-state argument, and the FFI's return. Concrete callbacks (no
+    /// type variables, e.g. `String -> String`) thread no opaque state and are
+    /// allowed without further checks.
+    fn validate_ffi_callbacks(&mut self, name: &str, ty: &Ty) {
+        let ctx = || format!("FFI declaration of '{}'", name);
+        let mut err = |msg: String| {
+            self.errors.push(TypeError::in_context(TypeErrorKind::Other(msg), ctx()));
+        };
+
+        let (arg_tys, ret) = ty.peel_arrows();
+        // The FFI's value-return type (peel an IO/LuaIO effect wrapper).
+        let ffi_value_ret = match ret {
+            Ty::IO(inner) | Ty::LuaIO(_, inner) => inner.as_ref(),
+            other => other,
+        };
+
+        for cb in arg_tys.iter().filter(|t| matches!(t, Ty::Arrow(_, _))) {
+            if callback_value_vars(cb).is_empty() {
+                continue; // concrete callback: no opaque state to keep sound
+            }
+            // Polymorphic (stateful) callback: enforce the shared-variable rule.
+            let s = match ffi_value_ret {
+                Ty::Var(v) => v.clone(),
+                _ => {
+                    err(format!(
+                        "FFI '{}' passes a polymorphic callback, so its return type \
+                         must be the threaded state (a type variable); found a concrete type.",
+                        name));
+                    return;
+                }
+            };
+            let (cb_args, cb_ret) = cb.peel_arrows();
+            // Result must be `S` (pure) or `LuaIO s S` (effectful). `IO S` is
+            // rejected: effectful callbacks are standardized on `LuaIO s acc`.
+            let result_ok = match cb_ret {
+                Ty::Var(v) => *v == s,
+                Ty::LuaIO(_, inner) => matches!(inner.as_ref(), Ty::Var(v) if *v == s),
+                _ => false,
+            };
+            if !result_ok {
+                err(format!(
+                    "FFI '{}': callback must return the threaded state '{}' (pure) \
+                     or 'LuaIO s {}' (effectful).",
+                    name, s.name, s.name));
+            }
+            // The callback must take the state as an accumulator argument.
+            if !cb_args.iter().any(|a| matches!(a, Ty::Var(v) if *v == s)) {
+                err(format!(
+                    "FFI '{}': callback must take the threaded state '{}' as an argument.",
+                    name, s.name));
+            }
+            // The FFI must take the initial state as a direct argument.
+            if !arg_tys.iter().any(|a| matches!(a, Ty::Var(v) if *v == s)) {
+                err(format!(
+                    "FFI '{}': must take the initial state '{}' as an argument.",
+                    name, s.name));
+            }
+        }
+    }
 }
 
 /// Extract FFI info from an AST type.
@@ -3998,5 +4081,43 @@ fn extract_ffi_info(ty: &Type) -> Option<(String, FfiKind)> {
         Type::Paren(inner) => extract_ffi_info(inner),
         _ => None,
     }
+}
+
+/// Compute the OutgoingCallback flags for a callback parameter type.
+/// Returns (arity, marshal_args, run_io, marshal_ret). A position is marshalled
+/// across the boundary only when it is a `List` or nested `Arrow`; everything
+/// else (foreign types, tuples, primitives, and the opaque polymorphic state)
+/// is passed raw. Type-variable results are opaque state and returned raw.
+fn outgoing_cb_flags(cb_ty: &Ty) -> (usize, Vec<bool>, bool, bool) {
+    let (args, ret) = cb_ty.peel_arrows();
+    let marshal_args = args.iter()
+        .map(|a| matches!(a, Ty::List(_) | Ty::Arrow(_, _)))
+        .collect();
+    let (run_io, produced) = match ret {
+        Ty::IO(inner) | Ty::LuaIO(_, inner) => (true, inner.as_ref()),
+        other => (false, other),
+    };
+    let marshal_ret = !matches!(produced, Ty::Var(_));
+    (args.len(), marshal_args, run_io, marshal_ret)
+}
+
+/// Free type variables a callback carries through its argument and result
+/// *values*, excluding the phantom `LuaIO s` scope variable.
+fn callback_value_vars(cb_ty: &Ty) -> Vec<TyVar> {
+    let (args, ret) = cb_ty.peel_arrows();
+    let mut vars = Vec::new();
+    for a in &args {
+        for v in a.free_vars() {
+            if !vars.contains(&v) { vars.push(v); }
+        }
+    }
+    let produced = match ret {
+        Ty::IO(inner) | Ty::LuaIO(_, inner) => inner.as_ref(),
+        other => other,
+    };
+    for v in produced.free_vars() {
+        if !vars.contains(&v) { vars.push(v); }
+    }
+    vars
 }
 

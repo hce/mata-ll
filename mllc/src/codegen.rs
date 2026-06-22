@@ -1275,6 +1275,7 @@ impl CodeGen {
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => self.scan_call_sites(inner, ever_thunked, ever_called),
             TExprKind::Tuple(elems) => { for e in elems { self.scan_call_sites(e, ever_thunked, ever_called); } }
             TExprKind::SpecCall { args, .. } => { for a in args { self.scan_call_sites(a, ever_thunked, ever_called); } }
+            TExprKind::OutgoingCallback { callee, .. } => self.scan_call_sites(callee, ever_thunked, ever_called),
             _ => {}
         }
     }
@@ -2709,6 +2710,15 @@ impl CodeGen {
                 }
                 self.emit("; return _u end)()");
             }
+            TExprKind::OutgoingCallback { callee, arity, marshal_args, run_io, marshal_ret } => {
+                self.emit("__mll_wrap_callback_out(");
+                self.gen_expr(callee);
+                let flags = marshal_args.iter()
+                    .map(|b| if *b { "true" } else { "false" })
+                    .collect::<Vec<_>>().join(", ");
+                self.emit(&format!(", {}, {{{}}}, {}, {})",
+                    arity, flags, run_io, marshal_ret));
+            }
         }
     }
 
@@ -2888,6 +2898,7 @@ fn expr_references_name(expr: &TExpr, name: &str) -> bool {
             expr_references_name(record, name) ||
             updates.iter().any(|(_, _, e)| expr_references_name(e, name))
         }
+        TExprKind::OutgoingCallback { callee, .. } => expr_references_name(callee, name),
     }
 }
 
@@ -3022,6 +3033,34 @@ __mll_wrap_callback = function(f)
         local args = {n = select('#', ...), ...}
         for i = 1, args.n do args[i] = __mll_to_lua(args[i]) end
         return __lua_to_mll(f(__unpack(args, 1, args.n)))
+    end
+end
+
+-- Wrap an mata-ll callback `f` so a Lua host can call it with `n` positional
+-- arguments (mata-ll → Lua direction). mata-ll functions are n-ary, so the n
+-- arguments are applied in a single call. `marshal[i]` converts argument i
+-- across the boundary (lists/nested callbacks) versus passing it raw (an opaque
+-- polymorphic value such as a fold's threaded state must round-trip untouched).
+-- `run_io` runs the returned action for effectful callbacks; `marshal_ret`
+-- converts the result for the host versus returning it raw (opaque state stays
+-- raw).
+__mll_wrap_callback_out = function(f, n, marshal, run_io, marshal_ret)
+    return function(...)
+        -- mata-ll functions are n-ary (all arguments at once), so collect the
+        -- host's n positional arguments and apply them in a single call.
+        local args = {}
+        for i = 1, n do
+            local v = select(i, ...)
+            if marshal[i] then v = __lua_to_mll(v) end
+            args[i] = v
+        end
+        local r = __force(f)(__unpack(args, 1, n))
+        if run_io then
+            r = __force(r)
+            if type(r) == "function" then r = r() end
+        end
+        if marshal_ret then return __mll_to_lua(r) end
+        return r
     end
 end
 

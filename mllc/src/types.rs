@@ -94,6 +94,34 @@ impl Ty {
         args.iter().rev().fold(ret, |acc, arg| Ty::arrow(arg.clone(), acc))
     }
 
+    /// Number of top-level arrows: `a -> b -> c` is 2, `Con` is 0.
+    pub fn arrow_arity(&self) -> usize {
+        match self {
+            Ty::Arrow(_, rest) => 1 + rest.arrow_arity(),
+            _ => 0,
+        }
+    }
+
+    /// The final result type after peeling all top-level arrows.
+    pub fn return_type(&self) -> &Ty {
+        match self {
+            Ty::Arrow(_, rest) => rest.return_type(),
+            other => other,
+        }
+    }
+
+    /// Split a function type into its argument types and final result.
+    /// `a -> b -> c` becomes `([a, b], c)`.
+    pub fn peel_arrows(&self) -> (Vec<&Ty>, &Ty) {
+        let mut args = Vec::new();
+        let mut cur = self;
+        while let Ty::Arrow(a, b) = cur {
+            args.push(a.as_ref());
+            cur = b.as_ref();
+        }
+        (args, cur)
+    }
+
     /// Collect all free type variables
     pub fn free_vars(&self) -> Vec<TyVar> {
         match self {

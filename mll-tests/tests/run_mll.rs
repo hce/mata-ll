@@ -1776,3 +1776,116 @@ main = pure ()
     let result: Vec<i64> = rep.call((4, 7)).unwrap();
     assert_eq!(result, vec![7, 7, 7, 7], "replicate 4 7");
 }
+
+// --- Outgoing FFI callbacks (mata-ll -> Lua): the fold / threaded-state pattern.
+
+#[test]
+fn ffi_outgoing_callback_fold() {
+    // A Lua host (db.fold) calls our mata-ll callback as cb(row, state) per row
+    // and threads the result. Exercises a pure callback, an effectful (LuaIO s)
+    // callback, and an opaque tuple state that must round-trip through Lua.
+    let source = r#"
+-- Pure outgoing callback: state `acc` is opaque (a polymorphic type variable).
+foldRows :: String -> (Integer -> acc -> acc) -> acc -> LuaPure "db.fold" acc
+
+-- Effectful outgoing callback: returns LuaIO s acc, may do I/O per row.
+foldRowsIO :: String -> (Integer -> acc -> LuaIO s acc) -> acc -> LuaIO "db.fold" acc
+
+stepIO :: Integer -> Integer -> LuaIO s Integer
+stepIO row acc = do
+    liftIO (putStr "")
+    pure (acc + row)
+
+-- Pure sum into an Integer accumulator (uncurry + value return).
+export sumRows :: Integer -> Integer
+sumRows seed = foldRows "select" (\row acc -> acc + row) seed
+
+-- Opaque tuple state (sum, count): proves the state survives the Lua round-trip
+-- intact (the FFI converters would otherwise flatten a tuple to a cons list).
+export sumCount :: Integer -> Integer
+sumCount _ =
+    case foldRows "select" (\row acc -> case acc of (s, c) -> (s + row, c + 1)) (0, 0) of
+        (s, c) -> s * 1000 + c
+
+-- Effectful fold, returned as IO; the export wrapper runs the action.
+export runEffectful :: Integer -> IO Integer
+runEffectful seed = foldRowsIO "select" stepIO seed
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+
+    // Host fold API: db.fold(query, cb, init) folds cb over rows {10, 20, 30}.
+    lua.load(
+        r#"
+        db = {}
+        function db.fold(query, cb, init)
+            local rows = {10, 20, 30}
+            local acc = init
+            for i = 1, #rows do acc = cb(rows[i], acc) end
+            return acc
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    // Pure fold: 5 + 10 + 20 + 30 = 65.
+    let sum_rows: mlua::Function = module.get("sumRows").unwrap();
+    let r: i64 = sum_rows.call(5).unwrap();
+    assert_eq!(r, 65, "pure outgoing callback fold");
+
+    // Opaque tuple state round-trips: sum=60, count=3 -> 60003.
+    let sum_count: mlua::Function = module.get("sumCount").unwrap();
+    let r: i64 = sum_count.call(0).unwrap();
+    assert_eq!(r, 60003, "tuple state round-trips through Lua intact");
+
+    // Effectful fold: 0 + 10 + 20 + 30 = 60, with the per-row action run.
+    let run_eff: mlua::Function = module.get("runEffectful").unwrap();
+    let r: i64 = run_eff.call(0).unwrap();
+    assert_eq!(r, 60, "effectful outgoing callback fold");
+}
+
+fn compile_err(source: &str) -> String {
+    match mllc::compile(source, Path::new("."), &[]) {
+        Ok(_) => panic!("expected compilation to fail, but it succeeded"),
+        Err(e) => e.to_string(),
+    }
+}
+
+#[test]
+fn ffi_outgoing_callback_rejects_bad_signatures() {
+    // Effectful callbacks must use `LuaIO s acc`, not `IO acc`.
+    let e = compile_err(
+        r#"
+bad :: String -> (Integer -> acc -> IO acc) -> acc -> LuaPure "h.f" acc
+main :: IO ()
+main = pure ()
+"#,
+    );
+    assert!(e.contains("LuaIO s"), "IO acc should be rejected, got: {e}");
+
+    // The callback's result must be the threaded state, not some other type.
+    let e = compile_err(
+        r#"
+bad :: String -> (Integer -> acc -> LuaIO s Bool) -> acc -> LuaPure "h.f" acc
+main :: IO ()
+main = pure ()
+"#,
+    );
+    assert!(e.contains("threaded state"), "mismatched result should be rejected, got: {e}");
+
+    // A polymorphic callback requires a polymorphic (variable) FFI return type.
+    let e = compile_err(
+        r#"
+bad :: String -> (Integer -> a -> a) -> Integer -> LuaPure "h.f" Integer
+main :: IO ()
+main = pure ()
+"#,
+    );
+    assert!(
+        e.contains("type variable") || e.contains("threaded state"),
+        "concrete state should be rejected, got: {e}"
+    );
+}

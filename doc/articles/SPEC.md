@@ -329,6 +329,57 @@ argument is a string literal, it is the FFI type family; if it is a
 type variable, it is the scoped monad. These are represented as
 distinct AST nodes internally.
 
+## Passing mata-ll callbacks to FFI functions
+
+`engage` covers the *incoming* direction: Lua hands a function to
+mata-ll. The *outgoing* direction — mata-ll handing one of its own
+functions to a Lua host function — is supported when an FFI argument
+itself has a function type. The motivating case is a fold-style host
+API that calls the callback once per item and threads its return value
+as the next state (e.g. a SQL driver folding over result rows):
+
+    foldRows :: String
+             -> (Integer -> acc -> acc)        -- pure callback
+             -> acc
+             -> LuaPure "db.fold" acc
+
+    foldRowsIO :: String
+               -> (Integer -> acc -> LuaIO s acc)  -- effectful callback
+               -> acc
+               -> LuaIO "db.fold" acc
+
+The compiler wraps each function-typed FFI argument so the Lua host can
+call it with positional arguments. The wrapper:
+
+- applies the mata-ll callback to all of the host's arguments at once
+  (mata-ll functions are n-ary, not curried);
+- marshals each argument across the boundary when its type is a list or
+  nested function, and otherwise passes it raw;
+- runs the returned action for an effectful callback (whose result is
+  `LuaIO s acc`), or takes the value directly for a pure one (result
+  `acc`);
+- returns the result to the host, marshalling it unless it is the
+  opaque threaded state.
+
+### The threaded state is opaque
+
+The accumulator (`acc`) is a polymorphic type variable, so the Lua host
+cannot inspect it. The wrapper therefore passes it through *raw* in both
+directions rather than marshalling it. This is what lets **any** mata-ll
+value — including tuples and ADTs — be used as the state and round-trip
+intact: marshalling would flatten a tuple `(a, b)` to a Lua array and
+rebuild it as the cons list `a : b : []`, corrupting it.
+
+### Soundness is type-checked
+
+When an FFI callback threads a polymorphic state, the compiler requires
+it to be **one shared type variable** across four positions: the
+callback's accumulator argument, the callback's result, the FFI's
+initial-state argument, and the FFI's return type. Effectful callbacks
+must use `LuaIO s acc` (not `IO acc`). A callback with no type variables
+(e.g. `String -> String` for `string.gsub`) threads no opaque state and
+is accepted without these constraints. See `examples/ffi_fold.mll`.
+
 ## Runtime representation
 
 Both `s` and `forall s.` are purely compile-time constructs. They

@@ -824,6 +824,11 @@ impl Monomorphizer {
                 updates: updates.into_iter().map(|(n, idx, e)| (n, idx, self.mono_expr(e))).collect(),
                 num_fields,
             },
+            TExprKind::OutgoingCallback { callee, arity, marshal_args, run_io, marshal_ret } =>
+                TExprKind::OutgoingCallback {
+                    callee: Box::new(self.mono_expr(*callee)),
+                    arity, marshal_args, run_io, marshal_ret,
+                },
             other => other,
         };
         TExpr { kind, ty }
@@ -1288,6 +1293,7 @@ impl Monomorphizer {
                 Self::collect_expr_vars(record, vars);
                 for (_, _, e) in updates { Self::collect_expr_vars(e, vars); }
             }
+            TExprKind::OutgoingCallback { callee, .. } => Self::collect_expr_vars(callee, vars),
             _ => {}
         }
     }
