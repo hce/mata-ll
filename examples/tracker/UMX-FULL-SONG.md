@@ -55,9 +55,9 @@ Instrumenting the decode (per-100-chunk wall time):
   *not* show this asymmetry.
 - The bursts **persist with the GC disabled** (`collectgarbage("stop")`), so
   they are **not GC pauses**.
-- Real resident memory (OS `ps rss`) growth is **modest** (tens to low hundreds
-  of MB), and under normal GC the live heap stays ~7–11 MB. This is a speed
-  characteristic, not a memory one.
+- Memory is **not** the issue: under normal GC the OS RSS holds steady at
+  ~15–16 MB and the retained live set is a flat ~4.6 MB (see "It is not a memory
+  leak" below). This is a speed characteristic, not a memory one.
 
 The underlying cause is how non-strict evaluation is lowered onto Lua:
 mata-ll compiles laziness to `setmetatable` thunks and cons cells. The
@@ -67,6 +67,27 @@ that triggers LuaJIT trace aborts / NYI fallbacks. So that code stays
 interpreted while the numeric mixing loop traces fine. It is an
 impedance mismatch between Haskell-style laziness and LuaJIT's tracer, not a
 property of the (ancient, tiny) tracker format.
+
+### It is not a memory leak
+
+The churn is transient, not retained. Forcing a full collection
+(`collectgarbage("collect")`) every 500 chunks and reading the **live set after
+it** shows a flat retained footprint across many bursts:
+
+| chunk | live set (post full-GC) |
+|---|---|
+|  500 | 4.4 MB |
+| 1000 | 4.7 MB |
+| 1500 | 4.6 MB |
+| 2000 | 4.6 MB |
+
+A leak (accumulating references) would climb monotonically; this is flat at
+~4.6 MB. The OS agrees: real RSS holds steady at ~15–16 MB for the whole run
+(the gap above the 4.6 MB live set is just LuaJIT's allocator arenas). So the
+decoder genuinely streams — constant working set — it just manufactures and
+immediately discards a large volume of short-lived thunks per pattern. The cost
+is the CPU work of *creating and forcing* them, not holding them: not a leak,
+and (per the GC-off test above) not GC pauses either.
 
 ### Measurement caveat
 
