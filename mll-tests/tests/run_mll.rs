@@ -1903,7 +1903,10 @@ main = print (length "hello")
     );
     assert!(e.contains("[a]"), "var should prettify to [a], got: {e}");
     assert!(!e.contains("_i"), "internal `_i` var names must not leak, got: {e}");
-    assert!(e.contains("String is not a list"), "missing String/list note, got: {e}");
+    assert!(e.contains("not a list of characters"), "missing String/list note, got: {e}");
+    // The note must NOT prescribe string ops here: line is `trie "..."`, a list
+    // is wanted — there is nothing to concatenate or show.
+    assert!(!e.contains("concatenat"), "note must not suggest concatenation, got: {e}");
 
     // `<>` on a list should point the user at `++`.
     let e = compile_err(

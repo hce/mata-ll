@@ -540,9 +540,10 @@ impl TypeError {
         match &self.kind {
             TypeErrorKind::Mismatch(a, b) | TypeErrorKind::RigidMismatch(a, b)
                 if is_string_list_mismatch(a, b) =>
-                Some("in mata-ll String is not a list. List functions (++, map, length, \
-                      take, …) do not accept String; use the string operations instead \
-                      (<> concatenates, show converts to String)."),
+                Some("in mata-ll String is not a list of characters — it is an opaque \
+                      type that does not unify with [a]. A String cannot be passed where \
+                      a list is expected, and list functions (++, map, length, …) do not \
+                      accept it."),
             _ => None,
         }
     }
