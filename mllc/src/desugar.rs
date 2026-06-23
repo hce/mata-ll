@@ -42,13 +42,52 @@ fn desugar_clause(clause: &mut Clause) {
     }
 }
 
+/// Flatten a nested lambda *only when it is the callee of an application*:
+/// `(\t -> \v -> e) 2 3` becomes `(\t v -> e) 2 3`. A nested lambda compiles to
+/// nested 1-arg Lua functions; the call site applies every spine argument in
+/// one n-ary call, so the surplus are silently dropped and the inner function
+/// leaks out. The multi-param form compiles and applies correctly (and the
+/// partial-application path applies all args at once, so partial calls work
+/// too). Crucially this only fires in callee position — a lambda *passed as an
+/// argument* (e.g. `map (\n -> \x -> x + n) ns`, where `map` applies it one arg
+/// at a time and expects a function back) keeps its curried 1-arg-layer shape.
+fn flatten_callee_lambda(app: Expr) -> Expr {
+    let mut args: Vec<Expr> = Vec::new();
+    let mut head = app;
+    while let Expr::App(f, a) = head {
+        args.push(*a);
+        head = *f;
+    }
+    args.reverse();
+    // The callee is almost always parenthesized for application — `(\t -> …) x`
+    // parses as `App(Paren(Lambda), x)`. Peel redundant parens to reach it.
+    while let Expr::Paren(inner) = head {
+        head = *inner;
+    }
+    if let Expr::Lambda { mut params, mut body } = head {
+        loop {
+            match *body {
+                Expr::Lambda { params: inner, body: inner_body } => {
+                    params.extend(inner);
+                    body = inner_body;
+                }
+                // peel a redundant paren around the inner lambda
+                Expr::Paren(inner) if matches!(*inner, Expr::Lambda { .. }) => body = inner,
+                other => { body = Box::new(other); break; }
+            }
+        }
+        head = Expr::Lambda { params, body };
+    }
+    args.into_iter().fold(head, |f, a| Expr::App(Box::new(f), Box::new(a)))
+}
+
 fn desugar_expr(expr: Expr) -> Expr {
     match expr {
         Expr::Do(stmts) => desugar_do(stmts),
-        Expr::App(f, a) => Expr::App(
+        Expr::App(f, a) => flatten_callee_lambda(Expr::App(
             Box::new(desugar_expr(*f)),
             Box::new(desugar_expr(*a)),
-        ),
+        )),
         Expr::Lambda { params, body } => Expr::Lambda {
             params,
             body: Box::new(desugar_expr(*body)),

@@ -1899,6 +1899,101 @@ fn dead_code_is_eliminated() {
     assert_eq!(r, 42, "exported function must survive DCE and run");
 }
 
+// Compile + run an `assert`-based program; a failed assert raises a Lua error,
+// so exec() fails and the test fails (never passes vacuously).
+fn assert_mll(stmts: &str) {
+    let src = format!("main :: IO ()\nmain = do\n{stmts}\n");
+    let lua = mllc::compile(&src, Path::new("."), &[])
+        .unwrap_or_else(|e| panic!("compile failed:\n{e}"))
+        .lua_code;
+    let l = mlua::Lua::new();
+    l.load(&lua).set_name("lambda_test").exec()
+        .expect("program should run with all asserts holding");
+}
+
+// Regression battery for curried lambdas `\t -> \v -> …`. These compiled to
+// nested 1-arg Lua functions but the call site applied every argument in one
+// n-ary call, so surplus args were dropped and the inner function leaked out
+// (`(\t -> \v -> t + v) 2 3` returned a function instead of 5). The fix flattens
+// a lambda only in callee position, leaving argument-position lambdas curried.
+
+#[test]
+fn curried_lambda_full_application() {
+    assert_mll("    assert ((\\t -> \\v -> t + v) 2 3 == 5) \"full app\"");
+}
+
+#[test]
+fn curried_lambda_partial_then_apply() {
+    assert_mll("    let g = (\\a -> \\b -> a + b) 10\n    assert (g 5 == 15) \"partial\"");
+}
+
+#[test]
+fn curried_lambda_triple_full() {
+    assert_mll("    assert ((\\a -> \\b -> \\c -> a + b + c) 1 2 3 == 6) \"triple full\"");
+}
+
+#[test]
+fn curried_lambda_triple_partial() {
+    assert_mll("    let g = (\\a -> \\b -> \\c -> a + b + c) 1\n    assert (g 2 3 == 6) \"triple partial\"");
+}
+
+#[test]
+fn curried_lambda_parenthesized_inner() {
+    assert_mll("    assert ((\\t -> (\\v -> t - v)) 10 3 == 7) \"paren inner\"");
+}
+
+#[test]
+fn curried_lambda_four_levels() {
+    assert_mll("    assert ((\\a -> \\b -> \\c -> \\d -> a + b + c + d) 1 2 3 4 == 10) \"four levels\"");
+}
+
+#[test]
+fn curried_lambda_captures_outer_binding() {
+    assert_mll("    let k = 100\n    assert ((\\a -> \\b -> a + b + k) 1 2 == 103) \"capture\"");
+}
+
+#[test]
+fn curried_lambda_non_integer_result() {
+    // const-like: returns the first argument, ignores the second
+    assert_mll("    assert ((\\s -> \\n -> s) \"hi\" (5 :: Integer) == \"hi\") \"const\"");
+}
+
+#[test]
+fn curried_lambda_returns_list() {
+    assert_mll("    assert ((\\x -> \\y -> [x, y]) (1 :: Integer) 2 == [1, 2]) \"list result\"");
+}
+
+#[test]
+fn curried_lambda_embedded_in_expression() {
+    assert_mll("    assert (((\\a -> \\b -> a * b) 6 7) + 1 == 43) \"embedded\"");
+}
+
+#[test]
+fn curried_lambda_takes_function_argument() {
+    // Higher-order *and* curried: first parameter is itself a function.
+    assert_mll("    assert ((\\f -> \\x -> f x + 1) (\\y -> y * 2) 10 == 21) \"fn arg\"");
+}
+
+#[test]
+fn curried_lambda_in_higher_order_stays_curried() {
+    // The complementary case a naive flatten would break: `map` applies the
+    // lambda to ONE argument and expects a function back, so an argument-
+    // position lambda must keep its curried 1-arg-layer shape.
+    let src = r#"
+applyAll :: [a -> b] -> a -> [b]
+applyAll []     _ = []
+applyAll (f:fs) x = f x : applyAll fs x
+
+main :: IO ()
+main = do
+    let fns = map (\n -> \x -> x + n) [1, 5, 10]
+    assert (applyAll fns 42 == [43, 47, 52]) "higher-order curried"
+"#;
+    let lua = mllc::compile(src, Path::new("."), &[]).expect("compile").lua_code;
+    let l = mlua::Lua::new();
+    l.load(&lua).set_name("ho_curried").exec().expect("higher-order curried lambda should work");
+}
+
 fn compile_err(source: &str) -> String {
     match mllc::compile(source, Path::new("."), &[]) {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
