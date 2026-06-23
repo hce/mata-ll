@@ -9,6 +9,23 @@ use crate::tir::*;
 use crate::typechecker::{Checker, ClassInfo};
 use crate::types::{Ty, TyVar, TyConstraint, Subst};
 
+/// Format a "No instance" error, appending a mata-ll-specific hint when the
+/// (method, type) pair is a known GHC-vs-mata-ll divergence.
+fn no_instance_msg(method: &str, ty: &Ty) -> String {
+    let mut msg = format!("No instance for '{}' on type '{}'", method, ty);
+    let hint = match method {
+        "<>" if matches!(ty, Ty::List(_)) =>
+            Some("lists are concatenated with ++ in mata-ll; <> (Semigroup) is only defined for String"),
+        ">" | "<" | ">=" | "<=" | "compare" | "max" | "min" if matches!(ty, Ty::Tuple(_)) =>
+            Some("tuples have no Ord instance in mata-ll; compare their components individually"),
+        _ => None,
+    };
+    if let Some(h) = hint {
+        msg.push_str(&format!("\n  note: {}", h));
+    }
+    msg
+}
+
 /// A specialization demand: function name + concrete type arguments
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct SpecKey {
@@ -505,9 +522,7 @@ impl Monomorphizer {
                     }
                     // No resolution found for a class method on a concrete type
                     if let Some(arg_ty) = self.first_arg_type(&ty) {
-                        self.errors.push(format!(
-                            "No instance for '{}' on type '{}'", name, arg_ty
-                        ));
+                        self.errors.push(no_instance_msg(&name, &arg_ty));
                     }
                 }
                 // 2. Check for polymorphic function specialization
@@ -743,9 +758,7 @@ impl Monomorphizer {
                         }
                     } else if !self.is_polymorphic(&lhs.ty) {
                         // No resolution found for a class method on a concrete type
-                        self.errors.push(format!(
-                            "No instance for '{}' on type '{}'", op, lhs.ty
-                        ));
+                        self.errors.push(no_instance_msg(&op, &lhs.ty));
                     }
                 }
                 TExprKind::InfixApp {

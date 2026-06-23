@@ -1889,3 +1889,39 @@ main = pure ()
         "concrete state should be rejected, got: {e}"
     );
 }
+
+#[test]
+fn type_errors_are_explained_not_cryptic() {
+    // Passing a String to a list-typed function: internal unification vars
+    // must render as friendly letters (a, b, …), never as `_i700`, and the
+    // message must explain that String is not a list in mata-ll.
+    let e = compile_err(
+        r#"
+main :: IO ()
+main = print (length "hello")
+"#,
+    );
+    assert!(e.contains("[a]"), "var should prettify to [a], got: {e}");
+    assert!(!e.contains("_i"), "internal `_i` var names must not leak, got: {e}");
+    assert!(e.contains("String is not a list"), "missing String/list note, got: {e}");
+
+    // `<>` on a list should point the user at `++`.
+    let e = compile_err(
+        r#"
+main :: IO ()
+main = print ([1, 2] <> [3, 4] :: [Integer])
+"#,
+    );
+    assert!(e.contains("No instance for '<>'"), "got: {e}");
+    assert!(e.contains("concatenated with ++"), "missing ++ note, got: {e}");
+
+    // Ordering whole tuples should explain the missing Ord instance.
+    let e = compile_err(
+        r#"
+main :: IO ()
+main = print ((1, 2) > (1, 3) :: Bool)
+"#,
+    );
+    assert!(e.contains("No instance for '>'"), "got: {e}");
+    assert!(e.contains("no Ord instance"), "missing tuple Ord note, got: {e}");
+}

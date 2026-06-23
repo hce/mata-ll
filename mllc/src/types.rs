@@ -487,15 +487,84 @@ pub enum TypeErrorKind {
     Other(String),
 }
 
+/// Render the i-th friendly type-variable name: a, b, … z, a1, b1, …
+fn pretty_var_name(i: usize) -> String {
+    let letter = (b'a' + (i % 26) as u8) as char;
+    let suffix = i / 26;
+    if suffix == 0 { letter.to_string() } else { format!("{}{}", letter, suffix) }
+}
+
+/// Build a substitution that renames internal unification variables (names
+/// starting with '_', e.g. `_i700`) to friendly letters `a, b, c, …`. The map
+/// is shared across all the given types so the same variable reads the same on
+/// every side of the message. User-written variable names (which don't start
+/// with '_') are left untouched, and friendly letters skip any they already use.
+fn pretty_var_subst(tys: &[&Ty]) -> Subst {
+    let mut vars: Vec<TyVar> = Vec::new();
+    for t in tys {
+        for v in t.free_vars() {
+            if !vars.contains(&v) { vars.push(v); }
+        }
+    }
+    let mut used: std::collections::HashSet<String> = vars
+        .iter()
+        .filter(|v| !v.name.starts_with('_'))
+        .map(|v| v.name.clone())
+        .collect();
+    let mut map = HashMap::new();
+    let mut counter = 0usize;
+    for v in &vars {
+        if !v.name.starts_with('_') { continue; }
+        let name = loop {
+            let candidate = pretty_var_name(counter);
+            counter += 1;
+            if !used.contains(&candidate) { break candidate; }
+        };
+        used.insert(name.clone());
+        map.insert(v.clone(), Ty::Var(TyVar { name, id: v.id }));
+    }
+    Subst::from_map(map)
+}
+
+/// True when one side is `String` and the other is a list — mata-ll's most
+/// common confusion, since String is not `[Char]` here.
+fn is_string_list_mismatch(a: &Ty, b: &Ty) -> bool {
+    let is_str = |t: &Ty| matches!(t, Ty::Con(n) if n == "String");
+    let is_list = |t: &Ty| matches!(t, Ty::List(_));
+    (is_str(a) && is_list(b)) || (is_list(a) && is_str(b))
+}
+
+impl TypeError {
+    /// An optional mata-ll-specific explanation appended below the error.
+    fn hint(&self) -> Option<&'static str> {
+        match &self.kind {
+            TypeErrorKind::Mismatch(a, b) | TypeErrorKind::RigidMismatch(a, b)
+                if is_string_list_mismatch(a, b) =>
+                Some("in mata-ll String is not a list. List functions (++, map, length, \
+                      take, …) do not accept String; use the string operations instead \
+                      (<> concatenates, show converts to String)."),
+            _ => None,
+        }
+    }
+}
+
 impl fmt::Display for TypeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            TypeErrorKind::Mismatch(a, b) =>
-                write!(f, "Cannot unify '{}' with '{}'", a, b)?,
-            TypeErrorKind::RigidMismatch(a, b) =>
-                write!(f, "Cannot match '{}' with '{}': rank-2 polymorphism requires a polymorphic argument", a, b)?,
-            TypeErrorKind::OccursCheck(v, ty) =>
-                write!(f, "Infinite type: {} occurs in {}", v, ty)?,
+            TypeErrorKind::Mismatch(a, b) => {
+                let s = pretty_var_subst(&[a, b]);
+                write!(f, "Cannot unify '{}' with '{}'", a.apply_subst(&s), b.apply_subst(&s))?
+            }
+            TypeErrorKind::RigidMismatch(a, b) => {
+                let s = pretty_var_subst(&[a, b]);
+                write!(f, "Cannot match '{}' with '{}': rank-2 polymorphism requires a polymorphic argument",
+                    a.apply_subst(&s), b.apply_subst(&s))?
+            }
+            TypeErrorKind::OccursCheck(v, ty) => {
+                let vt = Ty::Var(v.clone());
+                let s = pretty_var_subst(&[&vt, ty]);
+                write!(f, "Infinite type: {} occurs in {}", vt.apply_subst(&s), ty.apply_subst(&s))?
+            }
             TypeErrorKind::UnboundVariable(name) =>
                 write!(f, "Unbound variable: {}", name)?,
             TypeErrorKind::UnboundConstructor(name) =>
@@ -505,9 +574,11 @@ impl fmt::Display for TypeError {
                     constructor, expected, got)?,
             TypeErrorKind::NonExhaustive(name) =>
                 write!(f, "Non-exhaustive patterns in {}", name)?,
-            TypeErrorKind::TypeSigMismatch { name, declared, inferred } =>
+            TypeErrorKind::TypeSigMismatch { name, declared, inferred } => {
+                let s = pretty_var_subst(&[declared, inferred]);
                 write!(f, "Type signature for '{}' doesn't match: declared {}, inferred {}",
-                    name, declared, inferred)?,
+                    name, declared.apply_subst(&s), inferred.apply_subst(&s))?
+            }
             TypeErrorKind::Other(msg) => write!(f, "{}", msg)?,
         }
         if let Some(ctx) = &self.context {
@@ -518,6 +589,9 @@ impl fmt::Display for TypeError {
             }
         } else if let Some(span) = &self.span {
             write!(f, "\n  at {}:{}", span.line, span.col)?;
+        }
+        if let Some(hint) = self.hint() {
+            write!(f, "\n  note: {}", hint)?;
         }
         Ok(())
     }
