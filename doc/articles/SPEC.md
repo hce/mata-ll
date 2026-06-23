@@ -739,8 +739,8 @@ String literals use double quotes with C-style escape sequences:
         show LLM   = "LLM"
 
     instance Show a => Show (Tree a) where
-        show (Leaf x)     = "Leaf " ++ show x
-        show (Branch l r) = "Branch (" ++ show l ++ ") (" ++ show r ++ ")"
+        show (Leaf x)     = "Leaf " <> show x
+        show (Branch l r) = "Branch (" <> show l <> ") (" <> show r <> ")"
 
 Superclass constraints on instances? Yes.
 
@@ -765,7 +765,7 @@ up from a Lua table parameter instead of being resolved statically.
 
     showDeep :: Show a => Deep a -> String
     showDeep DNil = "end"
-    showDeep (DCons x rest) = show x ++ " > " ++ showDeep rest
+    showDeep (DCons x rest) = show x <> " > " <> showDeep rest
 
 Here `showDeep` calls itself at `Deep (Box a)`, then
 `Deep (Box (Box a))`, etc. The compiler generates up to 16
@@ -1001,7 +1001,7 @@ receives the error message and produces a recovery action.
         result <- try (readFile "missing.txt")
         case result of
             Right contents -> putStrLn contents
-            Left err       -> putStrLn ("Error: " ++ err)
+            Left err       -> putStrLn ("Error: " <> err)
 
 Design decisions:
 - Only IO errors are catchable (category (a): Lua runtime errors).
