@@ -1,5 +1,6 @@
 pub mod ast;
 pub mod codegen;
+pub mod dce;
 pub mod demand;
 pub mod desugar;
 pub mod fold;
@@ -134,6 +135,10 @@ pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<C
 
     // Constant folding
     let mono_module = fold::fold_module(mono_module);
+
+    // Dead-code elimination: drop functions (auto-prelude, unused specializations
+    // and instance methods) not reachable from main/exports.
+    let mono_module = dce::eliminate(mono_module);
 
     // Generate Lua
     let lua_code = codegen::generate(&mono_module);

@@ -1872,6 +1872,33 @@ fn prelude_is_emitted_on_demand() {
         "on-demand prelude should track usage, not emit the whole runtime");
 }
 
+#[test]
+fn dead_code_is_eliminated() {
+    let fn_count = |src: &str| -> usize {
+        mllc::compile(src, Path::new("."), &[])
+            .expect("should compile")
+            .lua_code
+            .matches("= function").count()
+    };
+    // A trivial program must not carry the unused auto-prelude.
+    let trivial = fn_count("main :: IO ()\nmain = putStrLn \"hi\"\n");
+    let prelude_heavy = fn_count(
+        "main :: IO ()\nmain = print (foldr (+) 0 (map (\\x -> x * 2) (filter (\\x -> x > 0) [1, 2, 3, 4 :: Integer])))\n",
+    );
+    assert!(trivial < prelude_heavy,
+        "trivial ({trivial} fns) should emit fewer functions than prelude-heavy ({prelude_heavy} fns)");
+    assert!(trivial < 25, "trivial program should be tiny after DCE, got {trivial} fns");
+
+    // Exports are roots: an exported function survives DCE even when `main`
+    // never calls it (it is reachable only from outside).
+    let (_lua, module) = compile_ffi_module(
+        "export twice :: Integer -> Integer\ntwice x = x + x\nmain :: IO ()\nmain = pure ()\n",
+    );
+    let twice: mlua::Function = module.get("twice").unwrap();
+    let r: i64 = twice.call(21).unwrap();
+    assert_eq!(r, 42, "exported function must survive DCE and run");
+}
+
 fn compile_err(source: &str) -> String {
     match mllc::compile(source, Path::new("."), &[]) {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
