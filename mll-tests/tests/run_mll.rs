@@ -1990,3 +1990,58 @@ main = do
         .unwrap();
     assert_eq!(lines, vec!["[]", "[[1, 2], []]", "Nothing"]);
 }
+
+#[test]
+fn derived_show_uses_constructor_names_and_parens() {
+    // Regression: derived Show must render constructor names (not numeric tags
+    // or tuples), recurse through polymorphic types (Tree a b / Box a), and
+    // parenthesize constructor-application fields like GHC (showsPrec 11):
+    // nullary/atomic fields stay bare, negatives get parens.
+    let source = r#"
+data Tree a b = Leaf a b | Branch (Tree a b) (Tree a b) deriving (Show)
+data Box a = MkBox a deriving (Show)
+data C = Red | Green deriving (Show)
+data P a = P a a deriving (Show)
+data B = MkB Integer deriving (Show)
+
+main :: IO ()
+main = do
+    print (Branch (Leaf (1 :: Integer) (2 :: Integer)) (Leaf 3 4))
+    print (MkBox (MkBox (5 :: Integer)))
+    print (P Red Green)
+    print (MkB (0 - 5))
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+
+    let lua = mlua::Lua::new();
+    let captured = lua.create_table().unwrap();
+    lua.globals().set("__captured", captured.clone()).unwrap();
+    let print_fn = lua
+        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+            let line = s.to_str()?.to_string();
+            let t: mlua::Table = lua.globals().get("__captured")?;
+            let n = t.raw_len();
+            t.raw_set(n + 1, line)?;
+            Ok(())
+        })
+        .unwrap();
+    lua.globals().set("print", print_fn).unwrap();
+    lua.load(&lua_code).set_name("derived_show").exec()
+        .expect("should run");
+
+    let lines: Vec<String> = captured
+        .sequence_values::<String>()
+        .collect::<mlua::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        lines,
+        vec![
+            "Branch (Leaf 1 2) (Leaf 3 4)", // polymorphic recursion + parens
+            "MkBox (MkBox 5)",              // nested poly constructor
+            "P Red Green",                  // nullary fields: no parens
+            "MkB (-5)",                     // negative: parens
+        ]
+    );
+}

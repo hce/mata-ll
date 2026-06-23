@@ -158,6 +158,15 @@ impl Monomorphizer {
                 self.poly_fns.insert(func.name.clone(), func.clone());
             }
         }
+        // Polymorphic derived/instance methods (e.g. show_Box :: Box a -> String)
+        // must be specializable per concrete type too, so `show` on a nested
+        // value resolves to the concrete field show instead of the type-erased
+        // runtime `show`. The generic copy still serves as the fallback.
+        for func in &module.instance_fns {
+            if self.is_polymorphic(&func.ty) && !self.builtins.contains(&func.name) {
+                self.poly_fns.entry(func.name.clone()).or_insert_with(|| func.clone());
+            }
+        }
 
         // Monomorphize instance methods too
         let mut instance_fns: Vec<TFunction> = module.instance_fns.iter()
@@ -322,6 +331,45 @@ impl Monomorphizer {
     fn mangle_name(&mut self, name: &str, ty: &Ty) -> String {
         let ty_str = self.ty_to_suffix(ty);
         format!("{}_{}", name, ty_str)
+    }
+
+    /// Specialize a derived `show` for a parameterized user data type at a
+    /// concrete argument type. The generic `show_Box :: Box a -> String` shows
+    /// its fields with the type-erased runtime `show` (which can't recover
+    /// constructor names, so nested values print as tuples). Cloning it per
+    /// concrete type and re-running monomorphization on the body resolves each
+    /// field's `show` to the concrete field type — recursively. Returns `base`
+    /// unchanged when there is nothing to specialize (monomorphic type, still
+    /// polymorphic, or the polymorphic-recursion guard trips).
+    fn specialize_derived_show(&mut self, base: &str, arg_ty: &Ty) -> String {
+        if self.is_polymorphic(arg_ty) || !self.poly_fns.contains_key(base) {
+            return base.to_string();
+        }
+        let fn_ty = Ty::arrow(arg_ty.clone(), Ty::Con("String".into()));
+        let key = SpecKey { name: base.to_string(), ty: format!("{}", fn_ty) };
+        if let Some(existing) = self.specializations.get(&key) {
+            return existing.clone();
+        }
+        if self.specializations.keys().filter(|k| k.name == base).count() > 16 {
+            return base.to_string();
+        }
+        let mangled = self.mangle_name(base, &fn_ty);
+        // Insert before generating the body so a recursive field of the same
+        // type resolves to this same specialization instead of looping.
+        self.specializations.insert(key, mangled.clone());
+        if let Some(poly_fn) = self.poly_fns.get(base).cloned() {
+            let subst = Self::compute_body_subst(&poly_fn, &fn_ty);
+            let mut spec_fn = poly_fn.clone();
+            spec_fn.name = mangled.clone();
+            spec_fn.ty = fn_ty;
+            spec_fn.clauses = spec_fn.clauses.into_iter()
+                .map(|c| c.apply_subst(&subst))
+                .collect();
+            spec_fn.specialized = true;
+            spec_fn = self.mono_function(spec_fn);
+            self.generated.push(spec_fn);
+        }
+        mangled
     }
 
     fn ty_to_suffix(&self, ty: &Ty) -> String {
@@ -501,10 +549,13 @@ impl Monomorphizer {
                         if let Some(mangled) = self.instance_methods.get(&key).cloned() {
                             return TExpr { kind: TExprKind::Var(mangled), ty };
                         } else if let Some(mangled) = self.resolve_parameterized_instance(name, &arg_ty) {
-                            if name == "show"
-                                && let Some(specialized) = self.generate_container_show(&arg_ty) {
+                            if name == "show" {
+                                if let Some(specialized) = self.generate_container_show(&arg_ty) {
                                     return TExpr { kind: TExprKind::Var(specialized), ty };
                                 }
+                                let specialized = self.specialize_derived_show(&mangled, &arg_ty);
+                                return TExpr { kind: TExprKind::Var(specialized), ty };
+                            }
                             return TExpr { kind: TExprKind::Var(mangled), ty };
                         } else if let Ty::Tuple(elem_tys) = &arg_ty
                             && name == "show" {
@@ -615,10 +666,13 @@ impl Monomorphizer {
                             if fname == "show" {
                                 if let Ty::Tuple(elem_tys) = arg_ty {
                                     resolved = Some(self.generate_tuple_show(elem_tys));
-                                } else if resolved.is_some()
-                                    && let Some(specialized) = self.generate_container_show(arg_ty) {
+                                } else if resolved.is_some() {
+                                    if let Some(specialized) = self.generate_container_show(arg_ty) {
                                         resolved = Some(specialized);
+                                    } else if let Some(base) = resolved.clone() {
+                                        resolved = Some(self.specialize_derived_show(&base, arg_ty));
                                     }
+                                }
                             }
                             // Fallback: extract type constructor from result type
                             // (for higher-kinded methods like fmap, pure)

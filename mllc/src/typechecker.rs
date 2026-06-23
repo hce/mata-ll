@@ -1928,16 +1928,26 @@ impl Checker {
                     Ty::Con("String".into()),
                 );
 
-                // show field_i
+                // __mll_show_arg (show field_i) — parenthesize the field if it is
+                // a constructor application or negative number (GHC showsPrec 11).
                 let field_shown = TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(
-                            TExprKind::Var("show".into()),
-                            Ty::arrow(field_ty.clone(), Ty::Con("String".into())),
+                            TExprKind::Var("__mll_show_arg".into()),
+                            Ty::arrow(Ty::Con("String".into()), Ty::Con("String".into())),
                         )),
                         Box::new(TExpr::new(
-                            TExprKind::Var(pname.clone()),
-                            field_ty,
+                            TExprKind::App(
+                                Box::new(TExpr::new(
+                                    TExprKind::Var("show".into()),
+                                    Ty::arrow(field_ty.clone(), Ty::Con("String".into())),
+                                )),
+                                Box::new(TExpr::new(
+                                    TExprKind::Var(pname.clone()),
+                                    field_ty,
+                                )),
+                            ),
+                            Ty::Con("String".into()),
                         )),
                     ),
                     Ty::Con("String".into()),

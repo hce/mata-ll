@@ -217,7 +217,7 @@ impl CodeGen {
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList",
             "__mll_list_append", "__mll_list_index", "semigroup_String", "semigroup_List",
-            "__mll_show_list", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
+            "__mll_show_list", "__mll_show_arg", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
@@ -3214,6 +3214,19 @@ local function __mll_maybe_eq(elem_eq, a, b)
     if a == nil and b == nil then return true end
     if a == nil or b == nil then return false end
     return elem_eq(a, b)
+end
+local function __mll_show_arg(s)
+    s = __force(s)
+    -- Parenthesize a derived-Show field at argument position: a constructor
+    -- application ("Con a b") or a negative number, matching GHC's showsPrec 11.
+    local c = string.byte(s, 1)
+    if c == nil then return s end
+    local d = string.byte(s, 2)
+    if (c >= 65 and c <= 90 and string.find(s, " ", 1, true))
+       or (c == 45 and d ~= nil and d >= 48 and d <= 57) then
+        return "(" .. s .. ")"
+    end
+    return s
 end
 local function __mll_show_list(elem_show, xs)
     xs = __force(xs)
