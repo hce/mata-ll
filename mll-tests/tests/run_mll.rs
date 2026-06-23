@@ -1994,6 +1994,74 @@ main = do
     l.load(&lua).set_name("ho_curried").exec().expect("higher-order curried lambda should work");
 }
 
+// A class constraint with no instance must be rejected at type-check time,
+// rather than silently falling through to a runtime `tostring`.
+
+#[test]
+fn no_show_instance_for_function() {
+    let e = compile_err("main :: IO ()\nmain = putStrLn (show (\\a b -> a + b))\n");
+    assert!(e.contains("No instance for 'Show (a -> a -> a)'"), "got: {e}");
+    assert!(e.contains("no Show/Eq/Ord instance"), "missing function note, got: {e}");
+}
+
+#[test]
+fn no_eq_instance_for_function() {
+    let e = compile_err("main :: IO ()\nmain = print ((\\x -> x :: Integer) == (\\x -> x))\n");
+    assert!(e.contains("No instance for 'Eq (Integer -> Integer)'"), "got: {e}");
+}
+
+#[test]
+fn no_ord_instance_for_function() {
+    let e = compile_err(
+        "f :: (Integer -> Integer) -> Bool\nf g = g < g\nmain :: IO ()\nmain = print (f (\\x -> x))\n",
+    );
+    assert!(e.contains("No instance for 'Ord (Integer -> Integer)'"), "got: {e}");
+}
+
+#[test]
+fn no_show_instance_for_tuple_containing_function() {
+    let e = compile_err("main :: IO ()\nmain = putStrLn (show ((1 :: Integer), (\\x -> x :: Integer)))\n");
+    assert!(e.contains("No instance for 'Show (Integer, Integer -> Integer)'"), "got: {e}");
+}
+
+#[test]
+fn no_show_instance_for_io_action() {
+    let e = compile_err("main :: IO ()\nmain = print (putStrLn \"x\")\n");
+    assert!(e.contains("No instance for"), "got: {e}");
+    assert!(e.contains("IO"), "should mention the IO action type, got: {e}");
+}
+
+#[test]
+fn constraint_propagates_through_print() {
+    // `print :: Show a => …` — its constraint is checked at the call site, so
+    // even a never-applied (polymorphic) function is rejected.
+    let e = compile_err("main :: IO ()\nmain = print (\\a b -> a + b)\n");
+    assert!(e.contains("No instance for 'Show (a -> a -> a)'"), "got: {e}");
+}
+
+#[test]
+fn constraint_propagates_through_user_function() {
+    let e = compile_err(
+        "needsShow :: Show a => a -> String\nneedsShow x = show x\nmain :: IO ()\nmain = putStrLn (needsShow (\\y -> y + (1 :: Integer)))\n",
+    );
+    assert!(e.contains("No instance for 'Show (Integer -> Integer)'"), "got: {e}");
+}
+
+#[test]
+fn valid_show_constraints_still_compile() {
+    // Base types, structural containers, and a properly-constrained polymorphic
+    // function must all still type-check.
+    for src in [
+        "main :: IO ()\nmain = print (42 :: Integer)\n",
+        "main :: IO ()\nmain = print (Just [1, 2, 3 :: Integer])\n",
+        "main :: IO ()\nmain = print ([(1, 2), (3, 4)] :: [(Integer, Integer)])\n",
+        "p :: Show a => a -> IO ()\np x = putStrLn (show x)\nmain :: IO ()\nmain = p (42 :: Integer)\n",
+        "main :: IO ()\nmain = print (Just (1 :: Integer) == Just 1)\n",
+    ] {
+        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+    }
+}
+
 fn compile_err(source: &str) -> String {
     match mllc::compile(source, Path::new("."), &[]) {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
@@ -2065,14 +2133,15 @@ main = print ([1, 2] <> [3, 4] :: [Integer])
     assert!(e.contains("No instance for '<>'"), "got: {e}");
     assert!(e.contains("concatenated with ++"), "missing ++ note, got: {e}");
 
-    // Ordering whole tuples should explain the missing Ord instance.
+    // Ordering whole tuples is rejected at type-check with the missing-instance
+    // explanation (the checker discharges the Ord constraint before codegen).
     let e = compile_err(
         r#"
 main :: IO ()
 main = print ((1, 2) > (1, 3) :: Bool)
 "#,
     );
-    assert!(e.contains("No instance for '>'"), "got: {e}");
+    assert!(e.contains("No instance for 'Ord (Integer, Integer)'"), "got: {e}");
     assert!(e.contains("no Ord instance"), "missing tuple Ord note, got: {e}");
 }
 

@@ -119,6 +119,19 @@ pub struct Checker {
     orphan_check_enabled: bool,
     /// Typeclass constraints per function name (for dictionary-passing fallback)
     fn_constraints: HashMap<String, Vec<TyConstraint>>,
+    /// Class constraints carried by a class method, keyed by method name
+    /// (e.g. "show" -> [Show a]). Instantiating the method emits a wanted
+    /// constraint on the freshened type so it can be discharged.
+    method_constraints: HashMap<String, Vec<TyConstraint>>,
+    /// A function's signature constraints, expressed over the *freshened*
+    /// variable names its caller-visible scheme uses (so a call site can map
+    /// each constraint to the freshly-instantiated type). E.g. with `needsShow
+    /// :: Show a => …` freshened to `a519`, this holds [Show a519].
+    fn_use_constraints: HashMap<String, Vec<TyConstraint>>,
+    /// Wanted class constraints collected while checking the current function:
+    /// (class name, the instantiated type the constraint applies to). Discharged
+    /// at the function boundary once unification has resolved the type.
+    wanted: Vec<(String, Ty)>,
 }
 
 impl Default for Checker {
@@ -148,6 +161,9 @@ impl Checker {
             local_types: HashSet::new(),
             orphan_check_enabled: false,
             fn_constraints: HashMap::new(),
+            method_constraints: HashMap::new(),
+            fn_use_constraints: HashMap::new(),
+            wanted: Vec::new(),
         };
         checker.init_prelude();
         checker.init_kinds();
@@ -167,13 +183,85 @@ impl Checker {
     }
 
     fn instantiate(&mut self, scheme: &Scheme) -> Ty {
+        self.instantiate_with_map(scheme).0
+    }
+
+    /// Instantiate a scheme, also returning the var→fresh-type map so callers
+    /// can relate a class constraint's bound variable to its fresh type.
+    fn instantiate_with_map(&mut self, scheme: &Scheme) -> (Ty, HashMap<TyVar, Ty>) {
         let mut map = HashMap::new();
         for v in &scheme.vars {
             if let Ty::Var(fresh) = self.fresh_var("_i") {
                 map.insert(v.clone(), Ty::Var(fresh));
             }
         }
-        scheme.ty.apply_subst(&Subst::from_map(map))
+        (scheme.ty.apply_subst(&Subst::from_map(map.clone())), map)
+    }
+
+    /// Does `class` have an instance for `ty`? Conservative: a type variable or
+    /// rigid skolem is treated as satisfiable (deferred to the caller), and a
+    /// container (list/tuple/applied type) is satisfiable when its components
+    /// are. Only the cases that genuinely never have an instance — functions,
+    /// IO/ST actions, and a concrete type constructor with no registered
+    /// instance — are rejected.
+    fn has_instance(&self, class: &str, ty: &Ty) -> bool {
+        match ty {
+            // Polymorphic — not this definition's job to discharge.
+            Ty::Var(_) | Ty::Skolem(..) => true,
+            // No instance for functions or effectful actions, ever.
+            Ty::Arrow(_, _) | Ty::Forall(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => false,
+            Ty::Promoted(_) => false,
+            Ty::Unit => true,
+            // Lists/tuples are structural for Show and Eq (mono generates the
+            // instance), but not for Ord — mata-ll has no list/tuple ordering.
+            Ty::List(elem) => structural_container_class(class) && self.has_instance(class, elem),
+            Ty::Tuple(elems) =>
+                structural_container_class(class) && elems.iter().all(|e| self.has_instance(class, e)),
+            Ty::Con(name) => self.instances.contains_key(&(class.to_string(), name.clone())),
+            Ty::App(_, _) => {
+                // Peel `T a b …` to its head constructor and argument types.
+                let mut head = ty;
+                let mut args: Vec<&Ty> = Vec::new();
+                while let Ty::App(f, a) = head {
+                    args.push(a.as_ref());
+                    head = f.as_ref();
+                }
+                match head {
+                    // Maybe is structural for Show/Eq like lists are; its built-in
+                    // Eq isn't a registered instance, so check it the same way.
+                    Ty::Con(base) if base == "Maybe" =>
+                        structural_container_class(class) && args.iter().all(|a| self.has_instance(class, a)),
+                    // Other type constructors need a registered (derived) instance.
+                    Ty::Con(base) =>
+                        self.instances.contains_key(&(class.to_string(), base.clone()))
+                            && args.iter().all(|a| self.has_instance(class, a)),
+                    _ => true, // unknown head — defer rather than over-reject
+                }
+            }
+        }
+    }
+
+    /// Emit the wanted class constraints for a use of `name`, mapping each
+    /// constrained variable to its freshly-instantiated type. Covers both
+    /// built-in class methods (`show`/`==`/…) and any user/prelude function
+    /// whose signature carries constraints (e.g. `print :: Show a => …`), so a
+    /// constraint is checked wherever the function is called.
+    fn emit_use_constraints(&mut self, name: &str, inst_map: &HashMap<TyVar, Ty>) {
+        let mut constraints: Vec<TyConstraint> = Vec::new();
+        if let Some(cs) = self.method_constraints.get(name) {
+            constraints.extend(cs.iter().cloned());
+        }
+        if let Some(cs) = self.fn_use_constraints.get(name) {
+            constraints.extend(cs.iter().cloned());
+        }
+        for c in &constraints {
+            if let Some(fresh) = inst_map.iter()
+                .find(|(v, _)| v.name == c.type_var)
+                .map(|(_, t)| t.clone())
+            {
+                self.wanted.push((c.class_name.clone(), fresh));
+            }
+        }
     }
 
     fn generalize(&self, env: &TypeEnv, ty: &Ty) -> Scheme {
@@ -392,25 +480,34 @@ impl Checker {
     }
 
     fn freshen_sig_type(&mut self, ty: &Ty) -> Ty {
+        self.freshen_sig_type_mapped(ty).0
+    }
+
+    /// Like `freshen_sig_type` but also returns the renaming of signature
+    /// variables (original name → fresh name), so a function's class
+    /// constraints can be re-expressed over the freshened variables its
+    /// caller-visible scheme actually uses.
+    fn freshen_sig_type_mapped(&mut self, ty: &Ty) -> (Ty, HashMap<String, String>) {
         // Strip forall and bind scope variables as rigid
         let inner = match ty {
             Ty::Forall(v, inner) => {
-                // The forall-bound variable gets a fresh rigid binding
-                // but stays rigid (can't unify with other types)
                 let fresh = self.fresh_tyvar(&v.name);
                 let subst = Subst::singleton(v.clone(), Ty::Var(fresh));
-                return self.freshen_sig_type(&inner.apply_subst(&subst));
+                return self.freshen_sig_type_mapped(&inner.apply_subst(&subst));
             }
             other => other,
         };
         let vars = inner.free_vars();
         let mut map = HashMap::new();
+        let mut renames = HashMap::new();
         for v in &vars {
             if v.id == u32::MAX {
-                map.insert(v.clone(), Ty::Var(self.fresh_tyvar(&v.name)));
+                let fresh = self.fresh_tyvar(&v.name);
+                renames.insert(v.name.clone(), fresh.name.clone());
+                map.insert(v.clone(), Ty::Var(fresh));
             }
         }
-        inner.apply_subst(&Subst::from_map(map))
+        (inner.apply_subst(&Subst::from_map(map)), renames)
     }
 
     fn push_error_ctx(&mut self, kind: TypeErrorKind, ctx: String) {
@@ -1083,6 +1180,22 @@ impl Checker {
                 vars: vec![a.clone()],
                 ty: cmp_ty.clone(),
             });
+        }
+
+        // Class constraints carried by the built-in class methods. Each
+        // constrains the class variable "a"; a use whose "a" resolves to a
+        // concrete type with no instance (a function, an IO action, a type
+        // without the relevant deriving) is rejected at the function boundary.
+        let cm: &[(&str, &str)] = &[
+            ("show", "Show"), ("read", "Read"),
+            ("==", "Eq"), ("/=", "Eq"),
+            ("<", "Ord"), (">", "Ord"), ("<=", "Ord"), (">=", "Ord"),
+        ];
+        for (method, class) in cm {
+            self.method_constraints.insert(method.to_string(), vec![TyConstraint {
+                class_name: class.to_string(),
+                type_var: "a".to_string(),
+            }]);
         }
 
         // Ord instances for base types
@@ -2967,7 +3080,19 @@ impl Checker {
 
     fn check_function(&mut self, name: &str, clauses: &[Clause], declared_ty: &Ty) -> Option<TFunction> {
         self.current_fn = Some(name.to_string());
-        let fresh_ty = self.freshen_sig_type(declared_ty);
+        self.wanted.clear();
+        let (fresh_ty, renames) = self.freshen_sig_type_mapped(declared_ty);
+
+        // Re-express this function's declared constraints over the freshened
+        // variable names, so a caller can match each constraint to the type it
+        // instantiates the function at (and reject e.g. `print` of a function).
+        if let Some(cs) = self.fn_constraints.get(name) {
+            let renamed: Vec<TyConstraint> = cs.iter().map(|c| TyConstraint {
+                class_name: c.class_name.clone(),
+                type_var: renames.get(&c.type_var).cloned().unwrap_or_else(|| c.type_var.clone()),
+            }).collect();
+            self.fn_use_constraints.insert(name.to_string(), renamed);
+        }
 
         // Add self for recursion
         let self_scheme = self.generalize(&self.env.clone(), &fresh_ty);
@@ -2998,6 +3123,24 @@ impl Checker {
         let tclauses: Vec<TClause> = tclauses.into_iter()
             .map(|c| c.apply_subst(&overall_subst))
             .collect();
+
+        // Discharge wanted class constraints against the available instances.
+        // has_instance defers on bare type variables (returns true), so a still-
+        // polymorphic constraint is left for the caller; only a structurally
+        // impossible one (a function, an action, an instance-less type) is
+        // rejected — even when its components are not yet resolved, since e.g.
+        // no function type has a Show instance regardless of its arg/result.
+        let span = clauses.first().map(|c| c.span).unwrap_or_default();
+        for (class, cty) in std::mem::take(&mut self.wanted) {
+            let rty = cty.apply_subst(&overall_subst);
+            if !self.has_instance(&class, &rty) {
+                self.push_error_span(
+                    TypeErrorKind::NoInstance { class, ty: rty },
+                    format!("definition of '{}'", name),
+                    span,
+                );
+            }
+        }
 
         // Check exhaustiveness of first argument patterns
         if !clauses.is_empty() && !clauses[0].patterns.is_empty() {
@@ -3293,7 +3436,9 @@ impl Checker {
                         format!("'{}' is not exported by its module", name)));
                 }
                 if let Some(scheme) = env.lookup(name) {
-                    let ty = self.instantiate(scheme);
+                    let scheme = scheme.clone();
+                    let (ty, inst_map) = self.instantiate_with_map(&scheme);
+                    self.emit_use_constraints(name, &inst_map);
                     Ok((TExpr::new(TExprKind::Var(name.clone()), ty.clone()), ty, Subst::empty()))
                 } else {
                     Err(TypeErrorKind::UnboundVariable(name.clone()))
@@ -4061,6 +4206,13 @@ impl Checker {
 /// Walks through Arrow types to find LuaPure/LuaIO at the return position.
 /// Returns (lua_function_name, is_io).
 /// Convert an operator symbol to a name safe for mangling.
+/// Classes whose list/tuple/Maybe instances mata-ll synthesizes structurally
+/// (mono generates them from the element instances). Ord is excluded — there is
+/// no list/tuple/Maybe ordering — as are Read and user classes.
+fn structural_container_class(class: &str) -> bool {
+    matches!(class, "Show" | "Eq")
+}
+
 fn op_to_name(op: &str) -> &str {
     match op {
         "<" => "lt",

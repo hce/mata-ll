@@ -484,6 +484,8 @@ pub enum TypeErrorKind {
     PatternArgCount { constructor: String, expected: usize, got: usize },
     NonExhaustive(String),
     TypeSigMismatch { name: String, declared: Ty, inferred: Ty },
+    /// A class constraint with no matching instance, e.g. `Show (a -> b)`.
+    NoInstance { class: String, ty: Ty },
     Other(String),
 }
 
@@ -544,6 +546,14 @@ impl TypeError {
                       type that does not unify with [a]. A String cannot be passed where \
                       a list is expected, and list functions (++, map, length, …) do not \
                       accept it."),
+            TypeErrorKind::NoInstance { class, ty }
+                if class == "Ord" && matches!(ty, Ty::Tuple(_) | Ty::List(_) | Ty::App(_, _)) =>
+                Some("mata-ll has no Ord instance for tuples, lists, or Maybe; compare their \
+                      components individually."),
+            TypeErrorKind::NoInstance { ty, .. }
+                if matches!(ty, Ty::Arrow(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
+                Some("functions and IO actions have no Show/Eq/Ord instance — there is no \
+                      way to render or compare them."),
             _ => None,
         }
     }
@@ -579,6 +589,16 @@ impl fmt::Display for TypeError {
                 let s = pretty_var_subst(&[declared, inferred]);
                 write!(f, "Type signature for '{}' doesn't match: declared {}, inferred {}",
                     name, declared.apply_subst(&s), inferred.apply_subst(&s))?
+            }
+            TypeErrorKind::NoInstance { class, ty } => {
+                let s = pretty_var_subst(&[ty]);
+                let rendered = ty.apply_subst(&s);
+                let shown = match &rendered {
+                    Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
+                        format!("({})", rendered),
+                    _ => format!("{}", rendered),
+                };
+                write!(f, "No instance for '{} {}'", class, shown)?
             }
             TypeErrorKind::Other(msg) => write!(f, "{}", msg)?,
         }
