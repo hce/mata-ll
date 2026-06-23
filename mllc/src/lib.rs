@@ -10,6 +10,7 @@ pub mod parser;
 pub mod tir;
 pub mod typechecker;
 pub mod types;
+pub mod verify;
 
 use std::path::Path;
 
@@ -27,6 +28,9 @@ pub enum CompileError {
     Parse(String),
     Import(String),
     Type(Vec<String>),
+    /// A post-monomorphization invariant was violated — a compiler bug, not the
+    /// user's. Failing here beats emitting known-wrong Lua.
+    Internal(Vec<String>),
 }
 
 impl std::fmt::Display for CompileError {
@@ -38,6 +42,12 @@ impl std::fmt::Display for CompileError {
             CompileError::Type(errors) => {
                 for e in errors {
                     writeln!(f, "Type error: {}", e)?;
+                }
+                Ok(())
+            }
+            CompileError::Internal(errors) => {
+                for e in errors {
+                    writeln!(f, "Internal compiler error: {}", e)?;
                 }
                 Ok(())
             }
@@ -112,6 +122,14 @@ pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<C
 
     if !mono_pass.errors.is_empty() {
         return Err(CompileError::Type(mono_pass.errors));
+    }
+
+    // Invariant check: every type-directed `show` must have resolved to a
+    // specialized implementation at concrete structured types. A violation means
+    // the compiler would emit known-wrong output, so fail loudly instead.
+    let violations = mono_pass.verify(&mono_module);
+    if !violations.is_empty() {
+        return Err(CompileError::Internal(violations));
     }
 
     // Constant folding

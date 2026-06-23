@@ -151,6 +151,12 @@ impl Monomorphizer {
         }
     }
 
+    /// Check the post-monomorphization invariant: no type-directed class
+    /// method may remain type-erased at a concrete structured type.
+    pub fn verify(&self, module: &TModule) -> Vec<String> {
+        crate::verify::check(module, &self.class_methods)
+    }
+
     pub fn run(&mut self, module: TModule) -> TModule {
         // Collect polymorphic user-defined functions
         for func in &module.functions {
@@ -1154,13 +1160,17 @@ impl Monomorphizer {
             && let Some(mangled) = self.generate_container_show(ty) {
                 return mangled;
             }
-        if self.resolve_parameterized_instance("show", ty).is_some() {
-            // Has a generic instance — generate container show
+        if let Some(base) = self.resolve_parameterized_instance("show", ty) {
+            // Lists/Maybe get a threaded container show; a parameterized user
+            // type (derived Show) gets a per-type specialization. Either way we
+            // avoid the type-erased generic `show` at a concrete structured type.
             if let Some(mangled) = self.generate_container_show(ty) {
                 return mangled;
             }
+            return self.specialize_derived_show(&base, ty);
         }
-        // Fallback to generic runtime show
+        // Fallback to generic runtime show (only reached for primitives handled
+        // above, or genuinely unresolved/polymorphic types).
         "show".to_string()
     }
 
@@ -1177,17 +1187,12 @@ impl Monomorphizer {
         }
         self.instance_methods.insert(key, mangled.clone());
 
-        // Resolve show for each element type
-        let mut elem_show_names = Vec::new();
-        for et in elem_tys {
-            let show_name = if let Some(resolved) = self.instance_methods.get(&("show".to_string(), format!("{}", et))) {
-                resolved.clone()
-            } else {
-                // Fallback to generic show for unknown types
-                "show".to_string()
-            };
-            elem_show_names.push(show_name);
-        }
+        // Resolve show for each element type. Use the unified resolver so a
+        // structured element (list, Maybe, nested tuple, user ADT) gets its
+        // specialized show rather than the type-erased generic `show` — which
+        // would, e.g., render an empty-list element as "Nothing".
+        let elem_show_names: Vec<String> =
+            elem_tys.iter().map(|et| self.resolve_show_for(et)).collect();
 
         // Build body: "(" ++ show_E1(t[1]) ++ ", " ++ show_E2(t[2]) ++ ... ++ ")"
         // We generate this as a chain of InfixApp(++, ...)

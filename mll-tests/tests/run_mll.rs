@@ -1194,6 +1194,10 @@ main = do
   assert (show ([1, 2], [3, 4]) == "([1, 2], [3, 4])") "tuple of two lists"
   assert (show ([1, 2], 3) == "([1, 2], 3)") "tuple with list as first element"
   assert (show (1, 2) == "(1, 2)") "plain tuple"
+  -- An empty-list element must show as "[]", not the type-erased "Nothing"
+  -- (the post-mono verifier flagged this latent tuple-show leak).
+  assert (show ((1 :: Integer), ([] :: [Integer])) == "(1, [])") "tuple with empty list element"
+  assert (show ((Just (1 :: Integer)), (Nothing :: Maybe Integer)) == "(Just 1, Nothing)") "tuple of Maybe elements"
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])
         .expect("should compile")
