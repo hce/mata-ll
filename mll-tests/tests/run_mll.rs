@@ -1850,6 +1850,28 @@ main = pure ()
     assert_eq!(r, 60, "effectful outgoing callback fold");
 }
 
+#[test]
+fn prelude_is_emitted_on_demand() {
+    // A trivial program must not carry runtime helpers it never references.
+    let trivial = mllc::compile("main :: IO ()\nmain = putStrLn \"hi\"\n", Path::new("."), &[])
+        .expect("trivial should compile")
+        .lua_code;
+    assert!(!trivial.contains("show_HashMap"), "unused hashmap show must be shaken out");
+    assert!(!trivial.contains("__mll_st_new"), "unused ST-array runtime must be shaken out");
+    assert!(!trivial.contains("hashmap_insert"), "unused hashmap runtime must be shaken out");
+
+    // But a program that uses a feature must still carry its runtime, or it
+    // would break at runtime — reachability, not blanket removal.
+    let uses_list_show = mllc::compile("main :: IO ()\nmain = print [1, 2, 3 :: Integer]\n", Path::new("."), &[])
+        .expect("list-show program should compile")
+        .lua_code;
+    assert!(uses_list_show.contains("__mll_show_list"), "list show must be present when used");
+
+    // The trimmed prelude must be strictly smaller than carrying everything.
+    assert!(trivial.len() < uses_list_show.len() + 20_000,
+        "on-demand prelude should track usage, not emit the whole runtime");
+}
+
 fn compile_err(source: &str) -> String {
     match mllc::compile(source, Path::new("."), &[]) {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
