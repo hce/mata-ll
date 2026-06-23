@@ -217,7 +217,7 @@ impl CodeGen {
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList",
             "__mll_list_append", "__mll_list_index", "semigroup_String", "semigroup_List",
-            "__mll_show_list", "__mll_show_arg", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
+            "__mll_show_list", "__mll_show_arg", "__mll_show_maybe", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
@@ -2520,6 +2520,12 @@ impl CodeGen {
                     self.emit(&format!("__mll_show_list({}, ", self.lua_ref(elem_show)));
                     self.gen_expr(&args[0]);
                     self.emit(")");
+                } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_maybe:") {
+                    // Specialized Maybe show: type-directed, so Just/Nothing are
+                    // recovered from the element type (nil == Nothing).
+                    self.emit(&format!("__mll_show_maybe({}, ", self.lua_ref(elem_show)));
+                    self.gen_expr(&args[0]);
+                    self.emit(")");
                 } else if let Some(lua_name) = specialized.strip_prefix("__mll_const:") {
                     // Constant access: math.pi (no function call)
                     self.emit(lua_name);
@@ -3227,6 +3233,14 @@ local function __mll_show_arg(s)
         return "(" .. s .. ")"
     end
     return s
+end
+local function __mll_show_maybe(elem_show, x)
+    -- Type-directed Maybe show. Just x and x share a runtime rep, so the type
+    -- supplies the structure: nil is Nothing, anything else is Just <elem>.
+    -- (A wrapped Nothing — Just Nothing — collapses to nil and reads as Nothing.)
+    x = __force(x)
+    if x == nil then return "Nothing" end
+    return "Just " .. __mll_show_arg(elem_show(x))
 end
 local function __mll_show_list(elem_show, xs)
     xs = __force(xs)

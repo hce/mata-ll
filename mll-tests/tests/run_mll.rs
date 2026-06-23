@@ -2045,3 +2045,56 @@ main = do
         ]
     );
 }
+
+#[test]
+fn show_maybe_renders_just() {
+    // Regression: Just x and x share a runtime rep (identity), so `show` used to
+    // print Just 5 as bare "5". Type-directed Maybe show recovers the structure.
+    // The last case (Just Nothing) is the irreducible collision: a wrapped
+    // Nothing collapses to nil and is indistinguishable from Nothing.
+    let source = r#"
+main :: IO ()
+main = do
+    print (Just (5 :: Integer))
+    print (Nothing :: Maybe Integer)
+    print (Just (Just (5 :: Integer)))
+    print (Just (0 - 5 :: Integer))
+    print [Just (1 :: Integer), Nothing, Just 3]
+    print (Just (Nothing :: Maybe Integer))
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+
+    let lua = mlua::Lua::new();
+    let captured = lua.create_table().unwrap();
+    lua.globals().set("__captured", captured.clone()).unwrap();
+    let print_fn = lua
+        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+            let line = s.to_str()?.to_string();
+            let t: mlua::Table = lua.globals().get("__captured")?;
+            let n = t.raw_len();
+            t.raw_set(n + 1, line)?;
+            Ok(())
+        })
+        .unwrap();
+    lua.globals().set("print", print_fn).unwrap();
+    lua.load(&lua_code).set_name("show_maybe").exec()
+        .expect("should run");
+
+    let lines: Vec<String> = captured
+        .sequence_values::<String>()
+        .collect::<mlua::Result<_>>()
+        .unwrap();
+    assert_eq!(
+        lines,
+        vec![
+            "Just 5",
+            "Nothing",
+            "Just (Just 5)",
+            "Just (-5)",
+            "[Just 1, Nothing, Just 3]",
+            "Nothing", // Just Nothing collapses to nil — known representation limit
+        ]
+    );
+}

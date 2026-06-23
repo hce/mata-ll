@@ -1090,44 +1090,54 @@ impl Monomorphizer {
 
     fn generate_container_show(&mut self, ty: &Ty) -> Option<String> {
         match ty {
-            Ty::List(elem_ty) => {
-                let mangled = format!("show_{}", self.ty_to_suffix(ty));
-                let key = ("show".to_string(), format!("{}", ty));
-                if self.instance_methods.contains_key(&key) {
-                    return Some(self.instance_methods.get(&key).unwrap().clone());
-                }
-                self.instance_methods.insert(key, mangled.clone());
-
-                // Resolve show for the element type
-                let elem_show = self.resolve_show_for(elem_ty);
-
-                let str_ty = Ty::Con("String".to_string());
-                let param = "_xs".to_string();
-                let body = TExpr::new(
-                    TExprKind::SpecCall {
-                        original: mangled.clone(),
-                        specialized: format!("__mll_show_list:{}", elem_show),
-                        args: vec![TExpr::new(TExprKind::Var(param.clone()), ty.clone())],
-                    },
-                    str_ty.clone(),
-                );
-                let func = TFunction {
-                    name: mangled.clone(),
-                    ty: Ty::arrow(ty.clone(), str_ty),
-                    clauses: vec![TClause {
-                        patterns: vec![TPattern::Var(param, Ty::Unit)],
-                        guards: vec![],
-                        body,
-                        where_binds: vec![],
-                    }],
-                    specialized: true,
-            dict_params: vec![],
-                };
-                self.generated.push(func);
-                Some(mangled)
-            }
+            Ty::List(elem_ty) =>
+                Some(self.generate_threaded_show(ty, elem_ty, "__mll_show_list")),
+            // Maybe is type-directed: Just x and x share a runtime rep, so the
+            // element show plus the type recover the structure (nil == Nothing).
+            Ty::App(f, elem_ty) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") =>
+                Some(self.generate_threaded_show(ty, elem_ty, "__mll_show_maybe")),
             _ => None,
         }
+    }
+
+    /// Generate a `show` wrapper that threads the element show into a runtime
+    /// helper (`__mll_show_list` / `__mll_show_maybe`). Shared by the container
+    /// arms above so list and Maybe stay in lockstep.
+    fn generate_threaded_show(&mut self, ty: &Ty, elem_ty: &Ty, runtime_fn: &str) -> String {
+        let mangled = format!("show_{}", self.ty_to_suffix(ty));
+        let key = ("show".to_string(), format!("{}", ty));
+        if let Some(existing) = self.instance_methods.get(&key) {
+            return existing.clone();
+        }
+        self.instance_methods.insert(key, mangled.clone());
+
+        // Resolve show for the element type
+        let elem_show = self.resolve_show_for(elem_ty);
+
+        let str_ty = Ty::Con("String".to_string());
+        let param = "_x".to_string();
+        let body = TExpr::new(
+            TExprKind::SpecCall {
+                original: mangled.clone(),
+                specialized: format!("{}:{}", runtime_fn, elem_show),
+                args: vec![TExpr::new(TExprKind::Var(param.clone()), ty.clone())],
+            },
+            str_ty.clone(),
+        );
+        let func = TFunction {
+            name: mangled.clone(),
+            ty: Ty::arrow(ty.clone(), str_ty),
+            clauses: vec![TClause {
+                patterns: vec![TPattern::Var(param, Ty::Unit)],
+                guards: vec![],
+                body,
+                where_binds: vec![],
+            }],
+            specialized: true,
+            dict_params: vec![],
+        };
+        self.generated.push(func);
+        mangled
     }
 
     /// Resolve the show function name for a given type.
