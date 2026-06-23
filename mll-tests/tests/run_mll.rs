@@ -1949,3 +1949,44 @@ main = do
     lua.load(&lua_code).set_name("str_to_ints").exec()
         .expect("strToInts should produce the expected character codes");
 }
+
+#[test]
+fn print_of_empty_list_shows_brackets_not_nothing() {
+    // Regression: [] and Nothing share a runtime rep (Lua nil). `print` used the
+    // type-erased generic show, which guessed "Nothing" for nil — so an empty
+    // [Integer] (even nested) printed as "Nothing". `print` must use the typed
+    // list show (which knows nil means []), while real Nothing still shows.
+    let source = r#"
+main :: IO ()
+main = do
+    print ([] :: [Integer])
+    print ([[1, 2], []] :: [[Integer]])
+    print (Nothing :: Maybe Integer)
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+
+    // Capture `print` output instead of letting it hit stdout.
+    let lua = mlua::Lua::new();
+    let captured = lua.create_table().unwrap();
+    lua.globals().set("__captured", captured.clone()).unwrap();
+    let print_fn = lua
+        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+            let line = s.to_str()?.to_string();
+            let t: mlua::Table = lua.globals().get("__captured")?;
+            let n = t.raw_len();
+            t.raw_set(n + 1, line)?;
+            Ok(())
+        })
+        .unwrap();
+    lua.globals().set("print", print_fn).unwrap();
+    lua.load(&lua_code).set_name("print_empty").exec()
+        .expect("should run");
+
+    let lines: Vec<String> = captured
+        .sequence_values::<String>()
+        .collect::<mlua::Result<_>>()
+        .unwrap();
+    assert_eq!(lines, vec!["[]", "[[1, 2], []]", "Nothing"]);
+}

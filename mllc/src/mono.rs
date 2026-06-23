@@ -69,7 +69,7 @@ impl Monomorphizer {
         let mut builtins = HashSet::new();
         // Only mark as builtin functions that DON'T have user-defined instances
         for name in &[
-            "putStrLn", "print", "++", "$", ".", "id", "const",
+            "putStrLn", "++", "$", ".", "id", "const",
             "flip", "not", "error", "sqrt", "otherwise", "max", "min",
             "+", "-", "*", "/", "==", "/=", "<", ">", "<=", ">=",
             "&&", "||", "mod", "div", "map", "filter", "foldl", "foldr",
