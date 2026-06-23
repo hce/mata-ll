@@ -829,7 +829,6 @@ fn examples_compile() {
         "Ed25519",            // large literal lists need large stack (runs via mll compiler)
         "ed25519test",        // depends on Ed25519 which needs large stack
         "metar",              // needs large stack (many nested parser combinators)
-        "rectype",            // legitimate type errors (Ord on tuples, String as [Char])
         "match",              // experimental scratch file
         "experiments",        // experimental scratch file
     ];
@@ -1927,4 +1926,26 @@ main = print ((1, 2) > (1, 3) :: Bool)
     );
     assert!(e.contains("No instance for '>'"), "got: {e}");
     assert!(e.contains("no Ord instance"), "missing tuple Ord note, got: {e}");
+}
+
+#[test]
+fn str_to_ints_unpacks_char_codes() {
+    // strToInts bridges mata-ll's opaque String to a list of character codes,
+    // in order. A wrong result aborts the program via `error`, failing exec().
+    let source = r#"
+import LString (strToInts)
+
+main :: IO ()
+main = do
+    if strToInts "AZ" == [65, 90]
+        then pure () else error "AZ codes wrong"
+    if strToInts "hello" == [104, 101, 108, 108, 111]
+        then pure () else error "hello codes wrong"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[Path::new("../lib")])
+        .expect("strToInts program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("str_to_ints").exec()
+        .expect("strToInts should produce the expected character codes");
 }
