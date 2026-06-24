@@ -438,6 +438,11 @@ impl Checker {
 
     /// Substitute type variables in a type with bound values.
     fn substitute_type(&self, ty: &Type, bindings: &HashMap<String, &Type>) -> Type {
+        // Every node that can contain a nested type is handled explicitly. A
+        // catch-all `_ => ty.clone()` here is a trap: it silently drops the
+        // substitution for any unlisted variant, so an alias parameter buried
+        // inside e.g. a tuple leaks through unsubstituted and later collides
+        // with same-named variables from other expansions.
         match ty {
             Type::Var(name) => {
                 if let Some(bound) = bindings.get(name) {
@@ -446,7 +451,7 @@ impl Checker {
                     ty.clone()
                 }
             }
-            Type::Con(_) => ty.clone(),
+            Type::Con(_) | Type::Unit | Type::Promoted(_) => ty.clone(),
             Type::App(f, a) => Type::App(
                 Box::new(self.substitute_type(f, bindings)),
                 Box::new(self.substitute_type(a, bindings)),
@@ -458,7 +463,60 @@ impl Checker {
             Type::List(a) => Type::List(Box::new(self.substitute_type(a, bindings))),
             Type::IO(a) => Type::IO(Box::new(self.substitute_type(a, bindings))),
             Type::Paren(inner) => self.substitute_type(inner, bindings),
-            _ => ty.clone(),
+            Type::Tuple(elems) => Type::Tuple(
+                elems.iter().map(|e| self.substitute_type(e, bindings)).collect(),
+            ),
+            Type::ScopedLuaIO { scope_var, inner } => {
+                // Rename the scope variable too if the alias maps it to one.
+                let new_scope = match bindings.get(scope_var) {
+                    Some(Type::Var(n)) => n.clone(),
+                    _ => scope_var.clone(),
+                };
+                Type::ScopedLuaIO {
+                    scope_var: new_scope,
+                    inner: Box::new(self.substitute_type(inner, bindings)),
+                }
+            }
+            Type::Forall { var, inner } => {
+                // The bound variable shadows any alias parameter of the same
+                // name, so drop it from the bindings while descending.
+                if bindings.contains_key(var) {
+                    let mut inner_bindings = bindings.clone();
+                    inner_bindings.remove(var);
+                    Type::Forall {
+                        var: var.clone(),
+                        inner: Box::new(self.substitute_type(inner, &inner_bindings)),
+                    }
+                } else {
+                    Type::Forall {
+                        var: var.clone(),
+                        inner: Box::new(self.substitute_type(inner, bindings)),
+                    }
+                }
+            }
+            Type::LuaPure { lua_name, result } => Type::LuaPure {
+                lua_name: lua_name.clone(),
+                result: Box::new(self.substitute_type(result, bindings)),
+            },
+            Type::LuaIO { lua_name, result } => Type::LuaIO {
+                lua_name: lua_name.clone(),
+                result: Box::new(self.substitute_type(result, bindings)),
+            },
+            Type::LuaIterator { lua_name, result } => Type::LuaIterator {
+                lua_name: lua_name.clone(),
+                result: Box::new(self.substitute_type(result, bindings)),
+            },
+            Type::LuaTry { lua_name, result } => Type::LuaTry {
+                lua_name: lua_name.clone(),
+                result: Box::new(self.substitute_type(result, bindings)),
+            },
+            Type::Constrained { constraints, ty } => Type::Constrained {
+                constraints: constraints.iter().map(|c| Constraint {
+                    class_name: c.class_name.clone(),
+                    type_arg: self.substitute_type(&c.type_arg, bindings),
+                }).collect(),
+                ty: Box::new(self.substitute_type(ty, bindings)),
+            },
         }
     }
 
