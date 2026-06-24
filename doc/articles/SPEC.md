@@ -174,6 +174,12 @@ this:
 
     1 `add` 2
 
+Operators and functions may also be *defined* in infix position, with
+the name between its two operands, in addition to the prefix form:
+
+    a |+| b = a + b      -- same as (|+|) a b = a + b
+    x `add` y = x + y    -- same as add x y = x + y
+
 Multi parameter functions can be partly applied, just like in haskell.
 
 In order to support this efficiently, we do two optimizations below
@@ -934,7 +940,9 @@ applications, arithmetic, tuple construction, and cheap
 if-expressions.
 
 `seq :: a -> b -> b` forces its first argument before returning the
-second.
+second. When the second argument is a tail call it stays a tail call,
+so a `seq`-strict accumulator (`go n acc = seq acc (go (n - 1) ...)`)
+runs in constant stack and will not overflow on deep recursion.
 
 The compiler tracks concrete variables (already-forced values) to
 skip redundant `__force` calls at runtime. Function parameters forced

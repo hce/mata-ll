@@ -1,6 +1,8 @@
 -- Performance benchmark for MATA-LL
 -- Measures time for various operations to detect regressions.
 
+import LString (strLen)
+
 clockRaw :: Integer -> LuaIO "os.clock" Number
 
 clock :: IO Number
@@ -57,9 +59,12 @@ buildString 0 = ""
 buildString n = "x" <> buildString (n - 1)
 
 -- Higher-order function overhead
+-- `seq` forces the accumulator to WHNF each step, so the strict result is
+-- built incrementally instead of as a million-deep thunk chain (which would
+-- overflow the stack when finally forced).
 applyN :: Integer -> (a -> a) -> a -> a
 applyN 0 _ x = x
-applyN n f x = applyN (n - 1) f (f x)
+applyN n f x = seq x (applyN (n - 1) f (f x))
 
 -- Benchmark runner
 bench :: String -> IO () -> IO ()
@@ -96,7 +101,7 @@ main = do
         putStrLn ("  result: " <> show r))
 
     bench "buildString 10000" (do
-        let r = length (buildString 10000)
+        let r = strLen (buildString 10000)
         putStrLn ("  length: " <> show r))
 
     bench "applyN 1000000 (+1) 0" (do

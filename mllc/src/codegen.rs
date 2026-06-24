@@ -2151,7 +2151,16 @@ impl CodeGen {
                             self.emit("(function() __force(");
                             self.gen_expr(seq_a);
                             self.emit("); return ");
-                            self.gen_expr(arg);
+                            // Strip redundant source parens around the returned
+                            // expression: in Lua `return f(x)` is a proper tail
+                            // call but `return (f(x))` is not, so a parenthesised
+                            // call here would defeat TCO and blow the stack on
+                            // deep `seq`-strict recursion.
+                            let mut b: &TExpr = arg;
+                            while let TExprKind::Paren(inner) = &b.kind {
+                                b = inner.as_ref();
+                            }
+                            self.gen_expr(b);
                             self.emit(" end)()");
                             return;
                         }

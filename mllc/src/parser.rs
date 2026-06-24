@@ -799,6 +799,8 @@ impl Parser {
 
     /// Parse a value declaration (type signature or function definition).
     fn parse_value_decl(&mut self) -> Result<Vec<Decl>, String> {
+        let loc = self.peek_loc();
+        let (def_line, def_col) = (loc.line, loc.col);
         let name = self.expect_ident()?;
 
         // Type signature: `name :: type`
@@ -806,6 +808,37 @@ impl Parser {
             self.advance();
             let ty = self.parse_type()?;
             return Ok(vec![Decl::TypeSig { name, ty }]);
+        }
+
+        // Infix definition: `lhs <op> rhs = ...` or ``lhs `f` rhs = ...``.
+        // The leading identifier is the first operand (a var pattern), the
+        // operator (or backtick'd name) is the function being defined, and the
+        // following pattern is the second operand.
+        if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
+            let span = Span::new(def_line, def_col);
+            let saved_block = self.block_indent;
+            self.block_indent = self.current_indent;
+
+            let left = Pattern::Var(name);
+            let op = match self.peek().clone() {
+                Token::Operator(op) => {
+                    self.advance();
+                    op
+                }
+                Token::Backtick => {
+                    self.advance();
+                    let f = self.expect_ident()?;
+                    self.expect(&Token::Backtick)?;
+                    f
+                }
+                _ => unreachable!(),
+            };
+            let right = self.parse_pattern_atom()?;
+            let clause = self.finish_clause(vec![left, right], span, saved_block)?;
+            return Ok(vec![Decl::FunDef {
+                name: op,
+                clauses: vec![clause],
+            }]);
         }
 
         // Function definition: `name patterns = expr`
@@ -877,6 +910,19 @@ impl Parser {
             }
         }
 
+        self.finish_clause(patterns, span, saved_block)
+    }
+
+    /// Parse the tail of a clause (guards or `= body`, then an optional `where`)
+    /// given its already-parsed parameter patterns. `saved_block` is the
+    /// caller's previous `block_indent`, restored before returning. Shared by
+    /// the prefix form (`f a b = ...`) and the infix form (`a `op` b = ...`).
+    fn finish_clause(
+        &mut self,
+        patterns: Vec<Pattern>,
+        span: Span,
+        saved_block: usize,
+    ) -> Result<Clause, String> {
         // Guards
         let mut guards = Vec::new();
         self.skip_newlines_and_indent();

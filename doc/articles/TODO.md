@@ -24,7 +24,7 @@ MATA-LL TODO
 - [x] Composition codegen fix
 - [x] GADTs (full pipeline: parser, type checker, exhaustiveness, codegen)
 - [x] Non-strict evaluation with cheapness analysis
-- [x] seq :: a -> b -> b (explicit forcing)
+- [x] seq :: a -> b -> b (explicit forcing; preserves tail calls so seq-strict accumulators run in constant stack)
 - [x] Guards in where-clause bindings
 - [x] Do-notation: break on closing paren
 - [x] __mll_run for IO thunk forcing in >>=
@@ -46,6 +46,7 @@ MATA-LL TODO
 - [x] Eq for tuples (element-wise comparison with type dispatch)
 - [x] LuaTry type family (Lua nil-means-error → Either String a)
 - [x] Operator fixity declarations (infixl, infixr, infix)
+- [x] Infix-LHS definitions (a |+| b = ... and x `f` y = ..., not just prefix)
 - [x] STArray with rank-2 scoped mutability (runST, newSTArray, etc.)
 - [x] ByteString intrinsic type with binary I/O operations
 - [x] Standard library: Regex, JSON, LOS, LString, LBit modules

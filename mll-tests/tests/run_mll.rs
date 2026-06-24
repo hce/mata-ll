@@ -158,6 +158,8 @@ mll_test!(ffi, "ffi.mll");
 mll_test!(show_required, "show_required.mll");
 mll_test!(either_ordering, "either_ordering.mll");
 mll_test!(case_guards, "case_guards.mll");
+mll_test!(infix_def, "infix_def.mll");
+mll_test!(seq_tco, "seq_tco.mll");
 mll_test!(dict, "dict.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
