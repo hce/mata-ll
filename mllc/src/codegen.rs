@@ -522,7 +522,16 @@ impl CodeGen {
         let pat_arity = if clauses[0].patterns.is_empty() { 0 } else { clauses[0].patterns.len() };
         let eta_count = type_arity.saturating_sub(pat_arity);
 
-        if clauses.len() == 1 && clauses[0].patterns.is_empty() && clauses[0].guards.is_empty() {
+        if clauses.len() == 1 && clauses[0].patterns.is_empty() && clauses[0].guards.is_empty()
+            && eta_count == 0 {
+            // A genuine value binding: no parameters and the type has no
+            // outstanding arrows to eta-expand. A point-free *function* alias
+            // (`f = g`, where the type still has arrows so eta_count > 0) is
+            // NOT handled here — it falls through to the function branch, which
+            // eta-expands it into a real callable that looks the referent up at
+            // call time. Emitting it as a value instead would either capture a
+            // not-yet-assigned slot (forward reference -> nil) or leave a thunk
+            // where callers expect a directly-callable function.
             // Check if this is a value binding (non-function type) or a
             // zero-arg function (IO action / thunk)
             let is_io_action = matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _) | Ty::Forall(_, _));
@@ -2890,6 +2899,9 @@ fn sanitize_name(name: &str) -> String {
         "return" => "return_".to_string(),
         "not" => "not_".to_string(),
         "print" => "print_".to_string(),
+        // error_ forces its message before raising; Lua's bare `error` would
+        // hand a thunk to error() and print "table: 0x...".
+        "error" => "error_".to_string(),
         "end" => "end_".to_string(),
         "then" => "then_".to_string(),
         "do" => "do_".to_string(),

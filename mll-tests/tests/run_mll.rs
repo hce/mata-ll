@@ -226,6 +226,7 @@ mll_test!(do_eval_order, "do_eval_order.mll");
 mll_test!(do_let_scoping, "do_let_scoping.mll");
 mll_test!(exceptions, "exceptions.mll");
 mll_test!(type_alias_tuple, "type_alias_tuple.mll");
+mll_test!(pointfree_caf, "pointfree_caf.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -354,6 +355,7 @@ ghc_test!(ghc_regr020, "ghc_regr020.mll");
 
 // Library module tests (need lib/ search path)
 mll_lib_test!(lib_lstring, "lib_lstring.mll");
+mll_lib_test!(error_forces_message, "error_forces_message.mll");
 mll_lib_test!(lib_lbit, "lib_lbit.mll");
 mll_lib_test!(lib_lmath, "lib_lmath.mll");
 mll_lib_test!(lib_json, "lib_json.mll");
