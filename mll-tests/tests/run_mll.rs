@@ -227,6 +227,7 @@ mll_test!(do_let_scoping, "do_let_scoping.mll");
 mll_test!(exceptions, "exceptions.mll");
 mll_test!(type_alias_tuple, "type_alias_tuple.mll");
 mll_test!(pointfree_caf, "pointfree_caf.mll");
+mll_test!(value_forward_alias, "value_forward_alias.mll");
 mll_test!(diamond_import, "diamond_import.mll");
 
 // GHC-style compatibility tests

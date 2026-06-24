@@ -563,8 +563,14 @@ impl CodeGen {
                 self.gen_expr_lazy(&clauses[0].body, &func.name);
                 self.emit("\n");
                 is_concrete = true;
-            } else if clauses[0].where_binds.is_empty() && Self::is_cheap(&clauses[0].body) {
-                // Cheap value binding with no where clause — evaluate eagerly
+            } else if clauses[0].where_binds.is_empty() && Self::is_cheap(&clauses[0].body)
+                && !expr_evaluates_global_ref(&clauses[0].body) {
+                // Cheap value binding that does not eagerly dereference another
+                // top-level binding — safe to evaluate eagerly at module load.
+                // A binding like `y = x` or `useX = x + 1` that reads a global
+                // (possibly defined later in the file) falls through to the
+                // thunk branch below, deferring the read past module load when
+                // the slot is still nil.
                 self.emit_indent();
                 self.emit(&self.var_decl(&lua_name));
                 self.gen_expr(&clauses[0].body);
@@ -2984,6 +2990,37 @@ fn sanitize_name(name: &str) -> String {
 }
 
 /// Check if a TExpr references a given name anywhere
+/// Would evaluating `expr` eagerly (at module-load time) read another
+/// top-level binding's value? A top-level value binding with no params/where
+/// has no locals, so every variable it mentions is a global reference.
+/// References *inside a lambda* are safe — the closure reads them at call
+/// time, after every slot is assigned — but a reference evaluated immediately
+/// (a bare alias `y = x`, an operand `useX = x + 1`, a constructor field
+/// `c = Just g`) is not: the referent's slot may still be nil when the eager
+/// assignment runs. Such a binding must be thunked so the read is deferred to
+/// first use.
+fn expr_evaluates_global_ref(expr: &TExpr) -> bool {
+    match &expr.kind {
+        TExprKind::Var(_) => true,
+        // A lambda only captures its body; the reads fire at call time.
+        TExprKind::Lambda { .. } => false,
+        TExprKind::Con(_) | TExprKind::Lit(_) | TExprKind::OpFunc(_) => false,
+        TExprKind::App(f, a) => expr_evaluates_global_ref(f) || expr_evaluates_global_ref(a),
+        TExprKind::InfixApp { lhs, rhs, .. } => {
+            expr_evaluates_global_ref(lhs) || expr_evaluates_global_ref(rhs)
+        }
+        TExprKind::Negate(e) | TExprKind::Paren(e) => expr_evaluates_global_ref(e),
+        TExprKind::If { cond, then_branch, else_branch } => {
+            expr_evaluates_global_ref(cond)
+                || expr_evaluates_global_ref(then_branch)
+                || expr_evaluates_global_ref(else_branch)
+        }
+        TExprKind::Tuple(elems) => elems.iter().any(expr_evaluates_global_ref),
+        // Not reachable from the is_cheap eager path; thunk to be safe.
+        _ => true,
+    }
+}
+
 fn expr_references_name(expr: &TExpr, name: &str) -> bool {
     match &expr.kind {
         TExprKind::Var(n) => n == name,
