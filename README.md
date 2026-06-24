@@ -43,8 +43,10 @@ fmt2 :: String -> String -> String -> LuaPure "string.format" String
 ```
 
 For dynamic formatting with a variable number of values or mixed types,
-prefer mata-ll native constructs (`<>`, `intercalate`, `show`) over
-`string.format`.
+prefer mata-ll native constructs (`<>` and `show`) over `string.format`.
+Note that list functions like `intercalate` do not apply to `String`,
+which is opaque rather than `[Char]`; to join a list of strings, fold
+them with `<>`.
 
 ## Project goals
 
@@ -161,8 +163,9 @@ forces evaluation of its first argument before returning the second.
 
 This project was developed collaboratively by a human and an AI.
 The design, direction and taste are Hans-Christian's; much of the
-implementation was written by Claude (Anthropic). Neither could have
-built it alone -- at least not in a weekend.
+implementation was written by Claude (Anthropic). It came together over
+about two weeks of close back-and-forth -- neither of us could have
+built it alone.
 
 ## Contributing
 
