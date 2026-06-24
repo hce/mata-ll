@@ -18,6 +18,12 @@ struct Cli {
     /// Additional library search paths
     #[arg(short = 'L', long = "lib")]
     lib_paths: Vec<String>,
+
+    /// Arguments forwarded to the running program (readable via getArgs).
+    /// Everything after the script name is collected here, so place mll's
+    /// own flags before the script: `mll -r basic.mll game.bas`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+    prog_args: Vec<String>,
 }
 
 fn main() {
@@ -88,17 +94,22 @@ fn run_compiler(cli: Cli) {
 
     // Run with mlua if requested
     if cli.run {
-        run_lua(&result.lua_code, filename);
+        run_lua(&result.lua_code, filename, &cli.prog_args);
     }
 }
 
-fn run_lua(code: &str, filename: &str) {
+fn run_lua(code: &str, filename: &str, prog_args: &[String]) {
     let lua = mlua::Lua::new();
 
-    // Set up the script name for error messages
-    lua.scope(|_scope| {
-        Ok(())
-    }).unwrap();
+    // Populate the Lua `arg` table the way `lua`/`luajit` do, so a program's
+    // getArgs sees the forwarded arguments. arg[0] is the script name and
+    // arg[1..] are the program arguments.
+    let arg_table = lua.create_table().expect("create arg table");
+    arg_table.set(0, filename).expect("set arg[0]");
+    for (i, a) in prog_args.iter().enumerate() {
+        arg_table.set(i as i64 + 1, a.as_str()).expect("set arg[i]");
+    }
+    lua.globals().set("arg", arg_table).expect("install arg table");
 
     match lua.load(code).set_name(filename).exec() {
         Ok(()) => {}
