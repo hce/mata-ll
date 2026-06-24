@@ -61,15 +61,15 @@ Specifically:
 
 * Add the expressiveness, fun and safety of haskell to Lua
 * Target Lua 5.4 and LuaJIT; compile to Lua source for safe loading via mlua
-* Non-strict evaluation with cheapness analysis (thunk only what's worth thunking)
-* No need for a separate runtime, use zero-cost abstractions
+* Use non-strict evaluation with cheapness analysis (thunk only what's worth thunking)
+* Require no separate runtime; use zero-cost abstractions
 * If zero-cost abstractions don't fully work, use library functions
 * Incorporate new type system research where possible and useful
-* But once a stable version is reached, stay backwards compatible
+* Once a stable version is reached, stay backwards compatible
 * Have an easy interface to plain Lua
-* Be portable and small; the compiler itself -- the core of this
-  project -- incorporates no 3rd party rust libraries. The convenience
-  wrappers around it (the `mll` CLI, the wasm playground) do use a few.
+* Be portable and small; the compiler core -- the main part of this
+  project -- shall not incorporate 3rd party rust libraries. Convenience
+  wrappers around it (the `mll` CLI, the wasm playground) may use a few.
 * Use rust's versioning for dependency resolving, not haskell's
 
 ## What's the difference between a runtime and library functions?
