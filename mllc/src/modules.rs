@@ -89,6 +89,17 @@ impl ModuleLoader {
         let mut own_decls: Vec<Decl> = Vec::new();
         let mut seen_imports: HashSet<String> = HashSet::new();
         let mut hidden_names: HashSet<String> = module.hidden.clone();
+        // Names explicitly requested by a Specific import. A name can be
+        // merged in transitively by one import (and hidden because that import
+        // didn't request it) yet be explicitly imported by another; an
+        // explicit import must win, so these are subtracted from hidden_names
+        // at the end. Without this, `import M (a)` followed by `import L (b)`
+        // fails when M transitively pulls in b — b stays hidden forever.
+        let mut visible_names: HashSet<String> = HashSet::new();
+        // Names hidden because their defining module has an export list that
+        // omits them (genuinely private). Unlike selection-hiding, this is
+        // never overridden by an explicit import elsewhere.
+        let mut private_names: HashSet<String> = HashSet::new();
 
         for decl in &module.decls {
             match decl {
@@ -121,14 +132,24 @@ impl ModuleLoader {
                         .filter(|d| !matches!(d, Decl::Import { .. }))
                         .collect();
 
-                    // Compute hidden names: names in the module but not exported
+                    // Compute hidden names: names the module itself defines but
+                    // does not export. Only the module's OWN declarations count
+                    // — names merged in transitively from its imports are not
+                    // "private to" this module just because its export list
+                    // omits them, so we look at the loaded (pre-merge) module.
                     let parsed_exports = self.loaded.get(&key).and_then(|m| m.exports.clone());
+                    let own_decl_names: Vec<String> = self.loaded.get(&key)
+                        .map(|m| m.decls.iter()
+                            .filter(|d| !matches!(d, Decl::Import { .. }))
+                            .filter_map(decl_name)
+                            .collect())
+                        .unwrap_or_default();
                     if let Some(ref exports) = parsed_exports {
-                        for d in &all_decls {
-                            if let Some(name) = decl_name(d)
-                                && !exports.contains(&name) {
-                                    hidden_names.insert(name);
-                                }
+                        for name in &own_decl_names {
+                            if !exports.contains(name) {
+                                private_names.insert(name.clone());
+                                hidden_names.insert(name.clone());
+                            }
                         }
                     }
 
@@ -150,6 +171,9 @@ impl ModuleLoader {
                                 }
                             }).collect();
 
+                            for w in &wanted {
+                                visible_names.insert(w.clone());
+                            }
                             for d in &all_decls {
                                 imported_decls.push((*d).clone());
                                 if let Some(n) = decl_name(d)
@@ -185,6 +209,14 @@ impl ModuleLoader {
                 _ => {
                     own_decls.push(decl.clone());
                 }
+            }
+        }
+
+        // An explicit import of a name overrides transitive selection-hiding,
+        // but never a module's own export-list privacy.
+        for v in &visible_names {
+            if !private_names.contains(v) {
+                hidden_names.remove(v);
             }
         }
 
