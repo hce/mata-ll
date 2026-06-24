@@ -260,6 +260,9 @@ callBuiltin "SIN" [n] = VNum (sin (asNum n))
 callBuiltin "COS" [n] = VNum (cos (asNum n))
 callBuiltin "TAN" [n] = VNum (tan (asNum n))
 callBuiltin "ATN" [n] = VNum (atan (asNum n))
+-- RND would need IO (math.random is effectful), but expressions evaluate
+-- purely here, so it cannot be supported without reworking evaluation.
+callBuiltin "RND" _ = error "RND is not supported: expression evaluation is pure, so it cannot produce randomness"
 callBuiltin fn _ = error ("unknown function " <> fn)
 
 sgn :: Number -> Number

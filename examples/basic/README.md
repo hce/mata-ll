@@ -44,9 +44,26 @@ math builtins) are included.
 - Builtins: `LEN`, `LEFT$`, `RIGHT$`, `MID$`, `CHR$`, `ASC`, `STR$`, `VAL`,
   `ABS`, `INT`, `SGN`, `SQR`, `SIN`, `COS`, `TAN`, `ATN`.
 
-## Known simplifications
+## Known limitations
 
-- `AND` / `OR` / `NOT` are logical, not bitwise.
-- REPL immediate statements (no line number) run in a throwaway state, so
-  variables do not persist between them; use a numbered program and `RUN`.
-- `INPUT` splits on commas without quote handling.
+This is a teaching example, not a complete BASIC. Notable gaps:
+
+- **No `RND` / randomness.** Expressions evaluate purely (no IO), and Lua's
+  `math.random` is effectful, so `RND` is rejected with a clear error rather
+  than silently faked. Supporting it would mean evaluating expressions in IO.
+- **`AND` / `OR` / `NOT` are logical, not bitwise** — they treat any non-zero
+  value as true and yield 0 / -1.
+- **String literals have no escape sequences.** A `"` always ends the string,
+  so a quote cannot appear inside one.
+- **`NEXT` ignores its variable name.** It always advances the innermost open
+  `FOR` loop, so `NEXT J, I` and mismatched `NEXT` are not checked.
+- **One numeric type.** Everything is a single number type (Lua's); there are
+  no `%` / `!` / `#` type suffixes, and array indices are floored.
+- **Arrays are unchecked.** They auto-dimension to bound 10 on first use, and
+  an out-of-range or undeclared element reads as `0` / `""` rather than
+  raising an error.
+- **REPL immediate statements run in a throwaway state**, so variables do not
+  persist between un-numbered lines; use a numbered program and `RUN`.
+- **`INPUT` splits on commas without quote handling.**
+- **Not implemented:** `WHILE` / `WEND`, `DATA` / `READ` / `RESTORE`,
+  `DEF FN`, `ON … GOTO` / `GOSUB`, and `PRINT TAB()` / `SPC()`.
