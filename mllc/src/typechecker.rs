@@ -595,6 +595,7 @@ impl Checker {
             ("hmKeys", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(ta.clone()))),
             ("hmValues", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(tb.clone()))),
             ("hmMember", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], Ty::Con("Bool".into()))),
+            ("hmFromList", vec![a.clone(), b.clone()], Ty::arrow(Ty::list(Ty::Tuple(vec![ta.clone(), tb.clone()])), hm_kv.clone())),
         ];
         for (name, vars, ty) in hm_entries {
             self.env.insert(name.into(), Scheme { vars, ty });
@@ -1163,6 +1164,8 @@ impl Checker {
 
         // Built-in Ord typeclass (superclass: Eq)
         let cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
+        // `compare` is an Ord method returning Ordering (defined in the prelude).
+        let compare_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Ordering".into()));
         self.classes.insert("Ord".to_string(), ClassInfo {
             name: "Ord".to_string(),
             type_var: "a".to_string(),
@@ -1172,6 +1175,7 @@ impl Checker {
                 (">".to_string(), cmp_ty.clone()),
                 ("<=".to_string(), cmp_ty.clone()),
                 (">=".to_string(), cmp_ty.clone()),
+                ("compare".to_string(), compare_ty.clone()),
             ],
             default_methods: HashMap::new(),
         });
@@ -1181,6 +1185,10 @@ impl Checker {
                 ty: cmp_ty.clone(),
             });
         }
+        self.env.insert("compare".to_string(), Scheme {
+            vars: vec![a.clone()],
+            ty: compare_ty.clone(),
+        });
 
         // Class constraints carried by the built-in class methods. Each
         // constrains the class variable "a"; a use whose "a" resolves to a
@@ -1190,6 +1198,7 @@ impl Checker {
             ("show", "Show"), ("read", "Read"),
             ("==", "Eq"), ("/=", "Eq"),
             ("<", "Ord"), (">", "Ord"), ("<=", "Ord"), (">=", "Ord"),
+            ("compare", "Ord"),
         ];
         for (method, class) in cm {
             self.method_constraints.insert(method.to_string(), vec![TyConstraint {
@@ -1205,6 +1214,8 @@ impl Checker {
             for op in &["<", ">", "<=", ">="] {
                 method_fns.insert(op.to_string(), format!("ord_{}__{}", op_to_name(op), type_name));
             }
+            // Every base Ord type has a `compare` runtime helper.
+            method_fns.insert("compare".to_string(), format!("ord_compare__{}", type_name));
             self.instances.insert(
                 ("Ord".to_string(), type_name.to_string()),
                 InstanceInfo {
@@ -2335,11 +2346,52 @@ impl Checker {
             });
         }
 
+        // compare: return LT/EQ/GT by constructor index. This mirrors the
+        // index-only ordering used for the relational operators above (same
+        // constructor compares EQ; field-level ordering is not derived).
+        let ordering_ty = Ty::Con("Ordering".into());
+        let compare_fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], ordering_ty.clone());
+        let mut compare_clauses = Vec::new();
+        for (i, con_a) in constructors.iter().enumerate() {
+            let fc_a = match &con_a.fields {
+                ConstructorFields::Positional(fs) => fs.len(),
+                ConstructorFields::Named(fs) => fs.len(),
+            };
+            for (j, con_b) in constructors.iter().enumerate() {
+                let fc_b = match &con_b.fields {
+                    ConstructorFields::Positional(fs) => fs.len(),
+                    ConstructorFields::Named(fs) => fs.len(),
+                };
+                let ord_con = if i < j { "LT" } else if i > j { "GT" } else { "EQ" };
+                let a_args: Vec<TPattern> = (0..fc_a)
+                    .map(|k| TPattern::Var(format!("_a{}", k), Ty::Unit)).collect();
+                let b_args: Vec<TPattern> = (0..fc_b)
+                    .map(|k| TPattern::Var(format!("_b{}", k), Ty::Unit)).collect();
+                compare_clauses.push(TClause {
+                    patterns: vec![
+                        TPattern::Constructor { name: con_a.name.clone(), args: a_args },
+                        TPattern::Constructor { name: con_b.name.clone(), args: b_args },
+                    ],
+                    guards: vec![],
+                    body: TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone()),
+                    where_binds: vec![],
+                });
+            }
+        }
+        functions.push(TFunction {
+            name: format!("ord_compare__{}", type_name),
+            ty: compare_fn_ty,
+            clauses: compare_clauses,
+            specialized: false,
+            dict_params: vec![],
+        });
+
         // Register the Ord instance
         let mut method_fns = HashMap::new();
         for (op, op_name) in &[("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")] {
             method_fns.insert(op.to_string(), format!("ord_{}__{}", op_name, type_name));
         }
+        method_fns.insert("compare".to_string(), format!("ord_compare__{}", type_name));
         self.instances.insert(
             ("Ord".to_string(), type_name.to_string()),
             InstanceInfo {
@@ -3601,11 +3653,33 @@ impl Checker {
                     let scrut_ty = scrut_ty.apply_subst(&subst);
                     let (tp, pat_subst) = self.check_pattern(&branch.pattern, &scrut_ty, &mut branch_env)?;
                     subst = subst.compose(&pat_subst);
+
+                    // A branch may carry guards (`pat | g1 -> e1 | g2 -> e2`).
+                    // Each guard condition must be Bool and each guard body must
+                    // agree with the case result type, exactly as for function
+                    // clause guards. When guards are present the branch body is
+                    // the synthetic `undefined` fallthrough produced by the parser.
+                    let mut tguards = Vec::new();
+                    if !branch.guards.is_empty() {
+                        for guard in &branch.guards {
+                            let genv = branch_env.apply_subst(&subst);
+                            let (tcond, cond_ty, gs1) = self.infer_expr(&guard.condition, &genv)?;
+                            let gs2 = unify(&cond_ty.apply_subst(&gs1), &Ty::Con("Bool".into()))?;
+                            subst = subst.compose(&gs1).compose(&gs2);
+                            let genv2 = branch_env.apply_subst(&subst);
+                            let (tgbody, gbody_ty, gbs) = self.infer_expr(&guard.body, &genv2)?;
+                            subst = subst.compose(&gbs);
+                            let gu = unify(&result_ty.apply_subst(&subst), &gbody_ty)?;
+                            subst = subst.compose(&gu);
+                            tguards.push(TGuard { condition: tcond, body: tgbody });
+                        }
+                    }
+
                     let (tb, body_ty, body_subst) = self.infer_expr(&branch.body, &branch_env)?;
                     subst = subst.compose(&body_subst);
                     let s = unify(&result_ty.apply_subst(&subst), &body_ty)?;
                     subst = subst.compose(&s);
-                    tbranches.push(TCaseBranch { pattern: tp, guards: vec![], body: tb });
+                    tbranches.push(TCaseBranch { pattern: tp, guards: tguards, body: tb });
                 }
 
                 // Check exhaustiveness of case patterns

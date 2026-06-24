@@ -20,7 +20,7 @@ data Any = AnyString String | AnyInteger Integer | AnyNumber Number | AnyBool Bo
 data Either a b = Left a | Right b
 
 data Ordering = LT | EQ | GT
-    deriving Eq
+    deriving (Show, Eq, Ord, Enum, Bounded)
 
 -- Identity and combinators
 id :: a -> a

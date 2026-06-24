@@ -25,9 +25,17 @@ Lua dictionaries have their own intrinsic MATA-LL type:
     intrinsic HashMap :: Type -> Type -> Type
 
 HashMap is a compiler built-in backed by Lua tables, not a
-user-defined ADT. Built-in operations include hashmap_lookup,
-hashmap_insert, hashmap_delete, hashmap_keys, hashmap_values,
-hashmap_member, and hashmap_fromList.
+user-defined ADT. The built-in operations are:
+
+    hmEmpty    :: HashMap k v
+    hmFromList :: [(k, v)] -> HashMap k v
+    hmInsert   :: k -> v -> HashMap k v -> HashMap k v
+    hmLookup   :: k -> HashMap k v -> Maybe v
+    hmDelete   :: k -> HashMap k v -> HashMap k v
+    hmMember   :: k -> HashMap k v -> Bool
+    hmSize     :: HashMap k v -> Integer
+    hmKeys     :: HashMap k v -> [k]
+    hmValues   :: HashMap k v -> [v]
 
 We support haskell's algebraic datatypes:
 
@@ -941,17 +949,32 @@ parameters are marked concrete.
         ↓
     Parser — parse to AST (including fixity declarations)
         ↓
+    Import resolution — merge imported .mll modules and the prelude
+        ↓
     Desugar — do-notation to >>= chains
         ↓
     Type checker — HM unification + bidirectional checking,
-                   exhaustiveness checking, kind checking
+                   exhaustiveness checking, kind checking,
+                   class-constraint discharge (unsatisfiable
+                   constraints such as Show on a function are
+                   rejected here, at compile time)
         ↓
     Monomorphizer — specialize polymorphic functions per type
+        ↓
+    Verifier — post-monomorphization invariant check (a violation
+               signals a compiler bug, not a user error)
+        ↓
+    Constant folding — evaluate statically known expressions
+        ↓
+    Dead-code elimination — drop functions unreachable from main
+                            and exports
         ↓
     Code generator — Lua source with optimizations
                      (bind chain flattening, function inlining,
                       cheapness analysis, concrete variable tracking,
-                      cross-function demand analysis)
+                      cross-function demand analysis); the runtime
+                      prelude is emitted on demand, tree-shaking
+                      helpers the program never uses
         ↓
     .lua output (standalone, no runtime needed)
 

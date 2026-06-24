@@ -212,6 +212,9 @@ impl CodeGen {
             "ord_gt__Integer", "ord_gt__Number", "ord_gt__String",
             "ord_le__Integer", "ord_le__Number", "ord_le__String",
             "ord_ge__Integer", "ord_ge__Number", "ord_ge__String",
+            "ord_compare__Integer", "ord_compare__Number", "ord_compare__String",
+            "ord_lt__ByteString", "ord_gt__ByteString", "ord_le__ByteString",
+            "ord_ge__ByteString", "ord_compare__ByteString",
             "head", "tail", "map", "filter", "take", "drop", "zipWith",
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
@@ -898,6 +901,14 @@ impl CodeGen {
     }
 
     fn gen_pattern_match(&mut self, params: &[String], clauses: &[TClause]) {
+        // Clauses with guards need fallthrough semantics (a clause whose pattern
+        // matches but whose guards all fail must drop to the next clause). The
+        // if/elseif chain below cannot express that across a pattern boundary, so
+        // route any guard-bearing match through the independent-block emitter.
+        if clauses.iter().any(|c| !c.guards.is_empty()) {
+            self.gen_pattern_match_guarded(params, clauses);
+            return;
+        }
         for (i, clause) in clauses.iter().enumerate() {
             let keyword = if i == 0 { "if" } else { "elseif" };
 
@@ -995,6 +1006,58 @@ impl CodeGen {
             }
         }
         self.emit_line("end");
+        self.emit_line("error(\"Non-exhaustive patterns\")");
+    }
+
+    /// Pattern match where at least one clause carries guards. Each clause is
+    /// emitted as an independent block — `if <pat-conds> then …` for a refutable
+    /// pattern, `do …` for an irrefutable one — rather than a single if/elseif
+    /// chain. A clause whose pattern matches but whose guards all fail simply
+    /// reaches the end of its block and falls through to the next clause, which
+    /// is exactly Haskell's semantics. (The flat if/elseif chain cannot do this:
+    /// once a pattern's `then` arm is entered there is no way back to the next
+    /// `elseif`.)
+    fn gen_pattern_match_guarded(&mut self, params: &[String], clauses: &[TClause]) {
+        for clause in clauses {
+            let mut conditions = Vec::new();
+            let mut bindings = Vec::new();
+            for (pi, pat) in clause.patterns.iter().enumerate() {
+                self.collect_pattern_conditions(&params[pi], pat, &mut conditions, &mut bindings);
+            }
+            self.emit_indent();
+            if conditions.is_empty() {
+                self.emit("do\n");
+            } else {
+                self.emit(&format!("if {} then\n", conditions.join(" and ")));
+            }
+            self.indent += 1;
+            for (var, val) in &bindings {
+                let decl = self.declare_local(var);
+                self.emit_line(&format!("{} = {}", decl, val));
+                if self.concrete_vars.contains(val) {
+                    self.concrete_vars.insert(var.clone());
+                }
+            }
+            self.gen_where_binds(&clause.where_binds);
+            if clause.guards.is_empty() {
+                self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
+            } else {
+                for (gi, guard) in clause.guards.iter().enumerate() {
+                    let gkw = if gi == 0 { "if" } else { "elseif" };
+                    self.emit_indent(); self.emit(&format!("{} ", gkw));
+                    let mut sub = self.new_sub();
+                    sub.gen_expr(&guard.condition);
+                    self.emit(&sub.output);
+                    self.emit(" then\n");
+                    self.indent += 1;
+                    self.emit_indent(); self.emit("return "); self.gen_expr(&guard.body); self.emit("\n");
+                    self.indent -= 1;
+                }
+                self.emit_line("end");
+            }
+            self.indent -= 1;
+            self.emit_line("end");
+        }
         self.emit_line("error(\"Non-exhaustive patterns\")");
     }
 
@@ -1270,7 +1333,13 @@ impl CodeGen {
             }
             TExprKind::Case { scrutinee, branches } => {
                 self.scan_call_sites(scrutinee, ever_thunked, ever_called);
-                for b in branches { self.scan_call_sites(&b.body, ever_thunked, ever_called); }
+                for b in branches {
+                    for g in &b.guards {
+                        self.scan_call_sites(&g.condition, ever_thunked, ever_called);
+                        self.scan_call_sites(&g.body, ever_thunked, ever_called);
+                    }
+                    self.scan_call_sites(&b.body, ever_thunked, ever_called);
+                }
             }
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => self.scan_call_sites(inner, ever_thunked, ever_called),
             TExprKind::Tuple(elems) => { for e in elems { self.scan_call_sites(e, ever_thunked, ever_called); } }
@@ -2136,10 +2205,10 @@ impl CodeGen {
                     && let TExprKind::Var(name) = &f.kind {
                         let lua_op = match name.as_str() {
                             "eq_Integer" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
-                            "ord_lt__Integer" | "ord_lt__Number" | "ord_lt__String" => Some("<"),
-                            "ord_gt__Integer" | "ord_gt__Number" | "ord_gt__String" => Some(">"),
-                            "ord_le__Integer" | "ord_le__Number" | "ord_le__String" => Some("<="),
-                            "ord_ge__Integer" | "ord_ge__Number" | "ord_ge__String" => Some(">="),
+                            "ord_lt__Integer" | "ord_lt__Number" | "ord_lt__String" | "ord_lt__ByteString" => Some("<"),
+                            "ord_gt__Integer" | "ord_gt__Number" | "ord_gt__String" | "ord_gt__ByteString" => Some(">"),
+                            "ord_le__Integer" | "ord_le__Number" | "ord_le__String" | "ord_le__ByteString" => Some("<="),
+                            "ord_ge__Integer" | "ord_ge__Number" | "ord_ge__String" | "ord_ge__ByteString" => Some(">="),
                             "semigroup_String" => Some(".."),
                             _ => None,
                         };
@@ -2351,6 +2420,29 @@ impl CodeGen {
                 self.indent += 1; self.emit_indent(); self.emit("return "); self.gen_expr(else_branch); self.emit("\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end)()");
+            }
+            TExprKind::Case { scrutinee, branches } if branches.iter().any(|b| !b.guards.is_empty()) => {
+                // Guarded branches: lower to clause-based matching (via the
+                // shared pattern-match emitter) so a branch whose pattern
+                // matches but whose guards all fail falls through to the next
+                // branch, exactly like function-clause guards.
+                let saved_locals = self.local_vars.clone();
+                let saved_concrete = self.concrete_vars.clone();
+                self.emit("(function(_cg)\n"); self.indent += 1;
+                self.emit_line("_cg = __force(_cg)");
+                self.local_vars.insert("_cg".to_string());
+                self.concrete_vars.insert("_cg".to_string());
+                let clauses: Vec<TClause> = branches.iter().map(|b| TClause {
+                    patterns: vec![b.pattern.clone()],
+                    guards: b.guards.clone(),
+                    body: b.body.clone(),
+                    where_binds: vec![],
+                }).collect();
+                self.gen_pattern_match(&["_cg".to_string()], &clauses);
+                self.local_vars = saved_locals;
+                self.concrete_vars = saved_concrete;
+                self.indent -= 1; self.emit_indent(); self.emit("end)(");
+                self.gen_expr(scrutinee); self.emit(")");
             }
             TExprKind::Case { scrutinee, branches } => {
                 self.emit("(function()\n"); self.indent += 1;
@@ -2839,6 +2931,7 @@ fn sanitize_name(name: &str) -> String {
         "hmKeys" => "hashmap_keys".to_string(),
         "hmValues" => "hashmap_values".to_string(),
         "hmMember" => "hashmap_member".to_string(),
+        "hmFromList" => "hashmap_fromList".to_string(),
         _ => {
             let mut s = String::new();
             for c in name.chars() {
@@ -2887,7 +2980,11 @@ fn expr_references_name(expr: &TExpr, name: &str) -> bool {
         }
         TExprKind::Case { scrutinee, branches } => {
             expr_references_name(scrutinee, name) ||
-            branches.iter().any(|b| expr_references_name(&b.body, name))
+            branches.iter().any(|b| {
+                b.guards.iter().any(|g|
+                    expr_references_name(&g.condition, name) || expr_references_name(&g.body, name))
+                || expr_references_name(&b.body, name)
+            })
         }
         TExprKind::Let { binds, body } => {
             binds.iter().any(|b| expr_references_name(&b.body, name)) ||
@@ -3327,6 +3424,16 @@ local function ord_le__String(a, b) a = __force(a); b = __force(b); return a <= 
 local function ord_ge__Integer(a, b) a = __force(a); b = __force(b); return a >= b end
 local function ord_ge__Number(a, b) a = __force(a); b = __force(b); return a >= b end
 local function ord_ge__String(a, b) a = __force(a); b = __force(b); return a >= b end
+-- ByteString is a Lua string; `<` is byte-lexicographic, same as String.
+local function ord_lt__ByteString(a, b) a = __force(a); b = __force(b); return a < b end
+local function ord_gt__ByteString(a, b) a = __force(a); b = __force(b); return a > b end
+local function ord_le__ByteString(a, b) a = __force(a); b = __force(b); return a <= b end
+local function ord_ge__ByteString(a, b) a = __force(a); b = __force(b); return a >= b end
+-- compare returns the Ordering enum: LT=1, EQ=2, GT=3 (constructor index)
+local function ord_compare__Integer(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
+local function ord_compare__Number(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
+local function ord_compare__String(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
+local function ord_compare__ByteString(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .. b end
 local function semigroup_List(a, b) return __mll_list_append(a, function() return __force(b) end) end
 local function head(xs) return __mll_head(xs) end

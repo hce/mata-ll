@@ -122,3 +122,13 @@ main = do
     assert (bsFromString "abc" == bsFromString "abc") "bs eq"
     assert (bsFromString "abc" /= bsFromString "abd") "bs neq"
     assert (bsEmpty == bsEmpty) "bs empty eq"
+
+    -- Ord instance (byte-lexicographic, same as Lua string comparison)
+    assert (bsFromString "abc" < bsFromString "abd") "bs lt"
+    assert (bsFromString "abd" > bsFromString "abc") "bs gt"
+    assert (bsFromString "abc" <= bsFromString "abc") "bs le"
+    assert (bsFromString "abd" >= bsFromString "abc") "bs ge"
+    assert (compare (bsFromString "abc") (bsFromString "abd") == LT) "bs compare LT"
+    assert (compare (bsFromString "abd") (bsFromString "abc") == GT) "bs compare GT"
+    assert (compare (bsFromString "abc") (bsFromString "abc") == EQ) "bs compare EQ"
+    assert (bsEmpty < bsFromString "a") "bs empty lt"

@@ -862,7 +862,10 @@ impl Monomorphizer {
                         }
                         let result = TCaseBranch {
                             pattern: b.pattern,
-                            guards: b.guards,
+                            guards: b.guards.into_iter().map(|g| TGuard {
+                                condition: self.mono_expr(g.condition),
+                                body: self.mono_expr(g.body),
+                            }).collect(),
                             body: self.mono_expr(b.body),
                         };
                         for name in &new_vars {
@@ -1363,7 +1366,13 @@ impl Monomorphizer {
             }
             TExprKind::Case { scrutinee, branches } => {
                 Self::collect_expr_vars(scrutinee, vars);
-                for b in branches { Self::collect_expr_vars(&b.body, vars); }
+                for b in branches {
+                    for g in &b.guards {
+                        Self::collect_expr_vars(&g.condition, vars);
+                        Self::collect_expr_vars(&g.body, vars);
+                    }
+                    Self::collect_expr_vars(&b.body, vars);
+                }
             }
             TExprKind::Let { binds, body } => {
                 for b in binds { Self::collect_expr_vars(&b.body, vars); }
@@ -1584,7 +1593,11 @@ impl Monomorphizer {
                 kind: TExprKind::Case {
                     scrutinee: Box::new(self.rewrite_dict_call_sites(*scrutinee)),
                     branches: branches.into_iter().map(|b| TCaseBranch {
-                        pattern: b.pattern, guards: b.guards,
+                        pattern: b.pattern,
+                        guards: b.guards.into_iter().map(|g| TGuard {
+                            condition: self.rewrite_dict_call_sites(g.condition),
+                            body: self.rewrite_dict_call_sites(g.body),
+                        }).collect(),
                         body: self.rewrite_dict_call_sites(b.body),
                     }).collect(),
                 }, ty,

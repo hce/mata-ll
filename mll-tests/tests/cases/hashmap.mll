@@ -23,3 +23,10 @@ main = do
     let m3 = hmInsert "alice" 31 m
     assert (fromMaybe 0 (hmLookup "alice" m3) == 31) "update"
     assert (hmSize m3 == 3) "size after update"
+    -- fromList
+    let m4 = hmFromList [("x", 1), ("y", 2), ("x", 3)]
+    assert (hmSize m4 == 2) "fromList dedups keys"
+    assert (fromMaybe 0 (hmLookup "x" m4) == 3) "fromList last write wins"
+    assert (fromMaybe 0 (hmLookup "y" m4) == 2) "fromList other key"
+    assert (not (hmMember "z" m4)) "fromList missing key"
+    assert (hmSize (hmFromList []) == 0) "fromList empty"
