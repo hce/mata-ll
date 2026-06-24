@@ -1662,7 +1662,12 @@ impl Checker {
         let mut functions = Vec::new();
         let mut has_main = false;
 
-        for (name, (lua_name, ffi_kind)) in &ffi_info {
+        // Sorted: ffi_info is a HashMap, and this order determines the order
+        // FFI functions are emitted (and their __mll_fn slots assigned).
+        let mut ffi_names: Vec<&String> = ffi_info.keys().collect();
+        ffi_names.sort();
+        for name in ffi_names {
+            let (lua_name, ffi_kind) = &ffi_info[name];
             if !defined_fns.contains(name)
                 && let Some(ty) = sigs.get(name) {
                     self.validate_ffi_callbacks(name, ty);
@@ -1750,9 +1755,12 @@ impl Checker {
             }
         }
 
-        let record_accessors: Vec<(String, usize)> = self.record_fields.iter()
+        // Sorted so codegen emits accessors (and assigns their __mll_fn slots)
+        // in a deterministic order; record_fields is a HashMap.
+        let mut record_accessors: Vec<(String, usize)> = self.record_fields.iter()
             .map(|(name, (_, idx))| (name.clone(), *idx))
             .collect();
+        record_accessors.sort();
 
         let newtypes: Vec<String> = module.decls.iter().filter_map(|d| {
             if let Decl::NewtypeDef { name, .. } = d { Some(name.clone()) } else { None }

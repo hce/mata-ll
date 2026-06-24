@@ -41,6 +41,61 @@ macro_rules! mll_test {
     };
 }
 
+/// Code generation must be deterministic: the same source compiled repeatedly
+/// must produce byte-identical Lua. (Regression guard for HashMap iteration
+/// order leaking into emission — record accessors, FFI functions, and
+/// specialization resolution were all order-sensitive.)
+#[test]
+fn codegen_is_deterministic() {
+    let source = r#"
+data Color = Red | Green | Blue deriving (Show, Eq, Ord)
+data Person = Person { pName :: String, pAge :: Integer, pCity :: String, pActive :: Bool }
+data Tree a = Leaf a | Branch (Tree a) (Tree a) deriving (Show, Eq)
+
+class Describe a where
+  describe :: a -> String
+instance Describe Color where
+  describe Red = "red"
+  describe Green = "green"
+  describe Blue = "blue"
+
+mapList :: (a -> b) -> [a] -> [b]
+mapList _ [] = []
+mapList f (x:xs) = f x : mapList f xs
+
+depth :: Tree a -> Integer
+depth (Leaf _) = 0
+depth (Branch l r) = 1 + max (depth l) (depth r)
+
+main :: IO ()
+main = do
+  let p = Person { pName = "Ann", pAge = 30, pCity = "NYC", pActive = True }
+  putStr (pName p)
+  putStrLn (pCity p)
+  putStrLn (show (mapList (\n -> n + 1) [1, 2, 3]))
+  putStrLn (show (mapList (\s -> s) ["a", "b"]))
+  putStrLn (show (depth (Branch (Leaf 1) (Leaf 2))))
+  putStrLn (describe Blue)
+  putStrLn (show (compare Red Blue))
+  let m = hmFromList [("a", 1), ("b", 2)]
+  putStrLn (show (hmSize m))
+"#;
+    let dir = Path::new("tests/cases");
+    let first = mllc::compile(source, dir, &[])
+        .expect("compile should succeed")
+        .lua_code;
+    for i in 1..8 {
+        let again = mllc::compile(source, dir, &[])
+            .expect("compile should succeed")
+            .lua_code;
+        assert!(
+            again == first,
+            "codegen is non-deterministic: compile #{} differs from #0",
+            i
+        );
+    }
+}
+
 fn run_mll_file_with_lib(path: &Path) {
     let path = path.to_path_buf();
     let lib_path = Path::new("../lib").to_path_buf();

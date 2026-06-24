@@ -106,19 +106,20 @@ MATA-LL TODO
 
 ## Open
 
-- [ ] **MOST URGENT — non-deterministic codegen.** Generated `.lua` is not
-      reproducible: identical source compiled twice yields different output
-      (e.g. record field-accessor functions assigned to different `__mll_fn`
-      indices), because some emission order follows `HashMap` iteration order.
-      Confirmed by hashing the same compile three times (three distinct
-      hashes). Decoded program *behaviour* is unaffected (the accessors are
-      semantically identical), but builds are not byte-reproducible, which
-      breaks caching, diffing, and any byte-identical regression baseline.
-      Fix: make every codegen-visible collection deterministic — replace the
-      `HashMap`s whose iteration order reaches emission with `BTreeMap`/sorted
-      iteration (start at the record-accessor and instance-method emission
-      sites). Add a test that compiles a fixture twice and asserts identical
-      bytes.
+- [x] **Non-deterministic codegen — fixed.** Generated `.lua` was not
+      reproducible: identical source compiled twice could differ, because some
+      emission order followed `HashMap` iteration order. Three sources, all
+      fixed by sorting/stack-ordering rather than relying on `HashMap` order:
+      (1) record field accessors — `TModule.record_accessors` Vec is now sorted
+      at construction (typechecker); (2) FFI function emission — `ffi_info` is
+      now iterated in sorted-key order; (3) specialization resolution — a
+      still-polymorphic recursive call inside a specialization picked an
+      arbitrary entry via `self.specializations.iter().last()`; now resolves to
+      the enclosing specialization via an explicit generation stack (`gen_stack`),
+      which is both deterministic and correct under nested specialization.
+      Guarded by `codegen_is_deterministic` (compiles a feature-rich fixture 8×,
+      asserts byte-identical). Verified across every example and test case; the
+      tracker decode stays byte-identical.
 - [x] Default method implementations in class declarations (`x /= y = not (x == y)`)
 - [x] Where-clause type unification: pre-registered fresh type variables now unified with inferred types
 - [x] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)

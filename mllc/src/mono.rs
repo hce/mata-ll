@@ -62,6 +62,12 @@ pub struct Monomorphizer {
     /// Locally-bound names (lambda params, let binds, case pattern vars)
     /// that should NOT be resolved as typeclass methods
     locals: HashSet<String>,
+    /// Stack of (function name, mangled name) for specializations currently
+    /// being generated. A still-polymorphic recursive call inside a
+    /// specialization resolves to the top-most matching entry — deterministic
+    /// and correct under nested specialization (unlike picking an arbitrary
+    /// entry from the `specializations` HashMap).
+    gen_stack: Vec<(String, String)>,
 }
 
 impl Monomorphizer {
@@ -144,6 +150,7 @@ impl Monomorphizer {
             instance_methods,
             errors: Vec::new(),
             dict_passing_fns: HashSet::new(),
+            gen_stack: Vec::new(),
             fn_constraints: checker.get_fn_constraints().clone(),
             classes: checker.get_classes().clone(),
             method_to_class,
@@ -588,12 +595,24 @@ impl Monomorphizer {
                 // name, use the most recent one (the recursive/sibling call
                 // shares the same concrete type as the enclosing specialization)
                 if self.poly_fns.contains_key(name) && !self.locals.contains(name) && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty) {
-                    let specs: Vec<_> = self.specializations.iter()
-                        .filter(|(k, _)| k.name == *name)
-                        .map(|(_, v)| v.clone())
-                        .collect();
-                    if !specs.is_empty() {
-                        return TExpr { kind: TExprKind::Var(specs.last().unwrap().clone()), ty };
+                    // Resolve to the enclosing specialization of this function
+                    // (top-most on the generation stack). The HashMap of all
+                    // specializations has no meaningful order, so fall back to
+                    // the lexically-smallest one only if this call is somehow
+                    // not inside a specialization of `name`.
+                    let chosen = self.gen_stack.iter().rev()
+                        .find(|(n, _)| n == name)
+                        .map(|(_, m)| m.clone())
+                        .or_else(|| {
+                            let mut specs: Vec<String> = self.specializations.iter()
+                                .filter(|(k, _)| k.name == *name)
+                                .map(|(_, v)| v.clone())
+                                .collect();
+                            specs.sort();
+                            specs.into_iter().next()
+                        });
+                    if let Some(mangled) = chosen {
+                        return TExpr { kind: TExprKind::Var(mangled), ty };
                     }
                 }
                 if self.poly_fns.contains_key(name) && !self.locals.contains(name) && !self.dict_passing_fns.contains(name) && !self.is_polymorphic(&ty) {
@@ -624,7 +643,9 @@ impl Monomorphizer {
                                 .map(|c| c.apply_subst(&subst))
                                 .collect();
                             spec_fn.specialized = true;
+                            self.gen_stack.push((name.clone(), mangled.clone()));
                             spec_fn = self.mono_function(spec_fn);
+                            self.gen_stack.pop();
                             self.generated.push(spec_fn);
                         }
                         mangled
