@@ -67,7 +67,9 @@ Specifically:
 * Incorporate new type system research where possible and useful
 * But once a stable version is reached, stay backwards compatible
 * Have an easy interface to plain Lua
-* Be portable and small; do not incorporate 3rd party rust libraries
+* Be portable and small; the compiler itself -- the core of this
+  project -- incorporates no 3rd party rust libraries. The convenience
+  wrappers around it (the `mll` CLI, the wasm playground) do use a few.
 * Use rust's versioning for dependency resolving, not haskell's
 
 ## What's the difference between a runtime and library functions?
