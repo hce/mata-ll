@@ -927,6 +927,19 @@ impl CodeGen {
         for (i, clause) in clauses.iter().enumerate() {
             let keyword = if i == 0 { "if" } else { "elseif" };
 
+            // Each clause is an independent Lua branch (if/elseif … then … end),
+            // so its locals must not leak into sibling clauses. Without this,
+            // a name bound in one clause stays in `local_vars` and a later
+            // clause's `let`/where binding of the same name is emitted without
+            // `local` — assigning to a shared global instead, which corrupts
+            // when captured by a thunk across calls (e.g. nested FOR loops).
+            let scope_lv = self.local_vars.clone();
+            let scope_vs = self.var_slots.clone();
+            let scope_vsn = self.var_slots_next;
+            let scope_lc = self.local_count;
+            let scope_vte = self.var_table_emitted;
+            let scope_cv = self.concrete_vars.clone();
+
             if !clause.guards.is_empty() {
                 let mut bindings = Vec::new();
                 let mut conditions = Vec::new();
@@ -1019,6 +1032,15 @@ impl CodeGen {
                 self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
                 self.indent -= 1;
             }
+
+            // Restore the scope captured at the start of this clause so its
+            // locals do not leak into the next clause.
+            self.local_vars = scope_lv;
+            self.var_slots = scope_vs;
+            self.var_slots_next = scope_vsn;
+            self.local_count = scope_lc;
+            self.var_table_emitted = scope_vte;
+            self.concrete_vars = scope_cv;
         }
         self.emit_line("end");
         self.emit_line("error(\"Non-exhaustive patterns\")");
