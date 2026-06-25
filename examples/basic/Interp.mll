@@ -17,6 +17,11 @@ lenNum :: String -> LuaPure "string.len" Number
 byteNum :: String -> Integer -> LuaPure "string.byte" Number
 floorNum :: Number -> LuaPure "math.floor" Number
 
+-- math.random() with no arguments returns a fresh Number in [0,1). It is
+-- effectful, so RND lives in IO -- which is why expression evaluation runs in
+-- IO rather than purely.
+rnd01 :: LuaIO "math.random" Number
+
 -- A dimensioned array: the per-dimension upper bounds and a sparse store of
 -- element values keyed by row-major flat index.
 data BArr = BArr [Integer] (HashMap Integer Value)
@@ -100,28 +105,32 @@ exec st SReturn =
     case stSubs st of
         []          -> error "RETURN without GOSUB"
         (r : rest)  -> return (st { stSubs = rest }, FJump r)
-exec st (SLet name idxs valE) =
-    let v = eval st valE
-    in return (assign st name idxs v, FNext)
-exec st (SIf cond thenB elseB) =
-    if isTrue (eval st cond) then execSeq st thenB else execSeq st elseB
-exec st (SDim decls) = return (foldl dimOne st decls, FNext)
+exec st (SLet name idxs valE) = do
+    v <- eval st valE
+    st1 <- assign st name idxs v
+    return (st1, FNext)
+exec st (SIf cond thenB elseB) = do
+    c <- eval st cond
+    if isTrue c then execSeq st thenB else execSeq st elseB
+exec st (SDim decls) = do
+    st1 <- dimAll st decls
+    return (st1, FNext)
 exec st (SPrint items) = do
-    let txt = fst (renderPrint st 0.0 items)
-    if endsOpen items then putStr txt else putStrLn txt
+    res <- renderPrint st 0.0 items
+    if endsOpen items then putStr (fst res) else putStrLn (fst res)
     return (st, FNext)
-exec st (SFor var fromE toE stepE) =
-    let fromV = asNum (eval st fromE)
-        toV   = asNum (eval st toE)
-        stepV = asNum (eval st stepE)
-        st1   = setScalar st var (VNum fromV)
+exec st (SFor var fromE toE stepE) = do
+    fromV <- evalNum st fromE
+    toV   <- evalNum st toE
+    stepV <- evalNum st stepE
+    let st1   = setScalar st var (VNum fromV)
         frame = ForFrame var toV stepV (stPC st + 1)
-    in return (st1 { stFors = frame : stFors st1 }, FNext)
+    return (st1 { stFors = frame : stFors st1 }, FNext)
 exec st (SNext vars) = return (doNext st vars)
 exec st (SInput prompt targets) = do
     putStr (if prompt == "" then "? " else prompt <> "? ")
     line <- readLine
-    let st1 = assignInputs st targets (splitComma line)
+    st1 <- assignInputs st targets (splitComma line)
     return (st1, FNext)
 
 resolveLine :: State -> Integer -> Integer
@@ -144,9 +153,11 @@ doNext st _ =
 -- Assignment
 -- ---------------------------------------------------------------------------
 
-assign :: State -> String -> [Expr] -> Value -> State
-assign st name [] v = setScalar st name v
-assign st name idxs v = writeArr st name (map (\e -> asNum (eval st e)) idxs) v
+assign :: State -> String -> [Expr] -> Value -> IO State
+assign st name [] v = return (setScalar st name v)
+assign st name idxs v = do
+    vs <- evalArgs st idxs
+    return (writeArr st name (map asNum vs) v)
 
 setScalar :: State -> String -> Value -> State
 setScalar st name v = st { stVars = hmInsert name v (stVars st) }
@@ -160,10 +171,17 @@ defaultFor name = if isStrName name then VStr "" else VNum 0.0
 isStrName :: String -> Bool
 isStrName name = strByte name (strLen name) == 36   -- trailing '$'
 
-dimOne :: State -> (String, [Expr]) -> State
-dimOne st decl =
-    let dims = map (\e -> floor (asNum (eval st e))) (snd decl)
-    in st { stArrays = hmInsert (fst decl) (BArr dims hmEmpty) (stArrays st) }
+dimAll :: State -> [(String, [Expr])] -> IO State
+dimAll st [] = return st
+dimAll st (d : ds) = do
+    st1 <- dimOne st d
+    dimAll st1 ds
+
+dimOne :: State -> (String, [Expr]) -> IO State
+dimOne st decl = do
+    vs <- evalArgs st (snd decl)
+    let dims = map (\v -> floor (asNum v)) vs
+    return (st { stArrays = hmInsert (fst decl) (BArr dims hmEmpty) (stArrays st) })
 
 -- Look the array up (auto-dimensioning a missing one to bound 10 per index),
 -- then read or write the row-major element.
@@ -188,19 +206,53 @@ writeArr st name idxsN v =
             in st { stArrays = hmInsert name (BArr dims dat1) (stArrays st) }
 
 -- ---------------------------------------------------------------------------
--- Expression evaluation (pure)
+-- Expression evaluation
+--
+-- Evaluation runs in IO because BASIC's RND must draw from math.random, which
+-- is effectful. Everything else is pure and just threads through.
 -- ---------------------------------------------------------------------------
 
-eval :: State -> Expr -> Value
-eval _ (ENum n) = VNum n
-eval _ (EStr s) = VStr s
-eval st (EVar name) = lookupScalar st name
-eval st (EArr name idxs) = readArr st name (map (\e -> asNum (eval st e)) idxs)
-eval st (ECall fn args) = callBuiltin fn (map (eval st) args)
-eval st (EUn "-" e) = VNum (0.0 - asNum (eval st e))
-eval st (EUn "NOT" e) = fromBool (not (isTrue (eval st e)))
+eval :: State -> Expr -> IO Value
+eval _ (ENum n) = return (VNum n)
+eval _ (EStr s) = return (VStr s)
+eval st (EVar name) = return (lookupScalar st name)
+eval st (EArr name idxs) = do
+    vs <- evalArgs st idxs
+    return (readArr st name (map asNum vs))
+eval st (ECall "RND" args) = do
+    -- RND(x) ignores x (for x > 0) and returns a fresh value in [0,1). The
+    -- argument is still evaluated, in case it has its own effects.
+    _ <- evalArgs st args
+    r <- rnd01
+    return (VNum r)
+eval st (ECall fn args) = do
+    vs <- evalArgs st args
+    return (callBuiltin fn vs)
+eval st (EUn "-" e) = do
+    v <- eval st e
+    return (VNum (0.0 - asNum v))
+eval st (EUn "NOT" e) = do
+    v <- eval st e
+    return (fromBool (not (isTrue v)))
 eval _ (EUn op _) = error ("unknown unary operator " <> op)
-eval st (EBin op l r) = evalBin op (eval st l) (eval st r)
+eval st (EBin op l r) = do
+    a <- eval st l
+    b <- eval st r
+    return (evalBin op a b)
+
+-- Evaluate a list of argument expressions left to right.
+evalArgs :: State -> [Expr] -> IO [Value]
+evalArgs _ [] = return []
+evalArgs st (e : es) = do
+    v <- eval st e
+    vs <- evalArgs st es
+    return (v : vs)
+
+-- Evaluate an expression expected to be numeric.
+evalNum :: State -> Expr -> IO Number
+evalNum st e = do
+    v <- eval st e
+    return (asNum v)
 
 evalBin :: String -> Value -> Value -> Value
 evalBin "+" (VStr a) (VStr b) = VStr (a <> b)
@@ -260,9 +312,6 @@ callBuiltin "SIN" [n] = VNum (sin (asNum n))
 callBuiltin "COS" [n] = VNum (cos (asNum n))
 callBuiltin "TAN" [n] = VNum (tan (asNum n))
 callBuiltin "ATN" [n] = VNum (atan (asNum n))
--- RND would need IO (math.random is effectful), but expressions evaluate
--- purely here, so it cannot be supported without reworking evaluation.
-callBuiltin "RND" _ = error "RND is not supported: expression evaluation is pure, so it cannot produce randomness"
 callBuiltin fn _ = error ("unknown function " <> fn)
 
 sgn :: Number -> Number
@@ -294,17 +343,18 @@ endsOpen (_ : rest) = endsOpen rest
 
 -- Build the output text, tracking the current column so ',' can tab to the
 -- next 14-character zone. Returns (text, column).
-renderPrint :: State -> Number -> [PItem] -> (String, Number)
-renderPrint _ col [] = ("", col)
+renderPrint :: State -> Number -> [PItem] -> IO (String, Number)
+renderPrint _ col [] = return ("", col)
 renderPrint st col (PSemi : rest) = renderPrint st col rest
-renderPrint st col (PComma : rest) =
+renderPrint st col (PComma : rest) = do
     let pad = zonePad col
-        more = renderPrint st (col + lenNum pad) rest
-    in (pad <> fst more, snd more)
-renderPrint st col (PVal e : rest) =
-    let s = showVal (eval st e)
-        more = renderPrint st (col + lenNum s) rest
-    in (s <> fst more, snd more)
+    more <- renderPrint st (col + lenNum pad) rest
+    return (pad <> fst more, snd more)
+renderPrint st col (PVal e : rest) = do
+    v <- eval st e
+    let s = showVal v
+    more <- renderPrint st (col + lenNum s) rest
+    return (s <> fst more, snd more)
 
 zonePad :: Number -> String
 zonePad col = spaces (floor (14.0 - fmod col 14.0))
@@ -316,13 +366,13 @@ spaces k = if k <= 0 then "" else " " <> spaces (k - 1)
 -- INPUT
 -- ---------------------------------------------------------------------------
 
-assignInputs :: State -> [(String, [Expr])] -> [String] -> State
-assignInputs st [] _ = st
-assignInputs st _ [] = st
-assignInputs st (t : ts) (v : vs) =
+assignInputs :: State -> [(String, [Expr])] -> [String] -> IO State
+assignInputs st [] _ = return st
+assignInputs st _ [] = return st
+assignInputs st (t : ts) (v : vs) = do
     let value = if isStrName (fst t) then VStr v else VNum (read_Number v)
-        st1 = assign st (fst t) (snd t) value
-    in assignInputs st1 ts vs
+    st1 <- assign st (fst t) (snd t) value
+    assignInputs st1 ts vs
 
 -- Split a line on commas (no quoting -- adequate for INPUT).
 splitComma :: String -> [String]

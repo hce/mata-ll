@@ -15,8 +15,8 @@ mll -r basic.mll demo.bas
 mll -r basic.mll
 ```
 
-`demo.bas` (factorials, Fibonacci, GOSUB) and `arrays.bas` (arrays, string and
-math builtins) are included.
+`demo.bas` (factorials, Fibonacci, GOSUB), `arrays.bas` (arrays, string and
+math builtins), and `dice.bas` (RND) are included.
 
 ## Modules
 
@@ -42,15 +42,15 @@ math builtins) are included.
 - Operators: `+ - * / ^`, `MOD`, the comparisons, and `AND` / `OR` / `NOT`
   (treated logically), with the usual precedence.
 - Builtins: `LEN`, `LEFT$`, `RIGHT$`, `MID$`, `CHR$`, `ASC`, `STR$`, `VAL`,
-  `ABS`, `INT`, `SGN`, `SQR`, `SIN`, `COS`, `TAN`, `ATN`.
+  `ABS`, `INT`, `SGN`, `SQR`, `SIN`, `COS`, `TAN`, `ATN`, `RND`.
+
+`RND(x)` returns a fresh number in `[0,1)` from Lua's `math.random`; because
+that is effectful, expression evaluation runs in `IO`.
 
 ## Known limitations
 
 This is a teaching example, not a complete BASIC. Notable gaps:
 
-- **No `RND` / randomness.** Expressions evaluate purely (no IO), and Lua's
-  `math.random` is effectful, so `RND` is rejected with a clear error rather
-  than silently faked. Supporting it would mean evaluating expressions in IO.
 - **`AND` / `OR` / `NOT` are logical, not bitwise** — they treat any non-zero
   value as true and yield 0 / -1.
 - **String literals have no escape sequences.** A `"` always ends the string,
