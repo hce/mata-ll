@@ -1247,8 +1247,17 @@ impl Parser {
     }
 
     fn parse_expr_infix(&mut self, min_prec: u8) -> Result<Expr, String> {
-        let mut lhs = self.parse_expr_prefix()?;
+        let lhs = self.parse_expr_prefix()?;
+        self.continue_infix(lhs, min_prec)
+    }
 
+    /// Continue infix-operator parsing from an already-parsed left operand.
+    /// Splitting this out of `parse_expr_infix` lets callers that have already
+    /// parsed an application (e.g. the parenthesised-expression path, which
+    /// parses one to test for a left section) resume without re-parsing it —
+    /// the parenthesised body would otherwise be parsed twice at every nesting
+    /// level, giving O(2^n) parse time on deeply nested parentheses.
+    fn continue_infix(&mut self, mut lhs: Expr, min_prec: u8) -> Result<Expr, String> {
         loop {
             // Try to consume indentation for continuation lines
             // Only if the next real token after indent is an operator
@@ -1735,29 +1744,40 @@ impl Parser {
                     return Ok(Expr::Lit(Literal::Unit));
                 }
 
-                // Try to detect left section: (expr op)
-                // Parse application-level (no infix) and check for op )
-                let save_pos = self.pos;
-                let save_indent = self.current_indent;
+                // Parse the parenthesised body ONCE. To test for a left section
+                // `(expr op)` we need the application-level parse; if it turns
+                // out not to be a section we *continue* infix parsing from that
+                // same parse rather than backtracking and re-parsing. Parsing
+                // twice (the old behaviour) made nested parens cost O(2^n).
+                //
+                // Set up exactly as `parse_expr` does (leading layout skip and
+                // `expr_min_indent = current_indent`) so the resulting AST — and
+                // thus the emitted code — is identical to the previous
+                // parse-then-reparse path. `expr_min_indent` is restored before
+                // handling `::` ascription and the tuple/paren tail, mirroring
+                // `parse_expr`.
+                self.skip_newlines_and_indent();
+                let saved_expr_min_indent = self.expr_min_indent;
+                self.expr_min_indent = self.current_indent;
                 let lhs = self.parse_expr_app()?;
+
+                // (expr op) — left section: \x -> expr op x
                 if let Token::Operator(op) = self.peek().clone() {
-                    {
-                        let after_op = self.pos + 1;
-                        if after_op < self.tokens.len()
-                            && self.tokens[after_op].token == Token::RightParen {
-                                // (expr op) — left section: \x -> expr op x
-                                self.advance(); // consume operator
-                                self.advance(); // consume )
-                                return Ok(Expr::Lambda {
-                                    params: vec!["_sec".into()],
-                                    body: Box::new(Expr::InfixApp {
-                                        op,
-                                        lhs: Box::new(lhs),
-                                        rhs: Box::new(Expr::Var("_sec".into())),
-                                    }),
-                                });
-                            }
-                    }
+                    let after_op = self.pos + 1;
+                    if after_op < self.tokens.len()
+                        && self.tokens[after_op].token == Token::RightParen {
+                            self.advance(); // consume operator
+                            self.advance(); // consume )
+                            self.expr_min_indent = saved_expr_min_indent;
+                            return Ok(Expr::Lambda {
+                                params: vec!["_sec".into()],
+                                body: Box::new(Expr::InfixApp {
+                                    op,
+                                    lhs: Box::new(lhs),
+                                    rhs: Box::new(Expr::Var("_sec".into())),
+                                }),
+                            });
+                        }
                 }
 
                 // (expr `name`) — backtick left section: \x -> expr `name` x
@@ -1773,6 +1793,7 @@ impl Parser {
                                 let name = self.expect_ident()?;
                                 self.advance(); // consume second backtick
                                 self.advance(); // consume )
+                                self.expr_min_indent = saved_expr_min_indent;
                                 return Ok(Expr::Lambda {
                                     params: vec!["_sec".into()],
                                     body: Box::new(Expr::InfixApp {
@@ -1784,10 +1805,16 @@ impl Parser {
                             }
                 }
 
-                // Not a section — backtrack and parse full expression
-                self.pos = save_pos;
-                self.current_indent = save_indent;
-                let expr = self.parse_expr()?;
+                // Not a section — finish the infix expression from the parse we
+                // already have (no re-parse). This mirrors `parse_expr`:
+                // continue infix, restore `expr_min_indent`, then `::` ascription.
+                let mut expr = self.continue_infix(lhs, 0)?;
+                self.expr_min_indent = saved_expr_min_indent;
+                if self.at(&Token::DblColon) {
+                    self.advance();
+                    let ty = self.parse_type()?;
+                    expr = Expr::Ascription(Box::new(expr), ty);
+                }
                 if self.at(&Token::Comma) {
                     // Tuple expression: (a, b, ...)
                     let mut elems = vec![expr];

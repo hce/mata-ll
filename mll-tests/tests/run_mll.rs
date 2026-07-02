@@ -214,6 +214,7 @@ mll_test!(stress_large_adt, "stress_large_adt.mll");
 mll_test!(stress_deep_recursion, "stress_deep_recursion.mll");
 mll_test!(stress_nested_expr, "stress_nested_expr.mll");
 mll_test!(stress_deep_chain, "stress_deep_chain.mll");
+mll_test!(stress_deep_parens, "stress_deep_parens.mll");
 mll_test!(stress_many_functions, "stress_many_functions.mll");
 mll_test!(stress_many_instances, "stress_many_instances.mll");
 mll_test!(stress_long_do, "stress_long_do.mll");
