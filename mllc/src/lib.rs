@@ -8,6 +8,7 @@ pub mod lexer;
 pub mod modules;
 pub mod mono;
 pub mod parser;
+pub mod split;
 pub mod tir;
 pub mod typechecker;
 pub mod types;
@@ -135,6 +136,12 @@ pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<C
 
     // Constant folding
     let mono_module = fold::fold_module(mono_module);
+
+    // Bound emitted-expression nesting depth: pull deep pure sub-expressions
+    // into `let` bindings so the generated Lua stays within Lua's own parser
+    // recursion limit (a long chain would otherwise produce Lua that Lua
+    // refuses to load with a "C stack overflow"). See split.rs.
+    let mono_module = split::split_module(mono_module);
 
     // Dead-code elimination: drop functions (auto-prelude, unused specializations
     // and instance methods) not reachable from main/exports.
