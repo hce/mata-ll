@@ -1,4 +1,5 @@
 use crate::demand::DemandInfo;
+use crate::embed::{self, EmbedMode};
 use crate::tir::*;
 use crate::types::Ty;
 
@@ -45,6 +46,10 @@ struct CodeGen {
     var_table_emitted: bool,
     /// Demand analysis: per-function parameter strictness.
     demand_info: DemandInfo,
+    /// Source embedding in `EmbedMode::Var`: the emitted file starts with a
+    /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
+    /// return table must export it — even when there are no other exports.
+    embed_var_export: bool,
     output: String,
     indent: usize,
 }
@@ -66,6 +71,7 @@ impl CodeGen {
             var_slots_next: 0,
             var_table_emitted: false,
             demand_info: DemandInfo { strict_params: std::collections::HashMap::new() },
+            embed_var_export: false,
             output: String::new(), indent: 0,
         }
     }
@@ -393,7 +399,7 @@ impl CodeGen {
 
         // Generate module return table for exports
         // Wrap each export so return values are deep-forced for Lua consumption
-        if !module.exports.is_empty() {
+        if !module.exports.is_empty() || self.embed_var_export {
             // Collect export function types for type-directed FFI conversion
             let export_types: std::collections::HashMap<String, Ty> = module.functions.iter()
                 .filter(|f| module.exports.contains(&f.name))
@@ -405,6 +411,12 @@ impl CodeGen {
             self.emit_indent();
             self.emit("return {\n");
             self.indent += 1;
+            if self.embed_var_export {
+                // The embedded original source (a plain Lua string bound at
+                // the very top of the file — see embed.rs).
+                self.emit_indent();
+                self.emit(&format!("{0} = {0},\n", embed::SOURCE_VAR));
+            }
             for name in &module.exports {
                 let sname = sanitize_name(name);
                 // Extract argument types from function type
@@ -3103,15 +3115,24 @@ fn is_builtin_op(op: &str) -> bool {
         | "div" | "mod")
 }
 
-pub fn generate(module: &TModule) -> String {
+pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> String {
     let mut cg = CodeGen::new();
+    cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
     cg.demand_info = crate::demand::analyze(module);
     // Generate the program body first so we can see which runtime-prelude
     // functions it actually references, then prepend only those (transitively).
     cg.generate_module(module);
     let body = cg.output;
     let prelude = ondemand_prelude(&body);
-    let mut out = prelude;
+    // The embedded-source block goes at the very top of the file: extraction
+    // takes the earliest marker, so the genuine block must precede anything
+    // user-derived, and placing it before the prelude also keeps the prelude
+    // scan above from picking up names mentioned in the source text.
+    let mut out = match embed_source {
+        Some((mode, source)) => embed::embed_block(source, mode),
+        None => String::new(),
+    };
+    out.push_str(&prelude);
     out.push('\n');
     out.push_str(&body);
     out

@@ -3,6 +3,7 @@ pub mod codegen;
 pub mod dce;
 pub mod demand;
 pub mod desugar;
+pub mod embed;
 pub mod fold;
 pub mod lexer;
 pub mod modules;
@@ -16,11 +17,22 @@ pub mod verify;
 
 use std::path::Path;
 
+pub use embed::EmbedMode;
+
 /// Result of compilation
 pub struct CompileResult {
     pub lua_code: String,
     pub has_main: bool,
     pub exports: Vec<String>,
+}
+
+/// Options controlling the emitted Lua.
+#[derive(Debug, Default, Clone)]
+pub struct CompileOptions {
+    /// Embed the original source text into the emitted Lua so the .lua file
+    /// can later be recompiled without the .mll (see `embed::extract_source`).
+    /// `None` embeds nothing.
+    pub embed_source: Option<EmbedMode>,
 }
 
 /// Compile error
@@ -67,12 +79,23 @@ fn parse_prelude() -> Result<Vec<ast::Decl>, CompileError> {
     Ok(module.decls)
 }
 
-/// Compile mll source code to Lua.
+/// Compile mll source code to Lua with default options.
 ///
 /// `source`: the .mll source code
 /// `source_dir`: directory of the source file (for import resolution)
 /// `lib_paths`: additional search paths for library modules
 pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<CompileResult, CompileError> {
+    compile_with_options(source, source_dir, lib_paths, &CompileOptions::default())
+}
+
+/// Compile mll source code to Lua. See [`compile`]; `options` additionally
+/// controls output features such as source embedding.
+pub fn compile_with_options(
+    source: &str,
+    source_dir: &Path,
+    lib_paths: &[&Path],
+    options: &CompileOptions,
+) -> Result<CompileResult, CompileError> {
     // Lex
     let tokens = lexer::lex(source).map_err(CompileError::Lex)?;
 
@@ -154,7 +177,8 @@ pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<C
     let mono_module = dce::eliminate(mono_module);
 
     // Generate Lua
-    let lua_code = codegen::generate(&mono_module);
+    let embed = options.embed_source.map(|mode| (mode, source));
+    let lua_code = codegen::generate(&mono_module, embed);
 
     Ok(CompileResult {
         lua_code,

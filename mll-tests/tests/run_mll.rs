@@ -2404,3 +2404,163 @@ main = do
         ]
     );
 }
+
+// --- Source embedding (--embed-source) and recompilation (--recompile) ---
+//
+// Compiling with `CompileOptions { embed_source: Some(mode) }` must carry the
+// original .mll source inside the emitted Lua so `embed::extract_source` can
+// recover it byte-exactly and recompile it without the .mll file. The fixture
+// is deliberately hostile: long-bracket closers at several levels (forcing
+// the embedder to pick a non-colliding bracket level), fake marker lines,
+// and escaped quotes — none of which may terminate the block early or break
+// the emitted Lua.
+
+const EMBED_FIXTURE: &str = r#"-- bracket bombs in a comment: ]] ]=] ]==] --[[
+-- MLL-EMBEDDED-SOURCE-END ]=]
+greeting :: String
+greeting = "brackets: ]] ]=] ]==] ]===] and --[==[ and \"quotes\""
+
+fakeMarker :: String
+fakeMarker = "local __SOURCE_CODE = [=["
+
+main :: IO ()
+main = do
+  putStrLn greeting
+  putStrLn fakeMarker
+"#;
+
+fn compile_embedded(source: &str, mode: mllc::EmbedMode) -> String {
+    let opts = mllc::CompileOptions { embed_source: Some(mode) };
+    mllc::compile_with_options(source, Path::new("."), &[], &opts)
+        .expect("embedding compile should succeed")
+        .lua_code
+}
+
+#[test]
+fn embed_comments_round_trip() {
+    let plain = mllc::compile(EMBED_FIXTURE, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    // Without embedding, no marker or source variable may leak into the output.
+    assert!(!plain.contains("MLL-EMBEDDED-SOURCE-BEGIN"),
+        "plain compile must not carry an embedded-source block");
+
+    let embedded = compile_embedded(EMBED_FIXTURE, mllc::EmbedMode::Comments);
+
+    // The embedded file is still loadable, runnable Lua.
+    let lua = mlua::Lua::new();
+    lua.load(&embedded).set_name("embed_comments").exec()
+        .expect("comment-embedded Lua should still run");
+
+    // Extraction recovers the source byte-exactly, with the right mode.
+    let (extracted, mode) = mllc::embed::extract_source(&embedded)
+        .expect("embedded source should be found");
+    assert_eq!(mode, mllc::EmbedMode::Comments);
+    assert_eq!(extracted, EMBED_FIXTURE, "extraction must be byte-exact");
+
+    // Recompiling the extracted source matches a direct compile exactly...
+    let recompiled = mllc::compile(&extracted, Path::new("."), &[])
+        .expect("extracted source should recompile")
+        .lua_code;
+    assert_eq!(recompiled, plain, "recompile must equal a direct compile");
+
+    // ...and re-embedding reproduces the embedded file byte-for-byte, so an
+    // in-place `--recompile` of an unchanged file is a fixpoint.
+    let reembedded = compile_embedded(&extracted, mllc::EmbedMode::Comments);
+    assert_eq!(reembedded, embedded, "re-embedding must be a fixpoint");
+}
+
+#[test]
+fn embed_var_round_trip() {
+    let plain = mllc::compile(EMBED_FIXTURE, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    // The fixture's fake-marker string literal appears in the plain output
+    // (as a generated Lua string constant), so a bare substring check would
+    // misfire — what matters is that it doesn't extract as a source block.
+    assert!(mllc::embed::extract_source(&plain).is_err(),
+        "plain compile must not carry an extractable source block");
+
+    let embedded = compile_embedded(EMBED_FIXTURE, mllc::EmbedMode::Var);
+
+    // Loaded as a module (chunk argument set, so main is skipped), the
+    // exports table carries the exact source under __SOURCE_CODE.
+    let lua = mlua::Lua::new();
+    let exports: mlua::Table = lua.load(&embedded).set_name("embed_var")
+        .call("embed_var")
+        .expect("var-embedded Lua should load as a module");
+    let runtime_source: String = exports.get("__SOURCE_CODE")
+        .expect("module must export __SOURCE_CODE");
+    assert_eq!(runtime_source, EMBED_FIXTURE,
+        "__SOURCE_CODE at runtime must equal the original source");
+
+    // It also still runs as a program (main not skipped).
+    let lua = mlua::Lua::new();
+    lua.load(&embedded).set_name("embed_var").exec()
+        .expect("var-embedded Lua should still run as a program");
+
+    // Textual extraction round-trips byte-exactly and recompiles identically.
+    let (extracted, mode) = mllc::embed::extract_source(&embedded)
+        .expect("embedded source should be found");
+    assert_eq!(mode, mllc::EmbedMode::Var);
+    assert_eq!(extracted, EMBED_FIXTURE, "extraction must be byte-exact");
+    let recompiled = mllc::compile(&extracted, Path::new("."), &[])
+        .expect("extracted source should recompile")
+        .lua_code;
+    assert_eq!(recompiled, plain, "recompile must equal a direct compile");
+    let reembedded = compile_embedded(&extracted, mllc::EmbedMode::Var);
+    assert_eq!(reembedded, embedded, "re-embedding must be a fixpoint");
+}
+
+#[test]
+fn embed_var_merges_with_existing_exports() {
+    // A module with real `export`s: __SOURCE_CODE must join the exports table
+    // without displacing them.
+    let source = r#"
+export double :: Integer -> Integer
+double n = n * 2
+
+main :: IO ()
+main = putStrLn (show (double 4))
+"#;
+    let embedded = compile_embedded(source, mllc::EmbedMode::Var);
+    let lua = mlua::Lua::new();
+    let exports: mlua::Table = lua.load(&embedded).set_name("embed_exports")
+        .call("embed_exports")
+        .expect("should load as a module");
+    let runtime_source: String = exports.get("__SOURCE_CODE")
+        .expect("module must export __SOURCE_CODE");
+    assert_eq!(runtime_source, source);
+    let double: mlua::Function = exports.get("double")
+        .expect("real exports must survive alongside __SOURCE_CODE");
+    let result: i64 = double.call(21).expect("exported fn should be callable");
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn embed_source_without_trailing_newline() {
+    // The framing newlines belong to the block, not the source: a source with
+    // no final newline must come back without one.
+    let source = "main :: IO ()\nmain = putStrLn \"no trailing newline\"";
+    for mode in [mllc::EmbedMode::Comments, mllc::EmbedMode::Var] {
+        let embedded = compile_embedded(source, mode);
+        let lua = mlua::Lua::new();
+        lua.load(&embedded).set_name("embed_no_nl").exec()
+            .expect("should run");
+        let (extracted, _) = mllc::embed::extract_source(&embedded)
+            .expect("embedded source should be found");
+        assert_eq!(extracted, source, "byte-exact round trip ({:?})", mode);
+    }
+}
+
+#[test]
+fn extract_from_plain_lua_rejected() {
+    let plain = mllc::compile(EMBED_FIXTURE, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    match mllc::embed::extract_source(&plain) {
+        Err(e) => assert!(e.contains("no embedded MLL source"),
+            "expected a clear no-embedded-source message, got: {}", e),
+        Ok(_) => panic!("extraction from a plain compile must fail"),
+    }
+}

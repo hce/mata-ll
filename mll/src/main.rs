@@ -1,10 +1,22 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use std::path::Path;
+
+/// How to embed the original .mll source into the emitted .lua.
+#[derive(Clone, Copy, PartialEq, ValueEnum)]
+enum EmbedSourceArg {
+    /// Inside a clearly delimited Lua comment block
+    Comments,
+    /// As an exported module string variable named __SOURCE_CODE
+    Var,
+    /// Embed nothing (with --recompile: strip an existing embedding)
+    None,
+}
 
 #[derive(Parser)]
 #[command(name = "mll", about = "mll compiler and runner")]
 struct Cli {
-    /// The .mll source file to compile
+    /// The .mll source file to compile (with --recompile: a previously
+    /// emitted .lua file with embedded source)
     file: String,
 
     /// Run the compiled code immediately (don't write .lua file)
@@ -14,6 +26,18 @@ struct Cli {
     /// Write the compiled .lua file (default when not using --run)
     #[arg(short, long)]
     emit_lua: bool,
+
+    /// Embed the original source into the emitted .lua so the file can be
+    /// recompiled later without the .mll (see --recompile)
+    #[arg(long, value_enum, value_name = "MODE")]
+    embed_source: Option<EmbedSourceArg>,
+
+    /// Treat FILE as previously emitted Lua carrying its source (see
+    /// --embed-source): extract the source, recompile it, and rewrite FILE
+    /// in place. The file's embedding mode is kept unless --embed-source
+    /// overrides it.
+    #[arg(long)]
+    recompile: bool,
 
     /// Additional library search paths
     #[arg(short = 'L', long = "lib")]
@@ -48,12 +72,34 @@ fn main() {
 fn run_compiler(cli: Cli) {
     let filename = &cli.file;
 
-    let source = match std::fs::read_to_string(filename) {
+    let file_text = match std::fs::read_to_string(filename) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("Error reading {}: {}", filename, e);
             std::process::exit(1);
         }
+    };
+
+    // --recompile: FILE is previously emitted Lua; the source to compile is
+    // the embedded block, and (unless overridden) the embedding is preserved
+    // so the rewritten file stays recompilable.
+    let (source, detected_embed) = if cli.recompile {
+        match mllc::embed::extract_source(&file_text) {
+            Ok((source, mode)) => (source, Some(mode)),
+            Err(e) => {
+                eprintln!("Error recompiling {}: {}", filename, e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        (file_text, None)
+    };
+
+    let embed_source = match cli.embed_source {
+        Some(EmbedSourceArg::Comments) => Some(mllc::EmbedMode::Comments),
+        Some(EmbedSourceArg::Var) => Some(mllc::EmbedMode::Var),
+        Some(EmbedSourceArg::None) => None,
+        None => detected_embed,
     };
 
     let source_dir = Path::new(filename).parent().unwrap_or(Path::new("."));
@@ -72,7 +118,8 @@ fn run_compiler(cli: Cli) {
         lib_paths.push(auto.as_path());
     }
 
-    let result = match mllc::compile(&source, source_dir, &lib_paths) {
+    let options = mllc::CompileOptions { embed_source };
+    let result = match mllc::compile_with_options(&source, source_dir, &lib_paths, &options) {
         Ok(r) => r,
         Err(e) => {
             eprint!("{}", e);
@@ -82,13 +129,22 @@ fn run_compiler(cli: Cli) {
 
     // Write .lua file if requested or if not running
     if cli.emit_lua || !cli.run {
-        let out_filename = filename.replace(".mll", ".lua");
+        // --recompile rewrites the emitted .lua in place
+        let out_filename = if cli.recompile {
+            filename.clone()
+        } else {
+            filename.replace(".mll", ".lua")
+        };
         if let Err(e) = std::fs::write(&out_filename, &result.lua_code) {
             eprintln!("Error writing {}: {}", out_filename, e);
             std::process::exit(1);
         }
         if !cli.run {
-            println!("Compiled {} -> {}", filename, out_filename);
+            if cli.recompile {
+                println!("Recompiled {} from its embedded source", filename);
+            } else {
+                println!("Compiled {} -> {}", filename, out_filename);
+            }
         }
     }
 
