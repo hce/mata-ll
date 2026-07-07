@@ -83,7 +83,7 @@ impl Monomorphizer {
             ":", "[]", "head", "tail", "take", "drop", "zipWith", "length", "reverse",
             "engage", "liftIO",
             "hmEmpty", "hmInsert", "hmLookup", "hmDelete",
-            "hmSize", "hmKeys", "hmValues", "hmMember",
+            "hmSize", "hmKeys", "hmValues", "hmMember", "hmToList",
             "bsEmpty", "bsLength", "bsIndex", "bsSub", "bsSingleton",
             "bsConcat", "bsConcatList", "bsNull", "bsHead", "bsTail", "bsCons", "bsSnoc",
             "bsReplicate", "bsPack", "bsUnpack", "bsMap", "bsFoldl",

@@ -36,6 +36,27 @@ user-defined ADT. The built-in operations are:
     hmSize     :: HashMap k v -> Integer
     hmKeys     :: HashMap k v -> [k]
     hmValues   :: HashMap k v -> [v]
+    hmToList   :: HashMap k v -> [(k, v)]
+
+**Key-type constraint.** Keys must be *primitive* — strings or
+numbers. Two reasons, both rooted in the Lua-table backing:
+
+  1. Lua tables hash compound values (tables) by identity, not by
+     content, so a tuple or ADT key would never compare equal to a
+     structurally-identical lookup key: `hmLookup (1,2) (hmInsert (1,2) v m)`
+     would miss.
+  2. `hmKeys`, `hmValues`, `hmToList`, and `show` on a HashMap impose a
+     deterministic order by sorting the keys (see below), and Lua's
+     `table.sort` can only order mutually-comparable primitives — it
+     errors on table keys.
+
+A HashMap is unordered by definition, but the enumerating operations
+(`hmKeys`/`hmValues`/`hmToList`/`show`) must still be *pure functions*:
+the same map has to yield the same list every time. Lua's `pairs()`
+iteration order is unspecified, so relying on it would smuggle
+non-determinism into the pure world. These operations therefore return
+their elements sorted by key, which also makes `hmToList m` agree
+element-for-element with `zip (hmKeys m) (hmValues m)`.
 
 We support haskell's algebraic datatypes:
 

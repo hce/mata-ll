@@ -79,21 +79,27 @@ pub fn compile(source: &str, source_dir: &Path, lib_paths: &[&Path]) -> Result<C
     // Parse
     let parsed = parser::parse(&tokens).map_err(CompileError::Parse)?;
 
+    // Parse the prelude up-front: its signature shapes are the baseline against
+    // which unqualified imports are checked for incompatible-type collisions.
+    let prelude_decls = parse_prelude()?;
+    let prelude_shapes = modules::signature_shapes(&prelude_decls);
+
     // Resolve imports
     let mut loader = modules::ModuleLoader::new(source_dir);
     for path in lib_paths {
         loader.add_search_path(path.to_path_buf());
     }
     let module = loader.resolve_imports(&parsed).map_err(CompileError::Import)?;
+    // Reject unqualified imports that would clash in the flattened namespace,
+    // with a clear message, rather than letting the clash surface downstream.
+    loader.check_import_collisions(&parsed, &prelude_shapes)
+        .map_err(CompileError::Import)?;
 
     // Count own (non-import) declarations from the parsed source before
     // import resolution merges everything together.
     let own_count = parsed.decls.iter()
         .filter(|d| !matches!(d, ast::Decl::Import { .. }))
         .count();
-
-    // Merge prelude declarations (prepend before user declarations)
-    let prelude_decls = parse_prelude()?;
     let hidden = module.hidden.clone();
     let mut module = ast::Module {
         decls: prelude_decls.into_iter()

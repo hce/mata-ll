@@ -88,6 +88,16 @@ impl ModuleLoader {
         let mut imported_decls: Vec<Decl> = Vec::new();
         let mut own_decls: Vec<Decl> = Vec::new();
         let mut seen_imports: HashSet<String> = HashSet::new();
+        // Aliases introduced by `import qualified X as M`. A use-site `M.foo`
+        // parses as the field-access shape `App(Var "foo", Con "M")`; once we
+        // know which `Con`s are really module aliases, we rewrite those into a
+        // single qualified `Var "M.foo"` that matches the prefixed declaration.
+        let qualified_aliases: HashSet<String> = module.decls.iter()
+            .filter_map(|d| match d {
+                Decl::Import { items: ImportItems::Qualified(alias), .. } => Some(alias.clone()),
+                _ => None,
+            })
+            .collect();
         let mut hidden_names: HashSet<String> = module.hidden.clone();
         // Names explicitly requested by a Specific import. A name can be
         // merged in transitively by one import (and hidden because that import
@@ -200,14 +210,26 @@ impl ModuleLoader {
                             }
                         }
                         ImportItems::Qualified(alias) => {
+                            // Prefix every declaration to `alias.name` AND rewrite
+                            // intra-module references (a sibling function call, a
+                            // reference to the module's own types) to the prefixed
+                            // names, so the qualified namespace is self-contained
+                            // and never collides with the Prelude.
+                            let names = collect_module_names(&all_decls);
+                            let qual = Qual { alias, names: &names };
                             for d in &all_decls {
-                                imported_decls.push(prefix_decl(d, alias));
+                                imported_decls.push(qual.decl(d));
                             }
                         }
                     }
                 }
                 _ => {
-                    own_decls.push(decl.clone());
+                    let d = if qualified_aliases.is_empty() {
+                        decl.clone()
+                    } else {
+                        rewrite_qualified_uses_decl(decl.clone(), &qualified_aliases)
+                    };
+                    own_decls.push(d);
                 }
             }
         }
@@ -224,29 +246,512 @@ impl ModuleLoader {
         imported_decls.extend(own_decls);
         Ok(Module { decls: imported_decls, exports: None, hidden: hidden_names })
     }
+
+    /// Flag unqualified imports that redefine an existing name *with an
+    /// incompatible type* (against the Prelude, this file, or an earlier
+    /// import). Because mata-ll flattens every import into one namespace, such a
+    /// clash otherwise surfaces later as a baffling unification error deep inside
+    /// the imported module. A matching type shape (an FFI re-declaration like
+    /// `sqrt`, or the same definition re-exported through a diamond import) is
+    /// harmless and not flagged. Call after `resolve_imports`, which populates
+    /// the resolved-module cache this reads. `reserved` maps globally-provided
+    /// names (the Prelude's) to their type shapes.
+    pub fn check_import_collisions(
+        &self,
+        module: &Module,
+        reserved: &HashMap<String, String>,
+    ) -> Result<(), String> {
+        // name -> (source label, type shape)
+        let mut claimed: HashMap<String, (String, String)> = reserved.iter()
+            .map(|(n, shape)| (n.clone(), ("the Prelude".to_string(), shape.clone())))
+            .collect();
+        for (name, shape) in signature_shapes(&module.decls) {
+            claimed.entry(name).or_insert(("this file".to_string(), shape));
+        }
+
+        for d in &module.decls {
+            let Decl::Import { module_path, items } = d else { continue };
+            // Qualified imports are renamed to `Alias.name` and can't collide.
+            if matches!(items, ImportItems::Qualified(_)) {
+                continue;
+            }
+            let key = module_path.join(".");
+            // Skip if the module didn't resolve (e.g. an import cycle).
+            let Some(resolved) = self.resolved.get(&key) else { continue };
+
+            let shapes = signature_shapes(&resolved.decls);
+            let mut collisions: Vec<(String, String)> = Vec::new();
+            for (name, shape) in &shapes {
+                if let Some((src, claimed_shape)) = claimed.get(name)
+                    && claimed_shape != shape
+                {
+                    collisions.push((name.clone(), src.clone()));
+                }
+            }
+            if !collisions.is_empty() {
+                collisions.sort();
+                return Err(collision_error(&key, &collisions));
+            }
+            // Later imports compare against this one too.
+            for (name, shape) in shapes {
+                claimed.entry(name).or_insert((key.clone(), shape));
+            }
+        }
+        Ok(())
+    }
 }
 
-/// Get the primary name of a declaration for import filtering
-/// Prefix a declaration's name with a qualified alias: "T.foo"
-fn prefix_decl(decl: &Decl, alias: &str) -> Decl {
-    let prefix = |name: &str| format!("{}.{}", alias, name);
-    match decl {
-        Decl::TypeSig { name, ty } => Decl::TypeSig {
-            name: prefix(name), ty: ty.clone(),
-        },
-        Decl::FunDef { name, clauses } => Decl::FunDef {
-            name: prefix(name), clauses: clauses.clone(),
-        },
-        Decl::DataDef { name, type_vars, constructors, deriving } => Decl::DataDef {
-            name: prefix(name), type_vars: type_vars.clone(),
-            constructors: constructors.clone(), deriving: deriving.clone(),
-        },
-        Decl::NewtypeDef { name, type_vars, inner } => Decl::NewtypeDef {
-            name: prefix(name), type_vars: type_vars.clone(), inner: inner.clone(),
-        },
-        // Don't prefix class/instance names — they're global
-        other => other.clone(),
+/// The top-level names a module defines, split by namespace. Used to rewrite
+/// intra-module references when the module is imported `qualified`: only names
+/// the module actually defines get the alias prefix — references to the Prelude
+/// or to intrinsics (`elem`, `zip`, `hmInsert`, …) are left alone.
+struct ModuleNames {
+    /// Value-level bindings: functions, type signatures, exports.
+    vals: HashSet<String>,
+    /// Type-level names: data, newtype, alias, type-family.
+    tys: HashSet<String>,
+}
+
+fn collect_module_names(decls: &[&Decl]) -> ModuleNames {
+    let mut vals = HashSet::new();
+    let mut tys = HashSet::new();
+    for d in decls {
+        match d {
+            Decl::FunDef { name, .. }
+            | Decl::TypeSig { name, .. }
+            | Decl::ExportSig { name, .. } => { vals.insert(name.clone()); }
+            Decl::DataDef { name, .. } | Decl::NewtypeDef { name, .. }
+            | Decl::TypeAlias { name, .. } | Decl::TypeFamily { name, .. } => {
+                tys.insert(name.clone());
+            }
+            _ => {}
+        }
     }
+    ModuleNames { vals, tys }
+}
+
+/// Prefixes a `qualified`-imported module's declarations with its alias and
+/// rewrites references among them. Constructors and class/instance names are
+/// left global (a qualified `Con` can't be written at a use site anyway), so
+/// only value and type references are prefixed.
+struct Qual<'a> {
+    alias: &'a str,
+    names: &'a ModuleNames,
+}
+
+impl Qual<'_> {
+    fn q(&self, name: &str) -> String {
+        format!("{}.{}", self.alias, name)
+    }
+
+    fn decl(&self, decl: &Decl) -> Decl {
+        match decl {
+            Decl::TypeSig { name, ty } => Decl::TypeSig {
+                name: self.q(name), ty: self.ty(ty),
+            },
+            Decl::FunDef { name, clauses } => Decl::FunDef {
+                name: self.q(name),
+                clauses: clauses.iter().map(|c| self.clause(c)).collect(),
+            },
+            Decl::ExportSig { name, ty } => Decl::ExportSig {
+                name: self.q(name), ty: self.ty(ty),
+            },
+            Decl::DataDef { name, type_vars, constructors, deriving } => Decl::DataDef {
+                name: self.q(name),
+                type_vars: type_vars.clone(),
+                // Rewrite field types (sibling type references) but leave the
+                // constructor names global.
+                constructors: constructors.iter().map(|c| self.constructor(c)).collect(),
+                deriving: deriving.clone(),
+            },
+            Decl::NewtypeDef { name, type_vars, inner } => Decl::NewtypeDef {
+                name: self.q(name), type_vars: type_vars.clone(), inner: self.ty(inner),
+            },
+            Decl::TypeAlias { name, params, ty } => Decl::TypeAlias {
+                name: self.q(name), params: params.clone(), ty: self.ty(ty),
+            },
+            Decl::TypeFamily { name, equations } => Decl::TypeFamily {
+                name: self.q(name),
+                equations: equations.iter().map(|eq| TypeFamilyEq {
+                    args: eq.args.iter().map(|t| self.ty(t)).collect(),
+                    result: self.ty(&eq.result),
+                }).collect(),
+            },
+            // Classes and instances are global — don't prefix.
+            other => other.clone(),
+        }
+    }
+
+    fn constructor(&self, c: &Constructor) -> Constructor {
+        let fields = match &c.fields {
+            ConstructorFields::Positional(ts) =>
+                ConstructorFields::Positional(ts.iter().map(|t| self.ty(t)).collect()),
+            ConstructorFields::Named(fs) =>
+                ConstructorFields::Named(fs.iter().map(|(n, t)| (n.clone(), self.ty(t))).collect()),
+        };
+        Constructor {
+            name: c.name.clone(),
+            fields,
+            gadt_type: c.gadt_type.as_ref().map(|t| self.ty(t)),
+            existential_vars: c.existential_vars.clone(),
+            existential_constraints: c.existential_constraints.clone(),
+        }
+    }
+
+    fn clause(&self, c: &Clause) -> Clause {
+        // Clause parameters and where-bound names shadow module-level names,
+        // so references to them must not be prefixed.
+        let mut bound = HashSet::new();
+        for p in &c.patterns { collect_pattern_vars(p, &mut bound); }
+        for ld in &c.where_binds { bound.insert(ld.name.clone()); }
+        Clause {
+            patterns: c.patterns.clone(),
+            guards: c.guards.iter().map(|g| Guard {
+                condition: self.expr(&g.condition, &bound),
+                body: self.expr(&g.body, &bound),
+            }).collect(),
+            body: self.expr(&c.body, &bound),
+            where_binds: c.where_binds.iter().map(|ld| self.localdef(ld, &bound)).collect(),
+            span: c.span,
+        }
+    }
+
+    fn localdef(&self, ld: &LocalDef, outer: &HashSet<String>) -> LocalDef {
+        let mut bound = outer.clone();
+        for p in &ld.patterns { collect_pattern_vars(p, &mut bound); }
+        LocalDef {
+            name: ld.name.clone(),
+            patterns: ld.patterns.clone(),
+            body: self.expr(&ld.body, &bound),
+        }
+    }
+
+    fn expr(&self, e: &Expr, bound: &HashSet<String>) -> Expr {
+        match e {
+            Expr::Var(n) => {
+                if !bound.contains(n) && self.names.vals.contains(n) {
+                    Expr::Var(self.q(n))
+                } else {
+                    Expr::Var(n.clone())
+                }
+            }
+            Expr::OpFunc(n) => {
+                // Backtick sections `(`f`)` carry a plain function name here.
+                if !bound.contains(n) && self.names.vals.contains(n) {
+                    Expr::OpFunc(self.q(n))
+                } else {
+                    Expr::OpFunc(n.clone())
+                }
+            }
+            Expr::Con(_) | Expr::Lit(_) => e.clone(),
+            Expr::App(f, x) =>
+                Expr::App(Box::new(self.expr(f, bound)), Box::new(self.expr(x, bound))),
+            Expr::Lambda { params, body } => {
+                let mut b = bound.clone();
+                for p in params { b.insert(p.clone()); }
+                Expr::Lambda { params: params.clone(), body: Box::new(self.expr(body, &b)) }
+            }
+            Expr::InfixApp { op, lhs, rhs } => Expr::InfixApp {
+                op: op.clone(),
+                lhs: Box::new(self.expr(lhs, bound)),
+                rhs: Box::new(self.expr(rhs, bound)),
+            },
+            Expr::Negate(x) => Expr::Negate(Box::new(self.expr(x, bound))),
+            Expr::If { cond, then_branch, else_branch } => Expr::If {
+                cond: Box::new(self.expr(cond, bound)),
+                then_branch: Box::new(self.expr(then_branch, bound)),
+                else_branch: Box::new(self.expr(else_branch, bound)),
+            },
+            Expr::Case { scrutinee, branches } => Expr::Case {
+                scrutinee: Box::new(self.expr(scrutinee, bound)),
+                branches: branches.iter().map(|br| {
+                    let mut b = bound.clone();
+                    collect_pattern_vars(&br.pattern, &mut b);
+                    CaseBranch {
+                        pattern: br.pattern.clone(),
+                        guards: br.guards.iter().map(|g| Guard {
+                            condition: self.expr(&g.condition, &b),
+                            body: self.expr(&g.body, &b),
+                        }).collect(),
+                        body: self.expr(&br.body, &b),
+                    }
+                }).collect(),
+            },
+            Expr::Let { binds, body } => {
+                let mut b = bound.clone();
+                for ld in binds { b.insert(ld.name.clone()); }
+                Expr::Let {
+                    binds: binds.iter().map(|ld| self.localdef(ld, &b)).collect(),
+                    body: Box::new(self.expr(body, &b)),
+                }
+            }
+            Expr::Do(stmts) => {
+                let mut b = bound.clone();
+                Expr::Do(stmts.iter().map(|s| self.dostmt(s, &mut b)).collect())
+            }
+            Expr::Ascription(x, t) =>
+                Expr::Ascription(Box::new(self.expr(x, bound)), self.ty(t)),
+            Expr::RecordCon { constructor, fields } => Expr::RecordCon {
+                constructor: constructor.clone(),
+                fields: fields.iter().map(|(n, fe)| (n.clone(), self.expr(fe, bound))).collect(),
+            },
+            Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
+                expr: Box::new(self.expr(expr, bound)),
+                updates: updates.iter().map(|(n, fe)| (n.clone(), self.expr(fe, bound))).collect(),
+            },
+            Expr::Paren(x) => Expr::Paren(Box::new(self.expr(x, bound))),
+            Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| self.expr(x, bound)).collect()),
+        }
+    }
+
+    fn dostmt(&self, s: &DoStmt, bound: &mut HashSet<String>) -> DoStmt {
+        match s {
+            DoStmt::Bind { name, expr } => {
+                let e = self.expr(expr, bound);
+                bound.insert(name.clone());
+                DoStmt::Bind { name: name.clone(), expr: e }
+            }
+            DoStmt::Expr(e) => DoStmt::Expr(self.expr(e, bound)),
+            DoStmt::DoLet { name, expr } => {
+                let e = self.expr(expr, bound);
+                bound.insert(name.clone());
+                DoStmt::DoLet { name: name.clone(), expr: e }
+            }
+            DoStmt::PatternBind { pattern, expr } => {
+                let e = self.expr(expr, bound);
+                collect_pattern_vars(pattern, bound);
+                DoStmt::PatternBind { pattern: pattern.clone(), expr: e }
+            }
+            DoStmt::PatternDoLet { pattern, expr } => {
+                let e = self.expr(expr, bound);
+                collect_pattern_vars(pattern, bound);
+                DoStmt::PatternDoLet { pattern: pattern.clone(), expr: e }
+            }
+        }
+    }
+
+    fn ty(&self, t: &Type) -> Type {
+        match t {
+            Type::Con(n) => {
+                if self.names.tys.contains(n) { Type::Con(self.q(n)) } else { Type::Con(n.clone()) }
+            }
+            Type::Var(_) | Type::Unit | Type::Promoted(_) => t.clone(),
+            Type::App(a, b) => Type::App(Box::new(self.ty(a)), Box::new(self.ty(b))),
+            Type::Arrow(a, b) => Type::Arrow(Box::new(self.ty(a)), Box::new(self.ty(b))),
+            Type::List(x) => Type::List(Box::new(self.ty(x))),
+            Type::IO(x) => Type::IO(Box::new(self.ty(x))),
+            Type::ScopedLuaIO { scope_var, inner } => Type::ScopedLuaIO {
+                scope_var: scope_var.clone(), inner: Box::new(self.ty(inner)),
+            },
+            Type::Forall { var, inner } => Type::Forall {
+                var: var.clone(), inner: Box::new(self.ty(inner)),
+            },
+            Type::Paren(x) => Type::Paren(Box::new(self.ty(x))),
+            Type::LuaPure { lua_name, result } => Type::LuaPure {
+                lua_name: lua_name.clone(), result: Box::new(self.ty(result)),
+            },
+            Type::LuaIO { lua_name, result } => Type::LuaIO {
+                lua_name: lua_name.clone(), result: Box::new(self.ty(result)),
+            },
+            Type::LuaIterator { lua_name, result } => Type::LuaIterator {
+                lua_name: lua_name.clone(), result: Box::new(self.ty(result)),
+            },
+            Type::LuaTry { lua_name, result } => Type::LuaTry {
+                lua_name: lua_name.clone(), result: Box::new(self.ty(result)),
+            },
+            Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.ty(x)).collect()),
+            Type::Constrained { constraints, ty } => Type::Constrained {
+                constraints: constraints.iter().map(|c| Constraint {
+                    class_name: c.class_name.clone(), type_arg: self.ty(&c.type_arg),
+                }).collect(),
+                ty: Box::new(self.ty(ty)),
+            },
+        }
+    }
+}
+
+/// Collect the variable names bound by a pattern (for scope tracking).
+fn collect_pattern_vars(p: &Pattern, out: &mut HashSet<String>) {
+    match p {
+        Pattern::Var(n) => { out.insert(n.clone()); }
+        Pattern::Constructor { args, .. } => {
+            for a in args { collect_pattern_vars(a, out); }
+        }
+        Pattern::Paren(inner) => collect_pattern_vars(inner, out),
+        Pattern::Tuple(ps) => for p in ps { collect_pattern_vars(p, out); },
+        Pattern::Wildcard | Pattern::LitPat(_) => {}
+    }
+}
+
+/// Rewrite qualified use-sites in one of the importing module's declarations.
+/// `M.foo` parsed as the field-access shape `App(Var "foo", Con "M")`; where
+/// `M` is a known qualified alias, collapse it to `Var "M.foo"`.
+fn rewrite_qualified_uses_decl(decl: Decl, aliases: &HashSet<String>) -> Decl {
+    match decl {
+        Decl::FunDef { name, clauses } => Decl::FunDef {
+            name,
+            clauses: clauses.into_iter().map(|c| Clause {
+                patterns: c.patterns,
+                guards: c.guards.into_iter().map(|g| Guard {
+                    condition: rewrite_uses_expr(g.condition, aliases),
+                    body: rewrite_uses_expr(g.body, aliases),
+                }).collect(),
+                body: rewrite_uses_expr(c.body, aliases),
+                where_binds: c.where_binds.into_iter()
+                    .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
+                span: c.span,
+            }).collect(),
+        },
+        // Instance method bodies can also reference qualified imports.
+        Decl::InstanceDecl { class_name, target_type, methods } => Decl::InstanceDecl {
+            class_name, target_type,
+            methods: methods.into_iter().map(|m| InstanceMethod {
+                name: m.name,
+                clauses: m.clauses.into_iter().map(|c| Clause {
+                    patterns: c.patterns,
+                    guards: c.guards.into_iter().map(|g| Guard {
+                        condition: rewrite_uses_expr(g.condition, aliases),
+                        body: rewrite_uses_expr(g.body, aliases),
+                    }).collect(),
+                    body: rewrite_uses_expr(c.body, aliases),
+                    where_binds: c.where_binds.into_iter()
+                        .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
+                    span: c.span,
+                }).collect(),
+            }).collect(),
+        },
+        other => other,
+    }
+}
+
+fn rewrite_uses_localdef(ld: LocalDef, aliases: &HashSet<String>) -> LocalDef {
+    LocalDef {
+        name: ld.name,
+        patterns: ld.patterns,
+        body: rewrite_uses_expr(ld.body, aliases),
+    }
+}
+
+fn rewrite_uses_expr(e: Expr, aliases: &HashSet<String>) -> Expr {
+    // Recurse first (post-order), then collapse the field-access shape.
+    let e = match e {
+        Expr::App(f, x) => Expr::App(
+            Box::new(rewrite_uses_expr(*f, aliases)),
+            Box::new(rewrite_uses_expr(*x, aliases)),
+        ),
+        Expr::Lambda { params, body } => Expr::Lambda {
+            params, body: Box::new(rewrite_uses_expr(*body, aliases)),
+        },
+        Expr::InfixApp { op, lhs, rhs } => Expr::InfixApp {
+            op,
+            lhs: Box::new(rewrite_uses_expr(*lhs, aliases)),
+            rhs: Box::new(rewrite_uses_expr(*rhs, aliases)),
+        },
+        Expr::Negate(x) => Expr::Negate(Box::new(rewrite_uses_expr(*x, aliases))),
+        Expr::If { cond, then_branch, else_branch } => Expr::If {
+            cond: Box::new(rewrite_uses_expr(*cond, aliases)),
+            then_branch: Box::new(rewrite_uses_expr(*then_branch, aliases)),
+            else_branch: Box::new(rewrite_uses_expr(*else_branch, aliases)),
+        },
+        Expr::Case { scrutinee, branches } => Expr::Case {
+            scrutinee: Box::new(rewrite_uses_expr(*scrutinee, aliases)),
+            branches: branches.into_iter().map(|br| CaseBranch {
+                pattern: br.pattern,
+                guards: br.guards.into_iter().map(|g| Guard {
+                    condition: rewrite_uses_expr(g.condition, aliases),
+                    body: rewrite_uses_expr(g.body, aliases),
+                }).collect(),
+                body: rewrite_uses_expr(br.body, aliases),
+            }).collect(),
+        },
+        Expr::Let { binds, body } => Expr::Let {
+            binds: binds.into_iter().map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
+            body: Box::new(rewrite_uses_expr(*body, aliases)),
+        },
+        Expr::Do(stmts) => Expr::Do(stmts.into_iter().map(|s| match s {
+            DoStmt::Bind { name, expr } => DoStmt::Bind { name, expr: rewrite_uses_expr(expr, aliases) },
+            DoStmt::Expr(e) => DoStmt::Expr(rewrite_uses_expr(e, aliases)),
+            DoStmt::DoLet { name, expr } => DoStmt::DoLet { name, expr: rewrite_uses_expr(expr, aliases) },
+            DoStmt::PatternBind { pattern, expr } => DoStmt::PatternBind { pattern, expr: rewrite_uses_expr(expr, aliases) },
+            DoStmt::PatternDoLet { pattern, expr } => DoStmt::PatternDoLet { pattern, expr: rewrite_uses_expr(expr, aliases) },
+        }).collect()),
+        Expr::Ascription(x, t) => Expr::Ascription(Box::new(rewrite_uses_expr(*x, aliases)), t),
+        Expr::RecordCon { constructor, fields } => Expr::RecordCon {
+            constructor,
+            fields: fields.into_iter().map(|(n, e)| (n, rewrite_uses_expr(e, aliases))).collect(),
+        },
+        Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
+            expr: Box::new(rewrite_uses_expr(*expr, aliases)),
+            updates: updates.into_iter().map(|(n, e)| (n, rewrite_uses_expr(e, aliases))).collect(),
+        },
+        Expr::Paren(x) => Expr::Paren(Box::new(rewrite_uses_expr(*x, aliases))),
+        Expr::Tuple(xs) => Expr::Tuple(xs.into_iter().map(|x| rewrite_uses_expr(x, aliases)).collect()),
+        other => other,
+    };
+    // `App(Var field, Con alias)` with a known alias is a qualified reference.
+    if let Expr::App(f, x) = &e
+        && let Expr::Var(field) = f.as_ref()
+        && let Expr::Con(name) = x.as_ref()
+        && aliases.contains(name)
+    {
+        return Expr::Var(format!("{}.{}", name, field));
+    }
+    e
+}
+
+/// A structural fingerprint of a type, with variable names erased. Two
+/// signatures with the same shape are compatible enough to coexist as one
+/// merged definition; differing shapes are the real, breaking clash (e.g.
+/// `[a] -> Bool` vs `HashMap k v -> Bool` for two `null`s). FFI re-declarations
+/// (`sqrt`) and re-exports (diamond imports) share a shape, so they don't flag.
+fn type_shape(ty: &Type) -> String {
+    match ty {
+        Type::Con(n) => n.clone(),
+        Type::Var(_) => "_".to_string(),
+        Type::App(a, b) => format!("({} {})", type_shape(a), type_shape(b)),
+        Type::Arrow(a, b) => format!("({}->{})", type_shape(a), type_shape(b)),
+        Type::List(x) => format!("[{}]", type_shape(x)),
+        Type::IO(x) => format!("IO({})", type_shape(x)),
+        Type::ScopedLuaIO { inner, .. } => format!("LuaIO(_,{})", type_shape(inner)),
+        Type::Forall { inner, .. } => type_shape(inner),
+        Type::Unit => "()".to_string(),
+        Type::Paren(x) => type_shape(x),
+        Type::LuaPure { lua_name, result } => format!("LuaPure({},{})", lua_name, type_shape(result)),
+        Type::LuaIO { lua_name, result } => format!("LuaIO({},{})", lua_name, type_shape(result)),
+        Type::LuaIterator { lua_name, result } => format!("LuaIterator({},{})", lua_name, type_shape(result)),
+        Type::LuaTry { lua_name, result } => format!("LuaTry({},{})", lua_name, type_shape(result)),
+        Type::Tuple(xs) => format!("({})", xs.iter().map(type_shape).collect::<Vec<_>>().join(",")),
+        Type::Constrained { ty, .. } => type_shape(ty),
+        Type::Promoted(n) => format!("'{}", n),
+    }
+}
+
+/// Map each value-level name a group of declarations signs to its type shape.
+/// (Names without a signature are omitted — they can't be shape-compared.)
+pub fn signature_shapes(decls: &[Decl]) -> HashMap<String, String> {
+    let mut shapes = HashMap::new();
+    for d in decls {
+        if let Decl::TypeSig { name, ty } | Decl::ExportSig { name, ty } = d {
+            shapes.entry(name.clone()).or_insert_with(|| type_shape(ty));
+        }
+    }
+    shapes
+}
+
+fn collision_error(module: &str, collisions: &[(String, String)]) -> String {
+    let alias = module.rsplit('.').next().unwrap_or(module);
+    let listed: Vec<String> = collisions.iter()
+        .map(|(name, src)| format!("'{}' (already defined by {})", name, src))
+        .collect();
+    format!(
+        "importing '{module}' unqualified conflicts with {}.\n\
+         mata-ll merges every import into a single namespace, so these names would clash \
+         with the existing definitions. Import '{module}' qualified instead:\n\
+         \n    import qualified {module} as {alias}\n\n\
+         then refer to its members as `{alias}.name` (e.g. `{alias}.{}`).",
+        listed.join(", "),
+        collisions.first().map(|(n, _)| n.as_str()).unwrap_or("name"),
+    )
 }
 
 fn decl_name(decl: &Decl) -> Option<String> {

@@ -654,6 +654,7 @@ impl Checker {
             ("hmValues", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(tb.clone()))),
             ("hmMember", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], Ty::Con("Bool".into()))),
             ("hmFromList", vec![a.clone(), b.clone()], Ty::arrow(Ty::list(Ty::Tuple(vec![ta.clone(), tb.clone()])), hm_kv.clone())),
+            ("hmToList", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(Ty::Tuple(vec![ta.clone(), tb.clone()])))),
         ];
         for (name, vars, ty) in hm_entries {
             self.env.insert(name.into(), Scheme { vars, ty });

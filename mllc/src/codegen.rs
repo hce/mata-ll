@@ -218,7 +218,7 @@ impl CodeGen {
             "head", "tail", "map", "filter", "take", "drop", "zipWith",
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
-            "hashmap_member", "hashmap_fromList",
+            "hashmap_member", "hashmap_fromList", "hashmap_toList",
             "__mll_list_append", "__mll_list_index", "semigroup_String", "semigroup_List",
             "__mll_show_list", "__mll_show_arg", "__mll_show_maybe", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_iter", "getArgs", "exit_",
@@ -249,7 +249,7 @@ impl CodeGen {
             "modifySTArray", "stArrayLength", "newSTArrayFromList",
             "stArrayToList",
             "hmEmpty", "hmInsert", "hmLookup", "hmDelete", "hmSize",
-            "hmKeys", "hmValues", "hmMember", "hmFromList",
+            "hmKeys", "hmValues", "hmMember", "hmFromList", "hmToList",
             "return", "pure", "not", "print", "error", "show", "undefined",
             "try", "catch",
         ] {
@@ -2981,6 +2981,7 @@ fn sanitize_name(name: &str) -> String {
         "hmValues" => "hashmap_values".to_string(),
         "hmMember" => "hashmap_member".to_string(),
         "hmFromList" => "hashmap_fromList".to_string(),
+        "hmToList" => "hashmap_toList".to_string(),
         _ => {
             let mut s = String::new();
             for c in name.chars() {
@@ -3003,6 +3004,8 @@ fn sanitize_name(name: &str) -> String {
                     '$' => s.push_str("_dollar_"),
                     '[' => s.push_str("List_"),
                     ']' => {},
+                    // Qualified-import separator: `Map.insert` -> `Map_insert`.
+                    '.' => s.push('_'),
                     _ => s.push(c),
                 }
             }
@@ -3573,6 +3576,7 @@ local function hashmap_values(m) m = __force(m); local r = nil local ks = {} for
 local function hashmap_member(k, m) k = __force(k); m = __force(m); return m[k] ~= nil end
 local function show_HashMap(m) m = __force(m); local parts = {} for k, v in pairs(m) do parts[#parts+1] = show(k) .. " -> " .. show(v) end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
 local function hashmap_fromList(xs) xs = __force(xs); local t = {} local cur = xs while cur ~= nil do local pair = __mll_head(cur) t[__force(pair[1])] = __force(pair[2]) cur = __mll_tail(cur) end return t end
+local function hashmap_toList(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks) for i = #ks, 1, -1 do r = __mll_cons({ks[i], m[ks[i]]}, r) end return r end
 
 -- Specialized list show: uses a typed element show function
 local function __mll_list_eq(elem_eq, a, b)

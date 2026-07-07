@@ -10,6 +10,18 @@ module Data.Map
 
 -- Data.Map is backed by the HashMap FFI type.
 -- We re-export under the Haskell-compatible API.
+--
+-- Import this module `qualified`, as in Haskell:
+--     import qualified Data.Map as M
+-- Several names here (map, filter, null, lookup) deliberately shadow the
+-- Prelude; because mata-ll flattens all imports into one namespace, an
+-- unqualified `import Data.Map` would collide with the Prelude versions.
+-- Qualification keeps both usable.
+--
+-- Keys must be primitive (String or a numeric type): the backing Lua
+-- table hashes compound keys by identity, and the ordering operations
+-- (keys/values/toList) sort keys, which only works for comparable
+-- primitives. See doc/articles/SPEC.md for the rationale.
 
 -- Map is an alias for HashMap
 type Map k v = HashMap k v
@@ -42,7 +54,7 @@ values :: Map k v -> [v]
 values = hmValues
 
 toList :: Map k v -> [(k, v)]
-toList m = zip (keys m) (values m)
+toList = hmToList
 
 fromList :: [(k, v)] -> Map k v
 fromList = hmFromList

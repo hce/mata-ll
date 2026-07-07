@@ -4,6 +4,11 @@ fromMaybe :: a -> Maybe a -> a
 fromMaybe def Nothing = def
 fromMaybe _ (Just x) = x
 
+pairsEq :: [(String, Integer)] -> [(String, Integer)] -> Bool
+pairsEq [] [] = True
+pairsEq ((k1, v1) : rest1) ((k2, v2) : rest2) = k1 == k2 && v1 == v2 && pairsEq rest1 rest2
+pairsEq _ _ = False
+
 main :: IO ()
 main = do
     let m = hmInsert "alice" 30 $ hmInsert "bob" 25 $ hmInsert "charlie" 35 $ hmEmpty
@@ -30,3 +35,9 @@ main = do
     assert (fromMaybe 0 (hmLookup "y" m4) == 2) "fromList other key"
     assert (not (hmMember "z" m4)) "fromList missing key"
     assert (hmSize (hmFromList []) == 0) "fromList empty"
+    -- toList
+    assert (length (hmToList m) == 3) "toList length"
+    assert (pairsEq (hmToList m) (zip (hmKeys m) (hmValues m))) "toList matches zip keys values"
+    assert (pairsEq (hmToList m) [("alice", 30), ("bob", 25), ("charlie", 35)]) "toList sorted by key"
+    assert (pairsEq (hmToList (hmFromList (hmToList m))) (hmToList m)) "toList/fromList round-trip"
+    assert (length (hmToList hmEmpty) == 0) "toList empty"

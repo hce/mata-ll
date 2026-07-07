@@ -1106,10 +1106,52 @@ impl Parser {
         )
     }
 
+    /// After consuming an UpperIdent, join an adjacent `.UpperIdent` chain into
+    /// a module-qualified name like `Data.Map` or `M.Map`. Returns None when the
+    /// UpperIdent stands alone. Requiring adjacency (no spaces around the dot)
+    /// distinguishes a qualifier from the only other `.` a type can contain — a
+    /// `forall` dot, which always follows a lowercase variable, never an
+    /// UpperIdent.
+    fn try_parse_qualified_tail(&mut self, head: &str) -> Option<String> {
+        let mut name = head.to_string();
+        let mut matched = false;
+        loop {
+            if self.pos == 0 || self.pos + 1 >= self.tokens.len() {
+                break;
+            }
+            let prev = &self.tokens[self.pos - 1];
+            let dot = &self.tokens[self.pos];
+            if !matches!(&dot.token, Token::Operator(o) if o == ".") {
+                break;
+            }
+            if dot.line != prev.line || dot.col != prev.col + token_len(&prev.token) {
+                break; // space before the dot: not a qualifier
+            }
+            let seg = &self.tokens[self.pos + 1];
+            let seg_name = match &seg.token {
+                Token::UpperIdent(n) => n.clone(),
+                _ => break,
+            };
+            if seg.line != dot.line || seg.col != dot.col + 1 {
+                break; // space after the dot
+            }
+            self.advance(); // consume '.'
+            self.advance(); // consume the segment
+            name.push('.');
+            name.push_str(&seg_name);
+            matched = true;
+        }
+        if matched { Some(name) } else { None }
+    }
+
     fn parse_type_atom(&mut self) -> Result<Type, String> {
         match self.peek().clone() {
             Token::UpperIdent(name) => {
                 self.advance();
+                // Module-qualified type reference: `M.Map`, `Data.Map.Map`.
+                if let Some(qual) = self.try_parse_qualified_tail(&name) {
+                    return Ok(Type::Con(qual));
+                }
                 match name.as_str() {
                     "IO" => {
                         if self.is_type_atom_start() {

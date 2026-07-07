@@ -368,6 +368,7 @@ mll_lib_test!(lib_regex, "lib_regex.mll");
 mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
 mll_lib_test!(lib_data_maybe, "lib_data_maybe.mll");
+mll_lib_test!(lib_data_map, "lib_data_map.mll");
 
 // Compile-error tests: these SHOULD fail to compile
 #[test]
@@ -386,6 +387,28 @@ main = putStrLn (show (Foo == Foo))
         }
         Ok(_) => panic!("Expected compilation to fail for == without Eq instance"),
     }
+}
+
+#[test]
+fn unqualified_conflicting_import_rejected() {
+    // Data.Map defines `null` with an incompatible type; importing it
+    // unqualified must fail with a clear, actionable message pointing at
+    // qualified import — not a baffling unification error.
+    let lib = Path::new("../lib");
+    let source = "import Data.Map\nmain :: IO ()\nmain = putStrLn \"hi\"\n";
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("unqualified") && msg.contains("import qualified"),
+                "Expected a clear collision message, got: {}", msg);
+            assert!(msg.contains("null"), "Expected the conflicting name, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected unqualified Data.Map import to be rejected"),
+    }
+    // The qualified form must still compile.
+    let ok = "import qualified Data.Map as M\nmain :: IO ()\nmain = putStrLn (show (M.size M.empty))\n";
+    assert!(mllc::compile(ok, Path::new("."), &[lib]).is_ok(),
+        "qualified Data.Map import should compile");
 }
 
 #[test]
