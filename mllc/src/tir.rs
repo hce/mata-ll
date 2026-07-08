@@ -25,6 +25,11 @@ pub struct TDataDef {
     pub name: String,
     pub type_vars: Vec<String>,
     pub constructors: Vec<TConstructor>,
+    /// True when the type derives `LuaDict`: its single record constructor is
+    /// laid out as a Lua table keyed by field name (`{width = …, height = …}`)
+    /// instead of a positional array, for interop with Lua APIs that take
+    /// dictionaries. See codegen's LuaDict handling.
+    pub is_luadict: bool,
 }
 
 #[derive(Debug, Clone)]

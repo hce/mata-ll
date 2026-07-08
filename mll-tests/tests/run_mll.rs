@@ -137,6 +137,7 @@ mll_test!(basics, "basics.mll");
 mll_test!(lists, "lists.mll");
 mll_test!(data_types, "data_types.mll");
 mll_test!(records, "records.mll");
+mll_test!(luadict, "luadict.mll");
 mll_test!(newtypes, "newtypes.mll");
 mll_test!(typeclasses, "typeclasses.mll");
 mll_test!(superclass, "superclass.mll");
@@ -2551,6 +2552,75 @@ fn embed_source_without_trailing_newline() {
             .expect("embedded source should be found");
         assert_eq!(extracted, source, "byte-exact round trip ({:?})", mode);
     }
+}
+
+#[test]
+fn luadict_on_multi_constructor_rejected() {
+    // LuaDict has no tag to tell variants apart, so it only makes sense on a
+    // single-constructor record. Deriving it elsewhere must fail with an
+    // explanation, not silently miscompile.
+    let source = r#"
+data T = A { x :: Integer } | B { y :: Integer }
+    deriving (LuaDict)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("LuaDict") && msg.contains("one constructor"),
+                "expected a LuaDict single-constructor error, got: {}", msg);
+        }
+        Ok(_) => panic!("deriving LuaDict on a multi-constructor type must fail"),
+    }
+}
+
+#[test]
+fn luadict_on_positional_fields_rejected() {
+    let source = r#"
+data P = P Integer Integer
+    deriving (LuaDict)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("LuaDict") && msg.contains("positional"),
+                "expected a LuaDict positional-fields error, got: {}", msg);
+        }
+        Ok(_) => panic!("deriving LuaDict on positional fields must fail"),
+    }
+}
+
+#[test]
+fn luadict_exported_value_is_a_named_table() {
+    // A LuaDict record returned across the FFI boundary must reach Lua as a
+    // real dictionary keyed by field name — not the empty table that positional
+    // `ipairs` marshalling would produce. This is the whole point of LuaDict.
+    let source = r#"
+data Config = Config { width :: Integer, height :: Integer, title :: String }
+  deriving (LuaDict)
+
+export mkConfig :: Integer -> Integer -> Config
+mkConfig w h = Config { width = w, height = h, title = "win" }
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+    let mk: mlua::Function = module.get("mkConfig").unwrap();
+    let cfg: mlua::Table = mk.call((80, 25)).expect("mkConfig should return a table");
+    let width: i64 = cfg.get("width").expect("width key present");
+    let height: i64 = cfg.get("height").expect("height key present");
+    let title: String = cfg.get("title").expect("title key present");
+    assert_eq!(width, 80, "named width key survives marshalling");
+    assert_eq!(height, 25, "named height key survives marshalling");
+    assert_eq!(title, "win", "named title key survives marshalling");
+    // Positional array access must be empty — it's a dictionary, not an array.
+    assert_eq!(cfg.len().unwrap(), 0, "LuaDict has no positional entries");
 }
 
 #[test]

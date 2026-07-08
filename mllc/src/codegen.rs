@@ -27,6 +27,13 @@ struct CodeGen {
     /// Record field accessors: maps accessor name to 1-based field index.
     /// Used to inline field access as direct table indexing.
     record_accessors: std::collections::HashMap<String, usize>,
+    /// LuaDict constructors: constructor name -> its field names in declaration
+    /// order. A value of such a constructor is a Lua table keyed by these names
+    /// rather than a positional array (used by pattern matching to bind fields).
+    luadict_con_fields: std::collections::HashMap<String, Vec<String>>,
+    /// LuaDict field accessors: sanitized accessor name -> the raw field name
+    /// used as the Lua table key. Presence here means "index by key, not index".
+    luadict_field_key: std::collections::HashMap<String, String>,
     /// Function table: maps sanitized function names to __mll_fn[N] slots.
     /// Used to pack all forward-declared functions into a single table,
     /// avoiding Lua's 200-local-variable limit.
@@ -64,6 +71,8 @@ impl CodeGen {
             inline_fns: std::collections::HashMap::new(),
             top_level_names: std::collections::HashSet::new(),
             record_accessors: std::collections::HashMap::new(),
+            luadict_con_fields: std::collections::HashMap::new(),
+            luadict_field_key: std::collections::HashMap::new(),
             fn_table: std::collections::HashMap::new(),
             local_vars: std::collections::HashSet::new(),
             local_count: 0,
@@ -176,6 +185,8 @@ impl CodeGen {
         sub.fn_table = self.fn_table.clone();
         sub.concrete_vars = self.concrete_vars.clone();
         sub.record_accessors = self.record_accessors.clone();
+        sub.luadict_con_fields = self.luadict_con_fields.clone();
+        sub.luadict_field_key = self.luadict_field_key.clone();
         sub.top_level_names = self.top_level_names.clone();
         sub.local_vars = self.local_vars.clone();
         sub
@@ -196,6 +207,20 @@ impl CodeGen {
         let is_enum = def.constructors.iter().all(|c| matches!(&c.fields, TConFields::Positional(f) if f.is_empty()));
         for (i, con) in def.constructors.iter().enumerate() {
             self.constructors.push((con.name.clone(), def.name.clone(), i + 1, def.constructors.len(), is_enum));
+        }
+        // LuaDict types (validated by the typechecker to be single-constructor
+        // records) lay their constructor out as a name-keyed table. Record the
+        // ordered field names for pattern matching, and each field's key for the
+        // accessor / record-update sites.
+        if def.is_luadict {
+            if let Some(con) = def.constructors.first()
+                && let TConFields::Named(fields) = &con.fields {
+                    let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+                    for name in &names {
+                        self.luadict_field_key.insert(sanitize_name(name), name.clone());
+                    }
+                    self.luadict_con_fields.insert(con.name.clone(), names);
+                }
         }
     }
 
@@ -348,10 +373,14 @@ impl CodeGen {
         // (`fnField r x`) applies the projected function to them.
         for (name, idx) in &module.record_accessors {
             let n = sanitize_name(name);
+            let index = match self.luadict_field_key.get(&n) {
+                Some(key) => lua_field_index(key),
+                None => format!("[{}]", idx),
+            };
             if let Some(&slot) = self.fn_table.get(&n) {
                 self.emit_line(&format!(
-                    "__mll_fn[{}] = function(_v, ...) local _f = __force(__force(_v)[{}]); if select(\"#\", ...) == 0 then return _f else return _f(...) end end",
-                    slot, idx));
+                    "__mll_fn[{}] = function(_v, ...) local _f = __force(__force(_v){}); if select(\"#\", ...) == 0 then return _f else return _f(...) end end",
+                    slot, index));
             }
         }
         if !module.newtypes.is_empty() {
@@ -499,7 +528,14 @@ impl CodeGen {
             } else {
                 let params: Vec<String> = (0..field_count).map(|i| format!("_p{}", i)).collect();
                 let params_str = params.join(", ");
-                if single {
+                if let Some(field_names) = self.luadict_con_fields.get(&con.name).cloned() {
+                    // LuaDict: build a table keyed by field name for Lua interop,
+                    // `function(_p0, _p1) return {width = _p0, height = _p1} end`.
+                    let entries: Vec<String> = field_names.iter().zip(params.iter())
+                        .map(|(fname, p)| format!("{}{}", lua_field_assign(fname), p))
+                        .collect();
+                    self.emit_line(&format!("{}function({}) return {{{}}} end", decl, params_str, entries.join(", ")));
+                } else if single {
                     self.emit_line(&format!("{}function({}) return {{{}}} end", decl, params_str, params_str));
                 } else {
                     let mut entries = vec![format!("{}", tag)];
@@ -1133,6 +1169,16 @@ impl CodeGen {
         }
     }
 
+    /// Like `field_path`, but for a LuaDict field addressed by name (`.width`).
+    fn field_path_key(scrutinee: &str, key: &str, child: &TPattern) -> String {
+        let path = format!("{}{}", scrutinee, lua_field_index(key));
+        if Self::pattern_inspects_value(child) {
+            format!("__force({})", path)
+        } else {
+            path
+        }
+    }
+
     fn collect_pattern_conditions(&self, scrutinee: &str, pattern: &TPattern, conditions: &mut Vec<String>, bindings: &mut Vec<(String, String)>) {
         match pattern {
             TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.to_string())); }
@@ -1160,6 +1206,13 @@ impl CodeGen {
                         conditions.push(format!("{}[1] == {}", scrutinee, tag));
                         for (i, arg) in args.iter().enumerate() {
                             let path = Self::field_path(scrutinee, i + 2, arg);
+                            self.collect_pattern_conditions(&path, arg, conditions, bindings);
+                        }
+                    } else if let Some(fields) = self.luadict_con_fields.get(name) {
+                        // Single LuaDict constructor: bind each positional
+                        // sub-pattern from its named table key.
+                        for (i, arg) in args.iter().enumerate() {
+                            let path = Self::field_path_key(scrutinee, &fields[i], arg);
                             self.collect_pattern_conditions(&path, arg, conditions, bindings);
                         }
                     } else {
@@ -2139,9 +2192,16 @@ impl CodeGen {
                 // thunk-wrap the whole projection (see gen_arg).
                 if let TExprKind::Var(name) = &func.kind
                     && let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
+                        // A LuaDict field is keyed by name; a plain record field
+                        // by position. Compute the index expression before
+                        // gen_expr borrows self mutably.
+                        let index = match self.luadict_field_key.get(&sanitize_name(name)) {
+                            Some(key) => lua_field_index(key),
+                            None => format!("[{}]", idx),
+                        };
                         self.emit("__force(");
                         self.gen_expr(arg);
-                        self.emit(&format!("[{}])", idx));
+                        self.emit(&format!("{})", index));
                         return;
                     }
 
@@ -2850,6 +2910,23 @@ impl CodeGen {
                 self.emit(")");
             }
             TExprKind::RecordUpdate { record, updates, num_fields } => {
+                // A LuaDict record is keyed by name, so we can't copy it
+                // positionally: shallow-copy every key with `pairs`, then
+                // overwrite the updated fields by name.
+                let is_luadict = updates.first()
+                    .map(|(fname, _, _)| self.luadict_field_key.contains_key(&sanitize_name(fname)))
+                    .unwrap_or(false);
+                if is_luadict {
+                    self.emit("(function() local _r = __force(");
+                    self.gen_expr(record);
+                    self.emit("); local _u = {}; for _k, _v in pairs(_r) do _u[_k] = _v end");
+                    for (fname, _, val) in updates {
+                        self.emit(&format!("; _u{} = ", lua_field_index(fname)));
+                        self.gen_expr(val);
+                    }
+                    self.emit("; return _u end)()");
+                    return;
+                }
                 // Generate: (function() local _r = __force(record)
                 //   local _u = {_r[1], _r[2], ...}; _u[i] = val; ...; return _u end)()
                 self.emit("(function() local _r = __force(");
@@ -2931,6 +3008,48 @@ impl CodeGen {
             TLiteral::Unit => self.emit("nil"),
         }
     }
+}
+
+/// Lua reserved words — cannot be used as a bare `.field` key or `{field = …}`.
+fn is_lua_keyword(s: &str) -> bool {
+    matches!(s,
+        "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for"
+        | "function" | "goto" | "if" | "in" | "local" | "nil" | "not" | "or"
+        | "repeat" | "return" | "then" | "true" | "until" | "while")
+}
+
+/// True when `name` can appear as a bare Lua identifier key (`.name`, `{name = …}`).
+fn lua_bare_key_ok(name: &str) -> bool {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !is_lua_keyword(name)
+}
+
+/// A bracketed Lua string-literal table key: `["na\"me"]`. Always valid.
+fn lua_key_string(name: &str) -> String {
+    let mut s = String::from("[\"");
+    for c in name.chars() {
+        match c {
+            '"' => s.push_str("\\\""),
+            '\\' => s.push_str("\\\\"),
+            _ => s.push(c),
+        }
+    }
+    s.push_str("\"]");
+    s
+}
+
+/// Suffix that reads a LuaDict field from a table value: `.name` or `["name"]`.
+fn lua_field_index(name: &str) -> String {
+    if lua_bare_key_ok(name) { format!(".{}", name) } else { lua_key_string(name) }
+}
+
+/// Assignment target inside a table constructor: `name = ` or `["name"] = `.
+fn lua_field_assign(name: &str) -> String {
+    if lua_bare_key_ok(name) { format!("{} = ", name) } else { format!("{} = ", lua_key_string(name)) }
 }
 
 fn sanitize_name(name: &str) -> String {
@@ -3392,6 +3511,15 @@ local function __mll_to_lua(x)
             result[#result + 1] = __mll_to_lua(__force(cur[1]))
             cur = __mll_tail(cur)
         end
+        return result
+    end
+    -- LuaDict record: a name-keyed table (no positional [1]). Preserve its
+    -- string keys so exported functions and callbacks hand Lua a real
+    -- dictionary. (Positional ADTs and tuples always fill [1]; cons lists were
+    -- handled above; so a keyless [1] can only be a LuaDict or empty table.)
+    if x[1] == nil then
+        local result = {}
+        for k, v in pairs(x) do result[k] = __mll_to_lua(v) end
         return result
     end
     -- Tuple or ADT: force each element

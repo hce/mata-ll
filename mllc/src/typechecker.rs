@@ -99,6 +99,9 @@ pub struct Checker {
     instances: HashMap<(String, String), InstanceInfo>,
     /// Record field accessors: field_name -> (type_name, lua_index)
     pub record_fields: HashMap<String, (String, usize)>,
+    /// Type names that derive `LuaDict` (validated in `derive_luadict`): their
+    /// constructor emits a name-keyed Lua table rather than a positional one.
+    luadict_types: HashSet<String>,
     /// User-defined type families: name -> equations
     type_families: HashMap<String, Vec<TypeFamilyEq>>,
     /// Type aliases: name -> (params, expanded type)
@@ -151,6 +154,7 @@ impl Checker {
             classes: HashMap::new(),
             instances: HashMap::new(),
             record_fields: HashMap::new(),
+            luadict_types: HashSet::new(),
             type_families: HashMap::new(),
             type_aliases: HashMap::new(),
             kinds: HashMap::new(),
@@ -1576,6 +1580,7 @@ impl Checker {
         TDataDef {
             name: name.to_string(),
             type_vars: type_vars.to_vec(),
+            is_luadict: self.luadict_types.contains(name),
             constructors: constructors.iter().map(|c| {
                 TConstructor {
                     name: c.name.clone(),
@@ -2039,12 +2044,62 @@ impl Checker {
             "Enum" => self.derive_enum(type_name, type_vars, constructors),
             "Bounded" => self.derive_bounded(type_name, type_vars, constructors),
             "Functor" => self.derive_functor(type_name, type_vars, constructors),
+            "LuaDict" => { self.derive_luadict(type_name, constructors); vec![] }
             other => {
                 self.push_error_ctx(
-                    TypeErrorKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord and Functor are supported", other)),
+                    TypeErrorKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor and LuaDict are supported", other)),
                     format!("data {}", type_name),
                 );
                 vec![]
+            }
+        }
+    }
+
+    /// `LuaDict` is an intrinsic deriving: it generates no instance methods but
+    /// changes the runtime layout so the value is a Lua table keyed by field
+    /// name (`{width = …}`) instead of a positional array. That representation
+    /// only makes sense for a single record constructor whose fields all have
+    /// names to use as keys, so we validate that here and reject anything else
+    /// with an explanation of *why* rather than a bare "cannot derive".
+    fn derive_luadict(&mut self, type_name: &str, constructors: &[Constructor]) {
+        let reject = |checker: &mut Self, reason: String, note: &str| {
+            checker.push_error_ctx(
+                TypeErrorKind::Other(format!(
+                    "Cannot derive 'LuaDict' for '{}': {}\nnote: {}",
+                    type_name, reason, note,
+                )),
+                format!("data {}", type_name),
+            );
+        };
+
+        if constructors.len() != 1 {
+            reject(self,
+                format!("LuaDict needs exactly one constructor, but '{}' has {}", type_name, constructors.len()),
+                "the generated Lua table has no tag to tell variants apart, so a name-keyed dictionary can only represent a single-constructor record.");
+            return;
+        }
+
+        let con = &constructors[0];
+        if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
+            reject(self,
+                format!("'{}' is a GADT / existential constructor", con.name),
+                "LuaDict keys the table by record field name, which GADT and existential constructors do not provide.");
+            return;
+        }
+
+        match &con.fields {
+            ConstructorFields::Named(fields) if !fields.is_empty() => {
+                self.luadict_types.insert(type_name.to_string());
+            }
+            ConstructorFields::Named(_) => {
+                reject(self,
+                    format!("constructor '{}' has no fields", con.name),
+                    "LuaDict maps record fields to Lua table keys; there is nothing to key on an empty record.");
+            }
+            ConstructorFields::Positional(_) => {
+                reject(self,
+                    format!("constructor '{}' uses positional fields", con.name),
+                    "LuaDict keys the Lua table by field name, so it requires record syntax: `data … = … { field :: T, … }`.");
             }
         }
     }
