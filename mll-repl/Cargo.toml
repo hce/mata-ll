@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Interactive REPL for mata-ll, a Haskell subset that compiles to Lua."
 license = "MIT"
-# TODO before publishing: set a public `repository` URL, and make the `mllc`
-# path dependency a version dependency.
+repository = "https://github.com/hce/mata-ll"
+homepage = "https://matall.org"
 
 [dependencies]
-mllc = { path = "../mllc" }
+# path for in-workspace builds; version used when published (mllc publishes first).
+mllc = { path = "../mllc", version = "0.1.0" }
 mlua = { version = "0.12", features = ["luajit", "vendored"] }

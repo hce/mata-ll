@@ -1,13 +1,21 @@
 [package]
-name = "mll"
+# The `mll` name is taken on crates.io, so the package publishes as `mata-ll`
+# (matching the project, repo, and matall.org); the installed binary stays `mll`
+# via the [[bin]] target below. `cargo install mata-ll` provides the `mll` command.
+name = "mata-ll"
 version = "0.1.0"
 edition = "2024"
 description = "mata-ll command-line compiler and runner: compiles a Haskell subset to Lua and runs it via an embedded Lua interpreter."
 license = "MIT"
-# TODO before publishing: set a public `repository` URL; the `mllc` path
-# dependency must become a version dependency.
+repository = "https://github.com/hce/mata-ll"
+homepage = "https://matall.org"
+
+[[bin]]
+name = "mll"
+path = "src/main.rs"
 
 [dependencies]
-mllc = { path = "../mllc" }
+# path for in-workspace builds; version used when published (mllc publishes first).
+mllc = { path = "../mllc", version = "0.1.0" }
 mlua = { version = "0.12", features = ["lua54", "vendored"] }
 clap = { version = "4.6", features = ["derive"] }
