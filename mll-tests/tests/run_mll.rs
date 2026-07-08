@@ -2300,6 +2300,116 @@ main = do
 }
 
 #[test]
+fn ffi_result_marshalling_decodes_host_values() {
+    // A LuaIO host returns a *raw* Lua value (arrays, dicts, nested records).
+    // The compiler must decode it into the mata-ll representation per the
+    // declared result type: `[record]` and `[String]` lists (tested BOTH empty
+    // and non-empty) become cons lists, a `Maybe` field round-trips nil<->Nothing,
+    // and scalars pass through. Regression for the FFI-boundary bugs where the
+    // undecoded host value made `show` print numbers instead of the string keys
+    // and `[Nothing]` for an empty (`{}`) list. The mata-ll program does its own
+    // value assertions via `expect`; a decode bug makes one of them `error`.
+    let source = r#"
+data Params = Params { host :: String } deriving (Show, LuaDict)
+
+data Cert = Cert { ip :: String, chain :: [Integer] } deriving (Show, LuaDict)
+
+data Resp = Resp
+        { certificates :: [Cert]
+        , errors :: [String]
+        , note :: Maybe String
+        , count :: Integer }
+    deriving (Show, LuaDict)
+
+fetch :: Params -> LuaIO "luarest.fetch" Resp
+
+expect :: Bool -> String -> IO ()
+expect True _ = pure ()
+expect False m = error m
+
+len :: [a] -> Integer
+len [] = 0
+len (_:xs) = 1 + len xs
+
+main :: IO ()
+main = do
+    -- "ok" response: two certs, empty errors, present note, scalar count.
+    r <- fetch (Params "ok")
+    let cs = certificates r
+    expect (len cs == 2) "cert list should have two elements"
+    expect (ip (cs !! 0) == "1.2.3.4") "first ip must be the host string, not a number"
+    expect (ip (cs !! 1) == "5.6.7.8") "second ip must be the host string, not a number"
+    expect (len (chain (cs !! 0)) == 3) "nested chain list length"
+    expect ((chain (cs !! 0)) !! 1 == 20) "nested chain element"
+    expect (len (errors r) == 0) "empty error array must decode to the empty list"
+    expect (show (errors r) == "[]") "empty error list shows as [] not [Nothing]"
+    expect (count r == 42) "scalar field passes through"
+    case note r of
+        Just s  -> expect (s == "hi") "present Maybe field"
+        Nothing -> error "note should be Just for the ok response"
+    -- "bad" response: no certs, two errors, absent (nil) note.
+    r2 <- fetch (Params "bad")
+    expect (len (errors r2) == 2) "non-empty error list length"
+    expect ((errors r2) !! 0 == "e1") "first error string"
+    expect ((errors r2) !! 1 == "e2") "second error string"
+    expect (len (certificates r2) == 0) "empty cert array must decode to the empty list"
+    case note r2 of
+        Nothing -> pure ()
+        Just _  -> error "note should be Nothing when the host omits it"
+    pure ()
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+
+    let lua = mlua::Lua::new();
+    // Register the Lua host `luarest.fetch`, returning a *raw* Lua value shaped
+    // like a real host (arrays and dicts, not mata-ll cons cells).
+    let luarest = lua.create_table().unwrap();
+    let fetch = lua
+        .create_function(|lua, params: mlua::Table| -> mlua::Result<mlua::Table> {
+            let host: String = params.get("host")?;
+            let resp = lua.create_table()?;
+            if host == "ok" {
+                let certs = lua.create_table()?;
+                for (i, (ip, chain)) in
+                    [("1.2.3.4", [10, 20, 30]), ("5.6.7.8", [1, 2, 3])].iter().enumerate()
+                {
+                    let c = lua.create_table()?;
+                    c.set("ip", *ip)?;
+                    let ch = lua.create_table()?;
+                    for (j, v) in chain.iter().enumerate() {
+                        ch.set(j + 1, *v)?;
+                    }
+                    c.set("chain", ch)?;
+                    certs.set(i + 1, c)?;
+                }
+                resp.set("certificates", certs)?;
+                resp.set("errors", lua.create_table()?)?; // empty array {}
+                resp.set("note", "hi")?;
+                resp.set("count", 42)?;
+            } else {
+                resp.set("certificates", lua.create_table()?)?; // empty array {}
+                let errs = lua.create_table()?;
+                errs.set(1, "e1")?;
+                errs.set(2, "e2")?;
+                resp.set("errors", errs)?;
+                // note omitted -> nil -> Nothing
+                resp.set("count", 0)?;
+            }
+            Ok(resp)
+        })
+        .unwrap();
+    luarest.set("fetch", fetch).unwrap();
+    lua.globals().set("luarest", luarest).unwrap();
+
+    lua.load(&lua_code)
+        .set_name("ffi_result_marshalling")
+        .exec()
+        .expect("host result should decode and every in-program assertion should pass");
+}
+
+#[test]
 fn derived_show_uses_constructor_names_and_parens() {
     // Regression: derived Show must render constructor names (not numeric tags
     // or tuples), recurse through polymorphic types (Tree a b / Box a), and
