@@ -10,6 +10,7 @@ pub mod modules;
 pub mod mono;
 pub mod parser;
 pub mod split;
+mod stdlib;
 pub mod tir;
 pub mod typechecker;
 pub mod types;
@@ -69,12 +70,9 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-/// The MLL prelude source, embedded at compile time.
-const PRELUDE_MLL: &str = include_str!("../../lib/Prelude.mll");
-
 /// Parse and return the prelude declarations.
 fn parse_prelude() -> Result<Vec<ast::Decl>, CompileError> {
-    let tokens = lexer::lex(PRELUDE_MLL).map_err(CompileError::Lex)?;
+    let tokens = lexer::lex(stdlib::PRELUDE).map_err(CompileError::Lex)?;
     let module = parser::parse(&tokens).map_err(CompileError::Parse)?;
     Ok(module.decls)
 }

@@ -2,6 +2,10 @@
 name = "mllc-wasm"
 version = "0.1.0"
 edition = "2024"
+description = "WebAssembly bindings for the mata-ll compiler (mllc)."
+license = "MIT"
+# TODO before publishing: set a public `repository` URL, and make the `mllc`
+# path dependency a version dependency.
 
 [lib]
 crate-type = ["cdylib"]

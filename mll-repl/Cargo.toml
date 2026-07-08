@@ -2,6 +2,10 @@
 name = "mll-repl"
 version = "0.1.0"
 edition = "2024"
+description = "Interactive REPL for mata-ll, a Haskell subset that compiles to Lua."
+license = "MIT"
+# TODO before publishing: set a public `repository` URL, and make the `mllc`
+# path dependency a version dependency.
 
 [dependencies]
 mllc = { path = "../mllc" }

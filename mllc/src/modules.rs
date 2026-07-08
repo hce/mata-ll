@@ -69,11 +69,16 @@ impl ModuleLoader {
             return Ok(self.loaded.get(&key).unwrap());
         }
 
-        let file_path = self.resolve_path(module_path)
-            .ok_or_else(|| format!("Cannot find module '{}'", key))?;
-
-        let source = fs::read_to_string(&file_path)
-            .map_err(|e| format!("Error reading {}: {}", file_path.display(), e))?;
+        // Filesystem search paths take precedence (so `-L <dir>` can shadow a
+        // stdlib module); fall back to the embedded stdlib baked into the crate
+        // so an installed compiler needs no `lib/` directory on disk.
+        let source = match self.resolve_path(module_path) {
+            Some(file_path) => fs::read_to_string(&file_path)
+                .map_err(|e| format!("Error reading {}: {}", file_path.display(), e))?,
+            None => crate::stdlib::embedded_module(&key)
+                .map(str::to_string)
+                .ok_or_else(|| format!("Cannot find module '{}'", key))?,
+        };
 
         let tokens = lexer::lex(&source)?;
         let module = parser::parse(&tokens)?;

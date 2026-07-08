@@ -2,6 +2,8 @@
 name = "mll-tests"
 version = "0.1.0"
 edition = "2024"
+description = "Integration test suite for mata-ll (not published)."
+publish = false
 
 [dependencies]
 mllc = { path = "../mllc" }

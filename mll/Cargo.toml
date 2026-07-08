@@ -2,6 +2,10 @@
 name = "mll"
 version = "0.1.0"
 edition = "2024"
+description = "mata-ll command-line compiler and runner: compiles a Haskell subset to Lua and runs it via an embedded Lua interpreter."
+license = "MIT"
+# TODO before publishing: set a public `repository` URL; the `mllc` path
+# dependency must become a version dependency.
 
 [dependencies]
 mllc = { path = "../mllc" }
