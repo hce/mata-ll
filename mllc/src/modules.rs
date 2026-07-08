@@ -512,10 +512,12 @@ impl Qual<'_> {
                 DoStmt::Bind { name: name.clone(), expr: e }
             }
             DoStmt::Expr(e) => DoStmt::Expr(self.expr(e, bound)),
-            DoStmt::DoLet { name, expr } => {
-                let e = self.expr(expr, bound);
-                bound.insert(name.clone());
-                DoStmt::DoLet { name: name.clone(), expr: e }
+            DoStmt::DoLet { binds } => {
+                // Recursive group: every name is in scope for every body and for
+                // the rest of the do-block, so bind them all before rewriting.
+                for ld in binds { bound.insert(ld.name.clone()); }
+                let binds = binds.iter().map(|ld| self.localdef(ld, bound)).collect();
+                DoStmt::DoLet { binds }
             }
             DoStmt::PatternBind { pattern, expr } => {
                 let e = self.expr(expr, bound);
@@ -671,7 +673,9 @@ fn rewrite_uses_expr(e: Expr, aliases: &HashSet<String>) -> Expr {
         Expr::Do(stmts) => Expr::Do(stmts.into_iter().map(|s| match s {
             DoStmt::Bind { name, expr } => DoStmt::Bind { name, expr: rewrite_uses_expr(expr, aliases) },
             DoStmt::Expr(e) => DoStmt::Expr(rewrite_uses_expr(e, aliases)),
-            DoStmt::DoLet { name, expr } => DoStmt::DoLet { name, expr: rewrite_uses_expr(expr, aliases) },
+            DoStmt::DoLet { binds } => DoStmt::DoLet {
+                binds: binds.into_iter().map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
+            },
             DoStmt::PatternBind { pattern, expr } => DoStmt::PatternBind { pattern, expr: rewrite_uses_expr(expr, aliases) },
             DoStmt::PatternDoLet { pattern, expr } => DoStmt::PatternDoLet { pattern, expr: rewrite_uses_expr(expr, aliases) },
         }).collect()),

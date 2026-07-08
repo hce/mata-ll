@@ -148,7 +148,11 @@ fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
     let mut result = match &stmts[last] {
         DoStmt::Expr(expr) => desugar_expr(expr.clone()),
         DoStmt::Bind { expr, .. } => desugar_expr(expr.clone()),
-        DoStmt::DoLet { expr, .. } => desugar_expr(expr.clone()),
+        // A trailing `let` group has no body to bind; a do-block cannot end in
+        // `let`, but guard against it by desugaring the last binding's body.
+        DoStmt::DoLet { binds } => binds.last()
+            .map(|b| desugar_expr(b.body.clone()))
+            .unwrap_or(Expr::Lit(Literal::Bool(false))),
         DoStmt::PatternBind { expr, .. } => desugar_expr(expr.clone()),
         DoStmt::PatternDoLet { expr, .. } => desugar_expr(expr.clone()),
     };
@@ -177,14 +181,18 @@ fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
                     }),
                 };
             }
-            DoStmt::DoLet { name, expr } => {
-                let expr = desugar_expr(expr.clone());
+            DoStmt::DoLet { binds } => {
+                // Emit the whole `let` group as ONE multi-bind `Expr::Let` so
+                // all bindings share a single mutually-recursive scope. Splitting
+                // it into nested single-bind Lets would make each binding see
+                // only its predecessors, breaking forward references.
+                let binds = binds.iter().map(|b| LocalDef {
+                    name: b.name.clone(),
+                    patterns: b.patterns.clone(),
+                    body: desugar_expr(b.body.clone()),
+                }).collect();
                 result = Expr::Let {
-                    binds: vec![LocalDef {
-                        name: name.clone(),
-                        patterns: vec![],
-                        body: expr,
-                    }],
+                    binds,
                     body: Box::new(result),
                 };
             }

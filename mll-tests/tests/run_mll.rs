@@ -227,6 +227,7 @@ mll_test!(stress_complex_program, "stress_complex_program.mll");
 mll_test!(stress_long_do_200, "stress_long_do_200.mll");
 mll_test!(do_eval_order, "do_eval_order.mll");
 mll_test!(do_let_scoping, "do_let_scoping.mll");
+mll_test!(let_recursive_groups, "let_recursive_groups.mll");
 mll_test!(exceptions, "exceptions.mll");
 mll_test!(type_alias_tuple, "type_alias_tuple.mll");
 mll_test!(pointfree_caf, "pointfree_caf.mll");

@@ -252,8 +252,10 @@ pub enum DoStmt {
     Bind { name: String, expr: Expr },
     /// `expr` (bare expression)
     Expr(Expr),
-    /// `let x = expr`
-    DoLet { name: String, expr: Expr },
+    /// `let x = expr` — a whole binding group. All bindings in the group share
+    /// one mutually-recursive scope (Haskell 2010 letrec), so declaration order
+    /// within the group is irrelevant.
+    DoLet { binds: Vec<LocalDef> },
     /// `(a, b) <- expr` (pattern bind)
     PatternBind { pattern: Pattern, expr: Expr },
     /// `let (a, b) = expr` (pattern let)

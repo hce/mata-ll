@@ -2106,8 +2106,20 @@ impl Parser {
                         patterns.push(self.parse_pattern_atom()?);
                     }
                     self.expect(&Token::Eq)?;
-                    let body = self.parse_expr()?;
-                    binds.push(LocalDef { name, patterns, body });
+                    let mut body = self.parse_expr()?;
+                    // Desugar a function binding `let f x y = e` into a value
+                    // binding of a lambda `f = \x y -> e`, matching do-`let`.
+                    // This keeps the whole `let` group a uniform value-binding
+                    // group so it is inferred and generated as one mutually
+                    // recursive scope (patterns on let-binds are otherwise not
+                    // handled by the let pipeline).
+                    if !patterns.is_empty() {
+                        body = Expr::Lambda {
+                            params: Self::lambda_param_names(patterns),
+                            body: Box::new(body),
+                        };
+                    }
+                    binds.push(LocalDef { name, patterns: vec![], body });
                 }
 
                 self.skip_newlines_and_indent();
@@ -2178,19 +2190,16 @@ impl Parser {
                         let mut expr = self.parse_expr()?;
                         // Desugar: wrap body in a single multi-param lambda
                         if !params.is_empty() {
-                            let param_names: Vec<String> = params.into_iter().map(|pat| {
-                                match pat {
-                                    Pattern::Var(n) => n,
-                                    Pattern::Wildcard => "_".to_string(),
-                                    _ => "_p".to_string(),
-                                }
-                            }).collect();
                             expr = Expr::Lambda {
-                                params: param_names,
+                                params: Self::lambda_param_names(params),
                                 body: Box::new(expr),
                             };
                         }
-                        stmts.push(DoStmt::DoLet { name, expr });
+                        // Accumulate all bindings of THIS `let` group into one
+                        // list so they share a single mutually-recursive scope
+                        // (Haskell 2010 letrec); a later binding may be referenced
+                        // by an earlier one regardless of source order.
+                        let mut group = vec![LocalDef { name, patterns: vec![], body: expr }];
                         // Continue parsing additional bindings at the same or deeper indent
                         loop {
                             let save_pos = self.pos;
@@ -2213,19 +2222,12 @@ impl Parser {
                                             self.advance();
                                             let mut expr2 = self.parse_expr()?;
                                             if !params2.is_empty() {
-                                                let param_names: Vec<String> = params2.into_iter().map(|pat| {
-                                                    match pat {
-                                                        Pattern::Var(n) => n,
-                                                        Pattern::Wildcard => "_".to_string(),
-                                                        _ => "_p".to_string(),
-                                                    }
-                                                }).collect();
                                                 expr2 = Expr::Lambda {
-                                                    params: param_names,
+                                                    params: Self::lambda_param_names(params2),
                                                     body: Box::new(expr2),
                                                 };
                                             }
-                                            stmts.push(DoStmt::DoLet { name: n2, expr: expr2 });
+                                            group.push(LocalDef { name: n2, patterns: vec![], body: expr2 });
                                             continue;
                                         }
                                     }
@@ -2237,6 +2239,7 @@ impl Parser {
                             self.current_indent = save_indent;
                             break;
                         }
+                        stmts.push(DoStmt::DoLet { binds: group });
                         self.block_indent = saved_do_block;
                         continue;
                     }
@@ -2403,6 +2406,17 @@ impl Parser {
             }
 
         Ok(lhs)
+    }
+
+    /// Map a function binding's parameter patterns to plain lambda parameter
+    /// names (`let f x y = e` => `f = \x y -> e`). Non-variable patterns collapse
+    /// to a placeholder, matching the existing let-binding capability.
+    fn lambda_param_names(patterns: Vec<Pattern>) -> Vec<String> {
+        patterns.into_iter().map(|pat| match pat {
+            Pattern::Var(n) => n,
+            Pattern::Wildcard => "_".to_string(),
+            _ => "_p".to_string(),
+        }).collect()
     }
 
     fn is_pattern_start(&self) -> bool {

@@ -10,6 +10,8 @@ examples/tracker/*.wav
 *.s3m
 !mll-tests/tests/benchmark.it
 lib/*.lua
+# Proprietary commercial test code — must never be committed to this public repo.
+proprietary-tests/
 doc/*.pdf
 doc/*.aux
 doc/*.log

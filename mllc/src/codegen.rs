@@ -844,7 +844,7 @@ impl CodeGen {
         let mut i = 0;
         while i < binds.len() {
             if binds[i].patterns.is_empty() {
-                self.gen_where_value(&binds[i]);
+                self.gen_where_value(binds, i);
                 i += 1;
             } else {
                 self.gen_where_func_group_assign(binds, i);
@@ -856,14 +856,18 @@ impl CodeGen {
         }
     }
 
-    fn gen_where_value(&mut self, bind: &TLocalDef) {
+    fn gen_where_value(&mut self, binds: &[TLocalDef], i: usize) {
+        let bind = &binds[i];
         let sname = sanitize_name(&bind.name);
         // The name was forward-declared in gen_where_binds; assign to it
         // (rather than re-declaring) so the binding's own body can refer to
-        // itself and to its mutually-recursive siblings.
+        // itself and to its mutually-recursive siblings. A cheap value may only
+        // be assigned strictly when it does not read a still-nil sibling (a
+        // forward or self reference); otherwise it must be thunked so the read
+        // happens after every assignment in the group has run.
         let lref = self.lua_ref(&sname);
         self.emit_indent();
-        if Self::is_cheap(&bind.body) {
+        if Self::is_cheap(&bind.body) && strict_binding_safe(binds, i) {
             self.emit(&format!("{} = ", lref));
             self.gen_expr(&bind.body);
             self.concrete_vars.insert(sname);
@@ -1940,10 +1944,15 @@ impl CodeGen {
                             }
                         }
                     }
-                    for bind in binds {
+                    for (i, bind) in binds.iter().enumerate() {
                         let bname = sanitize_name(&bind.name);
                         let lval = self.local_lvalue(&bname);
-                        if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind {
+                        // Both the if-fast-path and the cheap-path evaluate the
+                        // RHS strictly, so they may only be used when the binding
+                        // does not read a still-nil sibling (see strict_binding_safe).
+                        let strict_ok = strict_binding_safe(binds, i);
+                        if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind
+                            && strict_ok {
                             self.concrete_vars.insert(bname.clone());
                             self.emit_indent();
                             self.emit("if ");
@@ -1962,7 +1971,7 @@ impl CodeGen {
                             self.emit(" end\n");
                         } else {
                             self.emit_indent();
-                            if Self::is_cheap(&bind.body) {
+                            if Self::is_cheap(&bind.body) && strict_ok {
                                 self.emit(&format!("{} = ", lval));
                                 self.gen_expr(&bind.body);
                                 self.emit("\n");
@@ -2616,10 +2625,10 @@ impl CodeGen {
                     // prelude function (e.g. a let-bound `sum` or `last`).
                     for n in &names { self.local_vars.insert(n.clone()); }
                 }
-                for bind in binds {
+                for (i, bind) in binds.iter().enumerate() {
                     self.emit_indent();
                     let sname = sanitize_name(&bind.name);
-                    if Self::is_cheap(&bind.body) {
+                    if Self::is_cheap(&bind.body) && strict_binding_safe(binds, i) {
                         self.emit(&format!("{} = ", sname));
                         self.gen_expr(&bind.body); self.emit("\n");
                         self.concrete_vars.insert(sname);
@@ -3217,6 +3226,28 @@ fn expr_references_name(expr: &TExpr, name: &str) -> bool {
         }
         TExprKind::OutgoingCallback { callee, .. } => expr_references_name(callee, name),
     }
+}
+
+/// Whether `binds[i]` may be emitted as a *strict* (immediately-evaluated,
+/// non-thunk) assignment without reading a still-`nil` sibling.
+///
+/// A `let`/`where` group is mutually recursive: all names are forward-declared,
+/// then assigned in source order. A strict assignment evaluates its RHS at the
+/// point it runs, so it may only read siblings whose assignment has already
+/// executed — i.e. names at an *earlier* position. A reference to itself or to a
+/// later binding (index `>= i`) would read `nil`, so such a binding must be
+/// emitted lazily (as a thunk) instead.
+///
+/// A `Lambda` body is the exception: its body runs when the function is *called*,
+/// by which time every assignment in the group has completed, so a function
+/// value is always safe to bind strictly regardless of forward references (this
+/// is what makes mutually-recursive local functions work).
+fn strict_binding_safe(binds: &[TLocalDef], i: usize) -> bool {
+    if matches!(binds[i].body.kind, TExprKind::Lambda { .. }) {
+        return true;
+    }
+    // Not-yet-assigned siblings are those at position i (self) and beyond.
+    !binds[i..].iter().any(|b| expr_references_name(&binds[i].body, &b.name))
 }
 
 /// Count how many arrows are at the top level of a type.
