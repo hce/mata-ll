@@ -135,6 +135,14 @@ pub struct Checker {
     /// (class name, the instantiated type the constraint applies to). Discharged
     /// at the function boundary once unification has resolved the type.
     wanted: Vec<(String, Ty)>,
+    /// Types assigned to value-level binders (parameters, lambda/case/do binders,
+    /// let/where bindings) seen while checking the current function. Their type
+    /// variables count as *determined by the program*: a leftover class
+    /// constraint over such a variable is not ambiguous even when the variable
+    /// does not appear in the function's own type (it is fixed by how the binder
+    /// is used). Collected here because the architecture does not otherwise scope
+    /// local constraints. Cleared per function alongside `wanted`.
+    binder_types: Vec<Ty>,
 }
 
 impl Default for Checker {
@@ -168,6 +176,7 @@ impl Checker {
             method_constraints: HashMap::new(),
             fn_use_constraints: HashMap::new(),
             wanted: Vec::new(),
+            binder_types: Vec::new(),
         };
         checker.init_prelude();
         checker.init_kinds();
@@ -3255,6 +3264,7 @@ impl Checker {
     fn check_function(&mut self, name: &str, clauses: &[Clause], declared_ty: &Ty) -> Option<TFunction> {
         self.current_fn = Some(name.to_string());
         self.wanted.clear();
+        self.binder_types.clear();
         let (fresh_ty, renames) = self.freshen_sig_type_mapped(declared_ty);
 
         // Re-express this function's declared constraints over the freshened
@@ -3305,11 +3315,38 @@ impl Checker {
         // rejected — even when its components are not yet resolved, since e.g.
         // no function type has a Show instance regardless of its arg/result.
         let span = clauses.first().map(|c| c.span).unwrap_or_default();
+        // A leftover constraint mentioning a variable that this binding is
+        // genuinely polymorphic over (i.e. in its caller-visible type) is left
+        // for the caller to discharge. A variable that is fixed by how some
+        // value-level binder (parameter, let/where/lambda binding) is used is
+        // likewise determined, even when it does not appear in the function's own
+        // type. Only a variable that is neither — nothing in the definition or
+        // its callers can ever fix it — makes the constraint ambiguous, so it is
+        // rejected rather than silently dropped (matching Haskell 2010 / GHC).
+        let mut determined = final_ty.free_vars();
+        for bt in &self.binder_types {
+            for v in bt.apply_subst(&overall_subst).free_vars() {
+                if !determined.contains(&v) { determined.push(v); }
+            }
+        }
         for (class, cty) in std::mem::take(&mut self.wanted) {
             let rty = cty.apply_subst(&overall_subst);
             if !self.has_instance(&class, &rty) {
                 self.push_error_span(
                     TypeErrorKind::NoInstance { class, ty: rty },
+                    format!("definition of '{}'", name),
+                    span,
+                );
+            } else if !is_structural_monad_class(&class)
+                && rty.free_vars().iter().any(|v| !determined.contains(v)) {
+                // The monad-hierarchy classes are resolved structurally for IO
+                // (mata-ll does not dictionary-pass them, and `has_instance`
+                // reports no instance for IO on them), so an unresolved monad
+                // variable from do-notation is IO by construction, not a genuine
+                // value-level ambiguity. Only the remaining, value-rendering /
+                // comparing classes (Show, Eq, Ord, user classes) are checked.
+                self.push_error_span(
+                    TypeErrorKind::AmbiguousType { class, ty: rty },
                     format!("definition of '{}'", name),
                     span,
                 );
@@ -3375,6 +3412,8 @@ impl Checker {
         for ld in &clause.where_binds {
             if ld.patterns.is_empty() {
                 let fresh = self.fresh_var("_wh");
+                // A where value binder's type is determined by its body/uses.
+                self.binder_types.push(fresh.clone());
                 local_env.insert(ld.name.clone(), Scheme::mono(fresh));
             } else {
                 // Local function: assign a fresh type for each parameter + return
@@ -3383,6 +3422,10 @@ impl Checker {
                     let param_ty = self.fresh_var("_wp");
                     fn_ty = Ty::arrow(param_ty, fn_ty);
                 }
+                // The whole local-function type (params + result) is determined
+                // by its uses; record it so constraints from its body are not
+                // spuriously flagged as ambiguous.
+                self.binder_types.push(fn_ty.clone());
                 local_env.insert(ld.name.clone(), Scheme::mono(fn_ty));
             }
         }
@@ -3392,17 +3435,29 @@ impl Checker {
 
         if !clause.guards.is_empty() {
             for guard in &clause.guards {
-                let (tcond, cond_ty, s1) = self.infer_expr(&guard.condition, &local_env)?;
+                // Check the condition and body against the environment with the
+                // accumulated substitution applied, so a binding used in both the
+                // condition and the body (e.g. a `where` value under `| p x = … x`)
+                // keeps a single, consistent instantiation. Without this the two
+                // uses instantiate independently and one side's resolution is lost
+                // when the substitutions compose, leaving a type variable — and any
+                // class constraint on it — spuriously unresolved.
+                let cond_env = local_env.apply_subst(&subst);
+                let (tcond, cond_ty, s1) = self.infer_expr(&guard.condition, &cond_env)?;
                 let s2 = unify(&cond_ty.apply_subst(&s1), &Ty::Con("Bool".into()))?;
                 let combined = s1.compose(&s2);
                 subst = subst.compose(&combined);
-                let (tbody_g, body_s) = self.check_expr_typed(&guard.body, &expected_ret, &local_env)?;
+                let body_env = local_env.apply_subst(&subst);
+                let ret = expected_ret.apply_subst(&subst);
+                let (tbody_g, body_s) = self.check_expr_typed(&guard.body, &ret, &body_env)?;
                 subst = subst.compose(&body_s);
                 tguards.push(TGuard { condition: tcond, body: tbody_g });
             }
             tbody = TExpr::new(TExprKind::Var("undefined".into()), expected_ret);
         } else {
-            let (tb, body_s) = self.check_expr_typed(&clause.body, &expected_ret, &local_env)?;
+            let body_env = local_env.apply_subst(&subst);
+            let ret = expected_ret.apply_subst(&subst);
+            let (tb, body_s) = self.check_expr_typed(&clause.body, &ret, &body_env)?;
             subst = subst.compose(&body_s);
             tbody = tb;
         }
@@ -3444,6 +3499,12 @@ impl Checker {
                     (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
                 });
                 where_subst = where_subst.compose(&bs);
+                // Propagate the local-function body's unifications to the outer
+                // substitution. Without this, the resolutions that fix a where
+                // function's parameter types (and any class-method type variables
+                // in its body) are visible only inside the emitted term, leaving
+                // those variables spuriously unresolved at the function boundary.
+                subst = subst.compose(&where_subst);
                 // Build the inferred function type and unify with pre-registered type
                 let mut inferred_fn_ty = body_ty.apply_subst(&where_subst);
                 for pty in param_tys.iter().rev() {
@@ -3499,6 +3560,9 @@ impl Checker {
         for bind in binds {
             let fv = self.fresh_var("_let");
             fresh_tys.push(fv.clone());
+            // A let binder's type is determined by its body/uses; record it so a
+            // class constraint over its variable is not flagged as ambiguous.
+            self.binder_types.push(fv.clone());
             rec_env.insert(bind.name.clone(), Scheme::mono(fv));
         }
 
@@ -3536,6 +3600,9 @@ impl Checker {
                 // Rank-2: if expected type is forall-quantified, bind as polymorphic scheme
                 let scheme = Self::forall_to_scheme(expected);
                 env.insert(name.clone(), scheme);
+                // This binder's type variables are determined by how it is used,
+                // so record it for the ambiguity check at the function boundary.
+                self.binder_types.push(expected.clone());
                 Ok((TPattern::Var(name.clone(), expected.clone()), Subst::empty()))
             }
             Pattern::Wildcard => Ok((TPattern::Wildcard, Subst::empty())),
@@ -4407,6 +4474,14 @@ impl Checker {
 /// no list/tuple/Maybe ordering — as are Read and user classes.
 fn structural_container_class(class: &str) -> bool {
     matches!(class, "Show" | "Eq")
+}
+
+/// The monad-hierarchy classes, which mata-ll resolves structurally for IO
+/// rather than by dictionary passing. A leftover constraint from one of these
+/// (e.g. the `Applicative f` of a `when`/`return` in an IO do-block) is IO by
+/// construction, not a genuine value-level ambiguity, so it is not flagged.
+fn is_structural_monad_class(class: &str) -> bool {
+    matches!(class, "Functor" | "Applicative" | "Monad")
 }
 
 fn op_to_name(op: &str) -> &str {

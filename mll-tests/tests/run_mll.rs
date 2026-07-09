@@ -431,6 +431,127 @@ main = putStrLn (show (Secret 42))
 }
 
 #[test]
+fn ambiguous_show_nothing_rejected() {
+    // `Nothing :: Maybe a` leaves the element type `a` unconstrained; `show`
+    // then needs a `Show a` that nothing can determine. This is a genuine
+    // ambiguous type (GHC rejects it too) and must be a compile error rather
+    // than silently defaulting or picking a runtime rendering.
+    let source = r#"
+main :: IO ()
+main = putStrLn (show Nothing)
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Ambiguous type"),
+                "Expected an ambiguity error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for ambiguous `show Nothing`"),
+    }
+}
+
+#[test]
+fn ambiguous_show_nothing_in_larger_expr_rejected() {
+    // The ambiguous `show Nothing` must still be caught when buried in a larger
+    // expression whose other parts (e.g. `show 3`) are perfectly well-typed.
+    let source = r#"
+main :: IO ()
+main = print $ show 3 <> "hi" <> show Nothing
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Ambiguous type"),
+                "Expected an ambiguity error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for ambiguous `show Nothing` in a larger expression"),
+    }
+}
+
+#[test]
+fn show_at_concrete_types_still_compiles() {
+    // The ambiguity check must not touch well-typed uses: a numeric literal
+    // (`show 3`), a concrete empty list, a concrete Nothing, and `Just 5` all
+    // have determined types and must compile.
+    let source = r#"
+main :: IO ()
+main = do
+    putStrLn (show (3 :: Integer))
+    putStrLn (show ([] :: [Integer]))
+    putStrLn (show (Nothing :: Maybe Integer))
+    putStrLn (show (Just (5 :: Integer)))
+"#;
+    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+        "show at concrete types should compile");
+}
+
+#[test]
+fn polymorphic_show_constraint_still_compiles() {
+    // A function that declares `Show a =>` legitimately defers the constraint to
+    // its callers; it must still compile (the leftover constraint's variable is
+    // part of the function's own type, so it is not ambiguous).
+    let source = r#"
+f :: Show a => a -> String
+f = show
+
+main :: IO ()
+main = do
+    putStrLn (f ([] :: [Integer]))
+    putStrLn (f (Nothing :: Maybe Integer))
+    putStrLn (f (42 :: Integer))
+"#;
+    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+        "polymorphic Show-constrained function should compile");
+}
+
+#[test]
+fn show_of_list_and_maybe_render_distinctly() {
+    // With concrete element types, `show` is type-directed: an empty list must
+    // render "[]" and `Nothing` must render "Nothing" — they must NOT both
+    // collapse to "Nothing" (their shared Lua-nil runtime rep). This exercises
+    // the distinction through `show` used as a value (via putStrLn), and through
+    // a polymorphic `Show a =>` wrapper, so dictionary dispatch is covered too.
+    let source = r#"
+f :: Show a => a -> String
+f = show
+
+main :: IO ()
+main = do
+    putStrLn (show ([] :: [Integer]))
+    putStrLn (show (Nothing :: Maybe Integer))
+    putStrLn (show (Just (5 :: Integer)))
+    putStrLn (f ([] :: [Integer]))
+    putStrLn (f (Nothing :: Maybe Integer))
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+
+    // Capture `print` (which `putStrLn` lowers to) instead of hitting stdout.
+    let lua = mlua::Lua::new();
+    let captured = lua.create_table().unwrap();
+    lua.globals().set("__captured", captured.clone()).unwrap();
+    let print_fn = lua
+        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+            let line = s.to_str()?.to_string();
+            let t: mlua::Table = lua.globals().get("__captured")?;
+            let n = t.raw_len();
+            t.raw_set(n + 1, line)?;
+            Ok(())
+        })
+        .unwrap();
+    lua.globals().set("print", print_fn).unwrap();
+    lua.load(&lua_code).set_name("show_list_vs_maybe").exec()
+        .expect("should run");
+
+    let lines: Vec<String> = captured
+        .sequence_values::<String>()
+        .collect::<mlua::Result<_>>()
+        .unwrap();
+    assert_eq!(lines, vec!["[]", "Nothing", "Just 5", "[]", "Nothing"]);
+}
+
+#[test]
 fn bare_signature_without_definition_rejected() {
     // A type signature with no accompanying definition (and not an FFI binding)
     // used to silently compile to a nil value. It must now be rejected.
@@ -885,10 +1006,16 @@ main = do
 // Runtime error tests: these should compile but fail at runtime
 #[test]
 fn undefined_errors_when_forced() {
+    // `x` carries a concrete type annotation. Without one, `print x` leaves the
+    // element type of `x = undefined` unconstrained, which is a genuine ambiguous
+    // type (GHC rejects `let x = undefined; print x` for the same reason); the
+    // ambiguity check now flags it at compile time. The purpose of this test —
+    // that a forced `undefined` raises `Prelude.undefined` at runtime — is
+    // unchanged by pinning the type.
     let source = r#"
 main :: IO ()
 main = do
-    let x = undefined
+    let x = undefined :: Integer
     print x
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])

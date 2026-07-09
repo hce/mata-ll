@@ -486,6 +486,10 @@ pub enum TypeErrorKind {
     TypeSigMismatch { name: String, declared: Ty, inferred: Ty },
     /// A class constraint with no matching instance, e.g. `Show (a -> b)`.
     NoInstance { class: String, ty: Ty },
+    /// A class constraint left over with a type variable that nothing in the
+    /// definition determines, e.g. `show Nothing` (the element of the `Maybe`
+    /// is never fixed). No instance can be chosen, so it is rejected.
+    AmbiguousType { class: String, ty: Ty },
     Other(String),
 }
 
@@ -554,6 +558,9 @@ impl TypeError {
                 if matches!(ty, Ty::Arrow(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
                 Some("functions and IO actions have no Show/Eq/Ord instance — there is no \
                       way to render or compare them."),
+            TypeErrorKind::AmbiguousType { .. } =>
+                Some("add a type annotation to pin the type down, e.g. \
+                      `show (Nothing :: Maybe Integer)`. GHC rejects this the same way."),
             _ => None,
         }
     }
@@ -599,6 +606,17 @@ impl fmt::Display for TypeError {
                     _ => format!("{}", rendered),
                 };
                 write!(f, "No instance for '{} {}'", class, shown)?
+            }
+            TypeErrorKind::AmbiguousType { class, ty } => {
+                let s = pretty_var_subst(&[ty]);
+                let rendered = ty.apply_subst(&s);
+                let shown = match &rendered {
+                    Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
+                        format!("({})", rendered),
+                    _ => format!("{}", rendered),
+                };
+                write!(f, "Ambiguous type: nothing here determines the type '{}', so no '{}' instance can be chosen for it",
+                    shown, class)?
             }
             TypeErrorKind::Other(msg) => write!(f, "{}", msg)?,
         }
