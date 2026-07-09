@@ -10,6 +10,9 @@ description = "mata-ll command-line compiler and runner: compiles a Haskell subs
 license = "MIT"
 repository = "https://github.com/hce/mata-ll"
 homepage = "https://matall.org"
+readme = "README.md"
+keywords = ["haskell", "lua", "compiler", "transpiler", "cli"]
+categories = ["compilers", "command-line-utilities"]
 
 [[bin]]
 name = "mll"

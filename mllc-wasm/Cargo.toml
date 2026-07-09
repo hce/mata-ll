@@ -7,6 +7,9 @@ description = "WebAssembly bindings for the mata-ll compiler (mllc)."
 license = "MIT"
 repository = "https://github.com/hce/mata-ll"
 homepage = "https://matall.org"
+readme = "README.md"
+keywords = ["haskell", "lua", "compiler", "wasm", "webassembly"]
+categories = ["compilers", "wasm"]
 
 [lib]
 crate-type = ["cdylib"]

@@ -7,5 +7,8 @@ description = "Compiler library for mata-ll: compiles a Haskell subset to a sing
 license = "MIT"
 repository = "https://github.com/hce/mata-ll"
 homepage = "https://matall.org"
+readme = "README.md"
+keywords = ["haskell", "lua", "compiler", "transpiler", "functional"]
+categories = ["compilers"]
 
 [dependencies]
