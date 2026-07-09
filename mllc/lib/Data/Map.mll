@@ -94,17 +94,17 @@ listAppend :: [a] -> [a] -> [a]
 listAppend [] ys = ys
 listAppend (x:xs) ys = x : listAppend xs ys
 
-intersection :: Map k v -> Map k v -> Map k v
+intersection :: Eq k => Map k v -> Map k v -> Map k v
 intersection m1 m2 = filter (\_ -> True) (fromList (filterByKeys (keys m2) (toList m1)))
 
-filterByKeys :: [k] -> [(k, v)] -> [(k, v)]
+filterByKeys :: Eq k => [k] -> [(k, v)] -> [(k, v)]
 filterByKeys _ [] = []
 filterByKeys ks ((k, v):rest) = if elem k ks then (k, v) : filterByKeys ks rest else filterByKeys ks rest
 
-difference :: Map k v -> Map k v -> Map k v
+difference :: Eq k => Map k v -> Map k v -> Map k v
 difference m1 m2 = fromList (filterNotByKeys (keys m2) (toList m1))
 
-filterNotByKeys :: [k] -> [(k, v)] -> [(k, v)]
+filterNotByKeys :: Eq k => [k] -> [(k, v)] -> [(k, v)]
 filterNotByKeys _ [] = []
 filterNotByKeys ks ((k, v):rest) = if elem k ks then filterNotByKeys ks rest else (k, v) : filterNotByKeys ks rest
 

@@ -275,7 +275,7 @@ snd :: (a, b) -> b
 snd (_, y) = y
 
 
-elem :: a -> [a] -> Bool
+elem :: Eq a => a -> [a] -> Bool
 elem a (x:xs)
     | a == x      = True
     | otherwise   = elem a xs

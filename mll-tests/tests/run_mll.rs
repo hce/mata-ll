@@ -552,6 +552,76 @@ main = do
 }
 
 #[test]
+fn unconstrained_class_method_on_signature_var_rejected() {
+    // `show` on a fully-polymorphic `a` with no `Show a` in the signature has no
+    // instance (a bare rigid variable has no evidence). GHC rejects this too.
+    let source = r#"
+poly :: a -> String
+poly x = show x
+
+main :: IO ()
+main = putStrLn (poly (5 :: Integer))
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("No instance for 'Show a'") && msg.contains("Add it to the context"),
+                "Expected a missing-context error suggesting the fix, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected rejection of `show` on an unconstrained variable"),
+    }
+}
+
+#[test]
+fn unconstrained_eq_on_signature_var_rejected() {
+    // The Eq analogue: `==` on a bare polymorphic variable with no `Eq a`.
+    let source = r#"
+same :: a -> a -> Bool
+same x y = x == y
+
+main :: IO ()
+main = putStrLn (show (same (1 :: Integer) 2))
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("No instance for 'Eq a'"),
+                "Expected a missing Eq-context error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected rejection of `==` on an unconstrained variable"),
+    }
+}
+
+#[test]
+fn declared_class_constraint_accepted() {
+    // A declared context makes the use legitimate; it must still compile and run.
+    let source = r#"
+f :: Show a => a -> String
+f = show
+
+main :: IO ()
+main = putStrLn (f (5 :: Integer))
+"#;
+    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+        "a declared `Show a =>` context should be accepted");
+}
+
+#[test]
+fn superclass_context_satisfies_wanted_constraint() {
+    // A declared `Ord a` provides the wanted `Eq a` (Eq is a superclass of Ord),
+    // so `x == y` under an `Ord a =>` context compiles.
+    let source = r#"
+same :: Ord a => a -> a -> Bool
+same x y = x == y
+
+main :: IO ()
+main = putStrLn (show (same (1 :: Integer) 2))
+"#;
+    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+        "an Ord context should satisfy a wanted Eq constraint via the superclass");
+}
+
+#[test]
 fn bare_signature_without_definition_rejected() {
     // A type signature with no accompanying definition (and not an FFI binding)
     // used to silently compile to a nil value. It must now be rejected.

@@ -254,6 +254,52 @@ impl Checker {
         }
     }
 
+    /// Collect the type-variable leaves a `class ty` constraint ultimately needs
+    /// an instance for, mirroring `has_instance`'s structural recursion (a
+    /// list/tuple/Maybe of `a` needs `class a`; a derived `T a` needs `class a`).
+    /// Only variable leaves are collected; concrete constructors are assumed
+    /// resolved (they passed `has_instance`). Skolems are left rigid/deferred.
+    fn collect_required_var_constraints(&self, class: &str, ty: &Ty, out: &mut Vec<(String, TyVar)>) {
+        match ty {
+            Ty::Var(v) => out.push((class.to_string(), v.clone())),
+            Ty::List(elem) if structural_container_class(class) =>
+                self.collect_required_var_constraints(class, elem, out),
+            Ty::Tuple(elems) if structural_container_class(class) =>
+                for e in elems { self.collect_required_var_constraints(class, e, out); },
+            Ty::App(_, _) => {
+                let mut head = ty;
+                let mut args: Vec<&Ty> = Vec::new();
+                while let Ty::App(f, a) = head { args.push(a.as_ref()); head = f.as_ref(); }
+                match head {
+                    Ty::Con(base) if base == "Maybe" && structural_container_class(class) =>
+                        for a in args { self.collect_required_var_constraints(class, a, out); },
+                    Ty::Con(base) if self.instances.contains_key(&(class.to_string(), base.clone())) =>
+                        for a in args { self.collect_required_var_constraints(class, a, out); },
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// True when a `declared` class provides `wanted`: they are the same class,
+    /// or `wanted` is a transitive superclass of `declared`.
+    fn class_satisfies(&self, declared: &str, wanted: &str) -> bool {
+        if declared == wanted { return true; }
+        let mut stack = vec![declared.to_string()];
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(c) = stack.pop() {
+            if !seen.insert(c.clone()) { continue; }
+            if let Some(info) = self.classes.get(&c) {
+                for sup in &info.superclasses {
+                    if sup == wanted { return true; }
+                    stack.push(sup.clone());
+                }
+            }
+        }
+        false
+    }
+
     /// Emit the wanted class constraints for a use of `name`, mapping each
     /// constrained variable to its freshly-instantiated type. Covers both
     /// built-in class methods (`show`/`==`/…) and any user/prelude function
@@ -3278,6 +3324,24 @@ impl Checker {
             self.fn_use_constraints.insert(name.to_string(), renamed);
         }
 
+        // The declared context as (class, freshened variable) pairs. The variable
+        // is the actual freshened signature TyVar (with its id), so it can be
+        // resolved through the clause substitution at discharge time — a signature
+        // variable often unifies with a fresh parameter variable, and a plain
+        // name match would then miss it. Used to decide whether a wanted
+        // constraint over a signature variable is provided by the context.
+        let declared_cvars: Vec<(String, TyVar)> = {
+            let name_to_var: HashMap<String, TyVar> = fresh_ty.free_vars()
+                .into_iter().map(|v| (v.name.clone(), v)).collect();
+            self.fn_constraints.get(name).cloned().unwrap_or_default().iter()
+                .filter_map(|c| {
+                    let fresh_name = renames.get(&c.type_var)?;
+                    let tv = name_to_var.get(fresh_name)?;
+                    Some((c.class_name.clone(), tv.clone()))
+                })
+                .collect()
+        };
+
         // Add self for recursion
         let self_scheme = self.generalize(&self.env.clone(), &fresh_ty);
         self.env.insert(name.to_string(), self_scheme);
@@ -3323,7 +3387,11 @@ impl Checker {
         // type. Only a variable that is neither — nothing in the definition or
         // its callers can ever fix it — makes the constraint ambiguous, so it is
         // rejected rather than silently dropped (matching Haskell 2010 / GHC).
-        let mut determined = final_ty.free_vars();
+        // This function's own signature-quantified variables (a leftover
+        // constraint over one of these must be discharged by the declared
+        // context) versus variables determined by a local binder.
+        let type_vars = final_ty.free_vars();
+        let mut determined = type_vars.clone();
         for bt in &self.binder_types {
             for v in bt.apply_subst(&overall_subst).free_vars() {
                 if !determined.contains(&v) { determined.push(v); }
@@ -3337,19 +3405,46 @@ impl Checker {
                     format!("definition of '{}'", name),
                     span,
                 );
-            } else if !is_structural_monad_class(&class)
-                && rty.free_vars().iter().any(|v| !determined.contains(v)) {
+            } else if is_structural_monad_class(&class) {
                 // The monad-hierarchy classes are resolved structurally for IO
                 // (mata-ll does not dictionary-pass them, and `has_instance`
                 // reports no instance for IO on them), so an unresolved monad
-                // variable from do-notation is IO by construction, not a genuine
-                // value-level ambiguity. Only the remaining, value-rendering /
-                // comparing classes (Show, Eq, Ord, user classes) are checked.
+                // variable from do-notation is IO by construction — neither a
+                // value-level ambiguity nor a missing-context error.
+            } else if rty.free_vars().iter().any(|v| !determined.contains(v)) {
+                // A variable nothing determines: no instance can ever be chosen.
                 self.push_error_span(
                     TypeErrorKind::AmbiguousType { class, ty: rty },
                     format!("definition of '{}'", name),
                     span,
                 );
+            } else {
+                // Every variable is determined. A constraint that bottoms out at
+                // one of this function's signature-quantified variables needs
+                // evidence: a bare rigid variable has no instance, so the
+                // declared context (or a superclass of it) must provide the
+                // class. If it does not, reject and point at the missing
+                // constraint — the reachable-but-unconstrained case GHC rejects.
+                let mut required: Vec<(String, TyVar)> = Vec::new();
+                self.collect_required_var_constraints(&class, &rty, &mut required);
+                for (rc, v) in required {
+                    if !type_vars.contains(&v) { continue; }
+                    // Provided if some declared constraint, resolved through the
+                    // clause substitution, lands on the same variable with a class
+                    // that satisfies `rc` (directly or via a superclass).
+                    let provided = declared_cvars.iter().any(|(dc, dv)| {
+                        self.class_satisfies(dc, &rc)
+                            && Ty::Var(dv.clone()).apply_subst(&overall_subst)
+                                .free_vars().contains(&v)
+                    });
+                    if !provided {
+                        self.push_error_span(
+                            TypeErrorKind::MissingContextConstraint { class: rc, ty: Ty::Var(v) },
+                            format!("definition of '{}'", name),
+                            span,
+                        );
+                    }
+                }
             }
         }
 

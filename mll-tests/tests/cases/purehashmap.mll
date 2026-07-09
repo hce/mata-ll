@@ -46,13 +46,13 @@ tlookup k (TNode _ nk nv left right)
 
 data Bucket k v = BEmpty | BCons k v (Bucket k v)
 
-blookup :: k -> Bucket k v -> Maybe v
+blookup :: Eq k => k -> Bucket k v -> Maybe v
 blookup _ BEmpty = Nothing
 blookup k (BCons bk bv rest)
     | k == bk   = Just bv
     | otherwise = blookup k rest
 
-binsert :: k -> v -> Bucket k v -> Bucket k v
+binsert :: Eq k => k -> v -> Bucket k v -> Bucket k v
 binsert k v BEmpty = BCons k v BEmpty
 binsert k v (BCons bk bv rest)
     | k == bk   = BCons k v rest
@@ -74,15 +74,15 @@ bucketFor h tree = case tlookup h tree of
     Just b  -> b
     Nothing -> BEmpty
 
-pmInsert :: k -> v -> PureMap k v -> PureMap k v
+pmInsert :: (Eq k, Show k) => k -> v -> PureMap k v -> PureMap k v
 pmInsert k v (PureMap tree) = PureMap (tinsert h (binsert k v (bucketFor h tree)) tree)
     where h = hashStr (show k)
 
-pmLookup :: k -> PureMap k v -> Maybe v
+pmLookup :: (Eq k, Show k) => k -> PureMap k v -> Maybe v
 pmLookup k (PureMap tree) = blookup k (bucketFor h tree)
     where h = hashStr (show k)
 
-pmMember :: k -> PureMap k v -> Bool
+pmMember :: (Eq k, Show k) => k -> PureMap k v -> Bool
 pmMember k m = case pmLookup k m of
     Just _  -> True
     Nothing -> False

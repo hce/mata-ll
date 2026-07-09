@@ -490,6 +490,12 @@ pub enum TypeErrorKind {
     /// definition determines, e.g. `show Nothing` (the element of the `Maybe`
     /// is never fixed). No instance can be chosen, so it is rejected.
     AmbiguousType { class: String, ty: Ty },
+    /// A class method is used on a signature-quantified type variable whose
+    /// class the function's declared context does not provide, e.g.
+    /// `poly :: a -> String; poly x = show x` (needs `Show a`, none declared).
+    /// There is no instance for a bare rigid variable, so the evidence is
+    /// missing and it must be rejected.
+    MissingContextConstraint { class: String, ty: Ty },
     Other(String),
 }
 
@@ -561,6 +567,9 @@ impl TypeError {
             TypeErrorKind::AmbiguousType { .. } =>
                 Some("add a type annotation to pin the type down, e.g. \
                       `show (Nothing :: Maybe Integer)`. GHC rejects this the same way."),
+            TypeErrorKind::MissingContextConstraint { .. } =>
+                Some("a bare polymorphic variable has no instance unless the signature \
+                      requires one. GHC reports this as \"add (C a) to the context\"."),
             _ => None,
         }
     }
@@ -617,6 +626,18 @@ impl fmt::Display for TypeError {
                 };
                 write!(f, "Ambiguous type: nothing here determines the type '{}', so no '{}' instance can be chosen for it",
                     shown, class)?
+            }
+            TypeErrorKind::MissingContextConstraint { class, ty } => {
+                // Show the signature variable's written name: a freshened rigid
+                // variable is `<name><id>` (e.g. `a519`), so trim the trailing id
+                // digits back to what the user wrote (`a`).
+                let v = match ty {
+                    Ty::Var(tv) => tv.name.trim_end_matches(|c: char| c.is_ascii_digit()).to_string(),
+                    other => format!("{}", other),
+                };
+                let v = if v.is_empty() { "a".to_string() } else { v };
+                write!(f, "No instance for '{} {}': the type variable '{}' is only as general as the signature says, and the signature does not require '{} {}'. Add it to the context, e.g. '({} {}) => …'",
+                    class, v, v, class, v, class, v)?
             }
             TypeErrorKind::Other(msg) => write!(f, "{}", msg)?,
         }
