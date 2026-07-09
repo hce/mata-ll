@@ -279,11 +279,16 @@ impl CodeGen {
             _ => {
                 let (head, args) = decompose_app(ty);
                 match head {
-                    // Maybe: nil ⇄ Nothing already round-trips, so decode only
-                    // when the payload type itself needs conversion.
-                    Some("Maybe") if args.len() == 1 => self
-                        .ffi_decode_desc_inner(args[0], stack)
-                        .map(|e| format!("{{k=\"maybe\",e={}}}", e)),
+                    // Maybe: a host value crossing in must be wrapped as `Just`
+                    // (nil stays Nothing), since `Just` is now a tagged wrapper
+                    // rather than the identity. Always emit the descriptor so the
+                    // wrapping happens; `e` decodes the payload when it too needs
+                    // conversion (false = pass the payload through).
+                    Some("Maybe") if args.len() == 1 => {
+                        let e = self.ffi_decode_desc_inner(args[0], stack)
+                            .unwrap_or_else(|| "false".into());
+                        Some(format!("{{k=\"maybe\",e={}}}", e))
+                    }
                     // HashMap always decodes: it validates each key's Lua type
                     // against the declared key type (catching a host array where
                     // a String-keyed map was declared) and decodes each value.
@@ -1348,9 +1353,14 @@ impl CodeGen {
                         "False" => conditions.push(format!("{} == false", scrutinee)),
                         "Nothing" | "[]" => conditions.push(format!("{} == nil", scrutinee)),
                         "Just" => {
+                            // A Maybe value is either nil (Nothing) or the Just
+                            // wrapper, so `~= nil` identifies Just; the payload is
+                            // unwrapped from field [1] (which is itself nil for
+                            // `Just Nothing` / `Just []`).
                             conditions.push(format!("{} ~= nil", scrutinee));
                             if let Some(arg) = args.first() {
-                                self.collect_pattern_conditions(scrutinee, arg, conditions, bindings);
+                                self.collect_pattern_conditions(
+                                    &format!("({})[1]", scrutinee), arg, conditions, bindings);
                             }
                         }
                         ":" => {
@@ -3012,6 +3022,13 @@ impl CodeGen {
                     self.emit("} end");
                 } else {
                     // Regular (pure) FFI: lua_func(arg0, arg1, ...)
+                    // Type-directed decode of the result, symmetric with the IO
+                    // arms above: e.g. a `Maybe a` result from the host must be
+                    // wrapped into the tagged `Just`/`Nothing` representation.
+                    let decode = self.ffi_decode_desc(&expr.ty);
+                    if let Some(desc) = &decode {
+                        self.emit(&format!("__mll_ffi_decode({}, ", desc));
+                    }
                     self.emit(specialized);
                     self.emit("(");
                     for (i, a) in args.iter().enumerate() {
@@ -3021,6 +3038,9 @@ impl CodeGen {
                         self.emit(")");
                     }
                     self.emit(")");
+                    if decode.is_some() {
+                        self.emit(")");
+                    }
                 }
             }
             TExprKind::Tuple(elems) => {
@@ -3653,6 +3673,9 @@ local __unpack = table.unpack or unpack
 -- Thunk infrastructure (non-strict evaluation)
 local __thunk_mt = {}
 local __cons_mt = {}
+-- Tags a `Just` wrapper (see the Maybe constructor below); declared here so the
+-- generic `show`/`__mll_to_lua` can identify it as an upvalue.
+local __just_mt = {}
 local function __thunk(f) return setmetatable({f, false}, __thunk_mt) end
 local function __force(x)
     if getmetatable(x) == __thunk_mt then
@@ -3714,6 +3737,11 @@ end
 local function __mll_to_lua(x)
     x = __force(x)
     if type(x) ~= "table" then return x end
+    -- Just wrapper: hand Lua the bare payload (Nothing is already nil). Lua's nil
+    -- cannot represent nesting, so `Just Nothing` flattens to nil and `Just (Just
+    -- v)` flattens to v at the boundary — this unwrap keeps the common single
+    -- level `Just v -> v` interop, which is all Lua can faithfully carry.
+    if getmetatable(x) == __just_mt then return __mll_to_lua(x[1]) end
     -- Cons list: identified by __cons_mt metatable
     if getmetatable(x) == __cons_mt then
         local result = {}
@@ -3819,6 +3847,21 @@ local function show(x)
         if x then return "True" else return "False" end
     elseif type(x) == "nil" then return "Nothing"
     elseif type(x) == "table" then
+        -- A Just wrapper is tagged; render it as "Just <payload>" (its payload
+        -- in field [1] may itself be nil, i.e. Just Nothing). Parenthesize a
+        -- payload that is a constructor application or negative number, matching
+        -- GHC's showsPrec 11 (same rule as __mll_show_arg, inlined so the generic
+        -- show does not depend on a helper defined later).
+        if getmetatable(x) == __just_mt then
+            local inner = show(x[1])
+            local c = string.byte(inner, 1)
+            local d = string.byte(inner, 2)
+            if c ~= nil and ((c >= 65 and c <= 90 and string.find(inner, " ", 1, true))
+               or (c == 45 and d ~= nil and d >= 48 and d <= 57)) then
+                inner = "(" .. inner .. ")"
+            end
+            return "Just " .. inner
+        end
         -- A non-empty list is exactly a cons cell, identified by __cons_mt.
         -- Tuples and constructor tables are plain tables; distinguishing by
         -- shape instead (does x[2] look list-like?) misrenders a tuple whose
@@ -3844,7 +3887,11 @@ local function max(a, b) return math.max(__force(a), __force(b)) end
 local function min(a, b) return math.min(__force(a), __force(b)) end
 local function pure(x) return function() return x end end
 local function return_(x) return function() return x end end
-local function Just(x) return x end
+-- Maybe: `Just x` is a metatable-tagged one-element wrapper (tag __just_mt,
+-- declared above) so it is injective even when the payload's own runtime
+-- representation is nil (`Nothing`, `[]`, or a nested `Just Nothing`).
+-- `Nothing` stays nil.
+local function Just(x) return setmetatable({x}, __just_mt) end
 local Nothing = nil
 local function show_Integer(x) return show(x) end
 local function show_Number(x) return show(x) end
@@ -3930,7 +3977,7 @@ local function __mll_hashstr(s) s = __force(s); local h = 5381 for i = 1, #s do 
 -- HashMap runtime (backed by Lua tables)
 local hashmap_empty = {}
 local function hashmap_insert(k, v, m) k = __force(k); v = __force(v); m = __force(m); local t = {} for a,b in pairs(m) do t[a] = b end t[k] = v return t end
-local function hashmap_lookup(k, m) k = __force(k); m = __force(m); local v = m[k] if v == nil then return nil else return v end end
+local function hashmap_lookup(k, m) k = __force(k); m = __force(m); local v = m[k] if v == nil then return nil else return Just(v) end end
 local function hashmap_delete(k, m) k = __force(k); m = __force(m); local t = {} for a,b in pairs(m) do t[a] = b end t[k] = nil return t end
 local function hashmap_size(m) m = __force(m); local n = 0 for _ in pairs(m) do n = n + 1 end return n end
 local function hashmap_keys(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks) for i = #ks, 1, -1 do r = __mll_cons(ks[i], r) end return r end
@@ -3954,7 +4001,8 @@ local function __mll_maybe_eq(elem_eq, a, b)
     a = __force(a); b = __force(b)
     if a == nil and b == nil then return true end
     if a == nil or b == nil then return false end
-    return elem_eq(a, b)
+    -- Both are Just wrappers; compare the unwrapped payloads.
+    return elem_eq(a[1], b[1])
 end
 local function __mll_show_arg(s)
     s = __force(s)
@@ -3970,12 +4018,12 @@ local function __mll_show_arg(s)
     return s
 end
 local function __mll_show_maybe(elem_show, x)
-    -- Type-directed Maybe show. Just x and x share a runtime rep, so the type
-    -- supplies the structure: nil is Nothing, anything else is Just <elem>.
-    -- (A wrapped Nothing — Just Nothing — collapses to nil and reads as Nothing.)
+    -- Type-directed Maybe show. `Nothing` is nil; `Just p` is a tagged wrapper
+    -- whose payload is field [1] (itself possibly nil, e.g. `Just Nothing`), so
+    -- nesting renders faithfully: `Just Nothing`, `Just (Just 5)`, etc.
     x = __force(x)
     if x == nil then return "Nothing" end
-    return "Just " .. __mll_show_arg(elem_show(x))
+    return "Just " .. __mll_show_arg(elem_show(x[1]))
 end
 local function __mll_show_list(elem_show, xs)
     xs = __force(xs)
@@ -4020,8 +4068,12 @@ local function __mll_ffi_decode(desc, v)
         end
         return r
     elseif k == "maybe" then
+        -- Host nil -> Nothing; any other value -> Just <decoded payload>. `Just`
+        -- is a tagged wrapper, so it must be constructed here (desc.e may be
+        -- false, meaning the payload needs no further decoding).
         if v == nil then return nil end
-        return __mll_ffi_decode(desc.e, v)
+        if desc.e then v = __mll_ffi_decode(desc.e, v) end
+        return Just(v)
     elseif k == "hashmap" then
         if type(v) ~= "table" then
             error("FFI result declared as HashMap, but the host returned a " .. type(v) ..

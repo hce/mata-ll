@@ -2593,10 +2593,9 @@ main = do
 
 #[test]
 fn show_maybe_renders_just() {
-    // Regression: Just x and x share a runtime rep (identity), so `show` used to
-    // print Just 5 as bare "5". Type-directed Maybe show recovers the structure.
-    // The last case (Just Nothing) is the irreducible collision: a wrapped
-    // Nothing collapses to nil and is indistinguishable from Nothing.
+    // Regression: `show` renders the Maybe structure. `Just` is now an injective
+    // tagged wrapper, so `Just Nothing` is distinct from `Nothing` at every
+    // nesting level and renders "Just Nothing" (it no longer collapses to nil).
     let source = r#"
 main :: IO ()
 main = do
@@ -2639,9 +2638,111 @@ main = do
             "Just (Just 5)",
             "Just (-5)",
             "[Just 1, Nothing, Just 3]",
-            "Nothing", // Just Nothing collapses to nil — known representation limit
+            "Just Nothing", // injective Just: distinct from Nothing
         ]
     );
+}
+
+// Helper: compile + run, capturing `print`/`putStrLn` output lines.
+fn run_capturing_lines(source: &str, name: &str) -> Vec<String> {
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let captured = lua.create_table().unwrap();
+    lua.globals().set("__captured", captured.clone()).unwrap();
+    let print_fn = lua
+        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+            let line = s.to_str()?.to_string();
+            let t: mlua::Table = lua.globals().get("__captured")?;
+            let n = t.raw_len();
+            t.raw_set(n + 1, line)?;
+            Ok(())
+        })
+        .unwrap();
+    lua.globals().set("print", print_fn).unwrap();
+    lua.load(&lua_code).set_name(name).exec().expect("should run");
+    captured.sequence_values::<String>().collect::<mlua::Result<_>>().unwrap()
+}
+
+#[test]
+fn nested_maybe_is_injective() {
+    // `Just` is an injective tagged wrapper: `Just Nothing` is distinct from
+    // `Nothing`, `Just (Just x)` from `Just x`, at every nesting level — with
+    // correct show, ==, and pattern-matching (via the Data.Maybe functions).
+    let source = r#"
+import qualified Data.Maybe as M
+
+main :: IO ()
+main = do
+    putStrLn (show (Nothing :: Maybe (Maybe Integer)))
+    putStrLn (show (Just Nothing :: Maybe (Maybe Integer)))
+    putStrLn (show (Just (Just 5) :: Maybe (Maybe Integer)))
+    putStrLn (show ((Just Nothing :: Maybe (Maybe Integer)) == Nothing))
+    putStrLn (show ((Just Nothing :: Maybe (Maybe Integer)) == Just Nothing))
+    putStrLn (show ((Just (Just 5) :: Maybe (Maybe Integer)) == Just (Just 5)))
+    putStrLn (show (M.isJust (Just Nothing :: Maybe (Maybe Integer))))
+    putStrLn (show (M.isNothing (Just Nothing :: Maybe (Maybe Integer))))
+    putStrLn (show (M.fromJust (Just (Just 7)) :: Maybe Integer))
+    putStrLn (show (M.fromMaybe (Just 9) (Just Nothing :: Maybe (Maybe Integer))))
+    putStrLn (show (M.maybe 0 (M.fromMaybe 1) (Just (Just 8) :: Maybe (Maybe Integer))))
+"#;
+    let lines = run_capturing_lines(source, "nested_maybe");
+    assert_eq!(
+        lines,
+        vec![
+            "Nothing",         // Nothing :: Maybe (Maybe Integer)
+            "Just Nothing",    // distinct from Nothing
+            "Just (Just 5)",
+            "False",           // Just Nothing /= Nothing
+            "True",            // Just Nothing == Just Nothing
+            "True",            // Just (Just 5) == Just (Just 5)
+            "True",            // isJust (Just Nothing)
+            "False",           // isNothing (Just Nothing)
+            "Just 7",          // fromJust (Just (Just 7))
+            "Nothing",         // fromMaybe (Just 9) (Just Nothing) = the inner Nothing
+            "8",               // maybe 0 (fromMaybe 1) (Just (Just 8))
+        ]
+    );
+}
+
+#[test]
+fn just_of_empty_list_distinct_from_nothing() {
+    // `[]` is also nil at runtime, so `Just []` used to collapse to Nothing too.
+    // The wrapper keeps them distinct.
+    let source = r#"
+main :: IO ()
+main = do
+    putStrLn (show (Just [] :: Maybe [Integer]))
+    putStrLn (show (Nothing :: Maybe [Integer]))
+    putStrLn (show ((Just [] :: Maybe [Integer]) == Nothing))
+    putStrLn (show (Just [1, 2] :: Maybe [Integer]))
+"#;
+    let lines = run_capturing_lines(source, "just_empty_list");
+    assert_eq!(lines, vec!["Just []", "Nothing", "False", "Just [1, 2]"]);
+}
+
+#[test]
+fn maybe_ffi_single_level_boundary_preserved() {
+    // Interop for the common single-level case is unchanged: an exported
+    // `Maybe a` marshals `Just v -> v` and `Nothing -> nil` for the Lua host.
+    // (Lua's nil cannot represent nested optionals; that is an accepted limit.)
+    let source = r#"
+export find :: Integer -> Maybe Integer
+find 0 = Nothing
+find n = Just (n * 10)
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let module: mlua::Table = lua.load(&lua_code).set_name("maybe_ffi").eval()
+        .expect("should load module");
+    let find: mlua::Function = module.get("find").unwrap();
+    let got_nothing: mlua::Value = find.call(0i64).unwrap();
+    assert!(matches!(got_nothing, mlua::Value::Nil), "Nothing should marshal to nil");
+    let got_just: i64 = find.call(7i64).unwrap();
+    assert_eq!(got_just, 70, "Just 70 should marshal to the bare value 70");
 }
 
 // --- Source embedding (--embed-source) and recompilation (--recompile) ---
