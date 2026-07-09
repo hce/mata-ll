@@ -2,6 +2,7 @@
 name = "mllc"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "Compiler library for mata-ll: compiles a Haskell subset to a single self-contained Lua file. Bundles its standard library, so it needs no files on disk at runtime."
 license = "MIT"
 repository = "https://github.com/hce/mata-ll"

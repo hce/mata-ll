@@ -5,6 +5,7 @@
 name = "mata-ll"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.85"
 description = "mata-ll command-line compiler and runner: compiles a Haskell subset to Lua and runs it via an embedded Lua interpreter."
 license = "MIT"
 repository = "https://github.com/hce/mata-ll"
