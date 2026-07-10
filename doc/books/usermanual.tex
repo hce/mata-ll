@@ -473,7 +473,11 @@ data Tree a = Leaf a | Branch (Tree a) (Tree a)
 \end{lstlisting}
 
 Supported: \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
-\texttt{Bounded}, \texttt{Functor}, and \texttt{LuaDict}.
+\texttt{Bounded}, \texttt{Functor}, \texttt{ToJSON}, \texttt{FromJSON},
+and \texttt{LuaDict}.
+\texttt{ToJSON} and \texttt{FromJSON} generate a JSON encoder and
+decoder for the type; they require \texttt{import JSON} --- see
+Section~\ref{sec:json}.
 \texttt{LuaDict} is special: it generates no methods but changes the
 record's runtime representation for Lua interop --- see
 Section~\ref{sec:luadict}.
@@ -647,7 +651,7 @@ Modules map to file paths: \texttt{Data.List} resolves to
 \texttt{LString}         & String utilities \\
 \texttt{LBit}            & Bitwise operations \\
 \texttt{Regex}           & CPS-based regex matching \\
-\texttt{JSON}            & JSON parsing and generation \\
+\texttt{JSON}            & JSON codec: parser, serializer, \texttt{ToJSON}/\texttt{FromJSON} \\
 \texttt{Data.List}       & sortBy, nubBy, groupBy, intercalate, \ldots \\
 \texttt{Data.Maybe}      & fromMaybe, catMaybes, mapMaybe, \ldots \\
 \texttt{Data.Map}        & HashMap operations \\
@@ -788,6 +792,7 @@ keys.  The type must have:
 Violations are compile errors with an explanation of why.
 
 \subsubsection{Renaming Keys with \texttt{as}}
+\label{sec:asrename}
 
 By default the Lua key is the field name.  Since record accessors share
 a single global function namespace (as in Haskell), fields are
@@ -808,12 +813,33 @@ resize :: Config -> Integer -> Config
 resize c w = c { cfgWidth = w }     -- updates the "width" key
 \end{lstlisting}
 
-\texttt{as "key"} changes \emph{only} the key in the runtime Lua table.
-In MATA-LL source the field keeps its declared name everywhere:
-accessors, record construction, record update, and pattern matching all
-use \texttt{cfgWidth}.  The rename applies in both directions across
-the FFI boundary --- tables you pass to Lua carry the renamed keys, and
+\texttt{as "key"} sets the field's \emph{external name} --- the name
+the field carries at the language boundary.  In MATA-LL source the
+field keeps its declared name everywhere: accessors, record
+construction, record update, and pattern matching all use
+\texttt{cfgWidth}.  The rename applies in both directions across the
+FFI boundary --- tables you pass to Lua carry the renamed keys, and
 tables returned from Lua are read by the renamed keys.
+
+The external name is shared by everything that puts the field outside
+MATA-LL: it is the key in the runtime Lua table of a \texttt{LuaDict}
+record \emph{and} the JSON object key of a derived
+\texttt{ToJSON}/\texttt{FromJSON} codec (Section~\ref{sec:json}).  One
+rename drives both boundaries:
+
+\begin{lstlisting}
+data Acct = Acct { acctName  as "name" :: String
+                 , acctScore :: Integer
+                 } deriving (Eq, LuaDict, ToJSON, FromJSON)
+
+-- at runtime the value is the Lua table
+--   {name = "zoe", acctScore = 5}
+-- and the derived codec uses the same keys:
+--   encodeToJSON (Acct "zoe" 5)
+--     == "{\"name\":\"zoe\",\"acctScore\":5}"
+-- decodeJSON reads the renamed keys back; the Haskell
+-- field name acctName appears at neither boundary.
+\end{lstlisting}
 
 Besides dropping prefixes, \texttt{as} is useful for
 \texttt{snake\_case} keys expected by Lua APIs, and for keys that are
@@ -832,17 +858,204 @@ The compiler enforces two rules on renames:
 
 \begin{itemize}[nosep]
   \item Effective keys must be unique and non-empty.  Each field
-        becomes one key of a single table, so two fields mapping to the
-        same key (or a key of \texttt{""}) are rejected.
-  \item \texttt{as} requires \texttt{deriving (LuaDict)}.  Without it
-        the record is a positional array, there is no key to rename,
-        and the annotation is rejected rather than silently ignored.
+        becomes one key of a single table (and of a single JSON
+        object), so two fields mapping to the same key (or a key of
+        \texttt{""}) are rejected.
+  \item \texttt{as} requires that the type derive at least one of
+        \texttt{LuaDict}, \texttt{ToJSON}, or \texttt{FromJSON}.
+        Without one of those the rename has nothing to apply to ---
+        there is no name-keyed table and no JSON codec --- and the
+        annotation is rejected rather than silently ignored.
 \end{itemize}
 
 \begin{note}
 \texttt{as} field renaming is a MATA-LL extension with no GHC
 equivalent.  In GHC, \texttt{as} is only a keyword in import lists;
 here it is additionally recognized inside record declarations.
+\end{note}
+
+\subsection{JSON}
+\label{sec:json}
+
+JSON is the lingua franca on the far side of the FFI --- Lua web
+frameworks, configuration files, and HTTP APIs all speak it.
+\texttt{import JSON} provides a complete codec: a strict JSON parser, a
+serializer, and the \texttt{ToJSON}/\texttt{FromJSON} classes, written
+entirely in MATA-LL (no Lua JSON library is needed).
+
+At the base sits an ordinary algebraic data type for JSON values, with
+a parser and a serializer:
+
+\begin{lstlisting}
+data Json = JNull | JBool Bool | JNum Number | JStr String
+          | JArr [Json] | JObj [(String, Json)]
+
+parseJSON  :: String -> Either String Json
+encodeJSON :: Json -> String
+\end{lstlisting}
+
+You can pattern-match \texttt{Json} values directly, but usually you
+will not need to: deriving \texttt{ToJSON} and \texttt{FromJSON}
+generates the codec for your own types, and one function each way does
+the whole job:
+
+\begin{lstlisting}
+encodeToJSON :: ToJSON a   => a -> String
+decodeJSON   :: FromJSON a => String -> Either String a
+\end{lstlisting}
+
+\begin{lstlisting}
+import JSON
+
+data Person = Person { name :: String, age :: Integer }
+    deriving (Eq, ToJSON, FromJSON)
+
+main :: IO ()
+main = do
+    putStrLn (encodeToJSON (Person "Ann" 30))
+    -- {"name":"Ann","age":30}
+    case (decodeJSON "{\"age\":7,\"name\":\"Bo\"}"
+              :: Either String Person) of
+        Right p  -> putStrLn ("hello, " <> name p)  -- hello, Bo
+        Left err -> putStrLn err
+\end{lstlisting}
+
+Decoding never crashes on bad input --- it returns
+\texttt{Either String a}, with the parse or shape error on the
+\texttt{Left}.  Like \texttt{read}, \texttt{decodeJSON} dispatches on
+its \emph{result} type; when the surrounding context does not pin that
+type, ascribe it at the call site as above.  Field order in the input
+is irrelevant, and unknown object keys are ignored.
+
+\subsubsection{Encoding Conventions}
+
+The derived codec mirrors the layout of GHC's \texttt{aeson} under its
+default options.  \texttt{deriving (ToJSON)} and
+\texttt{deriving (FromJSON)} are exact mirrors: everything the encoder
+writes, the decoder reads back, so
+\texttt{decodeJSON (encodeToJSON x) == Right x}.
+
+A single-constructor record maps to an object keyed by the field names
+(\texttt{Person} above).  When a field is renamed with \texttt{as
+"key"}, the JSON key is the renamed key --- the same shared external
+name that \texttt{LuaDict} uses as the Lua table key
+(Section~\ref{sec:asrename}).
+
+A multi-constructor type is \emph{tagged}, so the decoder can tell the
+constructors apart:
+
+\begin{lstlisting}
+data Shape = Circle { radius :: Number }
+           | Rect Integer Integer
+           | Point0
+    deriving (Eq, ToJSON, FromJSON)
+
+-- encodeToJSON (Circle 2.5)  record fields inline next to the tag:
+--   {"tag":"Circle","radius":2.5}
+-- encodeToJSON (Rect 3 4)    positional arguments under "contents":
+--   {"tag":"Rect","contents":[3,4]}
+-- encodeToJSON Point0        nullary: the bare constructor name:
+--   "Point0"
+\end{lstlisting}
+
+The decoder accepts a nullary constructor in either spelling --- the
+bare string \texttt{"Point0"} or the tagged object
+\texttt{\{"tag":"Point0"\}}.
+
+A type with a single \emph{positional} constructor is untagged: one
+argument encodes as the value itself, several as an array.
+
+\begin{lstlisting}
+data Wrap  = Wrap Integer          deriving (ToJSON, FromJSON)
+data Pair2 = Pair2 Integer String  deriving (ToJSON, FromJSON)
+
+-- encodeToJSON (Wrap 7)       ==  7
+-- encodeToJSON (Pair2 7 "a")  ==  [7,"a"]
+\end{lstlisting}
+
+Lists encode as arrays, \texttt{Maybe} maps to null
+(\texttt{Nothing} encodes as \texttt{null} with the key kept present;
+a missing key, an explicit \texttt{null}, and the plain value all
+decode), and fields of other \texttt{ToJSON}/\texttt{FromJSON} types
+nest --- including self- and mutually-recursive types:
+
+\begin{lstlisting}
+data Team = Team { leader  :: Person
+                 , members :: [Person]
+                 , motto   :: Maybe String
+                 } deriving (Eq, ToJSON, FromJSON)
+
+-- encodeToJSON (Team (Person "A" 1) [Person "B" 2] Nothing) ==
+-- {"leader":{"name":"A","age":1},
+--  "members":[{"name":"B","age":2}],"motto":null}
+
+data JTree = JLeaf Integer | JNode [JTree]
+    deriving (Eq, ToJSON, FromJSON)
+
+-- encodeToJSON (JNode [JLeaf 1]) ==
+-- {"tag":"JNode","contents":[{"tag":"JLeaf","contents":1}]}
+\end{lstlisting}
+
+\subsubsection{Decode Errors}
+
+A failed decode names the type being decoded and the full path to the
+offending value --- fields, array indices, constructor arguments ---
+before saying what was expected and what was found:
+
+\begin{lstlisting}[language={}]
+decodeJSON "{\"name\":\"Ann\",\"age\":\"old\"}"
+  => Left "while decoding Person: in field 'age': expected an integer, but found a string"
+
+decodeJSON "{...,\"members\":[{\"name\":\"B\",\"age\":2},{\"name\":\"C\"}]}"
+  => Left "while decoding Team: in field 'members': at array index 1: while decoding Person: the required field 'age' is missing"
+\end{lstlisting}
+
+Numbers are handled exactly: integers round-trip with full 64-bit
+precision (beyond the $2^{53}$ range of a double), and decoding an
+\texttt{Integer} field rejects non-integral numbers (\texttt{3.5}) and
+numbers outside the 64-bit range instead of silently rounding.
+
+\subsubsection{What Can Be Derived}
+
+A derived codec resolves one concrete encoder or decoder per field at
+compile time, which places requirements on the type:
+
+\begin{itemize}[nosep]
+  \item \texttt{import JSON} must be present --- the classes and the
+        combinators the generated code calls live there.
+  \item The type must have no type parameters.  (GHC's \texttt{aeson}
+        handles \texttt{Box a} with a constraint on the instance;
+        MATA-LL instances cannot carry constraints, so derive for
+        concrete types and wrap each instantiation you need in its own
+        data type.)
+  \item No GADT or existential constructors.
+  \item Every field must be \texttt{Integer}, \texttt{Number},
+        \texttt{String}, \texttt{Bool}, \texttt{Json} (kept verbatim),
+        a list or \texttt{Maybe} of a supported type, or a type that
+        itself has a \texttt{ToJSON}/\texttt{FromJSON} instance.
+        Function, tuple, and \texttt{IO} fields are rejected.
+  \item In a multi-constructor type, no field's JSON key may be
+        \texttt{"tag"} --- it would collide with the constructor tag.
+        (Renaming such a field with \texttt{as} resolves the
+        collision.)
+\end{itemize}
+
+Violations are compile errors with an explanation of why.  For a type
+the derive rejects, write the instance by hand: the JSON module exports
+the decoder combinators the derived code itself uses
+(\texttt{jFieldWith}, \texttt{jOptFieldWith}, \texttt{jContext},
+\texttt{jBind}, \ldots), so a manual instance composes the same pieces.
+
+\begin{note}
+Two deliberate deviations from GHC's \texttt{aeson}.  First,
+\texttt{aeson} encodes nullary constructors as bare strings only in
+\emph{all}-nullary sums and emits \texttt{\{"tag":"Point0"\}} in a
+mixed sum; MATA-LL emits the bare string for every nullary
+constructor.  The derived decoder accepts both spellings, so MATA-LL
+round-trips and \texttt{aeson}-encoded data both decode.  Second,
+\texttt{Maybe (Maybe a)} cannot round-trip under the null-is-Nothing
+convention: \texttt{Just Nothing} has no JSON form distinct from
+\texttt{Nothing}.
 \end{note}
 
 %======================================================================
