@@ -183,6 +183,21 @@ double :: Integer -> Integer
 double x = x * 2
 \end{lstlisting}
 
+\subsection{Identifiers}
+
+Names follow Haskell's rules: values and functions start with a lowercase
+letter, types and constructors with an uppercase letter.  Because MATA-LL
+compiles to Lua, a name may happen to collide with a Lua reserved word
+(\texttt{until}, \texttt{repeat}, \texttt{local}, \texttt{nil},
+\texttt{function}, \texttt{while}, \ldots).  This is fine --- such names are
+escaped automatically in the generated code, so you can use them for
+variables, parameters, functions, and record fields:
+
+\begin{lstlisting}
+until :: Integer -> Bool
+until n = n > 100
+\end{lstlisting}
+
 %======================================================================
 \section{Types and Data}
 
@@ -225,6 +240,21 @@ pair = ("age", 30)
 
 triple :: (Bool, Integer, String)
 triple = (True, 42, "hello")
+\end{lstlisting}
+
+The tuple constructor is also available as a prefix function: \texttt{(,)}
+has type \texttt{a -> b -> (a, b)}, \texttt{(,,)} has type
+\texttt{a -> b -> c -> (a, b, c)}, and so on.  Like any function it can be
+partially applied or passed higher-order:
+
+\begin{lstlisting}
+-- pair every element with a common key
+tagged = map ((,) "row") [1, 2, 3]
+-- => [("row", 1), ("row", 2), ("row", 3)]
+
+-- zip two lists into pairs
+pairs = zipWith (,) [1, 2] [10, 20]
+-- => [(1, 10), (2, 20)]
 \end{lstlisting}
 
 \subsection{Algebraic Data Types}
@@ -716,6 +746,41 @@ Wrap Lua iterator protocols:
 \begin{lstlisting}
 gmatch :: String -> String -> LuaIterator "string.gmatch" String
 \end{lstlisting}
+
+\subsection{Error-Capturing FFI}
+
+Many Lua functions signal failure by \emph{raising} an error
+(\texttt{error(...)}).  Called through a plain \texttt{LuaPure}/\texttt{LuaIO}
+binding, such an error propagates as a runtime crash.  \texttt{LuaCatch} and
+\texttt{LuaIOCatch} instead run the call under Lua's \texttt{pcall} and hand
+back an \texttt{Either}: a raised error becomes \texttt{Left} (carrying the
+message), a normal return becomes \texttt{Right}.
+
+\begin{lstlisting}
+-- pure call, result Either String a
+charOf :: Integer -> LuaCatch "string.char" (Either String String)
+
+-- effectful call, result IO (Either String a)
+readAll :: Handle -> LuaIOCatch ":read" (Either String String)
+\end{lstlisting}
+
+\texttt{LuaCatch "name" (Either String T)} reduces to \texttt{Either String T};
+\texttt{LuaIOCatch "name" (Either String T)} reduces to
+\texttt{IO (Either String T)}.  The result \emph{must} be written as
+\texttt{Either String a} --- the compiler rejects any other shape.  The
+success payload is marshalled as usual, inside the \texttt{Right}:
+
+\begin{lstlisting}
+main :: IO ()
+main = case charOf 65 of
+    Right c  -> putStrLn c              -- "A"
+    Left msg -> putStrLn ("failed: " <> msg)
+\end{lstlisting}
+
+Use these when a Lua function fails by raising.  For the
+\texttt{(nil, errmsg)} return convention (\texttt{io.open}-style) use
+\texttt{LuaTry} instead; to catch errors from an ordinary \texttt{LuaIO}
+action, wrap it in \texttt{try} (see \emph{Exception Handling}).
 
 \subsection{Exporting to Lua}
 
