@@ -44,20 +44,23 @@ pub enum TConFields {
     Named(Vec<TRecordField>),
 }
 
-/// A typed named record field. `lua_key`, when present, is the LuaDict rename
-/// from `name as "key" :: T`: codegen uses `lua_key.unwrap_or(name)` as the
-/// runtime Lua table key, while the Haskell-side accessor keeps `name`.
+/// A typed named record field. `external_key`, when present, is the shared
+/// external rename from `name as "key" :: T`: codegen uses
+/// `external_key.unwrap_or(name)` as the runtime Lua table key of a LuaDict
+/// type, and the derived ToJSON/FromJSON codecs use it as the JSON object
+/// key, while the Haskell-side accessor keeps `name`.
 #[derive(Debug, Clone)]
 pub struct TRecordField {
     pub name: String,
-    pub lua_key: Option<String>,
+    pub external_key: Option<String>,
     pub ty: Ty,
 }
 
 impl TRecordField {
-    /// The key this field uses in the runtime Lua table of a LuaDict type.
+    /// The name this field presents at external boundaries (Lua table key,
+    /// JSON object key).
     pub fn effective_key(&self) -> &str {
-        self.lua_key.as_deref().unwrap_or(&self.name)
+        self.external_key.as_deref().unwrap_or(&self.name)
     }
 }
 

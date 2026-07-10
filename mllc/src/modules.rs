@@ -394,7 +394,7 @@ impl Qual<'_> {
             ConstructorFields::Named(fs) =>
                 ConstructorFields::Named(fs.iter().map(|f| crate::ast::RecordField {
                     name: f.name.clone(),
-                    lua_key: f.lua_key.clone(),
+                    external_key: f.external_key.clone(),
                     ty: self.ty(&f.ty),
                 }).collect()),
         };

@@ -353,13 +353,24 @@ pub enum ConstructorFields {
     Named(Vec<RecordField>),
 }
 
-/// A named record field. `lua_key` is the optional LuaDict rename from
-/// `fieldName as "key" :: T` — it changes only the key used in the runtime
-/// Lua table of a `deriving (LuaDict)` type; the Haskell-side accessor and
-/// record syntax keep `name`.
+/// A named record field. `external_key` is the optional rename from
+/// `fieldName as "key" :: T` — one shared external name for the field at
+/// every boundary where the record leaves mata-ll: the key in the runtime
+/// Lua table of a `deriving (LuaDict)` type AND the JSON object key of a
+/// derived ToJSON/FromJSON codec. The Haskell-side accessor, record syntax
+/// and pattern matching keep `name`.
 #[derive(Debug, Clone)]
 pub struct RecordField {
     pub name: String,
-    pub lua_key: Option<String>,
+    pub external_key: Option<String>,
     pub ty: Type,
+}
+
+impl RecordField {
+    /// The name this field presents at external boundaries (Lua table key,
+    /// JSON object key): the `as "key"` rename when present, the field name
+    /// otherwise.
+    pub fn effective_key(&self) -> &str {
+        self.external_key.as_deref().unwrap_or(&self.name)
+    }
 }

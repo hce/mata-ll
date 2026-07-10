@@ -368,6 +368,7 @@ mll_lib_test!(lib_lmath, "lib_lmath.mll");
 mll_lib_test!(lib_json, "lib_json.mll");
 mll_lib_test!(json_codec, "json_codec.mll");
 mll_lib_test!(derive_fromjson, "derive_fromjson.mll");
+mll_lib_test!(derive_tojson, "derive_tojson.mll");
 mll_lib_test!(lib_regex, "lib_regex.mll");
 mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
@@ -491,6 +492,266 @@ main = putStrLn "hi"
         }
         Ok(_) => panic!("Expected a record field named 'tag' in a sum type to be rejected"),
     }
+}
+
+#[test]
+fn tojson_derive_requires_json_import() {
+    // deriving (ToJSON) without `import JSON`: the class and the encoder
+    // combinators the generated code calls are not in scope, and the error
+    // must say exactly what to add.
+    let source = r#"
+data P = P { x :: Integer } deriving (ToJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'ToJSON'"),
+                "Expected a ToJSON derive error, got: {}", msg);
+            assert!(msg.contains("import JSON"),
+                "The error must name the missing import, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (ToJSON) without import JSON to be rejected"),
+    }
+}
+
+#[test]
+fn tojson_derive_rejects_function_field() {
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data H = H { hop :: Integer -> Integer } deriving (ToJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'ToJSON' for 'H'"),
+                "Expected a ToJSON derive error, got: {}", msg);
+            assert!(msg.contains("field 'hop'") && msg.contains("function"),
+                "The error must name the field and explain functions have no JSON form, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (ToJSON) on a function-typed field to be rejected"),
+    }
+}
+
+#[test]
+fn tojson_derive_rejects_field_without_instance() {
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data Plain = Plain Integer
+
+data Holder = Holder { inner :: Plain } deriving (ToJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'ToJSON' for 'Holder'"),
+                "Expected a ToJSON derive error, got: {}", msg);
+            assert!(msg.contains("'Plain' has no ToJSON instance"),
+                "The error must name the instance-less field type, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (ToJSON) over an instance-less field type to be rejected"),
+    }
+}
+
+#[test]
+fn tojson_derive_rejects_type_parameters() {
+    // GHC's aeson derives `ToJSON (Box a)` by constraining `a`; mata-ll
+    // instances cannot carry constraints, so this is rejected with the
+    // explanation rather than producing an encoder that cannot exist.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data Box a = Box a deriving (ToJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'ToJSON' for 'Box'"),
+                "Expected a ToJSON derive error, got: {}", msg);
+            assert!(msg.contains("type parameters"),
+                "The error must explain the type-parameter limitation, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (ToJSON) on a parameterized type to be rejected"),
+    }
+}
+
+#[test]
+fn json_derive_duplicate_effective_keys_rejected() {
+    // Two fields mapping to the same effective JSON key would silently
+    // overwrite each other in the encoded object. This must be rejected on
+    // a type that derives ONLY a JSON codec (no LuaDict, so the LuaDict key
+    // validation cannot be the thing that catches it).
+    let lib = Path::new("../lib");
+    for class in ["ToJSON", "FromJSON"] {
+        let source = format!(r#"
+import JSON
+
+data D = D {{ a as "k" :: Integer, b as "k" :: Integer }}
+    deriving ({})
+
+main :: IO ()
+main = pure ()
+"#, class);
+        match mllc::compile(&source, Path::new("."), &[lib]) {
+            Err(e) => {
+                let msg = format!("{}", e);
+                assert!(msg.contains(&format!("Cannot derive '{}' for 'D'", class))
+                        && msg.contains("both map to the JSON key \"k\""),
+                    "expected a duplicate JSON key error for {}, got: {}", class, msg);
+            }
+            Ok(_) => panic!("duplicate effective JSON keys must fail deriving ({})", class),
+        }
+    }
+}
+
+#[test]
+fn json_derive_empty_effective_key_rejected() {
+    let lib = Path::new("../lib");
+    for class in ["ToJSON", "FromJSON"] {
+        let source = format!(r#"
+import JSON
+
+data D = D {{ a as "" :: Integer }}
+    deriving ({})
+
+main :: IO ()
+main = pure ()
+"#, class);
+        match mllc::compile(&source, Path::new("."), &[lib]) {
+            Err(e) => {
+                let msg = format!("{}", e);
+                assert!(msg.contains(&format!("Cannot derive '{}' for 'D'", class))
+                        && msg.contains("empty string"),
+                    "expected an empty JSON key error for {}, got: {}", class, msg);
+            }
+            Ok(_) => panic!("an empty effective JSON key must fail deriving ({})", class),
+        }
+    }
+}
+
+#[test]
+fn json_derive_renamed_tag_key_rejected() {
+    // The tag-collision check is on the EFFECTIVE key: a field renamed
+    // `as "tag"` collides with the codec's constructor tag even though its
+    // Haskell name does not.
+    let lib = Path::new("../lib");
+    for class in ["ToJSON", "FromJSON"] {
+        let source = format!(r#"
+import JSON
+
+data T = A {{ kind as "tag" :: String }} | B
+    deriving ({})
+
+main :: IO ()
+main = pure ()
+"#, class);
+        match mllc::compile(&source, Path::new("."), &[lib]) {
+            Err(e) => {
+                let msg = format!("{}", e);
+                assert!(msg.contains(&format!("Cannot derive '{}' for 'T'", class))
+                        && msg.contains("\"tag\""),
+                    "expected the tag-collision explanation for {}, got: {}", class, msg);
+            }
+            Ok(_) => panic!("a field renamed to the JSON key \"tag\" in a sum must fail deriving ({})", class),
+        }
+    }
+}
+
+#[test]
+fn json_derive_field_named_tag_renamed_away_accepted() {
+    // The flip side of the effective-key tag check: a field NAMED `tag`
+    // whose `as` rename moves it to a different JSON key does not collide.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data T = A { tag as "kind" :: String } | B
+    deriving (Eq, ToJSON, FromJSON)
+
+rt :: T -> Bool
+rt x = case decodeJSON (encodeToJSON x) of
+    Right y -> y == x
+    Left _ -> False
+
+main :: IO ()
+main = do
+    assert (encodeToJSON (A "z") == "{\"tag\":\"A\",\"kind\":\"z\"}") "renamed-away tag field encodes"
+    assert (rt (A "z")) "renamed-away tag field round-trips"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+        .expect("a `tag` field renamed to another JSON key should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("tag_renamed_away").exec()
+        .expect("every in-program assertion should pass");
+}
+
+#[test]
+fn shared_external_key_drives_lua_and_json() {
+    // The headline of the shared-external-name feature: ONE `as "key"`
+    // rename gives the field its external name at BOTH boundaries — the
+    // LuaDict table key (asserted via raw_get on the exported table) AND
+    // the JSON object key of the derived codec (asserted on the encoded
+    // string). The Haskell field name appears at neither.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data Acct = Acct { acctName as "name" :: String, acctScore :: Integer }
+    deriving (Eq, LuaDict, ToJSON, FromJSON)
+
+export mkAcct :: String -> Acct
+mkAcct n = Acct { acctName = n, acctScore = 5 }
+
+export encAcct :: Acct -> String
+encAcct a = encodeToJSON a
+
+main :: IO ()
+main = pure ()
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let module: mlua::Table = lua.load(&lua_code)
+        .set_name("shared_external_key")
+        .call("shared_external_key")
+        .expect("should load module");
+
+    let mk: mlua::Function = module.get("mkAcct").unwrap();
+    let acct: mlua::Table = mk.call("zoe").expect("mkAcct should return a table");
+
+    // Lua boundary: the renamed key IS the raw table key...
+    let name: String = acct.raw_get("name").expect("renamed 'name' key present");
+    assert_eq!(name, "zoe", "the `as` rename is the LuaDict table key");
+    let score: i64 = acct.raw_get("acctScore").expect("unrenamed key keeps its name");
+    assert_eq!(score, 5);
+    // ...and the Haskell field name is not.
+    let stray: mlua::Value = acct.raw_get("acctName").unwrap();
+    assert!(matches!(stray, mlua::Value::Nil),
+        "Haskell field name must not appear as a Lua key");
+
+    // JSON boundary: the SAME rename is the JSON object key.
+    let enc: mlua::Function = module.get("encAcct").unwrap();
+    let json: String = enc.call(acct).expect("encAcct should encode");
+    assert_eq!(json, "{\"name\":\"zoe\",\"acctScore\":5}",
+        "the same `as` rename is the JSON object key");
 }
 
 #[test]
@@ -3590,9 +3851,12 @@ main = pure ()
 }
 
 #[test]
-fn luadict_rename_without_luadict_rejected() {
-    // Without deriving (LuaDict) the record is a positional array — there is
-    // no Lua table key to rename, so `as` would be silently meaningless.
+fn luadict_rename_without_relevant_deriving_rejected() {
+    // `as` renames the field's shared external name: the LuaDict table key
+    // and the JSON key of a derived ToJSON/FromJSON codec. Without any of
+    // those derivings the record never crosses a boundary that keys by
+    // name, so the rename would be silently meaningless. The error must
+    // name all three derivings that would give the rename meaning.
     let source = r#"
 data D = D { a as "k" :: Integer }
     deriving (Show)
@@ -3603,10 +3867,13 @@ main = pure ()
     match mllc::compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
-            assert!(msg.contains("does not derive LuaDict"),
-                "expected an as-without-LuaDict error, got: {}", msg);
+            assert!(msg.contains("derives none of LuaDict, ToJSON or FromJSON"),
+                "expected the as-without-relevant-deriving error naming all three derivings, got: {}", msg);
+            assert!(msg.contains("`deriving (LuaDict)`") && msg.contains("`deriving (ToJSON)`")
+                    && msg.contains("`deriving (FromJSON)`"),
+                "the note must offer each deriving that would give `as` meaning, got: {}", msg);
         }
-        Ok(_) => panic!("`as` renaming without deriving LuaDict must fail"),
+        Ok(_) => panic!("`as` renaming without LuaDict/ToJSON/FromJSON must fail"),
     }
 }
 

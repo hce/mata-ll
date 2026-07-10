@@ -300,9 +300,11 @@ impl Parser {
                     break;
                 }
                 let field_name = self.expect_ident()?;
-                // Optional LuaDict key rename: `fieldName as "luaKey" :: T`.
-                // 'as' is not a reserved word — check for Ident("as").
-                let lua_key = if matches!(self.peek(), Token::Ident(s) if s == "as") {
+                // Optional external-key rename: `fieldName as "key" :: T`.
+                // One shared name for every external boundary (LuaDict table
+                // key, JSON object key). 'as' is not a reserved word — check
+                // for Ident("as").
+                let external_key = if matches!(self.peek(), Token::Ident(s) if s == "as") {
                     self.advance();
                     match self.peek().clone() {
                         Token::StrLit(s) => { self.advance(); Some(s) }
@@ -319,7 +321,7 @@ impl Parser {
                 };
                 self.expect(&Token::DblColon)?;
                 let field_type = self.parse_type()?;
-                fields.push(crate::ast::RecordField { name: field_name, lua_key, ty: field_type });
+                fields.push(crate::ast::RecordField { name: field_name, external_key, ty: field_type });
                 self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) {
                     self.advance();

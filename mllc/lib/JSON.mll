@@ -227,33 +227,43 @@ jContext _ (Right x) = Right x
 jContext ctx (Left e) = Left ("while decoding " <> ctx <> ": " <> e)
 
 -- ================================================================
--- Combinators for derived FromJSON decoders
+-- Combinators for derived ToJSON encoders and FromJSON decoders
 --
--- `deriving (FromJSON)` generates a decoder over these. The convention
--- (mirroring aeson's defaultOptions where mata-ll can):
---   * a single-constructor record decodes from an object keyed by the
---     field names:            data P = P { x :: Integer }   ⇐  {"x":1}
---   * a single positional constructor decodes from its argument itself
+-- `deriving (ToJSON)` / `deriving (FromJSON)` generate a codec over these.
+-- The convention (mirroring aeson's defaultOptions where mata-ll can):
+--   * a single-constructor record maps to an object keyed by the field
+--     names:                  data P = P { x :: Integer }   ⇔  {"x":1}
+--   * a single positional constructor maps to its argument itself
 --     (one field) or an array of its arguments (several fields):
---                             data W = W Integer            ⇐  7
---                             data V = V Integer String     ⇐  [7,"a"]
+--                             data W = W Integer            ⇔  7
+--                             data V = V Integer String     ⇔  [7,"a"]
 --   * a multi-constructor type is tagged: either the bare constructor
 --     name as a string (nullary constructors only), or an object with a
 --     "tag" field — record fields inline in the same object, positional
 --     arguments under "contents":
 --                             data S = A | B Integer | C { n :: Integer }
---                               ⇐  "A"  or  {"tag":"A"}
---                               ⇐  {"tag":"B","contents":7}
---                               ⇐  {"tag":"C","n":3}
---   * a Maybe field decodes from a missing key, null, or the value itself.
---   * unknown object keys are ignored, as aeson does.
+--                               ⇔  "A"  or  {"tag":"A"}
+--                               ⇔  {"tag":"B","contents":7}
+--                               ⇔  {"tag":"C","n":3}
+--   * a Maybe field encodes Nothing as null; it decodes from a missing
+--     key, null, or the value itself.
+--   * a field renamed with `as "key"` uses "key" as its JSON object key
+--     in both directions (the same shared external name LuaDict uses as
+--     the Lua table key).
+--   * unknown object keys are ignored on decode, as aeson does.
 --
 -- note: aeson encodes only ALL-nullary sum types as bare strings; the
--- derived decoder accepts both the bare string and the tagged-object form
--- for any nullary constructor, since a reasonable encoder may emit either.
+-- derived encoder emits the bare string for every nullary constructor
+-- (even in a mixed sum, where aeson would emit {"tag":"A"}), and the
+-- derived decoder accepts both forms, so the pair round-trips and both
+-- aeson spellings decode.
 -- note: Maybe (Maybe a) cannot round-trip under the null-is-Nothing
 -- convention — Just Nothing has no JSON form distinct from Nothing.
 -- ================================================================
+
+-- Identity encoder: emit a raw Json field as-is.
+toJSONValue :: Json -> Json
+toJSONValue j = j
 
 -- Identity decoder: keep the raw Json value (for fields of type Json).
 fromJSONValue :: Json -> Either String Json
