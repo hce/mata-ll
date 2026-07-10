@@ -254,18 +254,10 @@ infixl 4 <$>
 infixl 4 <*>
 
 -- Monadic combinators
-mapM_ :: (a -> IO ()) -> [a] -> IO ()
+-- Result-discarding traversal (works in any monad).
+mapM_ :: Monad m => (a -> m b) -> [a] -> m ()
 mapM_ _ [] = pure ()
 mapM_ f (x:xs) = f x >> mapM_ f xs
-
--- Result-collecting traversal (works in any monad).
-mapM :: Monad m => (a -> m b) -> [a] -> m [b]
-mapM _ [] = pure []
-mapM f (x:xs) = f x >>= \y -> mapM f xs >>= \ys -> pure (y : ys)
-
-sequence :: Monad m => [m a] -> m [a]
-sequence [] = pure []
-sequence (x:xs) = x >>= \y -> sequence xs >>= \ys -> pure (y : ys)
 
 -- Result-collecting traversal (works in any monad).
 mapM :: Monad m => (a -> m b) -> [a] -> m [b]

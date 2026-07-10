@@ -1400,6 +1400,25 @@ impl Monomorphizer {
             }
             (Ty::List(pa), Ty::List(ca)) |
             (Ty::IO(pa), Ty::IO(ca)) => Self::collect_subst_by_name(pa, ca, map),
+            // A constraint variable applied to an argument (`m a`) matched
+            // against a sugared concrete type: IO b binds m := IO, [b] binds
+            // m := [], LuaIO s b binds m := LuaIO s. Without these cases a
+            // result-only `Monad m` never gets bound here and is later
+            // mis-defaulted by compute_body_subst's single-parameter rule.
+            // Mirrors the App-vs-IO/List/LuaIO cases in types::unify.
+            (Ty::App(pf, pa), Ty::IO(ca)) => {
+                Self::collect_subst_by_name(pf, &Ty::Con("IO".into()), map);
+                Self::collect_subst_by_name(pa, ca, map);
+            }
+            (Ty::App(pf, pa), Ty::List(ca)) => {
+                Self::collect_subst_by_name(pf, &Ty::Con("[]".into()), map);
+                Self::collect_subst_by_name(pa, ca, map);
+            }
+            (Ty::App(pf, pa), Ty::LuaIO(s, ca)) => {
+                let lua_io_s = Ty::App(Box::new(Ty::Con("LuaIO".into())), Box::new(Ty::Var(s.clone())));
+                Self::collect_subst_by_name(pf, &lua_io_s, map);
+                Self::collect_subst_by_name(pa, ca, map);
+            }
             (Ty::Tuple(ps), Ty::Tuple(cs)) if ps.len() == cs.len() => {
                 for (p, c) in ps.iter().zip(cs.iter()) {
                     Self::collect_subst_by_name(p, c, map);
@@ -1420,6 +1439,21 @@ impl Monomorphizer {
             }
             (Ty::List(pa), Ty::List(ca)) |
             (Ty::IO(pa), Ty::IO(ca)) => Self::collect_subst_exact(pa, ca, map),
+            // Same sugared-type equivalences as collect_subst_by_name:
+            // `m a` vs IO b / [b] / LuaIO s b binds the constructor variable.
+            (Ty::App(pf, pa), Ty::IO(ca)) => {
+                Self::collect_subst_exact(pf, &Ty::Con("IO".into()), map);
+                Self::collect_subst_exact(pa, ca, map);
+            }
+            (Ty::App(pf, pa), Ty::List(ca)) => {
+                Self::collect_subst_exact(pf, &Ty::Con("[]".into()), map);
+                Self::collect_subst_exact(pa, ca, map);
+            }
+            (Ty::App(pf, pa), Ty::LuaIO(s, ca)) => {
+                let lua_io_s = Ty::App(Box::new(Ty::Con("LuaIO".into())), Box::new(Ty::Var(s.clone())));
+                Self::collect_subst_exact(pf, &lua_io_s, map);
+                Self::collect_subst_exact(pa, ca, map);
+            }
             (Ty::Tuple(ps), Ty::Tuple(cs)) if ps.len() == cs.len() => {
                 for (p, c) in ps.iter().zip(cs.iter()) {
                     Self::collect_subst_exact(p, c, map);
