@@ -616,8 +616,21 @@ intToNum :: Integer -> LuaPure "tonumber" Number
 numModf :: Number -> LuaPure "math.modf" (Number, Number)
 numFloor :: Number -> LuaPure "math.floor" Integer
 numFormat :: String -> Number -> LuaPure "string.format" String
-numMathType :: Number -> LuaPure "math.type" String
+-- __mll_math_type is the runtime's portability shim around math.type: native
+-- on Lua 5.3+, and on interpreters without an integer subtype (LuaJIT,
+-- Lua 5.1/5.2) it answers "float" for every number — which is the truth
+-- there, since all numbers are IEEE-754 doubles.
+numMathType :: Number -> LuaPure "__mll_math_type" String
 numHuge :: LuaPure "math.huge" Number
+
+-- True when this interpreter distinguishes integer numbers from floats
+-- (Lua 5.3+). Where it is False (LuaJIT), numbers are doubles only, so
+-- integers beyond 2^53 are not exactly representable and the strict 64-bit
+-- range checks in numToIntegerFloat correctly reject the int64 boundaries.
+-- note: GHC's Integer is arbitrary-precision, so this platform distinction
+-- has no GHC counterpart; use it to gate exactness expectations beyond 2^53.
+hasIntegerSubtype :: Bool
+hasIntegerSubtype = numMathType (intToNum 1) == "integer"
 
 -- ================================================================
 -- Accessors

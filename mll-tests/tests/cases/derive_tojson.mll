@@ -159,15 +159,39 @@ mustParse s = case parseJSON s of
     Left _ -> JNull
     Right v -> v
 
+-- Full int64 boundary encoding needs Lua's integer number subtype (5.3+),
+-- probed via hasIntegerSubtype.
+-- note: LuaJIT has no integer subtype — every number is an IEEE-754 double,
+-- so integers beyond 2^53 round (9223372036854775807 becomes 2^63) and
+-- cannot encode or round-trip exactly there; the strict range check
+-- correctly rejects the rounded boundary on decode. On such interpreters we
+-- assert exact encoding and round-trips at the double-safe boundary (±2^53)
+-- instead; on Lua 5.3+ the full int64 asserts always run.
+int64EncodeChecks :: Bool -> IO ()
+int64EncodeChecks True = do
+    assert (encodeToJSON (Person "x" 9223372036854775807) == "{\"name\":\"x\",\"age\":9223372036854775807}") "int64 max encodes exactly"
+    assert (encodeToJSON (Person "x" (0 - 9223372036854775807 - 1)) == "{\"name\":\"x\",\"age\":-9223372036854775808}") "int64 min encodes exactly"
+    assert (encodeToJSON (Person "x" 9007199254740993) == "{\"name\":\"x\",\"age\":9007199254740993}") "integer beyond 2^53 exact"
+int64EncodeChecks False = do
+    putStrLn "note: no integer subtype (LuaJIT) - asserting the double-safe 2^53 boundary instead of the full int64 range"
+    assert (encodeToJSON (Person "x" 9007199254740992) == "{\"name\":\"x\",\"age\":9007199254740992}") "2^53 encodes exactly (no integer subtype)"
+    assert (encodeToJSON (Person "x" (-9007199254740992)) == "{\"name\":\"x\",\"age\":-9007199254740992}") "-2^53 encodes exactly (no integer subtype)"
+
+int64RoundTripChecks :: Bool -> IO ()
+int64RoundTripChecks True = do
+    assert (rtP (Person (strChar 195 <> strChar 169) (0 - 9223372036854775807 - 1))) "round-trip unicode + int64 min"
+    assert (rtP (Person "x" 9223372036854775807)) "round-trip int64 max"
+int64RoundTripChecks False = do
+    assert (rtP (Person (strChar 195 <> strChar 169) (-9007199254740992))) "round-trip unicode + -2^53 (no integer subtype)"
+    assert (rtP (Person "x" 9007199254740992)) "round-trip 2^53 (no integer subtype)"
+
 main :: IO ()
 main = do
     -- ============================================================
     -- Exact encoded strings: records
     -- ============================================================
     assert (encodeToJSON (Person "Ann" 30) == "{\"name\":\"Ann\",\"age\":30}") "record encode"
-    assert (encodeToJSON (Person "x" 9223372036854775807) == "{\"name\":\"x\",\"age\":9223372036854775807}") "int64 max encodes exactly"
-    assert (encodeToJSON (Person "x" (0 - 9223372036854775807 - 1)) == "{\"name\":\"x\",\"age\":-9223372036854775808}") "int64 min encodes exactly"
-    assert (encodeToJSON (Person "x" 9007199254740993) == "{\"name\":\"x\",\"age\":9007199254740993}") "integer beyond 2^53 exact"
+    int64EncodeChecks hasIntegerSubtype
     -- unicode: UTF-8 text passes through byte-for-byte; control characters
     -- and quotes are escaped
     assert (encodeToJSON (Person (strChar 195 <> strChar 169) 1) == "{\"name\":\"" <> strChar 195 <> strChar 169 <> "\",\"age\":1}") "utf-8 passes through"
@@ -240,8 +264,7 @@ main = do
     -- Round-trips: fromJSON (parseJSON (encodeToJSON x)) == Right x
     -- ============================================================
     assert (rtP (Person "Ann" 30)) "round-trip record"
-    assert (rtP (Person (strChar 195 <> strChar 169) (0 - 9223372036854775807 - 1))) "round-trip unicode + int64 min"
-    assert (rtP (Person "x" 9223372036854775807)) "round-trip int64 max"
+    int64RoundTripChecks hasIntegerSubtype
     assert (rtSh (Circle 2.5)) "round-trip record constructor"
     assert (rtSh (Rect 3 4)) "round-trip positional constructor"
     assert (rtSh Point0) "round-trip nullary constructor"

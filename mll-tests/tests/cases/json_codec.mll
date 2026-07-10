@@ -162,6 +162,22 @@ bs = strChar 92
 qq :: String
 qq = strChar 34
 
+-- Full int64 boundary decoding needs Lua's integer number subtype (5.3+),
+-- probed via hasIntegerSubtype.
+-- note: LuaJIT has no integer subtype — every number is an IEEE-754 double,
+-- so the int64 boundaries round (9223372036854775807 becomes 2^63) and the
+-- strict range check in fromJSONInteger correctly rejects them there. On
+-- such interpreters we assert exact decoding at the double-safe boundary
+-- (±2^53) instead; on Lua 5.3+ the full int64 asserts always run.
+int64CodecChecks :: Bool -> IO ()
+int64CodecChecks True = do
+    assert (rightIntIs (fromJSONInteger (mustParse "9223372036854775807")) 9223372036854775807) "fromJSONInteger int64 max"
+    assert (rightIntIs (fromJSONInteger (mustParse "-9223372036854775808")) (0 - 9223372036854775807 - 1)) "fromJSONInteger int64 min exact"
+int64CodecChecks False = do
+    putStrLn "note: no integer subtype (LuaJIT) - asserting the double-safe 2^53 boundary instead of the full int64 range"
+    assert (rightIntIs (fromJSONInteger (mustParse "9007199254740992")) 9007199254740992) "fromJSONInteger 2^53 (no integer subtype)"
+    assert (rightIntIs (fromJSONInteger (mustParse "-9007199254740992")) (-9007199254740992)) "fromJSONInteger -2^53 (no integer subtype)"
+
 main :: IO ()
 main = do
     -- ============================================================
@@ -279,8 +295,7 @@ main = do
     -- int64 boundary exactness: the full range decodes with integer
     -- precision, and one-past-the-end is rejected even though Lua's float
     -- conversion rounds it onto the boundary.
-    assert (rightIntIs (fromJSONInteger (mustParse "9223372036854775807")) 9223372036854775807) "fromJSONInteger int64 max"
-    assert (rightIntIs (fromJSONInteger (mustParse "-9223372036854775808")) (0 - 9223372036854775807 - 1)) "fromJSONInteger int64 min exact"
+    int64CodecChecks hasIntegerSubtype
     assert (leftInt (fromJSONInteger (mustParse "9223372036854775808"))) "fromJSONInteger rejects max+1"
     assert (leftInt (fromJSONInteger (mustParse "-9223372036854775809"))) "fromJSONInteger rejects min-1"
     -- float syntax at the exact minimum is ambiguous after rounding and is

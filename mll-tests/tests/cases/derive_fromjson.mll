@@ -177,6 +177,23 @@ mustParse s = case parseJSON s of
     Left _ -> JNull
     Right v -> v
 
+-- Full int64 boundary decoding needs Lua's integer number subtype (5.3+),
+-- probed via hasIntegerSubtype.
+-- note: LuaJIT has no integer subtype — every number is an IEEE-754 double,
+-- so integers beyond 2^53 are not exactly representable there and the strict
+-- 64-bit range check correctly rejects the int64 boundaries. On such
+-- interpreters we assert exact decoding at the double-safe boundary (±2^53)
+-- instead; on Lua 5.3+ the full int64 asserts always run.
+int64DecodeChecks :: Bool -> IO ()
+int64DecodeChecks True = do
+    assert (okP (decP "{\"name\":\"x\",\"age\":9007199254740993}") (Person "x" 9007199254740993)) "integer beyond 2^53 exact"
+    assert (okP (decP "{\"name\":\"x\",\"age\":9223372036854775807}") (Person "x" 9223372036854775807)) "int64 max"
+    assert (okP (decP "{\"name\":\"x\",\"age\":-9223372036854775808}") (Person "x" (0 - 9223372036854775807 - 1))) "int64 min exact"
+int64DecodeChecks False = do
+    putStrLn "note: no integer subtype (LuaJIT) - asserting the double-safe 2^53 boundary instead of the full int64 range"
+    assert (okP (decP "{\"name\":\"x\",\"age\":9007199254740992}") (Person "x" 9007199254740992)) "2^53 decodes exactly (no integer subtype)"
+    assert (okP (decP "{\"name\":\"x\",\"age\":-9007199254740992}") (Person "x" (-9007199254740992))) "-2^53 decodes exactly (no integer subtype)"
+
 main :: IO ()
 main = do
     -- ============================================================
@@ -187,9 +204,7 @@ main = do
     assert (okP (decP "{\"name\":\"Ann\",\"age\":30,\"extra\":[1,2]}") (Person "Ann" 30)) "unknown keys ignored"
     assert (okP (decP "  { \"name\" : \"Ann\" , \"age\" : 30 }  ") (Person "Ann" 30)) "whitespace tolerated"
     assert (okP (decP "{\"name\":\"\\u00e9\",\"age\":-3}") (Person (strChar 195 <> strChar 169) (-3))) "escapes and negatives"
-    assert (okP (decP "{\"name\":\"x\",\"age\":9007199254740993}") (Person "x" 9007199254740993)) "integer beyond 2^53 exact"
-    assert (okP (decP "{\"name\":\"x\",\"age\":9223372036854775807}") (Person "x" 9223372036854775807)) "int64 max"
-    assert (okP (decP "{\"name\":\"x\",\"age\":-9223372036854775808}") (Person "x" (0 - 9223372036854775807 - 1))) "int64 min exact"
+    int64DecodeChecks hasIntegerSubtype
     case decP "{\"name\":\"x\",\"age\":-9223372036854775809}" of
         Left _ -> assert True "int64 min-1 rejected"
         Right _ -> assert False "int64 min-1 rejected"

@@ -387,7 +387,7 @@ impl CodeGen {
             "__mll_try", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
-            "__mll_shl", "__mll_shr",
+            "__mll_shl", "__mll_shr", "__mll_math_type",
             "__mll_array_from_list", "__mll_array_index", "__mll_array_length",
             "__mll_bs_empty", "__mll_bs",
             "__mll_ma_new", "__mll_ma_read", "__mll_ma_write",
@@ -4212,6 +4212,20 @@ else
     function __mll_bnot(a) return __mll_bit.bnot(__force(a)) end
     function __mll_shl(a, b) return __mll_bit.lshift(__force(a), __force(b)) end
     function __mll_shr(a, b) return __mll_bit.rshift(__force(a), __force(b)) end
+    end
+end
+
+-- Number subtype probe (Lua 5.3+ native math.type, else a portable fallback).
+-- LuaJIT and Lua 5.1/5.2 have no integer subtype: every number is an IEEE-754
+-- double, so "float" is the correct answer for any number there. Non-numbers
+-- yield nil, matching math.type's contract.
+local __mll_math_type
+if math.type then
+    function __mll_math_type(x) return math.type(__force(x)) end
+else
+    function __mll_math_type(x)
+        if type(__force(x)) == 'number' then return 'float' end
+        return nil
     end
 end
 
