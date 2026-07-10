@@ -982,6 +982,121 @@ main = print $ show 3 <> "hi" <> show Nothing
 }
 
 #[test]
+fn type_error_does_not_cascade_into_spurious_ambiguity() {
+    // A single genuine type error in one branch (badMap, a HashMap, spliced
+    // into a String with `<>`) must NOT spawn secondary "Ambiguous type"
+    // errors for the same definition. The scrutinee's `:: Either String Foo`
+    // annotation fully determines the FromJSON/Show types — the same code
+    // without the bad splice compiles — so those ambiguity reports are pure
+    // cascade artifacts that point the user away from the real problem.
+    let source = r#"
+import qualified Data.Map as Map
+import JSON
+
+data Foo = Foo { fooX as "x" :: [String] } deriving (FromJSON, Show)
+
+badMap :: Map.Map String String
+badMap = Map.empty
+
+export run :: IO ()
+run = case (decodeJSON "{}" :: Either String Foo) of
+        Right r -> print r
+        Left e  -> error $ "oops " <> e <> " (" <> badMap <> ")"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify 'HashMap String String' with 'String'"),
+                "Expected the genuine unification error, got: {}", msg);
+            assert!(!msg.contains("Ambiguous type"),
+                "The clause error must not cascade into a spurious ambiguity report: {}", msg);
+            assert!(!msg.contains("'FromJSON' instance") && !msg.contains("'Show' instance"),
+                "The annotated decodeJSON/print constraints are determined and must not be reported: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for the HashMap-into-String splice"),
+    }
+}
+
+#[test]
+fn type_error_in_where_binding_does_not_cascade_into_spurious_ambiguity() {
+    // Same cascade guard for the where-binding recovery path: the binding's
+    // genuine error (`String <> True`) is reported and checking continues,
+    // but the FromJSON/Show constraints emitted while inferring the failed
+    // body must not resurface as spurious "Ambiguous type" errors.
+    let source = r#"
+import JSON
+
+data Foo = Foo { fooX as "x" :: [String] } deriving (FromJSON, Show)
+
+export run :: IO ()
+run = putStrLn msg
+  where
+    msg = case (decodeJSON "{}" :: Either String Foo) of
+            Right r -> show r
+            Left e  -> "oops " <> e <> True
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify 'String' with 'Bool'"),
+                "Expected the genuine unification error, got: {}", msg);
+            assert!(msg.contains("where-binding 'msg'"),
+                "Expected the where-binding context on the error, got: {}", msg);
+            assert!(!msg.contains("Ambiguous type"),
+                "The where-binding error must not cascade into a spurious ambiguity report: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for `String <> True` in the where-binding"),
+    }
+}
+
+#[test]
+fn genuine_ambiguity_in_where_binding_still_rejected() {
+    // Over-suppression guard for the cascade fix: a where-binding that is
+    // GENUINELY ambiguous (`show Nothing`, no other error anywhere) must
+    // still be rejected with the ambiguity message.
+    let source = r#"
+main :: IO ()
+main = putStrLn msg
+  where msg = show Nothing
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Ambiguous type"),
+                "Expected an ambiguity error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for ambiguous `show Nothing` in a where-binding"),
+    }
+}
+
+#[test]
+fn sibling_clause_error_does_not_suppress_genuine_ambiguity() {
+    // Scope guard for the cascade fix: suppression is per failed clause, not
+    // per definition. Clause 2 has a genuine unification error; clause 1 has
+    // a genuine ambiguity (`show Nothing`) and checked cleanly, so BOTH must
+    // be reported — dropping the clean clause's ambiguity would hide a real
+    // problem behind an unrelated sibling error.
+    let source = r#"
+f :: Integer -> IO ()
+f 0 = putStrLn (show Nothing)
+f n = putStrLn (n <> "x")
+
+main :: IO ()
+main = f 1
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify 'Integer' with 'String'"),
+                "Expected the genuine unification error from clause 2, got: {}", msg);
+            assert!(msg.contains("Ambiguous type"),
+                "Clause 1's genuine ambiguity must survive the sibling clause's error: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for both the clause error and the ambiguity"),
+    }
+}
+
+#[test]
 fn show_at_concrete_types_still_compiles() {
     // The ambiguity check must not touch well-typed uses: a numeric literal
     // (`show 3`), a concrete empty list, a concrete Nothing, and `Just 5` all

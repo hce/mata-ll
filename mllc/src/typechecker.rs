@@ -4536,12 +4536,26 @@ impl Checker {
                 format!("definition of '{}'", name)
             };
 
+            // Snapshot the wanted-constraint list: if the clause fails, its
+            // substitution is discarded (only the error survives), so any
+            // class constraints emitted while checking it reference type
+            // variables whose determinations were lost with that substitution.
+            // Discharging those orphaned constraints below would report them
+            // as spuriously "ambiguous" (e.g. a scrutinee annotation that
+            // fully pins a `decodeJSON` result no longer counts, because the
+            // unification recording it died with the clause). Dropping them is
+            // safe: the clause's own error is reported and fails compilation,
+            // and once it is fixed the constraints are checked for real.
+            let wanted_before = self.wanted.len();
             match self.check_clause(clause, &fresh_ty, &clause_ctx) {
                 Ok((tc, clause_subst)) => {
                     tclauses.push(tc);
                     overall_subst = overall_subst.compose(&clause_subst);
                 }
-                Err(e) => { self.push_error_span(e, clause_ctx, clause.span); }
+                Err(e) => {
+                    self.wanted.truncate(wanted_before);
+                    self.push_error_span(e, clause_ctx, clause.span);
+                }
             }
         }
 
@@ -4746,7 +4760,15 @@ impl Checker {
                 // the error makes compilation fail before codegen, and carrying
                 // on lets one pass report errors in later bindings too.
                 let mut binding_errored = false;
+                // On failure the binding's substitution is lost (we continue
+                // with Subst::empty()), so class constraints emitted while
+                // inferring its body reference variables whose determinations
+                // are gone — discharging them would report spurious
+                // ambiguities on top of the real error. Drop them; they are
+                // re-checked for real once the reported error is fixed.
+                let wanted_before = self.wanted.len();
                 let (texpr, inferred_ty, s) = self.infer_expr(&ld.body, &local_env).unwrap_or_else(|e| {
+                    self.wanted.truncate(wanted_before);
                     self.push_error_span(
                         e,
                         format!("the where-binding '{}' ({})", ld.name, ctx),
@@ -4806,7 +4828,12 @@ impl Checker {
                 // Same recovery as the value-binding case above: record, then
                 // continue with a placeholder that can never reach codegen.
                 let mut binding_errored = false;
+                // As in the value-binding case: the failed body's substitution
+                // is lost, so drop the class constraints it emitted rather
+                // than report them as spuriously ambiguous.
+                let wanted_before = self.wanted.len();
                 let (texpr, body_ty, bs) = self.infer_expr(&ld.body, &fn_env).unwrap_or_else(|e| {
+                    self.wanted.truncate(wanted_before);
                     self.push_error_span(
                         e,
                         format!("the where-binding '{}' ({})", ld.name, ctx),
