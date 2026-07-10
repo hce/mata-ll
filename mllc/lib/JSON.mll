@@ -48,11 +48,9 @@ encodeJSON (JObj fields) = "{" <> encodePairs fields <> "}"
 encodeToJSON :: ToJSON a => a -> String
 encodeToJSON x = encodeJSON (toJSON x)
 
--- Parse JSON text and decode it with fromJSON.
--- NOTE: usable once the compiler can dispatch class methods whose class
--- variable only occurs nested in the return type (fromJSON's `a` sits inside
--- `Either String a`; mata-ll's monomorphizer cannot resolve that today).
--- Until then, use decodeJSONWith with an explicit decoder function.
+-- Parse JSON text and decode it with fromJSON. When the surrounding context
+-- does not pin the result type, ascribe it at the call site — exactly like
+-- `read`: `decodeJSON s :: Either String Person`.
 decodeJSON :: FromJSON a => String -> Either String a
 decodeJSON s = case parseJSON s of
     Left e -> Left e
@@ -104,11 +102,29 @@ fromJSONInteger :: Json -> Either String Integer
 fromJSONInteger (JNum n) = numToInteger n
 fromJSONInteger j = Left ("expected an integer, but found " <> jTypeName j)
 
+-- A number with Lua's integer subtype is exact and in range by construction
+-- (the parser only produces one for in-range integer syntax). Floats go
+-- through the integrality and range checks.
 numToInteger :: Number -> Either String Integer
-numToInteger n = case numModf n of
+numToInteger n = if numMathType n == "integer"
+    then Right (numFloor n)
+    else numToIntegerFloat n
+
+-- The float bounds are strict on BOTH sides: 2^63 and -2^63 are exactly
+-- representable as doubles, and any float equal to one of them may have
+-- rounded there from an out-of-range neighbour (e.g. -9223372036854775809
+-- becomes exactly -2^63), so accepting the boundary float would silently
+-- decode a wrong value. The true minimum -9223372036854775808 still decodes
+-- exactly — the parser special-cases its integer spelling (see numExact).
+-- note: the one casualty is float syntax for the exact minimum, like
+-- -9223372036854775808.0, which is rejected as out of range; GHC's aeson
+-- accepts it because it parses numbers exactly (Scientific), which a Lua
+-- double cannot reproduce.
+numToIntegerFloat :: Number -> Either String Integer
+numToIntegerFloat n = case numModf n of
     (_, frac) -> if frac /= 0.0
         then Left ("expected an integer, but found the non-integral number " <> encodeNum n)
-        else if n >= -9223372036854775808.0 && n < 9223372036854775808.0
+        else if n > -9223372036854775808.0 && n < 9223372036854775808.0
             then Right (numFloor n)
             else Left ("the number " <> encodeNum n <> " is outside the 64-bit Integer range")
 
@@ -211,6 +227,74 @@ jContext _ (Right x) = Right x
 jContext ctx (Left e) = Left ("while decoding " <> ctx <> ": " <> e)
 
 -- ================================================================
+-- Combinators for derived FromJSON decoders
+--
+-- `deriving (FromJSON)` generates a decoder over these. The convention
+-- (mirroring aeson's defaultOptions where mata-ll can):
+--   * a single-constructor record decodes from an object keyed by the
+--     field names:            data P = P { x :: Integer }   ⇐  {"x":1}
+--   * a single positional constructor decodes from its argument itself
+--     (one field) or an array of its arguments (several fields):
+--                             data W = W Integer            ⇐  7
+--                             data V = V Integer String     ⇐  [7,"a"]
+--   * a multi-constructor type is tagged: either the bare constructor
+--     name as a string (nullary constructors only), or an object with a
+--     "tag" field — record fields inline in the same object, positional
+--     arguments under "contents":
+--                             data S = A | B Integer | C { n :: Integer }
+--                               ⇐  "A"  or  {"tag":"A"}
+--                               ⇐  {"tag":"B","contents":7}
+--                               ⇐  {"tag":"C","n":3}
+--   * a Maybe field decodes from a missing key, null, or the value itself.
+--   * unknown object keys are ignored, as aeson does.
+--
+-- note: aeson encodes only ALL-nullary sum types as bare strings; the
+-- derived decoder accepts both the bare string and the tagged-object form
+-- for any nullary constructor, since a reasonable encoder may emit either.
+-- note: Maybe (Maybe a) cannot round-trip under the null-is-Nothing
+-- convention — Just Nothing has no JSON form distinct from Nothing.
+-- ================================================================
+
+-- Identity decoder: keep the raw Json value (for fields of type Json).
+fromJSONValue :: Json -> Either String Json
+fromJSONValue j = Right j
+
+-- The n-th element (0-based) of a list of Json values. Total: out of range
+-- yields JNull, but derived decoders only index after jExpectArrN has
+-- checked the arity.
+jNth :: Integer -> [Json] -> Json
+jNth _ [] = JNull
+jNth 0 (x:_) = x
+jNth n (_:xs) = jNth (n - 1) xs
+
+-- Expect the positional arguments of constructor `con` as an array of
+-- exactly n elements.
+jExpectArrN :: String -> Integer -> Json -> Either String [Json]
+jExpectArrN con n j = case jExpectArr j of
+    Left e -> Left ("in the arguments of constructor '" <> con <> "': " <> e)
+    Right xs -> if length xs == n
+        then Right xs
+        else Left ("constructor '" <> con <> "' takes " <> show n <> " arguments, but the array has " <> show (length xs))
+
+-- Decode argument #i (1-based, for messages) of constructor `con`.
+jArgWith :: (Json -> Either String a) -> String -> Integer -> Json -> Either String a
+jArgWith dec con i j = case dec j of
+    Left e -> Left ("in argument " <> show i <> " of constructor '" <> con <> "': " <> e)
+    Right x -> Right x
+
+-- The value cannot start a tagged-constructor decode at all.
+jExpectTagged :: Json -> Either String a
+jExpectTagged j = Left ("expected an object with a \"tag\" field naming the constructor (or a bare constructor-name string), but found " <> jTypeName j)
+
+-- A tag that names no constructor of the type being decoded.
+jBadTag :: String -> String -> Either String a
+jBadTag expected tag = Left ("the tag '" <> tag <> "' names no constructor of this type: expected " <> expected)
+
+-- A bare string named a constructor that has fields.
+jTagNeedsObject :: String -> Either String a
+jTagNeedsObject con = Left ("the constructor '" <> con <> "' has fields, so a bare string cannot encode it: expected an object with \"tag\":\"" <> con <> "\"")
+
+-- ================================================================
 -- Value parser
 -- ================================================================
 
@@ -293,7 +377,19 @@ numExpDigits :: String -> Integer -> Integer -> Integer -> JResult
 numExpDigits s pos len start = if pos <= len && isDigitByte (strByte s pos) then numExpDigits s (pos + 1) len start else numFinish s start pos
 
 numFinish :: String -> Integer -> Integer -> JResult
-numFinish s start pos = JOk (JNum (toNumber (strSub s start (pos - 1)))) (skipWS s pos (strLen s))
+numFinish s start pos = JOk (JNum (numExact (strSub s start (pos - 1)))) (skipWS s pos (strLen s))
+
+-- Convert matched number text to a Lua number, with one special case: the
+-- exact spelling of the minimum 64-bit integer. Lua's tonumber reads it as
+-- -(9223372036854775808); the positive magnitude overflows the integer
+-- subtype, so the result comes back as a float — indistinguishable from
+-- out-of-range neighbours like -9223372036854775809 that round onto the
+-- same double. Converting this one spelling by hand keeps the entire int64
+-- range decodable with integer precision.
+numExact :: String -> Number
+numExact t = if t == "-9223372036854775808"
+    then intToNum (0 - 9223372036854775807 - 1)
+    else toNumber t
 
 isDigitByte :: Integer -> Bool
 isDigitByte c = c >= 48 && c <= 57

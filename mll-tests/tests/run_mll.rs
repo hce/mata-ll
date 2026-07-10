@@ -367,6 +367,7 @@ mll_lib_test!(lib_lbit, "lib_lbit.mll");
 mll_lib_test!(lib_lmath, "lib_lmath.mll");
 mll_lib_test!(lib_json, "lib_json.mll");
 mll_lib_test!(json_codec, "json_codec.mll");
+mll_lib_test!(derive_fromjson, "derive_fromjson.mll");
 mll_lib_test!(lib_regex, "lib_regex.mll");
 mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
@@ -374,6 +375,180 @@ mll_lib_test!(lib_data_maybe, "lib_data_maybe.mll");
 mll_lib_test!(lib_data_map, "lib_data_map.mll");
 
 // Compile-error tests: these SHOULD fail to compile
+#[test]
+fn fromjson_derive_requires_json_import() {
+    // deriving (FromJSON) without `import JSON`: the class and the decoder
+    // combinators the generated code calls are not in scope, and the error
+    // must say exactly what to add.
+    let source = r#"
+data P = P { x :: Integer } deriving (FromJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'FromJSON'"),
+                "Expected a FromJSON derive error, got: {}", msg);
+            assert!(msg.contains("import JSON"),
+                "The error must name the missing import, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (FromJSON) without import JSON to be rejected"),
+    }
+}
+
+#[test]
+fn fromjson_derive_rejects_function_field() {
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data H = H { hop :: Integer -> Integer } deriving (FromJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'FromJSON' for 'H'"),
+                "Expected a FromJSON derive error, got: {}", msg);
+            assert!(msg.contains("field 'hop'") && msg.contains("function"),
+                "The error must name the field and explain functions have no JSON form, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (FromJSON) on a function-typed field to be rejected"),
+    }
+}
+
+#[test]
+fn fromjson_derive_rejects_type_parameters() {
+    // GHC's aeson derives `FromJSON (Box a)` by constraining `a`; mata-ll
+    // instances cannot carry constraints, so this is rejected with the
+    // explanation rather than producing a decoder that cannot exist.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data Box a = Box a deriving (FromJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'FromJSON' for 'Box'"),
+                "Expected a FromJSON derive error, got: {}", msg);
+            assert!(msg.contains("type parameters"),
+                "The error must explain the type-parameter limitation, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (FromJSON) on a parameterized type to be rejected"),
+    }
+}
+
+#[test]
+fn fromjson_derive_rejects_field_without_instance() {
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data Plain = Plain Integer
+
+data Holder = Holder { inner :: Plain } deriving (FromJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'FromJSON' for 'Holder'"),
+                "Expected a FromJSON derive error, got: {}", msg);
+            assert!(msg.contains("'Plain' has no FromJSON instance"),
+                "The error must name the instance-less field type, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected deriving (FromJSON) over an instance-less field type to be rejected"),
+    }
+}
+
+#[test]
+fn fromjson_derive_rejects_tag_field_collision() {
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data T = A { tag :: String } | B deriving (FromJSON)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'FromJSON' for 'T'") && msg.contains("tag"),
+                "Expected the tag-collision explanation, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected a record field named 'tag' in a sum type to be rejected"),
+    }
+}
+
+#[test]
+fn decode_json_without_instance_reported() {
+    // Using decodeJSON at a type with no FromJSON instance must fail with a
+    // missing-instance error at compile time, not produce broken Lua.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data Q = Q Integer
+
+main :: IO ()
+main = case (decodeJSON "1" :: Either String Q) of
+    Left e -> putStrLn e
+    Right _ -> putStrLn "ok"
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("No instance") && msg.contains("FromJSON") && msg.contains("Q"),
+                "Expected a FromJSON-instance error naming Q, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected decodeJSON at an instance-less type to be rejected"),
+    }
+}
+
+#[test]
+fn instance_on_parameterized_container_compiles() {
+    // Regression: `instance C [a]` and `instance C (Maybe a)` used to crash
+    // the compiler with a stack overflow — the class variable `a` and the
+    // instance's own `a` were the same TyVar, so substituting a := [a] made
+    // apply_subst chase its own output forever. They must now compile AND
+    // dispatch.
+    let source = r#"
+class C a where
+    cname :: a -> String
+
+instance C [a] where
+    cname _ = "list"
+
+instance C (Maybe a) where
+    cname _ = "maybe"
+
+main :: IO ()
+main = do
+    putStrLn (cname [1, 2, 3])
+    putStrLn (cname (Just True))
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Ok(r) => {
+            assert!(r.lua_code.contains("list") && r.lua_code.contains("maybe"),
+                "instance bodies should be present in the output");
+        }
+        Err(e) => panic!("instance C [a] / C (Maybe a) should compile, got: {}", e),
+    }
+}
+
 #[test]
 fn eq_without_instance_rejected() {
     let source = r#"

@@ -143,6 +143,12 @@ pub struct Checker {
     /// is used). Collected here because the architecture does not otherwise scope
     /// local constraints. Cleared per function alongside `wanted`.
     binder_types: Vec<Ty>,
+    /// Types that will have a FromJSON instance by the end of the module —
+    /// every `deriving (FromJSON)` and every explicit `instance FromJSON T`,
+    /// collected before deriving runs. Lets a derived decoder reference the
+    /// decoder of a type declared later in the module (mutual recursion), whose
+    /// instance is not registered yet when the earlier derive is generated.
+    fromjson_types: HashSet<String>,
 }
 
 impl Default for Checker {
@@ -177,6 +183,7 @@ impl Checker {
             fn_use_constraints: HashMap::new(),
             wanted: Vec::new(),
             binder_types: Vec::new(),
+            fromjson_types: HashSet::new(),
         };
         checker.init_prelude();
         checker.init_kinds();
@@ -1886,6 +1893,36 @@ impl Checker {
             }
         }
 
+        // Pre-register all function signatures BEFORE deriving and instance
+        // checking. Mutually recursive functions need to see each other, and
+        // instance method bodies (pass 4b) are type-checked before function
+        // definitions (pass 6), so without this an instance method could not
+        // call any top-level function — e.g. a FromJSON instance written in
+        // terms of the JSON module's decoder combinators.
+        for (name, ty) in &sigs {
+            let scheme = self.generalize(&self.env.clone(), ty);
+            self.env.insert(name.clone(), scheme);
+        }
+
+        // Collect the set of types that will carry a FromJSON instance once
+        // the whole module is processed (see `fromjson_types`).
+        self.fromjson_types.clear();
+        for decl in &module.decls {
+            match decl {
+                Decl::DataDef { name, deriving, .. }
+                    if deriving.iter().any(|c| c == "FromJSON") => {
+                    self.fromjson_types.insert(name.clone());
+                }
+                Decl::InstanceDecl { class_name, target_type, .. }
+                    if class_name == "FromJSON" => {
+                    if let Some(head) = Self::type_head_name(target_type) {
+                        self.fromjson_types.insert(head);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Pass 4a: process deriving clauses first (so derived instances
         // are available when checking explicit instances with superclass constraints)
         let mut instance_fns = Vec::new();
@@ -1948,13 +1985,6 @@ impl Checker {
                     let scheme = self.generalize(&self.env.clone(), ty);
                     self.env.insert(name.clone(), scheme);
                 }
-        }
-
-        // Pre-register all function signatures so mutually recursive
-        // functions can see each other during type checking
-        for (name, ty) in &sigs {
-            let scheme = self.generalize(&self.env.clone(), ty);
-            self.env.insert(name.clone(), scheme);
         }
 
         // Local declarations that redefine a hidden name should shadow it
@@ -2146,6 +2176,23 @@ impl Checker {
         let provided_methods: std::collections::HashSet<String> =
             methods.iter().map(|m| m.name.clone()).collect();
 
+        // Substituting the class variable with the target type must not capture:
+        // for `instance C [a]`, the target type's own `a` is a different variable
+        // from the class's `a`, but both are spelled TyVar { name: "a", id: MAX }.
+        // Substituting `a := [a]` directly makes apply_subst chase its own output
+        // forever (a → [a] → [[a]] → …) and overflow the stack. Alpha-rename the
+        // target type's variables to fresh ones first; only this freshened copy
+        // is used to specialize method types — instance registration and error
+        // messages keep the user's spelling.
+        let fresh_target_ty = {
+            let mut renames: HashMap<TyVar, Ty> = HashMap::new();
+            for v in target_ty.free_vars() {
+                let fresh = self.fresh_var("_inst");
+                renames.insert(v, fresh);
+            }
+            target_ty.apply_subst(&Subst::from_map(renames))
+        };
+
         for method_def in methods {
             // Find the class method's type
             let class_method_ty = class_info.methods.iter()
@@ -2156,7 +2203,7 @@ impl Checker {
                 Some(ty) => {
                     // Substitute the class type variable with the target type
                     let tv = TyVar { name: class_info.type_var.clone(), id: u32::MAX };
-                    let subst = Subst::singleton(tv, target_ty.clone());
+                    let subst = Subst::singleton(tv, fresh_target_ty.clone());
                     ty.apply_subst(&subst)
                 }
                 None => {
@@ -2186,7 +2233,7 @@ impl Checker {
             }
             if let Some(default_clauses) = class_info.default_methods.get(method_name) {
                 let tv = TyVar { name: class_info.type_var.clone(), id: u32::MAX };
-                let subst = Subst::singleton(tv, target_ty.clone());
+                let subst = Subst::singleton(tv, fresh_target_ty.clone());
                 let specialized_ty = method_ty.apply_subst(&subst);
 
                 let mangled_name = format!("{}_{}", method_name, ty_str);
@@ -2251,10 +2298,11 @@ impl Checker {
             "Enum" => self.derive_enum(type_name, type_vars, constructors),
             "Bounded" => self.derive_bounded(type_name, type_vars, constructors),
             "Functor" => self.derive_functor(type_name, type_vars, constructors),
+            "FromJSON" => self.derive_fromjson(type_name, type_vars, constructors),
             "LuaDict" => { self.derive_luadict(type_name, constructors); vec![] }
             other => {
                 self.push_error_ctx(
-                    TypeErrorKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor and LuaDict are supported", other)),
+                    TypeErrorKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor, FromJSON and LuaDict are supported", other)),
                     format!("data {}", type_name),
                 );
                 vec![]
@@ -3387,6 +3435,582 @@ impl Checker {
             name: mangled,
             ty: fn_ty,
             clauses,
+            specialized: false,
+            dict_params: vec![],
+        }]
+    }
+
+    // --- FromJSON deriving ---
+
+    fn json_ty() -> Ty { Ty::Con("Json".into()) }
+
+    /// `Either String t`
+    fn estr_ty(t: &Ty) -> Ty {
+        Ty::app(Ty::app(Ty::Con("Either".into()), Ty::Con("String".into())), t.clone())
+    }
+
+    fn ty_maybe_inner(ty: &Ty) -> Option<&Ty> {
+        if let Ty::App(f, inner) = ty
+            && matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") {
+                return Some(inner);
+            }
+        None
+    }
+
+    fn jx_var(name: &str, ty: Ty) -> TExpr {
+        TExpr::new(TExprKind::Var(name.to_string()), ty)
+    }
+
+    fn jx_str(s: &str) -> TExpr {
+        TExpr::new(TExprKind::Lit(TLiteral::Str(s.to_string())), Ty::Con("String".into()))
+    }
+
+    fn jx_int(i: i64) -> TExpr {
+        TExpr::new(TExprKind::Lit(TLiteral::Integer(i)), Ty::Con("Integer".into()))
+    }
+
+    fn jx_app(f: TExpr, arg: TExpr, ty: Ty) -> TExpr {
+        TExpr::new(TExprKind::App(Box::new(f), Box::new(arg)), ty)
+    }
+
+    /// `fname arg1 … argN` with the function type reconstructed from the
+    /// argument types, so the monomorphizer sees fully concrete types.
+    fn jx_call(fname: &str, args: Vec<TExpr>, ret_ty: Ty) -> TExpr {
+        let mut fty = ret_ty.clone();
+        for a in args.iter().rev() {
+            fty = Ty::arrow(a.ty.clone(), fty);
+        }
+        let mut e = Self::jx_var(fname, fty);
+        for a in args {
+            let next_ty = match &e.ty {
+                Ty::Arrow(_, b) => (**b).clone(),
+                _ => ret_ty.clone(),
+            };
+            e = Self::jx_app(e, a, next_ty);
+        }
+        e
+    }
+
+    /// `case scrut of { Left e -> Left e; Right ok -> ok_body }` — the
+    /// Either-plumbing every derived decode step threads through.
+    fn jx_bind_either(scrut: TExpr, ok_name: &str, ok_ty: Ty, ok_body: TExpr, out_ty: Ty) -> TExpr {
+        let str_ty = Ty::Con("String".into());
+        let err_name = format!("{}e", ok_name);
+        let rethrow = Self::jx_app(
+            TExpr::new(TExprKind::Con("Left".into()), Ty::arrow(str_ty.clone(), out_ty.clone())),
+            Self::jx_var(&err_name, str_ty.clone()),
+            out_ty.clone(),
+        );
+        TExpr::new(TExprKind::Case {
+            scrutinee: Box::new(scrut),
+            branches: vec![
+                TCaseBranch {
+                    pattern: TPattern::Constructor {
+                        name: "Left".into(),
+                        args: vec![TPattern::Var(err_name, str_ty)],
+                    },
+                    guards: vec![],
+                    body: rethrow,
+                },
+                TCaseBranch {
+                    pattern: TPattern::Constructor {
+                        name: "Right".into(),
+                        args: vec![TPattern::Var(ok_name.to_string(), ok_ty)],
+                    },
+                    guards: vec![],
+                    body: ok_body,
+                },
+            ],
+        }, out_ty)
+    }
+
+    /// `Right (Con _f0 … _fN)`
+    fn jx_ok_con(con_name: &str, field_tys: &[Ty], result_ty: &Ty, estr: &Ty) -> TExpr {
+        let mut built = TExpr::new(TExprKind::Con(con_name.to_string()), result_ty.clone());
+        for (i, fty) in field_tys.iter().enumerate() {
+            built = Self::jx_app(built, Self::jx_var(&format!("_f{}", i), fty.clone()), result_ty.clone());
+        }
+        Self::jx_app(
+            TExpr::new(TExprKind::Con("Right".into()), Ty::arrow(result_ty.clone(), estr.clone())),
+            built,
+            estr.clone(),
+        )
+    }
+
+    fn fromjson_field_err(what: String, (reason, note): (String, String)) -> (String, String) {
+        (format!("{} — {}", what, reason), note)
+    }
+
+    /// Build the decoder expression (of type `Json -> Either String field_ty`)
+    /// for one field of a FromJSON-derived constructor. Resolution is
+    /// STRUCTURAL at derive time (mirroring derive_functor's fmap resolution):
+    /// mata-ll cannot register class instances on library/container types, so
+    /// primitives use the fromJSON* combinators, `[t]` and `Maybe t` route
+    /// through fromJSONList/fromJSONMaybe, and a field of another FromJSON
+    /// type calls that type's own `fromJSON_T` decoder — including self- and
+    /// mutually-recursive types, via the `fromjson_types` prescan.
+    /// `Err` carries (reason, note) for the rejection message.
+    fn fromjson_field_decoder(&self, field_ty: &Ty) -> Result<TExpr, (String, String)> {
+        let dec_ty = Ty::arrow(Self::json_ty(), Self::estr_ty(field_ty));
+        match field_ty {
+            Ty::Con(n) if n == "Integer" => Ok(Self::jx_var("fromJSONInteger", dec_ty)),
+            Ty::Con(n) if n == "Number" => Ok(Self::jx_var("fromJSONNumber", dec_ty)),
+            Ty::Con(n) if n == "String" => Ok(Self::jx_var("fromJSONString", dec_ty)),
+            Ty::Con(n) if n == "Bool" => Ok(Self::jx_var("fromJSONBool", dec_ty)),
+            Ty::Con(n) if n == "Json" => Ok(Self::jx_var("fromJSONValue", dec_ty)),
+            Ty::List(elem) => {
+                let inner = self.fromjson_field_decoder(elem)?;
+                let list_fn_ty = Ty::arrow(inner.ty.clone(), dec_ty.clone());
+                Ok(Self::jx_app(Self::jx_var("fromJSONList", list_fn_ty), inner, dec_ty))
+            }
+            _ if Self::ty_maybe_inner(field_ty).is_some() => {
+                let inner_ty = Self::ty_maybe_inner(field_ty).unwrap();
+                let inner = self.fromjson_field_decoder(inner_ty)?;
+                let maybe_fn_ty = Ty::arrow(inner.ty.clone(), dec_ty.clone());
+                Ok(Self::jx_app(Self::jx_var("fromJSONMaybe", maybe_fn_ty), inner, dec_ty))
+            }
+            Ty::Con(n) => {
+                if self.fromjson_types.contains(n)
+                    || self.instances.contains_key(&("FromJSON".to_string(), n.clone())) {
+                    Ok(Self::jx_var(&format!("fromJSON_{}", n), dec_ty))
+                } else {
+                    Err((
+                        format!("the type '{}' has no FromJSON instance", n),
+                        format!("every field of a derived decoder needs its own decoder; add `deriving (FromJSON)` to '{}' or write `instance FromJSON {}` in the module that defines it.", n, n),
+                    ))
+                }
+            }
+            Ty::Arrow(..) => Err((
+                "it is a function type".to_string(),
+                "a function has no JSON representation, so no decoder can produce one; store data instead of behavior, or write the FromJSON instance by hand for an encoding you define.".to_string(),
+            )),
+            Ty::Tuple(_) => Err((
+                format!("the tuple type '{}' has no JSON decoding convention in mata-ll", field_ty),
+                "GHC's aeson decodes tuples from fixed-length arrays; mata-ll does not — wrap the tuple in a small record type deriving (FromJSON), which also gives the components names in the JSON.".to_string(),
+            )),
+            Ty::App(..) => Err((
+                format!("the type '{}' is parameterized", field_ty),
+                "a derived decoder resolves one concrete decoder per field at compile time, and mata-ll instances cannot cover a parameterized type at every instantiation; wrap the concrete instantiation in its own data type deriving (FromJSON).".to_string(),
+            )),
+            Ty::IO(_) | Ty::LuaIO(..) => Err((
+                "it is an effectful action type".to_string(),
+                "an IO action has no JSON representation.".to_string(),
+            )),
+            Ty::Var(v) => Err((
+                format!("its type is the type parameter '{}'", v.name),
+                "a type parameter has no decoder the compiler can pick at derive time.".to_string(),
+            )),
+            other => Err((
+                format!("the type '{}' cannot be decoded from JSON", other),
+                "derived FromJSON supports Integer, Number, String, Bool, Json, lists, Maybe, and types that themselves have a FromJSON instance.".to_string(),
+            )),
+        }
+    }
+
+    /// Decode a record constructor's fields from the object in `_j`
+    /// (field names as JSON keys; Maybe fields optional via jOptFieldWith).
+    fn fromjson_named_body(
+        &self,
+        con_name: &str,
+        fields: &[RecordField],
+        field_tys: &[Ty],
+        estr: &Ty,
+        result_ty: &Ty,
+    ) -> Result<TExpr, (String, String)> {
+        let json = Self::json_ty();
+        let mut body = Self::jx_ok_con(con_name, field_tys, result_ty, estr);
+        for i in (0..fields.len()).rev() {
+            let fty = &field_tys[i];
+            let fname = &fields[i].name;
+            let err_what = || format!("field '{}' of constructor '{}' cannot be decoded", fname, con_name);
+            let step = if let Some(inner) = Self::ty_maybe_inner(fty) {
+                // Maybe field: a missing key and an explicit null both → Nothing.
+                let dec = self.fromjson_field_decoder(inner)
+                    .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
+                Self::jx_call(
+                    "jOptFieldWith",
+                    vec![dec, Self::jx_str(fname), Self::jx_var("_j", json.clone())],
+                    Self::estr_ty(fty),
+                )
+            } else {
+                let dec = self.fromjson_field_decoder(fty)
+                    .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
+                Self::jx_call(
+                    "jFieldWith",
+                    vec![dec, Self::jx_str(fname), Self::jx_var("_j", json.clone())],
+                    Self::estr_ty(fty),
+                )
+            };
+            body = Self::jx_bind_either(step, &format!("_f{}", i), fty.clone(), body, estr.clone());
+        }
+        Ok(body)
+    }
+
+    /// Decode positional arguments, argument i taken from `elem_exprs[i]`,
+    /// finishing with `Right (Con _f0 …)`.
+    fn fromjson_positional_chain(
+        &self,
+        con_name: &str,
+        field_tys: &[Ty],
+        elem_exprs: Vec<TExpr>,
+        estr: &Ty,
+        result_ty: &Ty,
+    ) -> Result<TExpr, (String, String)> {
+        let mut body = Self::jx_ok_con(con_name, field_tys, result_ty, estr);
+        for i in (0..field_tys.len()).rev() {
+            let fty = &field_tys[i];
+            let dec = self.fromjson_field_decoder(fty).map_err(|e| Self::fromjson_field_err(
+                format!("argument {} of constructor '{}' cannot be decoded", i + 1, con_name), e))?;
+            let step = Self::jx_call(
+                "jArgWith",
+                vec![
+                    dec,
+                    Self::jx_str(con_name),
+                    Self::jx_int((i + 1) as i64),
+                    elem_exprs[i].clone(),
+                ],
+                Self::estr_ty(fty),
+            );
+            body = Self::jx_bind_either(step, &format!("_f{}", i), fty.clone(), body, estr.clone());
+        }
+        Ok(body)
+    }
+
+    /// Decode one constructor from the tagged object bound to `_j`:
+    /// record fields inline in the object, positional arguments under
+    /// "contents" (the value itself for one argument, an array for several),
+    /// nothing needed for a nullary constructor.
+    fn fromjson_tagged_con_body(
+        &self,
+        con: &Constructor,
+        field_tys: &[Ty],
+        estr: &Ty,
+        result_ty: &Ty,
+    ) -> Result<TExpr, (String, String)> {
+        let json = Self::json_ty();
+        match &con.fields {
+            ConstructorFields::Named(fields) if !fields.is_empty() => {
+                self.fromjson_named_body(&con.name, fields, field_tys, estr, result_ty)
+            }
+            _ if field_tys.is_empty() => Ok(Self::jx_ok_con(&con.name, &[], result_ty, estr)),
+            _ => {
+                let contents = Self::jx_call(
+                    "jField",
+                    vec![Self::jx_str("contents"), Self::jx_var("_j", json.clone())],
+                    Self::estr_ty(&json),
+                );
+                let inner = if field_tys.len() == 1 {
+                    self.fromjson_positional_chain(
+                        &con.name, field_tys,
+                        vec![Self::jx_var("_c", json.clone())],
+                        estr, result_ty,
+                    )?
+                } else {
+                    let arr_ty = Ty::list(json.clone());
+                    let elems: Vec<TExpr> = (0..field_tys.len()).map(|i| {
+                        Self::jx_call(
+                            "jNth",
+                            vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
+                            json.clone(),
+                        )
+                    }).collect();
+                    let chain = self.fromjson_positional_chain(&con.name, field_tys, elems, estr, result_ty)?;
+                    let arrn = Self::jx_call(
+                        "jExpectArrN",
+                        vec![
+                            Self::jx_str(&con.name),
+                            Self::jx_int(field_tys.len() as i64),
+                            Self::jx_var("_c", json.clone()),
+                        ],
+                        Self::estr_ty(&arr_ty),
+                    );
+                    Self::jx_bind_either(arrn, "_xs", arr_ty, chain, estr.clone())
+                };
+                Ok(Self::jx_bind_either(contents, "_c", json, inner, estr.clone()))
+            }
+        }
+    }
+
+    /// Generate `fromJSON` for a data type: `fromJSON_T :: Json -> Either String T`
+    /// built from the JSON module's decoder combinators, plus the FromJSON
+    /// instance registration.
+    ///
+    /// Decoding convention (mirrors aeson's defaultOptions where mata-ll can):
+    /// - a single-constructor record decodes from an object keyed by the
+    ///   Haskell field names: `data P = P { x :: Integer }` ⇐ `{"x":1}`
+    /// - a single positional constructor decodes from its argument directly
+    ///   (one field) or from an array of its arguments (several)
+    /// - a multi-constructor type (or a lone nullary constructor) is tagged:
+    ///   the value is either the bare constructor name as a string (nullary
+    ///   constructors only) or an object with "tag":"Con" — record fields
+    ///   inline in the same object, positional arguments under "contents"
+    /// - a `Maybe t` record field decodes a missing key, null, or the value
+    /// - unknown object keys are ignored (as aeson does)
+    ///
+    /// note: aeson encodes only ALL-nullary sum types as bare strings; this
+    /// decoder accepts both the bare string and the tagged-object form for any
+    /// nullary constructor, since a reasonable encoder may emit either.
+    /// note: `Maybe (Maybe a)` cannot round-trip under the null-is-Nothing
+    /// convention — `Just Nothing` has no JSON form distinct from `Nothing`
+    /// (the same collapse the "Just injective" codegen note documents).
+    fn derive_fromjson(
+        &mut self,
+        type_name: &str,
+        type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Vec<TFunction> {
+        let reject = |checker: &mut Self, reason: String, note: &str| {
+            checker.push_error_ctx(
+                TypeErrorKind::Other(format!(
+                    "Cannot derive 'FromJSON' for '{}': {}\nnote: {}",
+                    type_name, reason, note,
+                )),
+                format!("data {}", type_name),
+            );
+        };
+
+        // The class and every combinator the generated decoder calls live in
+        // the JSON library module; without the import nothing can resolve.
+        if !self.classes.contains_key("FromJSON") || self.env.lookup("jContext").is_none() {
+            reject(self,
+                "the FromJSON class and its decoder combinators are not in scope".to_string(),
+                "the FromJSON class and the codec combinators the derived decoder calls (jContext, jFieldWith, …) live in the JSON library module; add `import JSON` at the top of this file.");
+            return vec![];
+        }
+
+        if !type_vars.is_empty() {
+            reject(self,
+                format!("'{}' has type parameters", type_name),
+                "a derived decoder must pick one concrete decoder per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `FromJSON a` constraint on the instance; mata-ll instances cannot carry constraints, so derive FromJSON for concrete types only (wrap each instantiation you need in its own data type).");
+            return vec![];
+        }
+
+        for con in constructors {
+            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
+                reject(self,
+                    format!("constructor '{}' is a GADT / existential constructor", con.name),
+                    "a decoder must name every field's type to choose how to decode it, which GADT and existential constructors do not allow.");
+                return vec![];
+            }
+        }
+
+        // Tagged decoding applies to multi-constructor types, and to a lone
+        // nullary constructor (no fields to decode — the constructor NAME is
+        // the payload).
+        let single_nullary = constructors.len() == 1 && match &constructors[0].fields {
+            ConstructorFields::Positional(fs) => fs.is_empty(),
+            ConstructorFields::Named(fs) => fs.is_empty(),
+        };
+        let tagged = constructors.len() > 1 || single_nullary;
+
+        if tagged {
+            for con in constructors {
+                if let ConstructorFields::Named(fields) = &con.fields
+                    && fields.iter().any(|f| f.name == "tag") {
+                        reject(self,
+                            format!("field 'tag' of constructor '{}' collides with the \"tag\" key the decoder uses to tell constructors apart", con.name),
+                            "a multi-constructor type decodes from {\"tag\":\"Con\", …} with record fields inline in the same object; rename the field.");
+                        return vec![];
+                    }
+            }
+        }
+
+        let result_ty = Ty::Con(type_name.to_string());
+        let estr = Self::estr_ty(&result_ty);
+        let json = Self::json_ty();
+        let str_ty = Ty::Con("String".into());
+        let bool_ty = Ty::Con("Bool".into());
+        let mangled = format!("fromJSON_{}", type_name);
+
+        // Constructor field types as registered in pass 1.
+        let con_field_tys: Vec<Vec<Ty>> = constructors.iter().map(|con| {
+            self.constructors.get(&con.name)
+                .map(|ci| ci.field_types.clone())
+                .unwrap_or_default()
+        }).collect();
+
+        let body_inner: TExpr = if tagged {
+            // "'A', 'B' or 'C'" for the unknown-tag message.
+            let names: Vec<String> = constructors.iter().map(|c| format!("'{}'", c.name)).collect();
+            let expected = match names.len() {
+                1 => names[0].clone(),
+                _ => format!("{} or {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
+            };
+
+            // Per-constructor decode bodies for the tagged-object form; report
+            // every unsupported field before bailing out.
+            let mut con_bodies: Vec<TExpr> = Vec::new();
+            let mut failed = false;
+            for (con, ftys) in constructors.iter().zip(&con_field_tys) {
+                match self.fromjson_tagged_con_body(con, ftys, &estr, &result_ty) {
+                    Ok(e) => con_bodies.push(e),
+                    Err((reason, note)) => {
+                        reject(self, reason, &note);
+                        failed = true;
+                    }
+                }
+            }
+            if failed { return vec![]; }
+
+            // Bare-string form: only a nullary constructor may be a bare string.
+            let mut str_chain = Self::jx_call(
+                "jBadTag",
+                vec![Self::jx_str(&expected), Self::jx_var("_s", str_ty.clone())],
+                estr.clone(),
+            );
+            for (con, ftys) in constructors.iter().zip(&con_field_tys).rev() {
+                let then_branch = if ftys.is_empty() {
+                    Self::jx_ok_con(&con.name, &[], &result_ty, &estr)
+                } else {
+                    Self::jx_call("jTagNeedsObject", vec![Self::jx_str(&con.name)], estr.clone())
+                };
+                str_chain = TExpr::new(TExprKind::If {
+                    cond: Box::new(TExpr::new(TExprKind::InfixApp {
+                        op: "==".into(),
+                        lhs: Box::new(Self::jx_var("_s", str_ty.clone())),
+                        rhs: Box::new(Self::jx_str(&con.name)),
+                    }, bool_ty.clone())),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(str_chain),
+                }, estr.clone());
+            }
+
+            // Tagged-object form: dispatch on the decoded "tag" field.
+            let mut tag_chain = Self::jx_call(
+                "jBadTag",
+                vec![Self::jx_str(&expected), Self::jx_var("_tag", str_ty.clone())],
+                estr.clone(),
+            );
+            for (con, con_body) in constructors.iter().zip(con_bodies).rev() {
+                tag_chain = TExpr::new(TExprKind::If {
+                    cond: Box::new(TExpr::new(TExprKind::InfixApp {
+                        op: "==".into(),
+                        lhs: Box::new(Self::jx_var("_tag", str_ty.clone())),
+                        rhs: Box::new(Self::jx_str(&con.name)),
+                    }, bool_ty.clone())),
+                    then_branch: Box::new(con_body),
+                    else_branch: Box::new(tag_chain),
+                }, estr.clone());
+            }
+            let obj_body = Self::jx_bind_either(
+                Self::jx_call(
+                    "jFieldWith",
+                    vec![
+                        Self::jx_var("fromJSONString", Ty::arrow(json.clone(), Self::estr_ty(&str_ty))),
+                        Self::jx_str("tag"),
+                        Self::jx_var("_j", json.clone()),
+                    ],
+                    Self::estr_ty(&str_ty),
+                ),
+                "_tag", str_ty.clone(), tag_chain, estr.clone(),
+            );
+
+            TExpr::new(TExprKind::Case {
+                scrutinee: Box::new(Self::jx_var("_j", json.clone())),
+                branches: vec![
+                    TCaseBranch {
+                        pattern: TPattern::Constructor {
+                            name: "JStr".into(),
+                            args: vec![TPattern::Var("_s".into(), str_ty.clone())],
+                        },
+                        guards: vec![],
+                        body: str_chain,
+                    },
+                    TCaseBranch {
+                        pattern: TPattern::Constructor {
+                            name: "JObj".into(),
+                            args: vec![TPattern::Wildcard],
+                        },
+                        guards: vec![],
+                        body: obj_body,
+                    },
+                    TCaseBranch {
+                        pattern: TPattern::Wildcard,
+                        guards: vec![],
+                        body: Self::jx_call(
+                            "jExpectTagged",
+                            vec![Self::jx_var("_j", json.clone())],
+                            estr.clone(),
+                        ),
+                    },
+                ],
+            }, estr.clone())
+        } else {
+            // Single non-nullary constructor: untagged.
+            let con = &constructors[0];
+            let ftys = &con_field_tys[0];
+            let built = match &con.fields {
+                ConstructorFields::Named(fields) if !fields.is_empty() => {
+                    self.fromjson_named_body(&con.name, fields, ftys, &estr, &result_ty)
+                }
+                _ if ftys.len() == 1 => {
+                    self.fromjson_positional_chain(
+                        &con.name, ftys,
+                        vec![Self::jx_var("_j", json.clone())],
+                        &estr, &result_ty,
+                    )
+                }
+                _ => {
+                    let arr_ty = Ty::list(json.clone());
+                    let elems: Vec<TExpr> = (0..ftys.len()).map(|i| {
+                        Self::jx_call(
+                            "jNth",
+                            vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
+                            json.clone(),
+                        )
+                    }).collect();
+                    self.fromjson_positional_chain(&con.name, ftys, elems, &estr, &result_ty)
+                        .map(|chain| {
+                            let arrn = Self::jx_call(
+                                "jExpectArrN",
+                                vec![
+                                    Self::jx_str(&con.name),
+                                    Self::jx_int(ftys.len() as i64),
+                                    Self::jx_var("_j", json.clone()),
+                                ],
+                                Self::estr_ty(&arr_ty),
+                            );
+                            Self::jx_bind_either(arrn, "_xs", arr_ty, chain, estr.clone())
+                        })
+                }
+            };
+            match built {
+                Ok(e) => e,
+                Err((reason, note)) => {
+                    reject(self, reason, &note);
+                    return vec![];
+                }
+            }
+        };
+
+        // Tag every failure with the type being decoded.
+        let body = Self::jx_call(
+            "jContext",
+            vec![Self::jx_str(type_name), body_inner],
+            estr.clone(),
+        );
+
+        // Register the instance
+        let mut method_fns = HashMap::new();
+        method_fns.insert("fromJSON".to_string(), mangled.clone());
+        self.instances.insert(
+            ("FromJSON".to_string(), type_name.to_string()),
+            InstanceInfo {
+                class_name: "FromJSON".to_string(),
+                target_type: result_ty.clone(),
+                method_fns,
+            },
+        );
+
+        vec![TFunction {
+            name: mangled,
+            ty: Ty::arrow(json, estr),
+            clauses: vec![TClause {
+                patterns: vec![TPattern::Var("_j".into(), Self::json_ty())],
+                guards: vec![],
+                body,
+                where_binds: vec![],
+            }],
             specialized: false,
             dict_params: vec![],
         }]

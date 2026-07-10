@@ -1321,6 +1321,8 @@ impl CodeGen {
             TPattern::Wildcard => {}
             TPattern::LitPat(lit) => {
                 let s = match lit {
+                    // See gen_literal: i64::MIN has no decimal Lua spelling.
+                    TLiteral::Integer(i64::MIN) => "0x8000000000000000".to_string(),
                     TLiteral::Integer(n) => format!("{}", n),
                     TLiteral::Number(n) => format!("{}", n),
                     TLiteral::Str(s) => format!("\"{}\"", s),
@@ -3166,6 +3168,10 @@ impl CodeGen {
 
     fn gen_literal(&mut self, lit: &TLiteral) {
         match lit {
+            // i64::MIN cannot be written in decimal: Lua parses the positive
+            // magnitude first (overflowing to float) and negates the float.
+            // The hex spelling is defined to wrap to the integer subtype.
+            TLiteral::Integer(i64::MIN) => self.emit("0x8000000000000000"),
             TLiteral::Integer(n) => self.emit(&format!("{}", n)),
             TLiteral::Number(n) => self.emit(&format!("{}", n)),
             TLiteral::Str(s) => {

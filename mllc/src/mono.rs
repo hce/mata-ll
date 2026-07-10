@@ -49,6 +49,13 @@ pub struct Monomorphizer {
     return_type_methods: HashSet<String>,
     /// Instance resolution: (method_name, type_string) -> mangled function name
     instance_methods: HashMap<(String, String), String>,
+    /// Instance resolution for PARAMETERIZED instances by head constructor:
+    /// (method_name, head_name) -> mangled name. `instance C [a]` registers
+    /// under the type string "[a]", which no string-prefix probe can relate to
+    /// a concrete "[Integer]"; this map keys it structurally under "[]".
+    /// Only instances whose target type still contains variables are entered,
+    /// so a concrete `instance C (T Integer)` never shadows other T instances.
+    instance_methods_by_head: HashMap<(String, String), String>,
     /// Errors collected during monomorphization
     pub errors: Vec<String>,
     /// Functions that use dictionary-passing instead of monomorphization
@@ -98,13 +105,32 @@ impl Monomorphizer {
         // Collect class method names and instance resolutions from the checker
         let mut class_methods = HashSet::new();
         let mut instance_methods = HashMap::new();
+        let mut instance_methods_by_head = HashMap::new();
 
-        for ((_class_name, _ty_str), inst) in checker.get_instances() {
+        for ((class_name, _ty_str), inst) in checker.get_instances() {
+            // The built-in `Semigroup [a]` instance is deliberately NOT
+            // dispatchable at concrete list types: mata-ll's design is that
+            // lists are concatenated with ++ and `<>` is String-only (the
+            // no_instance_msg note documents the divergence from GHC). The
+            // instance exists only so polymorphic Semigroup-constrained
+            // bodies keep a resolution — keep it out of the head map.
+            let semigroup_list = class_name == "Semigroup"
+                && matches!(inst.target_type, Ty::List(_));
+            let parameterized_head = if semigroup_list
+                || inst.target_type.free_vars().is_empty() {
+                None
+            } else {
+                Self::extract_type_constructor(&inst.target_type)
+            };
             for (method_name, mangled) in &inst.method_fns {
                 class_methods.insert(method_name.clone());
                 // Key: (method_name, concrete_type_string)
                 let ty_str = format!("{}", inst.target_type);
                 instance_methods.insert((method_name.clone(), ty_str), mangled.clone());
+                if let Some(head) = &parameterized_head {
+                    instance_methods_by_head
+                        .insert((method_name.clone(), head.clone()), mangled.clone());
+                }
             }
         }
 
@@ -148,6 +174,7 @@ impl Monomorphizer {
             class_methods,
             return_type_methods,
             instance_methods,
+            instance_methods_by_head,
             errors: Vec::new(),
             dict_passing_fns: HashSet::new(),
             gen_stack: Vec::new(),
@@ -266,7 +293,41 @@ impl Monomorphizer {
                 return Some(mangled.clone());
             }
         }
-        None
+        // Structural head lookup: catches parameterized instances whose type
+        // string a prefix probe cannot relate to the head (e.g. `instance C [a]`
+        // is keyed "[a]", but a concrete list is "[Integer]").
+        self.instance_methods_by_head.get(&(method.to_string(), base.to_string())).cloned()
+    }
+
+    /// The concrete type the CLASS VARIABLE of `method` is bound to at a use
+    /// site, found by structurally matching the method's declared type against
+    /// the type it is used at. E.g. `fromJSON :: Json -> Either String a` used
+    /// at `Json -> Either String Person` binds a := Person.
+    fn class_var_binding(&self, method: &str, use_ty: &Ty) -> Option<Ty> {
+        let class_name = self.method_to_class.get(method)?;
+        let info = self.classes.get(class_name)?;
+        let (_, decl_ty) = info.methods.iter().find(|(n, _)| n == method)?;
+        let mut bindings: HashMap<String, Ty> = HashMap::new();
+        Self::collect_subst_by_name(decl_ty, use_ty, &mut bindings);
+        bindings.get(&info.type_var).cloned()
+    }
+
+    /// Resolve a class method by what its CLASS VARIABLE is bound to at this
+    /// use site (see `class_var_binding`). This is what makes return-type
+    /// dispatch work when the class variable sits NESTED inside the return
+    /// type — the older heuristics compare the whole return type ("Either
+    /// String Person") or its head ("Either") against the instance table and
+    /// can never see the `a` inside.
+    fn resolve_by_class_var(&self, method: &str, use_ty: &Ty) -> Option<String> {
+        let bound = self.class_var_binding(method, use_ty)?;
+        if bound.free_vars().is_empty() {
+            let key = (method.to_string(), format!("{}", bound));
+            if let Some(mangled) = self.instance_methods.get(&key) {
+                return Some(mangled.clone());
+            }
+        }
+        // Parameterized instance on the bound type's head constructor.
+        self.resolve_parameterized_instance(method, &bound)
     }
 
     /// Extract a type constructor from anywhere in a type.
@@ -543,6 +604,12 @@ impl Monomorphizer {
                     // For methods where the class variable is in the return position,
                     // resolve using the return type
                     if self.return_type_methods.contains(name) {
+                        // First: bind the class variable structurally. Handles a
+                        // class variable nested in the return type (fromJSON ::
+                        // Json -> Either String a used at … Either String Person).
+                        if let Some(mangled) = self.resolve_by_class_var(name, &ty) {
+                            return TExpr { kind: TExprKind::Var(mangled), ty };
+                        }
                         // For nullary methods (minBound, maxBound), the type IS the result
                         let ret_ty = self.return_type(&ty).unwrap_or_else(|| ty.clone());
                         let ret_str = format!("{}", ret_ty);
@@ -584,9 +651,17 @@ impl Monomorphizer {
                             return TExpr { kind: TExprKind::Var(mangled), ty };
                         }
                     }
-                    // No resolution found for a class method on a concrete type
+                    // No resolution found for a class method on a concrete type.
+                    // For a return-type-dispatched method the first argument is
+                    // not the type that lacks the instance — name the class
+                    // variable's binding (e.g. Person, not Json) when we can.
                     if let Some(arg_ty) = self.first_arg_type(&ty) {
-                        self.errors.push(no_instance_msg(&name, &arg_ty));
+                        let shown = if self.return_type_methods.contains(name) {
+                            self.class_var_binding(name, &ty).unwrap_or(arg_ty)
+                        } else {
+                            arg_ty
+                        };
+                        self.errors.push(no_instance_msg(&name, &shown));
                     }
                 }
                 // 2. Check for polymorphic function specialization
@@ -667,10 +742,15 @@ impl Monomorphizer {
                             // For methods where the class variable is in the return
                             // position (Read, toEnum), resolve against the result type
                             if self.return_type_methods.contains(fname) {
+                                // First: bind the class variable structurally from
+                                // the method's full type at this use (handles the
+                                // class variable nested in the return type, e.g.
+                                // fromJSON :: Json -> Either String a).
+                                resolved = self.resolve_by_class_var(fname, &func.ty);
                                 // For methods where the class variable is in the return
                                 // position (pure, return, toEnum), resolve using result
                                 // type — the arg type is the wrapped value, not the container.
-                                if !self.is_polymorphic(&ty) {
+                                if resolved.is_none() && !self.is_polymorphic(&ty) {
                                     let ret_str = format!("{}", ty);
                                     let ret_key = (fname.clone(), ret_str);
                                     resolved = self.instance_methods.get(&ret_key).cloned();

@@ -25,10 +25,7 @@ taggedFromJSON j = jContext "Tagged" (jBind (jFieldWith fromJSONString "name" j)
 
 -- A user-defined type with hand-written ToJSON/FromJSON instances against
 -- the imported classes (allowed because PtN is local to this module).
--- Instance bodies are self-contained: mata-ll type-checks instance methods
--- before it registers top-level function signatures, so an instance method
--- cannot call the codec combinators yet — a compiler limitation Phase 2
--- lifts before deriving can target the class.
+-- This instance body is deliberately self-contained (no combinators).
 data PtN = PtN Number Number
     deriving (Eq)
 
@@ -44,6 +41,16 @@ instance FromJSON PtN where
         go (("y", JNum v) : rest) mx _ = go rest mx (Just v)
         go (_ : rest) mx my = go rest mx my
     fromJSON _ = Left "PtN: expected an object"
+
+-- A hand-written FromJSON instance whose method body calls the top-level
+-- codec combinators. Top-level signatures are pre-registered before instance
+-- bodies are type-checked (they used to be checked too early to see them),
+-- so this is the natural way to write a manual instance.
+data PtC = PtC Integer Integer
+    deriving (Eq)
+
+instance FromJSON PtC where
+    fromJSON j = jContext "PtC" (jBind (jFieldWith fromJSONInteger "x" j) (\x -> jBind (jFieldWith fromJSONInteger "y" j) (\y -> Right (PtC x y))))
 
 -- Helpers -------------------------------------------------------------
 
@@ -122,6 +129,14 @@ leftPoint (Right _) = False
 rightTaggedIs :: Either String Tagged -> Tagged -> Bool
 rightTaggedIs (Right a) b = a == b
 rightTaggedIs (Left _) _ = False
+
+rightPtCIs :: Either String PtC -> PtC -> Bool
+rightPtCIs (Right a) b = a == b
+rightPtCIs (Left _) _ = False
+
+leftPtC :: Either String PtC -> Bool
+leftPtC (Left _) = True
+leftPtC (Right _) = False
 
 -- parse . encode round-trip
 rt :: Json -> Bool
@@ -261,6 +276,17 @@ main = do
     assert (leftInt (fromJSONInteger (mustParse "\"42\""))) "fromJSONInteger rejects string"
     assert (leftInt (fromJSONInteger (mustParse "1e300"))) "fromJSONInteger rejects out of range"
     assert (leftInt (fromJSONInteger JNull)) "fromJSONInteger rejects null"
+    -- int64 boundary exactness: the full range decodes with integer
+    -- precision, and one-past-the-end is rejected even though Lua's float
+    -- conversion rounds it onto the boundary.
+    assert (rightIntIs (fromJSONInteger (mustParse "9223372036854775807")) 9223372036854775807) "fromJSONInteger int64 max"
+    assert (rightIntIs (fromJSONInteger (mustParse "-9223372036854775808")) (0 - 9223372036854775807 - 1)) "fromJSONInteger int64 min exact"
+    assert (leftInt (fromJSONInteger (mustParse "9223372036854775808"))) "fromJSONInteger rejects max+1"
+    assert (leftInt (fromJSONInteger (mustParse "-9223372036854775809"))) "fromJSONInteger rejects min-1"
+    -- float syntax at the exact minimum is ambiguous after rounding and is
+    -- rejected (see the numToIntegerFloat note; aeson accepts it because it
+    -- parses numbers exactly).
+    assert (leftInt (fromJSONInteger (mustParse "-9223372036854775808.0"))) "fromJSONInteger rejects min in float syntax"
     assert (rightNumIs (fromJSONNumber (mustParse "3.5")) 3.5) "fromJSONNumber"
     assert (leftNum (fromJSONNumber (mustParse "true"))) "fromJSONNumber rejects bool"
     assert (rightStrIs (fromJSONString (mustParse "\"hi\"")) "hi") "fromJSONString"
@@ -322,3 +348,13 @@ main = do
     -- Maybe field through a full codec round-trip
     assert (rightTaggedIs (decodeJSONWith taggedFromJSON (encodeJSON (taggedToJSON (Tagged "a" (Just 5))))) (Tagged "a" (Just 5))) "Tagged rt just"
     assert (rightTaggedIs (decodeJSONWith taggedFromJSON (encodeJSON (taggedToJSON (Tagged "b" Nothing)))) (Tagged "b" Nothing)) "Tagged rt nothing"
+
+    -- Manual instance written over the combinators, dispatched three ways:
+    -- decodeJSON's constraint, fromJSON passed as a value, fromJSON applied.
+    assert (rightPtCIs (decodeJSON "{\"x\":2,\"y\":3}") (PtC 2 3)) "combinator instance via decodeJSON"
+    assert (rightPtCIs (decodeJSONWith fromJSON "{\"x\":4,\"y\":5}") (PtC 4 5)) "combinator instance as decoder value"
+    assert (rightPtCIs (fromJSON (mustParse "{\"x\":6,\"y\":7}")) (PtC 6 7)) "combinator instance applied"
+    case decodeJSON "{\"x\":1}" :: Either String PtC of
+        Left e -> assert (e == "while decoding PtC: the required field 'y' is missing") "combinator instance error text"
+        Right _ -> assert False "combinator instance error text"
+    assert (leftPtC (decodeJSON "{\"x\":1,\"y\":2.5}")) "combinator instance integrality"
