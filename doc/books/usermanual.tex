@@ -473,7 +473,10 @@ data Tree a = Leaf a | Branch (Tree a) (Tree a)
 \end{lstlisting}
 
 Supported: \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
-\texttt{Bounded}, \texttt{Functor}.
+\texttt{Bounded}, \texttt{Functor}, and \texttt{LuaDict}.
+\texttt{LuaDict} is special: it generates no methods but changes the
+record's runtime representation for Lua interop --- see
+Section~\ref{sec:luadict}.
 
 \subsection{Built-in Classes}
 
@@ -731,6 +734,116 @@ local fibs = mll.fibonacci(10)
 
 Exported functions automatically convert MLL values to Lua values
 (forces thunks, converts cons-lists to arrays).
+
+\subsection{LuaDict Records}
+\label{sec:luadict}
+
+Many Lua APIs take or return \emph{dictionaries} --- tables keyed by
+name, such as \texttt{\{width = 80, height = 25\}}.  Deriving
+\texttt{LuaDict} on a record makes its runtime representation exactly
+such a table.  This is not a marshalling layer that converts at the FFI
+boundary: the record value \emph{is} a name-keyed Lua table from the
+moment it is constructed, so it can be handed to (or received from) Lua
+functions with no conversion cost.
+
+\begin{lstlisting}
+data Config = Config { width  :: Integer
+                     , height :: Integer
+                     , title  :: String
+                     } deriving (Show, Eq, LuaDict)
+
+-- a Lua function expecting a dictionary
+setup :: Config -> LuaIO "display.setup" ()
+
+main :: IO ()
+main = do
+    let c = Config { width = 80, height = 25, title = "hi" }
+    -- at runtime, c is {width = 80, height = 25, title = "hi"}
+    setup c
+\end{lstlisting}
+
+Without \texttt{LuaDict}, records are stored as positional Lua arrays;
+with it, every field becomes a named key.  On the MATA-LL side nothing
+changes: accessor functions, record construction (named or positional),
+record update, pattern matching, and derived \texttt{Show}/\texttt{Eq}
+all work as usual.  The direction is symmetric --- an FFI function
+declared to \emph{return} a \texttt{LuaDict} type accepts a Lua table
+with the corresponding keys:
+
+\begin{lstlisting}
+currentConfig :: LuaIO "display.get_config" Config
+\end{lstlisting}
+
+\texttt{LuaDict} places requirements on the data type, because a
+name-keyed table has no constructor tag and needs field names for its
+keys.  The type must have:
+
+\begin{itemize}[nosep]
+  \item exactly one constructor,
+  \item record syntax (named fields, not positional),
+  \item at least one field,
+  \item no GADT or existential constructor.
+\end{itemize}
+
+Violations are compile errors with an explanation of why.
+
+\subsubsection{Renaming Keys with \texttt{as}}
+
+By default the Lua key is the field name.  Since record accessors share
+a single global function namespace (as in Haskell), fields are
+conventionally prefixed (\texttt{cfgWidth}, \texttt{cfgHeight}) --- but
+a Lua API will expect \texttt{width}, not \texttt{cfgWidth}.  The
+\texttt{as} annotation renames the Lua table key:
+
+\begin{lstlisting}
+data Config = Config { cfgWidth  as "width"  :: Integer
+                     , cfgHeight as "height" :: Integer
+                     , cfgTitle  as "title"  :: String
+                     } deriving (Show, Eq, LuaDict)
+
+area :: Config -> Integer
+area c = cfgWidth c * cfgHeight c   -- Haskell name, unchanged
+
+resize :: Config -> Integer -> Config
+resize c w = c { cfgWidth = w }     -- updates the "width" key
+\end{lstlisting}
+
+\texttt{as "key"} changes \emph{only} the key in the runtime Lua table.
+In MATA-LL source the field keeps its declared name everywhere:
+accessors, record construction, record update, and pattern matching all
+use \texttt{cfgWidth}.  The rename applies in both directions across
+the FFI boundary --- tables you pass to Lua carry the renamed keys, and
+tables returned from Lua are read by the renamed keys.
+
+Besides dropping prefixes, \texttt{as} is useful for
+\texttt{snake\_case} keys expected by Lua APIs, and for keys that are
+Lua reserved words:
+
+\begin{lstlisting}
+data Creds = Creds { credsUser as "user_name" :: String
+                   , credsNote as "function"  :: String
+                   } deriving (LuaDict)
+\end{lstlisting}
+
+Reserved-word keys are emitted with bracket syntax
+(\texttt{\{["function"] = ...\}}), so any string is a valid key.
+
+The compiler enforces two rules on renames:
+
+\begin{itemize}[nosep]
+  \item Effective keys must be unique and non-empty.  Each field
+        becomes one key of a single table, so two fields mapping to the
+        same key (or a key of \texttt{""}) are rejected.
+  \item \texttt{as} requires \texttt{deriving (LuaDict)}.  Without it
+        the record is a positional array, there is no key to rename,
+        and the annotation is rejected rather than silently ignored.
+\end{itemize}
+
+\begin{note}
+\texttt{as} field renaming is a MATA-LL extension with no GHC
+equivalent.  In GHC, \texttt{as} is only a keyword in import lists;
+here it is additionally recognized inside record declarations.
+\end{note}
 
 %======================================================================
 \section{Advanced Types}
