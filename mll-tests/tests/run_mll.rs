@@ -581,6 +581,150 @@ main = do
 }
 
 #[test]
+fn type_error_in_where_value_binding_rejected() {
+    // A type error inside a `where` value binding must fail compilation with a
+    // diagnostic naming the binding. Regression: check_clause used to swallow
+    // the inference error and substitute a placeholder term, so the program
+    // "compiled" and misbehaved at runtime instead of being rejected.
+    let source = r#"
+main :: IO ()
+main = putStrLn x
+  where x = 1 + "hello"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Type error"),
+                "Expected a type error, got: {}", msg);
+            assert!(msg.contains("where-binding 'x'"),
+                "Expected the error to name the where-binding, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for a type error in a where value binding"),
+    }
+}
+
+#[test]
+fn where_binding_definition_use_mismatch_rejected() {
+    // The binding's own body is fine (`x = 5`), but the clause body uses it as
+    // a String. Regression: the definition-vs-use unification failure was
+    // silently discarded, so this compiled and printed "5".
+    let source = r#"
+main :: IO ()
+main = putStrLn x
+  where x = 5
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify") && msg.contains("where-binding 'x'"),
+                "Expected a mismatch error naming the where-binding, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for a where binding defined as Integer but used as String"),
+    }
+}
+
+#[test]
+fn type_error_in_where_function_rejected() {
+    // Same for a where-bound local function: the conflict between its body
+    // and how the clause uses it must be reported, not swallowed into a
+    // runtime crash ("attempt to add a 'number' with a 'string'").
+    let source = r#"
+main :: IO ()
+main = putStrLn (go 3)
+  where go n = n + "oops"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("where-binding 'go'"),
+                "Expected the error to name the where-bound function, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for a type error in a where-bound function"),
+    }
+}
+
+#[test]
+fn where_function_pattern_use_mismatch_rejected() {
+    // The where-function's pattern gives it type `Maybe a -> a`, but the clause
+    // body applies it to a Bool. Regression: the pattern/use unification
+    // failure was discarded, producing a Lua indexing crash at runtime.
+    let source = r#"
+main :: IO ()
+main = putStrLn (f True)
+  where f (Just x) = x
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("where-binding 'f'"),
+                "Expected the error to name the where-bound function, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for a where function applied at the wrong type"),
+    }
+}
+
+#[test]
+fn multiple_where_binding_errors_all_reported() {
+    // Error recovery must keep going: two independently broken where bindings
+    // should both be diagnosed in a single compile.
+    let source = r#"
+main :: IO ()
+main = putStrLn (x <> y)
+  where x = 1 + "a"
+        y = notInScope 3
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("where-binding 'x'"),
+                "Expected an error for 'x', got: {}", msg);
+            assert!(msg.contains("where-binding 'y'") && msg.contains("notInScope"),
+                "Expected an error for 'y' too, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail with errors for both where bindings"),
+    }
+}
+
+#[test]
+fn valid_where_bindings_still_compile_and_run() {
+    // The error paths above must not break correct where clauses: chained
+    // value bindings referencing each other, a multi-clause recursive local
+    // function with pattern parameters, and bindings used from guards.
+    let source = r#"
+classify :: Integer -> String
+classify n
+  | n < low = "small"
+  | n > high = "big"
+  | otherwise = "mid " <> show n
+  where low = 10
+        high = 100
+
+message :: String
+message = greet <> "!"
+  where greet = "hello " <> name
+        name = "world"
+
+render :: [Integer] -> String
+render ys = fmt ys
+  where fmt [] = "empty"
+        fmt (x:xs) = show x <> "," <> fmt xs
+
+main :: IO ()
+main = do
+  putStrLn message
+  putStrLn (render [1, 2, 3])
+  putStrLn (classify 5)
+  putStrLn (classify 50)
+  putStrLn (classify 500)
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("valid where bindings must still compile").lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("valid_where").exec()
+        .expect("valid where bindings must still run");
+}
+
+#[test]
 fn show_of_list_and_maybe_render_distinctly() {
     // With concrete element types, `show` is type-directed: an empty list must
     // render "[]" and `Nothing` must render "Nothing" — they must NOT both
@@ -2084,8 +2228,14 @@ main = pure ()
 
 #[test]
 fn ffi_export_string_lists() {
-    // String lists: Lua string arrays → MLL [String] and back
+    // String lists: Lua string arrays → MLL [String] and back.
+    // (filterLong's where-binding originally used a nonexistent `unpack`; the
+    // typechecker used to swallow where-binding errors, so the broken —
+    // and never-called — function compiled anyway. It now uses a real
+    // string-length FFI declaration and is actually exercised.)
     let source = r#"
+strLen :: String -> LuaPure "string.len" Integer
+
 export joinWith :: String -> [String] -> String
 joinWith _ [] = ""
 joinWith _ [x] = x
@@ -2093,7 +2243,7 @@ joinWith sep (x:xs) = x <> sep <> joinWith sep xs
 
 export filterLong :: Integer -> [String] -> [String]
 filterLong n xs = filter (\s -> lengthS s > n) xs
-  where lengthS s = foldl (\acc c -> acc + 1) 0 (unpack s)
+  where lengthS s = strLen s
 
 main :: IO ()
 main = pure ()
@@ -2109,6 +2259,15 @@ main = pure ()
 
     let result: String = join.call((",", Vec::<String>::new())).unwrap();
     assert_eq!(result, "", "joinWith , []");
+
+    let filter_long: mlua::Function = module.get("filterLong").unwrap();
+    let result: Vec<String> = filter_long.call((3, vec!["hi", "hello", "hey", "world"])).unwrap();
+    assert_eq!(result, vec!["hello", "world"], "filterLong 3 keeps strings longer than 3");
+
+    // An empty MLL list is nil at the Lua boundary (same contract as Nothing):
+    // __mll_to_lua only builds an array from a non-empty cons chain.
+    let result: mlua::Value = filter_long.call((10, vec!["short", "tiny"])).unwrap();
+    assert!(result.is_nil(), "filterLong 10 filters everything out (empty list exports as nil)");
 }
 
 #[test]

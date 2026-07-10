@@ -3654,7 +3654,7 @@ impl Checker {
         })
     }
 
-    fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, _ctx: &str) -> Result<(TClause, Subst), TypeErrorKind> {
+    fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, ctx: &str) -> Result<(TClause, Subst), TypeErrorKind> {
         let mut local_env = self.env.clone();
         let mut remaining_ty = fun_ty.clone();
         let mut subst = Subst::empty();
@@ -3734,15 +3734,38 @@ impl Checker {
         for ld in &clause.where_binds {
             if ld.patterns.is_empty() {
                 // Simple value binding: where x = expr
-                let (texpr, inferred_ty, s) = self.infer_expr(&ld.body, &local_env).unwrap_or_else(|_| {
+                // On failure, record the error and continue with a placeholder:
+                // the error makes compilation fail before codegen, and carrying
+                // on lets one pass report errors in later bindings too.
+                let mut binding_errored = false;
+                let (texpr, inferred_ty, s) = self.infer_expr(&ld.body, &local_env).unwrap_or_else(|e| {
+                    self.push_error_span(
+                        e,
+                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        clause.span,
+                    );
+                    binding_errored = true;
                     (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
                 });
                 subst = subst.compose(&s);
-                // Unify with the pre-registered fresh type
-                if let Some(scheme) = local_env.lookup(&ld.name)
-                    && let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
-                        subst = subst.compose(&us);
+                // Unify with the pre-registered fresh type. That fresh type has
+                // absorbed how the clause body USES the binding, so a failure
+                // here means the binding's definition doesn't match its use —
+                // a real type error that must be reported, not dropped (unless
+                // the body already failed above, where a second message about
+                // the Unit placeholder would only be noise).
+                if let Some(scheme) = local_env.lookup(&ld.name) {
+                    match unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
+                        Ok(us) => subst = subst.compose(&us),
+                        Err(e) => if !binding_errored {
+                            self.push_error_span(
+                                e,
+                                format!("the where-binding '{}' ({})", ld.name, ctx),
+                                clause.span,
+                            );
+                        }
                     }
+                }
                 twhere.push(TLocalDef {
                     name: ld.name.clone(),
                     patterns: vec![],
@@ -3756,13 +3779,32 @@ impl Checker {
                 let mut where_subst = Subst::empty();
                 for pat in &ld.patterns {
                     let param_ty = self.fresh_var("_w");
-                    let (tp, ps) = self.check_pattern(pat, &param_ty, &mut fn_env)
-                        .unwrap_or((TPattern::Wildcard, Subst::empty()));
+                    // On failure, record the error and continue with a wildcard
+                    // placeholder: the error makes compilation fail before
+                    // codegen, and carrying on lets one pass report errors in
+                    // later patterns and bindings too.
+                    let (tp, ps) = self.check_pattern(pat, &param_ty, &mut fn_env).unwrap_or_else(|e| {
+                        self.push_error_span(
+                            e,
+                            format!("a pattern of the where-binding '{}' ({})", ld.name, ctx),
+                            clause.span,
+                        );
+                        (TPattern::Wildcard, Subst::empty())
+                    });
                     where_subst = where_subst.compose(&ps);
                     param_tys.push(param_ty.apply_subst(&where_subst));
                     tpatterns.push(tp);
                 }
-                let (texpr, body_ty, bs) = self.infer_expr(&ld.body, &fn_env).unwrap_or_else(|_| {
+                // Same recovery as the value-binding case above: record, then
+                // continue with a placeholder that can never reach codegen.
+                let mut binding_errored = false;
+                let (texpr, body_ty, bs) = self.infer_expr(&ld.body, &fn_env).unwrap_or_else(|e| {
+                    self.push_error_span(
+                        e,
+                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        clause.span,
+                    );
+                    binding_errored = true;
                     (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
                 });
                 where_subst = where_subst.compose(&bs);
@@ -3777,10 +3819,23 @@ impl Checker {
                 for pty in param_tys.iter().rev() {
                     inferred_fn_ty = Ty::arrow(pty.apply_subst(&where_subst), inferred_fn_ty);
                 }
-                if let Some(scheme) = local_env.lookup(&ld.name)
-                    && let Ok(us) = unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
-                        subst = subst.compose(&us);
+                // As in the value-binding case: the pre-registered type carries
+                // how the clause body uses this local function, so a unification
+                // failure is a definition-vs-use type error and must be recorded
+                // (suppressed only when the body already failed, to avoid a
+                // second message about the placeholder).
+                if let Some(scheme) = local_env.lookup(&ld.name) {
+                    match unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
+                        Ok(us) => subst = subst.compose(&us),
+                        Err(e) => if !binding_errored {
+                            self.push_error_span(
+                                e,
+                                format!("the where-binding '{}' ({})", ld.name, ctx),
+                                clause.span,
+                            );
+                        }
                     }
+                }
                 twhere.push(TLocalDef {
                     name: ld.name.clone(),
                     patterns: tpatterns.into_iter().map(|p| p.apply_subst(&where_subst)).collect(),
