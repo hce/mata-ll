@@ -366,6 +366,7 @@ mll_lib_test!(error_forces_message, "error_forces_message.mll");
 mll_lib_test!(lib_lbit, "lib_lbit.mll");
 mll_lib_test!(lib_lmath, "lib_lmath.mll");
 mll_lib_test!(lib_json, "lib_json.mll");
+mll_lib_test!(json_codec, "json_codec.mll");
 mll_lib_test!(lib_regex, "lib_regex.mll");
 mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
