@@ -1403,7 +1403,11 @@ impl Checker {
 
     fn init_kinds(&mut self) {
         // Base types: kind Type
-        for name in &["Integer", "Number", "String", "Bool", "()", "ByteString"] {
+        // LuaUserData is the opaque builtin for Lua userdata values crossing
+        // the FFI boundary (e.g. lib/LIO.mll's FileHandle wraps one); it must
+        // be registered here like every other builtin so that references to
+        // it pass the unknown-type check.
+        for name in &["Integer", "Number", "String", "Bool", "()", "ByteString", "LuaUserData"] {
             self.kinds.insert(name.to_string(), Kind::Type);
         }
         // Type constructors: kind Type -> Type
@@ -1447,31 +1451,68 @@ impl Checker {
         self.kinds.get(name).cloned().unwrap_or(Kind::Type)
     }
 
-    /// Infer the kind of an AST type expression and report errors.
-    fn check_type_kind(&mut self, ty: &Type) -> Kind {
+    /// Check that a type-constructor reference names a type that exists.
+    ///
+    /// Everything a type reference can legitimately name is registered by the
+    /// time declaration types are validated: builtins (init_kinds), data types
+    /// and newtypes (pass 1), type aliases and type families (pass 2). A name
+    /// found in none of those tables cannot be given any meaning — if it were
+    /// let through it would flow downstream as an opaque type and surface as a
+    /// misleading error later (e.g. "no Show instance for 'Boolean'" when the
+    /// real problem is that 'Boolean' does not exist).
+    fn check_con_defined(&mut self, name: &str, ctx: &str) {
+        if self.kinds.contains_key(name)
+            || self.type_aliases.contains_key(name)
+            || self.type_families.contains_key(name)
+            // Type-level string literals (LuaImport names etc.) parse as
+            // `Con "\"…\""`; they are names, not type constructors.
+            || name.starts_with('"')
+        {
+            return;
+        }
+        if self.classes.contains_key(name) {
+            self.push_error_ctx(
+                TypeErrorKind::Other(format!(
+                    "'{}' is a typeclass, not a type: a class describes operations a type supports and cannot itself stand where a type is expected",
+                    name
+                )),
+                ctx.to_string(),
+            );
+        } else {
+            self.push_error_ctx(TypeErrorKind::UnknownType(name.to_string()), ctx.to_string());
+        }
+    }
+
+    /// Infer the kind of an AST type expression and report errors, including
+    /// references to type names that were never defined. `ctx` names the
+    /// declaration being checked for the error message.
+    fn check_type_kind(&mut self, ty: &Type, ctx: &str) -> Kind {
         match ty {
-            Type::Con(name) => self.kind_of(name),
+            Type::Con(name) => {
+                self.check_con_defined(name, ctx);
+                self.kind_of(name)
+            }
             Type::Var(_) => Kind::Type, // type variables are assumed to be Type
             Type::Arrow(a, b) => {
-                let ka = self.check_type_kind(a);
-                let kb = self.check_type_kind(b);
+                let ka = self.check_type_kind(a, ctx);
+                let kb = self.check_type_kind(b, ctx);
                 if ka != Kind::Type {
                     self.push_error_ctx(
                         TypeErrorKind::Other(format!("Kind error: argument of '->' has kind {}, expected Type", ka)),
-                        "type expression".to_string(),
+                        ctx.to_string(),
                     );
                 }
                 if kb != Kind::Type {
                     self.push_error_ctx(
                         TypeErrorKind::Other(format!("Kind error: result of '->' has kind {}, expected Type", kb)),
-                        "type expression".to_string(),
+                        ctx.to_string(),
                     );
                 }
                 Kind::Type
             }
             Type::App(f, a) => {
-                let kf = self.check_type_kind(f);
-                let _ka = self.check_type_kind(a);
+                let kf = self.check_type_kind(f, ctx);
+                let _ka = self.check_type_kind(a, ctx);
                 match kf {
                     Kind::Arrow(_, result) => *result,
                     Kind::Type => {
@@ -1484,7 +1525,7 @@ impl Checker {
                                         "Kind error: '{}' has kind Type and cannot be applied to an argument",
                                         name
                                     )),
-                                    "type expression".to_string(),
+                                    ctx.to_string(),
                                 );
                             }
                         Kind::Type
@@ -1492,10 +1533,31 @@ impl Checker {
                     _ => Kind::Type,
                 }
             }
-            Type::List(_) | Type::IO(_) | Type::Unit => Kind::Type,
-            Type::Paren(inner) => self.check_type_kind(inner),
-            Type::Forall { inner, .. } => self.check_type_kind(inner),
-            Type::Constrained { ty, .. } => self.check_type_kind(ty),
+            Type::List(a) | Type::IO(a) => {
+                self.check_type_kind(a, ctx);
+                Kind::Type
+            }
+            Type::Unit => Kind::Type,
+            Type::Tuple(elems) => {
+                for e in elems {
+                    self.check_type_kind(e, ctx);
+                }
+                Kind::Type
+            }
+            Type::ScopedLuaIO { inner, .. } => {
+                self.check_type_kind(inner, ctx);
+                Kind::Type
+            }
+            Type::LuaPure { result, .. }
+            | Type::LuaIO { result, .. }
+            | Type::LuaIterator { result, .. }
+            | Type::LuaTry { result, .. } => {
+                self.check_type_kind(result, ctx);
+                Kind::Type
+            }
+            Type::Paren(inner) => self.check_type_kind(inner, ctx),
+            Type::Forall { inner, .. } => self.check_type_kind(inner, ctx),
+            Type::Constrained { ty, .. } => self.check_type_kind(ty, ctx),
             Type::Promoted(name) => {
                 let key = format!("'{}", name);
                 if let Some(kind) = self.kinds.get(&key).cloned() {
@@ -1503,12 +1565,11 @@ impl Checker {
                 } else {
                     self.push_error_ctx(
                         TypeErrorKind::Other(format!("Unknown promoted constructor '{}'", name)),
-                        "type expression".to_string(),
+                        ctx.to_string(),
                     );
                     Kind::Type
                 }
             }
-            _ => Kind::Type,
         }
     }
 
@@ -1726,13 +1787,76 @@ impl Checker {
             }
         }
 
+        // Pass 2b: validate every type reference in declarations. All names a
+        // type reference can legitimately use are registered by now (builtins,
+        // data/newtypes from pass 1, aliases and families from pass 2), so a
+        // name in none of those tables is undefined and is rejected here.
+        // This must run before deriving (pass 4a) and instance checking so an
+        // undefined type is reported as "unknown type" instead of surfacing
+        // later as a misleading missing-instance error.
+        for decl in &module.decls {
+            match decl {
+                Decl::DataDef { name, constructors, .. } => {
+                    let ctx = format!("the definition of data type '{}'", name);
+                    for con in constructors {
+                        if let Some(gadt_ty) = &con.gadt_type {
+                            self.check_type_kind(gadt_ty, &ctx);
+                            continue;
+                        }
+                        match &con.fields {
+                            ConstructorFields::Positional(tys) => {
+                                for t in tys {
+                                    self.check_type_kind(t, &ctx);
+                                }
+                            }
+                            ConstructorFields::Named(fields) => {
+                                for field in fields {
+                                    self.check_type_kind(&field.ty, &ctx);
+                                }
+                            }
+                        }
+                    }
+                }
+                Decl::NewtypeDef { name, inner, .. } => {
+                    self.check_type_kind(inner, &format!("the definition of newtype '{}'", name));
+                }
+                Decl::TypeAlias { name, ty, .. } => {
+                    self.check_type_kind(ty, &format!("the definition of type alias '{}'", name));
+                }
+                Decl::ClassDecl { name, methods, .. } => {
+                    for method in methods {
+                        self.check_type_kind(
+                            &method.ty,
+                            &format!("the signature of method '{}' in class '{}'", method.name, name),
+                        );
+                    }
+                }
+                Decl::InstanceDecl { class_name, target_type, .. } => {
+                    self.check_type_kind(
+                        target_type,
+                        &format!("the instance declaration 'instance {} …'", class_name),
+                    );
+                }
+                Decl::TypeFamily { name, equations } => {
+                    let ctx = format!("the definition of type family '{}'", name);
+                    for eq in equations {
+                        for arg in &eq.args {
+                            self.check_type_kind(arg, &ctx);
+                        }
+                        self.check_type_kind(&eq.result, &ctx);
+                    }
+                }
+                _ => {}
+            }
+        }
+
         // Pass 3: collect type signatures and FFI info
         let mut sigs: HashMap<String, Ty> = HashMap::new();
         let mut ffi_info: HashMap<String, (String, FfiKind)> = HashMap::new();
         for decl in &module.decls {
             if let Decl::TypeSig { name, ty } = decl {
-                // Kind-check the type signature
-                self.check_type_kind(ty);
+                // Kind-check the type signature (also rejects unknown type names)
+                self.check_type_kind(ty, &format!("the type signature for '{}'", name));
                 // Extract FFI info before reducing the type
                 if let Some(info) = extract_ffi_info(ty) {
                     ffi_info.insert(name.clone(), info);

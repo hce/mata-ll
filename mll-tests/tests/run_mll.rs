@@ -431,6 +431,82 @@ main = putStrLn (show (Secret 42))
 }
 
 #[test]
+fn unknown_type_in_record_field_rejected() {
+    // `Boolean` is not a type in mata-ll (the boolean type is `Bool`). This
+    // used to slip through unvalidated and resurface as a baffling
+    // "No instance for 'show' on type 'Boolean'" from deriving (Show). The
+    // reference must be rejected as an unknown type — with the Bool spelling
+    // hint — and the missing-instance error must not mask it.
+    let source = r#"
+data Foo = Foo { a :: String, b :: Boolean } deriving (Show)
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Unknown type 'Boolean'"),
+                "Expected an unknown-type error, got: {}", msg);
+            assert!(msg.contains("spelled 'Bool'"),
+                "Expected the Bool spelling hint, got: {}", msg);
+            assert!(!msg.contains("No instance"),
+                "A missing-instance error must not mask the unknown type: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for unknown type 'Boolean' in a record field"),
+    }
+}
+
+#[test]
+fn unknown_type_in_signature_rejected() {
+    // The same undefined name in a function signature must be caught too —
+    // previously it flowed through as an opaque type and compiled silently.
+    let source = r#"
+f :: Boolean -> Integer
+f x = 1
+
+main :: IO ()
+main = putStrLn "hi"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Unknown type 'Boolean'"),
+                "Expected an unknown-type error, got: {}", msg);
+            assert!(msg.contains("type signature for 'f'"),
+                "Expected the signature context in the error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for unknown type 'Boolean' in a signature"),
+    }
+}
+
+#[test]
+fn defined_type_without_show_still_reports_missing_instance() {
+    // Consistency guard for the unknown-type check: a type that EXISTS but
+    // has no Show instance must still get the missing-instance error, not an
+    // unknown-type error. "Type exists but lacks an instance" and "type does
+    // not exist" are different diagnoses.
+    let source = r#"
+data Baz = Baz Integer
+
+data Foo = Foo { a :: String, b :: Baz } deriving (Show)
+
+main :: IO ()
+main = putStrLn (show (Foo { a = "x", b = Baz 1 }))
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("No instance"),
+                "Expected a missing-instance error, got: {}", msg);
+            assert!(!msg.contains("Unknown type"),
+                "'Baz' is defined and must not be reported as unknown: {}", msg);
+        }
+        Ok(_) => panic!("Expected compilation to fail for deriving Show over a field type without Show"),
+    }
+}
+
+#[test]
 fn ambiguous_show_nothing_rejected() {
     // `Nothing :: Maybe a` leaves the element type `a` unconstrained; `show`
     // then needs a `Show a` that nothing can determine. This is a genuine
@@ -912,8 +988,9 @@ main = putStrLn "ok"
 #[test]
 fn unknown_type_rejected() {
     // Using a constructor from a type that doesn't exist.
-    // Known gap: the compiler accepts unknown names in type signatures.
-    // But using an unknown constructor in an expression should be caught.
+    // (Unknown names in type positions are rejected by the typechecker's
+    // unknown-type check — see unknown_type_in_signature_rejected. This test
+    // covers the expression side: an unknown *constructor* must be caught.)
     let source = r#"
 main :: IO ()
 main = print (NoSuchCtor 42)

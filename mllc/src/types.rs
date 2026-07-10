@@ -496,6 +496,12 @@ pub enum TypeErrorKind {
     /// There is no instance for a bare rigid variable, so the evidence is
     /// missing and it must be rejected.
     MissingContextConstraint { class: String, ty: Ty },
+    /// A type reference names a type that was never defined: no builtin,
+    /// data/newtype declaration, type alias, or type family has this name.
+    /// Rejected at the reference so it cannot flow downstream as an opaque
+    /// type and resurface as a misleading error (e.g. a missing Show
+    /// instance on a type that does not exist).
+    UnknownType(String),
     Other(String),
 }
 
@@ -570,6 +576,18 @@ impl TypeError {
             TypeErrorKind::MissingContextConstraint { .. } =>
                 Some("a bare polymorphic variable has no instance unless the signature \
                       requires one. GHC reports this as \"add (C a) to the context\"."),
+            TypeErrorKind::UnknownType(name) => match name.as_str() {
+                "Boolean" =>
+                    Some("the boolean type is spelled 'Bool', as in Haskell."),
+                "Char" =>
+                    Some("mata-ll has no Char type — String is opaque, not [Char]. \
+                          Individual characters are Integer byte codes; see strByte and \
+                          strChar in LString."),
+                "Double" | "Float" =>
+                    Some("the floating-point type is spelled 'Number' (Lua's number type); \
+                          GHC's Double and Float do not exist in mata-ll."),
+                _ => None,
+            },
             _ => None,
         }
     }
@@ -639,6 +657,8 @@ impl fmt::Display for TypeError {
                 write!(f, "No instance for '{} {}': the type variable '{}' is only as general as the signature says, and the signature does not require '{} {}'. Add it to the context, e.g. '({} {}) => …'",
                     class, v, v, class, v, class, v)?
             }
+            TypeErrorKind::UnknownType(name) =>
+                write!(f, "Unknown type '{}': nothing in this program or its imports defines a type with this name — it is not a builtin, and no data, newtype, type alias, or type family declaration for it is in scope", name)?,
             TypeErrorKind::Other(msg) => write!(f, "{}", msg)?,
         }
         if let Some(ctx) = &self.context {
