@@ -350,5 +350,16 @@ pub enum ConstructorFields {
     /// Positional fields: `Branch (Tree a) (Tree a)`
     Positional(Vec<Type>),
     /// Named fields (record): `Person { name :: String, age :: Number }`
-    Named(Vec<(String, Type)>),
+    Named(Vec<RecordField>),
+}
+
+/// A named record field. `lua_key` is the optional LuaDict rename from
+/// `fieldName as "key" :: T` — it changes only the key used in the runtime
+/// Lua table of a `deriving (LuaDict)` type; the Haskell-side accessor and
+/// record syntax keep `name`.
+#[derive(Debug, Clone)]
+pub struct RecordField {
+    pub name: String,
+    pub lua_key: Option<String>,
+    pub ty: Type,
 }

@@ -221,16 +221,26 @@ impl CodeGen {
         if def.is_luadict {
             if let Some(con) = def.constructors.first()
                 && let TConFields::Named(fields) = &con.fields {
-                    let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-                    for name in &names {
-                        self.luadict_field_key.insert(sanitize_name(name), name.clone());
+                    // Every map stores the *effective* Lua key — the `as "key"`
+                    // rename when present, the Haskell field name otherwise —
+                    // so construction, pattern matching, accessors, record
+                    // update and the FFI decoder all agree on the table layout.
+                    let keys: Vec<String> = fields.iter()
+                        .map(|f| f.effective_key().to_string())
+                        .collect();
+                    for field in fields {
+                        self.luadict_field_key.insert(
+                            sanitize_name(&field.name),
+                            field.effective_key().to_string(),
+                        );
                     }
-                    self.luadict_con_fields.insert(con.name.clone(), names);
+                    self.luadict_con_fields.insert(con.name.clone(), keys);
                     // Keyed by *type* name (as referenced in FFI result types),
                     // with field types retained for the FFI-boundary decoder.
                     self.luadict_type_fields.insert(
                         def.name.clone(),
-                        (def.type_vars.clone(), fields.clone()),
+                        (def.type_vars.clone(),
+                         fields.iter().map(|f| (f.effective_key().to_string(), f.ty.clone())).collect()),
                     );
                 }
         }
@@ -3083,7 +3093,15 @@ impl CodeGen {
                     self.gen_expr(record);
                     self.emit("); local _u = {}; for _k, _v in pairs(_r) do _u[_k] = _v end");
                     for (fname, _, val) in updates {
-                        self.emit(&format!("; _u{} = ", lua_field_index(fname)));
+                        // Resolve the Haskell field name to its effective Lua
+                        // key (`as "key"` rename) — the copied table is keyed
+                        // by effective keys, so writing the raw name would add
+                        // a stray key instead of updating the field.
+                        let key = self.luadict_field_key
+                            .get(&sanitize_name(fname))
+                            .cloned()
+                            .unwrap_or_else(|| fname.clone());
+                        self.emit(&format!("; _u{} = ", lua_field_index(&key)));
                         self.gen_expr(val);
                     }
                     self.emit("; return _u end)()");

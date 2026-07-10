@@ -303,7 +303,9 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 "module" => Token::KwModule,
                 "import" => Token::Import,
                 "qualified" => Token::Qualified,
-                // "as" not reserved — usable as variable name (import parser checks Ident("as"))
+                // "as" not reserved — usable as variable name (the parser checks
+                // Ident("as") contextually: qualified imports and record-field
+                // LuaDict key renames `field as "key" :: T`)
 
                 "data" => Token::Data,
                 "newtype" => Token::Newtype,

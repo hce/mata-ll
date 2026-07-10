@@ -392,7 +392,11 @@ impl Qual<'_> {
             ConstructorFields::Positional(ts) =>
                 ConstructorFields::Positional(ts.iter().map(|t| self.ty(t)).collect()),
             ConstructorFields::Named(fs) =>
-                ConstructorFields::Named(fs.iter().map(|(n, t)| (n.clone(), self.ty(t))).collect()),
+                ConstructorFields::Named(fs.iter().map(|f| crate::ast::RecordField {
+                    name: f.name.clone(),
+                    lua_key: f.lua_key.clone(),
+                    ty: self.ty(&f.ty),
+                }).collect()),
         };
         Constructor {
             name: c.name.clone(),

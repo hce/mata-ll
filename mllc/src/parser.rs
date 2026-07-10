@@ -300,9 +300,26 @@ impl Parser {
                     break;
                 }
                 let field_name = self.expect_ident()?;
+                // Optional LuaDict key rename: `fieldName as "luaKey" :: T`.
+                // 'as' is not a reserved word — check for Ident("as").
+                let lua_key = if matches!(self.peek(), Token::Ident(s) if s == "as") {
+                    self.advance();
+                    match self.peek().clone() {
+                        Token::StrLit(s) => { self.advance(); Some(s) }
+                        _ => {
+                            let loc = self.peek_loc();
+                            return Err(format!(
+                                "Expected a string literal after 'as' in field '{}' (e.g. `{} as \"key\" :: T`), found {:?} at {}:{}",
+                                field_name, field_name, loc.token, loc.line, loc.col
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
                 self.expect(&Token::DblColon)?;
                 let field_type = self.parse_type()?;
-                fields.push((field_name, field_type));
+                fields.push(crate::ast::RecordField { name: field_name, lua_key, ty: field_type });
                 self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) {
                     self.advance();

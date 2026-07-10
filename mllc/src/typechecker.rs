@@ -1565,7 +1565,7 @@ impl Checker {
                 // Standard ADT constructor
                 let fts: Vec<Ty> = match &con.fields {
                     ConstructorFields::Positional(types) => types.iter().map(|t| self.ast_type_to_ty(t)).collect(),
-                    ConstructorFields::Named(fields) => fields.iter().map(|(_, t)| self.ast_type_to_ty(t)).collect(),
+                    ConstructorFields::Named(fields) => fields.iter().map(|f| self.ast_type_to_ty(&f.ty)).collect(),
                 };
                 (fts, result_type.clone())
             };
@@ -1585,17 +1585,19 @@ impl Checker {
 
             // Register record field accessors
             if let ConstructorFields::Named(fields) = &con.fields {
-                for (fi, (field_name, field_ast_ty)) in fields.iter().enumerate() {
-                    let field_ty = self.ast_type_to_ty(field_ast_ty);
+                for (fi, field) in fields.iter().enumerate() {
+                    let field_ty = self.ast_type_to_ty(&field.ty);
                     // accessor :: DataType -> FieldType
+                    // Note: the accessor is always named after the Haskell field
+                    // name; an `as "key"` rename affects only the LuaDict table key.
                     let accessor_ty = Ty::arrow(result_type.clone(), field_ty);
-                    self.env.insert(field_name.clone(), Scheme {
+                    self.env.insert(field.name.clone(), Scheme {
                         vars: tvars.clone(),
                         ty: accessor_ty,
                     });
                     // Store field index for codegen
                     let index = if constructors.len() == 1 { fi + 1 } else { fi + 2 };
-                    self.record_fields.insert(field_name.clone(), (name.to_string(), index));
+                    self.record_fields.insert(field.name.clone(), (name.to_string(), index));
                 }
             }
         }
@@ -1648,7 +1650,11 @@ impl Checker {
                             ConstructorFields::Positional(types) =>
                                 TConFields::Positional(types.iter().map(|t| self.ast_type_to_ty(t)).collect()),
                             ConstructorFields::Named(fields) =>
-                                TConFields::Named(fields.iter().map(|(n, t)| (n.clone(), self.ast_type_to_ty(t))).collect()),
+                                TConFields::Named(fields.iter().map(|f| TRecordField {
+                                    name: f.name.clone(),
+                                    lua_key: f.lua_key.clone(),
+                                    ty: self.ast_type_to_ty(&f.ty),
+                                }).collect()),
                         }
                     },
                 }
@@ -1761,6 +1767,28 @@ impl Checker {
         let mut instance_fns = Vec::new();
         for decl in &module.decls {
             if let Decl::DataDef { name, type_vars, constructors, deriving } = decl {
+                // A field-key rename (`field as "key" :: T`) only changes the
+                // key of the runtime Lua table that `deriving (LuaDict)` lays
+                // the record out as. Without LuaDict there is no such table —
+                // the record is a positional array — so the rename would be
+                // silently meaningless. Reject it instead.
+                if !deriving.iter().any(|c| c == "LuaDict") {
+                    for con in constructors {
+                        if let ConstructorFields::Named(fields) = &con.fields {
+                            for field in fields {
+                                if let Some(key) = &field.lua_key {
+                                    self.push_error_ctx(
+                                        TypeErrorKind::Other(format!(
+                                            "Field '{}' of '{}' is renamed with `as \"{}\"`, but '{}' does not derive LuaDict: without LuaDict the record is stored as a positional array, so there is no Lua table key to rename\nnote: `as` field renaming is a mata-ll extension for LuaDict interop and has no GHC equivalent; add `deriving (LuaDict)` or drop the rename.",
+                                            field.name, name, key, name,
+                                        )),
+                                        format!("data {}", name),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
                 for class in deriving {
                     let derived = self.derive_instance(class, name, type_vars, constructors);
                     instance_fns.extend(derived);
@@ -2144,6 +2172,26 @@ impl Checker {
 
         match &con.fields {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
+                // Validate the *effective* Lua keys (the `as "key"` rename when
+                // present, the field name otherwise): each must be a non-empty
+                // string, and no two fields may share one — they become the keys
+                // of a single Lua table.
+                let mut seen: HashMap<&str, &str> = HashMap::new();
+                for field in fields {
+                    let key = field.lua_key.as_deref().unwrap_or(&field.name);
+                    if key.is_empty() {
+                        reject(self,
+                            format!("field '{}' renames its Lua key to the empty string", field.name),
+                            "the field name becomes a key in the runtime Lua table, and an empty key names nothing a Lua host could sensibly read; give `as` a non-empty string.");
+                        return;
+                    }
+                    if let Some(prev) = seen.insert(key, &field.name) {
+                        reject(self,
+                            format!("fields '{}' and '{}' both map to the Lua key \"{}\"", prev, field.name, key),
+                            "each record field becomes one key in the runtime Lua table, so two fields sharing a key would silently overwrite each other; rename one with `as \"otherKey\"`.");
+                        return;
+                    }
+                }
                 self.luadict_types.insert(type_name.to_string());
             }
             ConstructorFields::Named(_) => {

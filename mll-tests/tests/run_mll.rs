@@ -3033,6 +3033,191 @@ main = pure ()
 }
 
 #[test]
+fn luadict_renamed_keys_round_trip_ffi_boundary() {
+    // `field as "key"` renames only the LuaDict table key. Both FFI directions
+    // must use the renamed key: an exported record reaches Lua keyed by "key"
+    // (and NOT by the Haskell field name), and a host table keyed by "key"
+    // decodes back into the record — including through the type-directed
+    // decoder, which the [Integer] field forces (Lua array -> cons list).
+    let source = r#"
+data Acct = Acct
+  { acctName as "name" :: String
+  , acctScores as "scores" :: [Integer]
+  , acctActive :: Bool
+  } deriving (LuaDict)
+
+export mkAcct :: String -> Acct
+mkAcct n = Acct { acctName = n, acctScores = [1, 2], acctActive = True }
+
+fetch :: Integer -> LuaIO "acct.fetch" Acct
+
+expect :: Bool -> String -> IO ()
+expect True _ = pure ()
+expect False m = error m
+
+len :: [a] -> Integer
+len [] = 0
+len (_:xs) = 1 + len xs
+
+main :: IO ()
+main = do
+    r <- fetch 1
+    expect (acctName r == "zoe") "decoded renamed string key"
+    expect (len (acctScores r) == 3) "decoded renamed list key length"
+    expect ((acctScores r) !! 1 == 20) "decoded renamed list element"
+    expect (acctActive r == True) "decoded unrenamed key"
+    pure ()
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+
+    let lua = mlua::Lua::new();
+    // Host `acct.fetch` returns a raw Lua dict keyed by the *renamed* keys.
+    let acct = lua.create_table().unwrap();
+    let fetch = lua
+        .create_function(|lua, _n: i64| -> mlua::Result<mlua::Table> {
+            let t = lua.create_table()?;
+            t.set("name", "zoe")?;
+            let scores = lua.create_table()?;
+            for (i, v) in [10, 20, 30].iter().enumerate() {
+                scores.set(i + 1, *v)?;
+            }
+            t.set("scores", scores)?;
+            t.set("acctActive", true)?;
+            Ok(t)
+        })
+        .unwrap();
+    acct.set("fetch", fetch).unwrap();
+    lua.globals().set("acct", acct).unwrap();
+
+    // Load as a module (chunk arg set): exports available, main skipped.
+    let module: mlua::Table = lua.load(&lua_code).set_name("luadict_renamed")
+        .call("luadict_renamed")
+        .expect("should load module");
+
+    // Outbound: the exported record is keyed by the renamed keys...
+    let mk: mlua::Function = module.get("mkAcct").unwrap();
+    let a: mlua::Table = mk.call("kim").expect("mkAcct should return a table");
+    let name: String = a.get("name").expect("renamed 'name' key present");
+    assert_eq!(name, "kim");
+    let scores: mlua::Table = a.get("scores").expect("renamed 'scores' key present");
+    assert_eq!(scores.len().unwrap(), 2);
+    let active: bool = a.get("acctActive").expect("unrenamed key keeps its name");
+    assert!(active);
+    // ...and the Haskell field names must NOT appear as keys.
+    let stray_name: mlua::Value = a.get("acctName").unwrap();
+    assert!(matches!(stray_name, mlua::Value::Nil),
+        "Haskell field name 'acctName' must not leak into the Lua table");
+    let stray_scores: mlua::Value = a.get("acctScores").unwrap();
+    assert!(matches!(stray_scores, mlua::Value::Nil),
+        "Haskell field name 'acctScores' must not leak into the Lua table");
+
+    // Inbound: run main so the fetch-and-decode assertions execute.
+    let lua2 = mlua::Lua::new();
+    let acct2 = lua2.create_table().unwrap();
+    let fetch2 = lua2
+        .create_function(|lua, _n: i64| -> mlua::Result<mlua::Table> {
+            let t = lua.create_table()?;
+            t.set("name", "zoe")?;
+            let scores = lua.create_table()?;
+            for (i, v) in [10, 20, 30].iter().enumerate() {
+                scores.set(i + 1, *v)?;
+            }
+            t.set("scores", scores)?;
+            t.set("acctActive", true)?;
+            Ok(t)
+        })
+        .unwrap();
+    acct2.set("fetch", fetch2).unwrap();
+    lua2.globals().set("acct", acct2).unwrap();
+    lua2.load(&lua_code).set_name("luadict_renamed_main").exec()
+        .expect("host dict keyed by renamed keys should decode; every in-program assertion should pass");
+}
+
+#[test]
+fn luadict_duplicate_renamed_keys_rejected() {
+    // Two fields mapping to the same effective Lua key would silently
+    // overwrite each other in the runtime table.
+    let source = r#"
+data D = D { a as "k" :: Integer, b as "k" :: Integer }
+    deriving (LuaDict)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("LuaDict") && msg.contains("both map to the Lua key"),
+                "expected a duplicate-key error, got: {}", msg);
+        }
+        Ok(_) => panic!("duplicate effective LuaDict keys must fail"),
+    }
+}
+
+#[test]
+fn luadict_rename_colliding_with_plain_field_rejected() {
+    // A rename may also collide with an *unrenamed* field's name — same
+    // overwrite hazard, same rejection.
+    let source = r#"
+data D = D { a as "b" :: Integer, b :: Integer }
+    deriving (LuaDict)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("LuaDict") && msg.contains("both map to the Lua key"),
+                "expected a duplicate-key error, got: {}", msg);
+        }
+        Ok(_) => panic!("a rename colliding with a plain field name must fail"),
+    }
+}
+
+#[test]
+fn luadict_rename_without_luadict_rejected() {
+    // Without deriving (LuaDict) the record is a positional array — there is
+    // no Lua table key to rename, so `as` would be silently meaningless.
+    let source = r#"
+data D = D { a as "k" :: Integer }
+    deriving (Show)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("does not derive LuaDict"),
+                "expected an as-without-LuaDict error, got: {}", msg);
+        }
+        Ok(_) => panic!("`as` renaming without deriving LuaDict must fail"),
+    }
+}
+
+#[test]
+fn luadict_empty_renamed_key_rejected() {
+    let source = r#"
+data D = D { a as "" :: Integer }
+    deriving (LuaDict)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("LuaDict") && msg.contains("empty string"),
+                "expected an empty-key error, got: {}", msg);
+        }
+        Ok(_) => panic!("an empty `as` key must fail"),
+    }
+}
+
+#[test]
 fn extract_from_plain_lua_rejected() {
     let plain = mllc::compile(EMBED_FIXTURE, Path::new("."), &[])
         .expect("should compile")

@@ -41,7 +41,24 @@ pub struct TConstructor {
 #[derive(Debug, Clone)]
 pub enum TConFields {
     Positional(Vec<Ty>),
-    Named(Vec<(String, Ty)>),
+    Named(Vec<TRecordField>),
+}
+
+/// A typed named record field. `lua_key`, when present, is the LuaDict rename
+/// from `name as "key" :: T`: codegen uses `lua_key.unwrap_or(name)` as the
+/// runtime Lua table key, while the Haskell-side accessor keeps `name`.
+#[derive(Debug, Clone)]
+pub struct TRecordField {
+    pub name: String,
+    pub lua_key: Option<String>,
+    pub ty: Ty,
+}
+
+impl TRecordField {
+    /// The key this field uses in the runtime Lua table of a LuaDict type.
+    pub fn effective_key(&self) -> &str {
+        self.lua_key.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone)]
