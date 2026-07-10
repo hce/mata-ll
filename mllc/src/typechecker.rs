@@ -2740,12 +2740,138 @@ impl Checker {
 
         let mut functions = Vec::new();
 
+        let ordering_ty = Ty::Con("Ordering".into());
+        let compare_fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], ordering_ty.clone());
+        let compare_name = format!("ord_compare__{}", type_name);
+
+        // compare: cross-constructor pairs order by declaration index
+        // (earlier constructor < later); same-constructor pairs compare
+        // fields left-to-right, lexicographically, using each field type's
+        // own `compare` (resolved by the monomorphizer exactly like the
+        // per-field `==` in derive_eq). A nullary constructor is EQ to itself.
+        let mut compare_clauses = Vec::new();
+        for (i, con_a) in constructors.iter().enumerate() {
+            let fc_a = match &con_a.fields {
+                ConstructorFields::Positional(fs) => fs.len(),
+                ConstructorFields::Named(fs) => fs.len(),
+            };
+            for (j, con_b) in constructors.iter().enumerate() {
+                let fc_b = match &con_b.fields {
+                    ConstructorFields::Positional(fs) => fs.len(),
+                    ConstructorFields::Named(fs) => fs.len(),
+                };
+                if i != j {
+                    // Different constructors: index decides; fields are irrelevant.
+                    let ord_con = if i < j { "LT" } else { "GT" };
+                    let a_args: Vec<TPattern> = (0..fc_a).map(|_| TPattern::Wildcard).collect();
+                    let b_args: Vec<TPattern> = (0..fc_b).map(|_| TPattern::Wildcard).collect();
+                    compare_clauses.push(TClause {
+                        patterns: vec![
+                            TPattern::Constructor { name: con_a.name.clone(), args: a_args },
+                            TPattern::Constructor { name: con_b.name.clone(), args: b_args },
+                        ],
+                        guards: vec![],
+                        body: TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone()),
+                        where_binds: vec![],
+                    });
+                    continue;
+                }
+
+                // Same constructor: bind fields with their real types (as
+                // derive_eq does) so the monomorphizer can resolve `compare`
+                // per field type.
+                let field_tys: Vec<Ty> = self.constructors.get(&con_a.name)
+                    .map(|ci| ci.field_types.clone())
+                    .unwrap_or_default();
+                let a_names: Vec<String> = (0..fc_a).map(|k| format!("_a{}", k)).collect();
+                let b_names: Vec<String> = (0..fc_a).map(|k| format!("_b{}", k)).collect();
+                let pat_a = TPattern::Constructor {
+                    name: con_a.name.clone(),
+                    args: a_names.iter().enumerate().map(|(k, n)| {
+                        let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
+                        TPattern::Var(n.clone(), ty)
+                    }).collect(),
+                };
+                let pat_b = TPattern::Constructor {
+                    name: con_a.name.clone(),
+                    args: b_names.iter().enumerate().map(|(k, n)| {
+                        let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
+                        TPattern::Var(n.clone(), ty)
+                    }).collect(),
+                };
+
+                // Lexicographic chain, built inside-out:
+                //   case compare a0 b0 of { EQ -> <compare remaining>; o -> o }
+                // The innermost step is the last field's bare `compare`;
+                // zero fields is simply EQ.
+                let mk_field_compare = |k: usize| {
+                    let fty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
+                    let cmp_ty = Ty::fun(&[fty.clone(), fty.clone()], ordering_ty.clone());
+                    let partial_ty = Ty::fun(std::slice::from_ref(&fty), ordering_ty.clone());
+                    TExpr::new(
+                        TExprKind::App(
+                            Box::new(TExpr::new(
+                                TExprKind::App(
+                                    Box::new(TExpr::new(TExprKind::Var("compare".into()), cmp_ty)),
+                                    Box::new(TExpr::new(TExprKind::Var(a_names[k].clone()), fty.clone())),
+                                ),
+                                partial_ty,
+                            )),
+                            Box::new(TExpr::new(TExprKind::Var(b_names[k].clone()), fty)),
+                        ),
+                        ordering_ty.clone(),
+                    )
+                };
+
+                let mut body = if fc_a == 0 {
+                    TExpr::new(TExprKind::Con("EQ".into()), ordering_ty.clone())
+                } else {
+                    mk_field_compare(fc_a - 1)
+                };
+                for k in (0..fc_a.saturating_sub(1)).rev() {
+                    body = TExpr::new(
+                        TExprKind::Case {
+                            scrutinee: Box::new(mk_field_compare(k)),
+                            branches: vec![
+                                TCaseBranch {
+                                    pattern: TPattern::Constructor { name: "EQ".into(), args: vec![] },
+                                    guards: vec![],
+                                    body,
+                                },
+                                TCaseBranch {
+                                    pattern: TPattern::Var("_o".into(), ordering_ty.clone()),
+                                    guards: vec![],
+                                    body: TExpr::new(TExprKind::Var("_o".into()), ordering_ty.clone()),
+                                },
+                            ],
+                        },
+                        ordering_ty.clone(),
+                    );
+                }
+
+                compare_clauses.push(TClause {
+                    patterns: vec![pat_a, pat_b],
+                    guards: vec![],
+                    body,
+                    where_binds: vec![],
+                });
+            }
+        }
+        functions.push(TFunction {
+            name: compare_name.clone(),
+            ty: compare_fn_ty.clone(),
+            clauses: compare_clauses,
+            specialized: false,
+            dict_params: vec![],
+        });
+
         for (op, op_name) in &[("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")] {
             let mangled = format!("ord_{}__{}", op_name, type_name);
 
             let clauses = if is_enum {
-                // Enum: compare constructor indices
-                // Generate clauses for each pair, with catch-all using index comparison
+                // Enum: fields can't exist, so the constructor index fully
+                // decides every relational op. Emit direct Bool clauses per
+                // constructor pair (no Ordering round-trip on hot paths).
                 let mut cls = Vec::new();
                 for (i, con_a) in constructors.iter().enumerate() {
                     for (j, con_b) in constructors.iter().enumerate() {
@@ -2769,44 +2895,61 @@ impl Checker {
                 }
                 cls
             } else {
-                // Non-enum: for now, just compare constructor indices
-                // (field comparison would need recursive Ord instances)
-                let mut cls = Vec::new();
-                for (i, con_a) in constructors.iter().enumerate() {
-                    let field_count_a = match &con_a.fields {
-                        ConstructorFields::Positional(fs) => fs.len(),
-                        ConstructorFields::Named(fs) => fs.len(),
-                    };
-                    for (j, con_b) in constructors.iter().enumerate() {
-                        let field_count_b = match &con_b.fields {
-                            ConstructorFields::Positional(fs) => fs.len(),
-                            ConstructorFields::Named(fs) => fs.len(),
-                        };
-                        let a_args: Vec<TPattern> = (0..field_count_a)
-                            .map(|k| TPattern::Var(format!("_a{}", k), Ty::Unit))
-                            .collect();
-                        let b_args: Vec<TPattern> = (0..field_count_b)
-                            .map(|k| TPattern::Var(format!("_b{}", k), Ty::Unit))
-                            .collect();
-                        let result = match *op {
-                            "<" => i < j,
-                            ">" => i > j,
-                            "<=" => i <= j,
-                            ">=" => i >= j,
-                            _ => unreachable!(),
-                        };
-                        cls.push(TClause {
-                            patterns: vec![
-                                TPattern::Constructor { name: con_a.name.clone(), args: a_args },
-                                TPattern::Constructor { name: con_b.name.clone(), args: b_args },
+                // Non-enum: derive each relational op from `compare` so the
+                // lexicographic field ordering above is the single source of
+                // truth:  a < b = case compare a b of { LT -> True; _ -> False }
+                let cmp_call = TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(
+                            TExprKind::App(
+                                Box::new(TExpr::new(
+                                    TExprKind::Var(compare_name.clone()),
+                                    compare_fn_ty.clone(),
+                                )),
+                                Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
+                            ),
+                            Ty::fun(std::slice::from_ref(&result_type), ordering_ty.clone()),
+                        )),
+                        Box::new(TExpr::new(TExprKind::Var("_b".into()), result_type.clone())),
+                    ),
+                    ordering_ty.clone(),
+                );
+                // (match_con, on_match, otherwise): < and > are True exactly on
+                // their own Ordering; <= and >= are False exactly on the
+                // opposite strict Ordering.
+                let (match_con, on_match) = match *op {
+                    "<" => ("LT", true),
+                    ">" => ("GT", true),
+                    "<=" => ("GT", false),
+                    ">=" => ("LT", false),
+                    _ => unreachable!(),
+                };
+                vec![TClause {
+                    patterns: vec![
+                        TPattern::Var("_a".into(), result_type.clone()),
+                        TPattern::Var("_b".into(), result_type.clone()),
+                    ],
+                    guards: vec![],
+                    body: TExpr::new(
+                        TExprKind::Case {
+                            scrutinee: Box::new(cmp_call),
+                            branches: vec![
+                                TCaseBranch {
+                                    pattern: TPattern::Constructor { name: match_con.into(), args: vec![] },
+                                    guards: vec![],
+                                    body: TExpr::new(TExprKind::Lit(TLiteral::Bool(on_match)), bool_ty.clone()),
+                                },
+                                TCaseBranch {
+                                    pattern: TPattern::Wildcard,
+                                    guards: vec![],
+                                    body: TExpr::new(TExprKind::Lit(TLiteral::Bool(!on_match)), bool_ty.clone()),
+                                },
                             ],
-                            guards: vec![],
-                            body: TExpr::new(TExprKind::Lit(TLiteral::Bool(result)), bool_ty.clone()),
-                            where_binds: vec![],
-                        });
-                    }
-                }
-                cls
+                        },
+                        bool_ty.clone(),
+                    ),
+                    where_binds: vec![],
+                }]
             };
 
             functions.push(TFunction {
@@ -2817,46 +2960,6 @@ impl Checker {
                 dict_params: vec![],
             });
         }
-
-        // compare: return LT/EQ/GT by constructor index. This mirrors the
-        // index-only ordering used for the relational operators above (same
-        // constructor compares EQ; field-level ordering is not derived).
-        let ordering_ty = Ty::Con("Ordering".into());
-        let compare_fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], ordering_ty.clone());
-        let mut compare_clauses = Vec::new();
-        for (i, con_a) in constructors.iter().enumerate() {
-            let fc_a = match &con_a.fields {
-                ConstructorFields::Positional(fs) => fs.len(),
-                ConstructorFields::Named(fs) => fs.len(),
-            };
-            for (j, con_b) in constructors.iter().enumerate() {
-                let fc_b = match &con_b.fields {
-                    ConstructorFields::Positional(fs) => fs.len(),
-                    ConstructorFields::Named(fs) => fs.len(),
-                };
-                let ord_con = if i < j { "LT" } else if i > j { "GT" } else { "EQ" };
-                let a_args: Vec<TPattern> = (0..fc_a)
-                    .map(|k| TPattern::Var(format!("_a{}", k), Ty::Unit)).collect();
-                let b_args: Vec<TPattern> = (0..fc_b)
-                    .map(|k| TPattern::Var(format!("_b{}", k), Ty::Unit)).collect();
-                compare_clauses.push(TClause {
-                    patterns: vec![
-                        TPattern::Constructor { name: con_a.name.clone(), args: a_args },
-                        TPattern::Constructor { name: con_b.name.clone(), args: b_args },
-                    ],
-                    guards: vec![],
-                    body: TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone()),
-                    where_binds: vec![],
-                });
-            }
-        }
-        functions.push(TFunction {
-            name: format!("ord_compare__{}", type_name),
-            ty: compare_fn_ty,
-            clauses: compare_clauses,
-            specialized: false,
-            dict_params: vec![],
-        });
 
         // Register the Ord instance
         let mut method_fns = HashMap::new();

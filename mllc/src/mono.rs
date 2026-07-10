@@ -416,10 +416,27 @@ impl Monomorphizer {
     /// unchanged when there is nothing to specialize (monomorphic type, still
     /// polymorphic, or the polymorphic-recursion guard trips).
     fn specialize_derived_show(&mut self, base: &str, arg_ty: &Ty) -> String {
-        if self.is_polymorphic(arg_ty) || !self.poly_fns.contains_key(base) {
+        if self.is_polymorphic(arg_ty) {
             return base.to_string();
         }
         let fn_ty = Ty::arrow(arg_ty.clone(), Ty::Con("String".into()));
+        self.specialize_instance_fn(base, &fn_ty)
+    }
+
+    /// Specialize a still-polymorphic instance method (derived or user-written,
+    /// e.g. `eq_Box`, `ord_compare__Pair`) at the concrete function type it is
+    /// used at. Instance resolution alone only picks the FUNCTION — for a
+    /// parameterized instance its body still contains class methods at the
+    /// instance's type VARIABLES (`compare _a0 _b0` at type `a`), which the
+    /// polymorphic original can never resolve. Cloning it per concrete use
+    /// type and re-running monomorphization resolves each field's method at
+    /// its concrete type — recursively. Returns `base` unchanged when there is
+    /// nothing to specialize (not polymorphic, use type not concrete, or the
+    /// polymorphic-recursion guard trips).
+    fn specialize_instance_fn(&mut self, base: &str, fn_ty: &Ty) -> String {
+        if self.is_polymorphic(fn_ty) || !self.poly_fns.contains_key(base) {
+            return base.to_string();
+        }
         let key = SpecKey { name: base.to_string(), ty: format!("{}", fn_ty) };
         if let Some(existing) = self.specializations.get(&key) {
             return existing.clone();
@@ -427,20 +444,24 @@ impl Monomorphizer {
         if self.specializations.keys().filter(|k| k.name == base).count() > 16 {
             return base.to_string();
         }
-        let mangled = self.mangle_name(base, &fn_ty);
+        let mangled = self.mangle_name(base, fn_ty);
         // Insert before generating the body so a recursive field of the same
         // type resolves to this same specialization instead of looping.
         self.specializations.insert(key, mangled.clone());
         if let Some(poly_fn) = self.poly_fns.get(base).cloned() {
-            let subst = Self::compute_body_subst(&poly_fn, &fn_ty);
+            let subst = Self::compute_body_subst(&poly_fn, fn_ty);
             let mut spec_fn = poly_fn.clone();
             spec_fn.name = mangled.clone();
-            spec_fn.ty = fn_ty;
+            spec_fn.ty = fn_ty.clone();
             spec_fn.clauses = spec_fn.clauses.into_iter()
                 .map(|c| c.apply_subst(&subst))
                 .collect();
             spec_fn.specialized = true;
+            // Keep the generation stack accurate so a still-polymorphic
+            // recursive call inside this body resolves to THIS specialization.
+            self.gen_stack.push((base.to_string(), mangled.clone()));
             spec_fn = self.mono_function(spec_fn);
+            self.gen_stack.pop();
             self.generated.push(spec_fn);
         }
         mangled
@@ -789,6 +810,11 @@ impl Monomorphizer {
                                     resolved = self.instance_methods.get(&key2).cloned();
                                 }
                             if let Some(mangled) = resolved {
+                                // A parameterized instance's method is itself
+                                // polymorphic (e.g. ord_compare__Pair); its body
+                                // resolves class methods on FIELDS only once
+                                // specialized at this use's concrete type.
+                                let mangled = self.specialize_instance_fn(&mangled, &func.ty);
                                 let mono_arg = self.mono_expr(*arg);
                                 return TExpr {
                                     kind: TExprKind::App(
@@ -871,6 +897,16 @@ impl Monomorphizer {
                     }
 
                     if let Some(mangled) = resolved {
+                        // Specialize a parameterized instance's method at this
+                        // use's concrete type (see specialize_instance_fn) —
+                        // its body resolves class methods on fields only once
+                        // the instance's type variables are pinned down.
+                        let mangled = if mangled != op {
+                            let use_ty = Ty::fun(&[lhs.ty.clone(), rhs.ty.clone()], ty.clone());
+                            self.specialize_instance_fn(&mangled, &use_ty)
+                        } else {
+                            mangled
+                        };
                         // For /= operators, wrap in not
                         if op == "/=" {
                             let mono_lhs = self.mono_expr(*lhs);
@@ -1039,6 +1075,14 @@ impl Monomorphizer {
             && let Some(existing) = self.instance_methods.get(&("==".to_string(), tc)).cloned() {
                 return existing;
             }
+        // Parameterized instance at a CONCRETE element type (e.g. RoseTree
+        // Integer): the instance table is keyed by the polymorphic target
+        // ("RoseTree a"), so probe by head constructor, then specialize the
+        // instance function at this element type so ITS fields resolve too.
+        if let Some(base) = self.resolve_parameterized_instance("==", ty) {
+            let fn_ty = Ty::fun(&[ty.clone(), ty.clone()], Ty::Con("Bool".into()));
+            return self.specialize_instance_fn(&base, &fn_ty);
+        }
         "__mll_eq".to_string()
     }
 
