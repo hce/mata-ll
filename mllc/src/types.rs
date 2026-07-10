@@ -31,7 +31,7 @@ impl fmt::Display for Kind {
 
 /// Internal type representation used by the type checker.
 /// Separate from the AST's Type to allow for unification variables.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     /// Concrete type: Integer, String, Bool, Number
     Con(String),
@@ -266,6 +266,59 @@ impl fmt::Display for Ty {
     }
 }
 
+/// The head constructor a typeclass instance attaches to — the *structured*
+/// identity under which instances are registered by the typechecker and
+/// resolved by the monomorphizer. mata-ll instances are per-head-constructor
+/// (an `instance C (Pair a b)` is the one and only C instance for `Pair`), so
+/// this key is exact. It replaces the old Display-string keys ("Pair a b",
+/// "[a]", "[Integer]"), which required prefix probes and positional guessing
+/// to relate a use-site type to its instance.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum InstHead {
+    /// A named type constructor: `Integer`, `Maybe`, `Pair`, `IO`, `ST`, …
+    Con(String),
+    /// The list constructor `[]`.
+    List,
+    /// A tuple constructor of the given arity.
+    Tuple(usize),
+    /// The unit type `()`.
+    Unit,
+}
+
+impl InstHead {
+    /// The head constructor of a type, when it has one. `Maybe a`, `Pair x y`
+    /// and bare `Pair` all yield `Con("Pair")`-style heads; sugared list/IO
+    /// forms normalize to the same head as their constructor spelling
+    /// (`[a]` and `[] a` are both `List`; `IO a` and the `IO` constructor are
+    /// both `Con("IO")`). Variables, skolems, functions and promoted
+    /// constructors have no instance head.
+    pub fn of(ty: &Ty) -> Option<InstHead> {
+        match ty {
+            Ty::Con(n) if n == "[]" => Some(InstHead::List),
+            Ty::Con(n) => Some(InstHead::Con(n.clone())),
+            Ty::List(_) => Some(InstHead::List),
+            Ty::IO(_) => Some(InstHead::Con("IO".into())),
+            Ty::LuaIO(_, _) => Some(InstHead::Con("LuaIO".into())),
+            Ty::Unit => Some(InstHead::Unit),
+            Ty::Tuple(elems) => Some(InstHead::Tuple(elems.len())),
+            Ty::App(f, _) => InstHead::of(f),
+            Ty::Forall(_, inner) => InstHead::of(inner),
+            Ty::Var(_) | Ty::Skolem(..) | Ty::Arrow(..) | Ty::Promoted(_) => None,
+        }
+    }
+}
+
+impl fmt::Display for InstHead {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InstHead::Con(n) => write!(f, "{}", n),
+            InstHead::List => write!(f, "[]"),
+            InstHead::Tuple(n) => write!(f, "({})", ",".repeat(n.saturating_sub(1))),
+            InstHead::Unit => write!(f, "()"),
+        }
+    }
+}
+
 /// Type variable identifier
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TyVar {
@@ -367,6 +420,37 @@ impl Subst {
             result.entry(k.clone()).or_insert_with(|| v.clone());
         }
         Subst { map: result }
+    }
+
+    /// Merge two INDEPENDENT substitutions (e.g. from two clauses of the same
+    /// function, each checked against the same signature). Plain `compose`
+    /// keeps `self`'s binding when both bind the same variable and silently
+    /// DROPS `other`'s — severing everything reachable only through the
+    /// dropped binding (a later clause's body types lose their link to the
+    /// signature, so their class constraints and instantiations can no longer
+    /// be related to it). Merging instead unifies the two images when they
+    /// are compatible, so both bindings hold in the result.
+    ///
+    /// When the images genuinely conflict, `self`'s binding is kept — that is
+    /// deliberate, not a fallback: GADT-style clauses refine the same
+    /// signature variable to *different* concrete types per clause
+    /// (`action RedL` binds c := 'Red, `action GreenL` binds c := 'Green),
+    /// and those refinements must stay clause-local. A conflicting image is
+    /// always such a concrete refinement (two free clause variables can never
+    /// conflict), so nothing is severed by keeping it out of the shared
+    /// substitution.
+    pub fn merge(&self, other: &Subst) -> Subst {
+        let mut result = self.compose(other);
+        for (v, t_other) in &other.map {
+            if self.map.contains_key(v) {
+                let img_self = Ty::Var(v.clone()).apply_subst(&result);
+                let img_other = t_other.apply_subst(&result);
+                if let Ok(mgu) = unify(&img_self, &img_other) {
+                    result = result.compose(&mgu);
+                }
+            }
+        }
+        result
     }
 }
 

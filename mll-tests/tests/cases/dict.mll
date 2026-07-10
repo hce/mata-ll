@@ -33,14 +33,14 @@ rebalance (Node h k v l r)
     | balance (Node h k v l r) < -1                  = rotateLeft (node k v l r)
     | otherwise                                       = Node h k v l r
 
-insert :: k -> v -> Dict k v -> Dict k v
+insert :: Ord k => k -> v -> Dict k v -> Dict k v
 insert k v Empty = node k v Empty Empty
 insert k v (Node h nk nv left right)
     | k < nk    = rebalance (node nk nv (insert k v left) right)
     | k > nk    = rebalance (node nk nv left (insert k v right))
     | otherwise = Node h k v left right
 
-lookup' :: k -> Dict k v -> Maybe v
+lookup' :: Ord k => k -> Dict k v -> Maybe v
 lookup' _ Empty = Nothing
 lookup' k (Node _ nk nv left right)
     | k < nk    = lookup' k left

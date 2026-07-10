@@ -41,21 +41,21 @@ rebalance (Node h k v l r)
 
 -- Operations
 
-insert :: k -> v -> Dict k v -> Dict k v
+insert :: Ord k => k -> v -> Dict k v -> Dict k v
 insert k v Empty = node k v Empty Empty
 insert k v (Node h nk nv left right)
     | k < nk    = rebalance (node nk nv (insert k v left) right)
     | k > nk    = rebalance (node nk nv left (insert k v right))
     | otherwise = Node h k v left right
 
-lookup' :: k -> Dict k v -> Maybe v
+lookup' :: Ord k => k -> Dict k v -> Maybe v
 lookup' _ Empty = Nothing
 lookup' k (Node _ nk nv left right)
     | k < nk    = lookup' k left
     | k > nk    = lookup' k right
     | otherwise = Just nv
 
-member :: k -> Dict k v -> Bool
+member :: Ord k => k -> Dict k v -> Bool
 member k d = case lookup' k d of
     Just _  -> True
     Nothing -> False

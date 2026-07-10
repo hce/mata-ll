@@ -243,6 +243,13 @@ mll_test!(value_forward_alias, "value_forward_alias.mll");
 mll_test!(clause_local_scope, "clause_local_scope.mll");
 mll_test!(diamond_import, "diamond_import.mll");
 mll_test!(unit_type, "unit_type.mll");
+// Instance-evidence resolution regressions (structured instance identity,
+// deterministic class-variable dispatch, exact-identity specialization purge)
+mll_test!(pair_ord_fields, "pair_ord_fields.mll");
+mll_test!(mangle_collision, "mangle_collision.mll");
+mll_test!(spec_limit_sibling, "spec_limit_sibling.mll");
+mll_test!(tuple_eq_adt_elems, "tuple_eq_adt_elems.mll");
+mll_test!(multi_clause_class_constraint, "multi_clause_class_constraint.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

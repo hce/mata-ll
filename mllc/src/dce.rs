@@ -109,11 +109,18 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
         }
         TExprKind::SpecCall { original, specialized, args } => {
             refs.insert(original.clone());
-            // `specialized` threads element functions inside a `helper:fn[:fn]`
-            // string (e.g. "__mll_list_eq:eq_State", "__mll_show_list:show_Foo").
-            // Capture each segment so those derived show/eq functions stay live.
+            // `specialized` threads element functions inside a `helper:…`
+            // string. Segments come in three shapes:
+            //   "__mll_list_eq:eq_State"            — one function per segment
+            //   "__mll_tuple_eq:2:eq_Foo,eq_Bar"    — comma-joined function list
+            //   "__mll_dict:Show:show=show_Foo,…"   — method=impl pairs
+            // Capture every embedded function name so the derived show/eq
+            // implementations they reference stay live.
             for seg in specialized.split(':') {
-                refs.insert(seg.to_string());
+                for part in seg.split(',') {
+                    let name = part.rsplit('=').next().unwrap_or(part);
+                    refs.insert(name.to_string());
+                }
             }
             for a in args { collect_expr(a, refs); }
         }

@@ -95,8 +95,10 @@ pub struct Checker {
     current_fn: Option<String>,
     /// Registered typeclasses
     classes: HashMap<String, ClassInfo>,
-    /// Registered instances: (class_name, type_string) -> InstanceInfo
-    instances: HashMap<(String, String), InstanceInfo>,
+    /// Registered instances, keyed by the *structured* head constructor of the
+    /// instance's target type (see `InstHead`). One instance per (class, head):
+    /// this is the canonical instance identity shared with the monomorphizer.
+    instances: HashMap<(String, InstHead), InstanceInfo>,
     /// Record field accessors: field_name -> (type_name, lua_index)
     pub record_fields: HashMap<String, (String, usize)>,
     /// Type names that derive `LuaDict` (validated in `derive_luadict`): their
@@ -223,6 +225,17 @@ impl Checker {
         (scheme.ty.apply_subst(&Subst::from_map(map.clone())), map)
     }
 
+    /// Register an instance under its structured head key, derived from the
+    /// instance's target type — never from a Display string. Types with no
+    /// instance head (functions, bare type variables) cannot carry instances;
+    /// `check_instance` rejects those before reaching here, and the built-in /
+    /// derived registrations always have a head by construction.
+    fn register_instance(&mut self, info: InstanceInfo) {
+        if let Some(head) = InstHead::of(&info.target_type) {
+            self.instances.insert((info.class_name.clone(), head), info);
+        }
+    }
+
     /// Does `class` have an instance for `ty`? Conservative: a type variable or
     /// rigid skolem is treated as satisfiable (deferred to the caller), and a
     /// container (list/tuple/applied type) is satisfiable when its components
@@ -242,7 +255,8 @@ impl Checker {
             Ty::List(elem) => structural_container_class(class) && self.has_instance(class, elem),
             Ty::Tuple(elems) =>
                 structural_container_class(class) && elems.iter().all(|e| self.has_instance(class, e)),
-            Ty::Con(name) => self.instances.contains_key(&(class.to_string(), name.clone())),
+            Ty::Con(_) => InstHead::of(ty)
+                .is_some_and(|h| self.instances.contains_key(&(class.to_string(), h))),
             Ty::App(_, _) => {
                 // Peel `T a b …` to its head constructor and argument types.
                 let mut head = ty;
@@ -257,8 +271,9 @@ impl Checker {
                     Ty::Con(base) if base == "Maybe" =>
                         structural_container_class(class) && args.iter().all(|a| self.has_instance(class, a)),
                     // Other type constructors need a registered (derived) instance.
-                    Ty::Con(base) =>
-                        self.instances.contains_key(&(class.to_string(), base.clone()))
+                    Ty::Con(_) =>
+                        InstHead::of(head)
+                            .is_some_and(|h| self.instances.contains_key(&(class.to_string(), h)))
                             && args.iter().all(|a| self.has_instance(class, a)),
                     _ => true, // unknown head — defer rather than over-reject
                 }
@@ -285,7 +300,8 @@ impl Checker {
                 match head {
                     Ty::Con(base) if base == "Maybe" && structural_container_class(class) =>
                         for a in args { self.collect_required_var_constraints(class, a, out); },
-                    Ty::Con(base) if self.instances.contains_key(&(class.to_string(), base.clone())) =>
+                    Ty::Con(_) if InstHead::of(head).is_some_and(|h|
+                        self.instances.contains_key(&(class.to_string(), h))) =>
                         for a in args { self.collect_required_var_constraints(class, a, out); },
                     _ => {}
                 }
@@ -949,40 +965,31 @@ impl Checker {
             let mut method_fns = HashMap::new();
             method_fns.insert("fmap".to_string(), "fmap_IO".to_string());
             method_fns.insert("<$>".to_string(), "fmap_IO".to_string());
-            self.instances.insert(
-                ("Functor".to_string(), tc_name.to_string()),
-                InstanceInfo {
-                    class_name: "Functor".to_string(),
-                    target_type: Ty::Con(tc_name.to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Functor".to_string(),
+                target_type: Ty::Con(tc_name.to_string()),
+                method_fns,
+            });
         }
         {
             let mut method_fns = HashMap::new();
             method_fns.insert("fmap".to_string(), "map".to_string());
             method_fns.insert("<$>".to_string(), "map".to_string());
-            self.instances.insert(
-                ("Functor".to_string(), "[]".to_string()),
-                InstanceInfo {
-                    class_name: "Functor".to_string(),
-                    target_type: Ty::Con("[]".to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Functor".to_string(),
+                target_type: Ty::Con("[]".to_string()),
+                method_fns,
+            });
         }
         for tc_name in &["Maybe", "Either"] {
             let mut method_fns = HashMap::new();
             method_fns.insert("fmap".to_string(), format!("fmap_{}", tc_name));
             method_fns.insert("<$>".to_string(), format!("fmap_{}", tc_name));
-            self.instances.insert(
-                ("Functor".to_string(), tc_name.to_string()),
-                InstanceInfo {
-                    class_name: "Functor".to_string(),
-                    target_type: Ty::Con(tc_name.to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Functor".to_string(),
+                target_type: Ty::Con(tc_name.to_string()),
+                method_fns,
+            });
         }
 
         // Built-in Applicative typeclass (superclass: Functor)
@@ -1019,53 +1026,41 @@ impl Checker {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure".to_string());
             method_fns.insert("<*>".to_string(), "ap_IO".to_string());
-            self.instances.insert(
-                ("Applicative".to_string(), tc_name.to_string()),
-                InstanceInfo {
-                    class_name: "Applicative".to_string(),
-                    target_type: Ty::Con(tc_name.to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Applicative".to_string(),
+                target_type: Ty::Con(tc_name.to_string()),
+                method_fns,
+            });
         }
         {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure_List".to_string());
             method_fns.insert("<*>".to_string(), "ap_List".to_string());
-            self.instances.insert(
-                ("Applicative".to_string(), "[]".to_string()),
-                InstanceInfo {
-                    class_name: "Applicative".to_string(),
-                    target_type: Ty::Con("[]".to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Applicative".to_string(),
+                target_type: Ty::Con("[]".to_string()),
+                method_fns,
+            });
         }
         {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure_Maybe".to_string());
             method_fns.insert("<*>".to_string(), "ap_Maybe".to_string());
-            self.instances.insert(
-                ("Applicative".to_string(), "Maybe".to_string()),
-                InstanceInfo {
-                    class_name: "Applicative".to_string(),
-                    target_type: Ty::Con("Maybe".to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Applicative".to_string(),
+                target_type: Ty::Con("Maybe".to_string()),
+                method_fns,
+            });
         }
         {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure_Either".to_string());
             method_fns.insert("<*>".to_string(), "ap_Either".to_string());
-            self.instances.insert(
-                ("Applicative".to_string(), "Either".to_string()),
-                InstanceInfo {
-                    class_name: "Applicative".to_string(),
-                    target_type: Ty::Con("Either".to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Applicative".to_string(),
+                target_type: Ty::Con("Either".to_string()),
+                method_fns,
+            });
         }
 
         // Built-in Monad typeclass (superclass: Applicative)
@@ -1099,14 +1094,11 @@ impl Checker {
             method_fns.insert(">>=".to_string(), ">>=".to_string());
             method_fns.insert(">>".to_string(), ">>".to_string());
             method_fns.insert("return".to_string(), "pure".to_string());
-            self.instances.insert(
-                ("Monad".to_string(), monad_name.to_string()),
-                InstanceInfo {
-                    class_name: "Monad".to_string(),
-                    target_type: Ty::Con(monad_name.to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Monad".to_string(),
+                target_type: Ty::Con(monad_name.to_string()),
+                method_fns,
+            });
         }
 
         // Monad instance for [] (lists)
@@ -1115,14 +1107,11 @@ impl Checker {
             method_fns.insert(">>=".to_string(), "bind_List".to_string());
             method_fns.insert(">>".to_string(), "then_List".to_string());
             method_fns.insert("return".to_string(), "pure_List".to_string());
-            self.instances.insert(
-                ("Monad".to_string(), "[]".to_string()),
-                InstanceInfo {
-                    class_name: "Monad".to_string(),
-                    target_type: Ty::Con("[]".to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Monad".to_string(),
+                target_type: Ty::Con("[]".to_string()),
+                method_fns,
+            });
         }
 
         // Monad instance for Maybe
@@ -1131,14 +1120,11 @@ impl Checker {
             method_fns.insert(">>=".to_string(), "bind_Maybe".to_string());
             method_fns.insert(">>".to_string(), "then_Maybe".to_string());
             method_fns.insert("return".to_string(), "pure_Maybe".to_string());
-            self.instances.insert(
-                ("Monad".to_string(), "Maybe".to_string()),
-                InstanceInfo {
-                    class_name: "Monad".to_string(),
-                    target_type: Ty::Con("Maybe".to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Monad".to_string(),
+                target_type: Ty::Con("Maybe".to_string()),
+                method_fns,
+            });
         }
 
         // Built-in Enum typeclass
@@ -1196,14 +1182,11 @@ impl Checker {
             method_fns.insert("enumFromThen".to_string(), "enumFromThen_Integer".to_string());
             method_fns.insert("enumFromTo".to_string(), "enumFromTo_Integer".to_string());
             method_fns.insert("enumFromThenTo".to_string(), "enumFromThenTo_Integer".to_string());
-            self.instances.insert(
-                ("Enum".to_string(), "Integer".to_string()),
-                InstanceInfo {
-                    class_name: "Enum".to_string(),
-                    target_type: Ty::Con("Integer".to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Enum".to_string(),
+                target_type: Ty::Con("Integer".to_string()),
+                method_fns,
+            });
         }
 
         // Built-in Bounded typeclass
@@ -1260,14 +1243,11 @@ impl Checker {
         for type_name in &["Integer", "Number", "Bool", "String"] {
             let mut method_fns = HashMap::new();
             method_fns.insert("read".to_string(), format!("read_{}", type_name));
-            self.instances.insert(
-                ("Read".to_string(), type_name.to_string()),
-                InstanceInfo {
-                    class_name: "Read".to_string(),
-                    target_type: Ty::Con(type_name.to_string()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Read".to_string(),
+                target_type: Ty::Con(type_name.to_string()),
+                method_fns,
+            });
         }
 
         // Built-in Eq typeclass
@@ -1295,14 +1275,11 @@ impl Checker {
             let mangled = format!("eq_{}", type_name);
             let mut method_fns = HashMap::new();
             method_fns.insert("==".to_string(), mangled);
-            self.instances.insert(
-                ("Eq".to_string(), type_name.to_string()),
-                InstanceInfo {
-                    class_name: "Eq".to_string(),
-                    target_type: target,
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Eq".to_string(),
+                target_type: target,
+                method_fns,
+            });
         }
 
         // Built-in Ord typeclass (superclass: Eq)
@@ -1359,14 +1336,11 @@ impl Checker {
             }
             // Every base Ord type has a `compare` runtime helper.
             method_fns.insert("compare".to_string(), format!("ord_compare__{}", type_name));
-            self.instances.insert(
-                ("Ord".to_string(), type_name.to_string()),
-                InstanceInfo {
-                    class_name: "Ord".to_string(),
-                    target_type: target,
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Ord".to_string(),
+                target_type: target,
+                method_fns,
+            });
         }
 
         // Built-in Semigroup typeclass
@@ -1388,25 +1362,19 @@ impl Checker {
             // String: <> is string concatenation
             let mut method_fns = HashMap::new();
             method_fns.insert("<>".to_string(), "semigroup_String".to_string());
-            self.instances.insert(
-                ("Semigroup".to_string(), "String".to_string()),
-                InstanceInfo {
-                    class_name: "Semigroup".to_string(),
-                    target_type: Ty::Con("String".into()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Semigroup".to_string(),
+                target_type: Ty::Con("String".into()),
+                method_fns,
+            });
             // []: <> is list append (same as ++)
             let mut method_fns = HashMap::new();
             method_fns.insert("<>".to_string(), "semigroup_List".to_string());
-            self.instances.insert(
-                ("Semigroup".to_string(), "[]".to_string()),
-                InstanceInfo {
-                    class_name: "Semigroup".to_string(),
-                    target_type: Ty::list(ta.clone()),
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Semigroup".to_string(),
+                target_type: Ty::list(ta.clone()),
+                method_fns,
+            });
         }
 
         // Show instances for base types and parameterized types
@@ -1415,14 +1383,11 @@ impl Checker {
             let mangled = format!("show_{}", type_name);
             let mut method_fns = HashMap::new();
             method_fns.insert("show".to_string(), mangled);
-            self.instances.insert(
-                ("Show".to_string(), type_name.to_string()),
-                InstanceInfo {
-                    class_name: "Show".to_string(),
-                    target_type: target,
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Show".to_string(),
+                target_type: target,
+                method_fns,
+            });
         }
 
         // `()` is a base type like any other and carries the GHC base
@@ -1434,37 +1399,28 @@ impl Checker {
         {
             let mut method_fns = HashMap::new();
             method_fns.insert("show".to_string(), "show_Unit".to_string());
-            self.instances.insert(
-                ("Show".to_string(), "()".to_string()),
-                InstanceInfo {
-                    class_name: "Show".to_string(),
-                    target_type: Ty::Unit,
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Show".to_string(),
+                target_type: Ty::Unit,
+                method_fns,
+            });
             let mut method_fns = HashMap::new();
             method_fns.insert("==".to_string(), "eq_Unit".to_string());
-            self.instances.insert(
-                ("Eq".to_string(), "()".to_string()),
-                InstanceInfo {
-                    class_name: "Eq".to_string(),
-                    target_type: Ty::Unit,
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Eq".to_string(),
+                target_type: Ty::Unit,
+                method_fns,
+            });
             let mut method_fns = HashMap::new();
             for op in &["<", ">", "<=", ">="] {
                 method_fns.insert(op.to_string(), format!("ord_{}__Unit", op_to_name(op)));
             }
             method_fns.insert("compare".to_string(), "ord_compare__Unit".to_string());
-            self.instances.insert(
-                ("Ord".to_string(), "()".to_string()),
-                InstanceInfo {
-                    class_name: "Ord".to_string(),
-                    target_type: Ty::Unit,
-                    method_fns,
-                },
-            );
+            self.register_instance(InstanceInfo {
+                class_name: "Ord".to_string(),
+                target_type: Ty::Unit,
+                method_fns,
+            });
         }
     }
 
@@ -1495,18 +1451,15 @@ impl Checker {
             Kind::Arrow(Box::new(Kind::Type),
                 Box::new(Kind::Arrow(Box::new(Kind::Type), Box::new(Kind::Type)))));
         // Show instance for HashMap (uses Lua show fallback)
-        self.instances.insert(
-            ("Show".to_string(), "HashMap".to_string()),
-            InstanceInfo {
-                class_name: "Show".to_string(),
-                target_type: Ty::Con("HashMap".into()),
-                method_fns: {
-                    let mut m = HashMap::new();
-                    m.insert("show".to_string(), "show_HashMap".to_string());
-                    m
-                },
+        self.register_instance(InstanceInfo {
+            class_name: "Show".to_string(),
+            target_type: Ty::Con("HashMap".into()),
+            method_fns: {
+                let mut m = HashMap::new();
+                m.insert("show".to_string(), "show_HashMap".to_string());
+                m
             },
-        );
+        });
 
         // Int as alias for Integer (Lua has no fixed-width integers)
         self.type_aliases.insert("Int".to_string(),
@@ -2198,6 +2151,24 @@ impl Checker {
         let target_ty = self.ast_type_to_ty(target_type);
         let ty_str = format!("{}", target_ty);
 
+        // An instance must attach to a head constructor (a named type, a list,
+        // a tuple, or ()). Function types, bare type variables, etc. have no
+        // instance head — nothing could ever be resolved to such an instance.
+        let target_head = match InstHead::of(&target_ty) {
+            Some(h) => h,
+            None => {
+                self.push_error_ctx(
+                    TypeErrorKind::Other(format!(
+                        "Cannot define an instance for '{}': an instance must be \
+                         for a named type constructor, a list, a tuple, or ()",
+                        ty_str
+                    )),
+                    format!("instance {} {}", class_name, ty_str),
+                );
+                return vec![];
+            }
+        };
+
         // Orphan instance detection: either the class or the type must be local.
         // Only checked when check_module_with_local_start was used (local_start tracking active).
         if self.orphan_check_enabled {
@@ -2228,7 +2199,7 @@ impl Checker {
 
         // Check superclass constraints
         for superclass in &class_info.superclasses {
-            let key = (superclass.clone(), ty_str.clone());
+            let key = (superclass.clone(), target_head.clone());
             if !self.instances.contains_key(&key) {
                 self.push_error_ctx(
                     TypeErrorKind::Other(format!(
@@ -2319,30 +2290,13 @@ impl Checker {
             }
         }
 
-        self.instances.insert(
-            (class_name.to_string(), ty_str),
-            instance_info,
-        );
+        self.register_instance(instance_info);
 
         result_fns
     }
 
-    /// Look up the instance method for a given class method + concrete type
-    pub fn resolve_method(&self, method_name: &str, concrete_ty: &Ty) -> Option<String> {
-        for class_info in self.classes.values() {
-            if class_info.methods.iter().any(|(n, _)| n == method_name) {
-                let ty_str = format!("{}", concrete_ty);
-                let key = (class_info.name.clone(), ty_str);
-                if let Some(inst) = self.instances.get(&key) {
-                    return inst.method_fns.get(method_name).cloned();
-                }
-            }
-        }
-        None
-    }
-
     /// Expose instances for the monomorphizer
-    pub fn get_instances(&self) -> &HashMap<(String, String), InstanceInfo> {
+    pub fn get_instances(&self) -> &HashMap<(String, InstHead), InstanceInfo> {
         &self.instances
     }
 
@@ -2570,14 +2524,11 @@ impl Checker {
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert("show".to_string(), mangled.clone());
-        self.instances.insert(
-            ("Show".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "Show".to_string(),
-                target_type: result_type.clone(),
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "Show".to_string(),
+            target_type: result_type.clone(),
+            method_fns,
+        });
 
         vec![TFunction {
             name: mangled,
@@ -2697,14 +2648,11 @@ impl Checker {
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert("==".to_string(), mangled.clone());
-        self.instances.insert(
-            ("Eq".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "Eq".to_string(),
-                target_type: result_type.clone(),
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "Eq".to_string(),
+            target_type: result_type.clone(),
+            method_fns,
+        });
 
         vec![TFunction {
             name: mangled,
@@ -2967,14 +2915,11 @@ impl Checker {
             method_fns.insert(op.to_string(), format!("ord_{}__{}", op_name, type_name));
         }
         method_fns.insert("compare".to_string(), format!("ord_compare__{}", type_name));
-        self.instances.insert(
-            ("Ord".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "Ord".to_string(),
-                target_type: result_type,
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "Ord".to_string(),
+            target_type: result_type,
+            method_fns,
+        });
 
         functions
     }
@@ -3309,14 +3254,11 @@ impl Checker {
         method_fns.insert("enumFromThen".to_string(), enum_from_then_name);
         method_fns.insert("enumFromTo".to_string(), enum_from_to_name);
         method_fns.insert("enumFromThenTo".to_string(), enum_from_then_to_name);
-        self.instances.insert(
-            ("Enum".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "Enum".to_string(),
-                target_type: result_type,
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "Enum".to_string(),
+            target_type: result_type,
+            method_fns,
+        });
 
         functions
     }
@@ -3376,14 +3318,11 @@ impl Checker {
         let mut method_fns = HashMap::new();
         method_fns.insert("minBound".to_string(), min_name);
         method_fns.insert("maxBound".to_string(), max_name);
-        self.instances.insert(
-            ("Bounded".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "Bounded".to_string(),
-                target_type: result_type,
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "Bounded".to_string(),
+            target_type: result_type,
+            method_fns,
+        });
 
         functions
     }
@@ -3466,19 +3405,11 @@ impl Checker {
     /// Resolve the concrete fmap function for a type constructor at derive time.
     /// Extracts the outermost type constructor and looks up the Functor instance.
     fn resolve_functor_fmap(&self, ty: &Ty, self_fmap: &str) -> String {
+        // Only container-shaped types (a head constructor applied to at least
+        // one argument, or a list/IO) can have a Functor instance; a bare
+        // `Ty::Con` field is not mapped over.
         let tc_name = match ty {
-            Ty::List(_) => Some("[]".to_string()),
-            Ty::IO(_) => Some("IO".to_string()),
-            Ty::App(f, _) => {
-                let mut head = f.as_ref();
-                loop {
-                    match head {
-                        Ty::Con(name) => break Some(name.clone()),
-                        Ty::App(inner, _) => head = inner.as_ref(),
-                        _ => break None,
-                    }
-                }
-            }
+            Ty::List(_) | Ty::IO(_) | Ty::App(_, _) => InstHead::of(ty),
             _ => None,
         };
         if let Some(tc) = tc_name {
@@ -3600,14 +3531,11 @@ impl Checker {
         let mut method_fns = HashMap::new();
         method_fns.insert("fmap".to_string(), mangled.clone());
         method_fns.insert("<$>".to_string(), mangled.clone());
-        self.instances.insert(
-            ("Functor".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "Functor".to_string(),
-                target_type: Ty::Con(type_name.to_string()),
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "Functor".to_string(),
+            target_type: Ty::Con(type_name.to_string()),
+            method_fns,
+        });
 
         vec![TFunction {
             name: mangled,
@@ -3749,7 +3677,7 @@ impl Checker {
             }
             Ty::Con(n) => {
                 if self.fromjson_types.contains(n)
-                    || self.instances.contains_key(&("FromJSON".to_string(), n.clone())) {
+                    || self.instances.contains_key(&("FromJSON".to_string(), InstHead::Con(n.clone()))) {
                     Ok(Self::jx_var(&format!("fromJSON_{}", n), dec_ty))
                 } else {
                     Err((
@@ -4222,14 +4150,11 @@ impl Checker {
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert("fromJSON".to_string(), mangled.clone());
-        self.instances.insert(
-            ("FromJSON".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "FromJSON".to_string(),
-                target_type: result_ty.clone(),
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "FromJSON".to_string(),
+            target_type: result_ty.clone(),
+            method_fns,
+        });
 
         vec![TFunction {
             name: mangled,
@@ -4318,7 +4243,7 @@ impl Checker {
             }
             Ty::Con(n) => {
                 if self.tojson_types.contains(n)
-                    || self.instances.contains_key(&("ToJSON".to_string(), n.clone())) {
+                    || self.instances.contains_key(&("ToJSON".to_string(), InstHead::Con(n.clone()))) {
                     Ok(Self::jx_var(&format!("toJSON_{}", n), enc_ty))
                 } else {
                     Err((
@@ -4542,14 +4467,11 @@ impl Checker {
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert("toJSON".to_string(), mangled.clone());
-        self.instances.insert(
-            ("ToJSON".to_string(), type_name.to_string()),
-            InstanceInfo {
-                class_name: "ToJSON".to_string(),
-                target_type: result_ty.clone(),
-                method_fns,
-            },
-        );
+        self.register_instance(InstanceInfo {
+            class_name: "ToJSON".to_string(),
+            target_type: result_ty.clone(),
+            method_fns,
+        });
 
         vec![TFunction {
             name: mangled,
@@ -4710,7 +4632,18 @@ impl Checker {
             match self.check_clause(clause, &fresh_ty, &clause_ctx) {
                 Ok((tc, clause_subst)) => {
                     tclauses.push(tc);
-                    overall_subst = overall_subst.compose(&clause_subst);
+                    // Merge, don't just compose: each clause is checked against
+                    // the same signature, so two clauses routinely bind the
+                    // same signature variable to their own clause-local
+                    // variables. Composition would keep the first clause's
+                    // binding and silently drop the second's, severing the
+                    // second clause's body types from the signature — its
+                    // class constraints would escape the declared-context
+                    // check, and the monomorphizer could never relate its
+                    // types to a concrete instantiation. (GADT-style per-
+                    // clause refinements conflict instead of unifying and
+                    // deliberately stay clause-local — see Subst::merge.)
+                    overall_subst = overall_subst.merge(&clause_subst);
                 }
                 Err(e) => {
                     self.wanted.truncate(wanted_before);
