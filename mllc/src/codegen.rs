@@ -416,8 +416,11 @@ impl CodeGen {
             "pure", "return_", "Just",
             "show_Integer", "show_Number", "show_String", "show_Bool",
             "show_List_", "show_Maybe", "show_ByteString", "show_HashMap",
+            "show_Unit",
             "eq_Integer", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
-            "eq_Ordering",
+            "eq_Ordering", "eq_Unit",
+            "ord_lt__Unit", "ord_gt__Unit", "ord_le__Unit", "ord_ge__Unit",
+            "ord_compare__Unit",
             "ord_lt__Integer", "ord_lt__Number", "ord_lt__String",
             "ord_gt__Integer", "ord_gt__Number", "ord_gt__String",
             "ord_le__Integer", "ord_le__Number", "ord_le__String",
@@ -3989,10 +3992,21 @@ local function show_String(x) return show(x) end
 local function show_Bool(x) return show(x) end
 local function show_List_(x) return show(x) end
 local function show_Maybe(x) return show(x) end
+-- Unit's runtime rep is nil (same as Nothing/[]), so the type-erased generic
+-- `show` cannot render it; the Show () instance dispatches here type-directedly.
+local function show_Unit(x) return "()" end
 local function eq_Integer(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Number(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_String(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Bool(a, b) a = __force(a); b = __force(b); return a == b end
+-- () == () is always True; both sides are nil at runtime.
+local function eq_Unit(a, b) return true end
+-- Ord (): the single inhabitant compares EQ to itself (Ordering EQ = 2).
+local function ord_lt__Unit(a, b) return false end
+local function ord_gt__Unit(a, b) return false end
+local function ord_le__Unit(a, b) return true end
+local function ord_ge__Unit(a, b) return true end
+local function ord_compare__Unit(a, b) return 2 end
 local function __mll_eq(a, b) a = __force(a); b = __force(b); return a == b end
 local function ord_lt__Integer(a, b) a = __force(a); b = __force(b); return a < b end
 local function ord_lt__Number(a, b) a = __force(a); b = __force(b); return a < b end

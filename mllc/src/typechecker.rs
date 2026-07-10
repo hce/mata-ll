@@ -1424,6 +1424,48 @@ impl Checker {
                 },
             );
         }
+
+        // `()` is a base type like any other and carries the GHC base
+        // instances Show/Eq/Ord. It is registered separately from the loops
+        // above because its instance key is the type string "()" (matching
+        // `format!("{}", Ty::Unit)`) while its mangled runtime names must be
+        // identifier-safe (`show_Unit`, not `show_()`). Runtime rep is nil,
+        // so eq/ord are trivial (nil == nil; compare is always EQ).
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("show".to_string(), "show_Unit".to_string());
+            self.instances.insert(
+                ("Show".to_string(), "()".to_string()),
+                InstanceInfo {
+                    class_name: "Show".to_string(),
+                    target_type: Ty::Unit,
+                    method_fns,
+                },
+            );
+            let mut method_fns = HashMap::new();
+            method_fns.insert("==".to_string(), "eq_Unit".to_string());
+            self.instances.insert(
+                ("Eq".to_string(), "()".to_string()),
+                InstanceInfo {
+                    class_name: "Eq".to_string(),
+                    target_type: Ty::Unit,
+                    method_fns,
+                },
+            );
+            let mut method_fns = HashMap::new();
+            for op in &["<", ">", "<=", ">="] {
+                method_fns.insert(op.to_string(), format!("ord_{}__Unit", op_to_name(op)));
+            }
+            method_fns.insert("compare".to_string(), "ord_compare__Unit".to_string());
+            self.instances.insert(
+                ("Ord".to_string(), "()".to_string()),
+                InstanceInfo {
+                    class_name: "Ord".to_string(),
+                    target_type: Ty::Unit,
+                    method_fns,
+                },
+            );
+        }
     }
 
     fn init_kinds(&mut self) {

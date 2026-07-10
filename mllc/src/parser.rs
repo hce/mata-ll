@@ -2547,10 +2547,11 @@ impl Parser {
                 self.advance();
                 if self.at(&Token::RightParen) {
                     self.advance();
-                    return Ok(Pattern::Constructor {
-                        name: "()".to_string(),
-                        args: vec![],
-                    });
+                    // `()` in pattern position is the unit literal pattern
+                    // (mirroring the expression parser, where `()` is
+                    // Expr::Lit(Literal::Unit)) — NOT a constructor named
+                    // "()", which no constructor table will ever contain.
+                    return Ok(Pattern::LitPat(Literal::Unit));
                 }
                 let inner = self.parse_pattern()?;
                 if self.at(&Token::Comma) {

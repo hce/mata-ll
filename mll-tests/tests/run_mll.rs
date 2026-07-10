@@ -241,6 +241,7 @@ mll_test!(pointfree_caf, "pointfree_caf.mll");
 mll_test!(value_forward_alias, "value_forward_alias.mll");
 mll_test!(clause_local_scope, "clause_local_scope.mll");
 mll_test!(diamond_import, "diamond_import.mll");
+mll_test!(unit_type, "unit_type.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
