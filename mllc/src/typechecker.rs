@@ -395,6 +395,11 @@ impl Checker {
                 let inner = self.ast_type_to_ty(result);
                 Ty::io(Ty::app(Ty::app(Ty::Con("Either".into()), Ty::Con("String".into())), inner))
             }
+            // LuaCatch "name" (Either String T)  reduces to  Either String T
+            // (the parser has already checked the `Either String a` shape).
+            Type::LuaCatch { result, .. } => self.ast_type_to_ty(result),
+            // LuaIOCatch "name" (Either String T)  reduces to  IO (Either String T)
+            Type::LuaIOCatch { result, .. } => Ty::io(self.ast_type_to_ty(result)),
             Type::Promoted(name) => Ty::Promoted(name.clone()),
         }
     }
@@ -578,6 +583,14 @@ impl Checker {
                 result: Box::new(self.substitute_type(result, bindings)),
             },
             Type::LuaTry { lua_name, result } => Type::LuaTry {
+                lua_name: lua_name.clone(),
+                result: Box::new(self.substitute_type(result, bindings)),
+            },
+            Type::LuaCatch { lua_name, result } => Type::LuaCatch {
+                lua_name: lua_name.clone(),
+                result: Box::new(self.substitute_type(result, bindings)),
+            },
+            Type::LuaIOCatch { lua_name, result } => Type::LuaIOCatch {
                 lua_name: lua_name.clone(),
                 result: Box::new(self.substitute_type(result, bindings)),
             },
@@ -1563,7 +1576,9 @@ impl Checker {
             Type::LuaPure { result, .. }
             | Type::LuaIO { result, .. }
             | Type::LuaIterator { result, .. }
-            | Type::LuaTry { result, .. } => {
+            | Type::LuaTry { result, .. }
+            | Type::LuaCatch { result, .. }
+            | Type::LuaIOCatch { result, .. } => {
                 self.check_type_kind(result, ctx);
                 Kind::Type
             }
@@ -5662,6 +5677,8 @@ impl Checker {
         let specialized = match ffi_kind {
             FfiKind::Iterator => format!("__mll_iter:{}", lua_name),
             FfiKind::Try => format!("__mll_try:{}", lua_name),
+            FfiKind::Catch => format!("__mll_pcall:{}", lua_name),
+            FfiKind::IOCatch => format!("__mll_iopcall:{}", lua_name),
             FfiKind::IO if tuple_arity.is_some() => {
                 format!("__mll_io_tup:{}:{}", tuple_arity.unwrap(), lua_name)
             }
@@ -5859,6 +5876,10 @@ enum FfiKind {
     IO,
     Iterator,
     Try,
+    /// `LuaCatch`: pure call under `pcall`, result `Either String a`.
+    Catch,
+    /// `LuaIOCatch`: IO action under `pcall`, result `IO (Either String a)`.
+    IOCatch,
 }
 
 fn extract_ffi_info(ty: &Type) -> Option<(String, FfiKind)> {
@@ -5868,6 +5889,8 @@ fn extract_ffi_info(ty: &Type) -> Option<(String, FfiKind)> {
         Type::LuaIO { lua_name, .. } => Some((lua_name.clone(), FfiKind::IO)),
         Type::LuaIterator { lua_name, .. } => Some((lua_name.clone(), FfiKind::Iterator)),
         Type::LuaTry { lua_name, .. } => Some((lua_name.clone(), FfiKind::Try)),
+        Type::LuaCatch { lua_name, .. } => Some((lua_name.clone(), FfiKind::Catch)),
+        Type::LuaIOCatch { lua_name, .. } => Some((lua_name.clone(), FfiKind::IOCatch)),
         Type::Paren(inner) => extract_ffi_info(inner),
         _ => None,
     }

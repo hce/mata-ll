@@ -570,6 +570,12 @@ impl Qual<'_> {
             Type::LuaTry { lua_name, result } => Type::LuaTry {
                 lua_name: lua_name.clone(), result: Box::new(self.ty(result)),
             },
+            Type::LuaCatch { lua_name, result } => Type::LuaCatch {
+                lua_name: lua_name.clone(), result: Box::new(self.ty(result)),
+            },
+            Type::LuaIOCatch { lua_name, result } => Type::LuaIOCatch {
+                lua_name: lua_name.clone(), result: Box::new(self.ty(result)),
+            },
             Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.ty(x)).collect()),
             Type::Constrained { constraints, ty } => Type::Constrained {
                 constraints: constraints.iter().map(|c| Constraint {
@@ -733,6 +739,8 @@ fn type_shape(ty: &Type) -> String {
         Type::LuaIO { lua_name, result } => format!("LuaIO({},{})", lua_name, type_shape(result)),
         Type::LuaIterator { lua_name, result } => format!("LuaIterator({},{})", lua_name, type_shape(result)),
         Type::LuaTry { lua_name, result } => format!("LuaTry({},{})", lua_name, type_shape(result)),
+        Type::LuaCatch { lua_name, result } => format!("LuaCatch({},{})", lua_name, type_shape(result)),
+        Type::LuaIOCatch { lua_name, result } => format!("LuaIOCatch({},{})", lua_name, type_shape(result)),
         Type::Tuple(xs) => format!("({})", xs.iter().map(type_shape).collect::<Vec<_>>().join(",")),
         Type::Constrained { ty, .. } => type_shape(ty),
         Type::Promoted(n) => format!("'{}", n),

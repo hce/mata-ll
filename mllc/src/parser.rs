@@ -1225,6 +1225,28 @@ impl Parser {
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaTry { lua_name, result: Box::new(result) })
                     }
+                    "LuaCatch" | "LuaIOCatch" => {
+                        // LuaCatch    "lua.func.name" (Either String T)  ->  Either String T
+                        // LuaIOCatch  "lua.func.name" (Either String T)  ->  IO (Either String T)
+                        // A raised Lua error is captured as `Left msg` via pcall.
+                        let lua_name = match self.peek().clone() {
+                            Token::StrLit(s) => { self.advance(); s }
+                            _ => return Err(format!("{} expects a string literal", name)),
+                        };
+                        let result = self.parse_type_atom()?;
+                        if !is_either_string_type(&result) {
+                            return Err(format!(
+                                "{} requires the result to be written as `(Either String a)`, \
+                                 so a raised Lua error can be returned as `Left`",
+                                name
+                            ));
+                        }
+                        if name == "LuaCatch" {
+                            Ok(Type::LuaCatch { lua_name, result: Box::new(result) })
+                        } else {
+                            Ok(Type::LuaIOCatch { lua_name, result: Box::new(result) })
+                        }
+                    }
                     _ => Ok(Type::Con(name)),
                 }
             }
@@ -1749,6 +1771,23 @@ impl Parser {
             }
             Token::LeftParen => {
                 self.advance();
+
+                // (,) (,,) ... — tuple constructor as a prefix function. N commas
+                // denote an (N+1)-ary constructor. Desugar to a single multi-param
+                // lambda building a tuple: this compiles to a genuine N+1-arg Lua
+                // function (matching how binary functions are passed to `zipWith`,
+                // `foldr`, etc.), while partial application (e.g. `(,) x`) is
+                // handled by the ordinary call-site eta-wrap. Type: `a -> b -> (a, b)`.
+                if self.at(&Token::Comma) {
+                    let mut commas = 0;
+                    while self.at(&Token::Comma) { self.advance(); commas += 1; }
+                    self.expect(&Token::RightParen)?;
+                    let params: Vec<String> =
+                        (0..commas + 1).map(|i| format!("_tup{}", i)).collect();
+                    let elems: Vec<Expr> =
+                        params.iter().map(|p| Expr::Var(p.clone())).collect();
+                    return Ok(Expr::Lambda { params, body: Box::new(Expr::Tuple(elems)) });
+                }
 
                 // Check for operator-starting forms: (+), (+1), (-)
                 if let Token::Operator(op) = self.peek().clone() {
@@ -2652,6 +2691,31 @@ fn token_len(tok: &Token) -> usize {
         Token::Arrow | Token::FatArrow | Token::DblColon | Token::Eq
         | Token::Pipe | Token::Bind => 2,
         _ => 1,
+    }
+}
+
+/// True when `ty` is (syntactically) `Either String a` for some `a`, ignoring
+/// enclosing parentheses. Used to enforce the LuaCatch/LuaIOCatch result shape,
+/// so a captured Lua error has a `Left String` slot to land in.
+fn is_either_string_type(ty: &Type) -> bool {
+    // Peel parentheses.
+    let mut head = ty;
+    while let Type::Paren(inner) = head { head = inner; }
+    // Decompose the application spine: Either String a == App(App(Con Either, String), a).
+    let mut args: Vec<&Type> = Vec::new();
+    let mut cur = head;
+    loop {
+        match cur {
+            Type::App(f, a) => { args.push(a.as_ref()); cur = f.as_ref(); }
+            Type::Con(name) if name == "Either" => {
+                args.reverse();
+                if args.len() != 2 { return false; }
+                let mut fst = args[0];
+                while let Type::Paren(inner) = fst { fst = inner; }
+                return matches!(fst, Type::Con(s) if s == "String");
+            }
+            _ => return false,
+        }
     }
 }
 

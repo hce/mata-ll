@@ -305,6 +305,14 @@ pub enum Type {
     Tuple(Vec<Type>),
     /// FFI with Lua error convention: `LuaTry "io.open" FileHandle` reduces to `IO (Either String FileHandle)`
     LuaTry { lua_name: String, result: Box<Type> },
+    /// FFI pure call guarded by `pcall`: `LuaCatch "foo.bar" (Either String T)`
+    /// reduces to `Either String T`. A raised Lua `error(...)` becomes `Left msg`,
+    /// success becomes `Right T`. The result MUST be written as `Either String a`.
+    LuaCatch { lua_name: String, result: Box<Type> },
+    /// Effectful counterpart of `LuaCatch`: `LuaIOCatch "foo.bar" (Either String T)`
+    /// reduces to `IO (Either String T)`. Same `pcall` error capture, deferred as
+    /// an IO action. The result MUST be written as `Either String a`.
+    LuaIOCatch { lua_name: String, result: Box<Type> },
     /// Typeclass constraint: `Show a =>`
     Constrained {
         constraints: Vec<Constraint>,

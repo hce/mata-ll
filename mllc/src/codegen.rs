@@ -265,6 +265,53 @@ impl CodeGen {
         self.ffi_decode_desc_inner(inner, &mut Vec::new())
     }
 
+    /// Decode descriptor for a LuaCatch/LuaIOCatch success payload. The declared
+    /// result is `Either String a` (optionally under `IO` for LuaIOCatch); the
+    /// `pcall` wrapper builds the `Left`/`Right` tags itself, so only the inner
+    /// `a` may need FFI decoding. Peels the `IO` and `Either String _` layers,
+    /// then reuses the ordinary result decoder on `a`.
+    fn ffi_catch_decode_desc(&self, ty: &Ty) -> Option<String> {
+        let inner = match ty {
+            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+            other => other,
+        };
+        let (head, args) = decompose_app(inner);
+        match head {
+            Some("Either") if args.len() == 2 => {
+                self.ffi_decode_desc_inner(args[1], &mut Vec::new())
+            }
+            _ => None,
+        }
+    }
+
+    /// Emit `__mll_pcall(desc, fn, forced-args...)` for LuaCatch/LuaIOCatch.
+    /// The forced arguments are evaluated *outside* the protected call, so only
+    /// errors raised by the Lua function itself become `Left` — not errors from
+    /// forcing our own thunks. A leading `:` in `lua_func` is a method call on
+    /// arg0; the receiver is bound once to avoid re-evaluating it.
+    fn gen_pcall_call(&mut self, lua_func: &str, desc: &Option<String>, args: &[TExpr]) {
+        let desc_str = desc.as_deref().unwrap_or("false");
+        if let Some(method) = lua_func.strip_prefix(':') {
+            self.emit("(function() local __recv = __force(");
+            self.gen_expr(&args[0]);
+            self.emit(&format!("); return __mll_pcall({}, __recv.{}, __recv", desc_str, method));
+            for a in args.iter().skip(1) {
+                self.emit(", __force(");
+                self.gen_expr(a);
+                self.emit(")");
+            }
+            self.emit(") end)()");
+        } else {
+            self.emit(&format!("__mll_pcall({}, {}", desc_str, lua_func));
+            for a in args {
+                self.emit(", __force(");
+                self.gen_expr(a);
+                self.emit(")");
+            }
+            self.emit(")");
+        }
+    }
+
     fn ffi_decode_desc_inner(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
         match ty {
             // A list always needs converting: the host hands us a Lua array
@@ -384,7 +431,7 @@ impl CodeGen {
             "hashmap_member", "hashmap_fromList", "hashmap_toList",
             "__mll_list_append", "__mll_list_index", "semigroup_String", "semigroup_List",
             "__mll_show_list", "__mll_show_arg", "__mll_show_maybe", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
-            "__mll_try", "__mll_iter", "getArgs", "exit_",
+            "__mll_try", "__mll_pcall", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
             "__mll_shl", "__mll_shr", "__mll_math_type",
@@ -2962,6 +3009,17 @@ impl CodeGen {
                         self.emit(")");
                     }
                     self.emit(")");
+                } else if let Some(lua_func) = specialized.strip_prefix("__mll_pcall:") {
+                    // LuaCatch: pure call under pcall, result Either String a.
+                    let desc = self.ffi_catch_decode_desc(&expr.ty);
+                    self.gen_pcall_call(lua_func, &desc, args);
+                } else if let Some(lua_func) = specialized.strip_prefix("__mll_iopcall:") {
+                    // LuaIOCatch: same pcall capture, deferred as an IO action thunk.
+                    // Zero-arg still needs a wrapper: the value IS the action.
+                    self.emit("function() return ");
+                    let desc = self.ffi_catch_decode_desc(&expr.ty);
+                    self.gen_pcall_call(lua_func, &desc, args);
+                    self.emit(" end");
                 } else if let Some(method) = specialized.strip_prefix(':') {
                     // Method call FFI: arg0:method(arg1, arg2, ...)
                     self.emit("__force(");
@@ -3374,6 +3432,14 @@ fn sanitize_name(name: &str) -> String {
                     '.' => s.push('_'),
                     _ => s.push(c),
                 }
+            }
+            // A valid mata-ll identifier can be a Lua reserved word (e.g.
+            // `until`, `repeat`, `local`, `nil`, `function`). Emitting it bare
+            // is a Lua syntax error, so escape with a trailing `_` — the same
+            // convention as the explicit `end`/`then`/... arms above. Field
+            // names sanitize identically, so record access stays consistent.
+            if is_lua_keyword(&s) {
+                s.push('_');
             }
             s
         }
@@ -4149,6 +4215,18 @@ end
 -- Success: Right val, Failure: Left errmsg
 local function __mll_try(val, err)
     if val == nil then return {1, err or "unknown error"} else return {2, val} end
+end
+-- LuaCatch/LuaIOCatch: run a Lua function under pcall, returning Either String a.
+-- Success: Right (decoded), Failure: Left errmsg. `desc` is the FFI decode
+-- descriptor for the success payload (false = pass through). tostring() because
+-- error() can raise non-string values, while Left is declared String. Arguments
+-- are already forced by the caller (outside pcall) so only the Lua function's
+-- own error() is captured.
+local function __mll_pcall(desc, f, ...)
+    local ok, res = pcall(f, ...)
+    if not ok then return {1, tostring(res)} end
+    if desc then res = __mll_ffi_decode(desc, res) end
+    return {2, res}
 end
 -- Exception handling: try wraps an IO action in pcall, returning Either String a
 -- action is a closure (deferred by codegen) so errors happen inside pcall

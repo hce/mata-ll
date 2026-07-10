@@ -45,6 +45,7 @@ MATA-LL TODO
 - [x] String escape sequences in codegen (\n, \t, \\, \" properly escaped)
 - [x] Eq for tuples (element-wise comparison with type dispatch)
 - [x] LuaTry type family (Lua nil-means-error → Either String a)
+- [x] LuaCatch/LuaIOCatch type families (Lua raised error → Left, via pcall)
 - [x] Operator fixity declarations (infixl, infixr, infix)
 - [x] Infix-LHS definitions (a |+| b = ... and x `f` y = ..., not just prefix)
 - [x] STArray with rank-2 scoped mutability (runST, newSTArray, etc.)

@@ -78,6 +78,14 @@ clause, which does support multi-clause local functions.
 ## Lua errors from FFI calls are not wrapped
 
 When a Lua function called via the FFI raises an error (e.g. `io.open` on a
-missing file via `LuaIO` instead of `LuaTry`), the raw Lua error propagates
-as a runtime crash. Use `LuaTry` for Lua functions that can fail, or wrap
-calls in `try` to catch errors as `Either String a`.
+missing file via a plain `LuaIO` binding), the raw Lua error propagates as a
+runtime crash. To capture it instead:
+
+- **`LuaCatch "name" (Either String a)`** / **`LuaIOCatch "name" (Either
+  String a)`** — run the call under `pcall`, returning `Left msg` on a raised
+  error and `Right a` on success. This is the right tool when the Lua function
+  signals failure by *raising*.
+- **`LuaTry "name" a`** — for the `(nil, err)` return convention (`io.open`
+  style), not raised errors.
+- Wrapping a `LuaIO` call in **`try`** also catches errors as
+  `IO (Either String a)`.

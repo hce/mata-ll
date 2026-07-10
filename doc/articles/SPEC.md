@@ -195,6 +195,11 @@ this:
 
     1 `add` 2
 
+The tuple constructor is likewise available as a prefix function: `(,)`
+has type `a -> b -> (a, b)`, `(,,)` has type `a -> b -> c -> (a, b, c)`,
+and so on. Like any function it may be partially applied — `map ((,) k)`
+pairs each element with `k`.
+
 Operators and functions may also be *defined* in infix position, with
 the name between its two operands, in addition to the prefix form:
 

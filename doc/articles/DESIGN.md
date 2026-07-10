@@ -64,7 +64,7 @@ The parser produces an AST with these main node kinds:
 - **Patterns**: variable, wildcard, constructor, literal, tuple.
 - **Types**: concrete, variable, application, arrow, list, IO,
   ScopedLuaIO, Forall, LuaPure, LuaIO (FFI), LuaIterator, LuaTry,
-  tuple, constrained.
+  LuaCatch, LuaIOCatch, tuple, constrained.
 
 GADTs are detected by a `where` keyword after the type name in a data
 declaration. Each GADT constructor carries its full type signature
@@ -440,6 +440,16 @@ generation and then erases:
   mata-ll list via `__mll_iter`.
 - `LuaTry "name" a` — wraps a Lua function that returns `(val, err)`
   into `IO (Either String a)` via `__mll_try`.
+- `LuaCatch "name" (Either String a)` — pure call run under `pcall`,
+  reduces to `Either String a`. A raised Lua `error(...)` is captured
+  as `Left msg` (via `tostring`), a normal return as `Right a`, with
+  the success payload FFI-decoded via `__mll_pcall`. The result *must*
+  be written as `Either String a`; the parser rejects other shapes.
+- `LuaIOCatch "name" (Either String a)` — the effectful counterpart of
+  `LuaCatch`, reducing to `IO (Either String a)`. Same `pcall` capture,
+  deferred as an IO action. Use this instead of `LuaTry` when the Lua
+  function signals failure by *raising* rather than by the `(nil, err)`
+  convention.
 
 `Maybe` arguments in FFI signatures translate to optional Lua
 parameters: `Nothing` omits the argument, relying on Lua's `nil`
