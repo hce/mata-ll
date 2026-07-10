@@ -1413,9 +1413,17 @@ error     :: String -> a
 undefined :: a
 
 -- Monadic
-when   :: Bool -> IO () -> IO ()
-mapM_  :: (a -> IO ()) -> [a] -> IO ()
+when     :: Bool -> IO () -> IO ()
+mapM_    :: (a -> IO ()) -> [a] -> IO ()
+mapM     :: Monad m => (a -> m b) -> [a] -> m [b]
+sequence :: Monad m => [m a] -> m [a]
 \end{lstlisting}
+
+\texttt{mapM}/\texttt{sequence} (and \texttt{forM = flip mapM} in
+\texttt{Control.Monad}) collect their results and work in any monad ---
+\texttt{IO}, \texttt{Maybe}, \texttt{Either}, or lists.  The
+underscore variants (\texttt{mapM\_}, \texttt{sequence\_},
+\texttt{forM\_}) discard the results and run in \texttt{IO}.
 
 \subsection{Types}
 

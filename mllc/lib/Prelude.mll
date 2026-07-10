@@ -258,6 +258,24 @@ mapM_ :: (a -> IO ()) -> [a] -> IO ()
 mapM_ _ [] = pure ()
 mapM_ f (x:xs) = f x >> mapM_ f xs
 
+-- Result-collecting traversal (works in any monad).
+mapM :: Monad m => (a -> m b) -> [a] -> m [b]
+mapM _ [] = pure []
+mapM f (x:xs) = f x >>= \y -> mapM f xs >>= \ys -> pure (y : ys)
+
+sequence :: Monad m => [m a] -> m [a]
+sequence [] = pure []
+sequence (x:xs) = x >>= \y -> sequence xs >>= \ys -> pure (y : ys)
+
+-- Result-collecting traversal (works in any monad).
+mapM :: Monad m => (a -> m b) -> [a] -> m [b]
+mapM _ [] = pure []
+mapM f (x:xs) = f x >>= \y -> mapM f xs >>= \ys -> pure (y : ys)
+
+sequence :: Monad m => [m a] -> m [a]
+sequence [] = pure []
+sequence (x:xs) = x >>= \y -> sequence xs >>= \ys -> pure (y : ys)
+
 -- Conditional execution (non-strict evaluation makes this safe:
 -- the action is thunked and only forced when the condition is true)
 when :: Applicative f => Bool -> f () -> f ()

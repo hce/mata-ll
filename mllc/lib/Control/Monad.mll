@@ -1,13 +1,18 @@
 module Control.Monad
-    ( mapM_, forM_, when, unless, guard
+    ( mapM, mapM_, forM, forM_, when, unless, guard
     , void, join
-    , sequence_
+    , sequence, sequence_
     ) where
 
--- mapM_ and when are already in Prelude, re-exported here
+-- mapM, mapM_, sequence, when are already in Prelude, re-exported here
 
 forM_ :: [a] -> (a -> IO ()) -> IO ()
 forM_ xs f = mapM_ f xs
+
+-- forM = flip mapM: result-collecting traversal with args swapped, so the
+-- action can be written as a trailing lambda block.
+forM :: Monad m => [a] -> (a -> m b) -> m [b]
+forM xs f = mapM f xs
 
 unless :: Applicative f => Bool -> f () -> f ()
 unless cond action = if cond then pure () else action

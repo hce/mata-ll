@@ -159,6 +159,7 @@ mll_test!(ffi, "ffi.mll");
 mll_test!(luacatch, "luacatch.mll");
 mll_test!(tuple_ctor, "tuple_ctor.mll");
 mll_test!(lua_keywords, "lua_keywords.mll");
+mll_test!(mapm, "mapm.mll");
 mll_test!(show_required, "show_required.mll");
 mll_test!(either_ordering, "either_ordering.mll");
 mll_test!(case_guards, "case_guards.mll");
