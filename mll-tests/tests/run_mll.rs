@@ -296,6 +296,9 @@ mll_test!(tuple_eq_adt_elems, "tuple_eq_adt_elems.mll");
 mll_test!(multi_clause_class_constraint, "multi_clause_class_constraint.mll");
 mll_test!(lazy_cheap_bindings, "lazy_cheap_bindings.mll");
 mll_test!(nested_just_pattern, "nested_just_pattern.mll");
+mll_test!(constructor_shadowing, "constructor_shadowing.mll");
+mll_test!(constructor_shadowing_json, "constructor_shadowing_json.mll");
+mll_test!(exitvalue_prelude, "exitvalue_prelude.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -650,6 +653,77 @@ main = putStrLn "hi"
                 "The error must explain the type-parameter limitation, got: {}", msg);
         }
         Ok(_) => panic!("Expected deriving (ToJSON) on a parameterized type to be rejected"),
+    }
+}
+
+#[test]
+fn duplicate_local_constructor_rejected() {
+    // Two data types in the same module claiming one constructor name used to
+    // silently miscompile: the typechecker's map kept the last declaration
+    // while codegen's tag table matched the first, so pattern dispatch used
+    // the wrong tag at runtime with no diagnostic. Same-module duplicates are
+    // now a compile error naming both types (GHC: "Multiple declarations").
+    let source = r#"
+data A = Ok Integer | Bad
+data B = Ok String | Worse
+
+main :: IO ()
+main = putStrLn "should not compile"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Duplicate data constructor 'Ok'"),
+                "Expected a duplicate-constructor error, got: {}", msg);
+            assert!(msg.contains("'A'") && msg.contains("data B"),
+                "The error must name both types, got: {}", msg);
+            assert!(msg.contains("note:"),
+                "The error must carry an explanatory note, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected a same-module duplicate constructor to be rejected"),
+    }
+}
+
+#[test]
+fn duplicate_newtype_constructor_rejected() {
+    // Newtype constructors live in the same namespace.
+    let source = r#"
+data A = Wrap Integer
+
+newtype Wrap = Integer
+
+main :: IO ()
+main = putStrLn "should not compile"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Duplicate data constructor 'Wrap'"),
+                "Expected a duplicate-constructor error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected a newtype constructor duplicating a data constructor to be rejected"),
+    }
+}
+
+#[test]
+fn shadowed_prelude_constructor_stays_shadowed() {
+    // GHC scoping: once a local `Err` shadows the Prelude's (ExitValue's),
+    // an unqualified `Err` means the local one everywhere in the module —
+    // so passing it where an ExitValue is expected is a *type* error, not a
+    // silent reuse of the Prelude constructor.
+    let source = r#"
+data Foo = Err Integer | Other
+
+main :: IO ()
+main = exit (Err 1)
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify") && msg.contains("ExitValue") && msg.contains("Foo"),
+                "Expected an ExitValue/Foo unification error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected `exit (Err 1)` with a shadowing local Err to be a type error"),
     }
 }
 

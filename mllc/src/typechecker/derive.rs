@@ -135,14 +135,18 @@ impl Checker {
                 .map(|i| format!("_s{}", i))
                 .collect();
 
-            let con_info = self.constructors.get(&con.name).cloned();
+            // TIR references use the registered key (mangled when this local
+            // constructor shadows a Prelude/import one); the *displayed* name
+            // stays the source name the user wrote.
+            let con_key = self.resolve_con_name(&con.name).to_string();
+            let con_info = self.constructors.get(&con_key).cloned();
             let field_tys: Vec<Ty> = con_info.as_ref()
                 .map(|ci| ci.field_types.clone())
                 .unwrap_or_default();
 
             let patterns = vec![
                 TPattern::Constructor {
-                    name: con.name.clone(),
+                    name: con_key,
                     args: param_names.iter().enumerate().map(|(i, n)| {
                         let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
                         TPattern::Var(n.clone(), ty)
@@ -263,7 +267,8 @@ impl Checker {
                 ConstructorFields::Named(fs) => fs.len(),
             };
 
-            let con_info = self.constructors.get(&con.name).cloned();
+            let con_key = self.resolve_con_name(&con.name).to_string();
+            let con_info = self.constructors.get(&con_key).cloned();
             let field_tys: Vec<Ty> = con_info.as_ref()
                 .map(|ci| ci.field_types.clone())
                 .unwrap_or_default();
@@ -272,14 +277,14 @@ impl Checker {
             let b_names: Vec<String> = (0..field_count).map(|i| format!("_b{}", i)).collect();
 
             let pat_a = TPattern::Constructor {
-                name: con.name.clone(),
+                name: con_key.clone(),
                 args: a_names.iter().enumerate().map(|(i, n)| {
                     let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
                     TPattern::Var(n.clone(), ty)
                 }).collect(),
             };
             let pat_b = TPattern::Constructor {
-                name: con.name.clone(),
+                name: con_key,
                 args: b_names.iter().enumerate().map(|(i, n)| {
                     let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
                     TPattern::Var(n.clone(), ty)
@@ -415,8 +420,8 @@ impl Checker {
                     compare_clauses.push(TClause {
                         span: None,
                         patterns: vec![
-                            TPattern::Constructor { name: con_a.name.clone(), args: a_args },
-                            TPattern::Constructor { name: con_b.name.clone(), args: b_args },
+                            TPattern::Constructor { name: self.resolve_con_name(&con_a.name).to_string(), args: a_args },
+                            TPattern::Constructor { name: self.resolve_con_name(&con_b.name).to_string(), args: b_args },
                         ],
                         guards: vec![],
                         body: TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone()),
@@ -428,20 +433,21 @@ impl Checker {
                 // Same constructor: bind fields with their real types (as
                 // derive_eq does) so the monomorphizer can resolve `compare`
                 // per field type.
-                let field_tys: Vec<Ty> = self.constructors.get(&con_a.name)
+                let con_key = self.resolve_con_name(&con_a.name).to_string();
+                let field_tys: Vec<Ty> = self.constructors.get(&con_key)
                     .map(|ci| ci.field_types.clone())
                     .unwrap_or_default();
                 let a_names: Vec<String> = (0..fc_a).map(|k| format!("_a{}", k)).collect();
                 let b_names: Vec<String> = (0..fc_a).map(|k| format!("_b{}", k)).collect();
                 let pat_a = TPattern::Constructor {
-                    name: con_a.name.clone(),
+                    name: con_key.clone(),
                     args: a_names.iter().enumerate().map(|(k, n)| {
                         let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
                         TPattern::Var(n.clone(), ty)
                     }).collect(),
                 };
                 let pat_b = TPattern::Constructor {
-                    name: con_a.name.clone(),
+                    name: con_key,
                     args: b_names.iter().enumerate().map(|(k, n)| {
                         let ty = field_tys.get(k).cloned().unwrap_or(Ty::Unit);
                         TPattern::Var(n.clone(), ty)
@@ -534,8 +540,8 @@ impl Checker {
                         cls.push(TClause {
                             span: None,
                             patterns: vec![
-                                TPattern::Constructor { name: con_a.name.clone(), args: vec![] },
-                                TPattern::Constructor { name: con_b.name.clone(), args: vec![] },
+                                TPattern::Constructor { name: self.resolve_con_name(&con_a.name).to_string(), args: vec![] },
+                                TPattern::Constructor { name: self.resolve_con_name(&con_b.name).to_string(), args: vec![] },
                             ],
                             guards: vec![],
                             body: TExpr::new(TExprKind::Lit(TLiteral::Bool(result)), bool_ty.clone()),
@@ -659,7 +665,7 @@ impl Checker {
             let clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
                 TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: con.name.clone(), args: vec![] }],
+                    patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args: vec![] }],
                     guards: vec![],
                     body: TExpr::new(TExprKind::Lit(TLiteral::Integer(i as i64)), int_ty.clone()),
                     where_binds: vec![],
@@ -682,7 +688,7 @@ impl Checker {
                     span: None,
                     patterns: vec![TPattern::LitPat(TLiteral::Integer(i as i64))],
                     guards: vec![],
-                    body: TExpr::new(TExprKind::Con(con.name.clone()), result_type.clone()),
+                    body: TExpr::new(TExprKind::Con(self.resolve_con_name(&con.name).to_string()), result_type.clone()),
                     where_binds: vec![],
                 }
             }).collect();
@@ -718,9 +724,9 @@ impl Checker {
             for i in 0..n.saturating_sub(1) {
                 clauses.push(TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
+                    patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&constructors[i].name).to_string(), args: vec![] }],
                     guards: vec![],
-                    body: TExpr::new(TExprKind::Con(constructors[i+1].name.clone()), result_type.clone()),
+                    body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i+1].name).to_string()), result_type.clone()),
                     where_binds: vec![],
                 });
             }
@@ -756,9 +762,9 @@ impl Checker {
             for i in 1..n {
                 clauses.push(TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
+                    patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&constructors[i].name).to_string(), args: vec![] }],
                     guards: vec![],
-                    body: TExpr::new(TExprKind::Con(constructors[i-1].name.clone()), result_type.clone()),
+                    body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i-1].name).to_string()), result_type.clone()),
                     where_binds: vec![],
                 });
             }
@@ -877,7 +883,7 @@ impl Checker {
         {
             let a_var = TExpr::new(TExprKind::Var("_a".into()), result_type.clone());
             let last_con = TExpr::new(
-                TExprKind::Con(constructors.last().unwrap().name.clone()),
+                TExprKind::Con(self.resolve_con_name(&constructors.last().unwrap().name).to_string()),
                 result_type.clone(),
             );
             let body = TExpr::new(TExprKind::App(
@@ -1007,7 +1013,7 @@ impl Checker {
                 span: None,
                 patterns: vec![],
                 guards: vec![],
-                body: TExpr::new(TExprKind::Con(constructors.first().unwrap().name.clone()), result_type.clone()),
+                body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.first().unwrap().name).to_string()), result_type.clone()),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -1023,7 +1029,7 @@ impl Checker {
                 span: None,
                 patterns: vec![],
                 guards: vec![],
-                body: TExpr::new(TExprKind::Con(constructors.last().unwrap().name.clone()), result_type.clone()),
+                body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.last().unwrap().name).to_string()), result_type.clone()),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -1198,7 +1204,8 @@ impl Checker {
                 ConstructorFields::Named(fs) => fs.len(),
             };
 
-            let con_info = self.constructors.get(&con.name).cloned();
+            let con_key = self.resolve_con_name(&con.name).to_string();
+            let con_info = self.constructors.get(&con_key).cloned();
             let field_tys: Vec<Ty> = con_info.as_ref()
                 .map(|ci| ci.field_types.clone())
                 .unwrap_or_default();
@@ -1211,7 +1218,7 @@ impl Checker {
             let patterns = vec![
                 TPattern::Var("_f".to_string(), f_ty.clone()),
                 TPattern::Constructor {
-                    name: con.name.clone(),
+                    name: con_key.clone(),
                     args: param_names.iter().enumerate().map(|(i, n)| {
                         let ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
                         TPattern::Var(n.clone(), ty)
@@ -1221,7 +1228,7 @@ impl Checker {
 
             // Body: Con (mapped_x0) (mapped_x1) ...
             let mut body = TExpr::new(
-                TExprKind::Con(con.name.clone()),
+                TExprKind::Con(con_key),
                 output_type.clone(),
             );
 
@@ -1442,7 +1449,9 @@ impl Checker {
         result_ty: &Ty,
     ) -> Result<TExpr, (String, String)> {
         let json = Self::json_ty();
-        let mut body = Self::jx_ok_con(con_name, field_tys, result_ty, estr);
+        // The constructed value uses the registered key (a shadowing local
+        // constructor is mangled); every *string* below keeps the source name.
+        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
         for i in (0..fields.len()).rev() {
             let fty = &field_tys[i];
             let fname = &fields[i].name;
@@ -1484,7 +1493,7 @@ impl Checker {
         estr: &Ty,
         result_ty: &Ty,
     ) -> Result<TExpr, (String, String)> {
-        let mut body = Self::jx_ok_con(con_name, field_tys, result_ty, estr);
+        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
         for i in (0..field_tys.len()).rev() {
             let fty = &field_tys[i];
             let dec = self.fromjson_field_decoder(fty).map_err(|e| Self::fromjson_field_err(
@@ -1520,7 +1529,7 @@ impl Checker {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
                 self.fromjson_named_body(&con.name, fields, field_tys, estr, result_ty)
             }
-            _ if field_tys.is_empty() => Ok(Self::jx_ok_con(&con.name, &[], result_ty, estr)),
+            _ if field_tys.is_empty() => Ok(Self::jx_ok_con(self.resolve_con_name(&con.name), &[], result_ty, estr)),
             _ => {
                 let contents = Self::jx_call(
                     "jField",
@@ -1698,7 +1707,7 @@ impl Checker {
 
         // Constructor field types as registered in pass 1.
         let con_field_tys: Vec<Vec<Ty>> = constructors.iter().map(|con| {
-            self.constructors.get(&con.name)
+            self.constructors.get(self.resolve_con_name(&con.name))
                 .map(|ci| ci.field_types.clone())
                 .unwrap_or_default()
         }).collect();
@@ -1734,7 +1743,9 @@ impl Checker {
             );
             for (con, ftys) in constructors.iter().zip(&con_field_tys).rev() {
                 let then_branch = if ftys.is_empty() {
-                    Self::jx_ok_con(&con.name, &[], &result_ty, &estr)
+                    // TIR construction uses the registered key; the compared
+                    // JSON tag strings keep the source name.
+                    Self::jx_ok_con(self.resolve_con_name(&con.name), &[], &result_ty, &estr)
                 } else {
                     Self::jx_call("jTagNeedsObject", vec![Self::jx_str(&con.name)], estr.clone())
                 };
@@ -2152,7 +2163,7 @@ impl Checker {
 
         // Constructor field types as registered in pass 1.
         let con_field_tys: Vec<Vec<Ty>> = constructors.iter().map(|con| {
-            self.constructors.get(&con.name)
+            self.constructors.get(self.resolve_con_name(&con.name))
                 .map(|ci| ci.field_types.clone())
                 .unwrap_or_default()
         }).collect();
@@ -2169,7 +2180,7 @@ impl Checker {
                         .collect();
                     clauses.push(TClause {
                         span: None,
-                        patterns: vec![TPattern::Constructor { name: con.name.clone(), args }],
+                        patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args }],
                         guards: vec![],
                         body,
                         where_binds: vec![],

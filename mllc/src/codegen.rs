@@ -212,6 +212,24 @@ impl CodeGen {
     fn register_data_type(&mut self, def: &TDataDef) {
         let is_enum = def.constructors.iter().all(|c| matches!(&c.fields, TConFields::Positional(f) if f.is_empty()));
         for (i, con) in def.constructors.iter().enumerate() {
+            // `constructor_info` resolves by first match, so a second
+            // registration of the same name with a different tag would be
+            // silently ignored while the typechecker (last-writer-wins map)
+            // used the other one — the exact split-brain that produced silent
+            // miscompiles before constructor shadowing/duplicate detection.
+            // The typechecker guarantees unique names here; enforce it.
+            if let Some((prev_ty, prev_idx, prev_total, prev_enum)) = self.constructors.iter()
+                .find(|(cn, ..)| cn == &con.name)
+                .map(|(_, tn, idx, total, en)| (tn.clone(), *idx, *total, *en))
+                && (prev_ty.as_str(), prev_idx, prev_total, prev_enum)
+                    != (def.name.as_str(), i + 1, def.constructors.len(), is_enum) {
+                    panic!(
+                        "internal compiler error: constructor '{}' of '{}' reached codegen \
+                         under the same name as a constructor of '{}' with a different tag — \
+                         the typechecker's duplicate/shadowing handling should have prevented this",
+                        con.name, def.name, prev_ty,
+                    );
+                }
             self.constructors.push((con.name.clone(), def.name.clone(), i + 1, def.constructors.len(), is_enum));
         }
         // LuaDict types (validated by the typechecker to be single-constructor

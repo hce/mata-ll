@@ -49,9 +49,12 @@ impl Checker {
             .map(|(name, _)| name.clone())
             .collect();
 
-        // Return missing ones
+        // Return missing ones. Constructor keys are internal (a shadowing
+        // local constructor is registered under a mangled key); report the
+        // source name the user wrote.
         all_constructors.into_iter()
             .filter(|c| !seen_constructors.contains(c))
+            .map(|c| c.strip_suffix(super::SHADOW_SUFFIX).unwrap_or(&c).to_string())
             .collect()
     }
 
@@ -71,10 +74,13 @@ impl Checker {
                 }
             }
             Pattern::Constructor { name, .. } => {
-                if let Some(info) = self.constructors.get(name) {
+                // Track by registered key so a shadowing local constructor is
+                // compared against its own type's variants, not the shadowed one.
+                let key = self.resolve_con_name(name);
+                if let Some(info) = self.constructors.get(key) {
                     *type_name = Some(info.type_name.clone());
-                    if !seen.contains(name) {
-                        seen.push(name.clone());
+                    if !seen.iter().any(|s| s == key) {
+                        seen.push(key.to_string());
                     }
                 }
             }
@@ -589,7 +595,11 @@ impl Checker {
                 Ok((TPattern::LitPat(Self::convert_literal(lit)), s))
             }
             Pattern::Constructor { name, args } => {
-                let con_info = self.constructors.get(name)
+                // Resolve the source name to its registered key (a local
+                // constructor shadowing a Prelude/import one lives under a
+                // mangled key); diagnostics keep the source name.
+                let con_key = self.resolve_con_name(name).to_string();
+                let con_info = self.constructors.get(&con_key)
                     .ok_or_else(|| DiagnosticKind::UnboundConstructor(name.clone()))?.clone();
 
                 if args.len() != con_info.field_types.len() {
@@ -623,7 +633,7 @@ impl Checker {
                     targs.push(tp);
                 }
 
-                Ok((TPattern::Constructor { name: name.clone(), args: targs }, subst))
+                Ok((TPattern::Constructor { name: con_key, args: targs }, subst))
             }
             Pattern::Paren(inner) => self.check_pattern(inner, expected, env),
             Pattern::Tuple(pats) => {
@@ -663,9 +673,12 @@ impl Checker {
                 }
             }
             Expr::Con(name) => {
-                if let Some(scheme) = env.lookup(name) {
+                // Resolve to the registered key (shadowing, see check_pattern);
+                // the TIR carries the key so codegen picks the right tag.
+                let con_key = self.resolve_con_name(name).to_string();
+                if let Some(scheme) = env.lookup(&con_key) {
                     let ty = self.instantiate(scheme);
-                    Ok((TExpr::new(TExprKind::Con(name.clone()), ty.clone()), ty, Subst::empty()))
+                    Ok((TExpr::new(TExprKind::Con(con_key), ty.clone()), ty, Subst::empty()))
                 } else {
                     Err(DiagnosticKind::UnboundConstructor(name.clone()))
                 }
@@ -906,7 +919,7 @@ impl Checker {
             Expr::RecordCon { constructor, fields } => {
                 // Desugar to positional application by reordering fields
                 // to match the data declaration order
-                let con_info = self.constructors.get(constructor)
+                let con_info = self.constructors.get(self.resolve_con_name(constructor))
                     .ok_or_else(|| DiagnosticKind::UnboundConstructor(constructor.clone()))?.clone();
 
                 // Collect field names with their index from the record_fields table

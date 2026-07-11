@@ -159,7 +159,30 @@ pub struct Checker {
     /// end of the module, so a derived encoder can reference the encoder of a
     /// type declared later (mutual recursion).
     tojson_types: HashSet<String>,
+    /// Constructor keys (into `constructors`/`env`) declared by the *local*
+    /// module (decl index >= `local_decl_start`), as opposed to builtins, the
+    /// Prelude and imports. Drives duplicate-vs-shadowing decisions.
+    local_con_keys: HashSet<String>,
+    /// Source name -> mangled key, for local constructors that shadow a
+    /// non-local (builtin/Prelude/import) constructor of the same name.
+    /// The non-local constructor keeps its plain name — codegen relies on the
+    /// builtin names (`Just`, `Nothing`, `:`, `[]`) for the Maybe/list
+    /// representations — and the local one is registered, referenced and
+    /// emitted under the mangled key instead. `resolve_con_name` applies the
+    /// rename to every constructor reference in local code, so the local
+    /// definition consistently shadows the imported one (as in GHC, where a
+    /// local declaration shadows an implicitly imported name).
+    local_con_renames: HashMap<String, String>,
+    /// True while the declaration currently being processed is local (its decl
+    /// index is >= `local_decl_start`). Set by every decl-processing pass;
+    /// determines how `resolve_con_name` resolves constructor references.
+    checking_local: bool,
 }
+
+/// Suffix appended to a local constructor's key when it shadows a non-local
+/// constructor of the same name. Never shown to users: diagnostics strip it,
+/// derived Show prints the source name, and JSON codecs key by the source name.
+pub(crate) const SHADOW_SUFFIX: &str = "__mll_shadow";
 
 impl Default for Checker {
     fn default() -> Self {
@@ -195,6 +218,9 @@ impl Checker {
             binder_types: Vec::new(),
             fromjson_types: HashSet::new(),
             tojson_types: HashSet::new(),
+            local_con_keys: HashSet::new(),
+            local_con_renames: HashMap::new(),
+            checking_local: false,
         };
         checker.init_prelude();
         checker.init_kinds();
@@ -1485,6 +1511,122 @@ impl Checker {
 
     // --- Data types ---
 
+    /// Resolve a constructor reference (from a pattern, expression, derived
+    /// instance or data-def conversion) to the key it is registered under.
+    /// In local code a name that shadows a non-local constructor resolves to
+    /// the local (mangled) key; everywhere else — non-local code, or names the
+    /// local module does not redefine — the source name is the key. This is
+    /// the single point that keeps the typechecker, the derived instances and
+    /// codegen's tag table all agreeing on which constructor a name means.
+    pub(super) fn resolve_con_name<'a>(&'a self, name: &'a str) -> &'a str {
+        if self.checking_local
+            && let Some(key) = self.local_con_renames.get(name) {
+                return key;
+            }
+        name
+    }
+
+    /// Claim `con_name` (constructor `variant_index` of `total_variants` of
+    /// `type_name`, being registered by the declaration currently processed —
+    /// local iff `checking_local`) in the flat constructor namespace. Returns
+    /// the key to register it under, or `None` (with a diagnostic pushed) when
+    /// the name genuinely duplicates an existing same-scope constructor.
+    ///
+    /// Policy, mirroring GHC's scoping as closely as the flattened-namespace
+    /// architecture allows:
+    /// - two constructors of the same name in the same scope: error (GHC:
+    ///   "Multiple declarations of ...") — except that a *non-local*
+    ///   re-registration of the identical constructor (same type, same
+    ///   position) is benign and accepted: a diamond import merges the same
+    ///   module's declarations twice;
+    /// - a local constructor whose name a builtin/Prelude/import already uses:
+    ///   the local one shadows it (GHC: a local definition shadows an
+    ///   implicitly imported name) — it gets a mangled key, and
+    ///   `resolve_con_name` routes local references to it;
+    /// - two non-local constructors (an import against the Prelude or another
+    ///   import): error, consistent with the loud import-collision policy for
+    ///   functions in `check_import_collisions`.
+    ///
+    /// Silently keeping both under one name is never an option: the
+    /// typechecker's map is last-writer-wins but codegen's tag table scans
+    /// first-match, so the two phases would disagree on the constructor's tag
+    /// and the program would misbehave at runtime with no diagnostic.
+    fn claim_constructor_name(
+        &mut self,
+        con_name: &str,
+        type_name: &str,
+        variant_index: usize,
+        total_variants: usize,
+    ) -> Option<String> {
+        let duplicate_of = |checker: &mut Self, other_type: &str, other_is_local: bool| {
+            let where_other = if other_is_local { "in this module" } else { "by the Prelude or an import" };
+            let note = if other_is_local {
+                "GHC rejects this too (\"Multiple declarations\"): all constructors declared in one module share a single namespace, so a use of the name would be ambiguous. Rename one of the constructors.".to_string()
+            } else {
+                format!(
+                    "mata-ll merges the Prelude and every import into a single namespace, so two imported types cannot both declare a constructor named '{}'. (A constructor declared in your own file may shadow an imported one — this error is only for two imported/Prelude declarations.) Rename the constructor in one of the imported modules.",
+                    con_name,
+                )
+            };
+            checker.push_error_ctx(
+                DiagnosticKind::Other(format!(
+                    "Duplicate data constructor '{}': it is already declared by '{}' {}\nnote: {}",
+                    con_name, other_type, where_other, note,
+                )),
+                format!("data {}", type_name),
+            );
+        };
+
+        if self.checking_local {
+            // A previous local declaration already shadows a non-local `con_name`.
+            if let Some(key) = self.local_con_renames.get(con_name).cloned() {
+                let other = self.constructors.get(&key).map(|c| c.type_name.clone()).unwrap_or_default();
+                duplicate_of(self, &other, true);
+                return None;
+            }
+            let existing_type = self.constructors.get(con_name).map(|c| c.type_name.clone());
+            match existing_type {
+                Some(other) if self.local_con_keys.contains(con_name) => {
+                    duplicate_of(self, &other, true);
+                    None
+                }
+                Some(_) => {
+                    // Shadow the non-local constructor: the local one lives
+                    // under a mangled key, the non-local keeps its name.
+                    let key = format!("{}{}", con_name, SHADOW_SUFFIX);
+                    if let Some(clash) = self.constructors.get(&key).map(|c| c.type_name.clone()) {
+                        // Pathological: a constructor was literally named like
+                        // the mangled key. Refuse loudly rather than alias.
+                        let clash_local = self.local_con_keys.contains(&key);
+                        duplicate_of(self, &clash, clash_local);
+                        return None;
+                    }
+                    self.local_con_renames.insert(con_name.to_string(), key.clone());
+                    self.local_con_keys.insert(key.clone());
+                    Some(key)
+                }
+                None => {
+                    self.local_con_keys.insert(con_name.to_string());
+                    Some(con_name.to_string())
+                }
+            }
+        } else if let Some(existing) = self.constructors.get(con_name) {
+            if existing.type_name == type_name
+                && existing.variant_index == variant_index
+                && existing.total_variants == total_variants {
+                // The identical constructor registered again: a diamond import
+                // merges the same module's declarations more than once.
+                Some(con_name.to_string())
+            } else {
+                let other = existing.type_name.clone();
+                duplicate_of(self, &other, false);
+                None
+            }
+        } else {
+            Some(con_name.to_string())
+        }
+    }
+
     fn register_data_type(&mut self, name: &str, type_vars: &[String], constructors: &[Constructor]) {
         self.register_kind(name, type_vars.len());
         let tvars: Vec<TyVar> = type_vars.iter()
@@ -1508,6 +1650,14 @@ impl Checker {
         }
 
         for (i, con) in constructors.iter().enumerate() {
+            // Claim the name in the flat constructor namespace: `con_key` is
+            // the key the constructor is registered (and code-generated)
+            // under — the plain name, or a mangled key when a local
+            // constructor shadows a Prelude/import one. A genuine same-scope
+            // duplicate was reported by the claim; skip it so it cannot
+            // clobber the existing registration with conflicting tags.
+            let Some(con_key) = self.claim_constructor_name(&con.name, name, i + 1, constructors.len()) else { continue };
+
             // Collect existential type variables for this constructor
             let ex_tvars: Vec<TyVar> = con.existential_vars.iter()
                 .map(|n| TyVar { name: n.clone(), id: u32::MAX })
@@ -1538,12 +1688,12 @@ impl Checker {
             let mut all_scheme_vars = tvars.clone();
             all_scheme_vars.extend(ex_tvars.clone());
 
-            self.constructors.insert(con.name.clone(), ConInfo {
+            self.constructors.insert(con_key.clone(), ConInfo {
                 type_name: name.to_string(), variant_index: i + 1, total_variants: constructors.len(),
                 field_types: field_types.clone(), type_vars: tvars.clone(), result_type: con_result_type.clone(),
                 existential_vars: ex_tvars,
             });
-            self.env.insert(con.name.clone(), Scheme { vars: all_scheme_vars, ty: con_type });
+            self.env.insert(con_key, Scheme { vars: all_scheme_vars, ty: con_type });
 
             // Register record field accessors
             if let ConstructorFields::Named(fields) = &con.fields {
@@ -1580,7 +1730,10 @@ impl Checker {
         let inner_ty = self.ast_type_to_ty(inner);
 
         // Register constructor: Name :: InnerType -> Name
-        self.constructors.insert(name.to_string(), ConInfo {
+        // The constructor shares the flat namespace with data constructors,
+        // so it goes through the same duplicate/shadowing claim.
+        let Some(con_key) = self.claim_constructor_name(name, name, 1, 1) else { return };
+        self.constructors.insert(con_key.clone(), ConInfo {
             type_name: name.to_string(),
             variant_index: 1,
             total_variants: 1,
@@ -1589,7 +1742,7 @@ impl Checker {
             result_type: result_type.clone(),
             existential_vars: vec![],
         });
-        self.env.insert(name.to_string(), Scheme {
+        self.env.insert(con_key, Scheme {
             vars: tvars,
             ty: Ty::arrow(inner_ty, result_type),
         });
@@ -1602,10 +1755,14 @@ impl Checker {
             is_luadict: self.luadict_types.contains(name),
             constructors: constructors.iter().map(|c| {
                 TConstructor {
-                    name: c.name.clone(),
+                    // The TIR (and thus codegen) name is the registered key:
+                    // mangled when this local constructor shadows a non-local
+                    // one, the plain name otherwise. Every reference site
+                    // resolves the same way, so tags stay consistent.
+                    name: self.resolve_con_name(&c.name).to_string(),
                     fields: if c.gadt_type.is_some() {
                         // GADT: field types come from the registered ConInfo
-                        let con_info = self.constructors.get(&c.name).unwrap();
+                        let con_info = self.constructors.get(self.resolve_con_name(&c.name)).unwrap();
                         TConFields::Positional(con_info.field_types.clone())
                     } else {
                         match &c.fields {
@@ -1660,7 +1817,10 @@ impl Checker {
                 self.type_aliases.insert(name.clone(), (params.clone(), ty.clone()));
             }
         }
-        for decl in &module.decls {
+        for (decl_idx, decl) in module.decls.iter().enumerate() {
+            // Constructor names claimed by a local declaration shadow
+            // non-local (Prelude/import) ones; same-scope duplicates error.
+            self.checking_local = decl_idx >= self.local_decl_start;
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
                     self.register_data_type(name, type_vars, constructors);
@@ -1671,6 +1831,7 @@ impl Checker {
                 _ => {}
             }
         }
+        self.checking_local = false;
 
         // Pass 2: register typeclass declarations and type families
         for decl in &module.decls {
@@ -1830,7 +1991,11 @@ impl Checker {
         // Pass 4a: process deriving clauses first (so derived instances
         // are available when checking explicit instances with superclass constraints)
         let mut instance_fns = Vec::new();
-        for decl in &module.decls {
+        for (decl_idx, decl) in module.decls.iter().enumerate() {
+            // Derived instances build TIR directly; constructor references in
+            // them must resolve in the scope of the data type they derive for
+            // (a local shadowing constructor resolves to its mangled key).
+            self.checking_local = decl_idx >= self.local_decl_start;
             if let Decl::DataDef { name, type_vars, constructors, deriving } = decl {
                 // A field-key rename (`field as "key" :: T`) gives the field
                 // one shared EXTERNAL name: the key in the runtime Lua table
@@ -1863,13 +2028,19 @@ impl Checker {
             }
         }
 
+        self.checking_local = false;
+
         // Pass 4b: register and check explicit instance declarations
-        for decl in &module.decls {
+        for (decl_idx, decl) in module.decls.iter().enumerate() {
+            // Instance method bodies reference constructors; resolve them in
+            // the scope of the declaring module (shadowing, see pass 1).
+            self.checking_local = decl_idx >= self.local_decl_start;
             if let Decl::InstanceDecl { class_name, target_type, methods } = decl {
                 let ifns = self.check_instance(class_name, target_type, methods);
                 instance_fns.extend(ifns);
             }
         }
+        self.checking_local = false;
 
         // Pass 5: generate FFI functions (type sigs with LuaPure/LuaIO and no body)
         let mut data_defs = Vec::new();
@@ -1936,6 +2107,10 @@ impl Checker {
             self.enforce_hidden = !self.hidden_names.is_empty()
                 && self.local_decl_start > 0
                 && decl_idx >= self.local_decl_start;
+            // Constructor references in local bodies resolve to local
+            // (possibly shadowing) constructors; non-local bodies keep seeing
+            // the constructors of their own scope.
+            self.checking_local = decl_idx >= self.local_decl_start;
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
                     data_defs.push(self.convert_data_def(name, type_vars, constructors));
@@ -1969,8 +2144,20 @@ impl Checker {
             .collect();
         record_accessors.sort();
 
-        let newtypes: Vec<String> = module.decls.iter().filter_map(|d| {
-            if let Decl::NewtypeDef { name, .. } = d { Some(name.clone()) } else { None }
+        self.checking_local = false;
+
+        // The newtype list carries the *registered* constructor keys: a local
+        // newtype whose constructor shadows a non-local constructor is known
+        // to codegen (which elides it as an identity function) only under its
+        // mangled key.
+        let newtypes: Vec<String> = module.decls.iter().enumerate().filter_map(|(decl_idx, d)| {
+            if let Decl::NewtypeDef { name, .. } = d {
+                if decl_idx >= self.local_decl_start
+                    && let Some(key) = self.local_con_renames.get(name) {
+                        return Some(key.clone());
+                    }
+                Some(name.clone())
+            } else { None }
         }).collect();
 
         TModule { data_defs, functions, instance_fns, has_main, exports, record_accessors, newtypes }
