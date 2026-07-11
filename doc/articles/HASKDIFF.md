@@ -58,11 +58,14 @@ type signatures on every top-level definition:
     double :: Integer -> Integer
     double x = x * 2
 
-## No qualified imports or import renaming
+## Import renaming requires `qualified`
 
-mata-ll supports `import Module` and `import Module (foo, bar)` but
-not `import qualified`, `import Module as M`, or `import Module hiding`.
-All imported names go directly into scope.
+mata-ll supports `import Module`, `import Module (foo, bar)`,
+`import Module hiding (foo)`, and `import qualified Module as M` (used as
+`M.foo` — the `as` is required, unlike Haskell where it is optional). The
+one form it does *not* support is an unqualified rename: `import Module as M`
+without `qualified` is a parse error. Names from a plain (non-qualified)
+import go directly into scope.
 
 ## HashMap instead of Data.Map
 

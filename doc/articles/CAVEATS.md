@@ -60,6 +60,23 @@ Use `seq` to force intermediate values, or prefer strict accumulator patterns.
 The demand analysis pass eliminates many unnecessary thunks, but it cannot
 catch every case.
 
+## Cheap arguments may be evaluated even when unused
+
+To keep hot loops fast, mata-ll evaluates *cheap* function arguments (literals,
+variables, small arithmetic, and saturated calls to inlinable helpers) eagerly
+at the call site — even in argument positions the callee never forces. So a
+diverging or erroring expression in an argument the function ignores can crash
+where Haskell's non-strict semantics would return normally:
+
+    g _ = 42
+    main = print (g (error "boom"))   -- Haskell: 42; mata-ll: raises "boom"
+
+Local `let`/`where` bindings do *not* have this problem — a binding is only
+forced when the body demands it. Making arguments fully lazy was measured to
+roughly double the tracker benchmark's decode time, so eager cheap arguments
+are kept as a deliberate trade-off. Avoid passing a possibly-bottom expression
+in an argument position the callee may not use.
+
 ## `let` binds values, not functions
 
 `let` and do-block `let` bind values only. A binding with parameters, e.g.
@@ -74,6 +91,23 @@ including self-referential lazy values:
 
 For a local function, bind a lambda (`let f = \x -> x + 1`) or use a `where`
 clause, which does support multi-clause local functions.
+
+## Do-block `<-` binds a variable, `_`, or a tuple only
+
+A monadic bind `pat <- action` accepts a plain variable, a wildcard `_`, or a
+tuple pattern — nothing else. A unit pattern or a constructor pattern on the
+left is a parse error:
+
+    () <- return ()          -- Parse error: Expected expression, found Bind
+    Just x <- lookupThing k  -- not supported (no MonadFail-style refutable bind)
+
+Use `_ <- action` to discard a result, and match constructor results with a
+`case` on the bound value instead:
+
+    r <- lookupThing k
+    case r of
+        Just x  -> ...
+        Nothing -> ...
 
 ## Lua errors from FFI calls are not wrapped
 
