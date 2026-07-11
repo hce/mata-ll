@@ -795,26 +795,64 @@ matters for the Lua target where every extra table lookup and closure
 allocation is felt.
 
 Polymorphic recursion — where a function calls itself at a
-progressively different type — is supported via a fallback to
-dictionary-passing. When monomorphization would diverge (more than
-16 specializations of the same function), the compiler switches
-that function to dictionary-passing: typeclass methods are looked
-up from a Lua table parameter instead of being resolved statically.
+progressively different type — cannot be monomorphized: the type
+grows without bound, so there is no finite set of specializations
+to generate. The compiler detects this and falls back to
+dictionary-passing for the whole function.
 
-    data Deep a = DNil | DCons a (Deep (Box a))
+    data Nested a = NNil | NCons a (Nested [a])
 
-    showDeep :: Show a => Deep a -> String
-    showDeep DNil = "end"
-    showDeep (DCons x rest) = show x <> " > " <> showDeep rest
+    showNested :: Show a => Nested a -> String
+    showNested NNil = "end"
+    showNested (NCons x rest) = show x <> " > " <> showNested rest
 
-Here `showDeep` calls itself at `Deep (Box a)`, then
-`Deep (Box (Box a))`, etc. The compiler generates up to 16
-monomorphized copies (which handle the common shallow cases with
-zero overhead), then falls back to a single dictionary-threaded
-version for deeper nesting. Call sites pass concrete dictionaries
-as Lua tables:
+    main :: IO ()
+    main = do
+        let n = NCons (1 :: Integer)
+                      (NCons [2, 3]
+                             (NCons [[4, 5], [6]] NNil))
+        putStrLn (showNested n)
 
-    showDeep({ show = show_Integer }, value)
+Here `showNested` calls itself at `Nested [a]`, then `Nested [[a]]`,
+and so on — each recursive occurrence is a strictly larger type. This
+program compiles and runs, printing:
+
+    1 > [2, 3] > [[4, 5], [6]] > end
+
+Mechanically: monomorphization tries to specialize `showNested` at
+`Nested Integer`, which demands a specialization at `Nested [Integer]`,
+which demands `Nested [[Integer]]`, and so on. When more than 16
+trial specializations of one function accumulate, the compiler gives
+up on that function, **discards those trial specializations, and
+rewrites the entire function to dictionary-passing** — there is no
+mix of monomorphized shallow copies and a dict-passing tail; every
+call site of the function, however shallow, passes a dictionary. The
+typeclass method is then looked up from a Lua table parameter instead
+of being resolved statically. The emitted top-level call and the
+recursive call look like:
+
+    showNested({ show = show_Integer }, value)   -- from main
+    showNested(__dict_Show, rest)                -- the recursive call
+
+Limitation — read this before relying on it. The dictionary is built
+from the concrete type at the outermost call site and threaded
+**unchanged** through the recursion; it is *not* re-derived at the
+growing type. So every level resolves its method at the outermost
+element type. That is correct when the method is faithful at the
+deeper types anyway — the runtime `show` renders lists, tuples and
+numbers structurally, which is why the example above prints correctly
+— but it is wrong when a derived instance differs per level. With
+`data Box a = Box a deriving (Show)` and `Deep (Box a)` recursion,
+`show (Box 2)` on its own correctly prints `Box 2`, yet inside the
+polymorphic recursion the threaded `show_Integer` is applied to the
+`Box` value and it prints `(2)` instead. In other words, mata-ll
+compiles and runs genuinely polymorphic-recursive code, but the
+dictionary-passing fallback does not transform the dictionary at each
+recursive type, so class methods over a growing *user* type are
+resolved incorrectly. Polymorphic recursion whose class methods stay
+faithful under the outermost dictionary (structural `show`/`==` over
+built-in containers and primitives) works; polymorphic recursion that
+needs a genuinely different instance at each depth does not.
 
 # Module and import syntax
 
