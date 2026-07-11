@@ -775,7 +775,7 @@ impl CodeGen {
                 self.emit(&self.fn_decl(&lua_name, ""));
                 self.emit("\n");
                 self.indent += 1;
-                self.gen_where_binds(&clauses[0].where_binds);
+                self.gen_where_binds(&clauses[0].where_binds, self.clause_demanded(&clauses[0]));
                 self.gen_bind_chain_io(&clauses[0].body);
                 self.indent -= 1;
                 self.emit_line("end");
@@ -821,7 +821,7 @@ impl CodeGen {
                 self.emit(&self.var_decl(&lua_name));
                 self.emit("__thunk(function()\n");
                 self.indent += 1;
-                self.gen_where_binds(&clauses[0].where_binds);
+                self.gen_where_binds(&clauses[0].where_binds, self.clause_demanded(&clauses[0]));
                 self.emit_indent();
                 self.emit("return ");
                 self.gen_expr(&clauses[0].body);
@@ -888,7 +888,7 @@ impl CodeGen {
                         }
                     }
                 }
-                self.gen_where_binds(&clause.where_binds);
+                self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
                 if eta_count > 0 {
                     // Eta-expand: apply extra params to the body
                     self.emit_indent(); self.emit("return __force(");
@@ -927,7 +927,7 @@ impl CodeGen {
                         self.concrete_vars.insert(p.clone());
                     }
                 }
-                self.gen_where_binds(&clause.where_binds);
+                self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
                 self.gen_pattern_match(&params, clauses);
             }
             self.indent -= 1;
@@ -991,7 +991,10 @@ impl CodeGen {
         self.concrete_vars.insert(lua_name);
     }
 
-    fn gen_where_binds(&mut self, binds: &[TLocalDef]) {
+    /// `demanded` seeds which where-bound names are provably forced by the
+    /// clause body/guards (see clause_demanded); such bindings may be
+    /// assigned strictly even when they read suspended values.
+    fn gen_where_binds(&mut self, binds: &[TLocalDef], demanded: std::collections::HashSet<String>) {
         // Forward-declare ALL where-bound names — values as well as functions —
         // before emitting any definition. A where/let group is mutually
         // recursive in Haskell, and a value may reference itself (e.g. a
@@ -1020,13 +1023,17 @@ impl CodeGen {
             }
         }
 
+        // Close the demand seed over sibling RHSes: if the body demands z and
+        // z's RHS demands y, y is demanded too (see demanded_bindings).
+        let demanded = self.demanded_bindings(binds, demanded);
+
         // Now emit all bindings in source order — functions and values
         // interleaved as written. The forward declarations above ensure
         // references resolve regardless of order.
         let mut i = 0;
         while i < binds.len() {
             if binds[i].patterns.is_empty() {
-                self.gen_where_value(binds, i);
+                self.gen_where_value(binds, i, &demanded);
                 i += 1;
             } else {
                 self.gen_where_func_group_assign(binds, i);
@@ -1038,7 +1045,12 @@ impl CodeGen {
         }
     }
 
-    fn gen_where_value(&mut self, binds: &[TLocalDef], i: usize) {
+    fn gen_where_value(
+        &mut self,
+        binds: &[TLocalDef],
+        i: usize,
+        demanded: &std::collections::HashSet<String>,
+    ) {
         let bind = &binds[i];
         let sname = sanitize_name(&bind.name);
         // The name was forward-declared in gen_where_binds; assign to it
@@ -1049,11 +1061,14 @@ impl CodeGen {
         // happens after every assignment in the group has run.
         let lref = self.lua_ref(&sname);
         self.emit_indent();
-        if Self::is_cheap(&bind.body) && strict_binding_safe(binds, i) {
+        if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
             self.emit(&format!("{} = ", lref));
             self.gen_expr(&bind.body);
             self.concrete_vars.insert(sname);
         } else {
+            // Thunked: the name must not be considered concrete, even if a
+            // same-named outer binding was (this assignment shadows it).
+            self.concrete_vars.remove(&sname);
             self.emit(&format!("{} = __thunk(function() return ", lref));
             self.gen_expr(&bind.body);
             self.emit(" end)");
@@ -1192,7 +1207,7 @@ impl CodeGen {
                             self.concrete_vars.insert(var.clone());
                         }
                     }
-                    self.gen_where_binds(&clause.where_binds);
+                    self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
                     for (gi, guard) in clause.guards.iter().enumerate() {
                         let gkw = if gi == 0 { "if" } else { "elseif" };
                         self.emit_indent(); self.emit(&format!("{} ", gkw));
@@ -1215,7 +1230,7 @@ impl CodeGen {
                             self.concrete_vars.insert(var.clone());
                         }
                     }
-                    self.gen_where_binds(&clause.where_binds);
+                    self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
                     for (gi, guard) in clause.guards.iter().enumerate() {
                         let gkw = if i == 0 && gi == 0 { "if" } else { "elseif" };
                         self.emit_indent(); self.emit(&format!("{} ", gkw));
@@ -1245,7 +1260,7 @@ impl CodeGen {
                             self.concrete_vars.insert(var.clone());
                         }
                     }
-                    self.gen_where_binds(&clause.where_binds);
+                    self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
                     self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
                     if i > 0 { self.indent -= 1; self.emit_line("end"); }
                     return;
@@ -1262,7 +1277,7 @@ impl CodeGen {
                         self.concrete_vars.insert(var.clone());
                     }
                 }
-                self.gen_where_binds(&clause.where_binds);
+                self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
                 self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
                 self.indent -= 1;
             }
@@ -1309,7 +1324,7 @@ impl CodeGen {
                     self.concrete_vars.insert(var.clone());
                 }
             }
-            self.gen_where_binds(&clause.where_binds);
+            self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
             if clause.guards.is_empty() {
                 self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
             } else {
@@ -1487,33 +1502,135 @@ impl CodeGen {
 
     /// in accumulator patterns while preserving laziness for expensive
     /// computations (user function calls).
-    fn is_cheap(expr: &TExpr) -> bool {
+    ///
+    /// `var_ok` decides whether a variable reference counts as cheap. The
+    /// structural walk is shared between two notions of cheapness:
+    /// - `is_cheap` (var_ok = always): "small to duplicate/evaluate" — used
+    ///   for inlining decisions and the call-site protocol, where every
+    ///   emission path forces variables anyway.
+    /// - `is_cheap_to_force` (var_ok = provably WHNF): "safe to evaluate
+    ///   eagerly" — evaluating the expression now cannot force a suspended
+    ///   computation, so it cannot raise or diverge where GHC would not.
+    fn is_cheap_with(expr: &TExpr, var_ok: &dyn Fn(&str) -> bool) -> bool {
         match &expr.kind {
-            TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Var(_)
+            TExprKind::Lit(_) | TExprKind::Con(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
-            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap(inner),
-            TExprKind::Tuple(elems) => elems.iter().all(Self::is_cheap),
+            TExprKind::Var(name) => var_ok(name),
+            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap_with(inner, var_ok),
+            TExprKind::Tuple(elems) => elems.iter().all(|e| Self::is_cheap_with(e, var_ok)),
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // Builtin ops (arithmetic, comparison, concat) are cheap
                 // if their operands are cheap
-                is_builtin_op(op) && Self::is_cheap(lhs) && Self::is_cheap(rhs)
+                is_builtin_op(op) && Self::is_cheap_with(lhs, var_ok) && Self::is_cheap_with(rhs, var_ok)
             }
             TExprKind::App(func, arg) => {
                 // Constructor applications are cheap (just table creation).
                 // General function applications are NOT cheap — the function
                 // body might be expensive even if the args are cheap.
                 if Self::is_con_app(expr) {
-                    Self::is_cheap(arg) && Self::is_cheap(func)
+                    Self::is_cheap_with(arg, var_ok) && Self::is_cheap_with(func, var_ok)
                 } else {
                     false
                 }
             }
             TExprKind::If { cond, then_branch, else_branch } => {
-                Self::is_cheap(cond) && Self::is_cheap(then_branch) && Self::is_cheap(else_branch)
+                Self::is_cheap_with(cond, var_ok)
+                    && Self::is_cheap_with(then_branch, var_ok)
+                    && Self::is_cheap_with(else_branch, var_ok)
             }
             // Function calls, case, let — potentially expensive, thunk them
             _ => false,
         }
+    }
+
+    fn is_cheap(expr: &TExpr) -> bool {
+        Self::is_cheap_with(expr, &|_| true)
+    }
+
+    /// True when evaluating `expr` right now is *sound*, not just cheap:
+    /// it cannot force a suspended (possibly bottom) computation.
+    ///
+    /// Cheap-eagerness (Faxén-style) is only valid for expressions that
+    /// cannot fail or diverge. A bare `Var` does not qualify by itself: a
+    /// variable can be bound to a thunk of `error`/an infinite loop, and
+    /// gen_expr emits `__force(v)` for non-concrete variables — so eagerly
+    /// evaluating `y + 1` forces `y` even though the binding was never
+    /// demanded (GHC would never touch it). A variable only qualifies when
+    /// its referent is provably WHNF, which is exactly the `concrete_vars`
+    /// set: pattern-bound variables (forced by the match), demand-analysis
+    /// strict parameters (forced at entry), do-block bind results, top-level
+    /// functions, and prior bindings that were themselves assigned strictly
+    /// under this same rule (so WHNF-ness propagates transitively through a
+    /// binding group).
+    fn is_cheap_to_force(&self, expr: &TExpr) -> bool {
+        Self::is_cheap_with(expr, &|name| {
+            name == "otherwise" || self.concrete_vars.contains(&sanitize_name(name))
+        })
+    }
+
+    /// Names of value bindings in `binds` that are provably demanded when
+    /// the binding group's body is evaluated (seeded with the body's demand
+    /// set, closed transitively through the RHSes of demanded siblings).
+    ///
+    /// A demanded binding will be forced anyway, so evaluating it eagerly at
+    /// binding time is sound even when it can raise or diverge — the same
+    /// bottom merely surfaces at binding time instead of at first use. This
+    /// is the eagerization GHC's own demand analysis performs (let-to-case),
+    /// and it is what keeps hot-loop bindings strict without the unsound
+    /// "every Var is cheap" rule (see is_cheap_to_force).
+    fn demanded_bindings(
+        &self,
+        binds: &[TLocalDef],
+        seed: std::collections::HashSet<String>,
+    ) -> std::collections::HashSet<String> {
+        let inlined = |n: &str| self.inline_fns.contains_key(n);
+        let mut demanded = seed;
+        loop {
+            let mut changed = false;
+            for b in binds {
+                if b.patterns.is_empty() && demanded.contains(&b.name) {
+                    for v in crate::demand::forced_vars(
+                        &b.body,
+                        &self.demand_info.strict_params,
+                        &inlined,
+                    ) {
+                        if demanded.insert(v) {
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        demanded
+    }
+
+    /// Demand seed for a clause's where bindings: the variables the emitted
+    /// code for the clause body (or its guards) forces when evaluated.
+    fn clause_demanded(&self, clause: &TClause) -> std::collections::HashSet<String> {
+        let inlined = |n: &str| self.inline_fns.contains_key(n);
+        if clause.guards.is_empty() {
+            crate::demand::forced_vars(&clause.body, &self.demand_info.strict_params, &inlined)
+        } else {
+            crate::demand::forced_guards(&clause.guards, &self.demand_info.strict_params, &inlined)
+        }
+    }
+
+    /// Whether a value binding may be assigned strictly (evaluated eagerly):
+    /// either evaluating it cannot force a suspended computation at all
+    /// (is_cheap_to_force), or the binding is provably demanded by the
+    /// group's body — eager evaluation then only reorders a force that
+    /// happens regardless — and its RHS is structurally cheap (so we still
+    /// never eagerly run an expensive computation at binding time).
+    fn strict_binding_ok(
+        &self,
+        bind: &TLocalDef,
+        demanded: &std::collections::HashSet<String>,
+    ) -> bool {
+        self.is_cheap_to_force(&bind.body)
+            || (demanded.contains(&bind.name) && Self::is_cheap(&bind.body))
     }
 
     /// Whole-program call-site analysis. For each function, determine which
@@ -2143,15 +2260,32 @@ impl CodeGen {
                             }
                         }
                     }
+                    // Bindings demanded by the rest of the chain may be
+                    // evaluated eagerly even when they read suspended values —
+                    // the force happens regardless (see demanded_bindings).
+                    let demanded = self.demanded_bindings(
+                        binds,
+                        crate::demand::forced_vars(
+                            body,
+                            &self.demand_info.strict_params,
+                            &|n| self.inline_fns.contains_key(n),
+                        ),
+                    );
                     for (i, bind) in binds.iter().enumerate() {
                         let bname = sanitize_name(&bind.name);
                         let lval = self.local_lvalue(&bname);
                         // Both the if-fast-path and the cheap-path evaluate the
                         // RHS strictly, so they may only be used when the binding
-                        // does not read a still-nil sibling (see strict_binding_safe).
+                        // does not read a still-nil sibling (see strict_binding_safe)
+                        // AND evaluating the RHS now is sound: it either cannot
+                        // force a suspended computation (is_cheap_to_force) or is
+                        // provably demanded anyway — a let binding is not demanded
+                        // until used, so eagerly evaluating one that can
+                        // raise/diverge changes program behaviour.
                         let strict_ok = strict_binding_safe(binds, i);
                         if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind
-                            && strict_ok {
+                            && strict_ok
+                            && (self.is_cheap_to_force(&bind.body) || demanded.contains(&bind.name)) {
                             self.concrete_vars.insert(bname.clone());
                             self.emit_indent();
                             self.emit("if ");
@@ -2170,12 +2304,15 @@ impl CodeGen {
                             self.emit(" end\n");
                         } else {
                             self.emit_indent();
-                            if Self::is_cheap(&bind.body) && strict_ok {
+                            if self.strict_binding_ok(bind, &demanded) && strict_ok {
                                 self.emit(&format!("{} = ", lval));
                                 self.gen_expr(&bind.body);
                                 self.emit("\n");
                                 self.concrete_vars.insert(bname);
                             } else {
+                                // Thunked: must not stay marked concrete (a
+                                // same-named outer binding may have been).
+                                self.concrete_vars.remove(&bname);
                                 self.emit(&format!("{} = __thunk(function() return ", lval));
                                 self.gen_expr(&bind.body);
                                 self.emit(" end)\n");
@@ -2824,14 +2961,27 @@ impl CodeGen {
                     // prelude function (e.g. a let-bound `sum` or `last`).
                     for n in &names { self.local_vars.insert(n.clone()); }
                 }
+                // Bindings demanded by the let body may be evaluated eagerly
+                // even when they read suspended values (see demanded_bindings).
+                let demanded = self.demanded_bindings(
+                    binds,
+                    crate::demand::forced_vars(
+                        body,
+                        &self.demand_info.strict_params,
+                        &|n| self.inline_fns.contains_key(n),
+                    ),
+                );
                 for (i, bind) in binds.iter().enumerate() {
                     self.emit_indent();
                     let sname = sanitize_name(&bind.name);
-                    if Self::is_cheap(&bind.body) && strict_binding_safe(binds, i) {
+                    if self.strict_binding_ok(bind, &demanded) && strict_binding_safe(binds, i) {
                         self.emit(&format!("{} = ", sname));
                         self.gen_expr(&bind.body); self.emit("\n");
                         self.concrete_vars.insert(sname);
                     } else {
+                        // Thunked: must not stay marked concrete (a same-named
+                        // outer binding may have been).
+                        self.concrete_vars.remove(&sname);
                         self.emit(&format!("{} = __thunk(function() return ", sname));
                         self.gen_expr(&bind.body); self.emit(" end)\n");
                     }

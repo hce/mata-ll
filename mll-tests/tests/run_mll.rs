@@ -96,6 +96,50 @@ main = do
     }
 }
 
+/// Cheap-eagerness must stay sound but not over-tighten: a let binding whose
+/// RHS only reads provably-WHNF variables (a literal-bound sibling, a
+/// demand-analysis-strict parameter) is still assigned strictly — no thunk —
+/// while a binding reading a non-WHNF variable must be thunked. This is the
+/// eagerness half of the lazy_cheap_bindings.mll regression, which runtime
+/// behaviour alone cannot observe.
+#[test]
+fn cheap_eagerness_whnf_bindings_stay_strict() {
+    let source = r#"
+f :: Integer -> Integer
+f x = let n = 5
+          m = n + x
+      in m + n
+
+g :: Bool -> Integer
+g x = let y = error "boom"
+          z = y + 1
+      in if x then z else 0
+
+main :: IO ()
+main = putStrLn (show (f 10 + g False))
+"#;
+    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    // n is bound to a literal: strict assignment, no thunk.
+    assert!(lua.contains("n = 5"), "literal binding should be assigned strictly");
+    assert!(!lua.contains("n = __thunk"), "literal binding must not be thunked");
+    // m reads only provably-WHNF vars (n is literal-bound and already
+    // assigned; x is a demand-strict parameter forced at entry): strict.
+    assert!(
+        !lua.contains("m = __thunk"),
+        "binding over provably-WHNF variables must stay eagerly assigned:\n{}",
+        lua
+    );
+    // z reads y, a thunked bottom: z itself must be thunked, and y must
+    // never be forced outside a thunk body at binding time.
+    assert!(
+        lua.contains("z = __thunk"),
+        "binding over a non-WHNF variable must be thunked:\n{}",
+        lua
+    );
+}
+
 fn run_mll_file_with_lib(path: &Path) {
     let path = path.to_path_buf();
     let lib_path = Path::new("../lib").to_path_buf();
@@ -250,6 +294,7 @@ mll_test!(mangle_collision, "mangle_collision.mll");
 mll_test!(spec_limit_sibling, "spec_limit_sibling.mll");
 mll_test!(tuple_eq_adt_elems, "tuple_eq_adt_elems.mll");
 mll_test!(multi_clause_class_constraint, "multi_clause_class_constraint.mll");
+mll_test!(lazy_cheap_bindings, "lazy_cheap_bindings.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
