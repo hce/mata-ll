@@ -3283,6 +3283,57 @@ main = print ((1, 2) > (1, 3) :: Bool)
     assert!(e.contains("no Ord instance"), "missing tuple Ord note, got: {e}");
 }
 
+/// Monomorphization-time errors must carry a source location, like
+/// typechecker errors do. `<>` on lists is rejected during method resolution
+/// in mono (the checker keeps a builtin Semigroup [a] instance for
+/// polymorphic bodies), so its diagnostic is the canonical mono error: it
+/// must name the line/column of the offending clause and its definition,
+/// while keeping the message and the `note:` line verbatim.
+#[test]
+fn mono_error_reports_source_location() {
+    let e = compile_err(
+        r#"
+main :: IO ()
+main = print ([1, 2] <> [3, 4] :: [Integer])
+"#,
+    );
+    assert!(e.contains("No instance for '<>' on type '[Integer]'"), "got: {e}");
+    assert!(
+        e.contains("at 3:6, in definition of 'main'"),
+        "mono error must carry the clause's source location, got: {e}"
+    );
+    assert!(e.contains("note: lists are concatenated with ++"), "missing ++ note, got: {e}");
+}
+
+/// The parser recovers at declaration boundaries: one run reports every
+/// independent syntax error, not just the first. The first error's message
+/// must render exactly as it always has (inline ` at line:col`).
+#[test]
+fn parser_reports_multiple_errors_per_run() {
+    let e = compile_err(
+        r#"data Foo = = Bar
+
+good :: Integer -> Integer
+good x = x + 1
+
+main :: IO ()
+main = ]
+"#,
+    );
+    assert!(
+        e.contains("Parse error: Expected type/constructor name, found Eq at 1:12"),
+        "first error must keep its exact historical rendering, got: {e}"
+    );
+    assert!(
+        e.contains("Expected expression, found RightBracket at 7:8"),
+        "second independent error must also be reported, got: {e}"
+    );
+    assert!(
+        e.matches("Parse error: ").count() >= 2,
+        "expected at least two parse errors in one run, got: {e}"
+    );
+}
+
 #[test]
 fn str_to_ints_unpacks_char_codes() {
     // strToInts bridges mata-ll's opaque String to a list of character codes,

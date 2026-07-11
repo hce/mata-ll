@@ -1,6 +1,13 @@
 use std::collections::HashMap;
 use crate::ast::*;
 use crate::lexer::{Located, Token};
+use crate::types::Diagnostic;
+
+/// Internal parser result. The error is boxed because `Diagnostic` is large
+/// (it embeds `Ty`s) and would otherwise bloat every parser `Result` on the
+/// stack (clippy::result_large_err). The public `parse` unboxes into a
+/// `Vec<Diagnostic>`.
+type PResult<T> = Result<T, Box<Diagnostic>>;
 
 /// List comprehension qualifier (internal to parser, desugared before AST)
 enum ListCompQual {
@@ -51,16 +58,22 @@ impl Parser {
         tok
     }
 
-    fn expect(&mut self, expected: &Token) -> Result<(), String> {
+    /// A parse diagnostic pointing at the current token. The span renders
+    /// inline as ` at line:col`, exactly the parser's historical format.
+    fn err_here(&self, msg: String) -> Box<Diagnostic> {
+        let loc = self.peek_loc();
+        Box::new(Diagnostic::parse_at(msg, Span::new(loc.line, loc.col)))
+    }
+
+    fn expect(&mut self, expected: &Token) -> PResult<()> {
         if self.peek() == expected {
             self.advance();
             Ok(())
         } else {
-            let loc = self.peek_loc();
-            Err(format!(
-                "Expected {:?}, found {:?} at {}:{}",
-                expected, loc.token, loc.line, loc.col
-            ))
+            Err(self.err_here(format!(
+                "Expected {:?}, found {:?}",
+                expected, self.peek()
+            )))
         }
     }
 
@@ -95,7 +108,7 @@ impl Parser {
     }
 
     /// Check if the current token is at or beyond a given indentation level
-    fn parse_module(&mut self) -> Result<Module, String> {
+    fn parse_module(&mut self) -> Result<Module, Vec<Diagnostic>> {
         let mut decls = Vec::new();
         self.skip_indent();
 
@@ -147,10 +160,24 @@ impl Parser {
             self.skip_newlines_and_indent();
         }
 
+        // Parse declarations, recovering at declaration boundaries: a failed
+        // declaration records its diagnostic and parsing resumes at the next
+        // unindented line that can start a declaration, so one run reports
+        // every independent syntax error instead of only the first.
+        let mut errors: Vec<Diagnostic> = Vec::new();
         while !self.at_eof() {
-            let decl = self.parse_decl()?;
-            decls.extend(decl);
+            let started_at = self.pos;
+            match self.parse_decl() {
+                Ok(decl) => decls.extend(decl),
+                Err(e) => {
+                    errors.push(*e);
+                    self.recover_to_next_decl(started_at);
+                }
+            }
             self.skip_newlines_and_indent();
+        }
+        if !errors.is_empty() {
+            return Err(errors);
         }
 
         // Merge consecutive FunDef declarations with the same name
@@ -168,7 +195,36 @@ impl Parser {
         Ok(Module { decls: merged, exports: module_exports, hidden: std::collections::HashSet::new() })
     }
 
-    fn parse_decl(&mut self) -> Result<Vec<Decl>, String> {
+    /// True when `tok` can begin a top-level declaration — the resync points
+    /// for parser error recovery.
+    fn starts_decl(tok: &Token) -> bool {
+        matches!(tok,
+            Token::Data | Token::Newtype | Token::Import | Token::Class
+            | Token::Instance | Token::KwType | Token::Intrinsic | Token::Export
+            | Token::Infixl | Token::Infixr | Token::Infix
+            | Token::Ident(_) | Token::LeftParen)
+    }
+
+    /// After a declaration fails to parse, skip forward to the next plausible
+    /// declaration start: an unindented line (`Indent(0)`) whose first token
+    /// can begin a declaration. `started_at` is where the failed declaration
+    /// began; recovery always moves past it, so a failure on a declaration's
+    /// very first token cannot loop.
+    fn recover_to_next_decl(&mut self, started_at: usize) {
+        if self.pos <= started_at {
+            self.pos = started_at + 1;
+        }
+        while !self.at_eof() {
+            if matches!(self.peek(), Token::Indent(0))
+                && self.tokens.get(self.pos + 1).is_some_and(|next| Self::starts_decl(&next.token))
+            {
+                return;
+            }
+            self.pos += 1;
+        }
+    }
+
+    fn parse_decl(&mut self) -> PResult<Vec<Decl>> {
         self.skip_newlines_and_indent();
 
         match self.peek().clone() {
@@ -184,16 +240,15 @@ impl Parser {
             Token::Ident(_) => self.parse_value_decl(),
             Token::LeftParen => self.parse_operator_decl(),
             _ => {
-                let loc = self.peek_loc();
-                Err(format!(
-                    "Unexpected token {:?} at top level at {}:{}",
-                    loc.token, loc.line, loc.col
-                ))
+                Err(self.err_here(format!(
+                    "Unexpected token {:?} at top level",
+                    self.peek()
+                )))
             }
         }
     }
 
-    fn parse_data_decl(&mut self) -> Result<Decl, String> {
+    fn parse_data_decl(&mut self) -> PResult<Decl> {
         self.expect(&Token::Data)?;
         let name = self.expect_upper_ident()?;
 
@@ -259,7 +314,7 @@ impl Parser {
         })
     }
 
-    fn parse_constructor(&mut self) -> Result<Constructor, String> {
+    fn parse_constructor(&mut self) -> PResult<Constructor> {
         // Check for existential quantification: `forall a b. [Constraint =>] ConName fields`
         let mut existential_vars = Vec::new();
         let mut existential_constraints = Vec::new();
@@ -309,11 +364,10 @@ impl Parser {
                     match self.peek().clone() {
                         Token::StrLit(s) => { self.advance(); Some(s) }
                         _ => {
-                            let loc = self.peek_loc();
-                            return Err(format!(
-                                "Expected a string literal after 'as' in field '{}' (e.g. `{} as \"key\" :: T`), found {:?} at {}:{}",
-                                field_name, field_name, loc.token, loc.line, loc.col
-                            ));
+                            return Err(self.err_here(format!(
+                                "Expected a string literal after 'as' in field '{}' (e.g. `{} as \"key\" :: T`), found {:?}",
+                                field_name, field_name, self.peek()
+                            )));
                         }
                     }
                 } else {
@@ -360,7 +414,7 @@ impl Parser {
     }
 
     /// Parse optional `deriving (Show, Eq)` clause after a data declaration.
-    fn parse_deriving(&mut self) -> Result<Vec<String>, String> {
+    fn parse_deriving(&mut self) -> PResult<Vec<String>> {
         // Look ahead past newlines/indents for 'deriving'
         let save = self.pos;
         let save_indent = self.current_indent;
@@ -398,7 +452,7 @@ impl Parser {
         Ok(classes)
     }
 
-    fn parse_newtype_decl(&mut self) -> Result<Decl, String> {
+    fn parse_newtype_decl(&mut self) -> PResult<Decl> {
         self.expect(&Token::Newtype)?;
         let name = self.expect_upper_ident()?;
 
@@ -424,7 +478,7 @@ impl Parser {
         })
     }
 
-    fn parse_import_decl(&mut self) -> Result<Decl, String> {
+    fn parse_import_decl(&mut self) -> PResult<Decl> {
         self.expect(&Token::Import)?;
 
         let qualified = if self.at(&Token::Qualified) {
@@ -445,7 +499,7 @@ impl Parser {
             // 'as' is not a keyword — check for Ident("as")
             match self.peek().clone() {
                 Token::Ident(ref s) if s == "as" => { self.advance(); }
-                _ => return Err("Expected 'as' in qualified import".into()),
+                _ => return Err(self.err_here("Expected 'as' in qualified import".to_string())),
             }
             let alias = self.expect_upper_ident()?;
             return Ok(Decl::Import {
@@ -500,7 +554,7 @@ impl Parser {
         })
     }
 
-    fn parse_class_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_class_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Class)?;
 
         // Parse optional superclass constraints: Eq a => or (Eq a, Show a) =>
@@ -552,7 +606,7 @@ impl Parser {
                 self.advance();
                 let op = match self.peek().clone() {
                     Token::Operator(op) => { self.advance(); op }
-                    _ => return Err("Expected operator in class method".into()),
+                    _ => return Err(self.err_here("Expected operator in class method".to_string())),
                 };
                 self.expect(&Token::RightParen)?;
                 op
@@ -578,7 +632,7 @@ impl Parser {
                     self.advance();
                     let op = match self.peek().clone() {
                         Token::Operator(op) => { self.advance(); op }
-                        _ => return Err("Expected operator in default method".into()),
+                        _ => return Err(self.err_here("Expected operator in default method".to_string())),
                     };
                     self.expect(&Token::RightParen)?;
                     op
@@ -598,10 +652,10 @@ impl Parser {
                         None => m.default_clauses = Some(vec![clause]),
                     }
                 } else {
-                    return Err(format!(
+                    return Err(Box::new(Diagnostic::parse_at(format!(
                         "Default implementation for '{}' has no preceding type signature in class '{}'",
                         def_name, class_name
-                    ));
+                    ), clause.span)));
                 }
             }
         }
@@ -609,7 +663,7 @@ impl Parser {
         Ok(vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }])
     }
 
-    fn parse_instance_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_instance_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Instance)?;
 
         // Parse optional constraints: Eq a => or (Eq a, Show a) =>
@@ -660,7 +714,7 @@ impl Parser {
                 self.advance();
                 let op = match self.peek().clone() {
                     Token::Operator(op) => { self.advance(); op }
-                    _ => return Err("Expected operator in instance method".into()),
+                    _ => return Err(self.err_here("Expected operator in instance method".to_string())),
                 };
                 self.expect(&Token::RightParen)?;
                 op
@@ -685,7 +739,7 @@ impl Parser {
         Ok(vec![Decl::InstanceDecl { class_name, target_type, methods }])
     }
 
-    fn parse_export_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_export_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Export)?;
         let name = self.expect_ident()?;
         self.expect(&Token::DblColon)?;
@@ -700,7 +754,7 @@ impl Parser {
     /// Parse: type family Name args where
     ///            Name Pattern = Result
     ///            ...
-    fn parse_type_family_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_type_family_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::KwType)?;
 
         // Plain type alias: `type Name a b = ...`
@@ -758,7 +812,7 @@ impl Parser {
         Ok(vec![Decl::TypeFamily { name, equations }])
     }
 
-    fn parse_intrinsic_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_intrinsic_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Intrinsic)?;
         // intrinsic type family Name ... where ... => parse as type family
         if self.at(&Token::KwType) {
@@ -792,7 +846,7 @@ impl Parser {
     }
 
     /// Parse a fixity declaration: `infixl 6 +` or `infixr 5 :`
-    fn parse_fixity_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_fixity_decl(&mut self) -> PResult<Vec<Decl>> {
         let assoc = match self.peek() {
             Token::Infixl => { self.advance(); Assoc::Left }
             Token::Infixr => { self.advance(); Assoc::Right }
@@ -805,19 +859,19 @@ impl Parser {
                 self.advance();
                 p
             }
-            _ => return Err("Expected precedence level (0-9) after infixl/infixr/infix".into()),
+            _ => return Err(self.err_here("Expected precedence level (0-9) after infixl/infixr/infix".to_string())),
         };
         let op = match self.peek().clone() {
             Token::Operator(s) => { self.advance(); s }
             Token::Ident(s) => { self.advance(); s } // backtick operators
-            _ => return Err("Expected operator after fixity precedence".into()),
+            _ => return Err(self.err_here("Expected operator after fixity precedence".to_string())),
         };
         self.fixities.insert(op.clone(), (assoc, prec));
         Ok(vec![Decl::FixityDecl { assoc, prec, op }])
     }
 
     /// Parse a value declaration (type signature or function definition).
-    fn parse_value_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_value_decl(&mut self) -> PResult<Vec<Decl>> {
         let loc = self.peek_loc();
         let (def_line, def_col) = (loc.line, loc.col);
         let name = self.expect_ident()?;
@@ -870,7 +924,7 @@ impl Parser {
     }
 
     /// Parse an operator definition like `(+) a b = ...`
-    fn parse_operator_decl(&mut self) -> Result<Vec<Decl>, String> {
+    fn parse_operator_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::LeftParen)?;
         let op = match self.peek().clone() {
             Token::Operator(op) => {
@@ -878,8 +932,7 @@ impl Parser {
                 op
             }
             _ => {
-                let loc = self.peek_loc();
-                return Err(format!("Expected operator at {}:{}", loc.line, loc.col));
+                return Err(self.err_here("Expected operator".to_string()));
             }
         };
         self.expect(&Token::RightParen)?;
@@ -898,7 +951,7 @@ impl Parser {
         }])
     }
 
-    fn parse_clause(&mut self) -> Result<Clause, String> {
+    fn parse_clause(&mut self) -> PResult<Clause> {
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
         // The clause's column is the layout block for its RHS: continuation
@@ -941,7 +994,7 @@ impl Parser {
         patterns: Vec<Pattern>,
         span: Span,
         saved_block: usize,
-    ) -> Result<Clause, String> {
+    ) -> PResult<Clause> {
         // Guards
         let mut guards = Vec::new();
         self.skip_newlines_and_indent();
@@ -976,7 +1029,7 @@ impl Parser {
         })
     }
 
-    fn parse_where(&mut self) -> Result<Vec<LocalDef>, String> {
+    fn parse_where(&mut self) -> PResult<Vec<LocalDef>> {
         self.skip_newlines_and_indent();
         if !self.at(&Token::Where) {
             return Ok(vec![]);
@@ -1039,7 +1092,7 @@ impl Parser {
 
     // --- Type parsing ---
 
-    fn parse_type(&mut self) -> Result<Type, String> {
+    fn parse_type(&mut self) -> PResult<Type> {
         // Check for forall: `forall s. type`
         if let Token::Ident(ref name) = self.peek().clone()
             && name == "forall" {
@@ -1068,7 +1121,7 @@ impl Parser {
         self.parse_type_arrow()
     }
 
-    fn try_parse_constraints(&mut self) -> Result<Vec<Constraint>, String> {
+    fn try_parse_constraints(&mut self) -> PResult<Vec<Constraint>> {
         let mut constraints = Vec::new();
         if self.at(&Token::LeftParen) {
             self.advance();
@@ -1091,7 +1144,7 @@ impl Parser {
         Ok(constraints)
     }
 
-    fn parse_type_arrow(&mut self) -> Result<Type, String> {
+    fn parse_type_arrow(&mut self) -> PResult<Type> {
         let lhs = self.parse_type_app()?;
         self.skip_newlines_and_indent();
         if self.at(&Token::Arrow) {
@@ -1104,7 +1157,7 @@ impl Parser {
         }
     }
 
-    fn parse_type_app(&mut self) -> Result<Type, String> {
+    fn parse_type_app(&mut self) -> PResult<Type> {
         let mut ty = self.parse_type_atom()?;
         while self.is_type_atom_start() {
             let arg = self.parse_type_atom()?;
@@ -1163,7 +1216,7 @@ impl Parser {
         if matched { Some(name) } else { None }
     }
 
-    fn parse_type_atom(&mut self) -> Result<Type, String> {
+    fn parse_type_atom(&mut self) -> PResult<Type> {
         match self.peek().clone() {
             Token::UpperIdent(name) => {
                 self.advance();
@@ -1193,7 +1246,7 @@ impl Parser {
                         // LuaPure "lua.func.name" ReturnType
                         let lua_name = match self.peek().clone() {
                             Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err("LuaPure expects a string literal".into()),
+                            _ => return Err(self.err_here("LuaPure expects a string literal".to_string())),
                         };
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaPure { lua_name, result: Box::new(result) })
@@ -1202,7 +1255,7 @@ impl Parser {
                         // LuaIO "lua.func.name" ReturnType
                         let lua_name = match self.peek().clone() {
                             Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err("LuaIO expects a string literal".into()),
+                            _ => return Err(self.err_here("LuaIO expects a string literal".to_string())),
                         };
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaIO { lua_name, result: Box::new(result) })
@@ -1211,7 +1264,7 @@ impl Parser {
                         // LuaIterator "lua.func.name" ElementType
                         let lua_name = match self.peek().clone() {
                             Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err("LuaIterator expects a string literal".into()),
+                            _ => return Err(self.err_here("LuaIterator expects a string literal".to_string())),
                         };
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaIterator { lua_name, result: Box::new(result) })
@@ -1220,7 +1273,7 @@ impl Parser {
                         // LuaTry "lua.func.name" ResultType
                         let lua_name = match self.peek().clone() {
                             Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err("LuaTry expects a string literal".into()),
+                            _ => return Err(self.err_here("LuaTry expects a string literal".to_string())),
                         };
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaTry { lua_name, result: Box::new(result) })
@@ -1231,15 +1284,15 @@ impl Parser {
                         // A raised Lua error is captured as `Left msg` via pcall.
                         let lua_name = match self.peek().clone() {
                             Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err(format!("{} expects a string literal", name)),
+                            _ => return Err(self.err_here(format!("{} expects a string literal", name))),
                         };
                         let result = self.parse_type_atom()?;
                         if !is_either_string_type(&result) {
-                            return Err(format!(
+                            return Err(self.err_here(format!(
                                 "{} requires the result to be written as `(Either String a)`, \
                                  so a raised Lua error can be returned as `Left`",
                                 name
-                            ));
+                            )));
                         }
                         if name == "LuaCatch" {
                             Ok(Type::LuaCatch { lua_name, result: Box::new(result) })
@@ -1300,18 +1353,14 @@ impl Parser {
                 Ok(Type::Con(format!("\"{}\"", s)))
             }
             _ => {
-                let loc = self.peek_loc();
-                Err(format!(
-                    "Expected type, found {:?} at {}:{}",
-                    loc.token, loc.line, loc.col
-                ))
+                Err(self.err_here(format!("Expected type, found {:?}", self.peek())))
             }
         }
     }
 
     // --- Expression parsing ---
 
-    fn parse_expr(&mut self) -> Result<Expr, String> {
+    fn parse_expr(&mut self) -> PResult<Expr> {
         // Skip leading indent/newlines to find the actual expression start
         self.skip_newlines_and_indent();
         let saved_expr_min_indent = self.expr_min_indent;
@@ -1329,7 +1378,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn parse_expr_infix(&mut self, min_prec: u8) -> Result<Expr, String> {
+    fn parse_expr_infix(&mut self, min_prec: u8) -> PResult<Expr> {
         let lhs = self.parse_expr_prefix()?;
         self.continue_infix(lhs, min_prec)
     }
@@ -1340,7 +1389,7 @@ impl Parser {
     /// parses one to test for a left section) resume without re-parsing it —
     /// the parenthesised body would otherwise be parsed twice at every nesting
     /// level, giving O(2^n) parse time on deeply nested parentheses.
-    fn continue_infix(&mut self, mut lhs: Expr, min_prec: u8) -> Result<Expr, String> {
+    fn continue_infix(&mut self, mut lhs: Expr, min_prec: u8) -> PResult<Expr> {
         loop {
             // Try to consume indentation for continuation lines
             // Only if the next real token after indent is an operator
@@ -1400,7 +1449,7 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_expr_prefix(&mut self) -> Result<Expr, String> {
+    fn parse_expr_prefix(&mut self) -> PResult<Expr> {
         // Negation
         if let Token::Operator(ref op) = self.peek().clone()
             && op == "-" {
@@ -1411,7 +1460,7 @@ impl Parser {
         self.parse_expr_app()
     }
 
-    fn parse_expr_app(&mut self) -> Result<Expr, String> {
+    fn parse_expr_app(&mut self) -> PResult<Expr> {
         let mut func = self.parse_expr_atom_dotted()?;
 
         loop {
@@ -1457,7 +1506,7 @@ impl Parser {
     /// to distinguish from function composition `f . g`.
     /// Parse list comprehension qualifiers: x <- xs, pred, y <- ys, ...
     /// Supports pattern-matching generators: Ok x <- rs, (a, b) <- pairs, ...
-    fn parse_list_comprehension_quals(&mut self) -> Result<Vec<ListCompQual>, String> {
+    fn parse_list_comprehension_quals(&mut self) -> PResult<Vec<ListCompQual>> {
         let mut quals = Vec::new();
         loop {
             self.skip_newlines_and_indent();
@@ -1563,7 +1612,7 @@ impl Parser {
         }
     }
 
-    fn parse_expr_atom_dotted(&mut self) -> Result<Expr, String> {
+    fn parse_expr_atom_dotted(&mut self) -> PResult<Expr> {
         let mut expr = self.parse_expr_atom()?;
 
         while self.at(&Token::Operator(".".to_string())) {
@@ -1615,7 +1664,7 @@ impl Parser {
         Ok(expr)
     }
 
-    fn try_parse_record_update(&mut self) -> Result<Vec<(String, Expr)>, String> {
+    fn try_parse_record_update(&mut self) -> PResult<Vec<(String, Expr)>> {
         self.expect(&Token::LeftBrace)?;
         let mut updates = Vec::new();
         loop {
@@ -1625,7 +1674,7 @@ impl Parser {
             }
             let field_name = match self.peek().clone() {
                 Token::Ident(n) => { self.advance(); n }
-                _ => return Err("Expected field name".into()),
+                _ => return Err(self.err_here("Expected field name".to_string())),
             };
             self.expect(&Token::Eq)?;
             let value = self.parse_expr()?;
@@ -1638,7 +1687,7 @@ impl Parser {
             }
         }
         if updates.is_empty() {
-            return Err("Empty record update".into());
+            return Err(self.err_here("Empty record update".to_string()));
         }
         self.expect(&Token::RightBrace)?;
         Ok(updates)
@@ -1700,7 +1749,7 @@ impl Parser {
             | Token::RightParen | Token::RightBracket)
     }
 
-    fn parse_expr_atom(&mut self) -> Result<Expr, String> {
+    fn parse_expr_atom(&mut self) -> PResult<Expr> {
         // Negative literal: -N where - is not preceded by an expression-ending token
         if let Token::Operator(op) = self.peek()
             && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
@@ -2153,7 +2202,7 @@ impl Parser {
                             tuple_binds.push((fresh, pat));
                             continue;
                         }
-                        return Err("Expected tuple pattern or identifier in let binding".to_string());
+                        return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
                     }
                     if !matches!(self.peek(), Token::Ident(_)) {
                         break;
@@ -2231,7 +2280,7 @@ impl Parser {
                                 stmts.push(DoStmt::PatternDoLet { pattern: pat, expr });
                                 continue;
                             }
-                            return Err("Expected tuple pattern or identifier in let binding".to_string());
+                            return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
                         }
                         // The binding column is the layout block for the
                         // binding RHS(s), so a following sibling binding at the
@@ -2404,11 +2453,7 @@ impl Parser {
                     }
                 }
                 if params.is_empty() {
-                    let loc = self.peek_loc();
-                    return Err(format!(
-                        "Expected lambda parameter at {}:{}",
-                        loc.line, loc.col
-                    ));
+                    return Err(self.err_here("Expected lambda parameter".to_string()));
                 }
                 self.expect(&Token::Arrow)?;
                 let body = self.parse_expr()?;
@@ -2418,18 +2463,14 @@ impl Parser {
                 })
             }
             _ => {
-                let loc = self.peek_loc();
-                Err(format!(
-                    "Expected expression, found {:?} at {}:{}",
-                    loc.token, loc.line, loc.col
-                ))
+                Err(self.err_here(format!("Expected expression, found {:?}", self.peek())))
             }
         }
     }
 
     // --- Pattern parsing ---
 
-    fn parse_pattern(&mut self) -> Result<Pattern, String> {
+    fn parse_pattern(&mut self) -> PResult<Pattern> {
         let lhs = if let Token::UpperIdent(name) = self.peek().clone() {
             self.advance();
             // True/False are literal patterns, not constructors
@@ -2506,7 +2547,7 @@ impl Parser {
         false
     }
 
-    fn parse_pattern_atom(&mut self) -> Result<Pattern, String> {
+    fn parse_pattern_atom(&mut self) -> PResult<Pattern> {
         // Negative literal pattern: -N
         if let Token::Operator(op) = self.peek()
             && op == "-" && self.pos + 1 < self.tokens.len() {
@@ -2603,45 +2644,33 @@ impl Parser {
                 }
             }
             _ => {
-                let loc = self.peek_loc();
-                Err(format!(
-                    "Expected pattern, found {:?} at {}:{}",
-                    loc.token, loc.line, loc.col
-                ))
+                Err(self.err_here(format!("Expected pattern, found {:?}", self.peek())))
             }
         }
     }
 
     // --- Helpers ---
 
-    fn expect_ident(&mut self) -> Result<String, String> {
+    fn expect_ident(&mut self) -> PResult<String> {
         match self.peek().clone() {
             Token::Ident(name) => {
                 self.advance();
                 Ok(name)
             }
             _ => {
-                let loc = self.peek_loc();
-                Err(format!(
-                    "Expected identifier, found {:?} at {}:{}",
-                    loc.token, loc.line, loc.col
-                ))
+                Err(self.err_here(format!("Expected identifier, found {:?}", self.peek())))
             }
         }
     }
 
-    fn expect_upper_ident(&mut self) -> Result<String, String> {
+    fn expect_upper_ident(&mut self) -> PResult<String> {
         match self.peek().clone() {
             Token::UpperIdent(name) => {
                 self.advance();
                 Ok(name)
             }
             _ => {
-                let loc = self.peek_loc();
-                Err(format!(
-                    "Expected type/constructor name, found {:?} at {}:{}",
-                    loc.token, loc.line, loc.col
-                ))
+                Err(self.err_here(format!("Expected type/constructor name, found {:?}", self.peek())))
             }
         }
     }
@@ -2720,7 +2749,10 @@ fn is_either_string_type(ty: &Type) -> bool {
     }
 }
 
-pub fn parse(tokens: &[Located]) -> Result<Module, String> {
+/// Parse a token stream into a module. On failure, returns every syntax
+/// error found (the parser recovers at declaration boundaries), in source
+/// order; the list is never empty.
+pub fn parse(tokens: &[Located]) -> Result<Module, Vec<Diagnostic>> {
     let mut parser = Parser::new(tokens.to_vec());
     parser.parse_module()
 }

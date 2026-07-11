@@ -1088,6 +1088,7 @@ impl CodeGen {
         let mut i = start;
         while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
             clauses.push(TClause {
+                span: None,
                 patterns: binds[i].patterns.clone(),
                 guards: vec![],
                 body: binds[i].body.clone(),
@@ -2907,6 +2908,7 @@ impl CodeGen {
                 self.local_vars.insert("_cg".to_string());
                 self.concrete_vars.insert("_cg".to_string());
                 let clauses: Vec<TClause> = branches.iter().map(|b| TClause {
+                    span: None,
                     patterns: vec![b.pattern.clone()],
                     guards: b.guards.clone(),
                     body: b.body.clone(),

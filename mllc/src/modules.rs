@@ -81,7 +81,12 @@ impl ModuleLoader {
         };
 
         let tokens = lexer::lex(&source)?;
-        let module = parser::parse(&tokens)?;
+        // An imported module's syntax errors surface through the import-error
+        // channel, prefixed with the module that failed to parse.
+        let module = parser::parse(&tokens).map_err(|diags| {
+            let msgs: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
+            format!("in module '{}': {}", key, msgs.join("\n"))
+        })?;
 
         self.loaded.insert(key.clone(), module);
         Ok(self.loaded.get(&key).unwrap())

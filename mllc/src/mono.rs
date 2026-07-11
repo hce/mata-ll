@@ -5,14 +5,16 @@
 //! a specialized copy with a mangled name and rewrites call sites.
 
 use std::collections::{HashMap, HashSet};
+use crate::ast::Span;
 use crate::tir::*;
 use crate::typechecker::{Checker, ClassInfo};
-use crate::types::{InstHead, Ty, TyVar, TyConstraint, Subst};
+use crate::types::{Diagnostic, DiagnosticKind, InstHead, Ty, TyVar, TyConstraint, Subst};
 
-/// Format a "No instance" error, appending a mata-ll-specific hint when the
-/// (method, type) pair is a known GHC-vs-mata-ll divergence.
-fn no_instance_msg(method: &str, ty: &Ty) -> String {
-    let mut msg = format!("No instance for '{}' on type '{}'", method, ty);
+/// The message and optional note of a "No instance" error. The note carries a
+/// mata-ll-specific hint when the (method, type) pair is a known
+/// GHC-vs-mata-ll divergence.
+fn no_instance_parts(method: &str, ty: &Ty) -> (String, Option<&'static str>) {
+    let msg = format!("No instance for '{}' on type '{}'", method, ty);
     let hint = match method {
         "<>" if matches!(ty, Ty::List(_)) =>
             Some("lists are concatenated with ++ in mata-ll; <> (Semigroup) is only defined for String"),
@@ -20,10 +22,7 @@ fn no_instance_msg(method: &str, ty: &Ty) -> String {
             Some("tuples have no Ord instance in mata-ll; compare their components individually"),
         _ => None,
     };
-    if let Some(h) = hint {
-        msg.push_str(&format!("\n  note: {}", h));
-    }
-    msg
+    (msg, hint)
 }
 
 /// A specialization demand: function name + the concrete type it is
@@ -77,8 +76,15 @@ pub struct Monomorphizer {
     /// the emitted Lua). Genuine collisions get a deterministic "__2"/"__3"…
     /// disambiguator; non-colliding names are unchanged.
     mangled_names: HashMap<String, (String, Ty)>,
-    /// Errors collected during monomorphization
-    pub errors: Vec<String>,
+    /// Errors collected during monomorphization, located at the clause
+    /// being processed when they arose (see `cur_ctx`/`cur_span`).
+    pub errors: Vec<Diagnostic>,
+    /// The enclosing definition currently being monomorphized, phrased like
+    /// the typechecker's contexts ("definition of 'main'", "clause 2 of 'f'").
+    cur_ctx: Option<String>,
+    /// Source span of the clause currently being monomorphized. `None` inside
+    /// compiler-synthesized clauses (derived instances, generated impls).
+    cur_span: Option<Span>,
     /// Functions that use dictionary-passing instead of monomorphization
     dict_passing_fns: HashSet<String>,
     /// Specializations deleted when their function tripped the specialization
@@ -168,6 +174,8 @@ impl Monomorphizer {
             generated_impls: HashMap::new(),
             mangled_names: HashMap::new(),
             errors: Vec::new(),
+            cur_ctx: None,
+            cur_span: None,
             dict_passing_fns: HashSet::new(),
             purged_specs: HashMap::new(),
             gen_stack: Vec::new(),
@@ -539,9 +547,41 @@ impl Monomorphizer {
         }
     }
 
+    /// Record a "No instance" error at the clause currently being processed.
+    fn push_no_instance(&mut self, method: &str, ty: &Ty) {
+        let (msg, hint) = no_instance_parts(method, ty);
+        self.errors.push(Diagnostic {
+            kind: DiagnosticKind::Other(msg),
+            context: self.cur_ctx.clone(),
+            span: self.cur_span,
+            notes: hint.map(str::to_string).into_iter().collect(),
+        });
+    }
+
     fn mono_function(&mut self, mut func: TFunction) -> TFunction {
-        func.clauses = func.clauses.into_iter()
-            .map(|c| self.mono_clause(c))
+        // Name errors after the function the user wrote: a specialization
+        // being generated (top of `gen_stack`) reports as its original.
+        let display_name = self.gen_stack.last()
+            .filter(|(_, mangled)| *mangled == func.name)
+            .map(|(base, _)| base.clone())
+            .unwrap_or_else(|| func.name.clone());
+        let multi_clause = func.clauses.len() > 1;
+        func.clauses = func.clauses.into_iter().enumerate()
+            .map(|(idx, c)| {
+                let ctx = if multi_clause {
+                    format!("clause {} of '{}'", idx + 1, display_name)
+                } else {
+                    format!("definition of '{}'", display_name)
+                };
+                // Save/restore: specialization generation re-enters
+                // mono_function from inside an enclosing clause.
+                let saved_ctx = self.cur_ctx.replace(ctx);
+                let saved_span = std::mem::replace(&mut self.cur_span, c.span);
+                let result = self.mono_clause(c);
+                self.cur_ctx = saved_ctx;
+                self.cur_span = saved_span;
+                result
+            })
             .collect();
         func
     }
@@ -684,7 +724,7 @@ impl Monomorphizer {
                             return TExpr { kind: TExprKind::Var(mangled), ty };
                         }
                         MethodDispatch::Missing(binding) => {
-                            self.errors.push(no_instance_msg(name, &binding));
+                            self.push_no_instance(name, &binding);
                         }
                         MethodDispatch::Deferred => {}
                     }
@@ -795,7 +835,7 @@ impl Monomorphizer {
                     let resolved = match self.resolve_op_use(&lookup_op, &use_ty) {
                         MethodDispatch::Resolved(mangled) => Some(mangled),
                         MethodDispatch::Missing(binding) => {
-                            self.errors.push(no_instance_msg(&op, &binding));
+                            self.push_no_instance(&op, &binding);
                             None
                         }
                         MethodDispatch::Deferred => None,
@@ -996,6 +1036,7 @@ impl Monomorphizer {
             name: mangled.clone(),
             ty: Ty::fun(&[tuple_ty.clone(), tuple_ty], bool_ty),
             clauses: vec![TClause {
+                span: None,
                 patterns: vec![
                     TPattern::Var(a, Ty::Unit),
                     TPattern::Var(b, Ty::Unit),
@@ -1041,6 +1082,7 @@ impl Monomorphizer {
             name: mangled.clone(),
             ty: Ty::fun(&[list_ty.clone(), list_ty], bool_ty),
             clauses: vec![TClause {
+                span: None,
                 patterns: vec![
                     TPattern::Var("_a".into(), Ty::Unit),
                     TPattern::Var("_b".into(), Ty::Unit),
@@ -1096,6 +1138,7 @@ impl Monomorphizer {
             name: mangled.clone(),
             ty: Ty::fun(&[maybe_ty.clone(), maybe_ty], bool_ty),
             clauses: vec![TClause {
+                span: None,
                 patterns: vec![
                     TPattern::Var("_a".into(), Ty::Unit),
                     TPattern::Var("_b".into(), Ty::Unit),
@@ -1149,6 +1192,7 @@ impl Monomorphizer {
             name: mangled.clone(),
             ty: Ty::arrow(ty.clone(), str_ty),
             clauses: vec![TClause {
+                span: None,
                 patterns: vec![TPattern::Var(param, Ty::Unit)],
                 guards: vec![],
                 body,
@@ -1240,6 +1284,7 @@ impl Monomorphizer {
             name: mangled.clone(),
             ty: Ty::arrow(tuple_ty, str_ty),
             clauses: vec![TClause {
+                span: None,
                 patterns: vec![TPattern::Var(param_name, Ty::Unit)],
                 guards: vec![],
                 body,

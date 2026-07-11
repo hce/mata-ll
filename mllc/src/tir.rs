@@ -82,6 +82,11 @@ pub struct TClause {
     pub guards: Vec<TGuard>,
     pub body: TExpr,
     pub where_binds: Vec<TLocalDef>,
+    /// Source location of the clause this was checked from. `None` for
+    /// compiler-synthesized clauses (derived instances, generated impls).
+    /// Downstream passes (the monomorphizer) use it to give their
+    /// diagnostics a source location.
+    pub span: Option<crate::ast::Span>,
 }
 
 #[derive(Debug, Clone)]
@@ -282,6 +287,7 @@ impl TPattern {
 impl TClause {
     pub fn apply_subst(self, subst: &Subst) -> Self {
         TClause {
+            span: self.span,
             patterns: self.patterns.into_iter().map(|p| p.apply_subst(subst)).collect(),
             guards: self.guards.into_iter().map(|g| TGuard {
                 condition: g.condition.apply_subst(subst),

@@ -36,13 +36,15 @@ pub struct CompileOptions {
     pub embed_source: Option<EmbedMode>,
 }
 
-/// Compile error
+/// Compile error. Parse and type errors carry structured [`types::Diagnostic`]s
+/// (message, source span, enclosing definition, notes); the Display impl
+/// renders them exactly as before.
 #[derive(Debug)]
 pub enum CompileError {
     Lex(String),
-    Parse(String),
+    Parse(Vec<types::Diagnostic>),
     Import(String),
-    Type(Vec<String>),
+    Type(Vec<types::Diagnostic>),
     /// A post-monomorphization invariant was violated — a compiler bug, not the
     /// user's. Failing here beats emitting known-wrong Lua.
     Internal(Vec<String>),
@@ -52,7 +54,13 @@ impl std::fmt::Display for CompileError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CompileError::Lex(e) => write!(f, "Lexer error: {}", e),
-            CompileError::Parse(e) => write!(f, "Parse error: {}", e),
+            CompileError::Parse(errors) => {
+                for (i, e) in errors.iter().enumerate() {
+                    if i > 0 { writeln!(f)?; }
+                    write!(f, "Parse error: {}", e)?;
+                }
+                Ok(())
+            }
             CompileError::Import(e) => write!(f, "Import error: {}", e),
             CompileError::Type(errors) => {
                 for e in errors {
@@ -139,10 +147,7 @@ pub fn compile_with_options(
     let tir_module = checker.check_module_with_local_start(&module, local_start);
 
     if !checker.errors.is_empty() {
-        let errors: Vec<String> = checker.errors.iter()
-            .map(|e| format!("{}", e))
-            .collect();
-        return Err(CompileError::Type(errors));
+        return Err(CompileError::Type(std::mem::take(&mut checker.errors)));
     }
 
     // Monomorphize

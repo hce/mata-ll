@@ -455,7 +455,7 @@ impl Subst {
 }
 
 /// Unification: find a substitution that makes two types equal
-pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
+pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, DiagnosticKind> {
     match (t1, t2) {
         (Ty::Con(a), Ty::Con(b)) if a == b => Ok(Subst::empty()),
         (Ty::Promoted(a), Ty::Promoted(b)) if a == b => Ok(Subst::empty()),
@@ -465,7 +465,7 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
             if t == &Ty::Var(v.clone()) {
                 Ok(Subst::empty())
             } else if t.occurs(v) {
-                Err(TypeErrorKind::OccursCheck(v.clone(), t.clone()))
+                Err(DiagnosticKind::OccursCheck(v.clone(), t.clone()))
             } else {
                 Ok(Subst::singleton(v.clone(), t.clone()))
             }
@@ -533,33 +533,51 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, TypeErrorKind> {
         // Skolem: rigid type constant, only unifies with itself
         (Ty::Skolem(a, i), Ty::Skolem(b, j)) if a == b && i == j => Ok(Subst::empty()),
         (Ty::Skolem(..), _t) | (_t, Ty::Skolem(..)) => {
-            Err(TypeErrorKind::RigidMismatch(t1.clone(), t2.clone()))
+            Err(DiagnosticKind::RigidMismatch(t1.clone(), t2.clone()))
         }
 
-        _ => Err(TypeErrorKind::Mismatch(t1.clone(), t2.clone())),
+        _ => Err(DiagnosticKind::Mismatch(t1.clone(), t2.clone())),
     }
 }
 
-/// Type error with optional context and source location
+/// One structured compiler diagnostic, shared by the parser, the typechecker
+/// and the monomorphizer: what went wrong (`kind`), where in the source
+/// (`span`), inside which definition (`context`), plus optional mata-ll
+/// specific `note:` lines explaining a deviation from GHC.
 #[derive(Debug)]
-pub struct TypeError {
-    pub kind: TypeErrorKind,
+pub struct Diagnostic {
+    pub kind: DiagnosticKind,
     pub context: Option<String>,
     pub span: Option<crate::ast::Span>,
+    /// Extra explanatory lines rendered as `note: …` after the location.
+    /// (Type-error kinds additionally derive a builtin note via `hint()`.)
+    pub notes: Vec<String>,
 }
 
-impl TypeError {
-    pub fn new(kind: TypeErrorKind) -> Self {
-        TypeError { kind, context: None, span: None }
+impl Diagnostic {
+    pub fn new(kind: DiagnosticKind) -> Self {
+        Diagnostic { kind, context: None, span: None, notes: Vec::new() }
     }
 
-    pub fn in_context(kind: TypeErrorKind, ctx: impl Into<String>) -> Self {
-        TypeError { kind, context: Some(ctx.into()), span: None }
+    pub fn in_context(kind: DiagnosticKind, ctx: impl Into<String>) -> Self {
+        Diagnostic { kind, context: Some(ctx.into()), span: None, notes: Vec::new() }
     }
+
+    /// A parse error at a known source location. Rendered inline as
+    /// `"{msg} at {line}:{col}"` — the parser's historical format.
+    pub fn parse_at(msg: impl Into<String>, span: crate::ast::Span) -> Self {
+        Diagnostic {
+            kind: DiagnosticKind::Parse(msg.into()),
+            context: None,
+            span: Some(span),
+            notes: Vec::new(),
+        }
+    }
+
 }
 
 #[derive(Debug)]
-pub enum TypeErrorKind {
+pub enum DiagnosticKind {
     Mismatch(Ty, Ty),
     RigidMismatch(Ty, Ty),
     OccursCheck(TyVar, Ty),
@@ -586,6 +604,10 @@ pub enum TypeErrorKind {
     /// type and resurface as a misleading error (e.g. a missing Show
     /// instance on a type that does not exist).
     UnknownType(String),
+    /// A syntax error. The message is rendered verbatim, with the span (when
+    /// present) appended inline as ` at line:col` — the parser's historical
+    /// format, unlike type errors which put the location on its own line.
+    Parse(String),
     Other(String),
 }
 
@@ -636,31 +658,31 @@ fn is_string_list_mismatch(a: &Ty, b: &Ty) -> bool {
     (is_str(a) && is_list(b)) || (is_list(a) && is_str(b))
 }
 
-impl TypeError {
+impl Diagnostic {
     /// An optional mata-ll-specific explanation appended below the error.
     fn hint(&self) -> Option<&'static str> {
         match &self.kind {
-            TypeErrorKind::Mismatch(a, b) | TypeErrorKind::RigidMismatch(a, b)
+            DiagnosticKind::Mismatch(a, b) | DiagnosticKind::RigidMismatch(a, b)
                 if is_string_list_mismatch(a, b) =>
                 Some("in mata-ll String is not a list of characters — it is an opaque \
                       type that does not unify with [a]. A String cannot be passed where \
                       a list is expected, and list functions (++, map, length, …) do not \
                       accept it."),
-            TypeErrorKind::NoInstance { class, ty }
+            DiagnosticKind::NoInstance { class, ty }
                 if class == "Ord" && matches!(ty, Ty::Tuple(_) | Ty::List(_) | Ty::App(_, _)) =>
                 Some("mata-ll has no Ord instance for tuples, lists, or Maybe; compare their \
                       components individually."),
-            TypeErrorKind::NoInstance { ty, .. }
+            DiagnosticKind::NoInstance { ty, .. }
                 if matches!(ty, Ty::Arrow(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
                 Some("functions and IO actions have no Show/Eq/Ord instance — there is no \
                       way to render or compare them."),
-            TypeErrorKind::AmbiguousType { .. } =>
+            DiagnosticKind::AmbiguousType { .. } =>
                 Some("add a type annotation to pin the type down, e.g. \
                       `show (Nothing :: Maybe Integer)`. GHC rejects this the same way."),
-            TypeErrorKind::MissingContextConstraint { .. } =>
+            DiagnosticKind::MissingContextConstraint { .. } =>
                 Some("a bare polymorphic variable has no instance unless the signature \
                       requires one. GHC reports this as \"add (C a) to the context\"."),
-            TypeErrorKind::UnknownType(name) => match name.as_str() {
+            DiagnosticKind::UnknownType(name) => match name.as_str() {
                 "Boolean" =>
                     Some("the boolean type is spelled 'Bool', as in Haskell."),
                 "Char" =>
@@ -677,38 +699,38 @@ impl TypeError {
     }
 }
 
-impl fmt::Display for TypeError {
+impl fmt::Display for Diagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            TypeErrorKind::Mismatch(a, b) => {
+            DiagnosticKind::Mismatch(a, b) => {
                 let s = pretty_var_subst(&[a, b]);
                 write!(f, "Cannot unify '{}' with '{}'", a.apply_subst(&s), b.apply_subst(&s))?
             }
-            TypeErrorKind::RigidMismatch(a, b) => {
+            DiagnosticKind::RigidMismatch(a, b) => {
                 let s = pretty_var_subst(&[a, b]);
                 write!(f, "Cannot match '{}' with '{}': rank-2 polymorphism requires a polymorphic argument",
                     a.apply_subst(&s), b.apply_subst(&s))?
             }
-            TypeErrorKind::OccursCheck(v, ty) => {
+            DiagnosticKind::OccursCheck(v, ty) => {
                 let vt = Ty::Var(v.clone());
                 let s = pretty_var_subst(&[&vt, ty]);
                 write!(f, "Infinite type: {} occurs in {}", vt.apply_subst(&s), ty.apply_subst(&s))?
             }
-            TypeErrorKind::UnboundVariable(name) =>
+            DiagnosticKind::UnboundVariable(name) =>
                 write!(f, "Unbound variable: {}", name)?,
-            TypeErrorKind::UnboundConstructor(name) =>
+            DiagnosticKind::UnboundConstructor(name) =>
                 write!(f, "Unknown constructor: {}", name)?,
-            TypeErrorKind::PatternArgCount { constructor, expected, got } =>
+            DiagnosticKind::PatternArgCount { constructor, expected, got } =>
                 write!(f, "Constructor {} expects {} args, got {}",
                     constructor, expected, got)?,
-            TypeErrorKind::NonExhaustive(name) =>
+            DiagnosticKind::NonExhaustive(name) =>
                 write!(f, "Non-exhaustive patterns in {}", name)?,
-            TypeErrorKind::TypeSigMismatch { name, declared, inferred } => {
+            DiagnosticKind::TypeSigMismatch { name, declared, inferred } => {
                 let s = pretty_var_subst(&[declared, inferred]);
                 write!(f, "Type signature for '{}' doesn't match: declared {}, inferred {}",
                     name, declared.apply_subst(&s), inferred.apply_subst(&s))?
             }
-            TypeErrorKind::NoInstance { class, ty } => {
+            DiagnosticKind::NoInstance { class, ty } => {
                 let s = pretty_var_subst(&[ty]);
                 let rendered = ty.apply_subst(&s);
                 let shown = match &rendered {
@@ -718,7 +740,7 @@ impl fmt::Display for TypeError {
                 };
                 write!(f, "No instance for '{} {}'", class, shown)?
             }
-            TypeErrorKind::AmbiguousType { class, ty } => {
+            DiagnosticKind::AmbiguousType { class, ty } => {
                 let s = pretty_var_subst(&[ty]);
                 let rendered = ty.apply_subst(&s);
                 let shown = match &rendered {
@@ -729,7 +751,7 @@ impl fmt::Display for TypeError {
                 write!(f, "Ambiguous type: nothing here determines the type '{}', so no '{}' instance can be chosen for it",
                     shown, class)?
             }
-            TypeErrorKind::MissingContextConstraint { class, ty } => {
+            DiagnosticKind::MissingContextConstraint { class, ty } => {
                 // Show the signature variable's written name: a freshened rigid
                 // variable is `<name><id>` (e.g. `a519`), so trim the trailing id
                 // digits back to what the user wrote (`a`).
@@ -741,9 +763,21 @@ impl fmt::Display for TypeError {
                 write!(f, "No instance for '{} {}': the type variable '{}' is only as general as the signature says, and the signature does not require '{} {}'. Add it to the context, e.g. '({} {}) => …'",
                     class, v, v, class, v, class, v)?
             }
-            TypeErrorKind::UnknownType(name) =>
+            DiagnosticKind::UnknownType(name) =>
                 write!(f, "Unknown type '{}': nothing in this program or its imports defines a type with this name — it is not a builtin, and no data, newtype, type alias, or type family declaration for it is in scope", name)?,
-            TypeErrorKind::Other(msg) => write!(f, "{}", msg)?,
+            DiagnosticKind::Parse(msg) => {
+                // Parse errors keep their historical inline rendering:
+                // `Expected X, found Y at 3:7`.
+                write!(f, "{}", msg)?;
+                if let Some(span) = &self.span {
+                    write!(f, " at {}:{}", span.line, span.col)?;
+                }
+                for note in &self.notes {
+                    write!(f, "\n  note: {}", note)?;
+                }
+                return Ok(());
+            }
+            DiagnosticKind::Other(msg) => write!(f, "{}", msg)?,
         }
         if let Some(ctx) = &self.context {
             if let Some(span) = &self.span {
@@ -756,6 +790,9 @@ impl fmt::Display for TypeError {
         }
         if let Some(hint) = self.hint() {
             write!(f, "\n  note: {}", hint)?;
+        }
+        for note in &self.notes {
+            write!(f, "\n  note: {}", note)?;
         }
         Ok(())
     }

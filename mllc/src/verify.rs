@@ -160,7 +160,7 @@ mod tests {
                 name: "f".into(),
                 ty: Ty::Con("String".into()),
                 clauses: vec![TClause {
-                    patterns: vec![], guards: vec![], body, where_binds: vec![],
+                    patterns: vec![], guards: vec![], body, where_binds: vec![], span: None,
                 }],
                 specialized: false,
                 dict_params: vec![],
