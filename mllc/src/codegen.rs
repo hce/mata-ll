@@ -1436,8 +1436,19 @@ impl CodeGen {
                             // `Just Nothing` / `Just []`).
                             conditions.push(format!("{} ~= nil", scrutinee));
                             if let Some(arg) = args.first() {
-                                self.collect_pattern_conditions(
-                                    &format!("({})[1]", scrutinee), arg, conditions, bindings);
+                                // The payload may be a thunk (lazy construction),
+                                // so a nested pattern that indexes it (`Just (a,b)`,
+                                // `Just (Con ..)`) must force it first — matching a
+                                // nested constructor forces each level to WHNF. A
+                                // Var/Wildcard sub-pattern binds it lazily and needs
+                                // no force. (The general ADT/tuple paths already do
+                                // this via field_path; the Just special case did not.)
+                                let payload = if Self::pattern_inspects_value(arg) {
+                                    format!("__force(({})[1])", scrutinee)
+                                } else {
+                                    format!("({})[1]", scrutinee)
+                                };
+                                self.collect_pattern_conditions(&payload, arg, conditions, bindings);
                             }
                         }
                         ":" => {

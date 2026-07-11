@@ -295,6 +295,7 @@ mll_test!(spec_limit_sibling, "spec_limit_sibling.mll");
 mll_test!(tuple_eq_adt_elems, "tuple_eq_adt_elems.mll");
 mll_test!(multi_clause_class_constraint, "multi_clause_class_constraint.mll");
 mll_test!(lazy_cheap_bindings, "lazy_cheap_bindings.mll");
+mll_test!(nested_just_pattern, "nested_just_pattern.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
