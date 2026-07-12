@@ -86,7 +86,25 @@ strict FFI/ByteString/ST-array primitives), or the expression is provably total
 over such). See "The eagerness contract" in SPEC.md for the normative rule —
 bottom is never evaluated eagerly. This keeps the hot-loop performance that the
 earlier, unsound "evaluate any cheap-looking argument" heuristic bought, without
-its `⊥`-leaking behavior.
+its `⊥`-leaking behavior. It holds through function composition too:
+`(g . h) (error "boom")` does not force the error when `g` is non-strict.
+
+## A bottom stored in a list element is forced when the list is built
+
+The eagerness rule above governs *argument* positions. The head of a cons cell
+— and therefore the elements of a list literal — is evaluated eagerly, so a
+bottom placed directly in a list is forced when the list is constructed:
+
+    length [error "boom"]        -- raises, where a lazy language returns 1
+    map (\_ -> 0) [error "boom"] -- raises, rather than [0]
+
+This is a current limitation, not the intended end state: mata-ll's runtime and
+generated code read cons heads as already-evaluated values in many places, so
+making the head lazy is a runtime-wide change. Constructor fields other than the
+cons head are suspended normally (`f (Box (error "boom"))` does not force the
+error when `f` ignores its argument). To keep a possibly-bottom value out of a
+list until it is needed, wrap it — e.g. store `\() -> error "boom"` and apply it
+at the point of use, or keep the value in a non-list constructor.
 
 ## `let` binds values, not functions
 

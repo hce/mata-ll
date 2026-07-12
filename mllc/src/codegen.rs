@@ -3341,11 +3341,26 @@ impl CodeGen {
                             Ty::Arrow(_, res) => self.runtime_generic_adapter(lhs, 0, res),
                             _ => None,
                         };
+                        // `(f . g) x` is `f (g x)`. A non-strict `f` must not
+                        // force `g x` — doing so would force `x` and run any
+                        // bottom in `g x` that `f` never demands (e.g.
+                        // `(ignore . add1) (error "boom")` must return, not
+                        // raise). Suspend the inner application in that case.
+                        // Only the actual call form (`g_extras == 0`, no runtime
+                        // adapter) can be bottom; a partial application yields a
+                        // closure value, and a runtime generic (map/zipWith)
+                        // forces its function argument itself, so both are safe
+                        // to pass eagerly.
+                        let f_strict = matches!(&lhs.kind, TExprKind::Var(n)
+                            if self.demand_info.strict_params.get(n)
+                                .and_then(|v| v.first().copied()).unwrap_or(false));
+                        let suspend = !f_strict && g_extras == 0 && adapter.is_none();
                         self.emit("(function(_x");
                         for i in 0..extras { self.emit(&format!(", _pa{}", i)); }
                         self.emit(") return ");
                         self.gen_callee(lhs);
                         self.emit("(");
+                        if suspend { self.emit("__thunk(function() return "); }
                         if let Some(a) = adapter { self.emit(a); self.emit("("); }
                         if g_extras == 0 {
                             self.gen_callee(rhs);
@@ -3362,6 +3377,7 @@ impl CodeGen {
                             for i in 0..g_extras { self.emit(&format!(", _pb{}", i)); }
                             self.emit(") end)");
                         }
+                        if suspend { self.emit(" end)"); }
                         if adapter.is_some() { self.emit(")"); }
                         for i in 0..extras { self.emit(&format!(", _pa{}", i)); }
                         self.emit(") end)");
