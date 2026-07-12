@@ -353,6 +353,11 @@ mll_test!(instance_context_superclass, "instance_context_superclass.mll");
 // Instance identities register module-wide before bodies are checked: a
 // method body may use an instance declared later (or its own, recursively)
 mll_test!(instance_forward_ref, "instance_forward_ref.mll");
+// Application respects the callee's real arity: let/where-bound curried
+// lambdas applied flat/staged/partially, nested-lambda bodies of top-level
+// functions, `$`/`.` results that are still functions, and function-typed
+// results flowing through the erased runtime generics (map/zipWith)
+mll_test!(curried_lambda_arity, "curried_lambda_arity.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -3474,9 +3479,12 @@ fn curried_lambda_takes_function_argument() {
 
 #[test]
 fn curried_lambda_in_higher_order_stays_curried() {
-    // The complementary case a naive flatten would break: `map` applies the
-    // lambda to ONE argument and expects a function back, so an argument-
-    // position lambda must keep its curried 1-arg-layer shape.
+    // The complementary case a naive flatten would break: the erased runtime
+    // `map` applies its function argument to ONE argument and expects a
+    // function back. Lambdas are flattened to their full type arity, so the
+    // compiler must wrap arguments to map/zipWith in a currying adapter
+    // (__mll_curry1/2) whenever the result type variable is instantiated to a
+    // function type.
     let src = r#"
 applyAll :: [a -> b] -> a -> [b]
 applyAll []     _ = []

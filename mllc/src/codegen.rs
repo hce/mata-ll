@@ -1799,6 +1799,27 @@ impl CodeGen {
                     self.scan_call_sites(f, ever_thunked, ever_called);
                 }
             }
+            TExprKind::InfixApp { op, lhs, rhs } if op == "$" || op == "." => {
+                // These operators emit hidden call sites (see their gen_expr
+                // arms) that the generic recursion below cannot see:
+                //   f $ x  calls f with a thunked x appended to f's spine args;
+                //   f . g  builds a closure that calls g with the closure's raw
+                //          parameter (possibly a thunk, when the composition is
+                //          applied to a non-cheap argument) and calls f with
+                //          g's result (which may itself be a raw thunk, e.g.
+                //          when g just returns its lazy parameter).
+                // Without registering them, a parameter that is cheap at every
+                // direct call site but receives a thunk here is wrongly judged
+                // always-cheap and emitted without __force. Mark one extra,
+                // conservatively thunked argument position on each operand's
+                // application spine.
+                Self::mark_hidden_call_site(lhs, ever_thunked, ever_called);
+                if op == "." {
+                    Self::mark_hidden_call_site(rhs, ever_thunked, ever_called);
+                }
+                self.scan_call_sites(lhs, ever_thunked, ever_called);
+                self.scan_call_sites(rhs, ever_thunked, ever_called);
+            }
             TExprKind::InfixApp { lhs, rhs, .. } => {
                 self.scan_call_sites(lhs, ever_thunked, ever_called);
                 self.scan_call_sites(rhs, ever_thunked, ever_called);
@@ -1830,6 +1851,38 @@ impl CodeGen {
             TExprKind::FfiMaybeArg { value } => self.scan_call_sites(value, ever_thunked, ever_called),
             _ => {}
         }
+    }
+
+    /// Register the hidden call site that `$` and `.` emission creates for an
+    /// operand (see the scan_call_sites `$`/`.` arm): the operand's spine
+    /// callee receives one extra argument, in the position right after its
+    /// explicit spine arguments, and that argument may be a thunk — so the
+    /// position must never be judged always-cheap.
+    fn mark_hidden_call_site(
+        operand: &TExpr,
+        ever_thunked: &mut std::collections::HashMap<String, Vec<bool>>,
+        ever_called: &mut std::collections::HashMap<String, Vec<bool>>,
+    ) {
+        let mut extra_pos = 0usize;
+        let mut f = operand;
+        loop {
+            match &f.kind {
+                TExprKind::Paren(inner) => f = inner.as_ref(),
+                TExprKind::App(inner_f, _) => {
+                    extra_pos += 1;
+                    f = inner_f.as_ref();
+                }
+                _ => break,
+            }
+        }
+        if let TExprKind::Var(name) = &f.kind
+            && let Some(thunked) = ever_thunked.get_mut(name.as_str()) {
+                let called = ever_called.get_mut(name.as_str()).unwrap();
+                if extra_pos < thunked.len() {
+                    called[extra_pos] = true;
+                    thunked[extra_pos] = true;
+                }
+            }
     }
 
     /// Identify small pure functions eligible for inlining at call sites.
@@ -1966,6 +2019,14 @@ impl CodeGen {
                 self.emit(")");
             }
             TExprKind::Lambda { params, body } => {
+                // Flatten nested lambdas and eta-pad to the type's full arrow
+                // count, exactly like the gen_expr Lambda arm — the emitted
+                // arity must match the N-ary calling convention.
+                let (orig, inner_body) = Self::flatten_lambda(params, body);
+                let ps = Self::lambda_param_names(&orig);
+                let eta_count = count_arrows(&expr.ty).saturating_sub(ps.len());
+                let eta_params: Vec<String> =
+                    (0..eta_count).map(|i| format!("_eta{}", i)).collect();
                 // Remove shadowed names from substitution
                 let mut inner_subst = subst.clone();
                 let saved_locals = self.local_vars.clone();
@@ -1974,17 +2035,25 @@ impl CodeGen {
                 // thunk through a higher-order call), so drop it from
                 // concrete_vars — a same-named outer binding may be concrete —
                 // to force its uses in the body. See the gen_expr Lambda arm.
-                for (name, _) in params {
-                    inner_subst.remove(name.as_str());
-                    let sp = sanitize_name(name);
-                    self.local_vars.insert(sp.clone());
-                    self.concrete_vars.remove(&sp);
+                for name in &orig {
+                    inner_subst.remove(*name);
                 }
-                let ps: Vec<String> = params.iter().map(|(s, _)| sanitize_name(s)).collect();
-                self.emit(&format!("function({})\n", ps.join(", ")));
+                for p in &ps {
+                    self.local_vars.insert(p.clone());
+                    self.concrete_vars.remove(p);
+                }
+                let mut all_params = ps.clone();
+                all_params.extend(eta_params.iter().cloned());
+                self.emit(&format!("function({})\n", all_params.join(", ")));
                 self.indent += 1;
                 self.emit_indent(); self.emit("return ");
-                self.gen_expr_subst(body, &inner_subst);
+                if eta_count > 0 {
+                    self.emit("__force(");
+                    self.gen_expr_subst(inner_body, &inner_subst);
+                    self.emit(&format!(")({})", eta_params.join(", ")));
+                } else {
+                    self.gen_expr_subst(inner_body, &inner_subst);
+                }
                 self.emit("\n");
                 self.indent -= 1;
                 self.emit_indent(); self.emit("end");
@@ -2454,6 +2523,103 @@ impl CodeGen {
         }
     }
 
+    /// mata-ll's calling convention is N-ary: every function value is ONE Lua
+    /// function taking all `count_arrows(type)` arguments at once. Top-level
+    /// functions are emitted that way (clause params plus `_eta` padding, see
+    /// gen_function), partial applications close over the missing arguments,
+    /// and application sites flatten the whole spine into a single flat call —
+    /// `f 1 2` emits `f(1, 2)` (see the App arm and __mll_wrap_callback_out).
+    /// A curried lambda `\x -> \y -> e` must therefore also become one
+    /// two-parameter Lua function: the nested one-parameter form would consume
+    /// only the first argument of a flat call and silently return the inner
+    /// closure with the remaining arguments dropped.
+    ///
+    /// Walks directly nested lambdas (through source parens) and returns the
+    /// flattened parameter list (original names) plus the innermost body. The
+    /// caller eta-pads any arrows the type still has beyond these parameters.
+    fn flatten_lambda<'a>(
+        params: &'a [(String, Ty)],
+        body: &'a TExpr,
+    ) -> (Vec<&'a str>, &'a TExpr) {
+        let mut names: Vec<&str> = params.iter().map(|(s, _)| s.as_str()).collect();
+        let mut b = body;
+        loop {
+            let mut inner = b;
+            while let TExprKind::Paren(p) = &inner.kind {
+                inner = p.as_ref();
+            }
+            if let TExprKind::Lambda { params, body } = &inner.kind {
+                names.extend(params.iter().map(|(s, _)| s.as_str()));
+                b = body.as_ref();
+            } else {
+                break;
+            }
+        }
+        (names, b)
+    }
+
+    /// Sanitize a flattened lambda parameter list for emission. A duplicate
+    /// name (`\x -> \x -> x`) is legal in source — the inner binding shadows
+    /// the outer — but after flattening both would appear in one Lua parameter
+    /// list. Only the LAST occurrence is visible to the body (every earlier
+    /// one was shadowed before any body could reference it), so rename the
+    /// earlier occurrences to fresh dead names.
+    fn lambda_param_names(orig: &[&str]) -> Vec<String> {
+        let mut names: Vec<String> = orig.iter().map(|s| sanitize_name(s)).collect();
+        for i in 0..names.len() {
+            if names[i + 1..].contains(&names[i]) {
+                names[i] = format!("_sh{}", i);
+            }
+        }
+        names
+    }
+
+    /// Currying adapter for the hand-written runtime generics.
+    ///
+    /// map and zipWith exist as ONE erased Lua copy and call their function
+    /// parameter with its GENERIC arity (map's `f : a -> b` gets exactly one
+    /// argument, zipWith's `f : a -> b -> c` exactly two). Compiled generic
+    /// code is monomorphized per instantiation, so its call sites always match
+    /// the N-ary convention — but these builtins cannot. When the result type
+    /// variable is itself instantiated to a function (`map (\n -> \x -> ...)`
+    /// building a list of adders), the argument's real arity exceeds the
+    /// builtin's view and the plain call would silently drop arguments.
+    ///
+    /// Returns the runtime adapter (`__mll_curry1`/`__mll_curry2`) to wrap the
+    /// argument in when `callee` (paren-stripped) is a bare reference to such
+    /// a builtin, the argument lands in its function-parameter position
+    /// (`args_before == 0`), and `arg_ty` has more arrows than the builtin's
+    /// generic view. A same-named local or compiled (user/specialized)
+    /// function is NOT the runtime builtin and needs no adapter.
+    fn runtime_generic_adapter(
+        &self,
+        callee: &TExpr,
+        args_before: usize,
+        arg_ty: &Ty,
+    ) -> Option<&'static str> {
+        if args_before != 0 {
+            return None;
+        }
+        let mut c = callee;
+        while let TExprKind::Paren(p) = &c.kind {
+            c = p.as_ref();
+        }
+        let TExprKind::Var(name) = &c.kind else { return None };
+        let k = match name.as_str() {
+            "map" => 1,
+            "zipWith" => 2,
+            _ => return None,
+        };
+        if self.local_vars.contains(name.as_str()) || self.fn_table.contains_key(name.as_str()) {
+            return None;
+        }
+        if count_arrows(arg_ty) > k {
+            Some(if k == 1 { "__mll_curry1" } else { "__mll_curry2" })
+        } else {
+            None
+        }
+    }
+
     /// True when gen_expr emits this expression as a bare, unparenthesized
     /// Lua function literal (`function ... end`): lambdas — which include
     /// operator sections like `(+1)`, desugared to lambdas by the parser —
@@ -2832,6 +2998,11 @@ impl CodeGen {
                     None
                 };
 
+                // The function argument of a runtime generic (map/zipWith) may
+                // need a currying adapter — see runtime_generic_adapter.
+                let arg0_adapter = args.first()
+                    .and_then(|a| self.runtime_generic_adapter(f, 0, &a.ty));
+
                 // Check if this is a partial application:
                 // the result type is still a function type
                 let remaining = count_arrows(&expr.ty);
@@ -2851,7 +3022,14 @@ impl CodeGen {
                         if i > 0 { self.emit(", "); }
                         let is_strict = callee_strict.as_ref()
                             .is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                        self.gen_arg(a, is_strict);
+                        if i == 0 && let Some(adapter) = arg0_adapter {
+                            self.emit(adapter);
+                            self.emit("(");
+                            self.gen_arg(a, is_strict);
+                            self.emit(")");
+                        } else {
+                            self.gen_arg(a, is_strict);
+                        }
                     }
                     for p in &extra_params {
                         self.emit(", ");
@@ -2870,7 +3048,14 @@ impl CodeGen {
                         if i > 0 { self.emit(", "); }
                         let is_strict = callee_strict.as_ref()
                             .is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                        self.gen_arg(a, is_strict);
+                        if i == 0 && let Some(adapter) = arg0_adapter {
+                            self.emit(adapter);
+                            self.emit("(");
+                            self.gen_arg(a, is_strict);
+                            self.emit(")");
+                        } else {
+                            self.gen_arg(a, is_strict);
+                        }
                     }
                     self.emit(")");
                 }
@@ -2932,7 +3117,41 @@ impl CodeGen {
                         return;
                     }
                     "$" => {
-                        self.gen_callee(lhs); self.emit("(__thunk(function() return "); self.gen_expr(rhs); self.emit(" end))");
+                        // f $ x applies f to a lazily thunked x. When the
+                        // result type still has arrows, f's real Lua arity is
+                        // 1 + remaining under the N-ary convention, so close
+                        // over the missing arguments — exactly like the App
+                        // arm's partial-application closure. Calling f with
+                        // the thunk alone would leave its remaining
+                        // parameters nil.
+                        let remaining = count_arrows(&expr.ty);
+                        // `map $ f` puts f straight into a runtime generic's
+                        // function-parameter position (see
+                        // runtime_generic_adapter).
+                        let adapter = self.runtime_generic_adapter(lhs, 0, &rhs.ty);
+                        if remaining > 0 {
+                            let extra: Vec<String> =
+                                (0..remaining).map(|i| format!("_pa{}", i)).collect();
+                            self.emit(&format!("(function({}) return ", extra.join(", ")));
+                            self.gen_callee(lhs);
+                            self.emit("(");
+                            if let Some(a) = adapter { self.emit(a); self.emit("("); }
+                            self.emit("__thunk(function() return ");
+                            self.gen_expr(rhs);
+                            self.emit(" end)");
+                            if adapter.is_some() { self.emit(")"); }
+                            for p in &extra { self.emit(", "); self.emit(p); }
+                            self.emit(") end)");
+                        } else {
+                            self.gen_callee(lhs);
+                            self.emit("(");
+                            if let Some(a) = adapter { self.emit(a); self.emit("("); }
+                            self.emit("__thunk(function() return ");
+                            self.gen_expr(rhs);
+                            self.emit(" end)");
+                            if adapter.is_some() { self.emit(")"); }
+                            self.emit(")");
+                        }
                         return;
                     }
                     ">>=" => {
@@ -2962,8 +3181,48 @@ impl CodeGen {
                         return;
                     }
                     "." => {
-                        self.emit("(function(_x) return "); self.gen_callee(lhs);
-                        self.emit("("); self.gen_callee(rhs); self.emit("(_x)) end)");
+                        // f . g as a value. Under the N-ary convention the
+                        // closure must take ALL count_arrows(expr.ty)
+                        // parameters — `(f . g) x y` is one flat 2-arg call —
+                        // and the extras beyond the first belong to f (whose
+                        // arity is 1 + extras, since its argument type is g's
+                        // result). Likewise, g itself may have arity > 1 when
+                        // it returns a function; the composition feeds it only
+                        // one argument, so wrap `g _x` in the same
+                        // partial-application closure the App arm would emit.
+                        let extras = count_arrows(&expr.ty).saturating_sub(1);
+                        let g_extras = count_arrows(&rhs.ty).saturating_sub(1);
+                        // `map . g` feeds g's result straight into a runtime
+                        // generic's function-parameter position (see
+                        // runtime_generic_adapter).
+                        let adapter = match &rhs.ty {
+                            Ty::Arrow(_, res) => self.runtime_generic_adapter(lhs, 0, res),
+                            _ => None,
+                        };
+                        self.emit("(function(_x");
+                        for i in 0..extras { self.emit(&format!(", _pa{}", i)); }
+                        self.emit(") return ");
+                        self.gen_callee(lhs);
+                        self.emit("(");
+                        if let Some(a) = adapter { self.emit(a); self.emit("("); }
+                        if g_extras == 0 {
+                            self.gen_callee(rhs);
+                            self.emit("(_x)");
+                        } else {
+                            self.emit("(function(");
+                            for i in 0..g_extras {
+                                if i > 0 { self.emit(", "); }
+                                self.emit(&format!("_pb{}", i));
+                            }
+                            self.emit(") return ");
+                            self.gen_callee(rhs);
+                            self.emit("(_x");
+                            for i in 0..g_extras { self.emit(&format!(", _pb{}", i)); }
+                            self.emit(") end)");
+                        }
+                        if adapter.is_some() { self.emit(")"); }
+                        for i in 0..extras { self.emit(&format!(", _pa{}", i)); }
+                        self.emit(") end)");
                         return;
                     }
                     other => other,
@@ -3101,7 +3360,15 @@ impl CodeGen {
                 self.concrete_vars = saved_concrete;
             }
             TExprKind::Lambda { params, body } => {
-                let ps: Vec<String> = params.iter().map(|(s, _)| sanitize_name(s)).collect();
+                // Flatten directly nested lambdas into one Lua function and
+                // eta-pad up to the type's full arrow count, so the emitted
+                // function's arity matches what every call site assumes (see
+                // flatten_lambda for the calling-convention rationale).
+                let (orig, inner_body) = Self::flatten_lambda(params, body);
+                let ps = Self::lambda_param_names(&orig);
+                let eta_count = count_arrows(&expr.ty).saturating_sub(ps.len());
+                let eta_params: Vec<String> =
+                    (0..eta_count).map(|i| format!("_eta{}", i)).collect();
                 let saved_locals = self.local_vars.clone();
                 let saved_concrete = self.concrete_vars.clone();
                 // A lambda parameter is NOT guaranteed forced: when the lambda
@@ -3109,14 +3376,25 @@ impl CodeGen {
                 // see its strictness and may pass a thunk. Drop the params from
                 // concrete_vars (a same-named outer binding may be concrete) so
                 // their uses in the body are forced rather than emitted bare.
-                for (p, _) in params {
-                    let sp = sanitize_name(p);
-                    self.local_vars.insert(sp.clone());
-                    self.concrete_vars.remove(&sp);
+                for p in &ps {
+                    self.local_vars.insert(p.clone());
+                    self.concrete_vars.remove(p);
                 }
-                self.emit(&format!("function({})\n", ps.join(", ")));
+                let mut all_params = ps.clone();
+                all_params.extend(eta_params.iter().cloned());
+                self.emit(&format!("function({})\n", all_params.join(", ")));
                 self.indent += 1; self.emit_indent(); self.emit("return ");
-                self.gen_expr(body); self.emit("\n"); self.indent -= 1;
+                if eta_count > 0 {
+                    // The body still has function type (e.g. `\x -> f x` at
+                    // type a -> b -> c): apply the eta params to its value,
+                    // mirroring the top-level eta-expansion in gen_function.
+                    self.emit("__force(");
+                    self.gen_expr(inner_body);
+                    self.emit(&format!(")({})", eta_params.join(", ")));
+                } else {
+                    self.gen_expr(inner_body);
+                }
+                self.emit("\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end");
                 self.local_vars = saved_locals;
                 self.concrete_vars = saved_concrete;
@@ -4328,6 +4606,26 @@ local function zipWith(f, xs, ys)
     return __mll_lazy_cons(f(__mll_head(xs), __mll_head(ys)), function()
         return zipWith(f, __mll_tail(xs), __mll_tail(ys))
     end)
+end
+-- Currying adapters for the hand-written generic builtins above. Compiled
+-- mata-ll functions are N-ary (all count_arrows(type) arguments in one call),
+-- and compiled generic code is specialized per instantiation so its call
+-- sites always match. map/zipWith, however, exist as ONE erased copy and call
+-- their function argument with its GENERIC arity (map: 1, zipWith: 2). When
+-- the result type variable is itself instantiated to a function — e.g.
+-- `map (\n -> \x -> x + n) ns` builds a list of adders — the argument's real
+-- arity exceeds that view, so the compiler wraps it: absorb the builtin's
+-- call, then return a closure over the remaining arguments (the same shape a
+-- compiled partial application has).
+local function __mll_curry1(f)
+    return function(x)
+        return function(...) return __force(f)(x, ...) end
+    end
+end
+local function __mll_curry2(f)
+    return function(x, y)
+        return function(...) return __force(f)(x, y, ...) end
+    end
 end
 -- Hash helper
 local function __mll_hashstr(s) s = __force(s); local h = 5381 for i = 1, #s do h = ((h * 33) + string.byte(s, i)) % 2147483647 end return h end
