@@ -88,7 +88,11 @@ types, `SomeException`, `IOException`, or `catches`.
 ## No deriving for all classes
 
 `deriving` supports `Show`, `Eq`, `Ord`, `Enum`, `Bounded`, and
-`Functor`. There is no `deriving` for `Read`, `Generic`, `Hashable`,
+`Functor`, plus three that have no GHC-Prelude equivalent: `ToJSON` and
+`FromJSON` (a JSON encoder/decoder, requiring `import JSON`) and
+`LuaDict` (a name-based Lua-interop representation — a name-keyed table
+for a single-constructor record, a plain string for an all-nullary
+enum). There is no `deriving` for `Read`, `Generic`, `Hashable`,
 `NFData`, or arbitrary classes. There is no `GeneralizedNewtypeDeriving`
 or `DeriveAnyClass`.
 
