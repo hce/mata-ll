@@ -252,6 +252,7 @@ mll_test!(mapm_return_position, "mapm_return_position.mll");
 mll_test!(result_only_monad, "result_only_monad.mll");
 mll_test!(show_required, "show_required.mll");
 mll_test!(either_ordering, "either_ordering.mll");
+mll_test!(show_either, "show_either.mll");
 mll_test!(case_guards, "case_guards.mll");
 mll_test!(infix_def, "infix_def.mll");
 mll_test!(seq_tco, "seq_tco.mll");
