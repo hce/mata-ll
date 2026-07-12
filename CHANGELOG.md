@@ -43,6 +43,17 @@ below applies to both.
   compile to Lua's native proper tail calls and run in constant stack. (A
   parenthesised or otherwise wrapped tail call previously defeated Lua's
   tail-call optimization.)
+- `seq` now works in every application form, not just prefix. The backtick infix
+  (``a `seq` b``), partial application (`seq a`), and first-class/higher-order
+  uses (`foldr seq z xs`, `map (seq x) ys`) previously compiled to a call of a
+  nonexistent global `seq` and crashed at runtime with "attempt to call a nil
+  value"; only the curried prefix `seq a b` worked. All forms now share the same
+  semantics — force the first argument to WHNF, then yield the second (forced to
+  WHNF only, so its subparts stay lazy; a bottom in the first argument raises, a
+  bottom in the second is not forced until the result is demanded). The prefix
+  and backtick forms are lowered inline so a `seq`-strict tail-recursive second
+  operand stays a proper tail call (constant stack); the other forms route
+  through a runtime `__mll_seq` primitive with identical behaviour.
 
 ### Changed
 

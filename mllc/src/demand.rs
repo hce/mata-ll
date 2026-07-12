@@ -426,6 +426,15 @@ fn demanded_vars_mode(
             // Always demand the function.
             let mut s = rec(f);
 
+            // `seq` is strict in its FIRST argument only (it forces it to WHNF)
+            // and lazy in the rest, so a parameter passed as `seq`'s first
+            // argument is demanded, while the second stays lazy. Mirror the
+            // runtime `__mll_seq` / inline lowering exactly.
+            if let TExprKind::Var(name) = &f.kind
+                && name == "seq" && !args_rev.is_empty() {
+                    s.extend(rec(args_rev[0]));
+                }
+
             // Cross-function propagation: if callee is a known function
             // and is strict in position i, demand that argument's vars.
             if let TExprKind::Var(name) = &f.kind
@@ -490,6 +499,9 @@ fn demanded_vars_mode(
                 "$" => rec(lhs),
                 // Cons is lazy — neither side is forced.
                 ":" => HashSet::new(),
+                // Backtick `a `seq` b`: forces the FIRST operand only (WHNF),
+                // leaves the second lazy — same as prefix `seq a b`.
+                "seq" => rec(lhs),
                 // Monadic bind/sequence forces both actions. In Emission
                 // mode a `>>= \x -> rest` continuation always runs (the
                 // flattened IO/ST bind chain executes it in sequence), so

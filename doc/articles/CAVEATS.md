@@ -68,8 +68,11 @@ list:
     foldl (+) 0 [1..1000000]  -- builds a chain of 1M thunks
 
 Use `seq` to force intermediate values, or prefer strict accumulator patterns.
-The demand analysis pass eliminates many unnecessary thunks, but it cannot
-catch every case.
+`seq` works in every application form — prefix `seq a b`, backtick
+``a `seq` b``, partial application, and as a first-class value (`foldr seq z`) —
+all with the same semantics (force the first argument, yield the second). The
+demand analysis pass eliminates many unnecessary thunks, but it cannot catch
+every case.
 
 ## Unused arguments are not evaluated (non-strict semantics hold)
 

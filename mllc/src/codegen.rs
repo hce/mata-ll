@@ -541,7 +541,7 @@ impl CodeGen {
         // All Prelude runtime names are plain local functions — never thunks.
         // Seed concrete_vars so references skip __force throughout user code.
         for name in &[
-            "__force", "__thunk", "__mll_cons", "__mll_lazy_cons", "__mll_head",
+            "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
             "__mll_tail", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_perform",
             "__mll_ffi_decode",
             "not_", "engage", "liftIO", "show", "error_", "max", "min", "undefined",
@@ -2709,6 +2709,9 @@ impl CodeGen {
         if let TExprKind::Var(name) = &expr.kind {
             match name.as_str() {
                 "otherwise" => self.emit("true"),
+                // First-class / partially-applied `seq` as a callee resolves to
+                // the runtime primitive (see the gen_expr Var arm).
+                "seq" => self.emit("__mll_seq"),
                 _ => {
                     let sname = sanitize_name(name);
                     let lref = self.lua_ref(&sname);
@@ -2945,6 +2948,10 @@ impl CodeGen {
     fn gen_lazy_ref(&mut self, expr: &TExpr) {
         match &expr.kind {
             TExprKind::Var(name) if name == "otherwise" => self.emit("true"),
+            // A first-class `seq` reference resolves to the runtime primitive
+            // (see the gen_expr Var arm) — this is the path taken when `seq` is
+            // passed as a bare argument, e.g. `foldr seq z xs`.
+            TExprKind::Var(name) if name == "seq" => self.emit("__mll_seq"),
             TExprKind::Var(name) => {
                 let lref = self.lua_ref(&sanitize_name(name));
                 self.emit(&lref);
@@ -3001,6 +3008,33 @@ impl CodeGen {
     /// context-free floor of `is_cheap_to_force`, which is a subset of what the
     /// eager branch below accepts. So whenever the callee assumes a value, this
     /// function has indeed passed one.
+    /// Emit `seq a b` inline: force `a` to WHNF, then return `b`. Shared by the
+    /// prefix `seq a b` and backtick `a `seq` b` forms so the two cannot
+    /// diverge. Semantically identical to the runtime `__mll_seq(a, b)` that
+    /// backs every other application shape (partial application, first-class
+    /// reference, over-application): both force `a` then yield `b`. The ONLY
+    /// difference — and the reason this inline form is kept — is that `b` is
+    /// emitted in tail position with redundant source parens stripped, so a
+    /// `seq`-strict tail-recursive second operand (`go n acc = seq acc (go ..)`)
+    /// stays a Lua proper tail call and runs in constant stack. `__force` is
+    /// idempotent, so an already-evaluated `a` costs nothing extra; a lazy `a`
+    /// (a thunk of `error`/loop) is run here, exactly as `seq` requires.
+    fn gen_seq_inline(&mut self, a: &TExpr, b: &TExpr) {
+        self.emit("(function() __force(");
+        self.gen_expr(a);
+        self.emit("); return ");
+        // Strip redundant source parens around the returned expression: in Lua
+        // `return f(x)` is a proper tail call but `return (f(x))` is not, so a
+        // parenthesised call here would defeat TCO and blow the stack on deep
+        // `seq`-strict recursion.
+        let mut bb: &TExpr = b;
+        while let TExprKind::Paren(inner) = &bb.kind {
+            bb = inner.as_ref();
+        }
+        self.gen_expr(bb);
+        self.emit(" end)()");
+    }
+
     fn gen_arg(&mut self, expr: &TExpr, strict: bool) {
         // Eagerness weight wins: the callee forces it anyway, or it is provably
         // total (cannot be ⊥). Evaluate in place — no thunk.
@@ -3056,6 +3090,13 @@ impl CodeGen {
             TExprKind::Var(name) => {
                 match name.as_str() {
                     "otherwise" => self.emit("true"),
+                    // A first-class / partially-applied `seq` (e.g. `foldr seq
+                    // z`, `map (seq x) ys`, `let g = seq x`) resolves to the
+                    // runtime primitive, which forces its first argument and
+                    // returns the second (over-application applies the returned
+                    // function to the rest). The fully-applied prefix and
+                    // backtick forms are lowered inline before reaching here.
+                    "seq" => self.emit("__mll_seq"),
                     _ => {
                         let sname = sanitize_name(name);
                         let lref = self.lua_ref(&sname);
@@ -3157,24 +3198,17 @@ impl CodeGen {
                             return;
                         }
 
-                // seq a b => force a, return b
+                // seq a b (prefix, EXACTLY two args) => force a, return b,
+                // inline. `seq` applied to more than two args (its result is a
+                // function applied further), a partial `seq a`, a backtick
+                // `a `seq` b`, and a first-class `seq` all route through the
+                // runtime `__mll_seq` instead (see the Var arm and the InfixApp
+                // seq case) — this inline form is kept only for the common
+                // prefix shape because it preserves the proper tail call on `b`.
                 if let TExprKind::App(seq_f, seq_a) = &func.kind
                     && let TExprKind::Var(name) = &seq_f.kind
                         && name == "seq" {
-                            self.emit("(function() __force(");
-                            self.gen_expr(seq_a);
-                            self.emit("); return ");
-                            // Strip redundant source parens around the returned
-                            // expression: in Lua `return f(x)` is a proper tail
-                            // call but `return (f(x))` is not, so a parenthesised
-                            // call here would defeat TCO and blow the stack on
-                            // deep `seq`-strict recursion.
-                            let mut b: &TExpr = arg;
-                            while let TExprKind::Paren(inner) = &b.kind {
-                                b = inner.as_ref();
-                            }
-                            self.gen_expr(b);
-                            self.emit(" end)()");
+                            self.gen_seq_inline(seq_a, arg);
                             return;
                         }
 
@@ -3362,6 +3396,14 @@ impl CodeGen {
                     self.emit(", ");
                     self.gen_operand(rhs);
                     self.emit(")");
+                    return;
+                }
+                if op == "seq" {
+                    // Backtick `a `seq` b`: same inline lowering as prefix
+                    // `seq a b` (force a, return b in tail position). Without
+                    // this the operator fell to the user-operator branch below
+                    // and emitted `seq(a, b)` — a call to a nonexistent global.
+                    self.gen_seq_inline(lhs, rhs);
                     return;
                 }
                 let lua_op = match op.as_str() {
@@ -4622,6 +4664,28 @@ local function __force(x)
         return val
     end
     return x
+end
+
+-- seq: force the FIRST argument to WHNF, then return the SECOND evaluated to
+-- WHNF (GHC's seq — the value of `seq a b` *is* the value of `b`, so forcing
+-- the seq result forces `b`; this is what makes a `foldr seq z` chain fully
+-- evaluate). Only WHNF: `b`'s subparts (list heads, tuple fields) keep their
+-- laziness, exactly as the inline prefix/backtick lowering (`return <b>`) does.
+-- Laziness is preserved at the *use site*: `__mll_seq` runs only when the seq
+-- expression is itself evaluated, so a discarded `seq 1 (error "x")` (a thunked
+-- binding) never calls this and never raises. This runtime primitive backs
+-- every `seq` shape EXCEPT the fully-applied prefix `seq a b` and backtick
+-- `a `seq` b`, which codegen lowers inline to keep `b` a proper tail call (see
+-- gen_seq_inline). It is what a first-class or partially-applied `seq` becomes:
+-- `foldr seq z xs`, `map (seq x) ys`, `let g = seq x in g y`. Variadic so an
+-- over-applied `seq a f x y` — where the second argument is itself a function —
+-- forces `a`, evaluates `f`, then applies it to the remaining arguments,
+-- preserving the N-ary calling convention.
+local function __mll_seq(a, b, ...)
+    __force(a)
+    b = __force(b)
+    if select('#', ...) == 0 then return b end
+    return b(...)
 end
 
 -- List primitives (internal)

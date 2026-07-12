@@ -1164,10 +1164,19 @@ Everything else is thunked. A bare variable or nullary constructor in a
 lazy position is passed as its raw thunk-or-value reference rather than
 re-wrapped, so no redundant thunk is allocated.
 
-`seq :: a -> b -> b` forces its first argument before returning the
-second. When the second argument is a tail call it stays a tail call,
-so a `seq`-strict accumulator (`go n acc = seq acc (go (n - 1) ...)`)
-runs in constant stack and will not overflow on deep recursion.
+`seq :: a -> b -> b` forces its first argument to WHNF, then yields the
+second (the value of `seq a b` is the value of `b`; the second argument
+is forced only to WHNF, so its subparts — list heads, tuple fields —
+keep their laziness, and it is forced only when the `seq` result is
+itself demanded). It works in **every** application form with these same
+semantics: prefix `seq a b`, backtick infix ``a `seq` b``, partial
+application `seq a`, and as a first-class value (`foldr seq z xs`,
+`map (seq x) ys`). The fully-applied prefix and backtick forms are
+lowered inline so that when the second argument is a tail call it stays a
+tail call — a `seq`-strict accumulator (`go n acc = seq acc (go (n-1) …)`,
+or its backtick spelling) runs in constant stack and will not overflow on
+deep recursion. The other forms route through one runtime primitive with
+the identical force-first-then-yield-second behaviour.
 
 The compiler tracks concrete variables (already-forced values) to
 skip redundant `__force` calls at runtime. Function parameters forced
