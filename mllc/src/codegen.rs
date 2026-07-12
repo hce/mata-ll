@@ -1666,7 +1666,37 @@ impl CodeGen {
     fn is_cheap_to_force(&self, expr: &TExpr) -> bool {
         Self::is_cheap_with(expr, &|name| {
             name == "otherwise" || self.concrete_vars.contains(&sanitize_name(name))
-        })
+        }) && !Self::contains_trapping_op(expr)
+    }
+
+    /// True when `expr` (already known to be structurally cheap) contains a
+    /// built-in operator that can *trap* at runtime — integer `div`/`mod`/`%`
+    /// raise a Lua error on a zero divisor (`math.floor(n/0)` has no integer
+    /// representation; `n % 0` is rejected outright). Such an expression can be
+    /// ⊥ even though every operand is a plain value, so it is never safe to
+    /// evaluate eagerly in a non-strict position: bottom always weighs
+    /// maximally on the laziness side (see the weighing in gen_arg). Float `/`
+    /// is deliberately excluded — `1/0` is `inf`, matching Haskell's `Double`,
+    /// not an error.
+    fn contains_trapping_op(expr: &TExpr) -> bool {
+        match &expr.kind {
+            TExprKind::InfixApp { op, lhs, rhs } => {
+                matches!(op.as_str(), "div" | "mod" | "%")
+                    || Self::contains_trapping_op(lhs)
+                    || Self::contains_trapping_op(rhs)
+            }
+            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::contains_trapping_op(inner),
+            TExprKind::Tuple(elems) => elems.iter().any(Self::contains_trapping_op),
+            TExprKind::App(func, arg) => {
+                Self::contains_trapping_op(func) || Self::contains_trapping_op(arg)
+            }
+            TExprKind::If { cond, then_branch, else_branch } => {
+                Self::contains_trapping_op(cond)
+                    || Self::contains_trapping_op(then_branch)
+                    || Self::contains_trapping_op(else_branch)
+            }
+            _ => false,
+        }
     }
 
     /// Names of value bindings in `binds` that are provably demanded when
@@ -1817,7 +1847,23 @@ impl CodeGen {
                         for (i, arg) in args.iter().enumerate() {
                             if i < thunked.len() {
                                 called[i] = true;
-                                if !Self::is_cheap_arg(arg, &self.inline_fns) {
+                                // A parameter is judged "always cheap" (the
+                                // callee then skips forcing it and treats it as
+                                // a value) only when EVERY call site passes an
+                                // argument that gen_arg is guaranteed to
+                                // evaluate eagerly regardless of context. That
+                                // guarantee is the *context-free floor* of
+                                // is_cheap_to_force: cheap structure built
+                                // without leaning on any variable's WHNF-ness
+                                // (var_ok = false) and free of trapping ops.
+                                // gen_arg's eager set (strict OR
+                                // is_cheap_to_force) is a superset of this, so
+                                // whenever the callee assumes a value one was
+                                // passed. Any other argument may be thunked by
+                                // gen_arg, so mark the position thunked here.
+                                if !(Self::is_cheap_with(arg, &|_| false)
+                                    && !Self::contains_trapping_op(arg))
+                                {
                                     thunked[i] = true;
                                 }
                             }
@@ -2138,52 +2184,6 @@ impl CodeGen {
                 self.emit("}");
             }
             _ => self.gen_expr(expr),
-        }
-    }
-
-    /// Check if an expression is cheap enough to pass without thunking.
-    /// Whether an argument is cheap enough to evaluate eagerly rather than
-    /// wrap in a thunk.
-    ///
-    /// Cheap: literals, variables, lambdas (see is_cheap); constructor
-    /// applications with cheap fields; and a *saturated call to an inlinable
-    /// function* — inline candidates are non-recursive with a cheap (plain
-    /// arithmetic) body, so calling one is O(1) and terminates.
-    ///
-    /// NOT cheap: a general or recursive function call. Even a single-level
-    /// call can be expensive or non-terminating (e.g. a recursive call that
-    /// streams an infinite list), so it must be thunked to preserve non-strict
-    /// semantics. Treating every one-level call as cheap forced such arguments
-    /// eagerly and diverged on lazy code like `concatMap` / list comprehensions
-    /// over `[n..]`.
-    fn is_cheap_arg(
-        expr: &TExpr,
-        inline_fns: &std::collections::HashMap<String, (Vec<String>, TExpr)>,
-    ) -> bool {
-        if Self::is_cheap(expr) { return true; }
-        match &expr.kind {
-            TExprKind::App(_, _) => {
-                // Peel the application spine, requiring every argument cheap.
-                let mut argc = 0usize;
-                let mut f = expr;
-                while let TExprKind::App(func, arg) = &f.kind {
-                    if !Self::is_cheap_arg(arg, inline_fns) { return false; }
-                    argc += 1;
-                    f = func;
-                }
-                // Constructor application: cheap (O(1) WHNF).
-                if matches!(&f.kind, TExprKind::Con(_)) {
-                    return true;
-                }
-                // Saturated call to an inlinable function: cheap.
-                if let TExprKind::Var(name) = &f.kind
-                    && let Some((params, _)) = inline_fns.get(name) {
-                        return params.len() == argc;
-                    }
-                false
-            }
-            TExprKind::Paren(inner) => Self::is_cheap_arg(inner, inline_fns),
-            _ => false,
         }
     }
 
@@ -2826,9 +2826,63 @@ impl CodeGen {
     /// gen_expr which forces non-concrete variables. Expensive args for strict
     /// positions are also emitted via gen_expr. Expensive args for non-strict
     /// positions are wrapped in thunks to preserve non-strict semantics.
+    /// Emit a function-call argument, choosing eager or lazy evaluation by
+    /// WEIGHING the benefit of eagerness against the risk to non-strict
+    /// semantics. This is the single place that decision is made for call
+    /// arguments; it replaced an earlier ad-hoc "cheap argument" heuristic.
+    ///
+    /// The weighing has two sides:
+    ///
+    ///   * LAZINESS weight — dominated by one term: if evaluating the argument
+    ///     *now* could force a suspended, possibly-⊥ computation (`error`,
+    ///     `undefined`, non-termination, or a trapping `div`/`mod`) that the
+    ///     callee is not guaranteed to demand, the laziness weight is MAXIMAL.
+    ///     Bottom always outweighs any eagerness benefit. Non-strict semantics
+    ///     then *requires* the value be suspended, so it is thunked (or passed
+    ///     as an already-suspended reference) and forced only if the callee
+    ///     actually demands it. This is what makes
+    ///         g _ = 42 ;  g (error "boom")   ==>  42
+    ///     rather than raising "boom": `g` never forces its argument, so the
+    ///     `error` thunk is never run.
+    ///
+    ///   * EAGERNESS weight — the saved thunk allocation (and the saved force
+    ///     on use). It can only win when the laziness weight is *not* maximal,
+    ///     i.e. the argument is provably total at this point: a literal, a
+    ///     provably-WHNF (`concrete_vars`) variable, a constructor or tuple of
+    ///     such, non-trapping arithmetic over such, etc. — exactly
+    ///     `is_cheap_to_force`. Evaluating such an argument now cannot raise or
+    ///     diverge where the callee would not, so eager is always the win.
+    ///
+    /// `strict` short-circuits the weighing: demand analysis has proven the
+    /// callee forces this position on every path, so the callee would run the
+    /// same ⊥ anyway — eager evaluation cannot change the observable result and
+    /// the eagerness weight wins outright.
+    ///
+    /// Consistency with the callee: a parameter is only marked "always cheap"
+    /// (callee skips `__force` and treats it as a value — see
+    /// `analyze_call_sites`) when *every* call site passes an argument from the
+    /// context-free floor of `is_cheap_to_force`, which is a subset of what the
+    /// eager branch below accepts. So whenever the callee assumes a value, this
+    /// function has indeed passed one.
     fn gen_arg(&mut self, expr: &TExpr, strict: bool) {
-        if Self::is_cheap_arg(expr, &self.inline_fns) || strict {
+        // Eagerness weight wins: the callee forces it anyway, or it is provably
+        // total (cannot be ⊥). Evaluate in place — no thunk.
+        if strict || self.is_cheap_to_force(expr) {
             self.gen_expr(expr);
+            return;
+        }
+        // Laziness weight is maximal (the argument may be ⊥ and the callee may
+        // not demand it): suspend it. A bare variable or nullary constructor
+        // already denotes a thunk-or-value, so pass it raw rather than wrapping
+        // a fresh thunk around a force of it — the runtime forces it only if
+        // the callee reads it. Everything else is suspended in a thunk.
+        let stripped = {
+            let mut e = expr;
+            while let TExprKind::Paren(inner) = &e.kind { e = inner.as_ref(); }
+            e
+        };
+        if matches!(&stripped.kind, TExprKind::Var(_) | TExprKind::Con(_)) {
+            self.gen_lazy_ref(stripped);
         } else {
             self.emit("__thunk(function() return ");
             self.gen_expr(expr);

@@ -246,21 +246,34 @@ pub fn forced_guards(
     demanded_guards_mode(guards, env, DemandMode::Emission, inlined)
 }
 
-/// Structural mirror of codegen's static `is_cheap`: expressions gen_arg
-/// evaluates eagerly at call sites rather than thunking. Must stay a
-/// *subset* of codegen's `is_cheap_arg` (which starts from `is_cheap`), so
-/// Emission mode never claims a force for an argument the emitter actually
-/// thunks.
+/// Arguments that codegen's `gen_arg` evaluates eagerly at *every* call site,
+/// regardless of the callee's strictness — the context-free floor of
+/// `is_cheap_to_force`. Emission mode adds the demand of such an argument to
+/// the forced set, so this MUST stay a subset of what the emitter actually
+/// evaluates eagerly; otherwise a `let`/`where` binding could be judged
+/// demanded and evaluated strictly when the emitter in fact thunks the
+/// argument, forcing a value the program never demands.
+///
+/// Since the change to a bottom-safe weighing in `gen_arg`, that floor no
+/// longer includes a bare variable (a non-concrete variable is passed as its
+/// raw thunk-or-value, not forced) nor a trapping `div`/`mod`/`%` (which may be
+/// ⊥). What remains is genuinely total: literals, nullary constructors,
+/// lambdas, and non-trapping arithmetic / constructor / tuple / if structure
+/// built from those. (Constructors and tuples force nothing when built, so
+/// their demand is empty regardless; they are included only for structural
+/// completeness.)
 fn arg_emitted_eagerly(expr: &TExpr) -> bool {
     match &expr.kind {
-        TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Var(_)
+        TExprKind::Lit(_) | TExprKind::Con(_)
         | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
+        // A bare variable is NOT forced eagerly by gen_arg any more.
+        TExprKind::Var(_) => false,
         TExprKind::Paren(inner) | TExprKind::Negate(inner) => arg_emitted_eagerly(inner),
         TExprKind::Tuple(elems) => elems.iter().all(arg_emitted_eagerly),
         TExprKind::InfixApp { op, lhs, rhs } => {
-            matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "^" | "==" | "/=" | "~="
-                | "<" | ">" | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ".." | "$" | "."
-                | "div" | "mod")
+            // Trapping ops (div/mod/%) are excluded — gen_arg thunks them.
+            matches!(op.as_str(), "+" | "-" | "*" | "/" | "^" | "==" | "/=" | "~="
+                | "<" | ">" | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ".." | "$" | ".")
                 && arg_emitted_eagerly(lhs) && arg_emitted_eagerly(rhs)
         }
         TExprKind::App(func, arg) => {
