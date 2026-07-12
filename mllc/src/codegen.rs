@@ -1301,7 +1301,7 @@ impl CodeGen {
                         self.emit(&sub.output);
                         self.emit(" then\n");
                         self.indent += 1;
-                        self.emit_indent(); self.emit("return "); self.gen_expr(&guard.body); self.emit("\n");
+                        self.emit_indent(); self.emit("return "); self.gen_tail(&guard.body, false); self.emit("\n");
                         self.indent -= 1;
                     }
                     self.emit_line("end");
@@ -1324,7 +1324,7 @@ impl CodeGen {
                         self.emit(&sub.output);
                         self.emit(" then\n");
                         self.indent += 1;
-                        self.emit_indent(); self.emit("return "); self.gen_expr(&guard.body); self.emit("\n");
+                        self.emit_indent(); self.emit("return "); self.gen_tail(&guard.body, false); self.emit("\n");
                         self.indent -= 1;
                     }
                 }
@@ -1346,7 +1346,7 @@ impl CodeGen {
                         }
                     }
                     self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
-                    self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
+                    self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
                     if i > 0 { self.indent -= 1; self.emit_line("end"); }
                     return;
                 }
@@ -1363,7 +1363,7 @@ impl CodeGen {
                     }
                 }
                 self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
-                self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
+                self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
                 self.indent -= 1;
             }
 
@@ -1411,7 +1411,7 @@ impl CodeGen {
             }
             self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
             if clause.guards.is_empty() {
-                self.emit_indent(); self.emit("return "); self.gen_expr(&clause.body); self.emit("\n");
+                self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
             } else {
                 for (gi, guard) in clause.guards.iter().enumerate() {
                     let gkw = if gi == 0 { "if" } else { "elseif" };
@@ -1421,7 +1421,7 @@ impl CodeGen {
                     self.emit(&sub.output);
                     self.emit(" then\n");
                     self.indent += 1;
-                    self.emit_indent(); self.emit("return "); self.gen_expr(&guard.body); self.emit("\n");
+                    self.emit_indent(); self.emit("return "); self.gen_tail(&guard.body, false); self.emit("\n");
                     self.indent -= 1;
                 }
                 self.emit_line("end");
@@ -2369,6 +2369,43 @@ impl CodeGen {
         }
     }
 
+    /// Emit an expression that sits in TAIL position — i.e. its value becomes
+    /// the enclosing function's result via `return <expr>`.
+    ///
+    /// TAIL-CALL CONTRACT (this is the single place the property is enforced):
+    /// Lua performs a proper, stack-frame-replacing tail call *only* for the
+    /// exact syntactic form `return <functioncall>`. Wrapping the call in
+    /// parentheses — `return (f(x))` — is NOT a tail call: the parentheses
+    /// truncate the call to a single value and Lua keeps the current frame, so
+    /// deeply tail-recursive functions overflow the stack. mata-ll functions
+    /// always denote a single value, so source-level and desugarer-introduced
+    /// parentheses are semantically transparent here; stripping them turns
+    /// `return (f x)` into `return f(x)` and lets Lua reclaim the frame.
+    ///
+    /// Every genuine tail position (function-clause bodies, guard results,
+    /// if/case branch results, let-body results, lambda bodies) funnels its
+    /// result expression through this helper, so the tail-call property holds
+    /// uniformly rather than being re-derived per construct. Note the caller
+    /// still emits the literal `return `/`\n`; this only strips the wrappers
+    /// and dispatches to the right emitter.
+    ///
+    /// Nested tail calls compose: `return (function() ... return f(x) end)()`
+    /// (the IIFE that if/case/let expressions lower to) is itself a tail call
+    /// to the closure, and the closure tail-calls `f`, so the whole chain runs
+    /// in constant stack — which is why only the paren wrapper, not the IIFE,
+    /// has to be stripped.
+    fn gen_tail(&mut self, expr: &TExpr, inside_action: bool) {
+        let mut e = expr;
+        while let TExprKind::Paren(inner) = &e.kind {
+            e = inner.as_ref();
+        }
+        if inside_action {
+            self.gen_action(e);
+        } else {
+            self.gen_expr(e);
+        }
+    }
+
     /// Flatten a monadic bind chain (from do-notation) into sequential
     /// local statements.
     /// When `inside_action` is true, terminal IO expressions are performed
@@ -2518,11 +2555,9 @@ impl CodeGen {
                 _ => {
                     self.emit_indent();
                     self.emit("return ");
-                    if inside_action {
-                        self.gen_action(expr);
-                    } else {
-                        self.gen_expr(expr);
-                    }
+                    // Tail position: strip transparent parens so a wrapped call
+                    // (`return (f x)`) becomes a proper Lua tail call. See gen_tail.
+                    self.gen_tail(expr, inside_action);
                     self.emit("\n");
                 }
             }
@@ -3276,9 +3311,9 @@ impl CodeGen {
             TExprKind::If { cond, then_branch, else_branch } => {
                 self.emit("(function()\n"); self.indent += 1;
                 self.emit_indent(); self.emit("if "); self.gen_expr(cond); self.emit(" then\n");
-                self.indent += 1; self.emit_indent(); self.emit("return "); self.gen_expr(then_branch); self.emit("\n"); self.indent -= 1;
+                self.indent += 1; self.emit_indent(); self.emit("return "); self.gen_tail(then_branch, false); self.emit("\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("else\n");
-                self.indent += 1; self.emit_indent(); self.emit("return "); self.gen_expr(else_branch); self.emit("\n"); self.indent -= 1;
+                self.indent += 1; self.emit_indent(); self.emit("return "); self.gen_tail(else_branch, false); self.emit("\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end)()");
             }
@@ -3320,7 +3355,7 @@ impl CodeGen {
                     if conditions.is_empty() {
                         if i > 0 { self.emit_indent(); self.emit("else\n"); self.indent += 1; }
                         for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); self.local_vars.insert(var.clone()); }
-                        self.emit_indent(); self.emit("return "); self.gen_expr(&branch.body); self.emit("\n");
+                        self.emit_indent(); self.emit("return "); self.gen_tail(&branch.body, false); self.emit("\n");
                         if i > 0 { self.indent -= 1; self.emit_line("end"); }
                         self.local_vars = saved_locals;
                         break;
@@ -3329,7 +3364,7 @@ impl CodeGen {
                     self.emit_indent(); self.emit(&format!("{} {} then\n", kw, conditions.join(" and ")));
                     self.indent += 1;
                     for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); self.local_vars.insert(var.clone()); }
-                    self.emit_indent(); self.emit("return "); self.gen_expr(&branch.body); self.emit("\n");
+                    self.emit_indent(); self.emit("return "); self.gen_tail(&branch.body, false); self.emit("\n");
                     self.indent -= 1;
                     if i == branches.len() - 1 { self.emit_line("end"); }
                     self.local_vars = saved_locals;
@@ -3385,7 +3420,7 @@ impl CodeGen {
                         self.gen_expr(&bind.body); self.emit(" end)\n");
                     }
                 }
-                self.emit_indent(); self.emit("return "); self.gen_expr(body); self.emit("\n");
+                self.emit_indent(); self.emit("return "); self.gen_tail(body, false); self.emit("\n");
                 self.indent -= 1; self.emit_indent(); self.emit("end)()");
                 self.local_vars = saved_locals;
                 self.concrete_vars = saved_concrete;
@@ -3423,7 +3458,8 @@ impl CodeGen {
                     self.gen_expr(inner_body);
                     self.emit(&format!(")({})", eta_params.join(", ")));
                 } else {
-                    self.gen_expr(inner_body);
+                    // Lambda body is in tail position — strip parens for PTC.
+                    self.gen_tail(inner_body, false);
                 }
                 self.emit("\n"); self.indent -= 1;
                 self.emit_indent(); self.emit("end");
