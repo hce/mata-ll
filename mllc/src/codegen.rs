@@ -3533,6 +3533,9 @@ fn sanitize_name(name: &str) -> String {
         // error_ forces its message before raising; Lua's bare `error` would
         // hand a thunk to error() and print "table: 0x...".
         "error" => "error_".to_string(),
+        // exit_ unwraps the ExitValue ADT (Normal / Err code) and calls
+        // os.exit; a bare `exit` would reference an undefined Lua global.
+        "exit" => "exit_".to_string(),
         "end" => "end_".to_string(),
         "then" => "then_".to_string(),
         "do" => "do_".to_string(),
@@ -4483,9 +4486,12 @@ local getArgs = function()
     end
     return result
 end
-local function exit_(code)
+-- Prelude exit :: ExitValue -> IO (). ExitValue is a mixed ADT, so values
+-- are tag tables: Normal = {1}, Err code = {2, code} (fields may be thunks).
+local function exit_(v)
     return function()
-        if code == 1 then os.exit(0) else os.exit(code[2]) end
+        v = __force(v)
+        if v[1] == 1 then os.exit(0) else os.exit(__force(v[2])) end
     end
 end
 

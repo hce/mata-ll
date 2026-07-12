@@ -140,6 +140,47 @@ main = putStrLn (show (f 10 + g False))
     );
 }
 
+/// The Prelude builtin `exit :: ExitValue -> IO ()` must resolve to the
+/// runtime helper `exit_`, which unwraps the ExitValue ADT (Normal = {1},
+/// Err code = {2, code}) and calls os.exit. Before the fix the emitted Lua
+/// referenced an undefined global `exit` and crashed at runtime.
+///
+/// This test only inspects the emitted Lua — never execute `exit`
+/// in-process: os.exit would terminate the whole cargo test harness.
+/// Actual exit-code behaviour is covered by the subprocess tests in
+/// mll/tests/exit_builtin.rs.
+#[test]
+fn exit_builtin_resolves_to_runtime_helper() {
+    for src in [
+        "main :: IO ()\nmain = exit Normal\n",
+        "main :: IO ()\nmain = exit (Err 3)\n",
+    ] {
+        let lua = mllc::compile(src, Path::new("tests/cases"), &[])
+            .expect("compile should succeed")
+            .lua_code;
+        assert!(
+            !lua.contains("__force(exit)"),
+            "surface `exit` was left as an undefined Lua global:\n{}",
+            lua
+        );
+        assert!(
+            lua.contains("exit_("),
+            "call site should resolve to the exit_ runtime helper:\n{}",
+            lua
+        );
+        assert!(
+            lua.contains("local function exit_"),
+            "exit_ runtime helper chunk missing from emitted prelude:\n{}",
+            lua
+        );
+        assert!(
+            lua.contains("os.exit"),
+            "exit_ helper should call os.exit:\n{}",
+            lua
+        );
+    }
+}
+
 fn run_mll_file_with_lib(path: &Path) {
     let path = path.to_path_buf();
     let lib_path = Path::new("../lib").to_path_buf();
