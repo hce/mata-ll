@@ -351,8 +351,18 @@ impl CodeGen {
             need_comma = true;
             if let TExprKind::FfiMaybeArg { value } = &a.kind {
                 self.emit("__mll_opt(");
-                self.gen_expr(value);
+                self.gen_ffi_boundary_value(value);
                 self.emit(")");
+            } else if let Some(desc) = Self::tuple_force_desc(&a.ty) {
+                // A tuple is the one structure the Lua host reads RAW (it
+                // shares Lua's positional-array layout), and its fields are
+                // now built lazily — so the boundary must force them into
+                // real values before the host can see them. An FFI call is
+                // strict in its arguments, so this forces nothing the call
+                // does not already demand.
+                self.emit("__mll_tup_force(");
+                self.gen_expr(a);
+                self.emit(&format!(", {})", desc));
             } else {
                 self.emit("__force(");
                 self.gen_expr(a);
@@ -365,11 +375,52 @@ impl CodeGen {
             for (i, a) in args[tail_start..].iter().enumerate() {
                 if i > 0 { self.emit(", "); }
                 match &a.kind {
-                    TExprKind::FfiMaybeArg { value } => self.gen_expr(value),
+                    TExprKind::FfiMaybeArg { value } => self.gen_ffi_boundary_value(value),
                     _ => unreachable!("non-optional argument in trailing optional run"),
                 }
             }
             self.emit(")");
+        }
+    }
+
+    /// Emit an optional FFI argument's underlying `Maybe` value, forcing any
+    /// tuple structure inside it at the boundary (the `Just` payload is what
+    /// the host receives after `__mll_opt`/`__mll_opt_tail` unwrap it).
+    fn gen_ffi_boundary_value(&mut self, value: &TExpr) {
+        if let Some(desc) = Self::tuple_force_desc(&value.ty) {
+            self.emit("__mll_tup_force(");
+            self.gen_expr(value);
+            self.emit(&format!(", {})", desc));
+        } else {
+            self.gen_expr(value);
+        }
+    }
+
+    /// Build a Lua descriptor locating the tuple structure inside an FFI
+    /// argument's type, for `__mll_tup_force` (the argument-direction dual of
+    /// `ffi_decode_desc`). `None` when the type contains no tuple the host
+    /// could read raw — the plain shallow `__force` then suffices, exactly as
+    /// before. `{e1, .., en, n=N}` forces the N fields of a tuple (each `ei`
+    /// a nested descriptor or `false`); `{maybe=d}` descends through a `Just`
+    /// wrapper. Lists are deliberately not descended into: a cons list is
+    /// never host-readable raw (lazy spine, metatable cells), so its elements
+    /// stay untouched, same as before.
+    fn tuple_force_desc(ty: &Ty) -> Option<String> {
+        match ty {
+            Ty::Tuple(elems) => {
+                let parts: Vec<String> = elems.iter()
+                    .map(|e| Self::tuple_force_desc(e).unwrap_or_else(|| "false".into()))
+                    .collect();
+                Some(format!("{{{}, n={}}}", parts.join(", "), elems.len()))
+            }
+            _ => {
+                let (head, args) = decompose_app(ty);
+                if head == Some("Maybe") && args.len() == 1 {
+                    Self::tuple_force_desc(args[0]).map(|d| format!("{{maybe={}}}", d))
+                } else {
+                    None
+                }
+            }
         }
     }
 
@@ -2189,12 +2240,66 @@ impl CodeGen {
                 self.emit("{");
                 for (i, elem) in elems.iter().enumerate() {
                     if i > 0 { self.emit(", "); }
-                    self.gen_expr_subst(elem, subst);
+                    // Tuple fields are lazy positions in the inlined path too:
+                    // inlining `f x = (x, 1)` at `snd (f (error "boom"))` must
+                    // not run the error. Same weighing as the gen_expr arm.
+                    self.gen_arg_subst(elem, subst);
                 }
                 self.emit("}");
             }
             _ => self.gen_expr(expr),
         }
+    }
+
+    /// `gen_arg` for a lazy position inside an inlined (substituted) body —
+    /// today that is exactly a tuple field of an inlined function. The same
+    /// eager-vs-lazy weighing as gen_arg, with substituted parameters weighed
+    /// as the call-site expressions they stand for.
+    fn gen_arg_subst(&mut self, expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) {
+        let stripped = {
+            let mut e = expr;
+            while let TExprKind::Paren(inner) = &e.kind { e = inner.as_ref(); }
+            e
+        };
+        // A bare substituted parameter IS the call-site argument: weigh that
+        // argument exactly as a non-inlined call would.
+        if let TExprKind::Var(name) = &stripped.kind
+            && let Some(rep) = subst.get(name.as_str()) {
+                self.gen_arg(rep, false);
+                return;
+            }
+        // No substituted parameter occurs: ordinary weighing.
+        if !subst.keys().any(|k| expr_references_name(expr, k)) {
+            self.gen_arg(expr, false);
+            return;
+        }
+        // A tuple is WHNF-total — emit it directly, never as a whole-tuple
+        // thunk, and let its Tuple arm weigh each field (same rule as gen_arg).
+        if matches!(&stripped.kind, TExprKind::Tuple(_)) {
+            self.gen_expr_subst(stripped, subst);
+            return;
+        }
+        // Mixed structure over substituted parameters: eager only when the
+        // structure is total AND every substituted parameter it leans on is
+        // itself provably total; otherwise the laziness weight is maximal
+        // (the expression may be ⊥) and it is suspended.
+        if self.is_cheap_to_force_subst(expr, subst) {
+            self.gen_expr_subst(expr, subst);
+        } else {
+            self.emit("__thunk(function() return ");
+            self.gen_expr_subst(expr, subst);
+            self.emit(" end)");
+        }
+    }
+
+    /// `is_cheap_to_force` under an inlining substitution: a substituted
+    /// variable is exactly as safe to force as the call-site expression it
+    /// stands for.
+    fn is_cheap_to_force_subst(&self, expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) -> bool {
+        Self::is_cheap_with(expr, &|name| match subst.get(name) {
+            Some(rep) => self.is_cheap_to_force(rep),
+            None => name == "otherwise" || self.concrete_vars.contains(&sanitize_name(name)),
+        }) && !Self::contains_trapping_op(expr)
     }
 
     /// Check if an expression contains a function call where the function
@@ -2913,6 +3018,20 @@ impl CodeGen {
             while let TExprKind::Paren(inner) = &e.kind { e = inner.as_ref(); }
             e
         };
+        // A tuple literal is a constructor: building it to WHNF allocates a
+        // table and forces nothing, so the construction itself can never be ⊥.
+        // Never wrap the whole tuple in a thunk — emit it directly and let the
+        // Tuple arm weigh each field. A possibly-⊥ field is still suspended
+        // (per-field gen_arg), but the always-total construction costs no extra
+        // thunk, and a consumer that forces the tuple to WHNF gets the table
+        // with nothing to unwrap. This keeps tuple-threaded state (the tracker's
+        // hot loop) from paying a nested whole-tuple thunk allocation per frame.
+        // Sound for demand analysis: demanded_vars(Tuple) is empty, so no
+        // let/where binding is ever judged demanded by appearing in a tuple.
+        if matches!(&stripped.kind, TExprKind::Tuple(_)) {
+            self.gen_expr(stripped);
+            return;
+        }
         if matches!(&stripped.kind, TExprKind::Var(_) | TExprKind::Con(_)) {
             self.gen_lazy_ref(stripped);
         } else {
@@ -3792,7 +3911,16 @@ impl CodeGen {
                 self.emit("{");
                 for (i, e) in elems.iter().enumerate() {
                     if i > 0 { self.emit(", "); }
-                    self.gen_expr(e);
+                    // A tuple field is a lazy position: `(,)` forces neither
+                    // side, exactly like a cons head. Weigh it like any
+                    // argument so a possibly-⊥ field is suspended rather than
+                    // run when the tuple is built (fst (1, error) == 1).
+                    // Value-consumers force the field on read: pattern
+                    // destructuring via field_path, the __mll_tuple_eq /
+                    // __mll_tup_get specializations hand the raw field to an
+                    // eq/show function that forces, and the FFI boundary
+                    // deep-forces through __mll_tup_force.
+                    self.gen_arg(e, false);
                 }
                 self.emit("}");
             }
@@ -3885,7 +4013,11 @@ impl CodeGen {
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
             && op == ":" {
                 self.emit("__mll_lazy_cons(");
-                self.gen_expr(lhs);
+                // A cons head is a lazy position here too — weigh it like any
+                // argument so a possibly-⊥ element in a self-referential list
+                // (`xs = error "boom" : xs`) is suspended, not run at
+                // construction. Same rule as the other three `:` sites.
+                self.gen_arg(lhs, false);
                 self.emit(", function() return ");
                 self.gen_expr_lazy(rhs, self_name);
                 self.emit(" end)");
@@ -3897,7 +4029,7 @@ impl CodeGen {
                 && let TExprKind::Con(name) = &con.kind
                     && name == ":" {
                         self.emit("__mll_lazy_cons(");
-                        self.gen_expr(head);
+                        self.gen_arg(head, false);
                         self.emit(", function() return ");
                         self.gen_expr_lazy(tail, self_name);
                         self.emit(" end)");
@@ -4571,6 +4703,38 @@ local function __mll_opt_tail(...)
     end
     while n > 0 and t[n] == nil do n = n - 1 end
     return __unpack(t, 1, n)
+end
+
+-- Type-directed forcing of tuple structure crossing the FFI boundary in the
+-- ARGUMENT direction. A tuple is the one structure a Lua host reads RAW (it
+-- shares Lua's positional-array layout — see SPEC), and tuple fields are lazy
+-- positions since the eagerness contract covers them, so a lazily-built field
+-- must be forced into a real value before the host can see it. `d` says where
+-- the tuples are (built from the declared FFI type by tuple_force_desc):
+-- {e1, .., en, n=N} forces the N fields of a tuple (ei a nested descriptor,
+-- or false to just force); {maybe=d} descends through a `Just` wrapper.
+-- Forcing writes the value back into the field — the same memoization __force
+-- performs inside a thunk — so a shared tuple is forced at most once. A cons
+-- list field is left alone: it is never host-readable raw (lazy spine,
+-- metatable cells), exactly as before.
+local function __mll_tup_force(t, d)
+    t = __force(t)
+    if t == nil then return nil end
+    if d.maybe then
+        if getmetatable(t) == __just_mt then
+            t[1] = __mll_tup_force(t[1], d.maybe)
+        end
+        return t
+    end
+    for i = 1, d.n do
+        local sub = d[i]
+        if sub then
+            t[i] = __mll_tup_force(t[i], sub)
+        else
+            t[i] = __force(t[i])
+        end
+    end
+    return t
 end
 
 -- Deep-force an MLL value for export to Lua.

@@ -269,6 +269,7 @@ mll_test!(poly_recursion, "poly_recursion.mll");
 mll_test!(non_strict, "non_strict.mll");
 mll_test!(compose_non_strict, "compose_non_strict.mll");
 mll_test!(list_element_laziness, "list_element_laziness.mll");
+mll_test!(tuple_field_laziness, "tuple_field_laziness.mll");
 mll_test!(case_in_do_let, "case_in_do_let.mll");
 mll_test!(functor_applicative, "functor_applicative.mll");
 mll_test!(fmap_pure_bind_chain, "fmap_pure_bind_chain.mll");

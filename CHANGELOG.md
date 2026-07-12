@@ -19,14 +19,25 @@ below applies to both.
   could eagerly force a possibly-bottom value — a bare variable, arithmetic over
   lazy variables, a saturated inlinable call, or a trapping `div`/`mod`/`%` —
   even in a position whose value is never used.
-- Non-strict semantics now hold through function composition and list elements.
-  `(g . h) (error "boom")` no longer forces the error when `g` is non-strict,
-  and a bottom stored in a list element is not forced until it is consumed:
-  `length [error "boom"]` is `1` and `map g [error "boom"]` does not run the
-  element. A cons head is suspended at construction and forced only at the point
-  of consumption (arithmetic, a nested pattern, `show`, equality, …); infinite
-  lists, lazy tails, and self-referential lists are unaffected. (Tuple fields
-  remain eagerly evaluated — see CAVEATS.)
+- Non-strict semantics now hold through function composition, list elements,
+  and tuple fields. `(g . h) (error "boom")` no longer forces the error when `g`
+  is non-strict, and a bottom stored in a list element or a tuple field is not
+  forced until it is consumed: `length [error "boom"]` is `1`,
+  `map g [error "boom"]` does not run the element, and `fst (1, error "boom")`
+  is `1` / `snd (error "boom", 2)` is `2`. A cons head and a tuple field are
+  suspended at construction and forced only at the point of consumption
+  (arithmetic, `fst`/`snd`, a nested pattern, `show`, equality, the FFI
+  boundary, …); infinite lists, lazy tails, and self-referential lists are
+  unaffected. The eagerness contract now covers tuple fields and every cons-head
+  construction site (list literals, both `:` arms, and self-referential lists).
+  A tuple (like any constructor) is still built to WHNF eagerly — only a
+  possibly-⊥ *field* is suspended — so cheap/total fields stay eager and no
+  thunk wraps the always-total construction. This does carry a measured cost on
+  the tuple-threaded ST hot loop of the tracker benchmark (~211s → ~331s wall on
+  the dev machine, byte-identical output), dominated by suspending a state-tuple
+  field whose variable is already forced on the taken path but not provably so
+  at construction; recovering it needs per-field (product) demand analysis. This
+  is the same correctness-over-throughput tradeoff as the ST-closure change.
 - Deep tail recursion no longer overflows the stack. Recursive calls in tail
   position — direct or through `if`/`case`/`let`, and mutual recursion — now
   compile to Lua's native proper tail calls and run in constant stack. (A

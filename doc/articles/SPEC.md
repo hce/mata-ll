@@ -1128,9 +1128,15 @@ force the element. A cons head is suspended at construction and forced
 only at the point of consumption (see the head-consumption contract in
 `codegen.rs`: a value-consumer forces the head, a laziness-preserving one
 — storing it in a new cons, or passing it to a function that decides —
-does not). Data-constructor fields are likewise suspended
-(`g (Box (error "boom"))` does not force the error). Tuple fields remain
-a known exception — they are still evaluated eagerly at construction.
+does not). This holds at every construction site — list literals, both
+`:` emission arms, and self-referential lists (`xs = error "boom" : xs`).
+Data-constructor fields are likewise suspended
+(`g (Box (error "boom"))` does not force the error), and so are *tuple
+fields*: `fst (1, error "boom")` returns `1` and `snd (error "boom", 2)`
+returns `2`. A tuple field is suspended at construction (weighed exactly
+like a cons head) and forced only at a value-consumer — `fst`/`snd`, a
+pattern that inspects it, `show`, equality, or the FFI boundary (where a
+tuple is deep-forced into the positional array a Lua host reads raw).
 
 The decision is made by *weighing* the benefit of eagerness (a saved
 thunk allocation) against the risk to non-strict semantics. Bottom

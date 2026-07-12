@@ -87,20 +87,13 @@ over such). See "The eagerness contract" in SPEC.md for the normative rule —
 bottom is never evaluated eagerly. This keeps the hot-loop performance that the
 earlier, unsound "evaluate any cheap-looking argument" heuristic bought, without
 its `⊥`-leaking behavior. It holds through function composition
-(`(g . h) (error "boom")` does not force the error when `g` is non-strict) and
+(`(g . h) (error "boom")` does not force the error when `g` is non-strict),
 through list elements (`length [error "boom"]` is `1`; `map g [error "boom"]`
-does not force the element — a cons head is suspended until it is consumed).
-
-## Tuple fields are evaluated eagerly
-
-Unlike function arguments, list elements, and other constructor fields — all of
-which are suspended until demanded — a tuple's fields are evaluated eagerly when
-the tuple is built. So a discarded bottom in a tuple still raises:
-
-    fst (1, error "boom")   -- raises, where a lazy language returns 1
-
-Keep a possibly-bottom value out of a tuple until it is needed (e.g. behind a
-`\() -> …` thunk) if you rely on being able to discard it.
+does not force the element — a cons head is suspended until it is consumed, at
+every construction site including self-referential lists), and through *tuple
+fields* (`fst (1, error "boom")` is `1`; `snd (error "boom", 2)` is `2` — a
+tuple field is suspended until a value-consumer reads it, just like a cons
+head). Data-constructor fields other than the cons head were always lazy.
 
 ## `let` binds values, not functions
 
