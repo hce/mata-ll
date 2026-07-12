@@ -51,15 +51,113 @@ impl Checker {
                     // Eq isn't a registered instance, so check it the same way.
                     Ty::Con(base) if base == "Maybe" =>
                         structural_container_class(class) && args.iter().all(|a| self.has_instance(class, a)),
-                    // Other type constructors need a registered (derived) instance.
-                    Ty::Con(_) =>
-                        InstHead::of(head)
-                            .is_some_and(|h| self.instances.contains_key(&(class.to_string(), h)))
-                            && args.iter().all(|a| self.has_instance(class, a)),
+                    // Other type constructors need a registered instance. What
+                    // the instance then demands of the type ARGUMENTS depends
+                    // on its declared context: a user-written instance carries
+                    // its exact context (`instance Show a => Show (Tree a)` at
+                    // `Tree X` demands precisely `Show X`, and a context-free
+                    // one demands nothing), while builtin/derived instances
+                    // (context: None) keep the structural rule — every
+                    // argument needs the class itself.
+                    Ty::Con(_) => {
+                        // A Con head always has an InstHead; mirror the old
+                        // `is_some_and` (reject) if that ever changes.
+                        let Some(h) = InstHead::of(head) else { return false };
+                        let Some(inst) = self.instances.get(&(class.to_string(), h)) else {
+                            return false;
+                        };
+                        match &inst.context {
+                            Some(ctx) => match Self::match_instance_args(&inst.target_type, ty) {
+                                Some(binds) => ctx.iter().all(|c| {
+                                    binds.get(&c.type_var)
+                                        .map(|t| self.has_instance(&c.class_name, t))
+                                        // A context variable the use type does
+                                        // not determine — defer, don't reject.
+                                        .unwrap_or(true)
+                                }),
+                                // Argument spines don't line up — defer to the
+                                // monomorphizer rather than over-reject.
+                                None => true,
+                            },
+                            None => args.iter().all(|a| self.has_instance(class, a)),
+                        }
+                    }
                     _ => true, // unknown head — defer rather than over-reject
                 }
             }
         }
+    }
+
+    /// When `class ty` has no instance BECAUSE a registered instance's
+    /// declared context is unsatisfied, explain which context constraint
+    /// failed — recursing when the failure is itself context-shaped, so
+    /// `Show (Tree (Tree Blob))` bottoms out at `Blob`. Returns None when the
+    /// failure is not context-shaped (no registered head instance, a function
+    /// type, …); the plain "No instance" message already covers those.
+    pub(super) fn context_failure_note(&self, class: &str, ty: &Ty) -> Option<String> {
+        if !matches!(ty, Ty::App(_, _)) {
+            return None;
+        }
+        let inst = InstHead::of(ty)
+            .and_then(|h| self.instances.get(&(class.to_string(), h)))?;
+        let ctx = inst.context.as_ref()?;
+        let binds = Self::match_instance_args(&inst.target_type, ty)?;
+        // A compound type in constraint position reads wrong without parens
+        // ("Show Tree a" vs "Show (Tree a)").
+        let paren = |t: &Ty| match t {
+            Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
+                format!("({})", t),
+            _ => format!("{}", t),
+        };
+        for c in ctx {
+            let Some(bound) = binds.get(&c.type_var) else { continue };
+            if self.has_instance(&c.class_name, bound) {
+                continue;
+            }
+            let ctx_str = ctx.iter()
+                .map(|c| format!("{} {}", c.class_name, c.type_var))
+                .collect::<Vec<_>>().join(", ");
+            let here = format!(
+                "there is an instance '({}) => {} {}', but using it at '{}' needs '{} {}'",
+                ctx_str, inst.class_name, paren(&inst.target_type), ty,
+                c.class_name, paren(bound));
+            return Some(match self.context_failure_note(&c.class_name, bound) {
+                Some(deeper) => format!("{}; {}", here, deeper),
+                None => format!("{}, and there is no instance '{} {}'",
+                    here, c.class_name, paren(bound)),
+            });
+        }
+        None
+    }
+
+    /// Match a use type against a registered instance's target type,
+    /// positionally: `Tree Integer` against `Tree a` yields {a: Integer}.
+    /// Only plain-variable instance arguments bind anything. Returns None when
+    /// the two argument spines have different lengths — the caller then defers
+    /// rather than guessing.
+    fn match_instance_args(inst_target: &Ty, use_ty: &Ty) -> Option<HashMap<String, Ty>> {
+        fn peel(ty: &Ty) -> Vec<&Ty> {
+            let mut head = ty;
+            let mut args = Vec::new();
+            while let Ty::App(f, a) = head {
+                args.push(a.as_ref());
+                head = f.as_ref();
+            }
+            args.reverse();
+            args
+        }
+        let inst_args = peel(inst_target);
+        let use_args = peel(use_ty);
+        if inst_args.len() != use_args.len() {
+            return None;
+        }
+        let mut binds = HashMap::new();
+        for (ia, ua) in inst_args.iter().zip(use_args.iter()) {
+            if let Ty::Var(v) = ia {
+                binds.insert(v.name.clone(), (*ua).clone());
+            }
+        }
+        Some(binds)
     }
 
     /// Collect the type-variable leaves a `class ty` constraint ultimately needs
@@ -81,9 +179,29 @@ impl Checker {
                 match head {
                     Ty::Con(base) if base == "Maybe" && structural_container_class(class) =>
                         for a in args { self.collect_required_var_constraints(class, a, out); },
-                    Ty::Con(_) if InstHead::of(head).is_some_and(|h|
-                        self.instances.contains_key(&(class.to_string(), h))) =>
-                        for a in args { self.collect_required_var_constraints(class, a, out); },
+                    Ty::Con(_) => {
+                        let Some(inst) = InstHead::of(head)
+                            .and_then(|h| self.instances.get(&(class.to_string(), h)))
+                        else { return };
+                        // Mirror has_instance: a declared context is exact
+                        // (each context constraint recurses at the type its
+                        // variable is bound to), builtin/derived instances
+                        // stay structural (the class itself on every argument).
+                        match inst.context.clone() {
+                            Some(ctx) => {
+                                let Some(binds) = Self::match_instance_args(&inst.target_type, ty)
+                                else { return };
+                                for c in &ctx {
+                                    if let Some(bound) = binds.get(&c.type_var) {
+                                        self.collect_required_var_constraints(
+                                            &c.class_name, bound, out);
+                                    }
+                                }
+                            }
+                            None =>
+                                for a in args { self.collect_required_var_constraints(class, a, out); },
+                        }
+                    }
                     _ => {}
                 }
             }
@@ -177,10 +295,118 @@ impl Checker {
         }
     }
 
+    /// Convert an instance's declared context to TyConstraints over the same
+    /// variable names as the (unfreshened) target type. Only the Haskell-2010
+    /// form `C tyvar` is accepted, and the variable must be bound by the
+    /// instance head; anything else yields an error (when `report` is set —
+    /// the silent pre-registration pass leaves reporting to `check_instance`)
+    /// and is dropped, so downstream passes only ever see well-formed context
+    /// entries.
+    fn convert_instance_context(
+        &mut self,
+        class_name: &str,
+        target_ty: &Ty,
+        context: &[Constraint],
+        report: bool,
+    ) -> Vec<TyConstraint> {
+        let ty_str = format!("{}", target_ty);
+        let head_vars: HashSet<String> =
+            target_ty.free_vars().into_iter().map(|v| v.name).collect();
+        let mut out = Vec::new();
+        for c in context {
+            let ctx_str = format!("instance {} {}", class_name, ty_str);
+            if !self.classes.contains_key(&c.class_name) {
+                if report {
+                    self.push_error_ctx(
+                        DiagnosticKind::Other(format!(
+                            "Unknown typeclass '{}' in instance context", c.class_name)),
+                        ctx_str,
+                    );
+                }
+                continue;
+            }
+            let var = match &c.type_arg {
+                Type::Var(v) => v.clone(),
+                other => {
+                    if report {
+                        let shown = match self.ast_type_to_ty(other) {
+                            t @ (Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
+                                format!("({})", t),
+                            t => format!("{}", t),
+                        };
+                        self.push_error_ctx(
+                            DiagnosticKind::Other(format!(
+                                "Constraint '{} {}' in the instance context must apply the class to a plain type variable: the context names which of the instance head's type variables need their own instance, so a compound type has nothing to attach to here\nnote: GHC accepts compound context types with FlexibleContexts; mata-ll supports only the Haskell 2010 form `C a`.",
+                                c.class_name, shown)),
+                            ctx_str,
+                        );
+                    }
+                    continue;
+                }
+            };
+            if !head_vars.contains(&var) {
+                if report {
+                    self.push_error_ctx(
+                        DiagnosticKind::Other(format!(
+                            "Constraint '{} {}' in the instance context mentions type variable '{}', which does not appear in the instance head '{}': a use of the instance could never determine what type '{}' is, so the constraint could never be satisfied",
+                            c.class_name, var, var, ty_str, var)),
+                        ctx_str,
+                    );
+                }
+                continue;
+            }
+            out.push(TyConstraint { class_name: c.class_name.clone(), type_var: var });
+        }
+        out
+    }
+
+    /// Register an instance's identity — its (class, head) key, its context
+    /// and the mangled names of the methods it will provide — BEFORE any
+    /// instance method body is type-checked. Instances are globally visible in
+    /// Haskell, so a method body may use its own instance (a recursive `show`
+    /// on `Tree a`) or one declared later in the module; checking bodies
+    /// against an incomplete instance table would reject those. Mangled method
+    /// names are deterministic (`method_typestr`), so the full mapping is
+    /// known before the bodies are checked; `check_instance` later re-registers
+    /// the identical info. Silent by design: everything invalid (unknown
+    /// class, headless target type, ill-formed context) is skipped here and
+    /// reported by `check_instance`.
+    pub(super) fn preregister_instance(
+        &mut self,
+        class_name: &str,
+        target_type: &Type,
+        context: &[Constraint],
+        methods: &[InstanceMethod],
+    ) {
+        let target_ty = self.ast_type_to_ty(target_type);
+        if InstHead::of(&target_ty).is_none() {
+            return;
+        }
+        let Some(class_info) = self.classes.get(class_name).cloned() else { return; };
+        let ty_str = format!("{}", target_ty);
+        let provided: HashSet<&str> = methods.iter().map(|m| m.name.as_str()).collect();
+        let mut method_fns = HashMap::new();
+        for (method_name, _) in &class_info.methods {
+            if provided.contains(method_name.as_str())
+                || class_info.default_methods.contains_key(method_name)
+            {
+                method_fns.insert(method_name.clone(), format!("{}_{}", method_name, ty_str));
+            }
+        }
+        let ctx = self.convert_instance_context(class_name, &target_ty, context, false);
+        self.register_instance(InstanceInfo {
+            class_name: class_name.to_string(),
+            target_type: target_ty,
+            method_fns,
+            context: Some(ctx),
+        });
+    }
+
     pub(super) fn check_instance(
         &mut self,
         class_name: &str,
         target_type: &Type,
+        context: &[Constraint],
         methods: &[InstanceMethod],
     ) -> Vec<TFunction> {
         let target_ty = self.ast_type_to_ty(target_type);
@@ -246,10 +472,16 @@ impl Checker {
             }
         }
 
+        // Validate and convert the declared context (reporting any ill-formed
+        // entry); the well-formed part is registered on the instance so a use
+        // site knows what to demand of the concrete type arguments.
+        let ctx = self.convert_instance_context(class_name, &target_ty, context, true);
+
         let mut instance_info = InstanceInfo {
             class_name: class_name.to_string(),
             target_type: target_ty.clone(),
             method_fns: HashMap::new(),
+            context: Some(ctx.clone()),
         };
 
         let mut result_fns = Vec::new();
@@ -264,14 +496,25 @@ impl Checker {
         // target type's variables to fresh ones first; only this freshened copy
         // is used to specialize method types — instance registration and error
         // messages keep the user's spelling.
-        let fresh_target_ty = {
-            let mut renames: HashMap<TyVar, Ty> = HashMap::new();
-            for v in target_ty.free_vars() {
-                let fresh = self.fresh_var("_inst");
-                renames.insert(v, fresh);
-            }
-            target_ty.apply_subst(&Subst::from_map(renames))
-        };
+        let mut renames: HashMap<TyVar, Ty> = HashMap::new();
+        for v in target_ty.free_vars() {
+            let fresh = self.fresh_var("_inst");
+            renames.insert(v, fresh);
+        }
+        let fresh_target_ty = target_ty.apply_subst(&Subst::from_map(renames.clone()));
+
+        // The declared context, re-expressed over the freshened instance
+        // variables the specialized method types use. Registered as each
+        // method's declared function context (fn_constraints) — exactly the
+        // mechanism a constrained top-level function (`f :: Show a => …`)
+        // uses — so a method body may use the context's class methods on the
+        // instance's type variables, and check_function discharges those
+        // wanteds against the declared context instead of rejecting them.
+        let ctx_fresh: Vec<TyConstraint> = ctx.iter().filter_map(|c| {
+            let (_, fresh) = renames.iter().find(|(v, _)| v.name == c.type_var)?;
+            let Ty::Var(fv) = fresh else { return None };
+            Some(TyConstraint { class_name: c.class_name.clone(), type_var: fv.name.clone() })
+        }).collect();
 
         for method_def in methods {
             // Find the class method's type
@@ -300,7 +543,11 @@ impl Checker {
             let mangled_name = format!("{}_{}", method_def.name, ty_str);
             instance_info.method_fns.insert(method_def.name.clone(), mangled_name.clone());
 
-            // Type-check the instance method against the specialized type
+            // Type-check the instance method against the specialized type,
+            // with the instance's declared context in scope for its body.
+            if !ctx_fresh.is_empty() {
+                self.fn_constraints.insert(mangled_name.clone(), ctx_fresh.clone());
+            }
             if let Some(tfun) = self.check_function(&mangled_name, &method_def.clauses, &method_ty) {
                 result_fns.push(tfun);
             }
@@ -319,6 +566,11 @@ impl Checker {
                 let mangled_name = format!("{}_{}", method_name, ty_str);
                 instance_info.method_fns.insert(method_name.clone(), mangled_name.clone());
 
+                // A default body is checked at this instance's type, so it
+                // gets the same declared context as an explicit method body.
+                if !ctx_fresh.is_empty() {
+                    self.fn_constraints.insert(mangled_name.clone(), ctx_fresh.clone());
+                }
                 if let Some(tfun) = self.check_function(&mangled_name, default_clauses, &specialized_ty) {
                     result_fns.push(tfun);
                 }

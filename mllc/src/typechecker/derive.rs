@@ -229,6 +229,7 @@ impl Checker {
             class_name: "Show".to_string(),
             target_type: result_type.clone(),
             method_fns,
+            context: None,
         });
 
         vec![TFunction {
@@ -356,6 +357,7 @@ impl Checker {
             class_name: "Eq".to_string(),
             target_type: result_type.clone(),
             method_fns,
+            context: None,
         });
 
         vec![TFunction {
@@ -628,6 +630,7 @@ impl Checker {
             class_name: "Ord".to_string(),
             target_type: result_type,
             method_fns,
+            context: None,
         });
 
         functions
@@ -978,6 +981,7 @@ impl Checker {
             class_name: "Enum".to_string(),
             target_type: result_type,
             method_fns,
+            context: None,
         });
 
         functions
@@ -1044,6 +1048,7 @@ impl Checker {
             class_name: "Bounded".to_string(),
             target_type: result_type,
             method_fns,
+            context: None,
         });
 
         functions
@@ -1259,6 +1264,7 @@ impl Checker {
             class_name: "Functor".to_string(),
             target_type: Ty::Con(type_name.to_string()),
             method_fns,
+            context: None,
         });
 
         vec![TFunction {
@@ -1672,7 +1678,7 @@ impl Checker {
         if !type_vars.is_empty() {
             reject(self,
                 format!("'{}' has type parameters", type_name),
-                "a derived decoder must pick one concrete decoder per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `FromJSON a` constraint on the instance; mata-ll instances cannot carry constraints, so derive FromJSON for concrete types only (wrap each instantiation you need in its own data type).");
+                "a derived decoder must pick one concrete decoder per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `FromJSON a` constraint on the instance; mata-ll does not derive constrained codecs, so derive FromJSON for concrete types only (wrap each instantiation you need in its own data type).");
             return vec![];
         }
 
@@ -1882,6 +1888,7 @@ impl Checker {
             class_name: "FromJSON".to_string(),
             target_type: result_ty.clone(),
             method_fns,
+            context: None,
         });
 
         vec![TFunction {
@@ -2131,7 +2138,7 @@ impl Checker {
         if !type_vars.is_empty() {
             reject(self,
                 format!("'{}' has type parameters", type_name),
-                "a derived encoder must pick one concrete encoder per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `ToJSON a` constraint on the instance; mata-ll instances cannot carry constraints, so derive ToJSON for concrete types only (wrap each instantiation you need in its own data type).");
+                "a derived encoder must pick one concrete encoder per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `ToJSON a` constraint on the instance; mata-ll does not derive constrained codecs, so derive ToJSON for concrete types only (wrap each instantiation you need in its own data type).");
             return vec![];
         }
 
@@ -2201,6 +2208,7 @@ impl Checker {
             class_name: "ToJSON".to_string(),
             target_type: result_ty.clone(),
             method_fns,
+            context: None,
         });
 
         vec![TFunction {

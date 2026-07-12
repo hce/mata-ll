@@ -1090,7 +1090,7 @@ compile time, which places requirements on the type:
         combinators the generated code calls live there.
   \item The type must have no type parameters.  (GHC's \texttt{aeson}
         handles \texttt{Box a} with a constraint on the instance;
-        MATA-LL instances cannot carry constraints, so derive for
+        MATA-LL does not derive constrained codecs, so derive for
         concrete types and wrap each instantiation you need in its own
         data type.)
   \item No GADT or existential constructors.

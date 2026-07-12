@@ -88,6 +88,14 @@ pub struct InstanceInfo {
     pub target_type: Ty,
     /// Method name -> mangled function name
     pub method_fns: HashMap<String, String>,
+    /// The instance's declared context, over the same type-variable names as
+    /// `target_type`: `instance (Show a, Eq a) => C (T a)` stores
+    /// [Show a, Eq a]. `Some(ctx)` (user-written instances) is exact — a use
+    /// of the instance at a concrete type must satisfy exactly these
+    /// constraints, an empty context requiring nothing. `None` (builtin and
+    /// derived instances, which have no declared context) falls back to the
+    /// structural rule: every type argument needs the class itself.
+    pub context: Option<Vec<TyConstraint>>,
 }
 
 /// The type checker — validates types and produces typed IR
@@ -874,6 +882,7 @@ impl Checker {
                 class_name: "Functor".to_string(),
                 target_type: Ty::Con(tc_name.to_string()),
                 method_fns,
+                context: None,
             });
         }
         {
@@ -884,6 +893,7 @@ impl Checker {
                 class_name: "Functor".to_string(),
                 target_type: Ty::Con("[]".to_string()),
                 method_fns,
+                context: None,
             });
         }
         for tc_name in &["Maybe", "Either"] {
@@ -894,6 +904,7 @@ impl Checker {
                 class_name: "Functor".to_string(),
                 target_type: Ty::Con(tc_name.to_string()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -935,6 +946,7 @@ impl Checker {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con(tc_name.to_string()),
                 method_fns,
+                context: None,
             });
         }
         {
@@ -945,6 +957,7 @@ impl Checker {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con("[]".to_string()),
                 method_fns,
+                context: None,
             });
         }
         {
@@ -955,6 +968,7 @@ impl Checker {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con("Maybe".to_string()),
                 method_fns,
+                context: None,
             });
         }
         {
@@ -965,6 +979,7 @@ impl Checker {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con("Either".to_string()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -1003,6 +1018,7 @@ impl Checker {
                 class_name: "Monad".to_string(),
                 target_type: Ty::Con(monad_name.to_string()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -1016,6 +1032,7 @@ impl Checker {
                 class_name: "Monad".to_string(),
                 target_type: Ty::Con("[]".to_string()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -1029,6 +1046,7 @@ impl Checker {
                 class_name: "Monad".to_string(),
                 target_type: Ty::Con("Maybe".to_string()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -1091,6 +1109,7 @@ impl Checker {
                 class_name: "Enum".to_string(),
                 target_type: Ty::Con("Integer".to_string()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -1152,6 +1171,7 @@ impl Checker {
                 class_name: "Read".to_string(),
                 target_type: Ty::Con(type_name.to_string()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -1184,6 +1204,7 @@ impl Checker {
                 class_name: "Eq".to_string(),
                 target_type: target,
                 method_fns,
+                context: None,
             });
         }
 
@@ -1245,6 +1266,7 @@ impl Checker {
                 class_name: "Ord".to_string(),
                 target_type: target,
                 method_fns,
+                context: None,
             });
         }
 
@@ -1271,6 +1293,7 @@ impl Checker {
                 class_name: "Semigroup".to_string(),
                 target_type: Ty::Con("String".into()),
                 method_fns,
+                context: None,
             });
             // []: <> is list append (same as ++)
             let mut method_fns = HashMap::new();
@@ -1279,6 +1302,7 @@ impl Checker {
                 class_name: "Semigroup".to_string(),
                 target_type: Ty::list(ta.clone()),
                 method_fns,
+                context: None,
             });
         }
 
@@ -1292,6 +1316,7 @@ impl Checker {
                 class_name: "Show".to_string(),
                 target_type: target,
                 method_fns,
+                context: None,
             });
         }
 
@@ -1308,6 +1333,7 @@ impl Checker {
                 class_name: "Show".to_string(),
                 target_type: Ty::Unit,
                 method_fns,
+                context: None,
             });
             let mut method_fns = HashMap::new();
             method_fns.insert("==".to_string(), "eq_Unit".to_string());
@@ -1315,6 +1341,7 @@ impl Checker {
                 class_name: "Eq".to_string(),
                 target_type: Ty::Unit,
                 method_fns,
+                context: None,
             });
             let mut method_fns = HashMap::new();
             for op in &["<", ">", "<=", ">="] {
@@ -1325,6 +1352,7 @@ impl Checker {
                 class_name: "Ord".to_string(),
                 target_type: Ty::Unit,
                 method_fns,
+                context: None,
             });
         }
     }
@@ -1364,6 +1392,7 @@ impl Checker {
                 m.insert("show".to_string(), "show_HashMap".to_string());
                 m
             },
+            context: None,
         });
 
         // Int as alias for Integer (Lua has no fixed-width integers)
@@ -2030,13 +2059,22 @@ impl Checker {
 
         self.checking_local = false;
 
-        // Pass 4b: register and check explicit instance declarations
+        // Pass 4b: register and check explicit instance declarations.
+        // Registration runs over ALL instance decls before any method body is
+        // checked: instances are globally visible, so a body may use its own
+        // instance (`show l` on the sub-`Tree a` inside `instance Show a =>
+        // Show (Tree a)`) or one declared later in the module.
+        for decl in module.decls.iter() {
+            if let Decl::InstanceDecl { class_name, target_type, context, methods } = decl {
+                self.preregister_instance(class_name, target_type, context, methods);
+            }
+        }
         for (decl_idx, decl) in module.decls.iter().enumerate() {
             // Instance method bodies reference constructors; resolve them in
             // the scope of the declaring module (shadowing, see pass 1).
             self.checking_local = decl_idx >= self.local_decl_start;
-            if let Decl::InstanceDecl { class_name, target_type, methods } = decl {
-                let ifns = self.check_instance(class_name, target_type, methods);
+            if let Decl::InstanceDecl { class_name, target_type, context, methods } = decl {
+                let ifns = self.check_instance(class_name, target_type, context, methods);
                 instance_fns.extend(ifns);
             }
         }

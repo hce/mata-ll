@@ -666,37 +666,27 @@ impl Parser {
     fn parse_instance_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Instance)?;
 
-        // Parse optional constraints: Eq a => or (Eq a, Show a) =>
-        // Then: ClassName TargetType where
-        // Strategy: speculatively parse a type var after the first name; if no
-        // `=>` follows, backtrack (see save2 below) and treat it as the target.
-        let class_name;
-        let target_type;
-
-        // Speculatively try: constraint(s) => class type where
-        let first_name = self.expect_upper_ident()?;
-
-        // Check for constraint: UpperIdent lowerIdent =>
-        if let Token::Ident(_) = self.peek() {
-            let save2 = self.pos;
-            self.advance(); // consume the type var
-            if self.at(&Token::FatArrow) {
-                // Constraint found, skip it (constraint already validated by superclass)
+        // Parse an optional context, then `ClassName TargetType where`.
+        // Contexts come in the same three shapes as in type signatures —
+        // `Show a =>`, `(Show a) =>`, `(Show a, Eq b) =>` — so reuse the
+        // signature-context parser. Speculative: `instance Show (Tree a)` also
+        // starts like a constraint (`Show` + a type atom), so only commit to
+        // the context reading when a `=>` actually follows; otherwise backtrack
+        // and treat what was parsed as the class + target.
+        let save = self.pos;
+        let context = match self.try_parse_constraints() {
+            Ok(cs) if self.at(&Token::FatArrow) => {
                 self.advance(); // consume =>
-                class_name = self.expect_upper_ident()?;
-                target_type = self.parse_type_atom()?;
-            } else {
-                // No =>, backtrack to after first_name
-                self.pos = save2;
-                // first_name is the class, next is the target type
-                class_name = first_name;
-                target_type = self.parse_type_atom()?;
+                cs
             }
-        } else {
-            // target_type starts with uppercase — first_name is class, next is target
-            class_name = first_name;
-            target_type = self.parse_type_atom()?;
-        }
+            _ => {
+                self.pos = save;
+                Vec::new()
+            }
+        };
+
+        let class_name = self.expect_upper_ident()?;
+        let target_type = self.parse_type_atom()?;
 
         self.expect(&Token::Where)?;
         self.skip_newlines_and_indent();
@@ -736,7 +726,7 @@ impl Parser {
             }
         }
 
-        Ok(vec![Decl::InstanceDecl { class_name, target_type, methods }])
+        Ok(vec![Decl::InstanceDecl { class_name, target_type, context, methods }])
     }
 
     fn parse_export_decl(&mut self) -> PResult<Vec<Decl>> {

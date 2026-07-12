@@ -127,7 +127,13 @@ impl Checker {
                 .into_iter().map(|v| (v.name.clone(), v)).collect();
             self.fn_constraints.get(name).cloned().unwrap_or_default().iter()
                 .filter_map(|c| {
-                    let fresh_name = renames.get(&c.type_var)?;
+                    // A constraint var not in `renames` was already fresh in
+                    // the signature (id != MAX) — freshen_sig_type_mapped left
+                    // it alone. Instance-method signatures are like this:
+                    // check_instance alpha-renames the instance's variables
+                    // before specializing the method type, and declares the
+                    // instance context over those same pre-freshened names.
+                    let fresh_name = renames.get(&c.type_var).unwrap_or(&c.type_var);
                     let tv = name_to_var.get(fresh_name)?;
                     Some((c.class_name.clone(), tv.clone()))
                 })
@@ -217,11 +223,19 @@ impl Checker {
         for (class, cty) in std::mem::take(&mut self.wanted) {
             let rty = cty.apply_subst(&overall_subst);
             if !self.has_instance(&class, &rty) {
+                // When the failure is an instance whose declared context is
+                // unsatisfied, say WHICH context constraint failed and at
+                // what type — "No instance for 'Show (Tree Blob)'" alone
+                // hides that the real gap is 'Show Blob'.
+                let ctx_note = self.context_failure_note(&class, &rty);
                 self.push_error_span(
                     DiagnosticKind::NoInstance { class, ty: rty },
                     format!("definition of '{}'", name),
                     span,
                 );
+                if let (Some(note), Some(diag)) = (ctx_note, self.errors.last_mut()) {
+                    diag.notes.push(note);
+                }
             } else if is_structural_monad_class(&class) {
                 // The monad-hierarchy classes are resolved structurally for IO
                 // (mata-ll does not dictionary-pass them, and `has_instance`

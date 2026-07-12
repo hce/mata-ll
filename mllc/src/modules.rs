@@ -625,8 +625,8 @@ fn rewrite_qualified_uses_decl(decl: Decl, aliases: &HashSet<String>) -> Decl {
             }).collect(),
         },
         // Instance method bodies can also reference qualified imports.
-        Decl::InstanceDecl { class_name, target_type, methods } => Decl::InstanceDecl {
-            class_name, target_type,
+        Decl::InstanceDecl { class_name, target_type, context, methods } => Decl::InstanceDecl {
+            class_name, target_type, context,
             methods: methods.into_iter().map(|m| InstanceMethod {
                 name: m.name,
                 clauses: m.clauses.into_iter().map(|c| Clause {

@@ -299,6 +299,15 @@ mll_test!(nested_just_pattern, "nested_just_pattern.mll");
 mll_test!(constructor_shadowing, "constructor_shadowing.mll");
 mll_test!(constructor_shadowing_json, "constructor_shadowing_json.mll");
 mll_test!(exitvalue_prelude, "exitvalue_prelude.mll");
+// Instance contexts (`instance Show a => Show (Tree a)`): the context used to
+// be parsed and discarded (bare form) or fail to parse (parenthesized form)
+mll_test!(instance_context, "instance_context.mll");
+mll_test!(instance_context_paren, "instance_context_paren.mll");
+mll_test!(instance_context_multi, "instance_context_multi.mll");
+mll_test!(instance_context_superclass, "instance_context_superclass.mll");
+// Instance identities register module-wide before bodies are checked: a
+// method body may use an instance declared later (or its own, recursively)
+mll_test!(instance_forward_ref, "instance_forward_ref.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -943,6 +952,62 @@ main = do
                 "instance bodies should be present in the output");
         }
         Err(e) => panic!("instance C [a] / C (Maybe a) should compile, got: {}", e),
+    }
+}
+
+#[test]
+fn instance_context_unsatisfied_rejected() {
+    // Using a context-constrained instance at a type that lacks the required
+    // instance must fail with a located error naming the full type, and a
+    // note explaining WHICH context constraint failed — not compile silently,
+    // and not report a spurious error inside the instance body.
+    let source = r#"
+data Blob = MkBlob
+data Tree a = Leaf a | Branch (Tree a) (Tree a)
+
+instance Show a => Show (Tree a) where
+    show (Leaf x)     = "Leaf " <> show x
+    show (Branch l r) = "Branch (" <> show l <> ") (" <> show r <> ")"
+
+main :: IO ()
+main = putStrLn (show (Leaf MkBlob))
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("No instance for 'Show (Tree Blob)'"),
+                "Expected a missing-instance error at the use type, got: {}", msg);
+            assert!(msg.contains("there is no instance 'Show Blob'"),
+                "The note must name the failing context constraint, got: {}", msg);
+            assert!(msg.contains("definition of 'main'"),
+                "The error must point at the use site, not the instance body, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected use of Show (Tree a) at Tree Blob to be rejected"),
+    }
+}
+
+#[test]
+fn instance_context_ill_formed_rejected() {
+    // A context constraint over a variable the instance head does not bind
+    // can never be satisfied by any use of the instance; reject it at the
+    // declaration with an explanation.
+    let source = r#"
+data Tree a = Leaf a | Branch (Tree a) (Tree a)
+
+instance Show b => Show (Tree a) where
+    show (Leaf _) = "Leaf"
+    show (Branch _ _) = "Branch"
+
+main :: IO ()
+main = putStrLn (show (Leaf 1))
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("does not appear in the instance head"),
+                "Expected an unbound-context-variable error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected a context over an unbound variable to be rejected"),
     }
 }
 

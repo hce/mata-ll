@@ -65,6 +65,11 @@ pub enum Decl {
     InstanceDecl {
         class_name: String,
         target_type: Type,
+        /// Instance context: `instance (Show a, Eq a) => C (T a)` carries
+        /// [Show a, Eq a]. The context is what lets a method body use those
+        /// class methods on the instance's type variables, and what a use of
+        /// the instance at a concrete type must satisfy.
+        context: Vec<Constraint>,
         methods: Vec<InstanceMethod>,
     },
     /// Export declaration: `export add :: Integer -> Integer -> Integer`
