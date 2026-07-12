@@ -167,3 +167,35 @@ call still present (vs. inline mutation) plus the run-once forcing fixes.
 Implemented and verified. The ST test suite stays green (262 tests) and
 the tracker output is byte-identical to the closure build. Scratch
 worktrees and output removed.
+
+# Future work: per-field (product) demand analysis
+
+The tuple-field laziness fix (`218b660`, "make tuple fields lazy so bottom
+in a tuple field is not forced") completes the "bottom is never forced
+eagerly" contract, but costs tracker throughput. Measured on the CI gate
+input (`benchmark.it`, LuaJIT, this machine):
+
+| Build | Commit | Wall | Real-time (audio÷wall) |
+|---|---|---|---|
+| pre-tuple-fix | `c3cf855` | ~22.6–24.1 s | ~2.0× |
+| **tuple fields lazy** | `218b660` | ~32.8–32.9 s | **~1.4×** |
+
+A **~43% wall-time regression** (Fable measured ~57% on the larger
+`HongKong_Music.it` under interleaved load — same effect). The CI perf gate
+still passes comfortably: threshold is 0.5× real-time, HEAD is ~1.4×.
+
+**Cause:** a single per-note thunk on a state-tuple field (`off + 1`) inside
+an ST-action-returning function. `off` is provably forced on the taken path
+(via the `marker` thunk in the same closure), but the current whole-value
+demand analysis cannot mark it strict at construction — an ST action may be
+built and discarded, so a tuple field that is unconditionally used *on every
+run* is not, in general, forced. Emitting it eagerly anyway would reintroduce
+exactly the bottom-in-a-tuple-field leak `218b660` removes.
+
+**The sound recovery** is per-field (product) demand analysis: track demand
+per tuple/constructor position rather than per whole value, so a field that
+every use forces can be proven strict and emitted eagerly without weakening
+the contract. This is a real analysis feature, not a codegen patch. It would
+also subsume the ST-closure fusion special-case above with a general
+mechanism. Deferred — the current cost is a soundness-preserving conservative
+thunk, not a correctness hole, and the gate has ~3× margin.
