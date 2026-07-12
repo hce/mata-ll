@@ -30,6 +30,19 @@ mll -r fib.mll     # compile and run immediately
 > Note: `cargo install mata-ll` builds a vendored Lua, so it needs a C compiler
 > on the host.
 
+## Changelog
+
+Latest release — 0.1.2:
+
+- Fixed: instance-evidence resolution, cheap-eagerness let-binding, nested-`Just`
+  forcing, constructor shadowing, the SPEC-audit bugs B1-B5, `Show (Either a b)`,
+  and curried let/where-bound lambda application.
+- Added: per-constructor `as "tag"` JSON renaming, and `LuaDict` for all-nullary
+  enums (string-tagged Lua boundary, declaration-order `Ord`/`Enum`/`Bounded`/`Show`).
+
+See [CHANGELOG.md](https://github.com/hce/mata-ll/blob/main/CHANGELOG.md) for the
+full history.
+
 - Website: <https://matall.org>
 - Source: <https://github.com/hce/mata-ll>
 
