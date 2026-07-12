@@ -206,6 +206,11 @@ the name between its two operands, in addition to the prefix form:
     a |+| b = a + b      -- same as (|+|) a b = a + b
     x `add` y = x + y    -- same as add x y = x + y
 
+This infix definition form applies to top-level and local
+definitions. Inside a typeclass `instance`, however, an operator
+method must currently be defined in prefix form — `(#+#) (P a) (P b)
+= ...`, not `(P a) #+# (P b) = ...`; the latter is a parse error.
+
 Multi parameter functions can be partly applied, just like in haskell.
 
 In order to support this efficiently, we do two optimizations below
@@ -276,7 +281,7 @@ polymorphism and no promotion.
 
 Kind annotations use the `::` syntax within type signatures:
 
-    intrinsic engage :: LuaFunction -> (a :: Fn)
+    intrinsic engage :: LuaFunction s -> (a :: Fn)
 
 `Fn` constrains `a` to types of the form `x -> ... -> IO y`. The
 compiler rejects any `a` that does not end in `IO`. This ensures
@@ -346,9 +351,12 @@ Example:
     -- bad :: LuaFunction s -> IO (LuaFunction s)
     -- bad f = return f   -- type error: s is not in scope
 
-Rank-2 types are supported ONLY for this specific pattern: the
-`forall s.` quantifier on exported functions receiving
-`LuaFunction s`. General rank-2 polymorphism is not supported.
+This `forall s.` scope-sealing pattern is the primary motivating use
+of rank-2 quantification (the same mechanism backs `runST`). Rank-2
+function arguments more generally also work — a parameter of type
+`(forall a. a -> a)` may be instantiated at several types within the
+body — though the scope-tag pattern above is the case the language is
+designed around.
 
 ## Statically known FFI calls
 
@@ -432,8 +440,10 @@ type checker.
 
 The `intrinsic` keyword marks definitions whose equations are part of
 the language spec and visible for type checking, but whose
-implementation is provided by the compiler. Users cannot define their
-own intrinsic type families.
+implementation is provided by the compiler. Users are not intended to
+define their own intrinsic type families. (Note: the current parser
+does not reject a user-written `intrinsic type family`; it is simply
+accepted. Rejecting it is a candidate enforcement fix.)
 
 ## Intrinsic type families
 
@@ -506,6 +516,12 @@ Monads are just like in haskell:
         return = pure
         (>>)   :: m a -> m b -> m b
         m >> k = m >>= \_ -> k
+
+Note: of the operators shown above, `fmap`, `(<$>)`, `pure`, `(<*>)`,
+`(>>=)`, `return`, and `(>>)` are provided. The secondary combinators
+`(<$)`, `(*>)`, and `(<*)` are declared here as the intended interface
+but are not yet available — referring to them is currently an unbound
+variable.
 
     class Read a where
         read :: String -> a
@@ -584,9 +600,10 @@ namespace. All definitions must be local; FFI exports must be passed
 via the module's return value. FFI exports are restricted to
 functions.
 
-When MATA-LL is intended to run standalone, the compiler shall
-generate a stub Lua file main.lua that loads the MATA-LL bytecode and
-calls into it.
+When MATA-LL is intended to run standalone, the compiler appends an
+entry-point stub to the emitted `.lua` file itself (a single
+self-contained file — no separate `main.lua` is produced) that calls
+into the program. See "Standalone MATA-LL" below for the exact stub.
 
 ## Function bodies in MATA-LL
 
@@ -602,13 +619,17 @@ The compiler may inline functions whenever deemed necessary.
 ## Pattern matching
 
 Pattern matching is supported for function definitions, case blocks,
-and assignments.
+and assignments. In assignments (`let`, `where`, and `<-`), only
+variable and tuple patterns are currently accepted — constructor
+patterns such as `let Just x = m` or `Just y <- action` are not yet
+parsed. Constructor patterns in function definitions, case
+alternatives, and lambda arguments are fully supported.
 
-NOTE: The following distinction is aspirational and not yet
-implemented. Currently all non-exhaustive patterns produce a runtime
-error via a fallback.
+Non-exhaustive function definitions and case expressions are rejected
+at compile time (the type checker performs exhaustiveness checking).
 
-For assignments, we want to distinguish between "single-case
+NOTE: The following distinction for assignments is aspirational and
+not yet implemented. We want to distinguish between "single-case
 assignments" such as a let or <- assignment inside a do block. Here,
 pattern mismatch should raise an error. Multi-case assignments
 include where and let assignments outside of do blocks. Here, the
@@ -650,13 +671,18 @@ my.mll
     main :: IO ()
     main = ...
 
-The generated .lua file ends with a call to __run():
+The generated .lua file ends with an entry-point stub that runs the
+program only when the file is executed directly, and stays quiet when
+it is loaded as a module via `require`:
 
-    __run()
+    local __mll_modname = ...
+    if __mll_modname == nil then __mll_run(__mll_fn[N]()) end
 
-We call __run, not main, because main is not declared as a function
-exported to Lua. The compiler can also execute the result directly
-via the embedded mlua runtime when invoked with --run.
+The stub invokes an internal runner over `main`'s compiled thunk
+(`__mll_fn[N]` above) rather than a bare `main`, because `main` is not
+declared as a function exported to Lua. The compiler can also execute
+the result directly via the embedded mlua runtime when invoked with
+--run.
 
 Command line arguments are not passed to main, nor is a return value
 passed back to the OS.
@@ -674,9 +700,9 @@ Do should be desugared just like in haskell.
 
     main :: IO ()
     main = do
-        x <- rnd 1 (Just 6)
+        x <- rnd 1.0 (Just 6.0)
         putStrLn (show x)
-        let y = x + 1
+        let y = x + 1.0
         putStrLn (show y)
 
 Desugaring: `x <- e; rest` becomes `e >>= \x -> rest`,
@@ -715,6 +741,11 @@ There is a "monadic let" inside do blocks and a non-monadic one. The
 non-monadic one requires exhaustive pattern matching. The monadic one
 requires a single path, and will raise an exception if that path
 doesn't match.
+
+Note: as stated under Pattern matching, `let`/`where` bindings today
+accept only variable and tuple patterns, so the refutable-binding
+semantics above apply to those forms; constructor-pattern bindings are
+not yet parsed.
 
 # Lambda syntax
 
@@ -866,18 +897,34 @@ The README says each file is a module. But how do you import one?
 That will look for Data/Tree.mll in the project's and the compiler's
 default library directory.
 
+Two caveats on the forms above:
+
+- **Qualified imports cover functions, not constructors.** After
+  `import qualified Data.Tree as T`, a qualified *function* use like
+  `T.depth` resolves, but a qualified *constructor* use like `T.Leaf`
+  does not — constructors are not namespaced and must be written
+  unqualified (`Leaf`), and they remain visible even under a qualified
+  import.
+- **The `(..)` constructor-list on an import is currently
+  decorative.** `import Data.Tree (depth, Tree(..))` and
+  `import Data.Tree (depth)` behave identically: the selective list
+  restricts which *functions* are brought into scope, but a type's
+  constructors are always exposed regardless of whether `Tree(..)` is
+  written. `hiding (...)` is enforced for functions.
+
 re-exports are supported but the scope is limited to within .mll. No
 exports to plain Lua are allowed that way.
 
 # Minimal prelude
 
-Functions: show, putStrLn, putStr, print, (++), ($), max, min,
+Functions: show, putStrLn, putStr, print, (++), (<>), ($), max, min,
            const, id, (.), flip, map, filter, foldl, foldr, sqrt,
            not, (&&), (||), error, undefined, otherwise, head, tail,
            take, zipWith, elem, length, reverse, fst, snd, concatMap,
            mapM_, when, assert, seq, getArgs, exit, try, catch
 
-    (++)  :: String -> String -> String
+    (++)  :: [a] -> [a] -> [a]              -- list append only
+    (<>)  :: Semigroup a => a -> a -> a     -- string concatenation
     ($)   :: (a -> b) -> a -> b
     (.)   :: (b -> c) -> (a -> b) -> a -> c
     const :: a -> b -> a
@@ -888,6 +935,11 @@ Functions: show, putStrLn, putStr, print, (++), ($), max, min,
     seq   :: a -> b -> b  -- explicit forcing
     assert :: Bool -> String -> IO ()
 
+Note: `String` is *not* a list, so `(++)` does not concatenate
+strings — use `(<>)` for that. Conversely `(<>)` today applies only to
+`String`; lists are joined with `(++)`. (`(<>)` is the `Semigroup`
+method; only the `String` instance is usable at present.)
+
 Comparison and equality operators are methods of Eq and Ord:
 
     (==), (/=) :: Eq a => a -> a -> Bool
@@ -895,8 +947,8 @@ Comparison and equality operators are methods of Eq and Ord:
     compare :: Ord a => a -> a -> Ordering
     data Ordering = LT | EQ | GT
 
-Typeclasses: Show, Eq, Ord, Enum, Bounded, Read, Functor,
-             Applicative, Monad
+Typeclasses: Show, Eq, Ord, Enum, Bounded, Read, Semigroup,
+             Functor, Applicative, Monad
 
 Types: Maybe (Just, Nothing), Either (Left, Right), IO, Ordering,
        ExitValue (Normal, Err), Any
@@ -916,7 +968,7 @@ is given.
 # Deriving
 
 Automatic instance generation is supported for Show, Eq, Ord, Enum,
-Bounded, and Functor:
+Bounded, Functor, ToJSON, and FromJSON:
 
     data Color = Red | Green | Blue
         deriving (Show, Eq, Ord, Enum, Bounded)
@@ -924,9 +976,18 @@ Bounded, and Functor:
     data Tree a = Leaf a | Branch (Tree a) (Tree a)
         deriving (Show, Eq, Functor)
 
+    data Person = Person { pName :: String, pAge :: Integer }
+        deriving (Show, ToJSON, FromJSON)
+
 The compiler generates the obvious structural instances. Enum and
 Bounded are supported for simple enum types (constructors with no
 fields).
+
+`ToJSON`/`FromJSON` are provided by the `JSON` module (`import JSON`),
+which offers a hand-written codec alongside the derived instances:
+`encodeToJSON :: ToJSON a => a -> String` serializes a value, and
+`decodeJSON :: FromJSON a => String -> Either String a` parses one.
+Record fields map to JSON object keys.
 
 # Export
 
@@ -991,7 +1052,14 @@ are imported explicitly:
     import JSON          -- hand-written JSON parser
     import Data.List     -- sortBy, nubBy, groupBy, intercalate, etc.
     import Data.Maybe    -- fromMaybe, catMaybes, mapMaybe, etc.
+    import Data.Map      -- HashMap-backed Map (import qualified as M)
     import Control.Monad -- mapM, forM, sequence, etc.
+
+Several of these deliberately reuse Prelude names (`Data.Map`'s
+`map`/`filter`/`lookup`/`null`, `Data.List`'s `find`). Because
+mata-ll merges every import into one namespace, such modules must be
+imported `qualified` (e.g. `import qualified Data.Map as M`) to avoid
+clashing with the Prelude or with each other.
 
 # Evaluation strategy
 
@@ -1091,12 +1159,18 @@ the result is `Right value`; if it raises a Lua error, the result is
 `catch` runs an IO action; if it raises, the handler function
 receives the error message and produces a recovery action.
 
+    import LIO
+
     main :: IO ()
     main = do
-        result <- try (readFile "missing.txt")
+        result <- try (fileLines "missing.txt")
         case result of
-            Right contents -> putStrLn contents
-            Left err       -> putStrLn ("Error: " <> err)
+            Right ls  -> putStrLn (show (length ls))
+            Left err  -> putStrLn ("Error: " <> err)
+
+(There is no `readFile`; `fileLines :: String -> IO [String]` from
+`LIO` reads a file eagerly into a list of lines. See "No lazy IO"
+under Design constraints.)
 
 Design decisions:
 - Only IO errors are catchable (category (a): Lua runtime errors).
