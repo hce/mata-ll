@@ -228,6 +228,11 @@ fn flatten_expr(e: TExpr, binds: &mut Vec<TLocalDef>, ctr: &mut usize) -> TExpr 
             callee: Box::new(flatten_scope(*callee, ctr)),
             arity, marshal_args, run_io, marshal_ret,
         },
+        // An optional FFI argument: recurse but never hoist the wrapper itself
+        // — it must stay directly inside its SpecCall argument list.
+        TExprKind::FfiMaybeArg { value } => TExprKind::FfiMaybeArg {
+            value: Box::new(flatten_scope(*value, ctr)),
+        },
     };
     TExpr::new(kind, ty)
 }
@@ -422,5 +427,6 @@ fn depth(e: &TExpr) -> usize {
             1 + d
         }
         TExprKind::OutgoingCallback { callee, .. } => 1 + depth(callee),
+        TExprKind::FfiMaybeArg { value } => 1 + depth(value),
     }
 }

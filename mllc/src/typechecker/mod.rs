@@ -2259,6 +2259,12 @@ fn extract_ffi_info(ty: &Type) -> Option<(String, FfiKind)> {
     }
 }
 
+/// Is `ty` a saturated `Maybe a`? Used to spot optional FFI parameters in a
+/// declared FFI signature (SPEC "Optional parameters").
+fn is_maybe_ty(ty: &Ty) -> bool {
+    matches!(ty, Ty::App(f, _) if matches!(f.as_ref(), Ty::Con(c) if c == "Maybe"))
+}
+
 /// Compute the OutgoingCallback flags for a callback parameter type.
 /// Returns (arity, marshal_args, run_io, marshal_ret). A position is marshalled
 /// across the boundary only when it is a `List` or nested `Arrow`; everything

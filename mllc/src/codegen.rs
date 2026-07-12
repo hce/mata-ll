@@ -302,6 +302,54 @@ impl CodeGen {
         }
     }
 
+    /// Emit an FFI call's argument list (the text between the parens, after
+    /// any already-emitted receiver — `need_comma` says whether something was
+    /// emitted before this list). Plain arguments are `__force(a)`, exactly as
+    /// before. Arguments declared `Maybe` in the FFI signature (FfiMaybeArg)
+    /// are optional Lua parameters (SPEC "Optional parameters"):
+    ///   - the maximal *trailing* run of optionals is bundled into one
+    ///     `__mll_opt_tail(...)` call in final argument position — its
+    ///     multiple-return expands there, unwrapping each `Just` and dropping
+    ///     the trailing nils, so the callee sees `Nothing` as a genuinely
+    ///     omitted argument (`math.random(3)`, never `math.random(3, nil)`,
+    ///     which arg-count-sensitive hosts reject);
+    ///   - an optional *before* another passed argument cannot be positionally
+    ///     omitted in Lua, so it goes through `__mll_opt`: `Just x` unwraps to
+    ///     `x` and `Nothing` becomes an explicit nil — Lua's own idiom for a
+    ///     skipped middle optional (luaL_opt* treats nil as "use default").
+    fn gen_ffi_args(&mut self, args: &[TExpr], mut need_comma: bool) {
+        // Start of the maximal trailing run of declared-optional arguments.
+        let mut tail_start = args.len();
+        while tail_start > 0 && matches!(args[tail_start - 1].kind, TExprKind::FfiMaybeArg { .. }) {
+            tail_start -= 1;
+        }
+        for a in &args[..tail_start] {
+            if need_comma { self.emit(", "); }
+            need_comma = true;
+            if let TExprKind::FfiMaybeArg { value } = &a.kind {
+                self.emit("__mll_opt(");
+                self.gen_expr(value);
+                self.emit(")");
+            } else {
+                self.emit("__force(");
+                self.gen_expr(a);
+                self.emit(")");
+            }
+        }
+        if tail_start < args.len() {
+            if need_comma { self.emit(", "); }
+            self.emit("__mll_opt_tail(");
+            for (i, a) in args[tail_start..].iter().enumerate() {
+                if i > 0 { self.emit(", "); }
+                match &a.kind {
+                    TExprKind::FfiMaybeArg { value } => self.gen_expr(value),
+                    _ => unreachable!("non-optional argument in trailing optional run"),
+                }
+            }
+            self.emit(")");
+        }
+    }
+
     /// Emit `__mll_pcall(desc, fn, forced-args...)` for LuaCatch/LuaIOCatch.
     /// The forced arguments are evaluated *outside* the protected call, so only
     /// errors raised by the Lua function itself become `Left` — not errors from
@@ -313,19 +361,11 @@ impl CodeGen {
             self.emit("(function() local __recv = __force(");
             self.gen_expr(&args[0]);
             self.emit(&format!("); return __mll_pcall({}, __recv.{}, __recv", desc_str, method));
-            for a in args.iter().skip(1) {
-                self.emit(", __force(");
-                self.gen_expr(a);
-                self.emit(")");
-            }
+            self.gen_ffi_args(&args[1..], true);
             self.emit(") end)()");
         } else {
             self.emit(&format!("__mll_pcall({}, {}", desc_str, lua_func));
-            for a in args {
-                self.emit(", __force(");
-                self.gen_expr(a);
-                self.emit(")");
-            }
+            self.gen_ffi_args(args, true);
             self.emit(")");
         }
     }
@@ -1787,6 +1827,7 @@ impl CodeGen {
             TExprKind::Tuple(elems) => { for e in elems { self.scan_call_sites(e, ever_thunked, ever_called); } }
             TExprKind::SpecCall { args, .. } => { for a in args { self.scan_call_sites(a, ever_thunked, ever_called); } }
             TExprKind::OutgoingCallback { callee, .. } => self.scan_call_sites(callee, ever_thunked, ever_called),
+            TExprKind::FfiMaybeArg { value } => self.scan_call_sites(value, ever_thunked, ever_called),
             _ => {}
         }
     }
@@ -2105,22 +2146,12 @@ impl CodeGen {
                     self.gen_expr(&args[0]);
                     self.emit(&format!("):{}", method));
                     self.emit("(");
-                    for (i, a) in args.iter().enumerate().skip(1) {
-                        if i > 1 { self.emit(", "); }
-                        self.emit("__force(");
-                        self.gen_expr(a);
-                        self.emit(")");
-                    }
+                    self.gen_ffi_args(&args[1..], false);
                     self.emit(")");
                 } else {
                     self.emit(lua_func);
                     self.emit("(");
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.emit(", "); }
-                        self.emit("__force(");
-                        self.gen_expr(a);
-                        self.emit(")");
-                    }
+                    self.gen_ffi_args(args, false);
                     self.emit(")");
                 }
                 if decode.is_some() {
@@ -3145,12 +3176,7 @@ impl CodeGen {
                     self.emit(" = ");
                     self.emit(lua_func);
                     self.emit("(");
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.emit(", "); }
-                        self.emit("__force(");
-                        self.gen_expr(a);
-                        self.emit(")");
-                    }
+                    self.gen_ffi_args(args, false);
                     self.emit("); return {");
                     self.emit(&vars.join(", "));
                     self.emit("} end)()");
@@ -3158,11 +3184,7 @@ impl CodeGen {
                     // Iterator FFI: __mll_iter(lua_factory, arg0, arg1, ...)
                     self.emit("__mll_iter(");
                     self.emit(lua_func);
-                    for a in args {
-                        self.emit(", __force(");
-                        self.gen_expr(a);
-                        self.emit(")");
-                    }
+                    self.gen_ffi_args(args, true);
                     self.emit(")");
                 } else if let Some(lua_func) = specialized.strip_prefix("__mll_try:") {
                     // Try FFI: wrap result in Either via __mll_try
@@ -3173,23 +3195,13 @@ impl CodeGen {
                         self.gen_expr(&args[0]);
                         self.emit(&format!("):{}", method));
                         self.emit("(");
-                        for (i, a) in args.iter().enumerate().skip(1) {
-                            if i > 1 { self.emit(", "); }
-                            self.emit("__force(");
-                            self.gen_expr(a);
-                            self.emit(")");
-                        }
+                        self.gen_ffi_args(&args[1..], false);
                         self.emit(")");
                     } else {
                         // Global function try
                         self.emit(lua_func);
                         self.emit("(");
-                        for (i, a) in args.iter().enumerate() {
-                            if i > 0 { self.emit(", "); }
-                            self.emit("__force(");
-                            self.gen_expr(a);
-                            self.emit(")");
-                        }
+                        self.gen_ffi_args(args, false);
                         self.emit(")");
                     }
                     self.emit(")");
@@ -3210,12 +3222,7 @@ impl CodeGen {
                     self.gen_expr(&args[0]);
                     self.emit(&format!("):{}", method));
                     self.emit("(");
-                    for (i, a) in args.iter().enumerate().skip(1) {
-                        if i > 1 { self.emit(", "); }
-                        self.emit("__force(");
-                        self.gen_expr(a);
-                        self.emit(")");
-                    }
+                    self.gen_ffi_args(&args[1..], false);
                     self.emit(")");
                 } else if let Some(lua_func) = specialized.strip_prefix("__mll_io:") {
                     // IO FFI: wrap in action thunk — only performed by >>= / >>
@@ -3234,22 +3241,12 @@ impl CodeGen {
                         self.gen_expr(&args[0]);
                         self.emit(&format!("):{}", method));
                         self.emit("(");
-                        for (i, a) in args.iter().enumerate().skip(1) {
-                            if i > 1 { self.emit(", "); }
-                            self.emit("__force(");
-                            self.gen_expr(a);
-                            self.emit(")");
-                        }
+                        self.gen_ffi_args(&args[1..], false);
                         self.emit(")");
                     } else {
                         self.emit(lua_func);
                         self.emit("(");
-                        for (i, a) in args.iter().enumerate() {
-                            if i > 0 { self.emit(", "); }
-                            self.emit("__force(");
-                            self.gen_expr(a);
-                            self.emit(")");
-                        }
+                        self.gen_ffi_args(args, false);
                         self.emit(")");
                     }
                     if decode.is_some() { self.emit(")"); }
@@ -3265,12 +3262,7 @@ impl CodeGen {
                     self.emit(" = ");
                     self.emit(lua_func);
                     self.emit("(");
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.emit(", "); }
-                        self.emit("__force(");
-                        self.gen_expr(a);
-                        self.emit(")");
-                    }
+                    self.gen_ffi_args(args, false);
                     self.emit("); return {");
                     self.emit(&vars.join(", "));
                     self.emit("} end");
@@ -3285,12 +3277,7 @@ impl CodeGen {
                     }
                     self.emit(specialized);
                     self.emit("(");
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.emit(", "); }
-                        self.emit("__force(");
-                        self.gen_expr(a);
-                        self.emit(")");
-                    }
+                    self.gen_ffi_args(args, false);
                     self.emit(")");
                     if decode.is_some() {
                         self.emit(")");
@@ -3375,6 +3362,14 @@ impl CodeGen {
                     .collect::<Vec<_>>().join(", ");
                 self.emit(&format!(", {}, {{{}}}, {}, {})",
                     arity, flags, run_io, marshal_ret));
+            }
+            TExprKind::FfiMaybeArg { value } => {
+                // Normally consumed by gen_ffi_args inside a SpecCall argument
+                // list. If one is ever emitted standalone, degrade to its
+                // nullable value: Just x -> x, Nothing -> nil.
+                self.emit("__mll_opt(");
+                self.gen_expr(value);
+                self.emit(")");
             }
         }
     }
@@ -3701,6 +3696,7 @@ fn expr_references_name(expr: &TExpr, name: &str) -> bool {
             updates.iter().any(|(_, _, e)| expr_references_name(e, name))
         }
         TExprKind::OutgoingCallback { callee, .. } => expr_references_name(callee, name),
+        TExprKind::FfiMaybeArg { value } => expr_references_name(value, name),
     }
 }
 
@@ -4004,6 +4000,33 @@ local function __mll_list_index(xs, n)
     end
     if xs == nil then error("(!!): index too large") end
     return __mll_head(xs)
+end
+
+-- An optional FFI argument (declared `Maybe` in the FFI signature) that sits
+-- before another passed argument: unwrap `Just x` to its payload; `Nothing`
+-- (nil) stays an explicit nil — Lua's own idiom for a skipped middle optional,
+-- since a positional argument before another passed one cannot be omitted.
+local function __mll_opt(x)
+    x = __force(x)
+    if getmetatable(x) == __just_mt then return __force(x[1]) end
+    return x
+end
+
+-- The trailing run of optional FFI arguments, expanded in final argument
+-- position: unwrap each `Just`, then drop the trailing nils and return the
+-- remaining prefix as multiple values, so the callee sees `Nothing` as a
+-- genuinely omitted argument — math.random(3), never math.random(3, nil),
+-- which argument-count-sensitive host functions reject.
+local function __mll_opt_tail(...)
+    local n = select('#', ...)
+    local t = {...}
+    for i = 1, n do
+        local v = __force(t[i])
+        if getmetatable(v) == __just_mt then v = __force(v[1]) end
+        t[i] = v
+    end
+    while n > 0 and t[n] == nil do n = n - 1 end
+    return __unpack(t, 1, n)
 end
 
 -- Deep-force an MLL value for export to Lua.

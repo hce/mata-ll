@@ -1279,8 +1279,18 @@ impl Checker {
         // (callback) parameters are wrapped so the Lua host can call them with
         // positional arguments — see OutgoingCallback. Flags are computed here,
         // before monomorphization, while the threaded state is still a type var.
-        let call_args: Vec<TExpr> = params.iter()
-            .map(|(n, t)| {
+        //
+        // A parameter *declared* `Maybe a` is an optional Lua parameter (see
+        // SPEC "Optional parameters"): it is marked with FfiMaybeArg so codegen
+        // unwraps `Just x` to `x`, passes `Nothing` as nil, and truly omits the
+        // trailing run of nil optionals from the call. The mark is decided
+        // here, from the declared signature, so a *polymorphic* FFI parameter
+        // later instantiated at `Maybe` keeps its raw-value behavior. The
+        // receiver of a method-call FFI (arg 0 of a `:method` name) is never
+        // optional — there is no call without a receiver.
+        let is_method_call = lua_name.starts_with(':');
+        let call_args: Vec<TExpr> = params.iter().enumerate()
+            .map(|(i, (n, t))| {
                 let var = TExpr::new(TExprKind::Var(n.clone()), t.clone());
                 if matches!(t, Ty::Arrow(_, _)) {
                     let (arity, marshal_args, run_io, marshal_ret) = outgoing_cb_flags(t);
@@ -1289,6 +1299,11 @@ impl Checker {
                             callee: Box::new(var),
                             arity, marshal_args, run_io, marshal_ret,
                         },
+                        t.clone(),
+                    )
+                } else if is_maybe_ty(t) && !(is_method_call && i == 0) {
+                    TExpr::new(
+                        TExprKind::FfiMaybeArg { value: Box::new(var) },
                         t.clone(),
                     )
                 } else {

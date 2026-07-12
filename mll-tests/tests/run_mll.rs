@@ -200,6 +200,7 @@ mll_test!(strings, "strings.mll");
 mll_test!(operators, "operators.mll");
 mll_test!(let_exprs, "let_exprs.mll");
 mll_test!(ffi, "ffi.mll");
+mll_test!(ffi_maybe_args, "ffi_maybe_args.mll");
 mll_test!(luacatch, "luacatch.mll");
 mll_test!(tuple_ctor, "tuple_ctor.mll");
 mll_test!(lua_keywords, "lua_keywords.mll");

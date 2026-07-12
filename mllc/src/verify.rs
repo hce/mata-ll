@@ -121,6 +121,7 @@ impl Verifier {
                 for (_, _, val) in updates { self.walk(val, ctx); }
             }
             TExprKind::OutgoingCallback { callee, .. } => self.walk(callee, ctx),
+            TExprKind::FfiMaybeArg { value } => self.walk(value, ctx),
         }
     }
 }

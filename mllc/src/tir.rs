@@ -263,6 +263,8 @@ impl TExpr {
                     callee: Box::new(callee.apply_subst(subst)),
                     arity, marshal_args, run_io, marshal_ret,
                 },
+            TExprKind::FfiMaybeArg { value } =>
+                TExprKind::FfiMaybeArg { value: Box::new(value.apply_subst(subst)) },
             other => other,
         };
         TExpr { kind, ty }
@@ -376,6 +378,18 @@ pub enum TExprKind {
         /// Convert the result for the host rather than returning it raw
         /// (raw = opaque polymorphic state, must round-trip untouched).
         marshal_ret: bool,
+    },
+    /// An FFI argument whose *declared* type in the FFI signature is `Maybe a`
+    /// — an optional Lua parameter. At the boundary `Just x` unwraps to `x`
+    /// and `Nothing` becomes nil; codegen additionally drops the trailing run
+    /// of nil optionals so the Lua callee sees them as genuinely omitted
+    /// (arg-count-sensitive hosts like `math.random` distinguish nil from
+    /// absent). The flag is decided from the FFI declaration, not the value's
+    /// monomorphized type, so a polymorphic parameter instantiated at `Maybe`
+    /// is never affected. Only ever appears directly inside a SpecCall arg
+    /// list built by `generate_ffi_function`.
+    FfiMaybeArg {
+        value: Box<TExpr>,
     },
 }
 

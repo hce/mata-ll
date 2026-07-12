@@ -522,6 +522,12 @@ fn demanded_vars_mode(
             // The wrapped callback is invoked by the host, so it is demanded.
             rec(callee)
         }
+
+        TExprKind::FfiMaybeArg { value } => {
+            // The optional FFI argument is forced/unwrapped at the boundary,
+            // so it is demanded exactly like a plain FFI argument.
+            rec(value)
+        }
     }
 }
 

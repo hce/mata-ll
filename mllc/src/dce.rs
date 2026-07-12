@@ -135,5 +135,6 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
             for (_, _, val) in updates { collect_expr(val, refs); }
         }
         TExprKind::OutgoingCallback { callee, .. } => collect_expr(callee, refs),
+        TExprKind::FfiMaybeArg { value } => collect_expr(value, refs),
     }
 }

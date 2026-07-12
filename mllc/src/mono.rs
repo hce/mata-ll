@@ -974,6 +974,8 @@ impl Monomorphizer {
                     callee: Box::new(self.mono_expr(*callee)),
                     arity, marshal_args, run_io, marshal_ret,
                 },
+            TExprKind::FfiMaybeArg { value } =>
+                TExprKind::FfiMaybeArg { value: Box::new(self.mono_expr(*value)) },
             other => other,
         };
         TExpr { kind, ty }
@@ -1370,6 +1372,8 @@ impl Monomorphizer {
                     callee: Box::new(self.revert_purged(*callee)),
                     arity, marshal_args, run_io, marshal_ret,
                 },
+            TExprKind::FfiMaybeArg { value } =>
+                TExprKind::FfiMaybeArg { value: Box::new(self.revert_purged(*value)) },
             other => other,
         };
         TExpr { kind, ty }
@@ -1540,6 +1544,7 @@ impl Monomorphizer {
                 for (_, _, e) in updates { Self::collect_expr_vars(e, vars); }
             }
             TExprKind::OutgoingCallback { callee, .. } => Self::collect_expr_vars(callee, vars),
+            TExprKind::FfiMaybeArg { value } => Self::collect_expr_vars(value, vars),
             _ => {}
         }
     }
