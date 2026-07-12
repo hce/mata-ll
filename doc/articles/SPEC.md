@@ -1004,14 +1004,19 @@ it as the `"tag"` value:
     -- encodeToJSON (Err "x") == {"tag":"error","contents":"x"}
     -- show (Err "x") still prints the source name: Err "x"
 
-A constructor rename changes only the JSON tag: Show, construction,
-pattern matching, and the runtime representation keep the source
-name. It has no Lua-side counterpart — at the Lua boundary a
-constructor is a positional integer tag, not a name, so JSON is the
-only surface where constructors are named. Effective tags must be
-unique and non-empty within a type (the tag is all the decoder has to
-tell constructors apart), the rename requires a ToJSON or FromJSON
-deriving, and it is rejected on the constructor of an untagged type
+A constructor rename changes the JSON tag: Show, construction,
+pattern matching, and the in-language representation keep the source
+name. It reaches the Lua boundary only for the nullary constructors of
+a type deriving `LuaDict`, whose runtime value is a plain string (the
+rename, or the source name) rather than the usual positional integer
+tag; there one `as` sets both the JSON tag and the Lua string. A
+fielded variant (a positional table) and a plain enum without
+`LuaDict` (a positional integer) have no boundary name to change, so
+for them JSON is the only surface where constructors are renamed.
+Effective tags must be unique and non-empty within a type (the tag is
+all the decoder has to tell constructors apart), the rename requires a
+`ToJSON`, `FromJSON`, or `LuaDict` deriving, and it is rejected on the
+constructor of an untagged type
 (a single non-nullary constructor), whose JSON carries no tag.
 
 # Export

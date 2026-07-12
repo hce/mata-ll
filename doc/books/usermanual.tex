@@ -509,8 +509,8 @@ and \texttt{LuaDict}.
 decoder for the type; they require \texttt{import JSON} --- see
 Section~\ref{sec:json}.
 \texttt{LuaDict} is special: it generates no methods but changes the
-record's runtime representation for Lua interop --- see
-Section~\ref{sec:luadict}.
+runtime representation of a record or an all-nullary enum for Lua
+interop --- see Section~\ref{sec:luadict}.
 
 \subsection{Built-in Classes}
 
@@ -804,7 +804,7 @@ local fibs = mll.fibonacci(10)
 Exported functions automatically convert MLL values to Lua values
 (forces thunks, converts cons-lists to arrays).
 
-\subsection{LuaDict Records}
+\subsection{LuaDict}
 \label{sec:luadict}
 
 Many Lua APIs take or return \emph{dictionaries} --- tables keyed by
@@ -843,18 +843,52 @@ with the corresponding keys:
 currentConfig :: LuaIO "display.get_config" Config
 \end{lstlisting}
 
-\texttt{LuaDict} places requirements on the data type, because a
-name-keyed table has no constructor tag and needs field names for its
-keys.  The type must have:
+\texttt{LuaDict} accepts two shapes of data type, each with a natural
+name-based Lua representation:
 
 \begin{itemize}[nosep]
-  \item exactly one constructor,
-  \item record syntax (named fields, not positional),
-  \item at least one field,
-  \item no GADT or existential constructor.
+  \item A \emph{record} --- exactly one constructor, record syntax
+        (named fields, not positional), at least one field, no GADT or
+        existential.  Its value is the name-keyed table shown above.
+  \item An \emph{all-nullary sum type} --- an enumeration whose every
+        constructor takes no fields.  Its value is a \emph{string},
+        described next.
 \end{itemize}
 
-Violations are compile errors with an explanation of why.
+Violations (for instance a multi-constructor type with fields, which
+fits neither shape) are compile errors with an explanation of why.
+
+\subsubsection{LuaDict Enums}
+\label{sec:luadictenum}
+
+An all-nullary sum type --- an enumeration, every constructor without
+fields --- derives \texttt{LuaDict} to cross the Lua boundary as a
+plain \emph{string}.  As with a record, no marshalling runs at the FFI
+boundary: the runtime value \emph{is} that string --- the
+constructor's \texttt{as "tag"} rename when present, otherwise the
+constructor's own name --- so such an enum passes to and from Lua
+functions with no conversion cost.
+
+\begin{lstlisting}
+data Perm = Anonymous as "anonymous" | User | Admin
+    deriving (Show, Eq, Ord, Enum, Bounded, LuaDict)
+
+-- at the Lua boundary:
+--   Anonymous  is  "anonymous"   (the as rename)
+--   User       is  "User"        (the source name)
+--   Admin      is  "Admin"
+\end{lstlisting}
+
+The string is a boundary-only representation.  On the MATA-LL side
+nothing changes: construction, pattern matching, and the derived
+\texttt{Ord}, \texttt{Enum}, \texttt{Bounded}, and \texttt{Show} all
+follow declaration order and the source constructor names, exactly as
+for an enum without \texttt{LuaDict}.  So \texttt{fromEnum Anonymous ==
+0}, \texttt{Anonymous < User}, and \texttt{show User == "User"} hold
+regardless of any \texttt{as} rename --- \texttt{as} moves only the
+external string.  Effective tags (the rename when present, the source
+name otherwise) must be unique and non-empty, so two constructors
+cannot collide on one Lua string.
 
 \subsubsection{Renaming Keys with \texttt{as}}
 \label{sec:asrename}
@@ -933,11 +967,13 @@ The compiler enforces two rules on renames:
         annotation is rejected rather than silently ignored.
 \end{itemize}
 
-Sum-type \emph{constructors} have a parallel rename for their JSON
-tag --- \texttt{Con field-types as "name"} --- described with the JSON
-encoding conventions (Section~\ref{sec:conasrename}); it has no
-LuaDict counterpart, because a constructor is a positional integer
-tag at the Lua boundary, not a name.
+Sum-type \emph{constructors} have a parallel rename ---
+\texttt{Con field-types as "name"} --- described with the JSON
+encoding conventions (Section~\ref{sec:conasrename}).  For a fielded
+constructor it drives only the JSON tag, since a fielded variant is a
+positional table at the Lua boundary with no name to change; for the
+nullary constructors of a \texttt{LuaDict} enum it also sets the Lua
+boundary string (Section~\ref{sec:luadictenum} above).
 
 \begin{note}
 \texttt{as} renaming is a MATA-LL extension with no GHC equivalent.
@@ -1093,16 +1129,20 @@ data Outcome = Ok Integer as "ok" | Err String as "error"
 -- without `as` keeps its source name as before.
 \end{lstlisting}
 
-The rename changes only the JSON tag.  \texttt{show} still prints the
-source constructor name (\texttt{show Spades == "Spades"} ---
-\texttt{Show} is for debugging, as in Haskell), and construction,
-pattern matching, and the runtime representation are untouched.
-Unlike the field-level rename, a constructor rename has no Lua-side
-counterpart: at the Lua boundary a constructor is a positional
-integer tag (an enum value is a plain integer, a fielded variant a
-positional table), not a name, so there is no key the rename could
-change --- the JSON tag is the only surface where constructors are
-named externally.
+For the JSON codec the rename changes only the tag.  \texttt{show}
+still prints the source constructor name (\texttt{show Spades ==
+"Spades"} --- \texttt{Show} is for debugging, as in Haskell), and
+construction, pattern matching, and the in-language representation are
+untouched.
+
+Whether the rename also reaches the Lua boundary depends on the
+representation.  A fielded variant is a positional table there, and a
+plain enum without \texttt{LuaDict} a positional integer, neither with
+a name for \texttt{as} to change --- so the JSON tag is the only
+surface those constructors are renamed on.  The exception is an
+all-nullary constructor of a type deriving \texttt{LuaDict}, which is
+a plain string at the boundary (Section~\ref{sec:luadictenum}): there
+one \texttt{as} sets both the JSON tag and the Lua string.
 
 The compiler enforces the analogous rules.  Effective tags (the
 rename when present, the source name otherwise) must be unique and
@@ -1110,9 +1150,11 @@ non-empty within one type: the tag is the only thing the decoder has
 to tell the constructors apart, so two constructors sharing one ---
 including a rename that collides with another constructor's unrenamed
 name --- would encode identically and decode ambiguously, and are
-rejected.  The rename requires \texttt{deriving (ToJSON)} or
-\texttt{deriving (FromJSON)} (nothing else names constructors
-externally), and it is rejected on the constructor of an
+rejected.  The rename requires the type to derive \texttt{ToJSON},
+\texttt{FromJSON}, or \texttt{LuaDict} --- one of the derivings that
+names constructors externally, as a JSON tag or, for an all-nullary
+\texttt{LuaDict} enum, a Lua string.  Without one it is rejected
+rather than silently ignored, as is a rename on the constructor of an
 \emph{untagged} type --- a single non-nullary constructor, whose JSON
 carries no tag anywhere.
 
