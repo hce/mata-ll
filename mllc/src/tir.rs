@@ -25,17 +25,36 @@ pub struct TDataDef {
     pub name: String,
     pub type_vars: Vec<String>,
     pub constructors: Vec<TConstructor>,
-    /// True when the type derives `LuaDict`: its single record constructor is
-    /// laid out as a Lua table keyed by field name (`{width = …, height = …}`)
-    /// instead of a positional array, for interop with Lua APIs that take
-    /// dictionaries. See codegen's LuaDict handling.
+    /// True when the type derives `LuaDict`. Two shapes qualify:
+    /// - a single record constructor, laid out as a Lua table keyed by field
+    ///   name (`{width = …, height = …}`) instead of a positional array; or
+    /// - an all-nullary sum type (every constructor has zero fields), whose
+    ///   runtime value at the Lua boundary is a *string* — the constructor's
+    ///   `external_name` tag when present, its name otherwise — instead of the
+    ///   usual positional integer.
+    ///
+    /// Both exist for interop with Lua APIs that speak dictionaries / string
+    /// enums. See codegen's LuaDict handling.
     pub is_luadict: bool,
 }
 
 #[derive(Debug, Clone)]
 pub struct TConstructor {
     pub name: String,
+    /// The `as "tag"` constructor rename, threaded through from the AST. Used
+    /// by a derived JSON codec and, for a LuaDict all-nullary sum type, as the
+    /// constructor's runtime string value at the Lua boundary.
+    pub external_name: Option<String>,
     pub fields: TConFields,
+}
+
+impl TConstructor {
+    /// The tag this constructor presents at external boundaries (JSON tag, and
+    /// the runtime string of a LuaDict enum): the `as "tag"` rename when
+    /// present, the constructor name otherwise.
+    pub fn effective_tag(&self) -> &str {
+        self.external_name.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone)]

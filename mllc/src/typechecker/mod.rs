@@ -1789,6 +1789,7 @@ impl Checker {
                     // one, the plain name otherwise. Every reference site
                     // resolves the same way, so tags stay consistent.
                     name: self.resolve_con_name(&c.name).to_string(),
+                    external_name: c.external_name.clone(),
                     fields: if c.gadt_type.is_some() {
                         // GADT: field types come from the registered ConInfo
                         let con_info = self.constructors.get(self.resolve_con_name(&c.name)).unwrap();
@@ -2051,19 +2052,26 @@ impl Checker {
                     }
                 }
                 // A constructor rename (`Con field-types as "name"`) gives
-                // the constructor an external TAG — the string a derived
-                // ToJSON/FromJSON codec writes and reads to tell the
-                // constructors of a sum type apart. Nothing else names
-                // constructors externally: at the Lua boundary a constructor
-                // is a positional integer tag, not a name, so LuaDict does
-                // not apply here. Without a derived JSON codec the rename
-                // would be silently meaningless. Reject it instead.
-                if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON") {
+                // the constructor an external TAG. Two derivings give that tag
+                // a meaning: a ToJSON/FromJSON codec writes and reads it to
+                // tell the constructors of a sum type apart at the JSON
+                // boundary; and `deriving (LuaDict)` on an all-nullary sum type
+                // makes the tag the constructor's runtime string at the Lua
+                // boundary. Absent both, nothing names the constructor
+                // externally (an ADT with fields is a positional integer tag,
+                // not a name), so the rename would be silently meaningless —
+                // reject it instead.
+                let is_luadict_enum = deriving.iter().any(|c| c == "LuaDict")
+                    && constructors.iter().all(|c| match &c.fields {
+                        ConstructorFields::Positional(fs) => fs.is_empty(),
+                        ConstructorFields::Named(fs) => fs.is_empty(),
+                    });
+                if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON") && !is_luadict_enum {
                     for con in constructors {
                         if let Some(ext) = &con.external_name {
                             self.push_error_ctx(
                                 DiagnosticKind::Other(format!(
-                                    "Constructor '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives neither ToJSON nor FromJSON: the rename only changes the constructor's external tag — the string a derived JSON codec uses to tell the constructors apart — and without one of those derivings there is nothing the rename could apply to\nnote: `as` constructor renaming is a mata-ll extension with no GHC equivalent, and it never affects the Lua side (at the Lua boundary a constructor is a positional integer tag, not a name); add `deriving (ToJSON)` or `deriving (FromJSON)`, or drop the rename.",
+                                    "Constructor '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives neither ToJSON nor FromJSON, nor is it an all-nullary type deriving LuaDict: the rename only changes the constructor's external tag — the string a derived JSON codec, or a LuaDict string-enum, uses to tell the constructors apart — and without one of those there is nothing the rename could apply to\nnote: `as` constructor renaming is a mata-ll extension with no GHC equivalent; on a type with fields it never affects the Lua side (at the Lua boundary such a constructor is a positional integer tag, not a name). Add `deriving (ToJSON)` or `deriving (FromJSON)`, or make an all-nullary sum type `deriving (LuaDict)` so its constructors become Lua strings, or drop the rename.",
                                     con.name, name, ext, name,
                                 )),
                                 format!("data {}", name),

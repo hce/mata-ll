@@ -52,10 +52,49 @@ impl Checker {
             );
         };
 
+        // Shape 1: an all-nullary sum type (every constructor has zero fields).
+        // Its runtime value at the Lua boundary is the constructor's string tag
+        // — the `as "tag"` rename when present, the constructor name otherwise —
+        // rather than a positional integer, so a Lua host reads and writes it as
+        // a plain string. A single nullary constructor (`data T = T`) is the
+        // degenerate one-variant case. Ordering (`Ord`/`Enum`/`Bounded`) still
+        // follows declaration order; the tag is boundary-only.
+        let all_nullary = constructors.iter().all(|c| match &c.fields {
+            ConstructorFields::Positional(fs) => fs.is_empty(),
+            ConstructorFields::Named(fs) => fs.is_empty(),
+        });
+        if all_nullary {
+            // The effective tags become the wire values, so — exactly like the
+            // record field keys below — each must be a non-empty string and no
+            // two may collide, else two constructors would be indistinguishable
+            // at the Lua boundary.
+            let mut seen: HashMap<&str, &str> = HashMap::new();
+            for con in constructors {
+                let tag = con.effective_tag();
+                if tag.is_empty() {
+                    reject(self,
+                        format!("constructor '{}' renames its Lua tag to the empty string", con.name),
+                        "the constructor becomes a string at the Lua boundary, and an empty tag names nothing a Lua host could tell apart; give `as` a non-empty string.");
+                    return;
+                }
+                if let Some(prev) = seen.insert(tag, &con.name) {
+                    reject(self,
+                        format!("constructors '{}' and '{}' both map to the Lua tag \"{}\"", prev, con.name, tag),
+                        "each constructor becomes one string at the Lua boundary, so two sharing a tag would be indistinguishable there; rename one with `as \"otherTag\"`.");
+                    return;
+                }
+            }
+            self.luadict_types.insert(type_name.to_string());
+            return;
+        }
+
+        // Shape 2: a single record constructor laid out as a name-keyed table.
+        // Reaching here means the type is neither all-nullary nor a single
+        // constructor: it has multiple constructors and at least one has fields.
         if constructors.len() != 1 {
             reject(self,
-                format!("LuaDict needs exactly one constructor, but '{}' has {}", type_name, constructors.len()),
-                "the generated Lua table has no tag to tell variants apart, so a name-keyed dictionary can only represent a single-constructor record.");
+                format!("LuaDict needs one constructor (a record) or an all-nullary sum type, but '{}' has multiple constructors and at least one has fields", type_name),
+                "a name-keyed Lua table needs a single record constructor to key by field name; a string enum needs every constructor to be nullary — a multi-constructor type with fields has no single Lua representation.");
             return;
         }
 

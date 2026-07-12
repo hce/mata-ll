@@ -38,6 +38,14 @@ struct CodeGen {
     /// field_ty)]). Used to build type-directed decoders for values that cross
     /// the Lua FFI boundary (see ffi_decode_desc).
     luadict_type_fields: std::collections::HashMap<String, (Vec<String>, Vec<(String, Ty)>)>,
+    /// LuaDict *enum* constructors (an all-nullary sum type deriving LuaDict):
+    /// TIR constructor name -> the Lua string tag it becomes at runtime (the
+    /// `as "tag"` rename when present, the constructor name otherwise). Presence
+    /// here means "this nullary constructor is a string, not a positional
+    /// integer" — construction emits the string and pattern matching compares
+    /// against it. Ordering stays declaration-order via the derived Ord/Enum,
+    /// which pattern-match on the constructor, not the string.
+    luadict_enum_tag: std::collections::HashMap<String, String>,
     /// Function table: maps sanitized function names to __mll_fn[N] slots.
     /// Used to pack all forward-declared functions into a single table,
     /// avoiding Lua's 200-local-variable limit.
@@ -78,6 +86,7 @@ impl CodeGen {
             luadict_con_fields: std::collections::HashMap::new(),
             luadict_field_key: std::collections::HashMap::new(),
             luadict_type_fields: std::collections::HashMap::new(),
+            luadict_enum_tag: std::collections::HashMap::new(),
             fn_table: std::collections::HashMap::new(),
             local_vars: std::collections::HashSet::new(),
             local_count: 0,
@@ -193,6 +202,7 @@ impl CodeGen {
         sub.luadict_con_fields = self.luadict_con_fields.clone();
         sub.luadict_field_key = self.luadict_field_key.clone();
         sub.luadict_type_fields = self.luadict_type_fields.clone();
+        sub.luadict_enum_tag = self.luadict_enum_tag.clone();
         sub.top_level_names = self.top_level_names.clone();
         sub.local_vars = self.local_vars.clone();
         sub
@@ -232,11 +242,24 @@ impl CodeGen {
                 }
             self.constructors.push((con.name.clone(), def.name.clone(), i + 1, def.constructors.len(), is_enum));
         }
-        // LuaDict types (validated by the typechecker to be single-constructor
-        // records) lay their constructor out as a name-keyed table. Record the
-        // ordered field names for pattern matching, and each field's key for the
-        // accessor / record-update sites.
-        if def.is_luadict {
+        // A LuaDict type is one of two shapes (validated by the typechecker's
+        // derive_luadict): an all-field-less sum type laid out as Lua strings,
+        // or a single record constructor laid out as a name-keyed table.
+        // Distinguish them the same way the typechecker does — by whether every
+        // constructor is field-less — so construction and pattern matching
+        // agree, including on the degenerate empty-record case.
+        let all_field_less = def.constructors.iter().all(|c| match &c.fields {
+            TConFields::Positional(fs) => fs.is_empty(),
+            TConFields::Named(fs) => fs.is_empty(),
+        });
+        if def.is_luadict && all_field_less {
+            // LuaDict all-nullary sum type: each constructor is a Lua string at
+            // runtime (its `as "tag"` rename, or its name). Record the tag so
+            // construction and pattern matching agree on the string.
+            for con in &def.constructors {
+                self.luadict_enum_tag.insert(con.name.clone(), con.effective_tag().to_string());
+            }
+        } else if def.is_luadict {
             if let Some(con) = def.constructors.first()
                 && let TConFields::Named(fields) = &con.fields {
                     // Every map stores the *effective* Lua key — the `as "key"`
@@ -760,7 +783,10 @@ impl CodeGen {
             let decl = self.var_decl(&sanitize_name(&con.name));
 
             if field_count == 0 {
-                if is_enum {
+                if let Some(str_tag) = self.luadict_enum_tag.get(&con.name) {
+                    // LuaDict enum: the constructor *is* its Lua string tag.
+                    self.emit_line(&format!("{}{}", decl, lua_quoted_string(str_tag)));
+                } else if is_enum {
                     self.emit_line(&format!("{}{}", decl, tag));
                 } else {
                     self.emit_line(&format!("{}{{{}}}", decl, tag));
@@ -1461,6 +1487,11 @@ impl CodeGen {
                     for arg in args {
                         self.collect_pattern_conditions(scrutinee, arg, conditions, bindings);
                     }
+                } else if let Some(str_tag) = self.luadict_enum_tag.get(name) {
+                    // LuaDict enum: the value is the constructor's Lua string,
+                    // so match by string equality (declaration-order semantics
+                    // live in the derived Ord/Enum, not the wire value).
+                    conditions.push(format!("{} == {}", scrutinee, lua_quoted_string(str_tag)));
                 } else if let Some((tag, total, is_enum)) = self.constructor_info(name) {
                     if is_enum {
                         conditions.push(format!("{} == {}", scrutinee, tag));
@@ -3777,6 +3808,25 @@ fn lua_bare_key_ok(name: &str) -> bool {
 }
 
 /// A bracketed Lua string-literal table key: `["na\"me"]`. Always valid.
+/// A Lua double-quoted string literal for `s`, with the escaping used
+/// throughout codegen (mirrors `gen_literal`'s `TLiteral::Str`).
+fn lua_quoted_string(s: &str) -> String {
+    let mut out = String::from("\"");
+    for c in s.chars() {
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\0' => out.push_str("\\0"),
+            _ => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
 fn lua_key_string(name: &str) -> String {
     let mut s = String::from("[\"");
     for c in name.chars() {

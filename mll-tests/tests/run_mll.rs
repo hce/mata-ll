@@ -1126,6 +1126,113 @@ main = pure ()
 }
 
 #[test]
+fn luadict_enum_string_boundary_roundtrips() {
+    // `deriving (LuaDict)` on an all-nullary sum type makes each constructor a
+    // Lua STRING at the boundary: the `as "tag"` rename when present, the
+    // constructor name otherwise. The string must cross out AND back in, and
+    // Ord/fromEnum must still follow DECLARATION ORDER (the tag is boundary-only).
+    let lib = Path::new("../lib");
+    let source = r#"
+data Perm = Anonymous as "anonymous" | User | Admin
+    deriving (Eq, Ord, Enum, Bounded, Show, LuaDict)
+
+export mkFrom :: Integer -> Perm
+mkFrom n = toEnum n
+
+export isAnon :: Perm -> Bool
+isAnon Anonymous = True
+isAnon _ = False
+
+export rankOf :: Perm -> Integer
+rankOf p = fromEnum p
+
+export below :: Perm -> Perm -> Bool
+below a b = a < b
+
+main :: IO ()
+main = pure ()
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let module: mlua::Table = lua.load(&lua_code)
+        .set_name("luadict_enum")
+        .call("luadict_enum")
+        .expect("should load module");
+
+    // (a)+(b) Out at the boundary: renamed -> its `as` string; unrenamed -> name.
+    let mk: mlua::Function = module.get("mkFrom").unwrap();
+    let anon: String = mk.call(0).expect("mkFrom 0");
+    assert_eq!(anon, "anonymous", "renamed nullary constructor's `as` string");
+    let user: String = mk.call(1).expect("mkFrom 1");
+    assert_eq!(user, "User", "unrenamed nullary constructor uses its own name");
+    let admin: String = mk.call(2).expect("mkFrom 2");
+    assert_eq!(admin, "Admin");
+
+    // Round-trip BACK in: a raw Lua string is accepted as the constructor.
+    let is_anon: mlua::Function = module.get("isAnon").unwrap();
+    let a1: bool = is_anon.call("anonymous").expect("isAnon anonymous");
+    assert!(a1, "the `as` string round-trips back to Anonymous");
+    let a2: bool = is_anon.call("User").expect("isAnon User");
+    assert!(!a2);
+
+    // (d) Ord/fromEnum follow declaration order, not the string tag.
+    let rank: mlua::Function = module.get("rankOf").unwrap();
+    let r0: i64 = rank.call("anonymous").expect("rankOf anonymous");
+    assert_eq!(r0, 0, "fromEnum Anonymous == 0 (declaration order)");
+    let r2: i64 = rank.call("Admin").expect("rankOf Admin");
+    assert_eq!(r2, 2, "fromEnum Admin == 2 (declaration order)");
+    let below: mlua::Function = module.get("below").unwrap();
+    let lt: bool = below.call(("anonymous", "User")).expect("below anon user");
+    assert!(lt, "Anonymous < User by declaration order despite \"anonymous\" > \"User\"");
+    let gt: bool = below.call(("Admin", "User")).expect("below admin user");
+    assert!(!gt, "Admin < User is false by declaration order");
+}
+
+#[test]
+fn luadict_enum_duplicate_tag_rejected() {
+    // (c) Two constructors that map to the same Lua string are rejected: they
+    // would be indistinguishable at the boundary. Here an unrenamed `User`
+    // collides with a renamed `as "User"`.
+    let source = r#"
+data D = User | Other as "User" deriving (LuaDict)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'LuaDict' for 'D'")
+                    && msg.contains("both map to the Lua tag \"User\""),
+                "expected a duplicate-tag error, got: {}", msg);
+        }
+        Ok(_) => panic!("two LuaDict constructors sharing a tag must fail"),
+    }
+}
+
+#[test]
+fn luadict_enum_empty_tag_rejected() {
+    // (c) An empty `as` tag names nothing a Lua host could tell apart.
+    let source = r#"
+data D = A as "" | B deriving (LuaDict)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'LuaDict' for 'D'")
+                    && msg.contains("empty string"),
+                "expected an empty-tag error, got: {}", msg);
+        }
+        Ok(_) => panic!("an empty LuaDict enum tag must fail"),
+    }
+}
+
+#[test]
 fn decode_json_without_instance_reported() {
     // Using decodeJSON at a type with no FromJSON instance must fail with a
     // missing-instance error at compile time, not produce broken Lua.
