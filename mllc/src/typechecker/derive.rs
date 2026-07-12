@@ -1490,10 +1490,15 @@ impl Checker {
     }
 
     /// Decode positional arguments, argument i taken from `elem_exprs[i]`,
-    /// finishing with `Right (Con _f0 …)`.
+    /// finishing with `Right (Con _f0 …)`. `json_name` is the name runtime
+    /// decode errors use for the constructor — the effective TAG in a tagged
+    /// type (that is what the document contains), the source name in an
+    /// untagged one (where the two never differ: a rename on an untagged
+    /// constructor is rejected). Derive-time errors keep the source name.
     pub(super) fn fromjson_positional_chain(
         &self,
         con_name: &str,
+        json_name: &str,
         field_tys: &[Ty],
         elem_exprs: Vec<TExpr>,
         estr: &Ty,
@@ -1508,7 +1513,7 @@ impl Checker {
                 "jArgWith",
                 vec![
                     dec,
-                    Self::jx_str(con_name),
+                    Self::jx_str(json_name),
                     Self::jx_int((i + 1) as i64),
                     elem_exprs[i].clone(),
                 ],
@@ -1544,7 +1549,7 @@ impl Checker {
                 );
                 let inner = if field_tys.len() == 1 {
                     self.fromjson_positional_chain(
-                        &con.name, field_tys,
+                        &con.name, con.effective_tag(), field_tys,
                         vec![Self::jx_var("_c", json.clone())],
                         estr, result_ty,
                     )?
@@ -1557,11 +1562,11 @@ impl Checker {
                             json.clone(),
                         )
                     }).collect();
-                    let chain = self.fromjson_positional_chain(&con.name, field_tys, elems, estr, result_ty)?;
+                    let chain = self.fromjson_positional_chain(&con.name, con.effective_tag(), field_tys, elems, estr, result_ty)?;
                     let arrn = Self::jx_call(
                         "jExpectArrN",
                         vec![
-                            Self::jx_str(&con.name),
+                            Self::jx_str(con.effective_tag()),
                             Self::jx_int(field_tys.len() as i64),
                             Self::jx_var("_c", json.clone()),
                         ],
@@ -1581,6 +1586,17 @@ impl Checker {
     /// no key may be "tag". This is the JSON-side twin of the LuaDict key
     /// validation — a type that derives only a JSON codec (no LuaDict) still
     /// needs it, because the keys become the keys of one JSON object.
+    ///
+    /// Also validates the effective TAGS (the constructor-level `as "name"`
+    /// rename when present, the constructor name otherwise): in a tagged
+    /// type each must be non-empty and no two constructors may share one —
+    /// the tag is the only thing the decoder has to tell constructors apart,
+    /// so a shared tag would make every decode of it ambiguous (and two
+    /// values encode identically). This also catches a rename colliding with
+    /// another constructor's unrenamed source name. In an UNTAGGED type
+    /// (single non-nullary constructor) no tag ever appears in the JSON, so
+    /// a rename there is rejected rather than silently ignored.
+    ///
     /// `class` names the derive being rejected in the message. Returns false
     /// after reporting when validation fails.
     pub(super) fn validate_json_keys(
@@ -1599,6 +1615,33 @@ impl Checker {
                 format!("data {}", type_name),
             );
         };
+        if tagged {
+            let mut seen_tags: HashMap<&str, &str> = HashMap::new();
+            for con in constructors {
+                let tag = con.effective_tag();
+                if tag.is_empty() {
+                    reject(self,
+                        format!("constructor '{}' renames its JSON tag to the empty string", con.name),
+                        "the tag is the string the codec writes and reads to tell the constructors apart, and an empty one identifies nothing; give `as` a non-empty string.");
+                    return false;
+                }
+                if let Some(prev) = seen_tags.insert(tag, &con.name) {
+                    reject(self,
+                        format!("constructors '{}' and '{}' both map to the JSON tag \"{}\"", prev, con.name, tag),
+                        "the tag is the only thing the decoder has to tell the constructors apart, so two constructors sharing one would encode identically and decode ambiguously; rename one with `as \"otherName\"`.");
+                    return false;
+                }
+            }
+        } else {
+            for con in constructors {
+                if let Some(ext) = &con.external_name {
+                    reject(self,
+                        format!("constructor '{}' is renamed with `as \"{}\"`, but a single-constructor type encodes untagged", con.name, ext),
+                        "a lone non-nullary constructor encodes as its bare contents — an object of its record fields, or its positional argument(s) — with no tag anywhere in the JSON, so there is nothing the rename could apply to; drop the rename (only the constructors of a multi-constructor type, or a lone nullary constructor, carry a tag).");
+                    return false;
+                }
+            }
+        }
         for con in constructors {
             let ConstructorFields::Named(fields) = &con.fields else { continue };
             let mut seen: HashMap<&str, &str> = HashMap::new();
@@ -1719,8 +1762,11 @@ impl Checker {
         }).collect();
 
         let body_inner: TExpr = if tagged {
-            // "'A', 'B' or 'C'" for the unknown-tag message.
-            let names: Vec<String> = constructors.iter().map(|c| format!("'{}'", c.name)).collect();
+            // "'A', 'B' or 'C'" for the unknown-tag message — the effective
+            // tags (the `as "name"` rename when present): a runtime decode
+            // error names what the document must contain, and the document
+            // carries the external tag, not the source constructor name.
+            let names: Vec<String> = constructors.iter().map(|c| format!("'{}'", c.effective_tag())).collect();
             let expected = match names.len() {
                 1 => names[0].clone(),
                 _ => format!("{} or {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
@@ -1750,16 +1796,17 @@ impl Checker {
             for (con, ftys) in constructors.iter().zip(&con_field_tys).rev() {
                 let then_branch = if ftys.is_empty() {
                     // TIR construction uses the registered key; the compared
-                    // JSON tag strings keep the source name.
+                    // JSON tag strings are the effective tags (the `as
+                    // "name"` rename when present, the source name otherwise).
                     Self::jx_ok_con(self.resolve_con_name(&con.name), &[], &result_ty, &estr)
                 } else {
-                    Self::jx_call("jTagNeedsObject", vec![Self::jx_str(&con.name)], estr.clone())
+                    Self::jx_call("jTagNeedsObject", vec![Self::jx_str(con.effective_tag())], estr.clone())
                 };
                 str_chain = TExpr::new(TExprKind::If {
                     cond: Box::new(TExpr::new(TExprKind::InfixApp {
                         op: "==".into(),
                         lhs: Box::new(Self::jx_var("_s", str_ty.clone())),
-                        rhs: Box::new(Self::jx_str(&con.name)),
+                        rhs: Box::new(Self::jx_str(con.effective_tag())),
                     }, bool_ty.clone())),
                     then_branch: Box::new(then_branch),
                     else_branch: Box::new(str_chain),
@@ -1777,7 +1824,7 @@ impl Checker {
                     cond: Box::new(TExpr::new(TExprKind::InfixApp {
                         op: "==".into(),
                         lhs: Box::new(Self::jx_var("_tag", str_ty.clone())),
-                        rhs: Box::new(Self::jx_str(&con.name)),
+                        rhs: Box::new(Self::jx_str(con.effective_tag())),
                     }, bool_ty.clone())),
                     then_branch: Box::new(con_body),
                     else_branch: Box::new(tag_chain),
@@ -1836,7 +1883,7 @@ impl Checker {
                 }
                 _ if ftys.len() == 1 => {
                     self.fromjson_positional_chain(
-                        &con.name, ftys,
+                        &con.name, &con.name, ftys,
                         vec![Self::jx_var("_j", json.clone())],
                         &estr, &result_ty,
                     )
@@ -1850,7 +1897,7 @@ impl Checker {
                             json.clone(),
                         )
                     }).collect();
-                    self.fromjson_positional_chain(&con.name, ftys, elems, &estr, &result_ty)
+                    self.fromjson_positional_chain(&con.name, &con.name, ftys, elems, &estr, &result_ty)
                         .map(|chain| {
                             let arrn = Self::jx_call(
                                 "jExpectArrN",
@@ -2050,6 +2097,11 @@ impl Checker {
     ///   tagged: a lone nullary constructor is tagged by definition);
     /// - positional arguments → the encoded argument itself (one) or an
     ///   array (several), under `"contents"` in a tagged type.
+    ///
+    /// Every emitted tag string is the constructor's effective tag (the
+    /// `as "name"` rename when present, the source name otherwise) — the
+    /// same string the derived decoder dispatches on. Derive-time error
+    /// messages keep the source name.
     pub(super) fn tojson_con_body(
         &self,
         con: &Constructor,
@@ -2060,11 +2112,11 @@ impl Checker {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
                 let mut pairs = self.tojson_named_pairs(&con.name, fields, field_tys)?;
                 if tagged {
-                    pairs.insert(0, Self::jx_pair("tag", Self::jx_jstr(&con.name)));
+                    pairs.insert(0, Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())));
                 }
                 Ok(Self::jx_obj(pairs))
             }
-            _ if field_tys.is_empty() => Ok(Self::jx_jstr(&con.name)),
+            _ if field_tys.is_empty() => Ok(Self::jx_jstr(con.effective_tag())),
             _ => {
                 let args: Vec<TExpr> = field_tys.iter().enumerate().map(|(i, fty)| {
                     self.tojson_arg(i, fty).map_err(|e| Self::fromjson_field_err(
@@ -2077,7 +2129,7 @@ impl Checker {
                 };
                 if tagged {
                     Ok(Self::jx_obj(vec![
-                        Self::jx_pair("tag", Self::jx_jstr(&con.name)),
+                        Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())),
                         Self::jx_pair("contents", contents),
                     ]))
                 } else {

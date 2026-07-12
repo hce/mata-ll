@@ -273,6 +273,7 @@ impl Parser {
                     let ty = self.parse_type()?;
                     constructors.push(Constructor {
                         name: con_name,
+                        external_name: None,
                         fields: ConstructorFields::Positional(vec![]),
                         gadt_type: Some(ty),
                         existential_vars: vec![],
@@ -385,8 +386,10 @@ impl Parser {
             }
             self.skip_newlines_and_indent();
             self.expect(&Token::RightBrace)?;
+            let external_name = self.parse_constructor_external_name(&name)?;
             return Ok(Constructor {
                 name,
+                external_name,
                 fields: ConstructorFields::Named(fields),
                 gadt_type: None,
                 existential_vars,
@@ -398,19 +401,49 @@ impl Parser {
             self.current_indent = save_indent;
         }
 
-        // Positional fields
+        // Positional fields. A bare `as` after the constructor name or a
+        // field type can only start the constructor's external-name rename
+        // (`Con T1 T2 as "name"`), so field-type parsing stops there — this
+        // is what makes `Foo as "foo"` the rename instead of two phantom
+        // field types. A type VARIABLE named `as` is still fine anywhere it
+        // is not a whole bare field: `MkF (Maybe as)` parses as before.
         let mut fields = Vec::new();
-        while self.is_type_atom_start() {
+        while self.is_type_atom_start() && !matches!(self.peek(), Token::Ident(s) if s == "as") {
             fields.push(self.parse_type_atom()?);
         }
 
+        let external_name = self.parse_constructor_external_name(&name)?;
         Ok(Constructor {
             name,
+            external_name,
             fields: ConstructorFields::Positional(fields),
             gadt_type: None,
             existential_vars,
             existential_constraints,
         })
+    }
+
+    /// Parse the optional trailing external-name rename of a data
+    /// constructor: `Con field-types as "name"` (after the field types /
+    /// the record braces, before `|`, `deriving`, or the end of the
+    /// declaration). Mirrors the field-level `as "key"` rename: `as` is not
+    /// a reserved word, so check for Ident("as"), and anything but a string
+    /// literal after it is a located error rather than a silent misparse.
+    fn parse_constructor_external_name(&mut self, con_name: &str) -> PResult<Option<String>> {
+        if !matches!(self.peek(), Token::Ident(s) if s == "as") {
+            return Ok(None);
+        }
+        self.advance();
+        match self.peek().clone() {
+            Token::StrLit(s) => {
+                self.advance();
+                Ok(Some(s))
+            }
+            other => Err(self.err_here(format!(
+                "Expected a string literal after 'as' in constructor '{}' (e.g. `{} as \"name\"`), found {:?}",
+                con_name, con_name, other
+            ))),
+        }
     }
 
     /// Parse optional `deriving (Show, Eq)` clause after a data declaration.

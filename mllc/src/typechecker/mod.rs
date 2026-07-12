@@ -2050,6 +2050,27 @@ impl Checker {
                         }
                     }
                 }
+                // A constructor rename (`Con field-types as "name"`) gives
+                // the constructor an external TAG — the string a derived
+                // ToJSON/FromJSON codec writes and reads to tell the
+                // constructors of a sum type apart. Nothing else names
+                // constructors externally: at the Lua boundary a constructor
+                // is a positional integer tag, not a name, so LuaDict does
+                // not apply here. Without a derived JSON codec the rename
+                // would be silently meaningless. Reject it instead.
+                if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON") {
+                    for con in constructors {
+                        if let Some(ext) = &con.external_name {
+                            self.push_error_ctx(
+                                DiagnosticKind::Other(format!(
+                                    "Constructor '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives neither ToJSON nor FromJSON: the rename only changes the constructor's external tag — the string a derived JSON codec uses to tell the constructors apart — and without one of those derivings there is nothing the rename could apply to\nnote: `as` constructor renaming is a mata-ll extension with no GHC equivalent, and it never affects the Lua side (at the Lua boundary a constructor is a positional integer tag, not a name); add `deriving (ToJSON)` or `deriving (FromJSON)`, or drop the rename.",
+                                    con.name, name, ext, name,
+                                )),
+                                format!("data {}", name),
+                            );
+                        }
+                    }
+                }
                 for class in deriving {
                     let derived = self.derive_instance(class, name, type_vars, constructors);
                     instance_fns.extend(derived);

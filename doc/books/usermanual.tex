@@ -933,10 +933,17 @@ The compiler enforces two rules on renames:
         annotation is rejected rather than silently ignored.
 \end{itemize}
 
+Sum-type \emph{constructors} have a parallel rename for their JSON
+tag --- \texttt{Con field-types as "name"} --- described with the JSON
+encoding conventions (Section~\ref{sec:conasrename}); it has no
+LuaDict counterpart, because a constructor is a positional integer
+tag at the Lua boundary, not a name.
+
 \begin{note}
-\texttt{as} field renaming is a MATA-LL extension with no GHC
-equivalent.  In GHC, \texttt{as} is only a keyword in import lists;
-here it is additionally recognized inside record declarations.
+\texttt{as} renaming is a MATA-LL extension with no GHC equivalent.
+In GHC, \texttt{as} is only a keyword in import lists; here it is
+additionally recognized inside record declarations (after a field
+name) and data declarations (after a constructor's field types).
 \end{note}
 
 \subsection{JSON}
@@ -1060,6 +1067,54 @@ data JTree = JLeaf Integer | JNode [JTree]
 -- encodeToJSON (JNode [JLeaf 1]) ==
 -- {"tag":"JNode","contents":[{"tag":"JLeaf","contents":1}]}
 \end{lstlisting}
+
+\subsubsection{Renaming Constructor Tags with \texttt{as}}
+\label{sec:conasrename}
+
+By default the tag is the constructor's source name.  Like a record
+field (Section~\ref{sec:asrename}), a constructor can be renamed with
+\texttt{as}: \texttt{Con field-types as "name"} --- after the field
+types (or the record braces), before the next \texttt{|} or
+\texttt{deriving} --- sets the constructor's \emph{external tag}, the
+string the derived codec writes and reads to tell the constructors
+apart.  A nullary constructor encodes as the bare external string, a
+fielded one carries it as the \texttt{"tag"} value:
+
+\begin{lstlisting}
+data Suit = Clubs as "clubs" | Spades as "spades"
+    deriving (Show, Eq, ToJSON, FromJSON)
+
+data Outcome = Ok Integer as "ok" | Err String as "error"
+    deriving (Show, Eq, ToJSON, FromJSON)
+
+-- encodeToJSON Spades    == "spades"
+-- encodeToJSON (Err "x") == {"tag":"error","contents":"x"}
+-- decodeJSON reads the external tags back; a constructor
+-- without `as` keeps its source name as before.
+\end{lstlisting}
+
+The rename changes only the JSON tag.  \texttt{show} still prints the
+source constructor name (\texttt{show Spades == "Spades"} ---
+\texttt{Show} is for debugging, as in Haskell), and construction,
+pattern matching, and the runtime representation are untouched.
+Unlike the field-level rename, a constructor rename has no Lua-side
+counterpart: at the Lua boundary a constructor is a positional
+integer tag (an enum value is a plain integer, a fielded variant a
+positional table), not a name, so there is no key the rename could
+change --- the JSON tag is the only surface where constructors are
+named externally.
+
+The compiler enforces the analogous rules.  Effective tags (the
+rename when present, the source name otherwise) must be unique and
+non-empty within one type: the tag is the only thing the decoder has
+to tell the constructors apart, so two constructors sharing one ---
+including a rename that collides with another constructor's unrenamed
+name --- would encode identically and decode ambiguously, and are
+rejected.  The rename requires \texttt{deriving (ToJSON)} or
+\texttt{deriving (FromJSON)} (nothing else names constructors
+externally), and it is rejected on the constructor of an
+\emph{untagged} type --- a single non-nullary constructor, whose JSON
+carries no tag anywhere.
 
 \subsubsection{Decode Errors}
 

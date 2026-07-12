@@ -342,10 +342,18 @@ pub struct Constraint {
     pub type_arg: Type,
 }
 
-/// Data constructor definition.
+/// Data constructor definition. `external_name` is the optional rename from
+/// `Con field-types as "name"` — the per-constructor twin of the field-level
+/// `as "key"` rename (see `RecordField`). It sets the constructor's external
+/// TAG: the string a derived ToJSON/FromJSON codec writes and reads to tell
+/// the constructors of a sum type apart. Nothing else names constructors
+/// externally — at the Lua boundary a constructor is a positional integer
+/// tag, not a name — so the rename affects only the JSON codec. Show,
+/// construction, pattern matching and the runtime tag keep `name`.
 #[derive(Debug, Clone)]
 pub struct Constructor {
     pub name: String,
+    pub external_name: Option<String>,
     pub fields: ConstructorFields,
     /// GADT constructor type signature, e.g. `Integer -> Expr Integer`.
     /// When present, field types and result type are extracted from this
@@ -385,5 +393,14 @@ impl RecordField {
     /// otherwise.
     pub fn effective_key(&self) -> &str {
         self.external_key.as_deref().unwrap_or(&self.name)
+    }
+}
+
+impl Constructor {
+    /// The tag this constructor presents at the JSON boundary: the
+    /// `as "name"` rename when present, the constructor name otherwise —
+    /// the constructor-level twin of `RecordField::effective_key`.
+    pub fn effective_tag(&self) -> &str {
+        self.external_name.as_deref().unwrap_or(&self.name)
     }
 }

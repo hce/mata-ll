@@ -487,6 +487,7 @@ mll_lib_test!(lib_json, "lib_json.mll");
 mll_lib_test!(json_codec, "json_codec.mll");
 mll_lib_test!(derive_fromjson, "derive_fromjson.mll");
 mll_lib_test!(derive_tojson, "derive_tojson.mll");
+mll_lib_test!(constructor_as_rename, "constructor_as_rename.mll");
 mll_lib_test!(lib_regex, "lib_regex.mll");
 mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
@@ -889,6 +890,181 @@ main = do
     let lua = mlua::Lua::new();
     lua.load(&lua_code).set_name("tag_renamed_away").exec()
         .expect("every in-program assertion should pass");
+}
+
+#[test]
+fn constructor_as_duplicate_tags_rejected() {
+    // Two constructors mapping to the same effective JSON tag would encode
+    // identically and make every decode of that tag ambiguous.
+    let lib = Path::new("../lib");
+    for class in ["ToJSON", "FromJSON"] {
+        let source = format!(r#"
+import JSON
+
+data D = A as "x" | B as "x"
+    deriving ({})
+
+main :: IO ()
+main = pure ()
+"#, class);
+        match mllc::compile(&source, Path::new("."), &[lib]) {
+            Err(e) => {
+                let msg = format!("{}", e);
+                assert!(msg.contains(&format!("Cannot derive '{}' for 'D'", class))
+                        && msg.contains("both map to the JSON tag \"x\""),
+                    "expected a duplicate JSON tag error for {}, got: {}", class, msg);
+            }
+            Ok(_) => panic!("duplicate effective JSON tags must fail deriving ({})", class),
+        }
+    }
+}
+
+#[test]
+fn constructor_as_colliding_with_source_name_rejected() {
+    // A rename may also collide with another constructor's UNRENAMED source
+    // name — the effective-tag check catches that the same way.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data D = A as "B" | B
+    deriving (FromJSON)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'FromJSON' for 'D'")
+                    && msg.contains("both map to the JSON tag \"B\""),
+                "expected a tag collision with the unrenamed constructor, got: {}", msg);
+        }
+        Ok(_) => panic!("a rename colliding with another constructor's source name must fail"),
+    }
+}
+
+#[test]
+fn constructor_as_empty_tag_rejected() {
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data D = A as "" | B
+    deriving (ToJSON)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'ToJSON' for 'D'") && msg.contains("empty string"),
+                "expected an empty-tag error, got: {}", msg);
+        }
+        Ok(_) => panic!("an empty `as` tag must fail"),
+    }
+}
+
+#[test]
+fn constructor_as_without_json_deriving_rejected() {
+    // The constructor rename only changes the JSON tag; a constructor is a
+    // positional integer tag at the Lua boundary, so without a derived JSON
+    // codec the rename has nothing to apply to and is rejected rather than
+    // silently ignored. (This also pins down the old misparse: before the
+    // constructor `as` grammar existed, `data Foo = Foo as "foo"` parsed
+    // `as` and `"foo"` as two phantom FIELD TYPES — it "compiled" and then
+    // failed bizarrely at every use of Foo. It must now parse as the rename
+    // and produce this meaningful error.)
+    let source = r#"
+data Foo = Foo as "foo"
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Constructor 'Foo' of 'Foo' is renamed with `as \"foo\"`")
+                    && msg.contains("derives neither ToJSON nor FromJSON"),
+                "expected the as-without-JSON-deriving error, got: {}", msg);
+            assert!(msg.contains("positional integer tag"),
+                "the note must explain why the Lua side has no name slot, got: {}", msg);
+            assert!(!msg.contains("expects 2 args"),
+                "the old phantom-field misparse is back: {}", msg);
+        }
+        Ok(_) => panic!("constructor `as` without ToJSON/FromJSON must fail (and never misparse as phantom fields)"),
+    }
+}
+
+#[test]
+fn constructor_as_misparse_regression_nullary_stays_nullary() {
+    // The other half of the misparse regression: with a JSON deriving the
+    // renamed constructor compiles AND is genuinely nullary — usable as a
+    // bare value. Under the old misparse Foo would have demanded 2 phantom
+    // arguments here.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data Foo = Foo as "foo"
+    deriving (ToJSON)
+
+main :: IO ()
+main = putStrLn (encodeToJSON Foo)
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+        .expect("a renamed nullary constructor must compile and be nullary")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("con_as_nullary").exec()
+        .expect("should run");
+}
+
+#[test]
+fn constructor_as_on_untagged_single_constructor_rejected() {
+    // A lone non-nullary constructor encodes untagged — no tag appears in
+    // the JSON — so a rename there could only be silently ignored.
+    let lib = Path::new("../lib");
+    let source = r#"
+import JSON
+
+data W = W Integer as "w"
+    deriving (ToJSON)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[lib]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot derive 'ToJSON' for 'W'")
+                    && msg.contains("encodes untagged"),
+                "expected the untagged-rename rejection, got: {}", msg);
+        }
+        Ok(_) => panic!("a rename on the constructor of an untagged type must fail"),
+    }
+}
+
+#[test]
+fn constructor_as_requires_string_literal() {
+    // `as` after a constructor's field types can only start the rename;
+    // anything but a string literal after it is a located parse error, not
+    // a silent misparse.
+    let source = r#"
+data Foo = Foo as 5
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Expected a string literal after 'as' in constructor 'Foo'"),
+                "expected the string-literal parse error, got: {}", msg);
+        }
+        Ok(_) => panic!("`as` followed by a non-string must be a parse error"),
+    }
 }
 
 #[test]

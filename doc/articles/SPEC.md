@@ -989,6 +989,31 @@ which offers a hand-written codec alongside the derived instances:
 `decodeJSON :: FromJSON a => String -> Either String a` parses one.
 Record fields map to JSON object keys.
 
+Both levels of the external representation can be renamed with `as`.
+A record field's key: `fieldName as "key" :: T` — one shared external
+name used as the LuaDict table key and the JSON object key. And a sum
+constructor's tag: `Con field-types as "name"` (after the field
+types, before the next `|` or `deriving`) sets the string the derived
+codec writes and reads to tell the constructors apart — nullary
+constructors encode as the bare external string, fielded ones carry
+it as the `"tag"` value:
+
+    data Outcome = Ok Integer as "ok" | Err String as "error"
+        deriving (Show, ToJSON, FromJSON)
+
+    -- encodeToJSON (Err "x") == {"tag":"error","contents":"x"}
+    -- show (Err "x") still prints the source name: Err "x"
+
+A constructor rename changes only the JSON tag: Show, construction,
+pattern matching, and the runtime representation keep the source
+name. It has no Lua-side counterpart — at the Lua boundary a
+constructor is a positional integer tag, not a name, so JSON is the
+only surface where constructors are named. Effective tags must be
+unique and non-empty within a type (the tag is all the decoder has to
+tell constructors apart), the rename requires a ToJSON or FromJSON
+deriving, and it is rejected on the constructor of an untagged type
+(a single non-nullary constructor), whose JSON carries no tag.
+
 # Export
 
 Functions can be exported to plain Lua via the `export` keyword:

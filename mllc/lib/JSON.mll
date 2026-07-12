@@ -250,6 +250,11 @@ jContext ctx (Left e) = Left ("while decoding " <> ctx <> ": " <> e)
 --   * a field renamed with `as "key"` uses "key" as its JSON object key
 --     in both directions (the same shared external name LuaDict uses as
 --     the Lua table key).
+--   * a constructor renamed with `Con field-types as "name"` uses "name"
+--     as its tag in both directions — the bare string of a nullary
+--     constructor and the "tag" value of a fielded one. Show and the
+--     runtime representation keep the source constructor name; the
+--     rename exists only at the JSON boundary.
 --   * unknown object keys are ignored on decode, as aeson does.
 --
 -- note: aeson encodes only ALL-nullary sum types as bare strings; the

@@ -405,6 +405,7 @@ impl Qual<'_> {
         };
         Constructor {
             name: c.name.clone(),
+            external_name: c.external_name.clone(),
             fields,
             gadt_type: c.gadt_type.as_ref().map(|t| self.ty(t)),
             existential_vars: c.existential_vars.clone(),
