@@ -1120,21 +1120,17 @@ Consequently, an argument the callee ignores is never forced by the call:
 This holds regardless of how "cheap" the discarded argument looks —
 `g (x + y)`, `g (h x)`, and `g (Box x)` all leave their argument
 suspended when `g` does not demand it. It also holds through function
-composition: `(g . h) (error "boom")` is `g (h (error "boom"))`, and a
-non-strict `g` leaves `h (error "boom")` unevaluated, so the composition
-does not force the bottom either.
-
-**Scope.** The contract governs *argument* positions — direct
-application and composition. Two positions are, by contrast, evaluated
-eagerly today: the *head of a cons cell* and the *elements of a list
-literal* (both are the same `:` node internally). So a bottom stored as
-a list element — `length [error "boom"]`, or `map g [error "boom"]` —
-is forced when the list is built, where a fully lazy language would not
-force it. This is a deliberate current limitation: mata-ll's runtime and
-generated code read cons heads as already-evaluated values in many
-places, so making them lazy is a runtime-wide change rather than a local
-one. Constructor fields other than the cons head *are* suspended
-(`g (Box (error "boom"))` does not force the error).
+composition — `(g . h) (error "boom")` is `g (h (error "boom"))`, and a
+non-strict `g` leaves `h (error "boom")` unevaluated — and through *list
+elements*: the head of a cons cell is a lazy position, so
+`length [error "boom"]` returns `1` and `map g [error "boom"]` does not
+force the element. A cons head is suspended at construction and forced
+only at the point of consumption (see the head-consumption contract in
+`codegen.rs`: a value-consumer forces the head, a laziness-preserving one
+— storing it in a new cons, or passing it to a function that decides —
+does not). Data-constructor fields are likewise suspended
+(`g (Box (error "boom"))` does not force the error). Tuple fields remain
+a known exception — they are still evaluated eagerly at construction.
 
 The decision is made by *weighing* the benefit of eagerness (a saved
 thunk allocation) against the risk to non-strict semantics. Bottom

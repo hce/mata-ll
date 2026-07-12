@@ -19,6 +19,14 @@ below applies to both.
   could eagerly force a possibly-bottom value — a bare variable, arithmetic over
   lazy variables, a saturated inlinable call, or a trapping `div`/`mod`/`%` —
   even in a position whose value is never used.
+- Non-strict semantics now hold through function composition and list elements.
+  `(g . h) (error "boom")` no longer forces the error when `g` is non-strict,
+  and a bottom stored in a list element is not forced until it is consumed:
+  `length [error "boom"]` is `1` and `map g [error "boom"]` does not run the
+  element. A cons head is suspended at construction and forced only at the point
+  of consumption (arithmetic, a nested pattern, `show`, equality, …); infinite
+  lists, lazy tails, and self-referential lists are unaffected. (Tuple fields
+  remain eagerly evaluated — see CAVEATS.)
 - Deep tail recursion no longer overflows the stack. Recursive calls in tail
   position — direct or through `if`/`case`/`let`, and mutual recursion — now
   compile to Lua's native proper tail calls and run in constant stack. (A

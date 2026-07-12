@@ -86,25 +86,21 @@ strict FFI/ByteString/ST-array primitives), or the expression is provably total
 over such). See "The eagerness contract" in SPEC.md for the normative rule —
 bottom is never evaluated eagerly. This keeps the hot-loop performance that the
 earlier, unsound "evaluate any cheap-looking argument" heuristic bought, without
-its `⊥`-leaking behavior. It holds through function composition too:
-`(g . h) (error "boom")` does not force the error when `g` is non-strict.
+its `⊥`-leaking behavior. It holds through function composition
+(`(g . h) (error "boom")` does not force the error when `g` is non-strict) and
+through list elements (`length [error "boom"]` is `1`; `map g [error "boom"]`
+does not force the element — a cons head is suspended until it is consumed).
 
-## A bottom stored in a list element is forced when the list is built
+## Tuple fields are evaluated eagerly
 
-The eagerness rule above governs *argument* positions. The head of a cons cell
-— and therefore the elements of a list literal — is evaluated eagerly, so a
-bottom placed directly in a list is forced when the list is constructed:
+Unlike function arguments, list elements, and other constructor fields — all of
+which are suspended until demanded — a tuple's fields are evaluated eagerly when
+the tuple is built. So a discarded bottom in a tuple still raises:
 
-    length [error "boom"]        -- raises, where a lazy language returns 1
-    map (\_ -> 0) [error "boom"] -- raises, rather than [0]
+    fst (1, error "boom")   -- raises, where a lazy language returns 1
 
-This is a current limitation, not the intended end state: mata-ll's runtime and
-generated code read cons heads as already-evaluated values in many places, so
-making the head lazy is a runtime-wide change. Constructor fields other than the
-cons head are suspended normally (`f (Box (error "boom"))` does not force the
-error when `f` ignores its argument). To keep a possibly-bottom value out of a
-list until it is needed, wrap it — e.g. store `\() -> error "boom"` and apply it
-at the point of use, or keep the value in a non-list constructor.
+Keep a possibly-bottom value out of a tuple until it is needed (e.g. behind a
+`\() -> …` thunk) if you rely on being able to discard it.
 
 ## `let` binds values, not functions
 

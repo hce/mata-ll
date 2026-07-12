@@ -1544,10 +1544,20 @@ impl CodeGen {
                         ":" => {
                             // Cons pattern: x:xs
                             conditions.push(format!("{} ~= nil", scrutinee));
-                            if !args.is_empty() {
-                                self.collect_pattern_conditions(
-                                    &format!("__mll_head({})", scrutinee),
-                                    &args[0], conditions, bindings);
+                            if let Some(head_pat) = args.first() {
+                                // The head is stored lazily (a cons head is a
+                                // lazy position — see the head-consumption
+                                // contract on __mll_head), so a nested pattern
+                                // that indexes it (`(a,b):_`, `(Con ..):_`, a
+                                // literal) must force it to WHNF first. A
+                                // Var/Wildcard sub-pattern binds it lazily and
+                                // needs no force. Same rule as the `Just` payload.
+                                let head = if Self::pattern_inspects_value(head_pat) {
+                                    format!("__force(__mll_head({}))", scrutinee)
+                                } else {
+                                    format!("__mll_head({})", scrutinee)
+                                };
+                                self.collect_pattern_conditions(&head, head_pat, conditions, bindings);
                             }
                             if args.len() >= 2 {
                                 self.collect_pattern_conditions(
@@ -2981,7 +2991,13 @@ impl CodeGen {
                                 self.emit("(function() local _l = nil; ");
                                 for elem in elems.iter().rev() {
                                     self.emit("_l = __mll_cons(");
-                                    self.gen_expr(elem);
+                                    // A cons head is a lazy position: `:` forces
+                                    // neither side. Weigh it like any argument so
+                                    // a possibly-⊥ element is suspended rather
+                                    // than run when the cell is built.
+                                    // Value-consumers force the head on read; see
+                                    // the head-consumption contract on __mll_head.
+                                    self.gen_arg(elem, false);
                                     self.emit(", _l); ");
                                 }
                                 self.emit("return _l end)()");
@@ -3006,13 +3022,15 @@ impl CodeGen {
                                 TExprKind::Var(_) | TExprKind::Con(_));
                             if tail_is_ref {
                                 self.emit("__mll_cons(");
-                                self.gen_expr(inner_arg);
+                                self.gen_arg(inner_arg, false); // lazy head — see below
                                 self.emit(", ");
                                 self.gen_lazy_ref(tail);
                                 self.emit(")");
                             } else {
                                 self.emit("__mll_lazy_cons(");
-                                self.gen_expr(inner_arg);
+                                // Lazy head: suspend a possibly-⊥ element instead
+                                // of running it when the cell is built.
+                                self.gen_arg(inner_arg, false);
                                 self.emit(", function() return ");
                                 self.gen_expr(arg);
                                 self.emit(" end)");
@@ -3245,13 +3263,15 @@ impl CodeGen {
                         };
                         let tail_is_ref = matches!(&tail.kind,
                             TExprKind::Var(_) | TExprKind::Con(_));
+                        // The head is a lazy position too; weigh it so a
+                        // possibly-⊥ head is suspended, not run at construction.
                         if tail_is_ref {
                             self.emit("__mll_cons(");
-                            self.gen_expr(lhs); self.emit(", "); self.gen_lazy_ref(tail);
+                            self.gen_arg(lhs, false); self.emit(", "); self.gen_lazy_ref(tail);
                             self.emit(")");
                         } else {
                             self.emit("__mll_lazy_cons(");
-                            self.gen_expr(lhs);
+                            self.gen_arg(lhs, false);
                             self.emit(", function() return ");
                             self.gen_expr(rhs);
                             self.emit(" end)");
@@ -4465,6 +4485,24 @@ local function __force(x)
 end
 
 -- List primitives (internal)
+--
+-- HEAD-CONSUMPTION CONTRACT. A cons head is a lazy position: `x : xs` does not
+-- force `x`, so a head may be an unevaluated thunk (this is what makes
+-- `length [error "boom"]` return rather than raise). `__mll_head` returns the
+-- head RAW — it forces the list *cell* to WHNF but NOT the element — so the two
+-- kinds of consumer split as follows:
+--   * A laziness-preserving consumer — one that stores the head in a new cons
+--     (map/filter/take/++), passes it to a user function that decides
+--     (map/foldr/zipWith), or binds it to a variable pattern — uses
+--     `__mll_head` directly and never forces. (A variable-bound head is forced
+--     lazily by gen_expr at each value-use.)
+--   * A value-consumer — one that inspects the head itself (arithmetic, a
+--     nested constructor/tuple/literal pattern, `show`, equality, indexing, or
+--     a Lua builtin) — MUST wrap it: `__force(__mll_head(l))`. The generated
+--     cons-pattern match does this when the head sub-pattern inspects the value
+--     (see collect_pattern_conditions); runtime value-consumers do it inline.
+-- Forcing `__mll_head` itself would over-force and defeat the laziness (e.g.
+-- `foldr` would force elements a lazy fold never demands).
 local function __mll_cons(h, t) return setmetatable({h, t}, __cons_mt) end
 local function __mll_lazy_cons(h, thunk) return setmetatable({h, thunk, __lazy = true}, __cons_mt) end
 local function __mll_head(l) l = __force(l); return l[1] end
@@ -4818,7 +4856,7 @@ local function hashmap_keys(m) m = __force(m); local r = nil local ks = {} for k
 local function hashmap_values(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks) for i = #ks, 1, -1 do r = __mll_cons(m[ks[i]], r) end return r end
 local function hashmap_member(k, m) k = __force(k); m = __force(m); return m[k] ~= nil end
 local function show_HashMap(m) m = __force(m); local parts = {} for k, v in pairs(m) do parts[#parts+1] = show(k) .. " -> " .. show(v) end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
-local function hashmap_fromList(xs) xs = __force(xs); local t = {} local cur = xs while cur ~= nil do local pair = __mll_head(cur) t[__force(pair[1])] = __force(pair[2]) cur = __mll_tail(cur) end return t end
+local function hashmap_fromList(xs) xs = __force(xs); local t = {} local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) t[__force(pair[1])] = __force(pair[2]) cur = __mll_tail(cur) end return t end
 local function hashmap_toList(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks) for i = #ks, 1, -1 do r = __mll_cons({ks[i], m[ks[i]]}, r) end return r end
 
 -- Specialized list show: uses a typed element show function
