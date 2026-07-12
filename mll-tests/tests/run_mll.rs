@@ -268,6 +268,7 @@ mll_test!(poly_recursion, "poly_recursion.mll");
 mll_test!(non_strict, "non_strict.mll");
 mll_test!(case_in_do_let, "case_in_do_let.mll");
 mll_test!(functor_applicative, "functor_applicative.mll");
+mll_test!(fmap_pure_bind_chain, "fmap_pure_bind_chain.mll");
 mll_test!(io_actions, "io_actions.mll");
 mll_test!(haskell_compat, "haskell_compat.mll");
 mll_test!(pattern_matching, "pattern_matching.mll");

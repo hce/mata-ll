@@ -1098,9 +1098,13 @@ impl Checker {
             lhs_te: TExpr,
             param: String,
             param_ty: Ty,
+            /// The `m b` result type of this bind (the type of the whole
+            /// `lhs >>= \param -> rest`). Unified with the continuation's
+            /// type in the backward pass below.
+            result_ty: Ty,
         }
         enum TypedStmt {
-            Bind(TypedBind),
+            Bind(Box<TypedBind>),
             Let(Vec<TLocalDef>),
         }
         let mut typed_stmts: Vec<TypedStmt> = Vec::new();
@@ -1143,12 +1147,13 @@ impl Checker {
                         local_env.insert(param.to_string(), Scheme::mono(bound_ty.clone()));
                     }
 
-                    typed_stmts.push(TypedStmt::Bind(TypedBind {
+                    typed_stmts.push(TypedStmt::Bind(Box::new(TypedBind {
                         op: op.to_string(),
                         lhs_te: tlhs,
                         param: param.to_string(),
                         param_ty: bound_ty,
-                    }));
+                        result_ty,
+                    })));
                 }
                 BindStmt::Let { binds } => {
                     let (tbinds, new_env, new_subst) =
@@ -1164,11 +1169,32 @@ impl Checker {
         let (te_terminal, terminal_ty, s_term) = self.infer_expr(current, &local_env)?;
         subst = subst.compose(&s_term);
 
+        // Backward pass: unify each bind's result type with the type of its
+        // continuation (the rest of the chain). For `lhs >>= \p -> rest` the
+        // bind's `m b` result IS the type of `rest`, so the do-block's monad
+        // flows both ways along the chain. Without this, a bind whose lhs
+        // doesn't pin the monad by itself (e.g. `x <- fmap f (pure 1)`) stays
+        // polymorphic when later statements are the only thing that determine
+        // the monad, and monomorphization can't resolve the class methods.
+        // The non-chain (short do-block) path gets this unification for free
+        // from the general App rule; this restores it for the iterative path.
+        // A `let` statement is transparent here: `let ... in rest` has the
+        // type of `rest`.
+        let mut cont_ty = terminal_ty.clone();
+        for tstmt in typed_stmts.iter().rev() {
+            if let TypedStmt::Bind(tb) = tstmt {
+                let rt = tb.result_ty.apply_subst(&subst);
+                let s = unify(&rt, &cont_ty.apply_subst(&subst))?;
+                subst = subst.compose(&s);
+                cont_ty = rt.apply_subst(&s);
+            }
+        }
+
         // Reconstruct the nested TExpr bottom-up, applying the final
         // substitution to all stored expressions so that type variables
         // resolved later in the chain are propagated back.
         let mut result_te = te_terminal.apply_subst(&subst);
-        let mut result_ty = terminal_ty;
+        let mut result_ty = terminal_ty.apply_subst(&subst);
 
         for tstmt in typed_stmts.into_iter().rev() {
             match tstmt {
