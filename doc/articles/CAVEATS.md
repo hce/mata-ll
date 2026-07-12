@@ -16,18 +16,29 @@ messages but degrade performance for all callers, so this is left as-is. When
 you see `attempt to perform arithmetic on … (a nil value)` in compiled output,
 suspect an out-of-bounds access in the source.
 
-## No tail call optimization
+## Tail calls run in constant stack; non-tail recursion does not
 
-mata-ll does not emit Lua tail calls. Recursive functions compile to ordinary
-calls, so deep recursion will eventually hit Lua's call stack limit (typically
-around 200 levels in Lua 5.4, ~65000 in LuaJIT). The error looks like:
+Recursive calls in *tail position* compile to Lua's native proper tail calls,
+so self-recursive loops (direct or through `if`/`case`/`let`) and mutual
+recursion run in constant stack no matter how deep. A call is in tail position
+when its result is returned directly.
+
+A recursive call whose result is used further is *not* a tail call and still
+grows the stack:
+
+    length []     = 0
+    length (_:xs) = 1 + length xs      -- `1 + …` consumes the call: not a tail call
+
+Such non-tail recursion (and a deeply nested recursive data traversal) will hit
+Lua's stack limit on very deep input:
 
     stack overflow
 
-Functions that loop via self-recursion (accumulators, fold-style loops) work
-fine in practice because each iteration is a single call frame. But mutual
-recursion or deeply nested recursive data traversals can overflow. If you hit
-this, refactor to use an accumulator pattern or an iterative list operation.
+Refactor to an accumulator in tail position, or use an iterative list
+operation. Note that suspending the accumulator with a lazy `$`
+(`loop (n-1) $ acc+n`) keeps the call in tail position but builds a thunk
+chain that overflows when finally forced — pass the accumulator directly
+(`loop (n-1) (acc+n)`) so demand analysis can keep it strict.
 
 ## Non-exhaustive patterns produce a runtime error
 
@@ -60,22 +71,22 @@ Use `seq` to force intermediate values, or prefer strict accumulator patterns.
 The demand analysis pass eliminates many unnecessary thunks, but it cannot
 catch every case.
 
-## Cheap arguments may be evaluated even when unused
+## Unused arguments are not evaluated (non-strict semantics hold)
 
-To keep hot loops fast, mata-ll evaluates *cheap* function arguments (literals,
-variables, small arithmetic, and saturated calls to inlinable helpers) eagerly
-at the call site — even in argument positions the callee never forces. So a
-diverging or erroring expression in an argument the function ignores can crash
-where Haskell's non-strict semantics would return normally:
+An argument in a position the callee does not force is left suspended, so a
+diverging or erroring expression there does not crash — matching Haskell:
 
     g _ = 42
-    main = print (g (error "boom"))   -- Haskell: 42; mata-ll: raises "boom"
+    main = print (g (error "boom"))   -- prints 42
 
-Local `let`/`where` bindings do *not* have this problem — a binding is only
-forced when the body demands it. Making arguments fully lazy was measured to
-roughly double the tracker benchmark's decode time, so eager cheap arguments
-are kept as a deliberate trade-off. Avoid passing a possibly-bottom expression
-in an argument position the callee may not use.
+The compiler still evaluates an argument eagerly (skipping the thunk) when that
+is provably safe: the callee is proven to force it (demand analysis, plus the
+strict FFI/ByteString/ST-array primitives), or the expression is provably total
+(a literal, an already-forced variable, a constructor, non-trapping arithmetic
+over such). See "The eagerness contract" in SPEC.md for the normative rule —
+bottom is never evaluated eagerly. This keeps the hot-loop performance that the
+earlier, unsound "evaluate any cheap-looking argument" heuristic bought, without
+its `⊥`-leaking behavior.
 
 ## `let` binds values, not functions
 

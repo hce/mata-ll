@@ -20,6 +20,17 @@ crate (which provides the `mll` command).
 
 ## Changelog
 
+Unreleased (next release):
+
+- Correctness: non-strict semantics now hold for arguments the callee does not
+  demand — `g _ = 42; g (error "boom")` returns `42`. Argument and binding
+  evaluation uses a soundness-first weighing in which bottom is never forced
+  eagerly, trading some throughput for correct laziness.
+- Performance: recursive calls in tail position compile to Lua proper tail calls
+  (deep tail recursion runs in constant stack); a greatest-fixpoint strictness
+  analysis stops tail accumulators from leaking thunks; the ByteString and
+  ST-array primitives are seeded as strict in their value/index arguments.
+
 Latest release — 0.1.2:
 
 - Fixed: instance-evidence resolution, cheap-eagerness let-binding, nested-`Just`

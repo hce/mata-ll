@@ -1094,12 +1094,58 @@ clashing with the Prelude or with each other.
 # Evaluation strategy
 
 MATA-LL uses non-strict evaluation. Function arguments and let/where
-bindings are wrapped in memoizing thunks by default.
+bindings are wrapped in memoizing thunks by default, and are forced
+only when their value is demanded.
 
-Cheapness analysis avoids thunking expressions that are cheaper to
-evaluate than to thunk: literals, variable references, constructor
-applications, arithmetic, tuple construction, and cheap
-if-expressions.
+## The eagerness contract
+
+The compiler may evaluate a delayed expression *eagerly* (in place, with
+no thunk) instead of suspending it — but only when doing so cannot change
+the observable result. This is the normative rule, and every eagerness
+optimization must respect it:
+
+> **Bottom is never evaluated eagerly.** An argument or binding may be
+> evaluated eagerly only when either (a) the consumer is *guaranteed to
+> force it* on every path where the consumer's own result is demanded, or
+> (b) the expression is *provably total* — evaluating it now cannot raise
+> an error, diverge, or trap. Any expression that might be `⊥`
+> (`error`, `undefined`, non-termination, or a trapping `div`/`mod`) and
+> is not covered by (a) stays lazy.
+
+Consequently, an argument the callee ignores is never forced by the call:
+
+    g _ = 42
+    main = print (g (error "boom"))   -- prints 42, never raises "boom"
+
+This holds regardless of how "cheap" the discarded argument looks —
+`g (x + y)`, `g (h x)`, and `g (Box x)` all leave their argument
+suspended when `g` does not demand it.
+
+The decision is made by *weighing* the benefit of eagerness (a saved
+thunk allocation) against the risk to non-strict semantics. Bottom
+carries maximal weight on the laziness side, so it always wins; the
+eagerness benefit can only win for an expression that is provably total
+or that the callee is proven to force. The two sources of the "callee
+forces it" proof are:
+
+- **Demand analysis.** A whole-program, greatest-fixpoint strictness
+  analysis marks a parameter strict when forcing the function's result
+  forces that parameter. This includes tail accumulators — in
+  `loop 0 acc = acc; loop n acc = loop (n-1) (acc+n)`, `acc` is strict —
+  so accumulator loops run without building a thunk chain. The analysis
+  is a sound under-approximation: `&&`/`||`/`++`/`$` force only their
+  left operand, `:` and tuples force nothing, `if`/`case` force only
+  what all branches agree on. Runtime primitives that are strict by
+  construction (FFI calls, and the ByteString and ST-array intrinsics in
+  their value/index arguments) are seeded directly.
+
+- **Provable totality.** Literals, already-forced (`concrete`) variables,
+  constructors and tuples of such, and non-trapping arithmetic over such
+  are safe to evaluate now because they cannot be `⊥`.
+
+Everything else is thunked. A bare variable or nullary constructor in a
+lazy position is passed as its raw thunk-or-value reference rather than
+re-wrapped, so no redundant thunk is allocated.
 
 `seq :: a -> b -> b` forces its first argument before returning the
 second. When the second argument is a tail call it stays a tail call,
@@ -1110,6 +1156,18 @@ The compiler tracks concrete variables (already-forced values) to
 skip redundant `__force` calls at runtime. Function parameters forced
 at entry, top-level bindings, and monadic bind continuation
 parameters are marked concrete.
+
+## Tail calls
+
+Recursive calls in tail position compile to Lua's native proper tail
+calls (`return f(...)`), so self-recursive loops — direct or through
+`if`/`case`/`let`, and mutual recursion — run in constant stack. The
+compiler strips the transparent parentheses and force/thunk wrappers
+that would otherwise sit between `return` and the call and defeat Lua's
+tail-call optimization. A recursive call is *not* in tail position when
+its result is consumed further (e.g. `1 + f n`, or `f n` under a lazy
+`$` that suspends the accumulator); such calls still grow the stack or
+build a thunk chain, exactly as in Haskell.
 
 # Compilation pipeline
 
