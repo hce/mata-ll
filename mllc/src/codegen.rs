@@ -1919,10 +1919,22 @@ impl CodeGen {
                         self.gen_expr_subst(rhs, subst);
                         return;
                     }
-                    self.gen_expr_subst(lhs, subst);
+                    self.gen_callee_subst(lhs, subst);
                     self.emit("(__thunk(function() return ");
                     self.gen_expr_subst(rhs, subst);
                     self.emit(" end))");
+                    return;
+                }
+                if op == "." {
+                    // Mirror the gen_expr "." arm. Without this, `.` would
+                    // fall into the builtin-op branch below (is_builtin_op
+                    // lists it for cheapness) and be emitted as Lua infix
+                    // `a . b`, which is not a Lua operator.
+                    self.emit("(function(_x) return ");
+                    self.gen_callee_subst(lhs, subst);
+                    self.emit("(");
+                    self.gen_callee_subst(rhs, subst);
+                    self.emit("(_x)) end)");
                     return;
                 }
                 let lua_op = match op.as_str() {
@@ -1988,7 +2000,7 @@ impl CodeGen {
                     f = inner_f.as_ref();
                 }
                 args.reverse();
-                self.gen_expr_subst(f, subst);
+                self.gen_callee_subst(f, subst);
                 self.emit("(");
                 for (i, a) in args.iter().enumerate() {
                     if i > 0 { self.emit(", "); }
@@ -2442,6 +2454,47 @@ impl CodeGen {
         }
     }
 
+    /// True when gen_expr emits this expression as a bare, unparenthesized
+    /// Lua function literal (`function ... end`): lambdas — which include
+    /// operator sections like `(+1)`, desugared to lambdas by the parser —
+    /// and operator functions like `(+)`. Every other expression kind either
+    /// emits a callable reference (a name, `__mll_fn[i]`) or already wraps
+    /// itself in parentheses (Paren, If, partial-application closures, ...).
+    fn is_bare_fn_literal(expr: &TExpr) -> bool {
+        matches!(&expr.kind, TExprKind::OpFunc(_) | TExprKind::Lambda { .. })
+    }
+
+    /// Emit an expression in Lua *call position* — immediately followed by
+    /// `(args)`. Lua's grammar rejects calling a function literal directly:
+    /// `function() ... end(x)` is a syntax error; the literal must be
+    /// parenthesized, `(function() ... end)(x)`. Only bare function literals
+    /// get the extra parens, so all other callees emit exactly as before.
+    fn gen_callee(&mut self, f: &TExpr) {
+        let needs_wrap = Self::is_bare_fn_literal(f);
+        if needs_wrap { self.emit("("); }
+        self.gen_expr_raw(f);
+        if needs_wrap { self.emit(")"); }
+    }
+
+    /// Substituting counterpart of gen_callee for the inline path. The callee
+    /// may be a substitution variable whose *replacement* is a function
+    /// literal (e.g. a section passed to an inlined higher-order function),
+    /// so the literal check resolves through the substitution first.
+    fn gen_callee_subst(
+        &mut self,
+        f: &TExpr,
+        subst: &std::collections::HashMap<String, &TExpr>,
+    ) {
+        let resolved: &TExpr = match &f.kind {
+            TExprKind::Var(name) => subst.get(name.as_str()).copied().unwrap_or(f),
+            _ => f,
+        };
+        let needs_wrap = Self::is_bare_fn_literal(resolved);
+        if needs_wrap { self.emit("("); }
+        self.gen_expr_subst(f, subst);
+        if needs_wrap { self.emit(")"); }
+    }
+
     /// Emit an operand of a strict primitive (arithmetic, comparison) so the
     /// emitted Lua yields a forced scalar rather than a thunk.
     ///
@@ -2792,10 +2845,7 @@ impl CodeGen {
                     self.indent += 1;
                     self.emit_indent();
                     self.emit("return ");
-                    let needs_wrap = matches!(&f.kind, TExprKind::OpFunc(_) | TExprKind::Lambda { .. });
-                    if needs_wrap { self.emit("("); }
-                    self.gen_expr_raw(f);
-                    if needs_wrap { self.emit(")"); }
+                    self.gen_callee(f);
                     self.emit("(");
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 { self.emit(", "); }
@@ -2814,10 +2864,7 @@ impl CodeGen {
                 } else {
                     // Full application
                     // Wrap function literals in parens so Lua allows calling them
-                    let needs_wrap = matches!(&f.kind, TExprKind::OpFunc(_) | TExprKind::Lambda { .. });
-                    if needs_wrap { self.emit("("); }
-                    self.gen_expr_raw(f);
-                    if needs_wrap { self.emit(")"); }
+                    self.gen_callee(f);
                     self.emit("(");
                     for (i, a) in args.iter().enumerate() {
                         if i > 0 { self.emit(", "); }
@@ -2885,7 +2932,7 @@ impl CodeGen {
                         return;
                     }
                     "$" => {
-                        self.gen_expr(lhs); self.emit("(__thunk(function() return "); self.gen_expr(rhs); self.emit(" end))");
+                        self.gen_callee(lhs); self.emit("(__thunk(function() return "); self.gen_expr(rhs); self.emit(" end))");
                         return;
                     }
                     ">>=" => {
@@ -2915,8 +2962,8 @@ impl CodeGen {
                         return;
                     }
                     "." => {
-                        self.emit("(function(_x) return "); self.gen_expr(lhs);
-                        self.emit("("); self.gen_expr(rhs); self.emit("(_x)) end)");
+                        self.emit("(function(_x) return "); self.gen_callee(lhs);
+                        self.emit("("); self.gen_callee(rhs); self.emit("(_x)) end)");
                         return;
                     }
                     other => other,

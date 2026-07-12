@@ -233,6 +233,7 @@ mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(datakinds, "datakinds.mll");
 mll_test!(type_level_nats, "type_level_nats.mll");
 mll_test!(operator_sections, "operator_sections.mll");
+mll_test!(section_composition, "section_composition.mll");
 mll_test!(guards, "guards.mll");
 mll_test!(lambdas, "lambdas.mll");
 mll_test!(maybe, "maybe.mll");
