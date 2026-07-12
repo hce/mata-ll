@@ -3783,10 +3783,18 @@ impl CodeGen {
                     // Constant access: math.pi (no function call)
                     self.emit(lua_name);
                 } else if let Some(idx) = specialized.strip_prefix("__mll_tup_get:") {
-                    // Tuple field access: t[N]
-                    self.emit("__force(");
+                    // Tuple field access for the derived tuple `show`: force
+                    // BOTH the tuple cell (outer `__force`) AND the projected
+                    // field (inner `__force`). This is a value-consumer — the
+                    // field is handed to `show_E`, which itself forces only one
+                    // layer, so a now-lazily-built tuple field (a thunk) must be
+                    // forced to WHNF here or `show` renders the raw thunk table.
+                    // (Tuple `==` does the same via its `__force(a)[i]` inline;
+                    // this projection is otherwise the sole `__mll_tup_get`
+                    // consumer, generated only by generate_tuple_show.)
+                    self.emit("__force(__force(");
                     self.gen_expr(&args[0]);
-                    self.emit(&format!(")[{}]", idx));
+                    self.emit(&format!(")[{}])", idx));
                 } else if let Some(rest) = specialized.strip_prefix("__mll_tup_ret:") {
                     // Multi-return FFI: pack Lua multiple returns into a tuple table
                     // Format: __mll_tup_ret:N:lua_func

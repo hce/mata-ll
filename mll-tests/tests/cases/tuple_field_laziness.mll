@@ -25,6 +25,23 @@ mkPair x = (x, 1)
 errInt :: Integer
 errInt = error "unreached"
 
+-- A tuple field built from a function *application* is a genuine thunk (only a
+-- literal constant is emitted eagerly). `inc` is small enough to inline, but
+-- the FIELD is still thunked around the inlined body; `tri` is recursive, so it
+-- is not an inline candidate and its call is a genuine thunked application. A
+-- value-consumer such as `show` MUST force such a field — before the fix, tuple
+-- `show` rendered the raw thunk table (`(function, False)`) instead of forcing.
+inc :: Integer -> Integer
+inc x = x + 1
+
+tri :: Integer -> Integer
+tri 0 = 0
+tri n = n + tri (n - 1)
+
+-- An ADT whose fields (also thunked) sit inside a tuple, and vice versa.
+data Box = Box Integer Integer
+    deriving (Eq, Show)
+
 -- A self-referential top-level list with a bottom head (the gen_expr_lazy site).
 badHeads :: [Integer]
 badHeads = errInt : badHeads
@@ -69,9 +86,22 @@ main = do
     assert (takeFirst (2 * 3, errInt) == 6) "a demanded field through a pattern still evaluates"
     assert (snd (errInt, 4 + 5) == 9) "a demanded second field still evaluates"
 
-    -- A pattern that inspects a field forces it (equality/show over real values).
-    assert ((1, 2) == (1, 2)) "tuple equality forces both fields"
-    assert (show (1, 2) == "(1, 2)") "tuple show forces both fields"
+    -- A value-consumer forces a THUNKED field (the blind-spot the earlier
+    -- `show (1, 2)` — cheap eager fields — could not catch). Each field here is
+    -- a function application, so it is a genuine thunk; `show`/`==` must force
+    -- it to the real value, not render/compare the raw thunk table.
+    assert (show (inc 41, inc 1) == "(42, 2)") "tuple show forces thunked fields (2-tuple)"
+    assert (show (tri 3, tri 4) == "(6, 10)") "tuple show forces non-inlinable thunked fields"
+    assert (show (inc 1, inc 2, inc 3) == "(2, 3, 4)") "tuple show forces thunked fields (3-tuple)"
+    assert (show (inc 1, (inc 2, inc 3)) == "(2, (3, 4))") "tuple show forces nested thunked fields"
+    assert (show [(inc 1, inc 2), (inc 3, inc 4)] == "[(2, 3), (4, 5)]") "tuple show forces fields of tuples in a list"
+    assert (show (Just (inc 5, inc 6)) == "Just (6, 7)") "tuple show forces fields of a tuple inside an ADT"
+    assert (show (Box (inc 5) (inc 6), inc 7) == "(Box 6 7, 8)") "tuple show forces an ADT field inside a tuple"
+    assert ((inc 41, inc 1) == (42, 2)) "tuple equality forces thunked fields"
     assert (find (\p -> fst p == 2) [(1, 10), (2, 20)] == Just (2, 20)) "find over a list of pairs"
+
+    -- Note: `show` of a tuple containing an ACTUAL bottom field correctly
+    -- RAISES (that is strictness, not a leak) — it is exercised separately, not
+    -- here, since a raise would abort this passing program.
 
     putStrLn "All tuple field laziness tests passed!"
