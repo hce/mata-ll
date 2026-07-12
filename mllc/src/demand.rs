@@ -1,8 +1,16 @@
-//! Demand analysis: determines which function parameters are always
-//! forced on every code path through the body.
+//! Demand analysis: determines which function parameters are strict —
+//! guaranteed to be forced whenever the function's result is forced to WHNF.
 //!
 //! A parameter marked strict can be passed eagerly at call sites
-//! (no thunk allocation) and forced at function entry.
+//! (no thunk allocation) and forced at function entry: forcing it early only
+//! reorders a force the demanded result performs anyway, so it cannot
+//! introduce a bottom the callee would not have produced.
+//!
+//! The result is the greatest fixed point of the demand equations, seeded
+//! optimistically (every parameter strict) and shrunk to consistency. The
+//! greatest fixed point — rather than the least — is what lets self- and
+//! mutually-recursive parameters (notably tail accumulators) be recognized as
+//! strict; see the extended note in `analyze`.
 //!
 //! Cross-function propagation: if callee `g` is strict in position j,
 //! then `f(... g(x) ...)` where x is a parameter of f propagates
@@ -36,6 +44,48 @@ enum DemandMode {
     Emission,
 }
 
+/// Compiler builtins with known per-argument strictness. These are not mata-ll
+/// functions, so the fixed point below never derives a body for them; their
+/// strict positions are stated here and seeded into the demand environment
+/// keyed by the source name gen_arg looks up. Two families:
+///   * ByteString primitives — first-order, strict in every argument (they
+///     read a ByteString/Integer/String immediately; you cannot index/measure/
+///     slice through a thunk).
+///   * ST array primitives — strict in the array and index (always forced),
+///     lazy in the stored value (matching Haskell's `newArray`/`writeArray`).
+const STRICT_BUILTINS: &[(&str, &[bool])] = &[
+    ("bsLength", &[true]),
+    ("bsIndex", &[true, true]),
+    ("bsSub", &[true, true, true]),
+    ("bsNull", &[true]),
+    ("bsHead", &[true]),
+    ("bsTail", &[true]),
+    ("bsCons", &[true, true]),
+    ("bsSnoc", &[true, true]),
+    ("bsConcat", &[true, true]),
+    ("bsSingleton", &[true]),
+    ("bsReplicate", &[true, true]),
+    ("bsGetU16LE", &[true, true]),
+    ("bsGetU32LE", &[true, true]),
+    ("bsGetI8", &[true, true]),
+    ("bsGetI16LE", &[true, true]),
+    ("bsPutI16LE", &[true, true, true]),
+    ("bsToString", &[true]),
+    ("bsFromString", &[true]),
+    // ST array primitives. An array and an index are always forced (you cannot
+    // allocate/read/write/measure through a thunk); the *stored value* stays
+    // lazy, matching Haskell's `newArray`/`writeArray`. These masks mirror the
+    // fused `__mll_st_*` masks in codegen so the run-once and closure emission
+    // paths agree. `modifySTArray`'s function argument is forced (it is called).
+    ("newSTArray", &[true, false]),
+    ("readSTArray", &[true, true]),
+    ("writeSTArray", &[true, true, false]),
+    ("modifySTArray", &[true, true, true]),
+    ("stArrayLength", &[true]),
+    ("newSTArrayFromList", &[true]),
+    ("stArrayToList", &[true]),
+];
+
 /// Run demand analysis on a typed module with cross-function propagation.
 /// Iterates to a fixed point: each round may discover new strict params
 /// by looking through call sites to already-known-strict callees.
@@ -62,21 +112,62 @@ pub fn analyze(module: &TModule) -> DemandInfo {
         }
     }
 
-    // Initial pass: analyze each function without cross-function info
-    // (but with FFI strictness already seeded above).
+    // Seed compiler builtins that are strict but are not mata-ll functions, so
+    // the fixed point below never sees a body for them. The ByteString
+    // primitives immediately consume their arguments — you cannot measure,
+    // index, slice, or convert through a thunk — so every ByteString/Integer/
+    // String argument is forced. Marking them strict lets gen_arg pass address
+    // arithmetic like `off + 17` in place instead of thunking it (hot in binary
+    // decoders such as the tracker). Higher-order primitives (bsMap, bsFoldl,
+    // bsZipWith) are omitted: their accumulator/element positions may legitimately
+    // stay lazy, so leaving them unseeded keeps the safe default.
+    for (name, mask) in STRICT_BUILTINS {
+        strict_params.entry((*name).to_string()).or_insert_with(|| mask.to_vec());
+    }
+
+    // Seed every non-FFI function optimistically — every parameter strict —
+    // then iterate the demand equations DOWNWARD to their greatest fixed point.
+    //
+    // Why greatest, not least: the strictness of a self- or mutually-recursive
+    // parameter is only provable under the assumption that the recursive calls
+    // are already strict in it. The canonical case is a tail accumulator,
+    //
+    //     loop 0 acc = acc
+    //     loop n acc = loop (n - 1) (acc + n)
+    //
+    // where `acc` is strict — forcing `loop`'s result forces `acc` through both
+    // the base clause (`= acc`) and, inductively, the recursive `acc + n`. A
+    // least fixpoint seeded with "nothing is strict" can never make that leap:
+    // the recursive clause sees `loop` as non-strict in `acc`, so `acc + n`
+    // contributes no demand, so `acc` stays lazy — and every hot loop then
+    // builds a thunk chain in its accumulator. Seeding optimistically and
+    // shrinking to the greatest fixed point discovers the accumulator is strict.
+    //
+    // Soundness: `analyze_function` is built on `demanded_vars` (Semantic mode),
+    // a sound UNDER-approximation of "the variables forced when the body reaches
+    // WHNF" — it forces only the left operand of `&&`/`||`/`++`/`$`, nothing of
+    // `:`/tuples, the intersection of `if`/`case` branches, and nothing for
+    // unknown operators. The greatest fixed point of a sound, monotone demand
+    // function is the standard sound strictness result: a parameter is kept
+    // strict only if forcing the result genuinely forces it, so evaluating it
+    // eagerly at entry cannot introduce a bottom the callee would not itself
+    // have produced. (A parameter of a call that is never entered is never
+    // forced — a discarded lazy call is thunked and `loop` is simply not run.)
     for func in &functions {
         if func.clauses.is_empty() {
             continue;
         }
         if strict_params.contains_key(&func.name) {
-            continue; // already seeded as FFI
+            continue; // already seeded as FFI (all-strict, stays put)
         }
-        let strictness = analyze_function(func, &strict_params);
-        strict_params.insert(func.name.clone(), strictness);
+        let arity = func.clauses.iter().map(|c| c.patterns.len()).max().unwrap_or(0);
+        strict_params.insert(func.name.clone(), vec![true; arity]);
     }
 
-    // Fixed-point iteration: re-analyze with accumulated strictness info
-    // until no new strict parameters are discovered.
+    // Iterate to the greatest fixed point. `analyze_function` is monotone in the
+    // environment (a strictly larger strict-set can only demand more), so from
+    // the ⊤ seed the strict-sets only shrink; the finite lattice guarantees
+    // termination.
     loop {
         let mut changed = false;
         for func in &functions {
@@ -84,14 +175,9 @@ pub fn analyze(module: &TModule) -> DemandInfo {
                 continue;
             }
             let new_strict = analyze_function(func, &strict_params);
-            if let Some(old) = strict_params.get(&func.name) {
-                if &new_strict != old {
-                    changed = true;
-                    strict_params.insert(func.name.clone(), new_strict);
-                }
-            } else {
-                changed = true;
+            if strict_params.get(&func.name) != Some(&new_strict) {
                 strict_params.insert(func.name.clone(), new_strict);
+                changed = true;
             }
         }
         if !changed {

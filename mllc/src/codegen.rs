@@ -2277,11 +2277,33 @@ impl CodeGen {
             // construction. See st_intrinsic_fused.
             _ if Self::st_intrinsic_fused(expr).is_some() => {
                 let (fused, fargs) = Self::st_intrinsic_fused(expr).unwrap();
+                // Per-argument strictness of the ST array intrinsics. These
+                // runtime helpers bypass demand analysis (they are not mata-ll
+                // functions), so their strict positions are stated here. An
+                // array and an index are ALWAYS forced — you cannot allocate,
+                // read, or write through a thunk — so passing them eagerly is
+                // sound and, on the tracker's hot loop (four writes per note,
+                // every audio frame), removes a thunk allocation per index
+                // expression like `ch * 14 + off`. The *stored value* stays
+                // lazy, matching Haskell's `writeArray`/`newArray`, which store
+                // the value without forcing it; only `modify`'s function is
+                // forced (it must be called).
+                let strict_mask: &[bool] = match fused {
+                    "__mll_st_new" => &[true, false],        // size strict, init lazy
+                    "__mll_st_read" => &[true, true],        // arr, idx
+                    "__mll_st_write" => &[true, true, false],// arr, idx strict; val lazy
+                    "__mll_st_modify" => &[true, true, true],// arr, idx, f (f is called)
+                    "__mll_st_length" => &[true],
+                    "__mll_st_from_list" => &[true],
+                    "__mll_st_to_list" => &[true],
+                    _ => &[],
+                };
                 self.emit(fused);
                 self.emit("(");
                 for (i, a) in fargs.iter().enumerate() {
                     if i > 0 { self.emit(", "); }
-                    self.gen_arg(a, false);
+                    let strict = strict_mask.get(i).copied().unwrap_or(false);
+                    self.gen_arg(a, strict);
                 }
                 self.emit(")");
             }
