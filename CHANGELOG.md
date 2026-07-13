@@ -31,6 +31,22 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- FFI-result shape mismatches now fail with a clear, localized runtime error.
+  The type-directed decoder that runs on every value crossing the Lua FFI
+  boundary checks the declared shape as it decodes: a record missing a declared
+  field, a wrong-typed field or element, a scalar where a list/record/tuple was
+  declared, or a missing multi-return value now raises
+  `FFI result: declared T but the host returned X`, naming the position (e.g.
+  `field 'certPort' of record Cert`, `element 2 of the tuple declared
+  (String, Integer)`) and the host function whose result was being decoded —
+  instead of surfacing later as an arbitrary Lua error (nil index, arithmetic
+  on nil) deep in user code. Multi-return tuple results are now decoded like
+  every other FFI result, so structured elements (lists, Maybe, records) are
+  converted correctly there too. Valid host values are never rejected: bare
+  scalar results stay check-free (the hot path), and a mata-ll value
+  round-tripping through the host unchanged — such as the lazy tuple state of
+  an outgoing-callback fold — passes through untouched, preserving its
+  laziness.
 - `mll -v` / `mll --version` prints a short MIT license summary, the crate
   version, and the git commit the binary was built from, then exits (no source
   file required). The commit hash is captured at build time by a build script
@@ -41,6 +57,13 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- An operator in type position is now rejected with a clear parse error instead
+  of being silently parsed as the unit type. `f :: (+) -> Integer` previously
+  compiled — the `(+)` was read as `()`, so the signature meant something
+  entirely different from what was written and `f ()` ran without complaint.
+  The parser now explains that `(+)` names a function (a value) and that a type
+  must be built from type names, type variables, lists, tuples, and `->`, with
+  a `note:` on the GHC deviation (mata-ll has no TypeOperators).
 - Non-strict semantics for arguments the callee does not demand. An argument in
   a position the callee never forces is no longer evaluated, so
   `g _ = 42; g (error "boom")` returns `42` instead of raising, and a discarded

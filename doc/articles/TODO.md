@@ -127,15 +127,18 @@ MATA-LL TODO
 - [x] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
 - [x] Reject bare type signatures with no definition (was silently compiling to nil at runtime; now a compile error, FFI sigs still allowed body-less)
 - [ ] Strict ST monad variant (LuaStrictArray or similar) for performance-critical code — to be discussed; current closure-based ST is only ~4% slower than direct mutations
-- [ ] Well-defined runtime errors when decoding a LuaData/LuaDict value that
+- [x] Well-defined runtime errors when decoding a LuaData/LuaDict value that
       crosses the Lua FFI boundary. The type-directed FFI-result decoder
-      (`__mll_ffi_decode`) already raises a clear error for a HashMap-key type
-      mismatch; extend that so *every* shape mismatch (a record missing a
-      declared field, a scalar where a list/record was declared, a non-table
-      where a record was expected, etc.) fails with a descriptive
-      "declared T but the host returned X" message instead of surfacing as an
-      arbitrary, unexpected Lua error (nil index, arithmetic on nil, …) deep in
-      user code.
+      (`__mll_ffi_decode`) now raises a descriptive
+      "declared T but the host returned X" error for *every* shape mismatch —
+      a record missing a declared field, a wrong-typed field or element, a
+      scalar where a list/record/tuple was declared, a missing multi-return
+      value — naming the position (field/element) and the host function.
+      Multi-return tuple results are decoded like every other FFI result.
+      Valid values are never rejected: bare scalar results stay check-free
+      (hot path), and a mata-ll thunk round-tripping through the host as
+      opaque state passes through untouched (laziness preserved).
+      Test: ffi_decode_shape_mismatch_errors.
 - [x] Layout: a function whose first argument is on the next line (`f` then newline then `(arg)`) is now consumed as an application. The cross-line continuation no longer requires a same-line argument (has_args) — the block-column check alone keeps siblings from being grabbed, now that block_indent is tracked correctly. Test: first_argument_on_next_line. Found writing examples/lambda.mll.
 - [x] Layout: multi-line application-argument continuations now use the enclosing layout-block column (Haskell rule) instead of the function column. Introduced a `block_indent` field set at each block (top-level/clause, where, let, let-in-do, do, case, class/instance methods via parse_clause) to the block's item column; parse_expr_app gates cross-line continuation on `current_indent > block_indent`. So `f = foldr g 0` then `  [1,2,3]` now parses. Surfaced and fixed a 1-space misalignment in Data.List.sortBy that the old lenient rule had tolerated. Test: shallow_multiline_continuation. All 254 tests still pass.
 - [x] `$` operator emitted literally in Lua when inlined into ST action codegen path (should always desugar to function application)

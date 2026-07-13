@@ -1336,12 +1336,25 @@ impl Parser {
                     self.advance();
                     return Ok(Type::Unit);
                 }
-                // Check for operator type like (+)
-                if let Token::Operator(_) = self.peek() {
-                    let _op = self.advance().clone();
-                    self.expect(&Token::RightParen)?;
-                    // skip for now
-                    return Ok(Type::Unit);
+                // An operator in type position, e.g. `f :: (+) -> Integer`.
+                // This used to be silently parsed as the unit type, so the
+                // program compiled with a signature that meant something
+                // entirely different from what was written — reject it with
+                // an explanation instead.
+                if let Token::Operator(op) = self.peek().clone() {
+                    let mut diag = self.err_here(format!(
+                        "The operator '{}' cannot appear in a type: '({})' names a \
+                         function (a value), and a type must be built from type names, \
+                         type variables, lists, tuples, and '->'",
+                        op, op
+                    ));
+                    diag.notes.push(
+                        "GHC can accept an operator in a type with the TypeOperators \
+                         extension; mata-ll has no type-level operators, so this is \
+                         always an error here"
+                            .to_string(),
+                    );
+                    return Err(diag);
                 }
                 let ty = self.parse_type()?;
                 if self.at(&Token::Comma) {

@@ -3464,6 +3464,160 @@ main = pure ()
     assert_eq!(r, 60, "effectful outgoing callback fold");
 }
 
+// --- FFI result decoding: shape mismatches must fail with localized errors.
+
+#[test]
+fn ffi_decode_shape_mismatch_errors() {
+    // Every shape mismatch in a value crossing the Lua FFI boundary must fail
+    // with a "declared T but the host returned X" error naming WHERE (field/
+    // element position and the host function) — never surface as an arbitrary
+    // Lua error (nil index, arithmetic on nil) deep in user code. And the
+    // checks must NOT reject valid host values (the false-positive regression
+    // guarded by the n == 0 cases below).
+    let source = r#"
+data Cert = Cert { certName :: String, certPort :: Integer }
+    deriving (Show, LuaDict)
+
+getCert :: Integer -> LuaPure "host.cert" Cert
+getPorts :: Integer -> LuaPure "host.ports" [Integer]
+getPair :: Integer -> LuaPure "host.pair" (String, Integer)
+getEntries :: Integer -> LuaPure "host.entries" [(String, Integer)]
+
+export certPortOf :: Integer -> Integer
+certPortOf n = certPort (getCert n)
+
+sumList :: [Integer] -> Integer
+sumList xs = case xs of
+    []     -> 0
+    (y:ys) -> y + sumList ys
+
+export sumPorts :: Integer -> Integer
+sumPorts n = sumList (getPorts n)
+
+export pairSnd :: Integer -> Integer
+pairSnd n =
+    case getPair n of
+        (_, p) -> p
+
+sumValues :: [(String, Integer)] -> Integer
+sumValues xs = case xs of
+    []          -> 0
+    ((_, v):ys) -> v + sumValues ys
+
+export entrySum :: Integer -> Integer
+entrySum n = sumValues (getEntries n)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+
+    // Host functions returning one valid shape (n == 0) and several broken ones.
+    lua.load(
+        r#"
+        host = {}
+        function host.cert(n)
+            if n == 0 then return { certName = "ca", certPort = 443 } end
+            if n == 1 then return { certName = "ca" } end          -- field missing
+            if n == 2 then return "oops" end                        -- scalar, not a table
+            return { certName = 7, certPort = 443 }                 -- wrong field type
+        end
+        function host.ports(n)
+            if n == 0 then return {8000, 80, 8080} end
+            if n == 1 then return 443 end                           -- scalar, not an array
+            return {8000, "eighty"}                                 -- wrong element type
+        end
+        -- A top-level declared tuple is Lua's multi-value return convention.
+        function host.pair(n)
+            if n == 0 then return "a", 1 end
+            if n == 1 then return "a", "b" end                      -- wrong tuple element
+            return "a"                                              -- second value missing
+        end
+        function host.entries(n)
+            if n == 0 then return { {"a", 1}, {"b", 2} } end
+            if n == 1 then return { "a" } end                       -- scalar where a tuple
+            return { {"a", 1}, {"b", "two"} }                       -- wrong nested element
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    // Valid shapes decode and are NOT rejected: a genuine record, list, and
+    // tuple from the host all round-trip. This locks in that the scalar
+    // checks fire only on real mismatches.
+    let cert_port: mlua::Function = module.get("certPortOf").unwrap();
+    let p: i64 = cert_port.call(0).unwrap();
+    assert_eq!(p, 443, "valid record from the host decodes");
+    let sum_ports: mlua::Function = module.get("sumPorts").unwrap();
+    let s: i64 = sum_ports.call(0).unwrap();
+    assert_eq!(s, 16160, "valid list from the host decodes");
+    let pair_snd: mlua::Function = module.get("pairSnd").unwrap();
+    let x: i64 = pair_snd.call(0).unwrap();
+    assert_eq!(x, 1, "valid multi-return tuple from the host decodes");
+    let entry_sum: mlua::Function = module.get("entrySum").unwrap();
+    let x: i64 = entry_sum.call(0).unwrap();
+    assert_eq!(x, 3, "valid list of tuples from the host decodes");
+
+    // A declared record field the host left out.
+    let e = cert_port.call::<i64>(1).unwrap_err().to_string();
+    assert!(e.contains("declared Integer but the host returned nil"), "got: {e}");
+    assert!(e.contains("field 'certPort' of record Cert"), "got: {e}");
+    assert!(e.contains("in the result of host.cert"), "got: {e}");
+
+    // A scalar where a record was declared.
+    let e = cert_port.call::<i64>(2).unwrap_err().to_string();
+    assert!(e.contains("declared Cert but the host returned the string \"oops\""), "got: {e}");
+    assert!(e.contains("a record must arrive from the host as a Lua table"), "got: {e}");
+
+    // A record field of the wrong type.
+    let e = cert_port.call::<i64>(3).unwrap_err().to_string();
+    assert!(e.contains("declared String but the host returned the number 7"), "got: {e}");
+    assert!(e.contains("field 'certName' of record Cert"), "got: {e}");
+
+    // A scalar where a list was declared.
+    let e = sum_ports.call::<i64>(1).unwrap_err().to_string();
+    assert!(e.contains("declared [Integer] but the host returned the number 443"), "got: {e}");
+    assert!(e.contains("a list must arrive from the host as a Lua array"), "got: {e}");
+    assert!(e.contains("in the result of host.ports"), "got: {e}");
+
+    // A list element of the wrong type.
+    let e = sum_ports.call::<i64>(2).unwrap_err().to_string();
+    assert!(
+        e.contains("declared Integer but the host returned the string \"eighty\""),
+        "got: {e}"
+    );
+    assert!(e.contains("an element of the list declared [Integer]"), "got: {e}");
+
+    // A tuple element (multi-return value) of the wrong type.
+    let e = pair_snd.call::<i64>(1).unwrap_err().to_string();
+    assert!(e.contains("declared Integer but the host returned the string \"b\""), "got: {e}");
+    assert!(e.contains("element 2 of the tuple declared (String, Integer)"), "got: {e}");
+    assert!(e.contains("in the result of host.pair"), "got: {e}");
+
+    // A tuple element (multi-return value) the host left out entirely.
+    let e = pair_snd.call::<i64>(2).unwrap_err().to_string();
+    assert!(e.contains("declared Integer but the host returned nil"), "got: {e}");
+    assert!(e.contains("element 2 of the tuple declared (String, Integer)"), "got: {e}");
+
+    // A scalar where a tuple was declared (nested inside a list).
+    let e = entry_sum.call::<i64>(1).unwrap_err().to_string();
+    assert!(
+        e.contains("declared (String, Integer) but the host returned the string \"a\""),
+        "got: {e}"
+    );
+    assert!(e.contains("a tuple must arrive from the host as a Lua array"), "got: {e}");
+    assert!(e.contains("in the result of host.entries"), "got: {e}");
+
+    // A wrong-typed element of a tuple nested inside a list.
+    let e = entry_sum.call::<i64>(2).unwrap_err().to_string();
+    assert!(
+        e.contains("declared Integer but the host returned the string \"two\""),
+        "got: {e}"
+    );
+    assert!(e.contains("element 2 of the tuple declared (String, Integer)"), "got: {e}");
+}
+
 #[test]
 fn prelude_is_emitted_on_demand() {
     // A trivial program must not carry runtime helpers it never references.
@@ -3609,6 +3763,23 @@ main = do
     let lua = mllc::compile(src, Path::new("."), &[]).expect("compile").lua_code;
     let l = mlua::Lua::new();
     l.load(&lua).set_name("ho_curried").exec().expect("higher-order curried lambda should work");
+}
+
+#[test]
+fn operator_in_type_position_rejected() {
+    // `f :: (+) -> Integer` used to parse `(+)` silently as the unit type, so
+    // the program compiled with a signature meaning something entirely
+    // different from what was written (`f ()` ran fine). An operator in type
+    // position must be a parse error that explains why, with a note on the
+    // GHC deviation (TypeOperators).
+    let e = compile_err("f :: (+) -> Integer\nf _ = 1\nmain :: IO ()\nmain = print (f ())\n");
+    assert!(e.contains("The operator '+' cannot appear in a type"), "got: {e}");
+    assert!(e.contains("'(+)' names a function (a value)"), "got: {e}");
+    assert!(e.contains("note:") && e.contains("TypeOperators"), "got: {e}");
+
+    // Same rejection for other operators and positions inside the type.
+    let e = compile_err("g :: Integer -> (<>)\ng x = x\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("The operator '<>' cannot appear in a type"), "got: {e}");
 }
 
 // A class constraint with no instance must be rejected at type-check time,
