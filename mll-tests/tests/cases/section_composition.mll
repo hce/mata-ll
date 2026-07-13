@@ -49,10 +49,12 @@ main = do
     assert ((+1) 5 == 6) "bare section application"
 
     -- A section produced by a function, then applied
-    -- (top-level, not let-bound: two-step application of a let-bound
-    -- curried lambda is a separate pre-existing bug, present on HEAD
-    -- even without sections)
     assert ((addN 10) 5 == 15) "section returned then applied"
+
+    -- Two-step application of a let-bound curried lambda (used to be broken;
+    -- kept here as a direct regression test for that shape)
+    let addL = \a -> \b -> a + b
+    assert ((addL 10) 5 == 15) "let-bound curried lambda applied in two steps"
 
     -- Inline (substituting) emitter: `$` with a section substituted for
     -- the callee, and a `.` body with named and section replacements

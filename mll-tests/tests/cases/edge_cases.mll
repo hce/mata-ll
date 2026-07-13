@@ -116,10 +116,11 @@ main = do
     -- Lazy evaluation edge cases
     -- ============================================================
 
-    -- NOTE: `let bottom = error "msg"; const 1 bottom` currently forces bottom
-    -- at the call site because Lua evaluates all args eagerly. The non-strict
-    -- optimization to skip forcing was reverted because it caused the tracker
-    -- regression. This is a known limitation.
+    -- A let-bound bottom in an undemanded argument position is not forced:
+    -- per-argument demand analysis suspends it despite Lua's eager argument
+    -- evaluation. (This used to crash and was documented as a limitation.)
+    let bottom = error "msg"
+    assert (const 1 bottom == 1) "let-bound bottom not forced by const"
 
     -- Unused undefined (works because `undefined` is in concrete_vars)
     assert (const "safe" undefined == "safe") "unused undefined"
