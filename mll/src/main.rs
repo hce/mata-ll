@@ -1,6 +1,23 @@
 use clap::{Parser, ValueEnum};
 use std::path::Path;
 
+/// Printed by -v/--version. clap prefixes the first line with the binary
+/// name ("mll"), so the string starts mid-sentence. GIT_COMMIT is set by
+/// build.rs at build time ("unknown" when git or .git is unavailable).
+const VERSION_INFO: &str = concat!(
+    "— the mata-ll compiler and runner\n",
+    "\n",
+    "MIT License: free and open-source software, provided \"as is\",\n",
+    "without warranty of any kind.\n",
+    "Copyright (c) 2026 Hans-Christian Esperer\n",
+    "\n",
+    "version:    ",
+    env!("CARGO_PKG_VERSION"),
+    "\n",
+    "git commit: ",
+    env!("GIT_COMMIT"),
+);
+
 /// How to embed the original .mll source into the emitted .lua.
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
 enum EmbedSourceArg {
@@ -13,7 +30,17 @@ enum EmbedSourceArg {
 }
 
 #[derive(Parser)]
-#[command(name = "mll", about = "mll compiler and runner")]
+#[command(
+    name = "mll",
+    about = "mll compiler and runner",
+    // clap's built-in version flag uses uppercase -V; we want lowercase -v,
+    // so the built-in flag is disabled and replaced by the manual `version`
+    // field below. ArgAction::Version exits before required-argument
+    // checking, so `mll -v` works without a source file.
+    disable_version_flag = true,
+    version = VERSION_INFO,
+    long_version = VERSION_INFO,
+)]
 struct Cli {
     /// The .mll source file to compile (with --recompile: a previously
     /// emitted .lua file with embedded source)
@@ -42,6 +69,10 @@ struct Cli {
     /// Additional library search paths
     #[arg(short = 'L', long = "lib")]
     lib_paths: Vec<String>,
+
+    /// Print license, version and build information, then exit
+    #[arg(short = 'v', long = "version", action = clap::ArgAction::Version)]
+    version: (),
 
     /// Arguments forwarded to the running program (readable via getArgs).
     /// Everything after the script name is collected here, so place mll's
