@@ -10,6 +10,16 @@ below applies to both.
 
 ## [Unreleased]
 
+### Added
+
+- `mll -v` / `mll --version` prints a short MIT license summary, the crate
+  version, and the git commit the binary was built from, then exits (no source
+  file required). The commit hash is captured at build time by a build script
+  via `git rev-parse --short HEAD`, degrading to `unknown` when git or the
+  `.git` directory is absent (e.g. a packaged tarball build), so the build never
+  fails. The flag is lowercase `-v`; clap's default uppercase `-V` version flag
+  is disabled.
+
 ### Fixed
 
 - Non-strict semantics for arguments the callee does not demand. An argument in
