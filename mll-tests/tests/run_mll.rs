@@ -375,6 +375,36 @@ mll_test!(div_mod_fold_runtime, "div_mod_fold_runtime.mll");
 // past 2^53 on the embedded Lua 5.4 (native // floor division)
 mll_test!(div_exact_and_zero, "div_exact_and_zero.mll");
 
+// Independently-authored regression coverage for the same three findings
+// (broader shapes than the case files above).
+//
+// Finding 1: elements pulled via head/tail/(!!) from lazily-generated lists
+// are forced values (consumed via both arithmetic and show) ...
+mll_test!(lazy_index_thunk_leak, "lazy_index_thunk_leak.mll");
+// ... while unconsumed bottoms stay unevaluated and infinite/self-referential
+// lists still work (the laziness half of the contract)
+mll_test!(lazy_index_laziness_contract, "lazy_index_laziness_contract.mll");
+
+// Finding 2: folder and runtime agree on floor-semantics div/mod for every
+// sign combination (lit / run / agree triples), plus edge and larger
+// operands, the div/mod identity law, and the divisor-sign mod-range law
+mll_test!(div_mod_fold_runtime_agree, "div_mod_fold_runtime_agree.mll");
+mll_test!(div_mod_negative_edge, "div_mod_negative_edge.mll");
+
+// Finding 3: div/mod by zero raise in function, literal-infix, let-bound and
+// computed-zero forms; small div/mod stay exact in all four sign quadrants;
+// quotients past 2^53 are integer-exact on the embedded Lua 5.4, both at the
+// point of division and flowing onward through show/arithmetic/folds;
+// negative-divisor literals fold to floor (not Euclidean) answers.
+// NOTE: the independent suite also had div_zero_other_forms.mll (prefix /
+// partial / first-class `div 1 0` etc.); it is EXCLUDED — prefix and
+// first-class div/mod compile to a nil call (unfixed Finding 4).
+mll_test!(div_mod_by_zero_raises, "div_mod_by_zero_raises.mll");
+mll_test!(div_mod_small_exact, "div_mod_small_exact.mll");
+mll_test!(div_large_exact, "div_large_exact.mll");
+mll_test!(div_large_interaction, "div_large_interaction.mll");
+mll_test!(div_mod_negative_literal_folding, "div_mod_negative_literal_folding.mll");
+
 // GHC-style compatibility tests
 macro_rules! ghc_test {
     ($name:ident, $file:expr) => {
@@ -4353,6 +4383,39 @@ main = do
 "#;
     let lines = run_capturing_lines(source, "just_empty_list");
     assert_eq!(lines, vec!["Just []", "Nothing", "False", "Just [1, 2]"]);
+}
+
+#[test]
+fn lazy_index_elements_print_as_values() {
+    // Finding 1, exact repro on the PRINT path: an element pulled from a
+    // lazily-generated list via head/tail/(!!) must print as its value.
+    // Before the fix, a raw thunk escaped and `print` rendered its Lua
+    // representation ("(function: 0x.., False)" / garbage), and the
+    // let-bound form crashed with "attempt to perform arithmetic on a table
+    // value". Asserting on the captured output catches the leak even when
+    // it does NOT crash.
+    let source = r#"
+inc :: Integer -> Integer
+inc x = x + 1
+
+main :: IO ()
+main = do
+    print (head (tail (iterate inc 0)))
+    print ([1..] !! 5)
+    let v = iterate inc 0 !! 2
+    print (v * 10)
+    print (take 3 (iterate inc 0))
+"#;
+    let lines = run_capturing_lines(source, "lazy_index_print");
+    assert_eq!(
+        lines,
+        vec![
+            "1",         // head (tail (iterate inc 0)) — leaked "(function: 0x.., False)"
+            "6",         // [1..] !! 5 — index 5 of [1,2,3,...] is 6; printed garbage pre-fix
+            "20",        // (iterate inc 0 !! 2) * 10 — crashed on arithmetic
+            "[0, 1, 2]", // take must materialize values, not thunks
+        ]
+    );
 }
 
 #[test]
