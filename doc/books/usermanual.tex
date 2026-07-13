@@ -121,14 +121,19 @@ lua5.4 hello.lua               # runs standalone
 
 \subsection{Command-Line Usage}
 
-\begin{tabular}{@{}ll@{}}
+\begin{tabular}{@{}lp{0.38\textwidth}@{}}
 \toprule
 \textbf{Command} & \textbf{Effect} \\
 \midrule
-\texttt{mll file.mll}            & Compile, print Lua to stdout \\
-\texttt{mll file.mll -{}-run}     & Compile and execute immediately \\
-\texttt{mll file.mll -{}-emit-lua} & Write \texttt{file.lua} \\
+\texttt{mll file.mll}            & Compile, write \texttt{file.lua} \\
+\texttt{mll file.mll -{}-run}     & Compile and execute immediately (no \texttt{.lua} written) \\
+\texttt{mll file.mll -{}-emit-lua} & Write \texttt{file.lua} (also with \texttt{-{}-run}) \\
 \texttt{mll file.mll -L ./lib}   & Add library search path \\
+\texttt{mll file.mll -{}-embed-source MODE} & Embed the source in the emitted Lua
+                                   (\texttt{comments}, \texttt{var}, \texttt{none}) \\
+\texttt{mll -{}-recompile file.lua} & Recompile a \texttt{.lua} from its embedded
+                                   source, rewriting it in place \\
+\texttt{mll -v}                  & Print license, version, and git commit \\
 \bottomrule
 \end{tabular}
 
@@ -137,11 +142,12 @@ lua5.4 hello.lua               # runs standalone
 Start with \texttt{mll-repl}:
 
 \begin{lstlisting}[language={}]
-mll> let x = 42
+mll> x :: Integer \
+...> x = 42
 mll> x * 2 + 1
 85
-mll> :t map
-map :: (a -> b) -> [a] -> [b]
+mll> map (*2) [1, 2, 3]
+[2, 4, 6]
 \end{lstlisting}
 
 REPL commands: \texttt{/clear}, \texttt{/decls}, \texttt{/lua EXPR},
@@ -624,9 +630,14 @@ strictSum = go 0
 \end{lstlisting}
 
 \begin{note}
-The compiler performs demand analysis and cheapness analysis automatically.
-Cheap expressions (literals, variables, simple arithmetic) are never
-thunked.  Most programs do not need manual \texttt{seq}.
+The compiler avoids thunks where it can prove that is safe, under one
+normative rule: \emph{bottom is never evaluated eagerly}.  An expression
+is evaluated eagerly only when the consumer is proven to force it
+(demand analysis, which recognizes tail accumulators as strict), or when
+it is provably total --- a literal, an already-forced variable, a
+constructor or tuple of such, or non-trapping arithmetic over such.
+Everything else stays a thunk.  Most programs do not need manual
+\texttt{seq}.
 \end{note}
 
 %======================================================================

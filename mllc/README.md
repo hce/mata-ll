@@ -30,6 +30,11 @@ Unreleased (next release):
   (deep tail recursion runs in constant stack); a greatest-fixpoint strictness
   analysis stops tail accumulators from leaking thunks; the ByteString and
   ST-array primitives are seeded as strict in their value/index arguments.
+- Correctness: `seq` now works in every application form — backtick infix
+  (``a `seq` b``), partial application (`seq a`), and first-class uses
+  (`foldr seq z xs`) — not just prefix. The other forms previously crashed at
+  runtime calling a nonexistent global `seq`. The prefix and backtick forms are
+  lowered inline so a `seq`-strict tail call stays a proper tail call.
 
 Latest release — 0.1.2:
 

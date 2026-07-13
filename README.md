@@ -61,7 +61,8 @@ Specifically:
 
 * Add the expressiveness, fun and safety of haskell to Lua
 * Target Lua 5.4 and LuaJIT; compile to Lua source for safe loading via mlua
-* Use non-strict evaluation with cheapness analysis (thunk only what's worth thunking)
+* Use non-strict evaluation; skip thunks only where that provably cannot
+  change the result (bottom is never evaluated eagerly)
 * Require no separate runtime; use zero-cost abstractions
 * If zero-cost abstractions don't fully work, use library functions
 * Incorporate new type system research where possible and useful
@@ -150,12 +151,16 @@ and let bindings are not evaluated until their values are needed.
 This enables infinite data structures, avoids unnecessary computation,
 and makes the language behave as Haskell programmers expect.
 
-To avoid the overhead of thunking cheap expressions (and the classic
-space leak in accumulator patterns), the compiler performs cheapness
-analysis: expressions that are cheaper to compute than to thunk
-(arithmetic, variable references, literals, constructor applications)
-are evaluated eagerly. Only genuinely expensive expressions (function
-calls, case expressions) are wrapped in memoizing thunks.
+To avoid the overhead of thunking everything (and the classic space
+leak in accumulator patterns), the compiler skips the thunk where it
+can prove that is safe, under one normative rule: **bottom is never
+evaluated eagerly.** An expression is evaluated eagerly only when
+demand analysis proves the consumer forces it (this covers tail
+accumulators, so accumulator loops build no thunk chain), or when it is
+provably total — a literal, an already-forced variable, a constructor
+or tuple of such, or non-trapping arithmetic over such. Everything else
+is wrapped in a memoizing thunk. See the eagerness contract in
+`doc/articles/SPEC.md` for the full rule.
 
 For the rare cases where explicit control is needed, `seq :: a -> b -> b`
 forces evaluation of its first argument before returning the second.
