@@ -765,6 +765,132 @@ pub fn signature_shapes(decls: &[Decl]) -> HashMap<String, String> {
     shapes
 }
 
+/// Every value-level name the bodies of `decls` refer to, EXCLUDING each
+/// definition's references to itself (plain self-recursion does not make a
+/// name load-bearing for anyone else). Operators count: `>>=` in a body is a
+/// reference to `>>=`.
+///
+/// Used on the Prelude's own declarations to compute which names its
+/// implementation depends on. A user program redefining such a name would
+/// have the Prelude type-checked — and its generated code resolved — against
+/// the user's replacement, breaking code the user never wrote, so those
+/// redefinitions are rejected up front (see `lib.rs`).
+///
+/// Where/let-bound locals that happen to share a referenced name are not
+/// tracked as shadowing here; that only over-approximates the reference set,
+/// which is the safe direction (and the Prelude introduces no such locals).
+pub fn body_references(decls: &[Decl]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut add_clauses = |own_name: &str, clauses: &[Clause], out: &mut HashSet<String>| {
+        let mut refs = HashSet::new();
+        for c in clauses {
+            refs_in_clause(c, &mut refs);
+        }
+        refs.remove(own_name);
+        out.extend(refs);
+    };
+    for d in decls {
+        match d {
+            Decl::FunDef { name, clauses } => add_clauses(name, clauses, &mut out),
+            Decl::ClassDecl { methods, .. } => {
+                for m in methods {
+                    if let Some(clauses) = &m.default_clauses {
+                        add_clauses(&m.name, clauses, &mut out);
+                    }
+                }
+            }
+            Decl::InstanceDecl { methods, .. } => {
+                for m in methods {
+                    add_clauses(&m.name, &m.clauses, &mut out);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn refs_in_clause(c: &Clause, out: &mut HashSet<String>) {
+    for g in &c.guards {
+        refs_in_expr(&g.condition, out);
+        refs_in_expr(&g.body, out);
+    }
+    refs_in_expr(&c.body, out);
+    for b in &c.where_binds {
+        refs_in_expr(&b.body, out);
+    }
+}
+
+fn refs_in_expr(e: &Expr, out: &mut HashSet<String>) {
+    match e {
+        Expr::Var(name) => { out.insert(name.clone()); }
+        Expr::Con(_) | Expr::Lit(_) => {}
+        Expr::App(f, x) => { refs_in_expr(f, out); refs_in_expr(x, out); }
+        Expr::Lambda { body, .. } => refs_in_expr(body, out),
+        Expr::InfixApp { op, lhs, rhs } => {
+            out.insert(op.clone());
+            refs_in_expr(lhs, out);
+            refs_in_expr(rhs, out);
+        }
+        Expr::Negate(x) => refs_in_expr(x, out),
+        Expr::If { cond, then_branch, else_branch } => {
+            refs_in_expr(cond, out);
+            refs_in_expr(then_branch, out);
+            refs_in_expr(else_branch, out);
+        }
+        Expr::Case { scrutinee, branches } => {
+            refs_in_expr(scrutinee, out);
+            for b in branches {
+                for g in &b.guards {
+                    refs_in_expr(&g.condition, out);
+                    refs_in_expr(&g.body, out);
+                }
+                refs_in_expr(&b.body, out);
+            }
+        }
+        Expr::Let { binds, body } => {
+            for b in binds {
+                refs_in_expr(&b.body, out);
+            }
+            refs_in_expr(body, out);
+        }
+        Expr::Do(stmts) => {
+            for s in stmts {
+                match s {
+                    DoStmt::Bind { expr, .. }
+                    | DoStmt::Expr(expr)
+                    | DoStmt::PatternBind { expr, .. }
+                    | DoStmt::PatternDoLet { expr, .. } => refs_in_expr(expr, out),
+                    DoStmt::DoLet { binds } => {
+                        for b in binds {
+                            refs_in_expr(&b.body, out);
+                        }
+                    }
+                }
+            }
+        }
+        Expr::Ascription(x, _) => refs_in_expr(x, out),
+        Expr::RecordCon { fields, .. } => {
+            for (_, x) in fields {
+                refs_in_expr(x, out);
+            }
+        }
+        Expr::RecordUpdate { expr, updates } => {
+            refs_in_expr(expr, out);
+            for (_, x) in updates {
+                refs_in_expr(x, out);
+            }
+        }
+        Expr::Paren(x) => refs_in_expr(x, out),
+        Expr::OpFunc(op) => { out.insert(op.clone()); }
+        Expr::Tuple(xs) => {
+            for x in xs {
+                refs_in_expr(x, out);
+            }
+        }
+    }
+}
+
 fn collision_error(module: &str, collisions: &[(String, String)]) -> String {
     let alias = module.rsplit('.').next().unwrap_or(module);
     let listed: Vec<String> = collisions.iter()

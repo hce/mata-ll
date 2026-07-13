@@ -549,18 +549,30 @@ pub struct Diagnostic {
     pub kind: DiagnosticKind,
     pub context: Option<String>,
     pub span: Option<crate::ast::Span>,
+    /// The file the span refers to, when known. Rendered as `at file:line:col`
+    /// instead of the bare `at line:col`. Only set where the compiler actually
+    /// knows the file (the CLI passes the source path via
+    /// `CompileOptions::source_name`); `None` keeps the historical rendering.
+    pub file: Option<String>,
     /// Extra explanatory lines rendered as `note: …` after the location.
     /// (Type-error kinds additionally derive a builtin note via `hint()`.)
     pub notes: Vec<String>,
+    /// True when the error was produced while checking the implicit Prelude's
+    /// own declarations rather than the user's code (or their imports). Such
+    /// an error can only be caused by the user's program interfering with the
+    /// Prelude — the Prelude alone always compiles — so `lib.rs` replaces
+    /// these with a diagnosis of the interference (e.g. a redefined Prelude
+    /// name) instead of showing errors at source lines the user never wrote.
+    pub baseline: bool,
 }
 
 impl Diagnostic {
     pub fn new(kind: DiagnosticKind) -> Self {
-        Diagnostic { kind, context: None, span: None, notes: Vec::new() }
+        Diagnostic { kind, context: None, span: None, file: None, notes: Vec::new(), baseline: false }
     }
 
     pub fn in_context(kind: DiagnosticKind, ctx: impl Into<String>) -> Self {
-        Diagnostic { kind, context: Some(ctx.into()), span: None, notes: Vec::new() }
+        Diagnostic { kind, context: Some(ctx.into()), span: None, file: None, notes: Vec::new(), baseline: false }
     }
 
     /// A parse error at a known source location. Rendered inline as
@@ -570,7 +582,9 @@ impl Diagnostic {
             kind: DiagnosticKind::Parse(msg.into()),
             context: None,
             span: Some(span),
+            file: None,
             notes: Vec::new(),
+            baseline: false,
         }
     }
 
@@ -779,14 +793,19 @@ impl fmt::Display for Diagnostic {
             }
             DiagnosticKind::Other(msg) => write!(f, "{}", msg)?,
         }
+        // `at [file:]line:col` — the file prefix appears only when known.
+        let loc = |span: &crate::ast::Span| match &self.file {
+            Some(file) => format!("{}:{}:{}", file, span.line, span.col),
+            None => format!("{}:{}", span.line, span.col),
+        };
         if let Some(ctx) = &self.context {
             if let Some(span) = &self.span {
-                write!(f, "\n  at {}:{}, in {}", span.line, span.col, ctx)?;
+                write!(f, "\n  at {}, in {}", loc(span), ctx)?;
             } else {
                 write!(f, "\n  in {}", ctx)?;
             }
         } else if let Some(span) = &self.span {
-            write!(f, "\n  at {}:{}", span.line, span.col)?;
+            write!(f, "\n  at {}", loc(span))?;
         }
         if let Some(hint) = self.hint() {
             write!(f, "\n  note: {}", hint)?;

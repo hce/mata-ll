@@ -554,7 +554,9 @@ impl Monomorphizer {
             kind: DiagnosticKind::Other(msg),
             context: self.cur_ctx.clone(),
             span: self.cur_span,
+            file: None,
             notes: hint.map(str::to_string).into_iter().collect(),
+            baseline: false,
         });
     }
 

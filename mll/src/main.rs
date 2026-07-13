@@ -149,7 +149,10 @@ fn run_compiler(cli: Cli) {
         lib_paths.push(auto.as_path());
     }
 
-    let options = mllc::CompileOptions { embed_source };
+    let options = mllc::CompileOptions {
+        embed_source,
+        source_name: Some(filename.clone()),
+    };
     let result = match mllc::compile_with_options(&source, source_dir, &lib_paths, &options) {
         Ok(r) => r,
         Err(e) => {

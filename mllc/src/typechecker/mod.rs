@@ -128,6 +128,18 @@ pub struct Checker {
     enforce_hidden: bool,
     /// Index where local declarations start (for hidden name enforcement)
     local_decl_start: usize,
+    /// Number of leading declarations that belong to the implicit Prelude
+    /// (indices `0..prelude_decl_count` of the merged module; imports follow,
+    /// then local code). Set by `set_prelude_decl_count` before checking.
+    /// Errors produced while checking these declarations are tagged
+    /// `Diagnostic::baseline`: the Prelude alone always compiles, so such an
+    /// error means the user's program interfered with it (e.g. redefined a
+    /// Prelude name) and the caller reports THAT instead of the Prelude line.
+    prelude_decl_count: usize,
+    /// True while the declaration currently being processed is one of the
+    /// Prelude's own (decl index < `prelude_decl_count`). Maintained alongside
+    /// `checking_local` by every decl-processing pass.
+    checking_prelude: bool,
     /// Classes defined in the local module (for orphan detection)
     local_classes: HashSet<String>,
     /// Types defined in the local module (for orphan detection)
@@ -216,6 +228,8 @@ impl Checker {
             hidden_names: HashSet::new(),
             enforce_hidden: false,
             local_decl_start: 0,
+            prelude_decl_count: 0,
+            checking_prelude: false,
             local_classes: HashSet::new(),
             local_types: HashSet::new(),
             orphan_check_enabled: false,
@@ -582,11 +596,13 @@ impl Checker {
     }
 
     fn push_error_ctx(&mut self, kind: DiagnosticKind, ctx: String) {
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, notes: Vec::new() });
+        let baseline = self.checking_prelude;
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file: None, notes: Vec::new(), baseline });
     }
 
     fn push_error_span(&mut self, kind: DiagnosticKind, ctx: String, span: Span) {
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), notes: Vec::new() });
+        let baseline = self.checking_prelude;
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file: None, notes: Vec::new(), baseline });
     }
 
     fn literal_type(&self, lit: &Literal) -> Ty {
@@ -1813,6 +1829,21 @@ impl Checker {
 
     // --- Module checking (produces TIR) ---
 
+    /// True when `name` is bound in the initial global environment — a
+    /// compiler builtin (`error`, `seq`, `map`, `hmInsert`, …) or a builtin
+    /// class method (`show`, `fmap`, `>>=`, …). Only meaningful on a fresh
+    /// checker, before `check_module` has inserted source-level bindings.
+    pub fn is_builtin(&self, name: &str) -> bool {
+        self.env.lookup(name).is_some()
+    }
+
+    /// Declare how many leading declarations of the module about to be checked
+    /// belong to the implicit Prelude (see `prelude_decl_count`). Errors
+    /// raised inside that region are tagged [`Diagnostic::baseline`].
+    pub fn set_prelude_decl_count(&mut self, count: usize) {
+        self.prelude_decl_count = count;
+    }
+
     /// Check a module, with orphan instance detection.
     /// `local_start` is the index into `module.decls` where locally-defined
     /// declarations begin (everything before is prelude or imported).
@@ -1851,6 +1882,7 @@ impl Checker {
             // Constructor names claimed by a local declaration shadow
             // non-local (Prelude/import) ones; same-scope duplicates error.
             self.checking_local = decl_idx >= self.local_decl_start;
+            self.checking_prelude = decl_idx < self.prelude_decl_count;
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
                     self.register_data_type(name, type_vars, constructors);
@@ -1862,6 +1894,7 @@ impl Checker {
             }
         }
         self.checking_local = false;
+        self.checking_prelude = false;
 
         // Pass 2: register typeclass declarations and type families
         for decl in &module.decls {
@@ -2026,6 +2059,7 @@ impl Checker {
             // them must resolve in the scope of the data type they derive for
             // (a local shadowing constructor resolves to its mangled key).
             self.checking_local = decl_idx >= self.local_decl_start;
+            self.checking_prelude = decl_idx < self.prelude_decl_count;
             if let Decl::DataDef { name, type_vars, constructors, deriving } = decl {
                 // A field-key rename (`field as "key" :: T`) gives the field
                 // one shared EXTERNAL name: the key in the runtime Lua table
@@ -2087,6 +2121,7 @@ impl Checker {
         }
 
         self.checking_local = false;
+        self.checking_prelude = false;
 
         // Pass 4b: register and check explicit instance declarations.
         // Registration runs over ALL instance decls before any method body is
@@ -2102,12 +2137,14 @@ impl Checker {
             // Instance method bodies reference constructors; resolve them in
             // the scope of the declaring module (shadowing, see pass 1).
             self.checking_local = decl_idx >= self.local_decl_start;
+            self.checking_prelude = decl_idx < self.prelude_decl_count;
             if let Decl::InstanceDecl { class_name, target_type, context, methods } = decl {
                 let ifns = self.check_instance(class_name, target_type, context, methods);
                 instance_fns.extend(ifns);
             }
         }
         self.checking_local = false;
+        self.checking_prelude = false;
 
         // Pass 5: generate FFI functions (type sigs with LuaPure/LuaIO and no body)
         let mut data_defs = Vec::new();
@@ -2178,6 +2215,7 @@ impl Checker {
             // (possibly shadowing) constructors; non-local bodies keep seeing
             // the constructors of their own scope.
             self.checking_local = decl_idx >= self.local_decl_start;
+            self.checking_prelude = decl_idx < self.prelude_decl_count;
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
                     data_defs.push(self.convert_data_def(name, type_vars, constructors));
@@ -2212,6 +2250,7 @@ impl Checker {
         record_accessors.sort();
 
         self.checking_local = false;
+        self.checking_prelude = false;
 
         // The newtype list carries the *registered* constructor keys: a local
         // newtype whose constructor shadows a non-local constructor is known

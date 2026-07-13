@@ -34,6 +34,11 @@ pub struct CompileOptions {
     /// can later be recompiled without the .mll (see `embed::extract_source`).
     /// `None` embeds nothing.
     pub embed_source: Option<EmbedMode>,
+    /// Display name of the file being compiled (e.g. `foo.mll`). When set,
+    /// diagnostics that point into the user's own file render the location as
+    /// `at foo.mll:1:1` — used where the distinction from Prelude-internal
+    /// line numbers matters. `None` keeps the bare `at line:col` rendering.
+    pub source_name: Option<String>,
 }
 
 /// Compile error. Parse and type errors carry structured [`types::Diagnostic`]s
@@ -130,6 +135,7 @@ pub fn compile_with_options(
         .filter(|d| !matches!(d, ast::Decl::Import { .. }))
         .count();
     let hidden = module.hidden.clone();
+    let prelude_count = prelude_decls.len();
     let mut module = ast::Module {
         decls: prelude_decls.into_iter()
             .chain(module.decls)
@@ -142,12 +148,63 @@ pub fn compile_with_options(
     // Desugar do-notation to >>= chains
     desugar::desugar_module(&mut module);
 
-    // Type check
     let mut checker = typechecker::Checker::new();
+
+    // The user's own top-level value definitions that reuse a name the
+    // baseline already provides (a Prelude definition or a compiler builtin).
+    // mata-ll compiles the Prelude and the program into one flat namespace, so
+    // such a redefinition does not shadow the Prelude name (as it would in
+    // GHC) — it collides with it. Two collision classes are rejected up front,
+    // before the Prelude is ever type-checked against the user's signature:
+    //
+    //   1. the Prelude's own implementation uses the name (`error`, `show`,
+    //      `foldl`, …): the redefinition replaces the name out from under the
+    //      Prelude's code, which then either fails to type-check — a cascade
+    //      of errors at Prelude source lines the user never wrote — or
+    //      silently compiles against the user's replacement;
+    //   2. the name has a Prelude source definition and the user's definition
+    //      has the same type shape (or no signature): a duplicate definition
+    //      of the same function at the same type, which downstream passes
+    //      cannot disambiguate.
+    //
+    // Anything else is left alone: redefining an unreferenced builtin (`head`)
+    // or a Prelude function at a genuinely different type (a monomorphic
+    // `replicate` for FFI export) works today with GHC-like user-wins
+    // semantics and stays supported. If such a redefinition nevertheless
+    // breaks the Prelude's own type-checking, the safety net below converts
+    // the Prelude-internal errors into the same clear message.
+    let redefined = collect_baseline_redefinitions(
+        &module.decls[..prelude_count],
+        &module.decls[local_start..],
+        &checker,
+    );
+    let early: Vec<types::Diagnostic> = redefined.iter()
+        .filter(|r| r.load_bearing || r.duplicate)
+        .map(|r| redefinition_diagnostic(r, options.source_name.as_deref()))
+        .collect();
+    if !early.is_empty() {
+        return Err(CompileError::Type(early));
+    }
+
+    // Type check
+    checker.set_prelude_decl_count(prelude_count);
     let tir_module = checker.check_module_with_local_start(&module, local_start);
 
     if !checker.errors.is_empty() {
-        return Err(CompileError::Type(std::mem::take(&mut checker.errors)));
+        let errors = std::mem::take(&mut checker.errors);
+        // Safety net: an error inside the Prelude's own declarations can only
+        // mean the user's program interfered with the Prelude — by itself it
+        // always compiles. When the user redefined baseline names, report
+        // those redefinitions at the user's definition sites and drop the
+        // misleading Prelude-internal errors they caused.
+        if errors.iter().any(|e| e.baseline) && !redefined.is_empty() {
+            let mut diags: Vec<types::Diagnostic> = redefined.iter()
+                .map(|r| redefinition_diagnostic(r, options.source_name.as_deref()))
+                .collect();
+            diags.extend(errors.into_iter().filter(|e| !e.baseline));
+            return Err(CompileError::Type(diags));
+        }
+        return Err(CompileError::Type(errors));
     }
 
     // Monomorphize
@@ -188,4 +245,124 @@ pub fn compile_with_options(
         has_main: mono_module.has_main,
         exports: mono_module.exports,
     })
+}
+
+/// One user top-level value definition that reuses a baseline-provided name
+/// (a Prelude definition or a compiler builtin). See `compile_with_options`
+/// for the rejection rules built on the two flags.
+struct BaselineRedefinition {
+    name: String,
+    /// Where the user defined it: the first clause of their `FunDef`
+    /// (`None` for a signature with no accompanying definition).
+    span: Option<ast::Span>,
+    /// The Prelude's own implementation references this name from another
+    /// definition, so redefining it changes the Prelude out from under itself.
+    load_bearing: bool,
+    /// The name has a Prelude source definition and the user's definition has
+    /// the same type shape (or no signature): a duplicate of the same
+    /// function at the same type rather than an overload at a different one.
+    duplicate: bool,
+}
+
+/// Scan the user's own top-level declarations for value names the baseline
+/// (`prelude_decls` + the builtin environment of a fresh `checker`) already
+/// provides. Each redefined name is reported once, in source order.
+fn collect_baseline_redefinitions(
+    prelude_decls: &[ast::Decl],
+    own_decls: &[ast::Decl],
+    checker: &typechecker::Checker,
+) -> Vec<BaselineRedefinition> {
+    use std::collections::{HashMap, HashSet};
+
+    // What the Prelude provides, and which of it has a source FunDef.
+    let mut prelude_named: HashSet<&str> = HashSet::new();
+    let mut prelude_defs: HashSet<&str> = HashSet::new();
+    for d in prelude_decls {
+        match d {
+            ast::Decl::FunDef { name, .. } => {
+                prelude_named.insert(name);
+                prelude_defs.insert(name);
+            }
+            ast::Decl::TypeSig { name, .. } | ast::Decl::ExportSig { name, .. } => {
+                prelude_named.insert(name);
+            }
+            _ => {}
+        }
+    }
+    let prelude_used = modules::body_references(prelude_decls);
+    let prelude_shapes = modules::signature_shapes(prelude_decls);
+    let own_shapes = modules::signature_shapes(own_decls);
+
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut spans: HashMap<&str, ast::Span> = HashMap::new();
+    let mut order: Vec<&str> = Vec::new();
+    for d in own_decls {
+        match d {
+            ast::Decl::FunDef { name, clauses } => {
+                if seen.insert(name) {
+                    order.push(name);
+                }
+                if let Some(c) = clauses.first() {
+                    spans.entry(name).or_insert(c.span);
+                }
+            }
+            ast::Decl::TypeSig { name, .. } | ast::Decl::ExportSig { name, .. } => {
+                if seen.insert(name) {
+                    order.push(name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    order.into_iter()
+        .filter(|name| prelude_named.contains(*name) || checker.is_builtin(name))
+        .map(|name| BaselineRedefinition {
+            name: name.to_string(),
+            span: spans.get(name).copied(),
+            load_bearing: prelude_used.contains(name),
+            duplicate: prelude_defs.contains(name)
+                && match (own_shapes.get(name), prelude_shapes.get(name)) {
+                    (Some(user), Some(prelude)) => user == prelude,
+                    // No user signature: the definition inherits the
+                    // Prelude's, so it duplicates it at the same type.
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                },
+        })
+        .collect()
+}
+
+/// The clear, user-located error for a rejected baseline redefinition.
+fn redefinition_diagnostic(
+    r: &BaselineRedefinition,
+    source_name: Option<&str>,
+) -> types::Diagnostic {
+    let mut d = types::Diagnostic::new(types::DiagnosticKind::Other(format!(
+        "'{}' is already provided by the Prelude and cannot be redefined",
+        r.name
+    )));
+    d.span = r.span;
+    d.file = source_name.map(str::to_string);
+    d.notes.push(
+        "mata-ll includes the Prelude implicitly and compiles it with your program \
+         in one global namespace, so its names (error, map, head, …) are always in \
+         scope and a top-level definition does not shadow them as it would in GHC — \
+         rename your function."
+            .to_string(),
+    );
+    if r.load_bearing {
+        d.notes.push(format!(
+            "the Prelude's own functions use '{}', so redefining it would break \
+             Prelude code your program did not write.",
+            r.name
+        ));
+    } else if r.duplicate {
+        d.notes.push(format!(
+            "your definition has the same type as the Prelude's '{}', making it a \
+             duplicate definition of the same function rather than a distinct one.",
+            r.name
+        ));
+    }
+    d
 }

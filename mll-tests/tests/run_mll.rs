@@ -3824,6 +3824,97 @@ fn operator_in_type_position_rejected() {
     assert!(e.contains("The operator '<>' cannot appear in a type"), "got: {e}");
 }
 
+// Top-level redefinition of a name the Prelude/builtins provide. Historically
+// the collision surfaced as unification errors at Prelude-internal source
+// lines ("in clause 2 of 'assert'" at 15:8 for a redefined `error`), blaming
+// functions the user never wrote. It must instead be reported once, clearly,
+// at the user's own definition site.
+
+#[test]
+fn prelude_builtin_redefinition_reports_user_site_not_prelude() {
+    // `error` is a builtin the Prelude's own code depends on (assert, init,
+    // last). Redefining it used to fail inside those Prelude functions.
+    let e = compile_err(
+        "error :: String -> Integer\nerror s = 42\n\nmain :: IO ()\nmain = print (error \"hi\")\n",
+    );
+    assert!(
+        e.contains("'error' is already provided by the Prelude and cannot be redefined"),
+        "got: {e}"
+    );
+    assert!(e.contains("at 2:"), "should point at the user's definition line, got: {e}");
+    assert!(e.contains("note:") && e.contains("rename your function"), "got: {e}");
+    // The misleading Prelude-internal cascade must be gone entirely.
+    assert!(!e.contains("Cannot unify"), "cascade leaked through, got: {e}");
+    assert!(
+        !e.contains("'assert'") && !e.contains("'init'") && !e.contains("15:8"),
+        "blames Prelude internals, got: {e}"
+    );
+}
+
+#[test]
+fn prelude_load_bearing_name_redefinition_rejected() {
+    // `map` is a builtin the Prelude uses internally (ap_List). Redefining it
+    // used to compile silently and corrupt `<*>` on lists.
+    let e = compile_err(
+        "map :: (Integer -> Integer) -> [Integer] -> [Integer]\nmap f xs = xs\n\nmain :: IO ()\nmain = print (map (\\x -> x + 1) [1, 2, 3])\n",
+    );
+    assert!(
+        e.contains("'map' is already provided by the Prelude and cannot be redefined"),
+        "got: {e}"
+    );
+    assert!(e.contains("Prelude's own functions use 'map'"), "got: {e}");
+}
+
+#[test]
+fn prelude_same_type_duplicate_definition_rejected() {
+    // A definition duplicating a Prelude function at its exact type used to
+    // HANG the compiler (demand analysis never converged on the two same-name
+    // same-type functions). If this test times out, that regressed.
+    let e = compile_err(
+        "sum :: [Integer] -> Integer\nsum xs = 999\n\nmain :: IO ()\nmain = print (sum [1, 2, 3])\n",
+    );
+    assert!(
+        e.contains("'sum' is already provided by the Prelude and cannot be redefined"),
+        "got: {e}"
+    );
+    assert!(e.contains("same type as the Prelude's 'sum'"), "got: {e}");
+}
+
+#[test]
+fn prelude_redefinition_breaking_prelude_body_reports_user_not_prelude() {
+    // `replicate` is neither used by other Prelude code nor duplicated at the
+    // same type here, so it passes the up-front checks — but the Prelude's own
+    // `replicate` body cannot type-check against this signature (its cons
+    // result is not a String). The safety net must convert the resulting
+    // Prelude-internal error (formerly "Cannot unify '[String]' with 'String'
+    // at 96:11") into the same clear redefinition report.
+    let e = compile_err(
+        "replicate :: Integer -> String -> String\nreplicate n s = s\n\nmain :: IO ()\nmain = putStrLn (replicate 3 \"x\")\n",
+    );
+    assert!(
+        e.contains("'replicate' is already provided by the Prelude and cannot be redefined"),
+        "got: {e}"
+    );
+    assert!(!e.contains("Cannot unify"), "Prelude-internal error leaked, got: {e}");
+    assert!(!e.contains("96:"), "points at a Prelude source line, got: {e}");
+}
+
+#[test]
+fn prelude_benign_shadowing_still_compiles() {
+    // The permitted cases must NOT be rejected (no over-triggering):
+    // a builtin that no Prelude code depends on (`head`) redefined at a
+    // narrower type, GHC-shadow style — the user's definition wins…
+    let src = "head :: [Integer] -> Integer\nhead xs = 0\n\nmain :: IO ()\nmain = print (head [1, 2, 3])\n";
+    let lua = mllc::compile(src, Path::new("."), &[]).expect("head shadow should compile").lua_code;
+    let l = mlua::Lua::new();
+    l.load(&lua).set_name("head_shadow").exec().expect("head shadow should run");
+
+    // …and a Prelude function redefined at a genuinely different (here
+    // monomorphic) type, the pattern the FFI-export tests rely on.
+    let src = "replicate :: Integer -> Integer -> [Integer]\nreplicate 0 _ = []\nreplicate n x = x : replicate (n - 1) x\n\nmain :: IO ()\nmain = pure ()\n";
+    mllc::compile(src, Path::new("."), &[]).expect("monomorphic replicate should compile");
+}
+
 // A class constraint with no instance must be rejected at type-check time,
 // rather than silently falling through to a runtime `tostring`.
 
@@ -4466,7 +4557,7 @@ main = do
 "#;
 
 fn compile_embedded(source: &str, mode: mllc::EmbedMode) -> String {
-    let opts = mllc::CompileOptions { embed_source: Some(mode) };
+    let opts = mllc::CompileOptions { embed_source: Some(mode), ..Default::default() };
     mllc::compile_with_options(source, Path::new("."), &[], &opts)
         .expect("embedding compile should succeed")
         .lua_code

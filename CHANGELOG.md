@@ -57,6 +57,28 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- Redefining a name the Prelude or a builtin provides (`error`, `map`, `sum`,
+  …) at the top level is now reported once, clearly, at the user's own
+  definition site: `'error' is already provided by the Prelude and cannot be
+  redefined`, with a `note:` explaining that mata-ll compiles the Prelude and
+  the program into one flat namespace (so a top-level definition does not
+  shadow the Prelude name as it would in GHC) and why the specific collision
+  is rejected. Previously the collision surfaced as unification errors at
+  Prelude-internal source lines, blaming functions the user never wrote
+  (`in clause 2 of 'assert'` at `15:8` for a redefined `error`) — or worse:
+  redefining a Prelude function at its exact type (`sum`) hung the compiler,
+  and redefining a name the Prelude uses internally at a compatible type
+  (`map`) compiled silently and corrupted Prelude behavior (`<*>` on lists).
+  Rejected are exactly the collisions that cannot work: names the Prelude's
+  own implementation depends on, same-type duplicates of Prelude definitions,
+  and (as a safety net) any redefinition that makes the Prelude itself fail to
+  type-check — reported as the redefinition, with the Prelude-internal errors
+  suppressed. Benign GHC-style shadowing keeps compiling as before: a builtin
+  no Prelude code depends on (`head`) or a Prelude function redefined at a
+  genuinely different type (a monomorphic `replicate` for FFI export). When
+  the CLI knows the source file name, the error location is rendered as
+  `at file.mll:2:1` to make clear it is in the user's file.
+
 - `head`, `tail` chains, and `(!!)` return the element again instead of leaking
   an internal thunk (a regression introduced by the unreleased lazy-cons-heads
   change in this cycle; v0.1.2 behaves correctly, so no released version is
