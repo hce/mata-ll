@@ -8,6 +8,25 @@ Both crates — `mllc` (the compiler library) and `mata-ll` (the `mll`
 command-line compiler and runner) — share a single version line, so each entry
 below applies to both.
 
+## Versioning
+
+mata-ll has not reached 1.0, so it uses a pre-1.0 scheme (`0.MINOR.PATCH`) with
+a stronger stability promise than Semantic Versioning requires for `0.x`:
+
+- **The `0.1.x` series is initial development.** Any release may change the
+  language, the CLI, or the generated Lua in backward-incompatible ways relative
+  to the previous release. `0.1.x` releases are not assumed interchangeable.
+- **From `0.2.0` onward the minor version is the compatibility boundary.**
+  Within a `0.MINOR` line, patch releases are backward compatible: upgrading
+  `0.2.3 → 0.2.4` never breaks a program that compiled and ran under `0.2.3`. A
+  breaking change requires a minor bump (`0.2.4 → 0.3.0`).
+
+A change is *breaking* if an `.mll` program, a build invocation, or a Lua-host
+integration that worked on the previous release must be modified to keep
+compiling and behaving the same. (This covers the language, the `mll` CLI, and
+observable behavior of the generated Lua; it does not govern the internal Rust
+API of the `mllc` library crate.)
+
 ## [Unreleased]
 
 ### Added
