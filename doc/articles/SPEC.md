@@ -169,8 +169,19 @@ the result type, hiding the concrete type behind an interface:
 
 The `forall a.` in the constructor declaration makes `a` existential:
 it is chosen at construction time and hidden from consumers. Pattern
-matching on `MkShowBox` brings `a` back into scope locally, but it
-cannot escape the branch.
+matching on `MkShowBox` brings `a` back into scope locally, and it
+must not escape the branch.
+
+> **Known hole (bug, tracked in TODO.md):** the current typechecker does
+> not skolemize `a` when the constructor is unpacked, so the escape is
+> NOT rejected yet — `coerce (MkShowBox x _) = x` with any declared
+> return type is accepted and defers the type confusion to runtime.
+> GADT-syntax existentials leak the same way. This is not intended
+> behavior; the guarantee stated above is the specification, and the
+> implementation currently fails to enforce it. (The neighbouring
+> machinery is sound: `runST`/rank-2 scope escapes and GADT refinement
+> misuse are correctly rejected.) See CAVEATS.md for the user-facing
+> consequences.
 
 Runtime representation is identical to normal ADTs. The type erasure
 is purely compile-time.
@@ -1111,6 +1122,16 @@ optimization must respect it:
 > an error, diverge, or trap. Any expression that might be `⊥`
 > (`error`, `undefined`, non-termination, or a trapping `div`/`mod`) and
 > is not covered by (a) stays lazy.
+
+> **Known hole (bug, tracked in TODO.md):** the IO bind/`return` path
+> currently forces the returned value to WHNF eagerly —
+> `_ <- return (error "x")`, a bare `return (error "x")` statement in a
+> do-block, and `fmap f (return ⊥)` all raise, where GHC leaves the value
+> unforced. This violates the contract above for exactly that path; the
+> contract remains the specification and the implementation is wrong. The
+> hole is scalar WHNF through IO only: a returned tuple keeps its field
+> laziness, and the Maybe monad is properly lazy. See CAVEATS.md for the
+> user-facing consequences.
 
 Consequently, an argument the callee ignores is never forced by the call:
 

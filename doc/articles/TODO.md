@@ -108,6 +108,32 @@ MATA-LL TODO
 
 ## Open
 
+- [ ] **Prefix/partial `div`/`mod` crash at runtime.** `div 7 2` and
+      `map (div 10) xs` type-check but emit `__force(div)(...)` against a
+      Lua global that does not exist ("attempt to call a nil value"). The
+      backtick form and backtick sections work. Fix: reify `div`/`mod` as
+      first-class functions (the same treatment `seq` got), backed by the
+      `__mll_div`/`__mll_mod` runtime helpers. Found by the 0.1.3
+      soundness audit; documented in CAVEATS.md.
+- [ ] **Existential unpacking does not skolemize — type-soundness hole.**
+      `data ShowBox = forall a. MkShowBox a (a -> String)` with
+      `coerce (MkShowBox x _) = x` is ACCEPTED and coerces anything to
+      anything (GADT-syntax existentials leak identically). The hidden
+      variable must become a rigid skolem when the constructor is
+      unpacked, so unifying it with an outer type (like the declared
+      return type) is rejected — the same rigidity runST/rank-2 sealing
+      already enforces (those escapes ARE rejected; GADT refinement misuse
+      too). SPEC.md's "cannot escape the branch" promise is annotated as
+      currently not holding; restore it. Found by the 0.1.3 soundness
+      audit; documented in CAVEATS.md.
+- [ ] **IO bind/`return` forces the bound value eagerly.**
+      `_ <- return (error "x")`, a bare `return (error "x")` statement in
+      a do-block, and `fmap f (return ⊥)` all raise, where GHC leaves the
+      value unforced. Violates SPEC.md's eagerness contract ("bottom is
+      never evaluated eagerly"), which is annotated with this hole until
+      fixed. Scope is exactly scalar WHNF through the IO path: returned
+      tuples keep field laziness and the Maybe monad is properly lazy.
+      Found by the 0.1.3 soundness audit; documented in CAVEATS.md.
 - [x] **Non-deterministic codegen — fixed.** Generated `.lua` was not
       reproducible: identical source compiled twice could differ, because some
       emission order followed `HashMap` iteration order. Three sources, all

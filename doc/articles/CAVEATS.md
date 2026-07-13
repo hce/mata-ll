@@ -59,6 +59,69 @@ at runtime. If you need to detect overflow, check the bounds manually.
 On LuaJIT, integers are represented as doubles, so precision is lost beyond
 2^53.
 
+`div` and `mod` follow Haskell's floor semantics and raise a plain
+"divide by zero" error on a zero divisor, on every host. On Lua 5.3+ they
+use native integer floor division (`//`) and are exact over the full 64-bit
+range. On LuaJIT / Lua 5.1–5.2 there is no integer type at all — every
+number, including the literal you wrote, is already a double — so `div`
+results beyond 2^53 are approximate there. That is the host's number
+representation, not something the division operator can recover; if you
+need exact 62-bit quotients, run on a Lua 5.3+ host (the embedded runner
+is Lua 5.4).
+
+## Prefix and partially applied `div`/`mod` crash at runtime (known bug)
+
+Only the backtick forms of `div` and `mod` work: ``a `div` b`` and the
+backtick section ``(`div` 2)``. The prefix and partially applied forms —
+
+    div 7 2            -- type-checks, then crashes
+    map (div 10) xs    -- type-checks, then crashes
+
+type-check but compile to a call to a Lua global named `div` that does not
+exist, so they fail at runtime with:
+
+    attempt to call a nil value
+
+This is a compiler bug (the operator is not reified as a first-class
+function the way `seq` and the arithmetic operators are); it is tracked in
+TODO.md. Until it is fixed, write the backtick form, or wrap it in a
+lambda: `map (\x -> 10 `div` x) xs`.
+
+## Existential type variables can escape (known type-soundness hole)
+
+Unpacking an existential constructor does not skolemize the hidden type
+variable, so the typechecker will unify it with anything — including the
+function's declared return type:
+
+    data ShowBox = forall a. MkShowBox a (a -> String)
+
+    coerce :: ShowBox -> Integer
+    coerce (MkShowBox x _) = x     -- accepted; must be rejected
+
+This `coerce` is accepted and converts any value to any type, deferring the
+type confusion to a runtime crash (or silent nonsense) far from the real
+mistake. GADT-syntax existentials leak the same way. The related machinery
+that IS sound: `runST`/rank-2 scope escapes and GADT refinement misuse are
+correctly rejected — only existential unpacking is affected. SPEC.md's
+promise that the hidden variable "cannot escape the branch" does not
+currently hold; this is a bug tracked in TODO.md, not intended behavior.
+
+## IO `return` forces its argument eagerly (known laziness hole)
+
+Binding or sequencing a `return`ed value through the IO path evaluates it
+to WHNF immediately, where GHC would leave it unforced:
+
+    _ <- return (error "x")       -- raises here; GHC does not
+    return (error "x")            -- bare in a do-block: same
+    fmap f (return (error "x"))   -- same
+
+This contradicts the eagerness contract in SPEC.md ("bottom is never
+evaluated eagerly") for exactly this path: the hole is scalar WHNF through
+IO bind/`return`. Structured values keep their laziness — a returned tuple
+does not force its fields (`fst`/`snd` laziness is preserved), and the
+Maybe monad is properly lazy throughout. Tracked in TODO.md; until it is
+fixed, do not rely on `return ⊥` being inert in IO code.
+
 ## Lazy evaluation can cause space leaks
 
 mata-ll uses non-strict evaluation by default. Unevaluated thunks accumulate
