@@ -363,6 +363,18 @@ mll_test!(instance_forward_ref, "instance_forward_ref.mll");
 // results flowing through the erased runtime generics (map/zipWith)
 mll_test!(curried_lambda_arity, "curried_lambda_arity.mll");
 
+// head/(!!) return the element itself, never a raw lazy-cons-head thunk
+// (the WHNF-return invariant) — and stay exactly as lazy as before
+mll_test!(lazy_head_projection, "lazy_head_projection.mll");
+
+// The constant folder and the runtime agree on div/mod: Haskell FLOOR
+// semantics for every sign combination (folder used Euclidean before)
+mll_test!(div_mod_fold_runtime, "div_mod_fold_runtime.mll");
+
+// div/mod by zero raise instead of yielding inf/nan; div is integer-exact
+// past 2^53 on the embedded Lua 5.4 (native // floor division)
+mll_test!(div_exact_and_zero, "div_exact_and_zero.mll");
+
 // GHC-style compatibility tests
 macro_rules! ghc_test {
     ($name:ident, $file:expr) => {

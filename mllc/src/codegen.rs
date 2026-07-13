@@ -690,6 +690,7 @@ impl CodeGen {
             "try_", "catch_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
             "__mll_shl", "__mll_shr", "__mll_math_type",
+            "__mll_div", "__mll_mod",
             "__mll_array_from_list", "__mll_array_index", "__mll_array_length",
             "__mll_bs_empty", "__mll_bs",
             "__mll_ma_new", "__mll_ma_read", "__mll_ma_write",
@@ -1852,8 +1853,8 @@ impl CodeGen {
 
     /// True when `expr` (already known to be structurally cheap) contains a
     /// built-in operator that can *trap* at runtime — integer `div`/`mod`/`%`
-    /// raise a Lua error on a zero divisor (`math.floor(n/0)` has no integer
-    /// representation; `n % 0` is rejected outright). Such an expression can be
+    /// raise a Lua error on a zero divisor (`__mll_div`/`__mll_mod` check the
+    /// divisor and raise "divide by zero" explicitly). Such an expression can be
     /// ⊥ even though every operand is a plain value, so it is never safe to
     /// evaluate eagerly in a non-strict position: bottom always weighs
     /// maximally on the laziness side (see the weighing in gen_arg). Float `/`
@@ -2200,10 +2201,16 @@ impl CodeGen {
                 }
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                if op == "div" {
-                    self.emit("math.floor(");
+                if op == "div" || op == "mod" {
+                    // Runtime helpers, not inline float math / bare `%`:
+                    // math.floor(a/0) yields inf (a float escaping into
+                    // Integer) instead of raising, and float division is
+                    // inexact past 2^53. __mll_div/__mll_mod raise a clear
+                    // error on a zero divisor and use native integer floor
+                    // division (Lua 5.3+ `//`) when the host has it.
+                    self.emit(if op == "div" { "__mll_div(" } else { "__mll_mod(" });
                     self.gen_operand_subst(lhs, subst);
-                    self.emit(" / ");
+                    self.emit(", ");
                     self.gen_operand_subst(rhs, subst);
                     self.emit(")");
                     return;
@@ -2250,7 +2257,8 @@ impl CodeGen {
                 }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
-                    "mod" => "%",
+                    // "div"/"mod" never reach here: handled above via
+                    // __mll_div/__mll_mod (zero-divisor check, exact // ).
                     other => other,
                 };
                 if is_builtin_op(op) {
@@ -3494,10 +3502,16 @@ impl CodeGen {
                 }
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                if op == "div" {
-                    self.emit("math.floor(");
+                if op == "div" || op == "mod" {
+                    // Runtime helpers, not inline float math / bare `%`:
+                    // math.floor(a/0) yields inf (a float escaping into
+                    // Integer) instead of raising, and float division is
+                    // inexact past 2^53. __mll_div/__mll_mod raise a clear
+                    // error on a zero divisor and use native integer floor
+                    // division (Lua 5.3+ `//`) when the host has it.
+                    self.emit(if op == "div" { "__mll_div(" } else { "__mll_mod(" });
                     self.gen_operand(lhs);
-                    self.emit(" / ");
+                    self.emit(", ");
                     self.gen_operand(rhs);
                     self.emit(")");
                     return;
@@ -3528,7 +3542,8 @@ impl CodeGen {
                 }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
-                    "mod" => "%",
+                    // "div"/"mod" never reach here: handled above via
+                    // __mll_div/__mll_mod (zero-divisor check, exact // ).
                     ":" => {
                         // Keep the cons tail lazy. A bare reference (variable
                         // or []) already denotes a thunk-or-value, so emit it
@@ -4850,6 +4865,21 @@ end
 --     a Lua builtin) — MUST wrap it: `__force(__mll_head(l))`. The generated
 --     cons-pattern match does this when the head sub-pattern inspects the value
 --     (see collect_pattern_conditions); runtime value-consumers do it inline.
+--   * A function that RETURNS a head as its own result (`head`, `!!`) is a
+--     value-consumer too, because of the runtime's WHNF-return invariant:
+--     every compiled function and every codegen-emitted thunk body returns a
+--     value in WHNF, never a raw thunk (compiled code emits `return
+--     __force(x)` for a pattern-bound head — see gen_expr). `__force` relies
+--     on that invariant and unwraps exactly ONE thunk level, so a function
+--     that leaked a raw head would create a thunk-inside-a-thunk the moment a
+--     call site wraps its result in `__thunk(function() return head(...)
+--     end)` — and forcing that outer thunk would yield the INNER thunk as if
+--     it were the value (show renders the {fn, false} pair as a 2-tuple;
+--     arithmetic crashes on the table). Forcing on return does not lose
+--     laziness: a call like `head(xs)` only ever executes when the
+--     surrounding context demands the result to WHNF (direct calls sit in
+--     strict positions; deferred ones sit inside a thunk body, which runs
+--     only when forced), and at that moment Haskell forces `head xs` too.
 -- Forcing `__mll_head` itself would over-force and defeat the laziness (e.g.
 -- `foldr` would force elements a lazy fold never demands).
 local function __mll_cons(h, t) return setmetatable({h, t}, __cons_mt) end
@@ -4892,7 +4922,10 @@ local function __mll_list_index(xs, n)
         n = n - 1
     end
     if xs == nil then error("(!!): index too large") end
-    return __mll_head(xs)
+    -- Force: this returns the element itself (WHNF-return invariant above);
+    -- a raw head here would nest inside the caller's own thunk and escape
+    -- __force's single unwrap as a bogus "value".
+    return __force(__mll_head(xs))
 end
 
 -- An optional FFI argument (declared `Maybe` in the FFI signature) that sits
@@ -5161,7 +5194,13 @@ local function ord_compare__String(a, b) a = __force(a); b = __force(b); if a < 
 local function ord_compare__ByteString(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .. b end
 local function semigroup_List(a, b) return __mll_list_append(a, function() return __force(b) end) end
-local function head(xs) return __mll_head(xs) end
+-- head forces the element (a value-consumer under the head-consumption
+-- contract): it RETURNS the head as its result, and the WHNF-return invariant
+-- says a function may never return a raw thunk — the caller's one-level
+-- __force would mistake the nested thunk for the value. `head [1, ⊥]` still
+-- returns 1 (only the first element is forced), and a merely *stored*
+-- `head xs` stays unevaluated because the call itself sits inside a thunk.
+local function head(xs) return __force(__mll_head(xs)) end
 local function tail(xs) return __mll_tail(xs) end
 local function map(f, xs)
     f = __force(f); xs = __force(xs)
@@ -5529,6 +5568,32 @@ else
     function __mll_bnot(a) return __mll_bit.bnot(__force(a)) end
     function __mll_shl(a, b) return __mll_bit.lshift(__force(a), __force(b)) end
     function __mll_shr(a, b) return __mll_bit.rshift(__force(a), __force(b)) end
+    end
+end
+
+-- Integer division and modulo (Haskell `div`/`mod`: FLOOR semantics — the
+-- quotient rounds toward negative infinity, the remainder takes the sign of
+-- the divisor; the constant folder in fold.rs mirrors exactly this). A zero
+-- divisor raises on every host: mathematically there is no result, and the
+-- old float path (`math.floor(a/0)`) returned `inf` — a float silently
+-- flowing on as if it were an Integer. On Lua 5.3+ the native integer floor
+-- division `//` is exact over the full 64-bit range; on LuaJIT / Lua 5.1-5.2
+-- every number is an IEEE-754 double, so math.floor(a/b) is the best those
+-- hosts can do and quotients are exact only while the operands fit in 2^53
+-- (a documented host limitation — see doc/articles/CAVEATS.md). The `//`
+-- form is compiled through load so this file still parses on 5.1 hosts,
+-- the same technique as the bitwise ops above.
+local __mll_div, __mll_mod
+do
+    local mk = (loadstring or load)('return function(a, b) return a // b end')
+    local floordiv = mk and mk() or function(a, b) return math.floor(a / b) end
+    __mll_div = function(a, b)
+        if b == 0 then error("divide by zero: `div` has no result when the divisor is 0") end
+        return floordiv(a, b)
+    end
+    __mll_mod = function(a, b)
+        if b == 0 then error("divide by zero: `mod` has no result when the divisor is 0") end
+        return a % b
     end
 end
 

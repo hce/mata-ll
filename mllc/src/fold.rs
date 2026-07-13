@@ -216,8 +216,16 @@ fn fold_int_int(op: &str, a: i64, b: i64, ty: &Ty) -> Option<TExpr> {
         "+"   => a.checked_add(b).and_then(lit),
         "-"   => a.checked_sub(b).and_then(lit),
         "*"   => a.checked_mul(b).and_then(lit),
-        "div" => if b != 0 { lit(a.div_euclid(b)) } else { None },
-        "mod" => if b != 0 { lit(a.rem_euclid(b)) } else { None },
+        // Haskell (and the emitted Lua runtime) use FLOOR semantics: `div`
+        // rounds the quotient toward negative infinity and `mod` takes the
+        // sign of the DIVISOR (7 `div` (-2) = -4, 7 `mod` (-2) = -1). Rust's
+        // div_euclid/rem_euclid are Euclidean (mod always >= 0), which
+        // disagrees for a negative divisor — folding with them would make a
+        // constant expression evaluate differently from the identical
+        // expression computed at runtime. Zero divisors (and the lone
+        // i64::MIN / -1 overflow) are left unfolded so the runtime raises.
+        "div" => if b != 0 { floor_div(a, b).and_then(lit) } else { None },
+        "mod" => if b != 0 { floor_mod(a, b).and_then(lit) } else { None },
         "=="  => cmp(a == b),
         "/="  => cmp(a != b),
         "<"   => cmp(a < b),
@@ -226,6 +234,23 @@ fn fold_int_int(op: &str, a: i64, b: i64, ty: &Ty) -> Option<TExpr> {
         ">="  => cmp(a >= b),
         _     => None,
     }
+}
+
+/// Floor division, matching Haskell's `div` and the Lua runtime (`//` /
+/// math.floor(a/b)): truncate toward negative infinity, so a quotient with a
+/// fractional part and mixed-sign operands rounds DOWN one more than Rust's
+/// truncating `/`. None on the single overflowing case (i64::MIN div -1).
+fn floor_div(a: i64, b: i64) -> Option<i64> {
+    let q = a.checked_div(b)?;
+    let r = a % b; // safe: checked_div succeeded, so b != 0 and no overflow
+    Some(if r != 0 && ((r < 0) != (b < 0)) { q - 1 } else { q })
+}
+
+/// Floor modulo, matching Haskell's `mod` and Lua's `%`: the result has the
+/// sign of the divisor and satisfies a == b * floor_div(a,b) + floor_mod(a,b).
+fn floor_mod(a: i64, b: i64) -> Option<i64> {
+    let r = a.checked_rem(b)?;
+    Some(if r != 0 && ((r < 0) != (b < 0)) { r + b } else { r })
 }
 
 fn fold_num_num(op: &str, a: f64, b: f64, ty: &Ty) -> Option<TExpr> {

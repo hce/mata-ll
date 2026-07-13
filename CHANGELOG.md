@@ -57,7 +57,42 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
-- An operator in type position is now rejected with a clear parse error instead
+- `head`, `tail` chains, and `(!!)` return the element again instead of leaking
+  an internal thunk (a regression introduced by the unreleased lazy-cons-heads
+  change in this cycle; v0.1.2 behaves correctly, so no released version is
+  affected). The lazy-cons-heads change stores an unevaluated thunk in
+  the head slot of a cons cell; the runtime's `head` and list-index primitives
+  returned that slot raw, violating the WHNF-return invariant every compiled
+  function obeys (a function never returns an unforced thunk). A call site
+  that wrapped the result in its own thunk — `print (head (tail xs))` thunks
+  the print argument — then held a thunk inside a thunk, and the one-level
+  `__force` handed the inner thunk out as if it were the value: `show` printed
+  `(function: 0x…, False)` and arithmetic crashed with "attempt to perform
+  arithmetic on a table value". `head` and `(!!)` now force the element they
+  return (they are value-consumers under the head-consumption contract).
+  Laziness is unchanged: only the returned element is forced —
+  `head [1, error "boom"]` is still `1`, `length [error "boom"]` is still `1`,
+  and infinite/self-referential lists still work. Test: lazy_head_projection.
+- The constant folder now agrees with the runtime (and Haskell) on `div` and
+  `mod` with negative operands. Both use floor semantics — the quotient rounds
+  toward negative infinity, the remainder takes the sign of the divisor — but
+  the folder used Rust's Euclidean `div_euclid`/`rem_euclid`, so a constant
+  ``7 `div` (-2)`` folded to `-3` while the same expression on runtime values
+  computed `-4` (and ``7 `mod` (-2)`` folded to `1` instead of `-1`): one
+  expression, two answers, depending on whether the operands were literals.
+  Test: div_mod_fold_runtime.
+- `div` no longer runs through float division. It was emitted as
+  `math.floor(a / b)`, so ``1 `div` 0`` yielded `inf` — a float silently
+  flowing on as an Integer — and quotients past 2^53 were wrong (float
+  mantissa: ``4611686018427387905 `div` 3`` came out 85 too small). `div` and
+  `mod` now go through runtime helpers that raise a plain-language
+  "divide by zero" error on a zero divisor on every host, and use Lua 5.3+'s
+  native integer floor division (`//`, probed via `load` so the generated file
+  still parses on Lua 5.1/LuaJIT), which is exact over the full 64-bit range.
+  On LuaJIT every number is already a double — including the literals — so
+  exactness past 2^53 is a documented host limitation (CAVEATS.md), not
+  something division can recover there. Tracker benchmark timing is unchanged
+  and its decoded output byte-identical. Test: div_exact_and_zero.
   of being silently parsed as the unit type. `f :: (+) -> Integer` previously
   compiled — the `(+)` was read as `()`, so the signature meant something
   entirely different from what was written and `f ()` ran without complaint.
