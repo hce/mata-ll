@@ -26,6 +26,7 @@ jobs:
     needs: test
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         include:
           - lua: lua5_4

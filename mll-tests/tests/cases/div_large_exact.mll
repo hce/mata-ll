@@ -1,3 +1,9 @@
+-- lua-compat-skip: luajit
+--   (integers > 2^53 are not representable on LuaJIT's doubles: the
+--   literals below are rounded before any arithmetic runs, so exactness
+--   cannot hold there — a documented limitation, see
+--   doc/articles/CAVEATS.md. The contract holds on 64-bit-integer hosts.)
+--
 -- Regression (Finding 3, part 2 — 64-BIT-INTEGER TARGET ONLY, i.e. the
 -- Lua 5.4 backend; on LuaJIT (5.1 doubles) Integers above 2^53 are not
 -- representable at all, so this file is expected to remain a documented

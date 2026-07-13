@@ -1,3 +1,9 @@
+-- lua-compat-skip: luajit
+--   (integers > 2^53 are not representable on LuaJIT's doubles: the
+--   literals below are rounded before any arithmetic runs, so exactness
+--   cannot hold there — a documented limitation, see
+--   doc/articles/CAVEATS.md. The contract holds on 64-bit-integer hosts.)
+--
 -- Regression (Finding 3, interaction — 64-BIT-INTEGER TARGET ONLY):
 -- a large `div` result must be a REAL integer downstream, not a float
 -- masquerading as one. A float sneaks through `==` against a rounded
