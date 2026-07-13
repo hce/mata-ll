@@ -781,7 +781,7 @@ pub fn signature_shapes(decls: &[Decl]) -> HashMap<String, String> {
 /// which is the safe direction (and the Prelude introduces no such locals).
 pub fn body_references(decls: &[Decl]) -> HashSet<String> {
     let mut out = HashSet::new();
-    let mut add_clauses = |own_name: &str, clauses: &[Clause], out: &mut HashSet<String>| {
+    let add_clauses = |own_name: &str, clauses: &[Clause], out: &mut HashSet<String>| {
         let mut refs = HashSet::new();
         for c in clauses {
             refs_in_clause(c, &mut refs);
