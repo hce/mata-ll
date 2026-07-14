@@ -125,8 +125,50 @@ re-exports the Prelude ones, so existing imports keep working:
     partition  nubBy  groupBy  sortBy  foldl'
 
 Other bundled modules, also explicitly imported: `Data.Map`, `Data.Maybe`,
-`Control.Monad`, `ByteString`, plus `LString`, `LMath`, `LIO`, `LOS`, `LBit`,
-`JSON`, `Regex`. There is no `Data.Char` (there is no `Char` type — see above).
+`Data.Foldable`, `Data.Traversable`, `Control.Monad`, `ByteString`, plus
+`LString`, `LMath`, `LIO`, `LOS`, `LBit`, `JSON`, `Regex`. There is no
+`Data.Char` (there is no `Char` type — see above).
 
 The lazy list functions stream properly over infinite lists, so e.g.
 `takeWhile (< 100) [1 ..]` and `take 10 (filter even [1 ..])` terminate.
+
+## Foldable and Traversable are narrower than GHC's
+
+`Foldable` (methods `foldr`/`foldl`) and `Traversable` (method
+`traverse`) exist with instances for `[]`, `Maybe` and `Either`, and
+user types can declare their own instances. `length`, `null`, `elem`,
+`sum`, `product`, `maximum`, `minimum`, `foldMap` and `sequenceA` are
+generic over them, as in GHC. The differences:
+
+- **No tuple instances.** GHC's `Foldable ((,) a)` (where
+  `length (x, y) == 1`) does not exist: mata-ll has no
+  partially-applied tuple constructor. Fold over tuple components
+  explicitly.
+- **`sum`/`product` are `t Integer -> Integer`.** There is no `Num`
+  class (see above), so they are fixed at `Integer` instead of GHC's
+  `Num a => t a -> a`.
+- **`mapM`/`mapM_`/`sequence`/`forM` stay list-only** (`Monad m =>
+  (a -> m b) -> [a] -> m [b]` etc.); GHC generalizes them to any
+  Traversable/Foldable. Use `traverse` for non-list structures.
+- **`and`/`or`/`any`/`all`/`concat`/`concatMap` stay list-only**;
+  GHC's are Foldable-generic. Apply them after `toList` if needed.
+- **A fold over `Either` needs the `Left` type determined.**
+  `length (Right 1)` is an ambiguity error (monomorphization must pin
+  the instance's type); annotate:
+  `length (Right 1 :: Either String Integer)`. GHC accepts the
+  ambiguous form.
+- **`foldl'` stays list-only** (in `Data.List`/`Data.Foldable`).
+- **`toList` is only in `Data.Foldable`**, matching GHC's Prelude
+  (which does not export it either) — and keeping the name free for
+  programs that define their own `toList`, since a mata-ll program
+  cannot shadow Prelude names.
+- **`mempty`/`mappend` (Monoid) have `String` and `[a]` instances.**
+  `mappend` works on lists, but the `(<>)` operator on lists remains
+  an error directing you to `(++)` (see Strings above).
+- **`liftA2` is the Applicative method to reach for in generic
+  code.** A `f <$> x <*> y` chain routes a function *through* the
+  applicative (an `f (b -> c)` intermediate); at `f = IO` the runtime
+  cannot represent an action whose result is itself a function, so
+  generic code written that way fails at run time where GHC's would
+  work. `liftA2 g x y` keeps only fully-applied values in the
+  container and works everywhere (`traverse` is built on it).

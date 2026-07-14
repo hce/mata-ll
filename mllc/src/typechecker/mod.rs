@@ -641,7 +641,8 @@ impl Checker {
 
         // Only register types for builtins that are NOT provided by Prelude.mll
         // Prelude.mll provides: putStrLn, sqrt, id, const, flip,
-        //   head, tail, map, filter, foldl, foldr, take, zipWith, length, reverse
+        //   head, tail, map, filter, take, zipWith, length, reverse
+        // (foldr/foldl are Foldable class methods, registered below)
         let entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
             ("print", vec![], Ty::arrow(Ty::Con("String".into()), Ty::io(Ty::Unit))),
             ("++", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::list(ta.clone())], Ty::list(ta.clone()))),
@@ -920,16 +921,36 @@ impl Checker {
                 class_name: "Functor".to_string(),
                 target_type: Ty::Con(tc_name.to_string()),
                 method_fns,
-                context: None,
+                // Empty context, NOT None: a higher-kinded instance demands
+                // nothing of the constructor's own type arguments, so the
+                // structural fallback rule in `has_instance` (meant for
+                // Show/Eq-style element checking) must not apply. Without
+                // this, a wanted like `Functor (Either String)` — where the
+                // class variable binds to a partially-applied constructor —
+                // would wrongly require `Functor String`.
+                context: Some(vec![]),
             });
         }
 
         // Built-in Applicative typeclass (superclass: Functor)
-        // pure  :: a -> f a
-        // (<*>) :: f (a -> b) -> f a -> f b
+        // pure   :: a -> f a
+        // (<*>)  :: f (a -> b) -> f a -> f b
+        // liftA2 :: (a -> b -> c) -> f a -> f b -> f c
+        // liftA2 is a real method (as in GHC), not sugar for <$>/<*>: the
+        // <$>/<*> chain routes a FUNCTION through the applicative (an
+        // `f (b -> c)` intermediate), and the type-erased IO runtime cannot
+        // represent an action whose result is itself a Lua function
+        // (__mll_run could not tell it from an unrun action). liftA2 keeps
+        // only fully-applied values in the container, so generic Applicative
+        // code (traverse) works at IO too.
         let pure_ty = Ty::arrow(ta.clone(), fa.clone());
         let fab = Ty::App(Box::new(tf.clone()), Box::new(Ty::arrow(ta.clone(), tb.clone())));
         let ap_ty = Ty::fun(&[fab, fa.clone()], fb.clone());
+        let fc = Ty::App(Box::new(tf.clone()), Box::new(tc.clone()));
+        let lifta2_ty = Ty::fun(
+            &[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), fa.clone(), fb.clone()],
+            fc,
+        );
         self.classes.insert("Applicative".to_string(), ClassInfo {
             name: "Applicative".to_string(),
             type_var: "f".to_string(),
@@ -937,6 +958,7 @@ impl Checker {
             methods: vec![
                 ("pure".to_string(), pure_ty.clone()),
                 ("<*>".to_string(), ap_ty.clone()),
+                ("liftA2".to_string(), lifta2_ty.clone()),
             ],
             default_methods: HashMap::new(),
         });
@@ -952,12 +974,17 @@ impl Checker {
             vars: vec![a.clone(), b.clone(), f.clone()],
             ty: ap_ty,
         });
+        self.env.insert("liftA2".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), c.clone(), f.clone()],
+            ty: lifta2_ty,
+        });
 
         // Applicative instances
         for tc_name in &["IO", "LuaIO", "ST"] {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure".to_string());
             method_fns.insert("<*>".to_string(), "ap_IO".to_string());
+            method_fns.insert("liftA2".to_string(), "liftA2_IO".to_string());
             self.register_instance(InstanceInfo {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con(tc_name.to_string()),
@@ -969,6 +996,7 @@ impl Checker {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure_List".to_string());
             method_fns.insert("<*>".to_string(), "ap_List".to_string());
+            method_fns.insert("liftA2".to_string(), "liftA2_List".to_string());
             self.register_instance(InstanceInfo {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con("[]".to_string()),
@@ -980,6 +1008,7 @@ impl Checker {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure_Maybe".to_string());
             method_fns.insert("<*>".to_string(), "ap_Maybe".to_string());
+            method_fns.insert("liftA2".to_string(), "liftA2_Maybe".to_string());
             self.register_instance(InstanceInfo {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con("Maybe".to_string()),
@@ -991,11 +1020,13 @@ impl Checker {
             let mut method_fns = HashMap::new();
             method_fns.insert("pure".to_string(), "pure_Either".to_string());
             method_fns.insert("<*>".to_string(), "ap_Either".to_string());
+            method_fns.insert("liftA2".to_string(), "liftA2_Either".to_string());
             self.register_instance(InstanceInfo {
                 class_name: "Applicative".to_string(),
                 target_type: Ty::Con("Either".to_string()),
                 method_fns,
-                context: None,
+                // Empty context, not None — see the Functor Either instance.
+                context: Some(vec![]),
             });
         }
 
@@ -1063,6 +1094,104 @@ impl Checker {
                 target_type: Ty::Con("Maybe".to_string()),
                 method_fns,
                 context: None,
+            });
+        }
+
+        // Built-in Foldable typeclass
+        // foldr :: (a -> b -> b) -> b -> t a -> b
+        // foldl :: (b -> a -> b) -> b -> t a -> b
+        // The remaining GHC Foldable vocabulary (length, null, elem, sum,
+        // product, maximum, minimum, foldMap, toList) is defined generically
+        // over these two methods in the Prelude / Data.Foldable.
+        let t = TyVar { name: "t".into(), id: u32::MAX };
+        let tt = Ty::Var(t.clone());
+        let ta_in_t = Ty::App(Box::new(tt.clone()), Box::new(ta.clone()));
+        let foldr_ty = Ty::fun(
+            &[Ty::fun(&[ta.clone(), tb.clone()], tb.clone()), tb.clone(), ta_in_t.clone()],
+            tb.clone(),
+        );
+        let foldl_ty = Ty::fun(
+            &[Ty::fun(&[tb.clone(), ta.clone()], tb.clone()), tb.clone(), ta_in_t.clone()],
+            tb.clone(),
+        );
+        self.classes.insert("Foldable".to_string(), ClassInfo {
+            name: "Foldable".to_string(),
+            type_var: "t".to_string(),
+            superclasses: vec![],
+            methods: vec![
+                ("foldr".to_string(), foldr_ty.clone()),
+                ("foldl".to_string(), foldl_ty.clone()),
+            ],
+            default_methods: HashMap::new(),
+        });
+        self.env.insert("foldr".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), t.clone()],
+            ty: foldr_ty,
+        });
+        self.env.insert("foldl".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), t.clone()],
+            ty: foldl_ty,
+        });
+        // Emit wanted constraints at use sites so a fold over a type without
+        // a Foldable instance — or an ambiguous one like `Right 5` with an
+        // undetermined Left type — is a compile error with the annotation
+        // hint, not a deferred dispatch that fails at runtime.
+        for method in &["foldr", "foldl"] {
+            self.method_constraints.insert(method.to_string(), vec![TyConstraint {
+                class_name: "Foldable".to_string(),
+                type_var: "t".to_string(),
+            }]);
+        }
+
+        // Foldable instances: [], Maybe, Either (folds over Right, like GHC).
+        // Tuples deliberately have no instance: the class variable has kind
+        // Type -> Type and mata-ll has no partially-applied tuple constructor
+        // (consistent with tuples having no Ord instance either).
+        for (tc_name, suffix) in &[("[]", "List"), ("Maybe", "Maybe"), ("Either", "Either")] {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("foldr".to_string(), format!("foldr_{}", suffix));
+            method_fns.insert("foldl".to_string(), format!("foldl_{}", suffix));
+            self.register_instance(InstanceInfo {
+                class_name: "Foldable".to_string(),
+                target_type: Ty::Con(tc_name.to_string()),
+                method_fns,
+                // Empty context, not None — see the Functor Either instance.
+                context: Some(vec![]),
+            });
+        }
+
+        // Built-in Traversable typeclass (superclasses: Functor, Foldable)
+        // traverse :: Applicative f => (a -> f b) -> t a -> f (t b)
+        // sequenceA is defined in the Prelude as `traverse (\x -> x)`.
+        let tb_in_t = Ty::App(Box::new(tt.clone()), Box::new(tb.clone()));
+        let traverse_ty = Ty::fun(
+            &[Ty::arrow(ta.clone(), fb.clone()), ta_in_t.clone()],
+            Ty::App(Box::new(tf.clone()), Box::new(tb_in_t)),
+        );
+        self.classes.insert("Traversable".to_string(), ClassInfo {
+            name: "Traversable".to_string(),
+            type_var: "t".to_string(),
+            superclasses: vec!["Functor".to_string(), "Foldable".to_string()],
+            methods: vec![("traverse".to_string(), traverse_ty.clone())],
+            default_methods: HashMap::new(),
+        });
+        self.env.insert("traverse".to_string(), Scheme {
+            vars: vec![a.clone(), b.clone(), f.clone(), t.clone()],
+            ty: traverse_ty,
+        });
+        self.method_constraints.insert("traverse".to_string(), vec![
+            TyConstraint { class_name: "Traversable".to_string(), type_var: "t".to_string() },
+            TyConstraint { class_name: "Applicative".to_string(), type_var: "f".to_string() },
+        ]);
+        for (tc_name, suffix) in &[("[]", "List"), ("Maybe", "Maybe"), ("Either", "Either")] {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("traverse".to_string(), format!("traverse_{}", suffix));
+            self.register_instance(InstanceInfo {
+                class_name: "Traversable".to_string(),
+                target_type: Ty::Con(tc_name.to_string()),
+                method_fns,
+                // Empty context, not None — see the Functor Either instance.
+                context: Some(vec![]),
             });
         }
 
@@ -1319,6 +1448,67 @@ impl Checker {
                 target_type: Ty::list(ta.clone()),
                 method_fns,
                 context: None,
+            });
+        }
+
+        // Built-in Monoid typeclass (superclass: Semigroup)
+        // mempty  :: a
+        // mappend :: a -> a -> a
+        // mappend is the named method form of <>. Note the mata-ll divergence:
+        // `<>` on concrete list types is deliberately rejected (lists are
+        // concatenated with ++, see mono.rs), but `mappend` dispatches on
+        // lists — polymorphic Monoid code (foldMap) needs a working append.
+        let mempty_ty = ta.clone();
+        let mappend_ty = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
+        self.classes.insert("Monoid".to_string(), ClassInfo {
+            name: "Monoid".to_string(),
+            type_var: "a".to_string(),
+            superclasses: vec!["Semigroup".to_string()],
+            methods: vec![
+                ("mempty".to_string(), mempty_ty.clone()),
+                ("mappend".to_string(), mappend_ty.clone()),
+            ],
+            default_methods: HashMap::new(),
+        });
+        self.env.insert("mempty".to_string(), Scheme {
+            vars: vec![a.clone()],
+            ty: mempty_ty,
+        });
+        self.env.insert("mappend".to_string(), Scheme {
+            vars: vec![a.clone()],
+            ty: mappend_ty,
+        });
+        self.method_constraints.insert("mempty".to_string(), vec![TyConstraint {
+            class_name: "Monoid".to_string(),
+            type_var: "a".to_string(),
+        }]);
+        self.method_constraints.insert("mappend".to_string(), vec![TyConstraint {
+            class_name: "Monoid".to_string(),
+            type_var: "a".to_string(),
+        }]);
+
+        // Monoid instances: String and [a]. mempty impls live in the Prelude;
+        // mappend reuses the runtime Semigroup concatenation helpers.
+        {
+            let mut method_fns = HashMap::new();
+            method_fns.insert("mempty".to_string(), "mempty_String".to_string());
+            method_fns.insert("mappend".to_string(), "semigroup_String".to_string());
+            self.register_instance(InstanceInfo {
+                class_name: "Monoid".to_string(),
+                target_type: Ty::Con("String".into()),
+                method_fns,
+                context: None,
+            });
+            let mut method_fns = HashMap::new();
+            method_fns.insert("mempty".to_string(), "mempty_List".to_string());
+            method_fns.insert("mappend".to_string(), "semigroup_List".to_string());
+            self.register_instance(InstanceInfo {
+                class_name: "Monoid".to_string(),
+                target_type: Ty::list(ta.clone()),
+                method_fns,
+                // Empty context: Monoid [a] demands nothing of the element
+                // type (see the Functor Either instance for the rationale).
+                context: Some(vec![]),
             });
         }
 

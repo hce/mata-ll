@@ -31,6 +31,47 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- `Foldable` and `Traversable` typeclasses, with instances for lists, `Maybe`
+  and `Either` (folding/traversing `Right`), plus the `Monoid` class
+  (superclass `Semigroup`; methods `mempty`/`mappend`; `String` and `[a]`
+  instances) behind `foldMap`. `foldr` and `foldl` are now Foldable class
+  methods rather than list-only Prelude functions, and `length`, `null`,
+  `elem`, `sum` and `product` are generic over Foldable (`sum`/`product`
+  remain fixed at `Integer` — there is still no `Num` class). New Prelude
+  functions: `maximum`, `minimum`, `foldMap`, `mempty`, `mappend`,
+  `traverse`, `sequenceA` and `liftA2`; new stdlib modules `Data.Foldable`
+  (home of `toList`, which stays out of the Prelude exactly like GHC's) and
+  `Data.Traversable` (re-exports). User types join all three classes with
+  ordinary `instance` declarations (`instance Foldable Tree where …`), and
+  the generic functions dispatch through them. Laziness is preserved:
+  `null`/`elem` still short-circuit on infinite lists, and type-erased
+  generic contexts fall back to new runtime `foldr`/`foldl` implementations
+  (the same role `map` plays for `fmap`). `liftA2` is a real Applicative
+  method (as in GHC) because a `<$>`/`<*>` chain routes a function-valued
+  intermediate through the applicative, which the type-erased IO runtime
+  cannot represent; `traverse` is built on `liftA2` so it works at `IO`.
+  Tuples have no Foldable/Traversable instance (mata-ll has no
+  partially-applied tuple constructor). Deviations from GHC are documented
+  in HASKDIFF.md. Tests: foldable, traversable, foldable_user_instance,
+  lib_data_foldable.
+- Redefining a Prelude function whose type became Foldable-generic at its old
+  monomorphic list type (e.g. `sum :: [Integer] -> Integer`) is now the
+  documented user-wins redefinition case rather than a same-type duplicate,
+  and compiles. Exact-type duplicates are still rejected. Tests:
+  prelude_same_type_duplicate_definition_rejected (now probed with
+  `reverse`), prelude_foldable_generic_allows_monomorphic_redefinition.
+
+### Fixed
+
+- Constraint discharge no longer applies the structural element rule to
+  higher-kinded instances: a wanted like `Functor (Either String)` — the
+  class variable bound to a partially-applied constructor — was wrongly
+  rejected with "No instance for 'Functor (Either String)'" because the
+  built-in instance's empty context fell back to requiring `Functor String`.
+  Built-in higher-kinded instances now carry an explicit empty context, and
+  a registered non-structural list-head instance (e.g. `Monoid [a]`) is
+  consulted instead of being unconditionally rejected.
+
 - Every compiled module now carries compiler provenance: `__MLLC_VERSION` (the
   `mllc` crate version) and `__MLLC_COMMIT` (the full git commit the compiler
   was built from). Both are emitted as top-level `local`s so they are present

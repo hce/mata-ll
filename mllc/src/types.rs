@@ -665,11 +665,15 @@ fn pretty_var_subst(tys: &[&Ty]) -> Subst {
 }
 
 /// True when one side is `String` and the other is a list — mata-ll's most
-/// common confusion, since String is not `[Char]` here.
+/// common confusion, since String is not `[Char]` here. A still-polymorphic
+/// container shape `t a` counts as list-like too: it is what a
+/// Foldable-generic function (length, null, sum, elem, …) expects, and
+/// passing a String there is the same confusion.
 fn is_string_list_mismatch(a: &Ty, b: &Ty) -> bool {
     let is_str = |t: &Ty| matches!(t, Ty::Con(n) if n == "String");
-    let is_list = |t: &Ty| matches!(t, Ty::List(_));
-    (is_str(a) && is_list(b)) || (is_list(a) && is_str(b))
+    let is_listish = |t: &Ty| matches!(t, Ty::List(_))
+        || matches!(t, Ty::App(f, _) if matches!(f.as_ref(), Ty::Var(_)));
+    (is_str(a) && is_listish(b)) || (is_listish(a) && is_str(b))
 }
 
 impl Diagnostic {

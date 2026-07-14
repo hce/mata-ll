@@ -118,9 +118,12 @@ impl Monomorphizer {
             "putStrLn", "++", "$", ".", "id", "const",
             "flip", "not", "error", "sqrt", "otherwise", "max", "min",
             "+", "-", "*", "/", "==", "/=", "<", ">", "<=", ">=",
-            "&&", "||", "mod", "div", "map", "filter", "foldl", "foldr",
+            // foldr/foldl are Foldable class methods and length carries a
+            // Foldable constraint (all dispatched/specialized), so none of
+            // them belong here.
+            "&&", "||", "mod", "div", "map", "filter",
             "True", "False", "Just", "Nothing",
-            ":", "[]", "head", "tail", "take", "drop", "zipWith", "length", "reverse",
+            ":", "[]", "head", "tail", "take", "drop", "zipWith", "reverse",
             "engage", "liftIO",
             "hmEmpty", "hmInsert", "hmLookup", "hmDelete",
             "hmSize", "hmKeys", "hmValues", "hmMember", "hmToList",

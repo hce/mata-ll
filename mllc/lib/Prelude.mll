@@ -33,18 +33,38 @@ const x _ = x
 flip :: (a -> b -> c) -> b -> a -> c
 flip f b a = f a b
 
--- Strict list operations (no lazy evaluation needed)
-foldl :: (b -> a -> b) -> b -> [a] -> b
-foldl _ acc [] = acc
-foldl f acc (x:xs) = foldl f (f acc x) xs
+-- Foldable instances. foldr and foldl are Foldable class methods
+-- (instances: lists, Maybe, Either); these are the per-type
+-- implementations the compiler dispatches to.
+foldr_List :: (a -> b -> b) -> b -> [a] -> b
+foldr_List _ acc [] = acc
+foldr_List f acc (x:xs) = f x (foldr_List f acc xs)
 
-foldr :: (a -> b -> b) -> b -> [a] -> b
-foldr _ acc [] = acc
-foldr f acc (x:xs) = f x (foldr f acc xs)
+foldl_List :: (b -> a -> b) -> b -> [a] -> b
+foldl_List _ acc [] = acc
+foldl_List f acc (x:xs) = foldl_List f (f acc x) xs
 
-length :: [a] -> Integer
-length [] = 0
-length (_:xs) = 1 + length xs
+foldr_Maybe :: (a -> b -> b) -> b -> Maybe a -> b
+foldr_Maybe _ acc Nothing = acc
+foldr_Maybe f acc (Just x) = f x acc
+
+foldl_Maybe :: (b -> a -> b) -> b -> Maybe a -> b
+foldl_Maybe _ acc Nothing = acc
+foldl_Maybe f acc (Just x) = f acc x
+
+-- Folding an Either folds over Right and ignores Left, like GHC.
+foldr_Either :: (a -> b -> b) -> b -> Either c a -> b
+foldr_Either _ acc (Left _) = acc
+foldr_Either f acc (Right x) = f x acc
+
+foldl_Either :: (b -> a -> b) -> b -> Either c a -> b
+foldl_Either _ acc (Left _) = acc
+foldl_Either f acc (Right x) = f acc x
+
+-- Length-generic Foldable functions, defined over foldr/foldl.
+-- (toList lives in Data.Foldable, matching GHC's Prelude exports.)
+length :: Foldable t => t a -> Integer
+length t = foldl (\n _ -> n + 1) 0 t
 
 reverse :: [a] -> [a]
 reverse xs = go [] xs
@@ -70,10 +90,10 @@ dropWhile :: (a -> Bool) -> [a] -> [a]
 dropWhile _ [] = []
 dropWhile p (x:xs) = if p x then dropWhile p xs else x : xs
 
--- True for the empty list.
-null :: [a] -> Bool
-null [] = True
-null _  = False
+-- True for an empty structure. Lazy: only looks at the outermost
+-- constructor, so it works on infinite lists.
+null :: Foldable t => t a -> Bool
+null t = foldr (\_ _ -> False) True t
 
 -- Last element / everything but the last. Both error on the empty list.
 last :: [a] -> a
@@ -136,12 +156,38 @@ all :: (a -> Bool) -> [a] -> Bool
 all _ []       = True
 all p (x : xs) = if p x then all p xs else False
 
--- Sum and product of an integer list.
-sum :: [Integer] -> Integer
-sum = foldl (\acc x -> acc + x) 0
+-- Sum and product of any Foldable of integers. (mata-ll has no Num
+-- typeclass, so these are fixed at Integer rather than GHC's `Num a`.)
+sum :: Foldable t => t Integer -> Integer
+sum t = foldl (\acc x -> acc + x) 0 t
 
-product :: [Integer] -> Integer
-product = foldl (\acc x -> acc * x) 1
+product :: Foldable t => t Integer -> Integer
+product t = foldl (\acc x -> acc * x) 1 t
+
+-- Largest / smallest element. Both error on an empty structure.
+maximum :: (Ord a, Foldable t) => t a -> a
+maximum t = case foldr (\x xs -> x : xs) [] t of
+    []     -> error "maximum: empty structure"
+    (x:xs) -> foldl (\m y -> if y > m then y else m) x xs
+
+minimum :: (Ord a, Foldable t) => t a -> a
+minimum t = case foldr (\x xs -> x : xs) [] t of
+    []     -> error "minimum: empty structure"
+    (x:xs) -> foldl (\m y -> if y < m then y else m) x xs
+
+-- Map each element to a monoid and combine the results.
+-- Monoid instances: String (concatenation, mempty "") and lists
+-- (append, mempty []).
+foldMap :: (Monoid m, Foldable t) => (a -> m) -> t a -> m
+foldMap f t = foldr (\x acc -> mappend (f x) acc) mempty t
+
+-- Monoid instance implementations (mappend uses the runtime
+-- concatenation helpers; mempty impls live here).
+mempty_String :: String
+mempty_String = ""
+
+mempty_List :: [a]
+mempty_List = []
 
 
 
@@ -177,6 +223,25 @@ ap_List (f:fs) xs = concatMap_ap (map f xs) (ap_List fs xs)
     where concatMap_ap [] rest = rest
           concatMap_ap (y:ys) rest = y : concatMap_ap ys rest
 
+-- liftA2 instance implementations. liftA2 is an Applicative class
+-- method (see the compiler's class registry for why it is a real
+-- method and not <$>/<*> sugar: the IO runtime cannot carry a
+-- function-valued action result).
+liftA2_IO :: (a -> b -> c) -> IO a -> IO b -> IO c
+liftA2_IO g ma mb = ma >>= \x -> mb >>= \y -> pure (g x y)
+
+liftA2_Maybe :: (a -> b -> c) -> Maybe a -> Maybe b -> Maybe c
+liftA2_Maybe g (Just x) (Just y) = Just (g x y)
+liftA2_Maybe _ _ _ = Nothing
+
+liftA2_List :: (a -> b -> c) -> [a] -> [b] -> [c]
+liftA2_List g xs ys = concatMap (\x -> map (g x) ys) xs
+
+liftA2_Either :: (a -> b -> c) -> Either e a -> Either e b -> Either e c
+liftA2_Either g (Right x) (Right y) = Right (g x y)
+liftA2_Either _ (Left e) _ = Left e
+liftA2_Either _ _ (Left e) = Left e
+
 pure_Either :: a -> Either c a
 pure_Either x = Right x
 
@@ -184,6 +249,28 @@ ap_Either :: Either c (a -> b) -> Either c a -> Either c b
 ap_Either (Right f) (Right x) = Right (f x)
 ap_Either (Left e) _ = Left e
 ap_Either _ (Left e) = Left e
+
+-- Traversable instances. traverse is a Traversable class method
+-- (instances: lists, Maybe, Either); these are the per-type
+-- implementations the compiler dispatches to.
+-- Built on liftA2 rather than <$>/<*> so the applicative never carries
+-- a function-valued intermediate (which the IO runtime cannot represent).
+traverse_List :: Applicative f => (a -> f b) -> [a] -> f [b]
+traverse_List _ [] = pure []
+traverse_List f (x:xs) = liftA2 (\y ys -> y : ys) (f x) (traverse_List f xs)
+
+traverse_Maybe :: Applicative f => (a -> f b) -> Maybe a -> f (Maybe b)
+traverse_Maybe _ Nothing = pure Nothing
+traverse_Maybe f (Just x) = fmap (\y -> Just y) (f x)
+
+-- Traversing an Either visits Right and passes Left through, like GHC.
+traverse_Either :: Applicative f => (a -> f b) -> Either c a -> f (Either c b)
+traverse_Either _ (Left e) = pure (Left e)
+traverse_Either f (Right x) = fmap (\y -> Right y) (f x)
+
+-- Evaluate each action in the structure and collect the results.
+sequenceA :: (Traversable t, Applicative f) => t (f a) -> f (t a)
+sequenceA t = traverse (\x -> x) t
 
 -- Monad instances for Maybe
 bind_Maybe :: Maybe a -> (a -> Maybe b) -> Maybe b
@@ -286,11 +373,10 @@ snd :: (a, b) -> b
 snd (_, y) = y
 
 
-elem :: Eq a => a -> [a] -> Bool
-elem a (x:xs)
-    | a == x      = True
-    | otherwise   = elem a xs
-elem _ []     = False
+-- Is the element in the structure? Short-circuiting and lazy, so it
+-- terminates on infinite lists when the element occurs.
+elem :: (Eq a, Foldable t) => a -> t a -> Bool
+elem a t = foldr (\x rest -> if a == x then True else rest) False t
 
 -- head, tail, map, filter, take, drop, zipWith are implemented in the
 -- Lua runtime to support lazy cons cells (infinite lists).

@@ -469,6 +469,12 @@ mll_test!(st_return, "st_return.mll");
 mll_test!(local_overflow, "local_overflow.mll");
 mll_test!(existentials, "existentials.mll");
 mll_test!(derive_functor, "derive_functor.mll");
+// Foldable/Traversable: class methods (foldr/foldl/traverse), the generic
+// Prelude functions over them, the Monoid class behind foldMap, liftA2,
+// and user-defined instances of all three on a custom type
+mll_test!(foldable, "foldable.mll");
+mll_test!(traversable, "traversable.mll");
+mll_test!(foldable_user_instance, "foldable_user_instance.mll");
 mll_test!(derive_eq, "derive_eq.mll");
 mll_test!(derive_ord, "derive_ord.mll");
 mll_test!(rank2, "rank2.mll");
@@ -722,6 +728,7 @@ mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
 mll_lib_test!(lib_data_maybe, "lib_data_maybe.mll");
 mll_lib_test!(lib_data_map, "lib_data_map.mll");
+mll_lib_test!(lib_data_foldable, "lib_data_foldable.mll");
 // FFI marshalling probed with CONSTRUCTED values (ranges, map/filter, `<>`,
 // JSON decoding, computed Just/Nothing) — literals are already native Lua
 // values and hide marshalling bugs.
@@ -4474,14 +4481,50 @@ fn prelude_same_type_duplicate_definition_rejected() {
     // A definition duplicating a Prelude function at its exact type used to
     // HANG the compiler (demand analysis never converged on the two same-name
     // same-type functions). If this test times out, that regressed.
+    // (This used `sum :: [Integer] -> Integer` before sum was generalized to
+    // `Foldable t => t Integer -> Integer`; the monomorphic signature is now a
+    // DIFFERENT type, i.e. an allowed user-wins redefinition — see the test
+    // below — so the exact-duplicate case is probed with `reverse` instead.)
     let e = compile_err(
-        "sum :: [Integer] -> Integer\nsum xs = 999\n\nmain :: IO ()\nmain = print (sum [1, 2, 3])\n",
+        "reverse :: [a] -> [a]\nreverse xs = xs\n\nmain :: IO ()\nmain = print (reverse [1, 2, 3])\n",
     );
     assert!(
-        e.contains("'sum' is already provided by the Prelude and cannot be redefined"),
+        e.contains("'reverse' is already provided by the Prelude and cannot be redefined"),
         "got: {e}"
     );
-    assert!(e.contains("same type as the Prelude's 'sum'"), "got: {e}");
+    assert!(e.contains("same type as the Prelude's 'reverse'"), "got: {e}");
+}
+
+#[test]
+fn prelude_foldable_generic_allows_monomorphic_redefinition() {
+    // Redefining a Foldable-generic Prelude function at a genuinely different
+    // (monomorphic list) type is the documented user-wins case, and the
+    // user's definition is the one that runs.
+    let source =
+        "sum :: [Integer] -> Integer\nsum xs = 999\n\nmain :: IO ()\nmain = putStrLn (show (sum [1, 2, 3]))\n";
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let captured = lua.create_table().unwrap();
+    lua.globals().set("__captured", captured.clone()).unwrap();
+    let print_fn = lua
+        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+            let line = s.to_str()?.to_string();
+            let t: mlua::Table = lua.globals().get("__captured")?;
+            let n = t.raw_len();
+            t.raw_set(n + 1, line)?;
+            Ok(())
+        })
+        .unwrap();
+    lua.globals().set("print", print_fn).unwrap();
+    lua.load(&lua_code).set_name("user_wins_sum").exec()
+        .expect("should run");
+    let lines: Vec<String> = captured
+        .sequence_values::<String>()
+        .collect::<mlua::Result<_>>()
+        .unwrap();
+    assert_eq!(lines, vec!["999"]);
 }
 
 #[test]

@@ -980,7 +980,9 @@ Functions: show, putStrLn, putStr, print, (++), (<>), ($), max, min,
            const, id, (.), flip, map, filter, foldl, foldr, sqrt,
            not, (&&), (||), error, undefined, otherwise, head, tail,
            take, zipWith, elem, length, reverse, fst, snd, concatMap,
-           mapM_, when, assert, seq, getArgs, exit, try, catch
+           mapM_, when, assert, seq, getArgs, exit, try, catch,
+           foldMap, maximum, minimum, mempty, mappend,
+           traverse, sequenceA, liftA2
 
     (++)  :: [a] -> [a] -> [a]              -- list append only
     (<>)  :: Semigroup a => a -> a -> a     -- string concatenation
@@ -997,7 +999,37 @@ Functions: show, putStrLn, putStr, print, (++), (<>), ($), max, min,
 Note: `String` is *not* a list, so `(++)` does not concatenate
 strings — use `(<>)` for that. Conversely `(<>)` today applies only to
 `String`; lists are joined with `(++)`. (`(<>)` is the `Semigroup`
-method; only the `String` instance is usable at present.)
+method; only the `String` instance is usable at present.) The `Monoid`
+class (superclass `Semigroup`) provides `mempty` and the *named*
+method `mappend`, with instances for `String` and `[a]` — `mappend`
+does dispatch on lists (polymorphic `Monoid` code like `foldMap`
+needs a working append), while the `(<>)` operator on lists stays
+rejected in favour of `(++)`.
+
+`Foldable` (methods `foldr`, `foldl`; instances `[]`, `Maybe`,
+`Either` — folding over `Right`) generalizes the container folds, and
+`length`, `null`, `elem`, `sum`, `product`, `maximum`, `minimum` and
+`foldMap` are defined generically over it, so they work on any
+Foldable (including user instances). `toList` lives in
+`Data.Foldable` (as in GHC, whose Prelude does not export it either).
+`Traversable` (method `traverse`; superclasses `Functor` and
+`Foldable`; the same three instances) provides applicative traversal,
+with `sequenceA` defined over it. `Applicative` additionally carries
+`liftA2` as a real method (as in GHC). User types join all three
+classes with ordinary `instance` declarations:
+
+    data Tree a = Leaf | Node (Tree a) a (Tree a)
+        deriving (Functor)
+
+    instance Foldable Tree where
+        foldr _ z Leaf = z
+        foldr f z (Node l x r) = foldr f (f x (foldr f z r)) l
+        foldl _ z Leaf = z
+        foldl f z (Node l x r) = foldl f (f (foldl f z l) x) r
+
+Tuples have no Foldable/Traversable instance: the class variable has
+kind `Type -> Type`, and mata-ll has no partially-applied tuple
+constructor (the same reason tuples have no Ord instance).
 
 Comparison and equality operators are methods of Eq and Ord:
 
@@ -1006,8 +1038,8 @@ Comparison and equality operators are methods of Eq and Ord:
     compare :: Ord a => a -> a -> Ordering
     data Ordering = LT | EQ | GT
 
-Typeclasses: Show, Eq, Ord, Enum, Bounded, Read, Semigroup,
-             Functor, Applicative, Monad
+Typeclasses: Show, Eq, Ord, Enum, Bounded, Read, Semigroup, Monoid,
+             Functor, Applicative, Monad, Foldable, Traversable
 
 Types: Maybe (Just, Nothing), Either (Left, Right), IO, Ordering,
        ExitValue (Normal, Err), Any

@@ -108,6 +108,20 @@ To catch an error in a *pure* value, force it to WHNF inside the tried action �
 IO effects inside `try` are still caught normally; only a lazily-returned pure
 value needs the explicit force.
 
+## An IO action's result must not itself be a function
+
+The compiled IO runtime distinguishes "an action to run" from "a result value"
+by shape: after forcing, a Lua function is treated as an action and called.
+That heuristic is ambiguous exactly when an action's *result* is a function —
+`IO (a -> b)` — so generic code that routes a function through IO with
+`g <$> action <*> action2` (which builds an `IO (b -> c)` intermediate) can
+misfire at run time even though GHC accepts it. Direct `<*>` chains in
+do-blocks are compiled specially and work; the caveat applies to
+`Applicative f =>`-generic bodies instantiated at IO. Write such code with
+`liftA2` (a real Applicative method here, as in GHC), which keeps only
+fully-applied values in the container — the Prelude's `traverse` is built on
+it for exactly this reason.
+
 ## Lazy evaluation can cause space leaks
 
 mata-ll uses non-strict evaluation by default. Unevaluated thunks accumulate

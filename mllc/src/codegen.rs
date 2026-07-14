@@ -785,6 +785,7 @@ impl CodeGen {
             "ord_lt__ByteString", "ord_gt__ByteString", "ord_le__ByteString",
             "ord_ge__ByteString", "ord_compare__ByteString",
             "head", "tail", "map", "filter", "take", "drop", "zipWith",
+            "foldr", "foldl",
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList", "hashmap_toList",
@@ -5526,6 +5527,43 @@ local function zipWith(f, xs, ys)
     return __mll_lazy_cons(f(__mll_head(xs), __mll_head(ys)), function()
         return zipWith(f, __mll_tail(xs), __mll_tail(ys))
     end)
+end
+-- Type-erased Foldable fallbacks. Typed code dispatches foldr/foldl to
+-- foldr_List/foldr_Maybe/foldr_Either at compile time; these run only in
+-- type-erased generic contexts (the same role `map` plays for fmap and the
+-- generic `show` plays for Show). They handle the structures whose runtime
+-- shape is self-describing: nil ([] and Nothing both fold to the seed),
+-- cons lists, and Just wrappers. Either cannot be recognized type-erased
+-- (Left/Right are plain constructor tables), so it fails loudly.
+-- foldr keeps the compiled version's laziness: the recursive fold is a
+-- thunk, so a short-circuiting f terminates on infinite lists.
+local function foldr(f, z, t)
+    f = __force(f); t = __force(t)
+    if t == nil then return __force(z) end
+    local mt = getmetatable(t)
+    if mt == __just_mt then return f(t[1], z) end
+    if mt == __cons_mt then
+        return f(__mll_head(t), __thunk(function()
+            return foldr(f, z, __mll_tail(t))
+        end))
+    end
+    error("foldr: type-erased fold over a structure that is not a list or Maybe")
+end
+local function foldl(f, z, t)
+    f = __force(f); t = __force(t)
+    if t == nil then return __force(z) end
+    local mt = getmetatable(t)
+    if mt == __just_mt then return f(z, t[1]) end
+    if mt ~= __cons_mt then
+        error("foldl: type-erased fold over a structure that is not a list or Maybe")
+    end
+    local acc = z
+    local cur = t
+    while cur ~= nil do
+        acc = f(acc, __mll_head(cur))
+        cur = __mll_tail(cur)
+    end
+    return __force(acc)
 end
 -- Currying adapters for the hand-written generic builtins above. Compiled
 -- mata-ll functions are N-ary (all count_arrows(type) arguments in one call),

@@ -33,7 +33,28 @@ impl Checker {
             Ty::Unit => true,
             // Lists/tuples are structural for Show and Eq (mono generates the
             // instance), but not for Ord — mata-ll has no list/tuple ordering.
-            Ty::List(elem) => structural_container_class(class) && self.has_instance(class, elem),
+            // A non-structural class can still have a registered list instance
+            // (e.g. Monoid [a]); its declared context governs what the element
+            // must provide, exactly like the Con-headed path below.
+            Ty::List(elem) => {
+                if structural_container_class(class) {
+                    return self.has_instance(class, elem);
+                }
+                let Some(inst) = self.instances.get(&(class.to_string(), InstHead::List)) else {
+                    return false;
+                };
+                match &inst.context {
+                    Some(ctx) => match Self::match_instance_args(&inst.target_type, ty) {
+                        Some(binds) => ctx.iter().all(|c| {
+                            binds.get(&c.type_var)
+                                .map(|t| self.has_instance(&c.class_name, t))
+                                .unwrap_or(true)
+                        }),
+                        None => true,
+                    },
+                    None => self.has_instance(class, elem),
+                }
+            }
             Ty::Tuple(elems) =>
                 structural_container_class(class) && elems.iter().all(|e| self.has_instance(class, e)),
             Ty::Con(_) => InstHead::of(ty)
