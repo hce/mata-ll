@@ -103,6 +103,7 @@ impl Checker {
         self.current_fn = Some(name.to_string());
         self.wanted.clear();
         self.binder_types.clear();
+        self.pattern_skolems.clear();
         let (fresh_ty, renames) = self.freshen_sig_type_mapped(declared_ty);
 
         // Re-express this function's declared constraints over the freshened
@@ -318,6 +319,10 @@ impl Checker {
         let mut remaining_ty = fun_ty.clone();
         let mut subst = Subst::empty();
         let mut tpatterns = Vec::new();
+        // Existential skolems minted anywhere in this clause (argument
+        // patterns or nested matches in the body) must not survive into the
+        // function's own type; snapshot to know which ones are ours.
+        let skolems_before = self.pattern_skolems.len();
 
         for pattern in &clause.patterns {
             match &remaining_ty {
@@ -444,6 +449,10 @@ impl Checker {
                 let mut param_tys = Vec::new();
                 let mut tpatterns = Vec::new();
                 let mut where_subst = Subst::empty();
+                // A where-function's patterns can unpack an existential too;
+                // its skolems must not survive into the function's own type
+                // (checked below, once that type is assembled).
+                let where_skolems_before = self.pattern_skolems.len();
                 for pat in &ld.patterns {
                     let param_ty = self.fresh_var("_w");
                     // On failure, record the error and continue with a wildcard
@@ -508,6 +517,16 @@ impl Checker {
                         }
                     }
                 }
+                // A skolem this where-function unpacked must not appear in
+                // its own type: mata-ll where-bindings are monomorphic, so
+                // every CALL of the function shares one type — a where-fn
+                // returning its unpacked existential (`unpack (Foo x) = x`)
+                // would claim two calls on two different boxes yield the
+                // SAME hidden type, which is false (and, with an Eq-style
+                // constrained existential, exploitable). GHC rejects this
+                // the same way.
+                self.check_existential_escape(
+                    &inferred_fn_ty.apply_subst(&subst), where_skolems_before)?;
                 twhere.push(TLocalDef {
                     name: ld.name.clone(),
                     patterns: tpatterns.into_iter().map(|p| p.apply_subst(&where_subst)).collect(),
@@ -515,6 +534,15 @@ impl Checker {
                 });
             }
         }
+
+        // An existential skolem unpacked by this clause (in an argument
+        // pattern or a nested match) must not appear in the function's own
+        // type: the function type is what callers see, and the hidden type
+        // must stay hidden. This catches both the direct leak (`unFoo (Foo
+        // x) = x` — the return type IS the skolem) and the indirect one
+        // through a parameter (`f g s = case s of Foo x -> g x` — g's type
+        // becomes `skolem -> r`).
+        self.check_existential_escape(&fun_ty.apply_subst(&subst), skolems_before)?;
 
         // Apply the accumulated substitution to the entire clause,
         // keeping the source clause's location so downstream passes (the
@@ -587,6 +615,30 @@ impl Checker {
         Ok((tbinds, out_env, subst))
     }
 
+    /// Reject a type that mentions an existential skolem minted after
+    /// `since` (a snapshot of `pattern_skolems.len()`). Called on any type
+    /// that outlives the pattern match which unpacked the existential — the
+    /// result type of a case expression, or the whole function type of a
+    /// clause (which also catches leaks into parameter types, e.g. an outer
+    /// lambda-bound function unified against `skolem -> r`). The concrete
+    /// type was erased at packing time, so nothing outside the match may
+    /// name it.
+    fn check_existential_escape(&self, ty: &Ty, since: usize) -> Result<(), DiagnosticKind> {
+        for (sk_name, sk_id) in &self.pattern_skolems[since..] {
+            if ty.contains_skolem(sk_name, *sk_id) {
+                let con = self.existential_skolems.get(sk_id)
+                    .map(|i| i.con.clone())
+                    .unwrap_or_default();
+                return Err(DiagnosticKind::ExistentialEscape {
+                    var: sk_name.clone(),
+                    con,
+                    ty: ty.clone(),
+                });
+            }
+        }
+        Ok(())
+    }
+
     // --- Pattern checking (returns typed pattern) ---
 
     pub(super) fn check_pattern(
@@ -628,12 +680,31 @@ impl Checker {
                         tv_map.insert(tv.clone(), Ty::Var(fresh));
                     }
                 }
-                // Existential type variables get fresh (skolem-like) variables
-                // that are local to this pattern match branch
+                // Existential type variables become fresh RIGID skolem
+                // constants, scoped to this pattern-match branch: the
+                // concrete type was erased when the value was packed, so the
+                // body may not assume anything about it — a skolem unifies
+                // only with itself, never with a concrete type. Provenance is
+                // recorded so (a) `has_instance` satisfies a wanted class
+                // constraint on the skolem from exactly the constructor's
+                // declared context and nothing else, (b) the escape checks in
+                // `check_clause` / `Expr::Case` know which skolems this
+                // pattern introduced, and (c) diagnostics can say where the
+                // hidden type came from.
                 for tv in &con_info.existential_vars {
-                    if let Ty::Var(fresh) = self.fresh_var("_ex") {
-                        tv_map.insert(tv.clone(), Ty::Var(fresh));
-                    }
+                    let sk_id = self.next_var;
+                    self.next_var += 1;
+                    tv_map.insert(tv.clone(), Ty::Skolem(tv.name.clone(), sk_id));
+                    self.pattern_skolems.push((tv.name.clone(), sk_id));
+                    let givens = con_info.existential_constraints.iter()
+                        .filter(|c| c.type_var == tv.name)
+                        .map(|c| c.class_name.clone())
+                        .collect();
+                    self.existential_skolems.insert(sk_id, ExSkolemInfo {
+                        var: tv.name.clone(),
+                        con: name.clone(),
+                        givens,
+                    });
                 }
                 let tv_subst = Subst::from_map(tv_map);
                 let result_ty = con_info.result_type.apply_subst(&tv_subst);
@@ -682,6 +753,13 @@ impl Checker {
                     let (ty, inst_map) = self.instantiate_with_map(&scheme);
                     self.emit_use_constraints(name, &inst_map);
                     Ok((TExpr::new(TExprKind::Var(name.clone()), ty.clone()), ty, Subst::empty()))
+                } else if let Some(con) = self.existential_fields.get(name) {
+                    // The field exists, but its type is existential — a
+                    // selector would hand the hidden type to any caller,
+                    // outside every match scope.
+                    Err(DiagnosticKind::Other(format!(
+                        "Field '{}' of constructor '{}' has an existential type, so it has no selector function: the field's type was erased when the value was packed, and a selector would carry it out of the pattern match that is the only place it may be used. Pattern-match the constructor positionally instead ('case v of {} x -> …')",
+                        name, con, con)))
                 } else {
                     Err(DiagnosticKind::UnboundVariable(name.clone()))
                 }
@@ -691,7 +769,24 @@ impl Checker {
                 // the TIR carries the key so codegen picks the right tag.
                 let con_key = self.resolve_con_name(name).to_string();
                 if let Some(scheme) = env.lookup(&con_key) {
-                    let ty = self.instantiate(scheme);
+                    let scheme = scheme.clone();
+                    let (ty, inst_map) = self.instantiate_with_map(&scheme);
+                    // Packing a value into a constrained existential
+                    // constructor (`forall a. Show a => Showable a`) must
+                    // prove the declared context for the packed type HERE:
+                    // construction is the only moment the concrete type is
+                    // still known — after it, only the constraint's evidence
+                    // survives. Emit each declared constraint as a wanted on
+                    // the instantiation of its existential variable.
+                    if let Some(ci) = self.constructors.get(&con_key) {
+                        for c in &ci.existential_constraints {
+                            if let Some(t) = inst_map.iter()
+                                .find(|(v, _)| v.name == c.type_var)
+                                .map(|(_, t)| t.clone()) {
+                                self.wanted.push((c.class_name.clone(), t));
+                            }
+                        }
+                    }
                     Ok((TExpr::new(TExprKind::Con(con_key), ty.clone()), ty, Subst::empty()))
                 } else {
                     Err(DiagnosticKind::UnboundConstructor(name.clone()))
@@ -844,6 +939,9 @@ impl Checker {
                 for branch in branches {
                     let mut branch_env = env.apply_subst(&subst);
                     let scrut_ty = scrut_ty.apply_subst(&subst);
+                    // Any existential skolem this branch's pattern mints must
+                    // stay inside the branch; snapshot to check that below.
+                    let skolems_before = self.pattern_skolems.len();
                     let (tp, pat_subst) = self.check_pattern(&branch.pattern, &scrut_ty, &mut branch_env)?;
                     subst = subst.compose(&pat_subst);
 
@@ -872,6 +970,12 @@ impl Checker {
                     subst = subst.compose(&body_subst);
                     let s = unify(&result_ty.apply_subst(&subst), &body_ty)?;
                     subst = subst.compose(&s);
+                    // The case's result outlives the branch, so an unpacked
+                    // existential's skolem must not appear in it (e.g.
+                    // `case s of Foo x -> x`). Leaks into longer-lived types
+                    // that are not the result (an outer binder's type) are
+                    // caught by the same check at the clause boundary.
+                    self.check_existential_escape(&result_ty.apply_subst(&subst), skolems_before)?;
                     tbranches.push(TCaseBranch { pattern: tp, guards: tguards, body: tb });
                 }
 
@@ -1008,6 +1112,15 @@ impl Checker {
                             "Field '{}' belongs to type '{}', not '{}'",
                             field_name, field_tn, type_name
                         )));
+                    }
+                    if let Some(con) = self.existential_fields.get(field_name) {
+                        // The new value's type would have to match a type
+                        // that was erased when the record was packed —
+                        // unknowable. Rebuild the record with its
+                        // constructor instead.
+                        return Err(DiagnosticKind::Other(format!(
+                            "Field '{}' of constructor '{}' has an existential type and cannot be record-updated: the type the new value must have was erased when the record was packed, so there is nothing to check the new value against. Rebuild the value with '{}' instead",
+                            field_name, con, con)));
                     }
                     let env2 = env.apply_subst(&subst);
                     let (te, _ty, s) = self.infer_expr(field_expr, &env2)?;

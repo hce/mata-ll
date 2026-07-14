@@ -122,17 +122,26 @@ MATA-LL TODO
       partial-via-`map`, first-class-via-`foldr`/higher-order with thunked
       operands, floor semantics on negatives, and zero-divisor raising through
       the prefix/first-class path).
-- [ ] **Existential unpacking does not skolemize — type-soundness hole.**
-      `data ShowBox = forall a. MkShowBox a (a -> String)` with
-      `coerce (MkShowBox x _) = x` is ACCEPTED and coerces anything to
-      anything (GADT-syntax existentials leak identically). The hidden
-      variable must become a rigid skolem when the constructor is
-      unpacked, so unifying it with an outer type (like the declared
-      return type) is rejected — the same rigidity runST/rank-2 sealing
-      already enforces (those escapes ARE rejected; GADT refinement misuse
-      too). SPEC.md's "cannot escape the branch" promise is annotated as
-      currently not holding; restore it. Found by the 0.1.3 soundness
-      audit; documented in CAVEATS.md.
+- [x] **Existential unpacking does not skolemize — type-soundness hole —
+      fixed.** `data ShowBox = forall a. MkShowBox a (a -> String)` with
+      `coerce (MkShowBox x _) = x` was ACCEPTED and coerced anything to
+      anything (GADT-syntax existentials leaked identically). Unpacking now
+      mints a fresh rigid skolem per pattern (`check_pattern`), so unifying
+      the hidden variable with any outer or concrete type is rejected with
+      a provenance note naming the hiding constructor. Escape checks cover
+      the function's own type (`check_clause`), `case` result types, and
+      `where`-function types; the record-selector and record-update back
+      doors are closed (existential fields have no selector and cannot be
+      updated — as in GHC); GADT-syntax existentials (any signature
+      variable not reaching the result type, explicit `forall` and
+      contexts included) go through the same skolemization. Declared
+      contexts (`forall a. Show a => …`) are enforced both ways: packing
+      emits the wanted instance at the concrete type, unpacking provides
+      exactly the declared classes (plus superclasses) on the skolem.
+      SPEC.md's "cannot escape the branch" promise now holds; CAVEATS.md
+      documents the remaining record restrictions. Tests:
+      existential_constraints.mll and the existential_unpacking_* /
+      existential_* error-path tests in run_mll.rs.
 - [x] **IO bind/`return` forces the bound value eagerly — fixed.**
       `_ <- return (error "x")`, a bare `return (error "x")` statement in
       a do-block, and `fmap f (return ⊥)` all raised, where GHC leaves the

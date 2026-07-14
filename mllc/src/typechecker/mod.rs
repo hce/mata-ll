@@ -66,6 +66,28 @@ pub struct ConInfo {
     pub result_type: Ty,
     /// Existential type variables (quantified per-constructor, not in the data type params)
     pub existential_vars: Vec<TyVar>,
+    /// Class constraints declared on the existential variables
+    /// (`forall a. Show a => MkBox a`): the classes the constructor
+    /// GUARANTEES for each hidden type. Enforced in both directions —
+    /// construction emits a wanted constraint (the packed type must have the
+    /// instance), and unpacking makes exactly these classes available on the
+    /// skolem that replaces the hidden variable.
+    pub existential_constraints: Vec<TyConstraint>,
+}
+
+/// Provenance of a skolem constant minted for an EXISTENTIAL type variable
+/// when its constructor was unpacked in a pattern. Skolems without an entry
+/// here are rank-2 sealing skolems (their constraints are the caller's to
+/// discharge); existential skolems carry exactly the classes the constructor
+/// declared (`givens`) and are used to build precise diagnostics.
+#[derive(Debug, Clone)]
+pub(super) struct ExSkolemInfo {
+    /// The source-level variable name (`a` in `forall a. …`).
+    pub var: String,
+    /// The constructor whose pattern match introduced the skolem.
+    pub con: String,
+    /// Class names the constructor's declared constraints guarantee for it.
+    pub givens: Vec<String>,
 }
 
 /// Typeclass info
@@ -197,6 +219,26 @@ pub struct Checker {
     /// index is >= `local_decl_start`). Set by every decl-processing pass;
     /// determines how `resolve_con_name` resolves constructor references.
     checking_local: bool,
+    /// Skolems minted for existential type variables while checking the
+    /// current function, as (name, id). `check_pattern` appends; the escape
+    /// checks in `check_clause` and `Expr::Case` snapshot the length around a
+    /// pattern to know which skolems that pattern introduced. Cleared per
+    /// function alongside `wanted`.
+    pattern_skolems: Vec<(String, u32)>,
+    /// Provenance and declared givens for every existential skolem ever
+    /// minted, keyed by skolem id (ids come from `next_var`, so they are
+    /// unique program-wide). Consulted by `has_instance` (a wanted on an
+    /// existential skolem is satisfied only by the constructor's declared
+    /// constraints) and by diagnostic enrichment.
+    existential_skolems: HashMap<u32, ExSkolemInfo>,
+    /// Record fields whose type mentions their constructor's existential
+    /// variables, mapped to the constructor name. Such a field has no usable
+    /// selector (the selector's result type would BE the hidden type, walking
+    /// it straight out of any match scope) and cannot be record-updated (the
+    /// new value's type cannot be checked against a type that was erased).
+    /// Registered instead of a selector so both uses get a real explanation
+    /// rather than "unbound variable". Same restriction as GHC.
+    existential_fields: HashMap<String, String>,
 }
 
 /// Suffix appended to a local constructor's key when it shadows a non-local
@@ -243,6 +285,9 @@ impl Checker {
             local_con_keys: HashSet::new(),
             local_con_renames: HashMap::new(),
             checking_local: false,
+            pattern_skolems: Vec::new(),
+            existential_skolems: HashMap::new(),
+            existential_fields: HashMap::new(),
         };
         checker.init_prelude();
         checker.init_kinds();
@@ -597,12 +642,67 @@ impl Checker {
 
     fn push_error_ctx(&mut self, kind: DiagnosticKind, ctx: String) {
         let baseline = self.checking_prelude;
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file: None, notes: Vec::new(), baseline });
+        let notes = self.existential_provenance_notes(&kind);
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file: None, notes, baseline });
     }
 
     fn push_error_span(&mut self, kind: DiagnosticKind, ctx: String, span: Span) {
         let baseline = self.checking_prelude;
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file: None, notes: Vec::new(), baseline });
+        let notes = self.existential_provenance_notes(&kind);
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file: None, notes, baseline });
+    }
+
+    /// Provenance notes for every existential skolem a diagnostic's types
+    /// mention. A skolem prints as a plain type-variable name ('a'), which is
+    /// baffling in a message like "Cannot match 'a' with 'Integer'" or
+    /// "No instance for 'Num a'" unless the reader is told that 'a' is the
+    /// type a constructor hid — so every error path (push_error_ctx/_span)
+    /// attaches where the skolem came from and what the constructor
+    /// guarantees for it. Rank-2 sealing skolems have no entry in
+    /// `existential_skolems` and get no note.
+    fn existential_provenance_notes(&self, kind: &DiagnosticKind) -> Vec<String> {
+        let mut sks: Vec<(String, u32)> = Vec::new();
+        match kind {
+            DiagnosticKind::Mismatch(a, b) | DiagnosticKind::RigidMismatch(a, b) => {
+                a.collect_skolems(&mut sks);
+                b.collect_skolems(&mut sks);
+            }
+            DiagnosticKind::OccursCheck(_, t)
+            | DiagnosticKind::NoInstance { ty: t, .. }
+            | DiagnosticKind::AmbiguousType { ty: t, .. }
+            | DiagnosticKind::MissingContextConstraint { ty: t, .. } => t.collect_skolems(&mut sks),
+            DiagnosticKind::TypeSigMismatch { declared, inferred, .. } => {
+                declared.collect_skolems(&mut sks);
+                inferred.collect_skolems(&mut sks);
+            }
+            // ExistentialEscape already names the constructor in its message.
+            _ => {}
+        }
+        let mut notes = Vec::new();
+        for (_, id) in sks {
+            if let Some(info) = self.existential_skolems.get(&id) {
+                let guaranteed = if info.givens.is_empty() {
+                    "the constructor declares no constraints for it, so nothing at all is known about it".to_string()
+                } else {
+                    format!("the only thing known about it is the constructor's declared context ({})",
+                        info.givens.join(", "))
+                };
+                let note = format!(
+                    "'{}' is the existential type hidden by constructor '{}': the concrete type was erased when the value was packed, so inside the match '{}' stands for some unknown, rigid type — {}",
+                    info.var, info.con, info.var, guaranteed);
+                if notes.contains(&note) {
+                    // Two DISTINCT skolems that print identically: the same
+                    // constructor unpacked twice. Saying "cannot match 'a'
+                    // with 'a'" is baffling without this.
+                    notes.push(format!(
+                        "the two '{}'s are different types: every unpacking of '{}' hides its own concrete type, so values from two separate matches cannot be assumed to share one",
+                        info.var, info.con));
+                } else {
+                    notes.push(note);
+                }
+            }
+        }
+        notes
     }
 
     fn literal_type(&self, lit: &Literal) -> Ty {
@@ -749,8 +849,8 @@ impl Checker {
         self.env.insert("zipWith".into(), Scheme { vars: vec![a.clone(), b.clone(), c.clone()], ty: Ty::fun(&[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), Ty::list(ta.clone()), Ty::list(tb.clone())], Ty::list(tc.clone())) });
 
         // Maybe
-        self.constructors.insert("Just".into(), ConInfo { type_name: "Maybe".into(), variant_index: 1, total_variants: 2, field_types: vec![ta.clone()], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![] });
-        self.constructors.insert("Nothing".into(), ConInfo { type_name: "Maybe".into(), variant_index: 2, total_variants: 2, field_types: vec![], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![] });
+        self.constructors.insert("Just".into(), ConInfo { type_name: "Maybe".into(), variant_index: 1, total_variants: 2, field_types: vec![ta.clone()], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![], existential_constraints: vec![] });
+        self.constructors.insert("Nothing".into(), ConInfo { type_name: "Maybe".into(), variant_index: 2, total_variants: 2, field_types: vec![], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![], existential_constraints: vec![] });
         self.env.insert("Just".into(), Scheme { vars: vec![a.clone()], ty: Ty::arrow(ta.clone(), Ty::app(Ty::Con("Maybe".into()), ta.clone())) });
         self.env.insert("Nothing".into(), Scheme { vars: vec![a.clone()], ty: Ty::app(Ty::Con("Maybe".into()), ta.clone()) });
         self.env.insert("True".into(), Scheme::mono(Ty::Con("Bool".into())));
@@ -763,6 +863,7 @@ impl Checker {
             type_vars: vec![a.clone()],
             result_type: Ty::list(ta.clone()),
             existential_vars: vec![],
+            existential_constraints: vec![],
         });
         self.constructors.insert("[]".into(), ConInfo {
             type_name: "[]".into(), variant_index: 2, total_variants: 2,
@@ -770,6 +871,7 @@ impl Checker {
             type_vars: vec![a.clone()],
             result_type: Ty::list(ta.clone()),
             existential_vars: vec![],
+            existential_constraints: vec![],
         });
         // (:) :: a -> [a] -> [a]
         self.env.insert(":".into(), Scheme {
@@ -1862,6 +1964,48 @@ impl Checker {
         }
     }
 
+    /// Decompose a GADT constructor signature into (context constraints,
+    /// field types, result type, existential vars): peels explicit `forall`s
+    /// and an outer context (`MkBox :: forall a. Show a => a -> Box`), splits
+    /// the arrow spine, and computes which signature variables are
+    /// EXISTENTIAL — the ones that occur in the fields but not in the result
+    /// type. GADT syntax declares existentials implicitly this way; the data
+    /// header's parameter names are only arity markers, so a field variable
+    /// that happens to share a header name but does not reach the result is
+    /// existential all the same.
+    fn analyze_gadt_signature(&mut self, gadt_ty: &Type) -> (Vec<Constraint>, Vec<Ty>, Ty, Vec<TyVar>) {
+        let mut core = gadt_ty;
+        let mut constraints: Vec<Constraint> = Vec::new();
+        loop {
+            match core {
+                Type::Forall { inner, .. } => core = inner,
+                Type::Paren(inner) => core = inner,
+                Type::Constrained { constraints: cs, ty } => {
+                    constraints.extend(cs.iter().cloned());
+                    core = ty;
+                }
+                _ => break,
+            }
+        }
+        let full_ty = self.ast_type_to_ty(core);
+        let mut args = Vec::new();
+        let mut cur = full_ty;
+        while let Ty::Arrow(a, b) = cur {
+            args.push(*a);
+            cur = *b;
+        }
+        let result_vars = cur.free_vars();
+        let mut ex_vars: Vec<TyVar> = Vec::new();
+        for ft in &args {
+            for v in ft.free_vars() {
+                if !result_vars.contains(&v) && !ex_vars.contains(&v) {
+                    ex_vars.push(v);
+                }
+            }
+        }
+        (constraints, args, cur, ex_vars)
+    }
+
     fn register_data_type(&mut self, name: &str, type_vars: &[String], constructors: &[Constructor]) {
         self.register_kind(name, type_vars.len());
         let tvars: Vec<TyVar> = type_vars.iter()
@@ -1894,20 +2038,47 @@ impl Checker {
             let Some(con_key) = self.claim_constructor_name(&con.name, name, i + 1, constructors.len()) else { continue };
 
             // Collect existential type variables for this constructor
-            let ex_tvars: Vec<TyVar> = con.existential_vars.iter()
+            let mut ex_tvars: Vec<TyVar> = con.existential_vars.iter()
                 .map(|n| TyVar { name: n.clone(), id: u32::MAX })
                 .collect();
 
+            // The constraints declared on those variables (`forall a. Show a
+            // => …`). Only the Haskell-2010 form `C a` over a variable bound
+            // by THIS constructor's forall can mean anything here; pass 2b
+            // rejects everything else, so a malformed constraint is dropped
+            // rather than half-registered.
+            let mut ex_constraints: Vec<TyConstraint> = con.existential_constraints.iter()
+                .filter_map(|c| match &c.type_arg {
+                    Type::Var(v) if con.existential_vars.contains(v) =>
+                        Some(TyConstraint { class_name: c.class_name.clone(), type_var: v.clone() }),
+                    _ => None,
+                })
+                .collect();
+
             let (field_types, con_result_type) = if let Some(gadt_ty) = &con.gadt_type {
-                // GADT constructor: decompose type sig into args + return type
-                let full_ty = self.ast_type_to_ty(gadt_ty);
-                let mut args = Vec::new();
-                let mut cur = full_ty;
-                while let Ty::Arrow(a, b) = cur {
-                    args.push(*a);
-                    cur = *b;
+                // GADT constructor: decompose type sig into args + return
+                // type, collecting the implicitly-declared existentials
+                // (field variables that do not reach the result type) and
+                // any context constraints on them. Malformed constraints
+                // (unknown class, non-existential variable) are reported in
+                // pass 2b, like the `forall`-syntax ones.
+                let (gadt_constraints, args, result, gadt_ex) =
+                    self.analyze_gadt_signature(gadt_ty);
+                for v in gadt_ex {
+                    if !ex_tvars.contains(&v) {
+                        ex_tvars.push(v);
+                    }
                 }
-                (args, cur)
+                for c in &gadt_constraints {
+                    if let Type::Var(v) = &c.type_arg
+                        && ex_tvars.iter().any(|t| &t.name == v) {
+                            ex_constraints.push(TyConstraint {
+                                class_name: c.class_name.clone(),
+                                type_var: v.clone(),
+                            });
+                        }
+                }
+                (args, result)
             } else {
                 // Standard ADT constructor
                 let fts: Vec<Ty> = match &con.fields {
@@ -1927,6 +2098,7 @@ impl Checker {
                 type_name: name.to_string(), variant_index: i + 1, total_variants: constructors.len(),
                 field_types: field_types.clone(), type_vars: tvars.clone(), result_type: con_result_type.clone(),
                 existential_vars: ex_tvars,
+                existential_constraints: ex_constraints,
             });
             self.env.insert(con_key, Scheme { vars: all_scheme_vars, ty: con_type });
 
@@ -1934,6 +2106,21 @@ impl Checker {
             if let ConstructorFields::Named(fields) = &con.fields {
                 for (fi, field) in fields.iter().enumerate() {
                     let field_ty = self.ast_type_to_ty(&field.ty);
+                    // A field whose type mentions an existential variable
+                    // gets NO selector: `getIt :: Foo -> a` would hand the
+                    // hidden type to any caller, outside any match scope —
+                    // the selector is the escape hole in function form.
+                    // Record it so uses of the name (and record updates of
+                    // the field) can explain this instead of claiming the
+                    // name is unbound. Construction and pattern matching
+                    // still work (both go through the constructor itself).
+                    if field_ty.free_vars().iter()
+                        .any(|v| con.existential_vars.contains(&v.name)) {
+                        self.existential_fields.insert(field.name.clone(), con.name.clone());
+                        let index = if constructors.len() == 1 { fi + 1 } else { fi + 2 };
+                        self.record_fields.insert(field.name.clone(), (name.to_string(), index));
+                        continue;
+                    }
                     // accessor :: DataType -> FieldType
                     // Note: the accessor is always named after the Haskell field
                     // name; an `as "key"` rename affects only the LuaDict table key.
@@ -1976,6 +2163,7 @@ impl Checker {
             type_vars: tvars.clone(),
             result_type: result_type.clone(),
             existential_vars: vec![],
+            existential_constraints: vec![],
         });
         self.env.insert(con_key, Scheme {
             vars: tvars,
@@ -2114,7 +2302,84 @@ impl Checker {
                 Decl::DataDef { name, constructors, .. } => {
                     let ctx = format!("the definition of data type '{}'", name);
                     for con in constructors {
+                        // Validate the constraints on this constructor's
+                        // existential variables (`forall a. Show a => …`).
+                        // register_data_type (pass 1, before classes existed)
+                        // silently dropped anything malformed; report it here
+                        // so a typo'd class or a constraint on the wrong
+                        // variable cannot silently become "no constraint".
+                        for c in &con.existential_constraints {
+                            match &c.type_arg {
+                                Type::Var(v) if con.existential_vars.contains(v) => {
+                                    if !self.classes.contains_key(&c.class_name) {
+                                        self.push_error_ctx(
+                                            DiagnosticKind::Other(format!(
+                                                "Unknown typeclass '{}' in the context of constructor '{}': the constraint names the class the packed value must have an instance of, so it must be a class that is in scope",
+                                                c.class_name, con.name)),
+                                            ctx.clone(),
+                                        );
+                                    }
+                                }
+                                Type::Var(v) => {
+                                    self.push_error_ctx(
+                                        DiagnosticKind::Other(format!(
+                                            "Constraint '{} {}' on constructor '{}' does not mention any of its existentially quantified variables: only the variables bound by this constructor's 'forall' can carry a constraint here",
+                                            c.class_name, v, con.name)),
+                                        ctx.clone(),
+                                    );
+                                }
+                                other => {
+                                    let shown = self.ast_type_to_ty(other);
+                                    self.push_error_ctx(
+                                        DiagnosticKind::Other(format!(
+                                            "Constraint '{} {}' on constructor '{}' must apply the class to a plain type variable bound by the 'forall' (the Haskell 2010 form 'C a')",
+                                            c.class_name, shown, con.name)),
+                                        ctx.clone(),
+                                    );
+                                }
+                            }
+                        }
                         if let Some(gadt_ty) = &con.gadt_type {
+                            // A GADT signature's context is subject to the
+                            // same rules as a forall-constructor's: each
+                            // constraint must name a known class and apply
+                            // it to one of the constructor's EXISTENTIAL
+                            // variables (a variable that reaches the result
+                            // type is the caller's, and its constraints
+                            // belong on the functions that use the type).
+                            let (gadt_constraints, _, _, ex_vars) =
+                                self.analyze_gadt_signature(gadt_ty);
+                            for c in &gadt_constraints {
+                                match &c.type_arg {
+                                    Type::Var(v) if ex_vars.iter().any(|t| &t.name == v) => {
+                                        if !self.classes.contains_key(&c.class_name) {
+                                            self.push_error_ctx(
+                                                DiagnosticKind::Other(format!(
+                                                    "Unknown typeclass '{}' in the context of constructor '{}': the constraint names the class the packed value must have an instance of, so it must be a class that is in scope",
+                                                    c.class_name, con.name)),
+                                                ctx.clone(),
+                                            );
+                                        }
+                                    }
+                                    Type::Var(v) => {
+                                        self.push_error_ctx(
+                                            DiagnosticKind::Other(format!(
+                                                "Constraint '{} {}' on constructor '{}' does not mention any of its existential variables ('{}' reaches the constructor's result type, so it is chosen by the caller, not hidden by the constructor)",
+                                                c.class_name, v, con.name, v)),
+                                            ctx.clone(),
+                                        );
+                                    }
+                                    other => {
+                                        let shown = self.ast_type_to_ty(other);
+                                        self.push_error_ctx(
+                                            DiagnosticKind::Other(format!(
+                                                "Constraint '{} {}' on constructor '{}' must apply the class to a plain type variable (the Haskell 2010 form 'C a')",
+                                                c.class_name, shown, con.name)),
+                                            ctx.clone(),
+                                        );
+                                    }
+                                }
+                            }
                             self.check_type_kind(gadt_ty, &ctx);
                             continue;
                         }

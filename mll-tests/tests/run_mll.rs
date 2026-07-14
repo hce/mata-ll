@@ -468,6 +468,12 @@ mll_test!(nested_eq, "nested_eq.mll");
 mll_test!(st_return, "st_return.mll");
 mll_test!(local_overflow, "local_overflow.mll");
 mll_test!(existentials, "existentials.mll");
+// Constrained existentials (`forall a. Show a => Con a`): the pack side
+// proves the instance, the unpack side gets exactly the declared classes
+// on the skolemized hidden type. The rejection half (skolems must not
+// unify with concrete types or escape) is exercised by the
+// existential_unpacking_* tests below.
+mll_test!(existential_constraints, "existential_constraints.mll");
 mll_test!(derive_functor, "derive_functor.mll");
 // Foldable/Traversable: class methods (foldr/foldl/traverse), the generic
 // Prelude functions over them, the Monoid class behind foldMap, liftA2,
@@ -4711,6 +4717,232 @@ main = print ((1, 2) > (1, 3) :: Bool)
     );
     assert!(e.contains("No instance for 'Ord (Integer, Integer)'"), "got: {e}");
     assert!(e.contains("no Ord instance"), "missing tuple Ord note, got: {e}");
+}
+
+/// Unpacking an existential must SKOLEMIZE: the hidden type variable becomes
+/// a rigid constant that cannot unify with any concrete type. The canonical
+/// soundness probe — before the fix this compiled and produced a Lua runtime
+/// crash ("attempt to add a 'string' with a 'number'").
+#[test]
+fn existential_unpacking_skolemizes() {
+    let e = compile_err(
+        r#"
+data Foo = forall a. Foo a
+
+unFoo :: Foo -> Integer
+unFoo (Foo x) = x + 1
+
+main :: IO ()
+main = putStrLn (show (unFoo (Foo "hello")))
+"#,
+    );
+    assert!(
+        e.contains("Cannot match 'a' with 'Integer'"),
+        "the skolem must not unify with Integer, got: {e}"
+    );
+    assert!(e.contains("rigid type variable"), "must explain rigidity, got: {e}");
+    assert!(e.contains("in definition of 'unFoo'"), "must locate the clause, got: {e}");
+    // The provenance note: 'a' alone is baffling unless the error says the
+    // type was hidden by the constructor.
+    assert!(
+        e.contains("existential type hidden by constructor 'Foo'"),
+        "must name the hiding constructor, got: {e}"
+    );
+    assert!(
+        e.contains("declares no constraints"),
+        "must say why no instance can help, got: {e}"
+    );
+
+    // GADT syntax declares existentials implicitly (a signature variable
+    // that does not reach the result type); it must skolemize identically.
+    let e = compile_err(
+        r#"
+data Box where
+  MkBox :: a -> Box
+
+coerce :: Box -> Integer
+coerce (MkBox x) = x
+
+main :: IO ()
+main = putStrLn (show (coerce (MkBox "boom") + 1))
+"#,
+    );
+    assert!(
+        e.contains("Cannot match 'a' with 'Integer'")
+            || e.contains("escapes its scope"),
+        "GADT-syntax existential must be rigid too, got: {e}"
+    );
+    assert!(
+        e.contains("hidden by constructor 'MkBox'"),
+        "must name the hiding constructor, got: {e}"
+    );
+}
+
+/// An unpacked existential's skolem must not survive the match that
+/// introduced it: not via the function's own type, not via a case
+/// expression's result, and not via a where-function's (monomorphic,
+/// shared-across-calls) type.
+#[test]
+fn existential_skolem_cannot_escape() {
+    // Direct escape through the return type.
+    let e = compile_err(
+        r#"
+data Foo = forall a. Foo a
+
+unFoo :: Foo -> a
+unFoo (Foo x) = x
+
+main :: IO ()
+main = putStrLn "no"
+"#,
+    );
+    assert!(
+        e.contains("Existential type variable 'a' escapes its scope"),
+        "return-type escape must be rejected, got: {e}"
+    );
+    assert!(e.contains("hidden by constructor 'Foo'"), "got: {e}");
+    assert!(
+        e.contains("repack it into the existential"),
+        "the note should suggest the legitimate uses, got: {e}"
+    );
+
+    // Escape through a case expression's result type.
+    let e = compile_err(
+        r#"
+data Foo = forall a. Foo a
+
+useCase :: Foo -> Integer
+useCase f = case f of
+  Foo x -> x
+
+main :: IO ()
+main = putStrLn "no"
+"#,
+    );
+    assert!(
+        e.contains("escapes its scope"),
+        "case-result escape must be rejected, got: {e}"
+    );
+
+    // Escape through a where-function's type: where-bindings are
+    // monomorphic, so `unpack e1` and `unpack e2` would claim the SAME
+    // hidden type for two different boxes — with an Eq-constrained
+    // existential that "equates" an Integer with a String.
+    let e = compile_err(
+        r#"
+data EqBox = forall a. Eq a => EqBox a
+
+test :: EqBox -> EqBox -> Bool
+test e1 e2 = unpack e1 == unpack e2
+  where unpack (EqBox x) = x
+
+main :: IO ()
+main = putStrLn (show (test (EqBox 1) (EqBox "one")))
+"#,
+    );
+    assert!(
+        e.contains("escapes its scope"),
+        "where-function escape must be rejected, got: {e}"
+    );
+}
+
+/// A constrained existential (`forall a. Show a => …`) is checked in both
+/// directions: packing must prove the declared instance for the concrete
+/// type, and unpacking provides exactly the declared classes — a class the
+/// constructor does not declare stays unavailable.
+#[test]
+fn existential_constraints_enforced_both_ways() {
+    // Unpack side: Show is declared, Num is not — arithmetic on the hidden
+    // type must be rejected, and the note must say what IS available.
+    let e = compile_err(
+        r#"
+data Showable = forall a. Show a => Showable a
+
+bad :: Showable -> Integer
+bad s = case s of
+  Showable x -> x + 1
+
+main :: IO ()
+main = putStrLn "no"
+"#,
+    );
+    assert!(
+        e.contains("Cannot match 'a' with 'Integer'"),
+        "undeclared class use must be rejected, got: {e}"
+    );
+    assert!(
+        e.contains("declared context (Show)"),
+        "note must list what the constructor guarantees, got: {e}"
+    );
+
+    // Pack side: a function has no Show instance, so it cannot be packed
+    // into a Show-constrained existential.
+    let e = compile_err(
+        r#"
+data Showable = forall a. Show a => Showable a
+
+pack :: Showable
+pack = Showable (\x -> (x :: Integer))
+
+main :: IO ()
+main = putStrLn "no"
+"#,
+    );
+    assert!(
+        e.contains("No instance for 'Show (Integer -> Integer)'"),
+        "packing an instance-less type must be rejected, got: {e}"
+    );
+
+    // A typo'd class in the constructor context must error at the data
+    // declaration, not silently become "no constraint".
+    let e = compile_err(
+        r#"
+data Box = forall a. Showw a => Box a
+
+main :: IO ()
+main = putStrLn "no"
+"#,
+    );
+    assert!(
+        e.contains("Unknown typeclass 'Showw' in the context of constructor 'Box'"),
+        "unknown context class must be reported, got: {e}"
+    );
+}
+
+/// Record syntax back doors: a field whose type is existential has no
+/// selector (the selector's result type would BE the hidden type, outside
+/// any match) and cannot be record-updated (nothing to check the new value
+/// against). Both were runtime type confusions before the fix.
+#[test]
+fn existential_record_fields_have_no_selector_or_update() {
+    let e = compile_err(
+        r#"
+data Foo = forall a. Foo { getIt :: a }
+
+main :: IO ()
+main = putStrLn (show (getIt (Foo "hello") + 1))
+"#,
+    );
+    assert!(
+        e.contains("has an existential type, so it has no selector function"),
+        "selector use must be rejected with an explanation, got: {e}"
+    );
+
+    let e = compile_err(
+        r#"
+data Foo = forall a. Foo { getIt :: a, label :: String }
+
+update :: Foo -> Foo
+update f = f { getIt = 42 }
+
+main :: IO ()
+main = putStrLn "no"
+"#,
+    );
+    assert!(
+        e.contains("cannot be record-updated"),
+        "existential field update must be rejected, got: {e}"
+    );
 }
 
 /// Monomorphization-time errors must carry a source location, like

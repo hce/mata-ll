@@ -216,6 +216,26 @@ impl Ty {
         }
     }
 
+    /// Collect every distinct skolem constant occurring in this type, as
+    /// (name, id) pairs. Used to attach provenance notes to diagnostics that
+    /// mention a skolem (existential unpacking vs rank-2 sealing).
+    pub fn collect_skolems(&self, out: &mut Vec<(String, u32)>) {
+        match self {
+            Ty::Skolem(n, i) => {
+                if !out.iter().any(|(on, oi)| on == n && oi == i) {
+                    out.push((n.clone(), *i));
+                }
+            }
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Var(_) => {}
+            Ty::Arrow(a, b) | Ty::App(a, b) => {
+                a.collect_skolems(out);
+                b.collect_skolems(out);
+            }
+            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => a.collect_skolems(out),
+            Ty::Tuple(elems) => for e in elems { e.collect_skolems(out); },
+        }
+    }
+
     /// Check if a type variable occurs in this type (for occurs check)
     pub fn occurs(&self, v: &TyVar) -> bool {
         match self {
@@ -612,6 +632,12 @@ pub enum DiagnosticKind {
     /// There is no instance for a bare rigid variable, so the evidence is
     /// missing and it must be rejected.
     MissingContextConstraint { class: String, ty: Ty },
+    /// An existentially quantified type variable, skolemized when its data
+    /// constructor was unpacked in a pattern, occurs in a type that outlives
+    /// the pattern match (the match's result type, or the enclosing
+    /// function's type). The concrete type was erased when the value was
+    /// packed, so nothing outside the match may see or name it.
+    ExistentialEscape { var: String, con: String, ty: Ty },
     /// A type reference names a type that was never defined: no builtin,
     /// data/newtype declaration, type alias, or type family has this name.
     /// Rejected at the reference so it cannot flow downstream as an opaque
@@ -700,6 +726,11 @@ impl Diagnostic {
             DiagnosticKind::MissingContextConstraint { .. } =>
                 Some("a bare polymorphic variable has no instance unless the signature \
                       requires one. GHC reports this as \"add (C a) to the context\"."),
+            DiagnosticKind::ExistentialEscape { .. } =>
+                Some("the concrete type was erased when the value was packed into the \
+                      constructor, so no code outside the match can know what it is. Use \
+                      the value inside the match (e.g. apply the functions packed \
+                      alongside it), or repack it into the existential before returning."),
             DiagnosticKind::UnknownType(name) => match name.as_str() {
                 "Boolean" =>
                     Some("the boolean type is spelled 'Bool', as in Haskell."),
@@ -726,7 +757,7 @@ impl fmt::Display for Diagnostic {
             }
             DiagnosticKind::RigidMismatch(a, b) => {
                 let s = pretty_var_subst(&[a, b]);
-                write!(f, "Cannot match '{}' with '{}': rank-2 polymorphism requires a polymorphic argument",
+                write!(f, "Cannot match '{}' with '{}': a rigid type variable stands for one specific type that is not visible here, so it cannot be assumed to be any particular type",
                     a.apply_subst(&s), b.apply_subst(&s))?
             }
             DiagnosticKind::OccursCheck(v, ty) => {
@@ -780,6 +811,11 @@ impl fmt::Display for Diagnostic {
                 let v = if v.is_empty() { "a".to_string() } else { v };
                 write!(f, "No instance for '{} {}': the type variable '{}' is only as general as the signature says, and the signature does not require '{} {}'. Add it to the context, e.g. '({} {}) => …'",
                     class, v, v, class, v, class, v)?
+            }
+            DiagnosticKind::ExistentialEscape { var, con, ty } => {
+                let s = pretty_var_subst(&[ty]);
+                write!(f, "Existential type variable '{}' escapes its scope: '{}' is hidden by constructor '{}' and exists only inside the pattern match that unpacks it, but here it leaks into the type '{}', which outlives the match",
+                    var, var, con, ty.apply_subst(&s))?
             }
             DiagnosticKind::UnknownType(name) =>
                 write!(f, "Unknown type '{}': nothing in this program or its imports defines a type with this name — it is not a builtin, and no data, newtype, type alias, or type family declaration for it is in scope", name)?,

@@ -1434,6 +1434,32 @@ boxes :: [ShowBox]
 boxes = [MkShowBox 42 show, MkShowBox "hi" id]
 \end{lstlisting}
 
+The hidden type is \emph{rigid} inside a match: it was erased when the
+value was packed, so the compiler rejects any use that would need to
+know it --- returning the unpacked value, comparing it to a concrete
+type, or letting it reach any type that outlives the match. The error
+notes name the constructor that hid the type. Two matches on two boxes
+see two \emph{different} hidden types.
+
+A constructor can promise classes for the hidden type; packing checks
+the instance, and inside a match exactly those classes (and their
+superclasses) are usable:
+
+\begin{lstlisting}
+data Showable = forall a. Show a => Showable a
+
+describe :: Showable -> String
+describe (Showable x) = show x   -- Show is declared: fine
+-- (Showable x) -> x + 1         -- rejected: Num was never promised
+\end{lstlisting}
+
+GADT syntax hides implicitly: a signature variable that does not reach
+the constructor's result type is existential, context included
+(\texttt{MkBox :: Show a => a -> Box} in \texttt{where}-style
+declarations). Record fields whose type mentions the hidden variable
+have no selector function and cannot be record-updated --- pattern-match
+positionally and rebuild with the constructor instead.
+
 \subsection{DataKinds}
 
 Promote data constructors to the type level for compile-time safety:

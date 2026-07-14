@@ -63,6 +63,34 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Type-soundness hole closed: unpacking an existential constructor now
+  skolemizes the hidden type variable.** Previously
+  `coerce (MkShowBox x _) = x` type-checked with ANY declared return type
+  — an unchecked coercion deferring the type confusion to a Lua runtime
+  crash — and GADT-syntax existentials leaked identically. Each pattern
+  match now mints a fresh rigid skolem for every existential variable: it
+  unifies only with itself, and an occurrence in any type that outlives
+  the match (the function's own type, a `case` result, a `where`-function's
+  type) is rejected as an escape. Every diagnostic mentioning a skolem
+  carries a note naming the constructor that hid the type and what its
+  declared context guarantees. Constructor contexts
+  (`data Showable = forall a. Show a => Showable a`, and GADT
+  `MkBox :: Show a => a -> Box`) are enforced in both directions: packing
+  proves the instance at the concrete type, unpacking provides exactly the
+  declared classes (plus superclasses) on the skolem and nothing more. The
+  record back doors are closed the way GHC closes them: a field whose type
+  mentions the hidden variable has no selector function and cannot be
+  record-updated (both get targeted errors; construction, positional
+  matching, and other fields' selectors are unaffected). A malformed
+  constructor context (unknown class, constraint on a non-existential
+  variable, non-variable constraint argument) is now reported at the data
+  declaration instead of being silently dropped. Breaking only for
+  programs that exploited the hole. Tests: existential_constraints.mll
+  (constrained/GADT/record existentials run end-to-end) and the
+  existential_unpacking_skolemizes / existential_skolem_cannot_escape /
+  existential_constraints_enforced_both_ways /
+  existential_record_fields_have_no_selector_or_update error-path tests.
+
 - Constraint discharge no longer applies the structural element rule to
   higher-kinded instances: a wanted like `Functor (Either String)` — the
   class variable bound to a partially-applied constructor — was wrongly

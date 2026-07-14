@@ -69,24 +69,30 @@ representation, not something the division operator can recover; if you
 need exact 62-bit quotients, run on a Lua 5.3+ host (the embedded runner
 is Lua 5.4).
 
-## Existential type variables can escape (known type-soundness hole)
+## Existential record fields have no selector and no record update
 
-Unpacking an existential constructor does not skolemize the hidden type
-variable, so the typechecker will unify it with anything — including the
-function's declared return type:
+Unpacking an existential constructor skolemizes the hidden type variable
+(it is rigid inside the match and cannot leave it — see SPEC.md), which
+rules out two record conveniences on fields whose type mentions the hidden
+variable:
 
-    data ShowBox = forall a. MkShowBox a (a -> String)
+    data Foo = forall a. Foo { getIt :: a, label :: String }
 
-    coerce :: ShowBox -> Integer
-    coerce (MkShowBox x _) = x     -- accepted; must be rejected
+`getIt` exists as a field (construction and pattern matching work, and
+`label` keeps its ordinary selector), but there is no `getIt` selector
+function — `getIt :: Foo -> a` would hand the hidden type to any caller,
+outside every match — and `f { getIt = … }` is rejected because the type
+the new value would have to match was erased when the record was packed.
+Pattern-match the constructor positionally, and rebuild with the
+constructor instead of updating. GHC restricts both the same way.
 
-This `coerce` is accepted and converts any value to any type, deferring the
-type confusion to a runtime crash (or silent nonsense) far from the real
-mistake. GADT-syntax existentials leak the same way. The related machinery
-that IS sound: `runST`/rank-2 scope escapes and GADT refinement misuse are
-correctly rejected — only existential unpacking is affected. SPEC.md's
-promise that the hidden variable "cannot escape the branch" does not
-currently hold; this is a bug tracked in TODO.md, not intended behavior.
+One adjacent divergence to know about: `where`-bindings are monomorphic in
+mata-ll, so a polymorphic where-helper (`where ident v = v`) applied to
+values unpacked from two *different* existential boxes is rejected — the
+first use pins the helper to the first box's hidden type, and the second
+box's hidden type is a different rigid type. GHC generalizes
+where-bindings and accepts this. Inline the helper or make it a top-level
+function with a signature.
 
 ## `try (pure e)` does not catch an error inside `e`
 

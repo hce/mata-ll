@@ -172,3 +172,16 @@ generic over them, as in GHC. The differences:
   generic code written that way fails at run time where GHC's would
   work. `liftA2 g x y` keeps only fully-applied values in the
   container and works everywhere (`traverse` is built on it).
+
+## Existentials: where-helpers are monomorphic
+
+Existential types behave as in GHC: unpacking skolemizes the hidden
+variable, escapes are rejected, constructor contexts
+(`forall a. Show a => …`) are enforced at pack and unpack, and record
+fields with existential types have no selector and no record update.
+One divergence: mata-ll `where`-bindings are monomorphic, so a
+polymorphic where-helper applied to values unpacked from two
+*different* boxes is rejected — the first use pins the helper to the
+first box's hidden type. GHC generalizes where-bindings and accepts
+it. Inline the helper or make it a top-level function with a
+signature.

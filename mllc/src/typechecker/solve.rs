@@ -26,7 +26,18 @@ impl Checker {
     pub(super) fn has_instance(&self, class: &str, ty: &Ty) -> bool {
         match ty {
             // Polymorphic — not this definition's job to discharge.
-            Ty::Var(_) | Ty::Skolem(..) => true,
+            Ty::Var(_) => true,
+            // A rank-2 sealing skolem defers to the enclosing context (the
+            // caller's constraints discharge it). An EXISTENTIAL skolem
+            // cannot defer: the concrete type was erased when the value was
+            // packed into its constructor, so the only evidence that can
+            // ever exist is what the constructor's declared context
+            // (`forall a. Show a => …`) guarantees — exactly those classes
+            // (and their superclasses), nothing more.
+            Ty::Skolem(_, id) => match self.existential_skolems.get(id) {
+                Some(info) => info.givens.iter().any(|g| self.class_satisfies(g, class)),
+                None => true,
+            },
             // No instance for functions or effectful actions, ever.
             Ty::Arrow(_, _) | Ty::Forall(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => false,
             Ty::Promoted(_) => false,

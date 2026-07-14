@@ -172,16 +172,39 @@ it is chosen at construction time and hidden from consumers. Pattern
 matching on `MkShowBox` brings `a` back into scope locally, and it
 must not escape the branch.
 
-> **Known hole (bug, tracked in TODO.md):** the current typechecker does
-> not skolemize `a` when the constructor is unpacked, so the escape is
-> NOT rejected yet — `coerce (MkShowBox x _) = x` with any declared
-> return type is accepted and defers the type confusion to runtime.
-> GADT-syntax existentials leak the same way. This is not intended
-> behavior; the guarantee stated above is the specification, and the
-> implementation currently fails to enforce it. (The neighbouring
-> machinery is sound: `runST`/rank-2 scope escapes and GADT refinement
-> misuse are correctly rejected.) See CAVEATS.md for the user-facing
-> consequences.
+Unpacking SKOLEMIZES: each match on an existential constructor turns
+the hidden variable into a fresh rigid type constant. Inside the match
+it unifies only with itself — `coerce (MkShowBox x _) = x` with any
+declared return type is rejected, as is any use that would need a
+concrete type (`x + 1`). A skolem appearing in any type that outlives
+the match (the function's own type, a `case` expression's result, a
+`where`-function's type) is an escape error. Every diagnostic that
+mentions a skolemized variable carries a note naming the constructor
+that hid it. Two unpackings of the same constructor yield two
+*different* skolems: values from two boxes never share a type.
+
+Constructors can declare class constraints for the hidden type:
+
+    data Showable = forall a. Show a => Showable a
+
+The constraint is checked in both directions. Packing (`Showable 42`)
+must prove the instance for the concrete type — the only moment it is
+still known. Unpacking makes exactly the declared classes (and their
+superclasses) available on the skolem, and nothing else: `show x` works
+inside a match on `Showable x`; `x + 1` does not.
+
+GADT syntax declares existentials implicitly: a signature variable that
+occurs in the constructor's fields but not in its result type is
+existential (`MkBox :: Show a => a -> Box` hides `a`, with the context
+travelling along). The data header's parameter names are only arity
+markers in GADT syntax, so this holds even for a field variable that
+happens to share a header name.
+
+Record syntax combines with existentials, with two GHC-matching
+restrictions: a field whose type mentions the hidden variable has no
+selector function, and cannot be targeted by record update (see
+CAVEATS.md). Construction, positional matching, and the other fields'
+selectors are unaffected.
 
 Runtime representation is identical to normal ADTs. The type erasure
 is purely compile-time.
