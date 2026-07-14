@@ -353,14 +353,13 @@ impl CodeGen {
                 self.emit("__mll_opt(");
                 self.gen_ffi_boundary_value(value);
                 self.emit(")");
-            } else if let Some(desc) = Self::tuple_force_desc(&a.ty) {
-                // A tuple is the one structure the Lua host reads RAW (it
-                // shares Lua's positional-array layout), and its fields are
-                // now built lazily — so the boundary must force them into
-                // real values before the host can see them. An FFI call is
-                // strict in its arguments, so this forces nothing the call
-                // does not already demand.
-                self.emit("__mll_tup_force(");
+            } else if let Some(desc) = self.ffi_arg_marshal_desc(&a.ty, &mut Vec::new()) {
+                // The argument carries structure a Lua host reads: a list must
+                // be rebuilt into a plain array, and a tuple's/record's lazy
+                // fields must be forced (and nested lists converted) before the
+                // host sees them. An FFI call is strict in its arguments, so
+                // this forces nothing the call does not already demand.
+                self.emit("__mll_arg_marshal(");
                 self.gen_expr(a);
                 self.emit(&format!(", {})", desc));
             } else {
@@ -383,12 +382,13 @@ impl CodeGen {
         }
     }
 
-    /// Emit an optional FFI argument's underlying `Maybe` value, forcing any
-    /// tuple structure inside it at the boundary (the `Just` payload is what
-    /// the host receives after `__mll_opt`/`__mll_opt_tail` unwrap it).
+    /// Emit an optional FFI argument's underlying `Maybe` value, marshalling any
+    /// structure inside it at the boundary (a list, or a tuple's/record's lazy
+    /// fields) so the `Just` payload the host receives after `__mll_opt` /
+    /// `__mll_opt_tail` unwrap it is a real host value.
     fn gen_ffi_boundary_value(&mut self, value: &TExpr) {
-        if let Some(desc) = Self::tuple_force_desc(&value.ty) {
-            self.emit("__mll_tup_force(");
+        if let Some(desc) = self.ffi_arg_marshal_desc(&value.ty, &mut Vec::new()) {
+            self.emit("__mll_arg_marshal(");
             self.gen_expr(value);
             self.emit(&format!(", {})", desc));
         } else {
@@ -396,27 +396,81 @@ impl CodeGen {
         }
     }
 
-    /// Build a Lua descriptor locating the tuple structure inside an FFI
-    /// argument's type, for `__mll_tup_force` (the argument-direction dual of
-    /// `ffi_decode_desc`). `None` when the type contains no tuple the host
-    /// could read raw — the plain shallow `__force` then suffices, exactly as
-    /// before. `{e1, .., en, n=N}` forces the N fields of a tuple (each `ei`
-    /// a nested descriptor or `false`); `{maybe=d}` descends through a `Just`
-    /// wrapper. Lists are deliberately not descended into: a cons list is
-    /// never host-readable raw (lazy spine, metatable cells), so its elements
-    /// stay untouched, same as before.
-    fn tuple_force_desc(ty: &Ty) -> Option<String> {
+    /// Build a Lua descriptor locating the structure inside an FFI *argument*
+    /// type that must be marshalled from the mata-ll representation into what a
+    /// Lua host reads — the argument-direction dual of `ffi_decode_desc_inner`,
+    /// interpreted at runtime by `__mll_arg_marshal`.
+    ///
+    /// A host reads:
+    ///   - a **list** as a plain 1-based Lua array, so a cons list (lazy spine,
+    ///     metatable-tagged cells, head/tail at `[1]`/`[2]`) must be walked and
+    ///     rebuilt into an array with each element forced and recursively
+    ///     marshalled (`{k="list",e=..}`);
+    ///   - a **tuple** as a positional array — the layout already matches, so
+    ///     only its lazy fields are forced in place and nested lists inside them
+    ///     converted (`{k="tuple",n=N,es={..}}`);
+    ///   - a **LuaDict record** as a name-keyed table — again the layout matches,
+    ///     so its lazy fields are forced in place and nested structure converted
+    ///     (`{k="record",fs={..}}`);
+    ///   - a **`Maybe`** payload is marshalled while the `Just` wrapper is left
+    ///     intact (`{k="maybe",e=..}`): the wrapper's unwrap happens later in
+    ///     `__mll_opt`/`__mll_opt_tail` for optional arguments, so descending
+    ///     here must not strip it.
+    ///
+    /// `None` when the type is opaque — a type variable, `LuaData`, a function,
+    /// or a plain (non-`LuaDict`) ADT — or a bare scalar: those cross the
+    /// boundary with a shallow `__force` (existing behavior), so an opaque
+    /// round-trip value (a fold's threaded state, a polymorphic argument) is
+    /// passed through untouched and never mangled. `stack` guards against a
+    /// recursive record type expanding forever.
+    fn ffi_arg_marshal_desc(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
+        // A nested position marshals when it has its own descriptor; otherwise
+        // it is opaque or a bare scalar and the runtime simply forces it
+        // (`false`) — the host reads the value as-is.
+        let child = |slf: &Self, t: &Ty, stack: &mut Vec<String>| {
+            slf.ffi_arg_marshal_desc(t, stack).unwrap_or_else(|| "false".into())
+        };
         match ty {
+            // A cons list is never host-readable raw: rebuild it into an array.
+            Ty::List(inner) => {
+                let e = child(self, inner, stack);
+                Some(format!("{{k=\"list\",e={}}}", e))
+            }
+            // A tuple shares Lua's positional layout; force its lazy fields in
+            // place (and convert any nested list/record/tuple field).
             Ty::Tuple(elems) => {
-                let parts: Vec<String> = elems.iter()
-                    .map(|e| Self::tuple_force_desc(e).unwrap_or_else(|| "false".into()))
-                    .collect();
-                Some(format!("{{{}, n={}}}", parts.join(", "), elems.len()))
+                let es: Vec<String> = elems.iter().map(|e| child(self, e, stack)).collect();
+                Some(format!("{{k=\"tuple\",n={},es={{{}}}}}", elems.len(), es.join(",")))
             }
             _ => {
                 let (head, args) = decompose_app(ty);
                 if head == Some("Maybe") && args.len() == 1 {
-                    Self::tuple_force_desc(args[0]).map(|d| format!("{{maybe={}}}", d))
+                    // Keep the Just wrapper (unwrapped later by __mll_opt); only
+                    // descend when the payload itself needs marshalling.
+                    self.ffi_arg_marshal_desc(args[0], stack)
+                        .map(|d| format!("{{k=\"maybe\",e={}}}", d))
+                } else if let Some(name) = head.filter(|n| self.luadict_type_fields.contains_key(*n)) {
+                    // A LuaDict record is a name-keyed table; force its lazy
+                    // fields (the host reads `rec.field`) and convert nested
+                    // structure. Cycle guard: a recursive record (e.g. a tree)
+                    // would otherwise expand forever — treat the re-entry as
+                    // opaque (shallow force).
+                    if stack.iter().any(|s| s == name) {
+                        return None;
+                    }
+                    let (tvars, fields) = self.luadict_type_fields.get(name).unwrap().clone();
+                    let mut smap = std::collections::HashMap::new();
+                    for (tv, a) in tvars.iter().zip(args.iter()) {
+                        smap.insert(tv.clone(), (*a).clone());
+                    }
+                    stack.push(name.to_string());
+                    let fs: Vec<String> = fields.iter().map(|(fname, fty)| {
+                        let fty = subst_tyvars(fty, &smap);
+                        let d = child(self, &fty, stack);
+                        format!("{{n={:?},d={}}}", fname, d)
+                    }).collect();
+                    stack.pop();
+                    Some(format!("{{k=\"record\",fs={{{}}}}}", fs.join(",")))
                 } else {
                     None
                 }
@@ -4193,7 +4247,7 @@ impl CodeGen {
                     // destructuring via field_path, the __mll_tuple_eq /
                     // __mll_tup_get specializations hand the raw field to an
                     // eq/show function that forces, and the FFI boundary
-                    // deep-forces through __mll_tup_force.
+                    // deep-forces through __mll_arg_marshal.
                     self.gen_arg(e, false);
                 }
                 self.emit("}");
@@ -5019,36 +5073,68 @@ local function __mll_opt_tail(...)
     return __unpack(t, 1, n)
 end
 
--- Type-directed forcing of tuple structure crossing the FFI boundary in the
--- ARGUMENT direction. A tuple is the one structure a Lua host reads RAW (it
--- shares Lua's positional-array layout — see SPEC), and tuple fields are lazy
--- positions since the eagerness contract covers them, so a lazily-built field
--- must be forced into a real value before the host can see it. `d` says where
--- the tuples are (built from the declared FFI type by tuple_force_desc):
--- {e1, .., en, n=N} forces the N fields of a tuple (ei a nested descriptor,
--- or false to just force); {maybe=d} descends through a `Just` wrapper.
--- Forcing writes the value back into the field — the same memoization __force
--- performs inside a thunk — so a shared tuple is forced at most once. A cons
--- list field is left alone: it is never host-readable raw (lazy spine,
--- metatable cells), exactly as before.
-local function __mll_tup_force(t, d)
-    t = __force(t)
-    if t == nil then return nil end
-    if d.maybe then
-        if getmetatable(t) == __just_mt then
-            t[1] = __mll_tup_force(t[1], d.maybe)
+-- Type-directed marshalling of an mata-ll value crossing the FFI boundary in
+-- the ARGUMENT direction — the dual of __mll_ffi_decode. `d` is the descriptor
+-- built from the declared FFI argument type by ffi_arg_marshal_desc; it names
+-- exactly the structure the host reads, so opaque values (a polymorphic
+-- argument, a fold's threaded state, a plain ADT) carry no descriptor, are
+-- shallow-forced by the caller, and never reach here — they pass through
+-- untouched. FFI calls are strict in their arguments, so forcing here evaluates
+-- nothing the call does not already demand.
+--
+--   {k="list",e=..}    a cons list becomes a fresh 1-based Lua array; each
+--                      element is forced and (if e is a descriptor, not false)
+--                      recursively marshalled. Empty list (nil) -> {}.
+--   {k="tuple",n=N,es} a tuple shares Lua's positional layout, so its N lazy
+--                      fields are forced in place (es[i] a nested descriptor,
+--                      or false to just force).
+--   {k="record",fs=..} a LuaDict record is a name-keyed table; each declared
+--                      field is forced in place (fs[i].d a nested descriptor,
+--                      or false to just force) so the host reads real values.
+--   {k="maybe",e=..}   descend through a `Just` wrapper, leaving the wrapper in
+--                      place (its unwrap happens in __mll_opt); Nothing (nil)
+--                      passes through.
+--
+-- In-place forcing writes each value back into its field/cell — the same
+-- memoization __force performs — so a shared value is marshalled at most once.
+local function __mll_arg_marshal(v, d)
+    v = __force(v)
+    if d.k == "list" then
+        -- Walk the (possibly lazy) cons spine into a plain array, exactly the
+        -- conversion __mll_to_lua performs, but marshalling each element by the
+        -- element descriptor so an opaque element type is passed raw rather than
+        -- mangled (which a blanket __mll_to_lua would not distinguish).
+        local arr = {}
+        local cur = v
+        while cur ~= nil do
+            cur = __force(cur)
+            if getmetatable(cur) ~= __cons_mt then break end
+            local h = __force(cur[1])
+            if d.e then h = __mll_arg_marshal(h, d.e) end
+            arr[#arr + 1] = h
+            cur = __mll_tail(cur)
         end
-        return t
-    end
-    for i = 1, d.n do
-        local sub = d[i]
-        if sub then
-            t[i] = __mll_tup_force(t[i], sub)
-        else
-            t[i] = __force(t[i])
+        return arr
+    elseif d.k == "tuple" then
+        for i = 1, d.n do
+            local sub = d.es[i]
+            if sub then v[i] = __mll_arg_marshal(v[i], sub) else v[i] = __force(v[i]) end
         end
+        return v
+    elseif d.k == "record" then
+        if v ~= nil then
+            for _, f in ipairs(d.fs) do
+                if f.d then v[f.n] = __mll_arg_marshal(v[f.n], f.d) else v[f.n] = __force(v[f.n]) end
+            end
+        end
+        return v
+    elseif d.k == "maybe" then
+        if getmetatable(v) == __just_mt then
+            v[1] = __mll_arg_marshal(v[1], d.e)
+        end
+        return v
     end
-    return t
+    return v
 end
 
 -- Deep-force an MLL value for export to Lua.

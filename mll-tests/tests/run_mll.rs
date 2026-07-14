@@ -2759,6 +2759,79 @@ main = do
         .expect("takeWhile/dropWhile should evaluate correctly");
 }
 
+// Regression (long-standing FFI bug): a list-typed argument crossing OUT to a
+// Lua host — on its own, nested inside a LuaDict record, or nested inside
+// another list — must be marshalled into a plain 1-based Lua array with its
+// elements forced, not handed over as a raw mata-ll cons cell. Before the fix
+// the argument-direction marshaller only descended into tuples/Maybe and
+// deliberately skipped lists, so the host received a cons cell (head at [1],
+// lazy tail thunk at [2]); `operands[2]` was a function and any arithmetic on
+// it crashed. The host functions below assert they receive real plain arrays
+// (no metatable) of numbers, so a regression to the raw cons cell fails loudly.
+#[test]
+fn ffi_list_argument_marshalled_to_array() {
+    let source = r#"
+data Bag = Bag { bagItems as "items" :: [Integer], bagName as "name" :: String }
+    deriving (Show, LuaDict)
+
+-- top-level list argument
+hostSum :: [Integer] -> LuaPure "host_sum" Integer
+-- list nested inside a LuaDict record field
+hostBagSum :: Bag -> LuaPure "host_bagsum" Integer
+-- list of lists (nested list element needs its own conversion)
+hostSum2 :: [[Integer]] -> LuaPure "host_sum2" Integer
+
+main :: IO ()
+main = do
+  -- literal list
+  assert (hostSum [10, 20, 30] == 60) "top-level [Integer] argument"
+  -- computed elements (thunks): forcing at the boundary is exercised
+  assert (hostSum (map (\x -> x * 2) [5, 10, 15]) == 60) "list argument with thunked elements"
+  -- list nested in a record, alongside a scalar field
+  assert (hostBagSum (Bag [1, 2, 3, 4] "xs") == 10) "list nested in a record field"
+  -- list of lists
+  assert (hostSum2 [[1, 2], [3, 4], [5]] == 15) "list-of-lists argument"
+  putStrLn "ffi list argument marshalling ok"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("ffi list-argument program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    // Host functions that REQUIRE a real Lua array of forced numbers. A raw cons
+    // cell (metatable-tagged, `[2]` = tail function) trips every guard.
+    let host = r#"
+        local function checkArray(a, who)
+            if type(a) ~= "table" then error(who .. ": not a table, got " .. type(a)) end
+            if getmetatable(a) ~= nil then error(who .. ": got a metatable-tagged value (raw cons cell), not a plain array") end
+        end
+        local function sumArray(a, who)
+            checkArray(a, who)
+            local s = 0
+            for i = 1, #a do
+                if type(a[i]) ~= "number" then error(who .. ": element " .. i .. " is " .. type(a[i]) .. ", not a number") end
+                s = s + a[i]
+            end
+            return s
+        end
+        function host_sum(a) return sumArray(a, "host_sum") end
+        function host_bagsum(bag)
+            if type(bag) ~= "table" then error("host_bagsum: bag not a table") end
+            if type(bag.name) ~= "string" then error("host_bagsum: bag.name is " .. type(bag.name) .. ", not a string") end
+            return sumArray(bag.items, "host_bagsum items")
+        end
+        function host_sum2(a)
+            checkArray(a, "host_sum2")
+            local s = 0
+            for i = 1, #a do s = s + sumArray(a[i], "host_sum2 inner " .. i) end
+            return s
+        end
+    "#;
+    lua.load(host).set_name("ffi_host").exec().expect("host definitions load");
+    lua.load(&lua_code).set_name("ffi_list_argument_marshalled_to_array").exec()
+        .expect("ffi list-argument program should run and pass its assertions");
+}
+
 // Regression: a locally-bound name (function parameter, case-pattern var, or
 // let-bound var) must shadow a same-named top-level/prelude function. The
 // monomorphizer's specialization paths and the codegen Let/Case arms used to

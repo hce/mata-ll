@@ -388,6 +388,21 @@ argument is a string literal, it is the FFI type family; if it is a
 type variable, it is the scoped monad. These are represented as
 distinct AST nodes internally.
 
+Arguments crossing OUT to the host are marshalled from the mata-ll
+representation by their declared type: a **list** becomes a plain 1-based
+Lua array (its elements forced and recursively marshalled), and a **tuple**
+or **`LuaDict` record** — which already share Lua's positional/named table
+layout — has its lazy fields forced in place, with any nested list
+converted. This applies at every depth: a list argument, a list inside a
+record field, a list of lists, and so on. An **opaque** argument — a
+polymorphic type variable, `LuaData`, a function, or a plain (non-`LuaDict`)
+ADT — is passed through raw with only a shallow force, so a value the host
+holds without inspecting (a fold's threaded state) round-trips untouched.
+Because an FFI call is strict in its arguments, forcing what the host reads
+evaluates nothing the call does not already demand. The result crossing back
+IN is decoded by the dual mechanism (arrays → cons lists, host tables →
+records/tuples), validating each declared scalar's Lua type.
+
 ## Passing mata-ll callbacks to FFI functions
 
 `engage` covers the *incoming* direction: Lua hands a function to
@@ -1154,8 +1169,10 @@ Data-constructor fields are likewise suspended
 fields*: `fst (1, error "boom")` returns `1` and `snd (error "boom", 2)`
 returns `2`. A tuple field is suspended at construction (weighed exactly
 like a cons head) and forced only at a value-consumer — `fst`/`snd`, a
-pattern that inspects it, `show`, equality, or the FFI boundary (where a
-tuple is deep-forced into the positional array a Lua host reads raw).
+pattern that inspects it, `show`, equality, or the FFI boundary (where an
+outgoing argument's list/tuple/record structure is marshalled into what a
+Lua host reads — a cons list becomes a plain array, and a tuple's or
+record's lazy fields are forced in place; an opaque value is passed raw).
 
 The decision is made by *weighing* the benefit of eagerness (a saved
 thunk allocation) against the risk to non-strict semantics. Bottom

@@ -59,6 +59,24 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- List-typed FFI arguments crossing OUT to a Lua host are now marshalled into
+  plain Lua arrays. A list passed to a host function — on its own
+  (`f [1,2,3]`), nested inside a `LuaDict` record field, or nested inside
+  another list — reached the host as a raw mata-ll cons cell (head at `[1]`,
+  the spine's tail thunk at `[2]`) instead of a 1-based array, so the host read
+  `arr[1]` as the first element but `arr[2]` as the tail function and any use of
+  it failed (`attempt to perform arithmetic on a function value`). This is a
+  long-standing bug — list-typed FFI arguments never worked; the argument
+  marshaller only descended into tuples and `Maybe` and skipped lists and
+  records entirely. It is not a regression from any recent change (the released
+  0.1.2 fails the same way). The argument-direction marshaller is now the dual
+  of the result decoder: a list becomes an array with its elements forced and
+  recursively marshalled, and a tuple's or record's lazy fields are forced in
+  place (with nested lists converted), at every depth. Opaque arguments — a
+  polymorphic type variable, `LuaData`, a function, a plain ADT — still pass
+  through raw with a shallow force, so a fold's threaded state (including a
+  tuple state) round-trips untouched exactly as before. Test:
+  ffi_list_argument_marshalled_to_array; example: examples/ffi.
 - `return`/`pure` are now non-strict, matching GHC and the eagerness contract:
   a returned value is left unforced until it is demanded. Previously the IO
   bind/`return` path forced the value to WHNF eagerly, so `_ <- return (error
