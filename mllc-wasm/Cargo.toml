@@ -1,6 +1,6 @@
 [package]
 name = "mllc-wasm"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2024"
 rust-version = "1.85"
 description = "WebAssembly bindings for the mata-ll compiler (mllc)."
@@ -16,5 +16,5 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # path for in-workspace builds; version used when published (mllc publishes first).
-mllc = { path = "../mllc", version = "0.1.2" }
+mllc = { path = "../mllc", version = "0.1.3" }
 wasm-bindgen = "0.2.126"

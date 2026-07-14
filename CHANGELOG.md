@@ -29,6 +29,8 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-14
+
 ### Added
 
 - FFI-result shape mismatches now fail with a clear, localized runtime error.
