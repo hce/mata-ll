@@ -802,7 +802,103 @@ So a \texttt{HashMap String [Integer]} reaches the host as a dictionary
 of arrays, and a record whose field is a list of records is fully
 converted.  Marshalling is non-destructive: the argument is copied into
 fresh Lua values, so the original remains usable in your program after
-the call.
+the call.  An FFI call is strict in its arguments --- everything the
+host will read is forced at the call --- but this evaluates nothing the
+call does not already demand.
+
+\subsection{Receiving Values from Lua}
+\label{sec:resultmarshal}
+
+A result crossing back \emph{in} is decoded by the exact dual of the
+argument marshaller: the declared result type drives a type-directed
+decoder that descends into the same containers, so a value passed out
+to an echoing host and handed back arrives identical at every nesting
+depth.
+
+\begin{itemize}
+  \item A Lua array decodes to a list \texttt{[a]}, each element
+    recursively decoded.  An empty or absent (\texttt{nil}) array
+    decodes to \texttt{[]}.
+  \item A \texttt{LuaDict} record is read from a Lua table by its
+    (possibly \texttt{as}-renamed) field keys; a tuple \emph{nested}
+    inside a structure is read from a positional table.
+  \item A \emph{top-level} tuple result is the one exception to
+    ``tables in, tables out'': it is received as Lua's multiple return
+    values (\texttt{return a, b}), not as a single table.
+  \item A \texttt{HashMap k v} is read from a keyed table; each value
+    is decoded by \texttt{v}.  Keys are validated against \texttt{k}
+    (string vs.\ numeric) but kept as they are --- the argument
+    marshaller likewise never converts keys.
+  \item A \texttt{Maybe} reached through this descent inverts the
+    unwrapping on the way out: a present value decodes to \texttt{Just}
+    (its payload recursively decoded), \texttt{nil} to \texttt{Nothing}.
+  \item Opaque values --- a type variable, a plain
+    (non-\texttt{LuaDict}) ADT, a function, \texttt{LuaData} --- pass
+    through untouched, so a mata-ll value the host merely held and
+    handed back round-trips intact.
+\end{itemize}
+
+Every declared scalar is validated against its Lua runtime type as it
+crosses.  If the host returns the wrong shape --- a missing record
+field, a string where a number was declared, a scalar where an array
+was declared --- the call fails immediately with an error naming what
+was declared, what actually arrived, and where (the field or element
+position, and the host function), instead of surfacing later as an
+arbitrary Lua error deep in your program:
+
+\begin{lstlisting}[language={}]
+FFI result: declared Integer but the host returned nil
+  (field 'certPort' of record Cert; in the result of host.cert)
+\end{lstlisting}
+
+\subsection{Passing Callbacks to Lua}
+\label{sec:outcallbacks}
+
+An FFI argument may itself have a function type: mata-ll hands one of
+its own functions to the host.  (The opposite direction --- Lua handing
+a function to mata-ll --- is \texttt{engage}; see \emph{Scoped Lua
+Callbacks}.)  The motivating case is a fold-style host API that calls
+the callback once per item and threads its return value as the next
+state, such as a SQL driver folding over result rows:
+
+\begin{lstlisting}
+foldRows :: String
+         -> (Integer -> acc -> acc)          -- pure callback
+         -> acc
+         -> LuaPure "db.fold" acc
+
+foldRowsIO :: String
+           -> (Integer -> acc -> LuaIO s acc)  -- effectful callback
+           -> acc
+           -> LuaIO "db.fold" acc
+\end{lstlisting}
+
+The compiler wraps each function-typed argument so the Lua host can
+call it with positional arguments.  The wrapper applies the mata-ll
+callback to all of the host's arguments at once (mata-ll functions are
+n-ary, not curried); marshals an argument across the boundary when its
+type is a list or a nested function, and otherwise passes it raw; runs
+the returned action for an effectful callback (result \texttt{LuaIO s
+acc}), or takes the value directly for a pure one (result
+\texttt{acc}); and returns the result to the host, marshalling it
+unless it is the opaque threaded state.
+
+The threaded state (\texttt{acc}) is a polymorphic type variable, so
+the host cannot inspect it --- and the wrapper passes it through
+\emph{raw} in both directions rather than marshalling it.  This is
+what lets \emph{any} mata-ll value, including tuples and ADTs, be used
+as the state and round-trip intact: marshalling would flatten a tuple
+\texttt{(a, b)} to a Lua array and rebuild it as the cons list
+\texttt{a : b : []}, corrupting it.
+
+The compiler type-checks this soundness: when a callback threads a
+polymorphic state, it must be \emph{one shared type variable} across
+four positions --- the callback's accumulator argument, the callback's
+result, the FFI's initial-state argument, and the FFI's return type.
+Effectful callbacks must use \texttt{LuaIO s acc}, not \texttt{IO acc}.
+A callback with no type variables (say \texttt{String -> String} for
+\texttt{string.gsub}) threads no opaque state and is accepted without
+these constraints.
 
 \subsection{Iterators}
 
@@ -866,8 +962,25 @@ local fibs = mll.fibonacci(10)
 -- fibs is a plain Lua array: {1, 1, 2, 3, 5, 8, 13, 21, 34, 55}
 \end{lstlisting}
 
-Exported functions automatically convert MLL values to Lua values
-(forces thunks, converts cons-lists to arrays).
+Exported functions marshal in both directions.  Arguments the host
+passes are converted to mata-ll representations: Lua arrays become cons
+lists (recursively), Lua functions become callable callbacks, and
+scalars pass as-is.  The result is deep-converted to plain Lua data:
+thunks are forced, cons lists become 1-based arrays, \texttt{LuaDict}
+records stay name-keyed tables, tuples and plain ADTs become positional
+tables, \texttt{Just x} is unwrapped to the bare \texttt{x} and
+\texttt{Nothing} becomes \texttt{nil}.
+
+\begin{note}
+Lua's \texttt{nil} carries less structure than mata-ll values, and an
+exported result inherits its limits: an empty list crosses to the host
+as \texttt{nil}, the same value as \texttt{Nothing} --- and because
+\texttt{nil} cannot nest, \texttt{Just Nothing} flattens to
+\texttt{nil} and \texttt{Just (Just x)} to \texttt{x} at the boundary.
+Declare an FFI \emph{argument} as \texttt{[a]} and an empty list
+reaches the host as an empty table instead; only exported
+\emph{results} collapse it to \texttt{nil}.
+\end{note}
 
 \subsection{LuaDict}
 \label{sec:luadict}

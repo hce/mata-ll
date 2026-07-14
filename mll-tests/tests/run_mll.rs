@@ -722,6 +722,10 @@ mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
 mll_lib_test!(lib_data_maybe, "lib_data_maybe.mll");
 mll_lib_test!(lib_data_map, "lib_data_map.mll");
+// FFI marshalling probed with CONSTRUCTED values (ranges, map/filter, `<>`,
+// JSON decoding, computed Just/Nothing) — literals are already native Lua
+// values and hide marshalling bugs.
+mll_lib_test!(ffi_constructed_values, "ffi_constructed_values.mll");
 
 // Compile-error tests: these SHOULD fail to compile
 #[test]
@@ -3256,6 +3260,98 @@ main = do
         .expect("echo host loads");
     lua.load(&lua_code).set_name("ffi_arg_marshal_roundtrips_all_containers").exec()
         .expect("ffi parity program should run and pass its assertions");
+}
+
+// FFI marshalling with a fully CONSTRUCTED structure: the record crossing OUT
+// is decoded from JSON — not written as a record literal — so every leaf
+// (native string, bare number, nested record, list, present/absent Maybe) is
+// the product of the FromJSON decoder, and the marshaller must convert what
+// the decoder actually builds, not what a literal would compile to. The host
+// type-checks every leaf (a raw cons cell, an unstripped Just wrapper, or a
+// [Char]-structured string all fail loudly), then answers with a structure of
+// its own that the result decoder must rebuild (including nil -> Nothing and
+// a present field -> Just).
+#[test]
+fn ffi_json_constructed_record_crosses_boundary() {
+    let source = r#"
+import JSON
+
+data Peer = Peer { peerHost as "host" :: String, peerPort as "port" :: Maybe Integer }
+    deriving (Eq, Show, FromJSON, LuaDict)
+
+data Job = Job
+        { jobName as "name" :: String
+        , jobRetries as "retries" :: Integer
+        , jobPeers as "peers" :: [Peer]
+        , jobNote as "note" :: Maybe String }
+    deriving (Eq, Show, FromJSON, LuaDict)
+
+data Verdict = Verdict
+        { vOk as "ok" :: Bool
+        , vTotal as "total" :: Integer
+        , vFirst as "first" :: Maybe String }
+    deriving (Show, LuaDict)
+
+submit :: Job -> LuaPure "submit_job" Verdict
+
+-- The job is CONSTRUCTED by the JSON decoder: renamed keys, a nested record
+-- list, a present Maybe (port 443), an absent Maybe (b.example has no port),
+-- and a null Maybe (note).
+job :: Job
+job = case decodeJSON "{\"name\": \"scan\", \"retries\": 3, \"peers\": [{\"host\": \"a.example\", \"port\": 443}, {\"host\": \"b.example\"}], \"note\": null}" of
+        Right j -> j
+        Left e  -> error e
+
+main :: IO ()
+main =
+  case submit job of
+    Verdict ok total first -> do
+      assert ok "host validated every leaf of the JSON-built job"
+      assert (total == 446) "host summed retries and the one present port (3 + 443)"
+      case first of
+        Just h  -> assert (h == "a.example") "host's present field decodes back to Just"
+        Nothing -> error "expected Just \"a.example\" back, got Nothing"
+      putStrLn "ffi json-constructed record ok"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("json-constructed record program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    // The host REQUIRES converted leaves everywhere: native strings, bare
+    // numbers or nil for Maybe fields, metatable-free plain tables for the
+    // record and the peer array. Whatever the FromJSON decoder built, only
+    // proper marshalling satisfies these guards.
+    let host = r#"
+        function submit_job(job)
+            local function fail(msg) error("submit_job: " .. msg) end
+            if type(job) ~= "table" then fail("job is " .. type(job) .. ", not a table") end
+            if getmetatable(job) ~= nil then fail("job carries a metatable (raw mata-ll value)") end
+            if type(job.name) ~= "string" then
+                fail("name is " .. type(job.name) .. ", not a native string (JSON-built String regression)")
+            end
+            if type(job.retries) ~= "number" then fail("retries is " .. type(job.retries) .. ", not a number") end
+            if job.note ~= nil then fail("null note must arrive as nil, got " .. type(job.note)) end
+            if type(job.peers) ~= "table" then fail("peers is " .. type(job.peers) .. ", not a table") end
+            if getmetatable(job.peers) ~= nil then fail("peers carries a metatable (raw cons cell)") end
+            if #job.peers ~= 2 then fail("expected 2 peers, got " .. #job.peers) end
+            local total = job.retries
+            for i, p in ipairs(job.peers) do
+                if type(p) ~= "table" then fail("peer " .. i .. " is " .. type(p) .. ", not a table") end
+                if type(p.host) ~= "string" then
+                    fail("peer " .. i .. " host is " .. type(p.host) .. ", not a native string")
+                end
+                if p.port ~= nil and type(p.port) ~= "number" then
+                    fail("peer " .. i .. " port must be a bare number or nil (Just unwrap regression), got " .. type(p.port))
+                end
+                total = total + (p.port or 0)
+            end
+            return { ok = true, total = total, first = job.peers[1].host }
+        end
+    "#;
+    lua.load(host).set_name("ffi_json_record_host").exec().expect("host definitions load");
+    lua.load(&lua_code).set_name("ffi_json_constructed_record_crosses_boundary").exec()
+        .expect("json-constructed record program should run and pass its assertions");
 }
 
 // Regression: a locally-bound name (function parameter, case-pattern var, or
