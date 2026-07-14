@@ -87,6 +87,25 @@ API of the `mllc` library crate.)
   literal-only tests never caught this.) Tests:
   ffi_list_argument_marshalled_to_array,
   ffi_json_decoded_string_argument_is_native_string; example: examples/ffi.
+- A `Maybe` field inside a `LuaDict` record crossing OUT to a Lua host is now
+  unwrapped. `Just x` reached the host as the raw `{x}` wrapper table (a
+  metatable-tagged one-element table) instead of the bare value, so a host
+  reading e.g. `params.port + 1` failed with `attempt to perform arithmetic on
+  a table value`; `Nothing` likewise did not become an absent (`nil`) field.
+  This is a long-standing gap — a `Maybe` field never marshalled correctly: in
+  0.1.2 the argument marshaller did not descend into records at all, and after
+  records/lists were handled this cycle it still descended into the `Just`
+  wrapper without stripping it, so no released version handed the host a bare
+  value. The structural marshaller now unwraps a `Maybe` reached through a
+  record field, list element, or tuple field — `Just x` becomes the bare `x`
+  recursively marshalled by `x`'s type (`Just 443` → `443`, `Just [1,2,3]` → a
+  real array, `Just "s"` → a native string), and `Nothing` becomes `nil` —
+  exactly inverting the result decoder and matching `__mll_to_lua`, so a record
+  with a `Maybe` field round-trips through a host unchanged. The separate
+  top-level *optional positional argument* feature (a `Maybe` FFI parameter that
+  `Nothing` omits) is unaffected: that path still keeps the wrapper until it is
+  consumed positionally and only marshals the payload. Test:
+  ffi_maybe_field_marshalled_and_roundtrips.
 - `return`/`pure` are now non-strict, matching GHC and the eagerness contract:
   a returned value is left unforced until it is demanded. Previously the IO
   bind/`return` path forced the value to WHNF eagerly, so `_ <- return (error

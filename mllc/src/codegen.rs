@@ -382,15 +382,24 @@ impl CodeGen {
         }
     }
 
-    /// Emit an optional FFI argument's underlying `Maybe` value, marshalling any
-    /// structure inside it at the boundary (a list, or a tuple's/record's lazy
-    /// fields) so the `Just` payload the host receives after `__mll_opt` /
-    /// `__mll_opt_tail` unwrap it is a real host value.
+    /// Emit an optional FFI argument's underlying `Maybe` value. `__mll_opt` /
+    /// `__mll_opt_tail` unwrap the `Just`/`Nothing` wrapper AFTER this to decide
+    /// whether the argument is present, so here the wrapper is KEPT and only the
+    /// payload's structure is marshalled (a list inside a `Just` must still
+    /// become an array, a tuple's fields forced, etc.). This is the `just`
+    /// descriptor, distinct from the structural `maybe` descriptor that unwraps
+    /// (used for a `Maybe` nested in a record/list/tuple — see
+    /// `ffi_arg_marshal_desc`). When the payload has no structure to marshal
+    /// (a scalar or opaque payload), emit it directly — `__mll_opt` forces it.
     fn gen_ffi_boundary_value(&mut self, value: &TExpr) {
-        if let Some(desc) = self.ffi_arg_marshal_desc(&value.ty, &mut Vec::new()) {
+        let (head, args) = decompose_app(&value.ty);
+        if head == Some("Maybe")
+            && args.len() == 1
+            && let Some(pdesc) = self.ffi_arg_marshal_desc(args[0], &mut Vec::new())
+        {
             self.emit("__mll_arg_marshal(");
             self.gen_expr(value);
-            self.emit(&format!(", {})", desc));
+            self.emit(&format!(", {{k=\"just\",e={}}})", pdesc));
         } else {
             self.gen_expr(value);
         }
@@ -445,10 +454,23 @@ impl CodeGen {
             _ => {
                 let (head, args) = decompose_app(ty);
                 if head == Some("Maybe") && args.len() == 1 {
-                    // Keep the Just wrapper (unwrapped later by __mll_opt); only
-                    // descend when the payload itself needs marshalling.
-                    self.ffi_arg_marshal_desc(args[0], stack)
-                        .map(|d| format!("{{k=\"maybe\",e={}}}", d))
+                    // A Maybe reached through the structural descent — a record
+                    // field, list element, or tuple field — is UNWRAPPED for the
+                    // host: `Just x` becomes the bare `x` (recursively marshalled
+                    // by x's type), `Nothing` becomes `nil` (an absent field).
+                    // This matches __mll_to_lua and is the exact inverse of the
+                    // result decoder's Maybe case (nil -> Nothing, value -> Just).
+                    // Always Some, so even a `Maybe Integer` field is unwrapped,
+                    // not handed over as the raw `{x}` wrapper table.
+                    //
+                    // The TOP-LEVEL optional positional-argument path is separate:
+                    // it keeps the wrapper for __mll_opt/__mll_opt_tail (which
+                    // detect present/absent) and marshals only the payload — see
+                    // gen_ffi_boundary_value, which emits the `just` descriptor
+                    // and never routes a Maybe through here.
+                    let e = self.ffi_arg_marshal_desc(args[0], stack)
+                        .unwrap_or_else(|| "false".into());
+                    Some(format!("{{k=\"maybe\",e={}}}", e))
                 } else if let Some(name) = head.filter(|n| self.luadict_type_fields.contains_key(*n)) {
                     // A LuaDict record is a name-keyed table; force its lazy
                     // fields (the host reads `rec.field`) and convert nested
@@ -5091,9 +5113,15 @@ end
 --   {k="record",fs=..} a LuaDict record is a name-keyed table; each declared
 --                      field is forced in place (fs[i].d a nested descriptor,
 --                      or false to just force) so the host reads real values.
---   {k="maybe",e=..}   descend through a `Just` wrapper, leaving the wrapper in
---                      place (its unwrap happens in __mll_opt); Nothing (nil)
---                      passes through.
+--   {k="maybe",e=..}   a STRUCTURAL Maybe (record field, list element, tuple
+--                      field): UNWRAP it for the host — `Just x` becomes the
+--                      bare `x` recursively marshalled by e (or forced when e is
+--                      false), `Nothing` (nil) becomes nil. Matches __mll_to_lua
+--                      and inverts the result decoder's Maybe case.
+--   {k="just",e=..}    an OPTIONAL positional argument's payload: KEEP the `Just`
+--                      wrapper (its unwrap happens later in __mll_opt/
+--                      __mll_opt_tail) and marshal the payload in place, so e.g.
+--                      a list inside a Just still becomes an array.
 --
 -- In-place forcing writes each value back into its field/cell — the same
 -- memoization __force performs — so a shared value is marshalled at most once.
@@ -5129,6 +5157,17 @@ local function __mll_arg_marshal(v, d)
         end
         return v
     elseif d.k == "maybe" then
+        -- Structural Maybe: unwrap to the bare payload the host reads. A nested
+        -- Maybe payload recurses (so `Just Nothing` flattens to nil, matching
+        -- __mll_to_lua); Nothing (nil) or an already-bare value stays as-is.
+        if getmetatable(v) == __just_mt then
+            local p = v[1]
+            if d.e then return __mll_arg_marshal(p, d.e) else return __force(p) end
+        end
+        return v
+    elseif d.k == "just" then
+        -- Optional positional argument's payload: keep the Just wrapper (unwrapped
+        -- later by __mll_opt/__mll_opt_tail), marshalling the payload in place.
         if getmetatable(v) == __just_mt then
             v[1] = __mll_arg_marshal(v[1], d.e)
         end

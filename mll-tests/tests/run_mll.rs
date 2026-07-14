@@ -2887,6 +2887,83 @@ main = do
         .expect("ffi json-string program should run and pass its assertions");
 }
 
+// Regression (long-standing FFI bug): a `Maybe` field inside a LuaDict record
+// crossing OUT to a host must be UNWRAPPED — `Just x` becomes the bare `x`
+// (recursively marshalled by x's type), `Nothing` becomes nil — matching
+// __mll_to_lua and inverting the result decoder. Before the fix the argument
+// marshaller descended into the `Just` wrapper without stripping it, so the
+// host received the raw `{x}` __just_mt table and `p.port + 1` crashed with
+// "arithmetic on a table value". This exercises the OUT direction (host sees a
+// bare number / a real array / nil) AND the round-trip: the host echoes the
+// port back into a `Maybe Integer` result field, which the decoder must
+// reconstruct as Just/Nothing — encode-then-decode identity.
+#[test]
+fn ffi_maybe_field_marshalled_and_roundtrips() {
+    let source = r#"
+data In = In
+        { iName as "name" :: String
+        , iPort as "port" :: Maybe Integer
+        , iTags as "tags" :: Maybe [Integer] }
+    deriving (Show, LuaDict)
+
+data Out = Out { oBack as "back" :: Maybe Integer, oSum as "sum" :: Integer }
+    deriving (Show, LuaDict)
+
+probe :: In -> LuaPure "probe" Out
+
+main :: IO ()
+main = do
+  -- Just: host sees a bare number and a real array; echoes the port back.
+  case probe (In "h" (Just 443) (Just [1, 2, 3])) of
+    Out back s -> do
+      case back of
+        Just n  -> assert (n == 443) "Just Maybe field round-trips to Just (present)"
+        Nothing -> error "expected Just 443 back, got Nothing"
+      assert (s == 6) "Just [Integer] field unwrapped and marshalled to an array (1+2+3)"
+  -- Nothing: host sees nil for both optional fields; echoes Nothing back.
+  case probe (In "h" Nothing Nothing) of
+    Out back s -> do
+      case back of
+        Nothing -> putStrLn "Nothing Maybe field round-trips to Nothing (absent)"
+        Just _  -> error "expected Nothing back, got Just"
+      assert (s == 0) "Nothing [Integer] field is nil (sum 0)"
+  putStrLn "ffi maybe-field marshalling ok"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("ffi maybe-field program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    // The host REQUIRES unwrapped Maybe fields: a bare number (or nil) for
+    // `port`, and a plain array (no metatable) or nil for `tags`. A raw
+    // `{x}` __just_mt wrapper or a cons cell trips these guards.
+    let host = r#"
+        function probe(inp)
+            if inp.port ~= nil and type(inp.port) ~= "number" then
+                error("probe: port must be a bare number or nil, got " .. type(inp.port))
+            end
+            local s = 0
+            if inp.tags ~= nil then
+                if getmetatable(inp.tags) ~= nil then
+                    error("probe: tags must be a plain array (Just unwrapped), got a metatable-tagged value")
+                end
+                for i = 1, #inp.tags do
+                    if type(inp.tags[i]) ~= "number" then
+                        error("probe: tags element " .. i .. " is " .. type(inp.tags[i]) .. ", not a number")
+                    end
+                    s = s + inp.tags[i]
+                end
+            end
+            -- Round-trip: echo the (already-unwrapped) port back; nil stays nil
+            -- so the decoder reconstructs Nothing.
+            return { back = inp.port, sum = s }
+        end
+    "#;
+    lua.load(host).set_name("ffi_maybe_host").exec().expect("host definitions load");
+    lua.load(&lua_code).set_name("ffi_maybe_field_marshalled_and_roundtrips").exec()
+        .expect("ffi maybe-field program should run and pass its assertions");
+}
+
 // Regression: a locally-bound name (function parameter, case-pattern var, or
 // let-bound var) must shadow a same-named top-level/prelude function. The
 // monomorphizer's specialization paths and the codegen Let/Case arms used to
