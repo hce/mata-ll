@@ -350,10 +350,16 @@ Method-call syntax uses a colon prefix:
 fileWrite :: LuaIO ":write" (Handle -> String -> IO ())
 \end{lstlisting}
 
-\texttt{Maybe} parameters become optional Lua arguments.  The \texttt{export}
-keyword wraps return values via \texttt{\_\_mll\_to\_lua} (deep-forces thunks,
-converts cons lists to Lua arrays) and incoming callbacks via
-\texttt{\_\_mll\_wrap\_callback}.
+A top-level \texttt{Maybe} parameter becomes an optional Lua argument.  Outgoing
+call arguments are marshalled by \texttt{\_\_mll\_arg\_marshal}, the structural
+dual of the result decoder \texttt{\_\_mll\_ffi\_decode}: it descends into lists,
+tuples, \texttt{LuaDict} records, \texttt{HashMap} values, and \texttt{Maybe}
+(unwrapping \texttt{Just}/\texttt{Nothing}), rebuilding fresh Lua values --- so
+any type the decoder converts on the way in is converted on the way out --- while
+leaving opaque values (type variables, plain ADTs, functions) raw.  The
+\texttt{export} keyword wraps return values via \texttt{\_\_mll\_to\_lua}
+(deep-forces thunks, converts cons lists to Lua arrays) and incoming callbacks
+via \texttt{\_\_mll\_wrap\_callback}.
 
 %----------------------------------------------------------------------
 \section{Standard Library}

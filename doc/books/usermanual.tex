@@ -750,6 +750,40 @@ rnd :: Number -> Maybe Number -> LuaIO "math.random" Number
 -- rnd 1.0 (Just 6.0)  => math.random(1.0, 6.0)
 \end{lstlisting}
 
+\subsection{Passing Structured Values to Lua}
+\label{sec:argmarshal}
+
+When you call a host function, MATA-LL marshals each argument into its
+natural Lua representation --- the mirror image of the conversion applied
+to exported return values (see \emph{Exporting to Lua}).  The conversion
+is structural and recursive, at every depth:
+
+\begin{itemize}
+  \item A list \texttt{[a]} becomes a plain 1-based Lua array, each
+    element marshalled by its type.
+  \item A \texttt{LuaDict} record becomes a name-keyed Lua table; a tuple
+    becomes a positional table.
+  \item A \texttt{HashMap k v} becomes a string-keyed Lua table (a
+    dictionary), each value marshalled by \texttt{v}.
+  \item A \texttt{Maybe} \emph{inside} a record, list, or tuple is
+    unwrapped: \texttt{Just x} passes the bare (marshalled) \texttt{x},
+    and \texttt{Nothing} passes \texttt{nil} (an absent field).  This is
+    distinct from a top-level \texttt{Maybe} \emph{parameter}, which is an
+    optional positional argument (previous subsection).
+  \item A \texttt{String} always arrives as a native Lua string, however
+    it was built --- a literal, a concatenation, or a JSON-decoded value.
+  \item Opaque values --- a type variable, a plain (non-\texttt{LuaDict})
+    ADT, a function, \texttt{LuaData} --- pass through unchanged, so a
+    value the host only stores and hands back (such as a fold's threaded
+    state) round-trips intact.
+\end{itemize}
+
+So a \texttt{HashMap String [Integer]} reaches the host as a dictionary
+of arrays, and a record whose field is a list of records is fully
+converted.  Marshalling is non-destructive: the argument is copied into
+fresh Lua values, so the original remains usable in your program after
+the call.
+
 \subsection{Iterators}
 
 Wrap Lua iterator protocols:
