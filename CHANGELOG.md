@@ -29,6 +29,32 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Fixed
+
+- A `<-`-bound result of a user-defined action is no longer assumed to be an
+  already-forced value. The non-strict `return`/`pure` fix (0.1.3) made a
+  user action whose body ends in `pure <expr>` yield its result as an
+  unevaluated thunk, but the bind site still marked the bound variable
+  "concrete" (readable without forcing) for every non-`return` action — so a
+  strict use of the variable compiled to a force-free read of a thunk table
+  and crashed at runtime ("attempt to perform arithmetic on a table value"):
+
+      v <- stHelper arr n      -- stHelper ends in `pure (g x * 2)`
+      return (v + 1)           -- emitted bare `v + 1` over a thunk: crash
+
+  The WHNF claim now mirrors the code generator's emission arms exactly and
+  defaults to *not proven*: it is kept only for shapes whose emitted result is
+  provably forced (`pure` of a provably-total value, literal/constructor/tuple
+  actions, FFI calls, fused ST intrinsics), and dropped for calls to
+  user-defined actions, whose uses then force normally (an idempotent, cheap
+  probe). Relatedly, `runST` now forces the state thread's result to WHNF —
+  in GHC, demanding `runST m` *is* demanding the returned value — so a
+  suspended terminal `pure e` can no longer escape the ST boundary as a raw
+  thunk and reach force-free consumers like `show` (which rendered the thunk's
+  internal table as a spurious tuple). Structured laziness is unchanged: WHNF
+  of a tuple/cons/constructor does not touch its fields, and `return ⊥` stays
+  inert until demanded. Test: action_result_whnf.
+
 ## [0.1.3] - 2026-07-14
 
 ### Added

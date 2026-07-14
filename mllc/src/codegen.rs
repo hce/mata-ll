@@ -754,7 +754,7 @@ impl CodeGen {
         // Seed concrete_vars so references skip __force throughout user code.
         for name in &[
             "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
-            "__mll_tail", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_perform",
+            "__mll_tail", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_st", "__mll_perform",
             "__mll_ffi_decode",
             "not_", "engage", "liftIO", "show", "error_", "max", "min", "undefined",
             "pure", "return_", "Just",
@@ -2547,12 +2547,29 @@ impl CodeGen {
     /// value) rather than a possibly-suspended thunk. A `<-`-bound variable is
     /// marked `concrete` (read force-free downstream) only when this holds.
     ///
-    /// Nearly every action yields a forced value — IO primitives, FFI results,
-    /// and ST effects all return WHNF. The exception is `return e` / `pure e`,
-    /// whose result is `e` left UNFORCED per the non-strict contract (see
-    /// gen_action): it is WHNF only when `e` is itself provably total
-    /// (`is_cheap_to_force`), otherwise gen_action suspends it in a thunk and
-    /// the binder must keep the variable non-concrete so its uses force it.
+    /// This must mirror gen_action's emission arms exactly — it is a claim
+    /// about what the emitted code produces, so each `true` arm corresponds to
+    /// an arm of gen_action whose result is provably forced:
+    ///
+    ///   * `return e` / `pure e` (prefix or `$`): the result is `e` left
+    ///     UNFORCED per the non-strict contract — WHNF only when `e` is itself
+    ///     provably total (`is_cheap_to_force`); otherwise gen_action suspends
+    ///     it in a thunk.
+    ///   * literal / constructor / tuple actions: emitted as the value itself,
+    ///     which is WHNF by construction.
+    ///   * FFI SpecCalls (`__mll_io:`): a raw host value (plus decode), never
+    ///     a mata-ll thunk.
+    ///   * fused ST intrinsics: `__mll_st_write` forces on store, so reads and
+    ///     the other intrinsics return forced values.
+    ///
+    /// Everything else — in particular a call to a USER-DEFINED action, which
+    /// goes through `__mll_run` — defaults to `false`: a user function whose
+    /// body ends in `pure <expr>` compiles to an action closure whose result
+    /// `__mll_run` returns UNFORCED, so the bound variable can hold a thunk.
+    /// Claiming WHNF there emitted force-free reads of a thunk table (e.g.
+    /// bare `v + 1` → "attempt to perform arithmetic on a table value").
+    /// Being conservative here only costs an idempotent `__force` probe at the
+    /// use sites; being aggressive miscompiles.
     fn action_result_is_whnf(&self, action: &TExpr) -> bool {
         let mut a = action;
         while let TExprKind::Paren(inner) = &a.kind {
@@ -2566,7 +2583,10 @@ impl CodeGen {
                 if op == "$"
                     && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
                 self.is_cheap_to_force(rhs),
-            _ => true,
+            TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => true,
+            TExprKind::SpecCall { specialized, .. } if specialized.starts_with("__mll_io:") => true,
+            _ if Self::st_intrinsic_fused(a).is_some() => true,
+            _ => false,
         }
     }
 
@@ -4591,7 +4611,10 @@ fn sanitize_name(name: &str) -> String {
         "bsGetI16LE" => "__mll_bs[23]".to_string(),
         "bsPutI16LE" => "__mll_bs[24]".to_string(),
         "bsConcatList" => "__mll_bs[25]".to_string(),
-        "runST" => "__mll_run".to_string(),
+        // runST forces the state thread's result to WHNF (GHC: demanding
+        // `runST m` demands the returned value), collapsing a suspended
+        // terminal `pure e` so no raw thunk escapes the ST boundary.
+        "runST" => "__mll_run_st".to_string(),
         "newSTArray" => "__mll_ma_new".to_string(),
         "readSTArray" => "__mll_ma_read".to_string(),
         "writeSTArray" => "__mll_ma_write".to_string(),
@@ -5316,6 +5339,20 @@ end
 local function __mll_perform(action)
     action = __force(action)
     return action()
+end
+-- runST: run the state thread AND force its result to WHNF. Demanding
+-- `runST m` to WHNF is, in GHC, demanding the returned value to WHNF —
+-- the state thread runs and the result is evaluated through any `pure`
+-- thunk (a closure-form action whose terminal `pure e` is suspended
+-- returns that suspension from __mll_run). Forcing here upholds the
+-- WHNF-return invariant at the ST→pure boundary: consumers of a runST
+-- value (show, arithmetic, concrete-marked bindings) may read it
+-- force-free. Structured laziness is intact — WHNF of a tuple/cons/
+-- constructor does not touch its fields. Do NOT use this for bind sites
+-- inside a chain: there the result must stay unforced (`x <- pure ⊥`
+-- binds ⊥ without raising), which is why __mll_run does not force.
+local function __mll_run_st(action)
+    return __force(__mll_run(action))
 end
 
 -- Primitives that require Lua runtime dispatch

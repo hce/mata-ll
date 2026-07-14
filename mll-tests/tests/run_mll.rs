@@ -384,6 +384,12 @@ mll_test!(div_mod_prefix_forms, "div_mod_prefix_forms.mll");
 // (audit finding 6)
 mll_test!(return_non_strict, "return_non_strict.mll");
 
+// A <-bound user-action result may be a thunk (non-strict return): the binder
+// must not mark it concrete, and runST must force the thread's result to WHNF.
+// Regression for the miscompilation "attempt to perform arithmetic on a table
+// value" introduced alongside the non-strict return fix.
+mll_test!(action_result_whnf, "action_result_whnf.mll");
+
 // Independently-authored regression coverage for the same three findings
 // (broader shapes than the case files above).
 //

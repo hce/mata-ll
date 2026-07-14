@@ -233,6 +233,21 @@ MATA-LL TODO
 - [x] `let bottom = error "msg"; const 1 bottom` forces bottom eagerly at call site (fixed: callee-side strictness — call sites pass args without forcing, callee forces at entry based on demand analysis)
 - [x] Multi-line case in do-let can cause multi-line continuation to consume next statement as argument (fixed: case loop restores parser position on break so whitespace tokens aren't consumed)
 - [x] Pattern-matching generators in list comprehensions (`[x | Ok x <- rs]`)
+- [ ] Interprocedural `return ⊥` is still forced at the bind for APPLIED user
+      functions that compile to value-form actions: with `mk n = do { _ <-
+      return (); pure (error "boom") }`, the bind `v <- mk 1` raises even when
+      `v` is never used, where GHC does not. Cause: `return e` is represented
+      as `e` itself, so `__mll_run` cannot distinguish "a thunk that computes
+      the action" (must force to find the closure) from "a value-action that
+      IS a thunk" (must not force) — it forces. Zero-arg bindings escape this
+      (they compile to deferred functions, so `__mll_run` calls instead of
+      forcing; return_non_strict test 4 covers that shape). Not a release
+      regression — every earlier release forced strictly more eagerly — but
+      the non-strict `return` contract is only complete intraprocedurally and
+      for zero-arg/closure-form actions. The proper fix is a tagged pure-value
+      representation (e.g. `{__mll_pure, v}`) that `__mll_run` unwraps without
+      forcing; that is a runtime-representation change touching every action
+      emission site, deferred.
 
 ## Testing
 
