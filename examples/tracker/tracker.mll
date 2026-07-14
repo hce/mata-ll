@@ -308,7 +308,14 @@ mixTick mi arr spt chunks = do
 
 mixFrames :: ModInfo -> STArray s -> Integer
     -> [ByteString] -> ST s ByteString
-mixFrames mi arr 0 acc = return (bsConcatList (reverse acc))
+-- The accumulated per-frame chunks are concatenated STRICTLY (`seq`, GHC's
+-- `return $!`): `return` is non-strict, so without the force the concat stays
+-- a thunk retaining every per-frame cons cell until the chunk is finally
+-- written -- the classic lazy-accumulator space leak (GHC behaves the same).
+-- Forcing here collapses each tick to one compact string as it is produced.
+mixFrames mi arr 0 acc =
+    let pcm = bsConcatList (reverse acc)
+    in pcm `seq` return pcm
 mixFrames mi arr n acc = do
     (l, r) <- mixFrame mi arr 0 0 0
     let ml  = (l * 48) `div` (128 * 3)

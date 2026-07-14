@@ -54,6 +54,16 @@ API of the `mllc` library crate.)
   internal table as a spurious tuple). Structured laziness is unchanged: WHNF
   of a tuple/cons/constructor does not touch its fields, and `return ⊥` stays
   inert until demanded. Test: action_result_whnf.
+- The tracker example no longer retains a whole pattern of per-frame sample
+  thunks: `mixFrames` now concatenates each tick's accumulated PCM strictly
+  (`seq`, GHC's `return $!`) instead of returning the concat as a lazy thunk.
+  With the now-correct non-strict `return` (0.1.3), the previous code kept
+  every per-frame cons cell and arithmetic thunk alive until the chunk was
+  finally written — the classic lazy-accumulator space leak (GHC behaves
+  identically on the same code) — inflating peak heap from ~20 MB to ~4.3 GB
+  on the CI benchmark and dropping decode speed from ~1.4x to ~0.9x realtime on
+  the development machine, below the 0.5x CI gate on slower runners. Decoded
+  output is byte-identical; the gate is back to ~1.4-1.6x realtime at ~20 MB.
 
 ## [0.1.3] - 2026-07-14
 

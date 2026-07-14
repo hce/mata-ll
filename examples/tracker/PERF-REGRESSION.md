@@ -199,3 +199,46 @@ the contract. This is a real analysis feature, not a codegen patch. It would
 also subsume the ST-closure fusion special-case above with a general
 mechanism. Deferred — the current cost is a soundness-preserving conservative
 thunk, not a correctness hole, and the gate has ~3× margin.
+
+# CI gate failure (0.1.3 cycle): non-strict `return` exposed a space leak
+
+The `perf` CI job went red after `d3ef741` ("fix prefix/partial div/mod crash
+and non-strict IO return"). Bisected on `benchmark.it` (LuaJIT, dev machine):
+
+| Build | Commit | Wall | Peak RSS | Real-time |
+|---|---|---|---|---|
+| tuple-lazy baseline | `282e93b`…`f64337c` | 31.6–34.3 s | **19.9 MB** | ~1.4× |
+| non-strict return | `d3ef741` → HEAD | 49.6–60.6 s | **4.26 GB** | ~0.7–0.9× |
+
+NOT the tuple/cons laziness of `c3cf855`/`218b660` (that cost is the 1.4×
+figure above, already absorbed). The generated tracker differed in only three
+lines; patching them individually isolated the whole regression to ONE thunk:
+
+    mixFrames mi arr 0 acc = return (bsConcatList (reverse acc))
+
+With `return` correctly non-strict, the per-tick concat stays suspended and
+retains the tick's entire per-frame cons chain (each element itself a thunk
+over `ml`/`mr` arithmetic thunks) until `emitChunks` finally writes it — the
+classic lazy-accumulator space leak. ~200× heap turns LuaJIT GC-bound: HEAD
+retired FEWER instructions (512G vs 936G) yet ran 50% longer. On a CI runner
+the 4.3 GB heap is disproportionately worse, which is what pushed the gate
+under 0.5×.
+
+**Not recoverable in the compiler.** Eagerly evaluating the returned value is
+sound only if it is demanded before the action's result escapes; here the
+demand comes from `emitChunks`, two callers up, through a list — an
+interprocedural result-demand proof. GHC does not attempt it either:
+GHC-compiled equivalent code has the identical leak, and the idiomatic fix
+there is `return $!` / a bang. Per-field demand analysis (above) would not
+help: the thunk is on a whole scalar result, and an A/B with only the cons
+eagerized showed zero effect.
+
+**Fix (implemented):** the same strictness a GHC program needs —
+`mixFrames`' base case forces the concat (`pcm \`seq\` return pcm`).
+Output byte-identical (md5 `1de1d8d6217f3009158f48350ccefc20`), back to
+~28–35 s / 20 MB / 1.4–1.6× realtime. The benchmark workload and the 0.5×
+gate are untouched.
+
+The same commit's WHNF-assumption on `<-`-bound user-action results was a
+separate *correctness* bug (miscompiled strict uses; fixed in codegen, see
+CHANGELOG and test `action_result_whnf`).
