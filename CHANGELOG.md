@@ -29,6 +29,18 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Added
+
+- Every compiled module now carries compiler provenance: `__MLLC_VERSION` (the
+  `mllc` crate version) and `__MLLC_COMMIT` (the full git commit the compiler
+  was built from). Both are emitted as top-level `local`s so they are present
+  in every generated file, and are surfaced through the module's export table
+  when it has one, so a Lua host can read them as properties of the required
+  module (`require("M").__MLLC_VERSION`). The commit is captured at build time
+  by a new `mllc` build script (`git rev-parse HEAD`), degrading to `"unknown"`
+  when git or the `.git` directory is absent (e.g. a packaged tarball build),
+  so the build never fails.
+
 ### Fixed
 
 - A `<-`-bound result of a user-defined action is no longer assumed to be an

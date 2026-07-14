@@ -181,6 +181,58 @@ fn exit_builtin_resolves_to_runtime_helper() {
     }
 }
 
+/// Every compiled module carries compiler provenance: __MLLC_VERSION (the mllc
+/// crate version) and __MLLC_COMMIT (the full git commit it was built from),
+/// emitted as top-level locals and surfaced through the export table.
+///
+/// The workspace shares a single version line, so this test crate's
+/// CARGO_PKG_VERSION equals mllc's — asserting equality also guards against a
+/// version desync between crates.
+#[test]
+fn compiled_module_carries_mllc_provenance() {
+    // A plain program (has main, no exports): stamps present as locals.
+    let prog = "main :: IO ()\nmain = putStrLn \"hi\"\n";
+    let lua = mllc::compile(prog, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+
+    let ver_line = format!("local __MLLC_VERSION = \"{}\"", env!("CARGO_PKG_VERSION"));
+    assert!(
+        lua.contains(&ver_line),
+        "module must stamp the mllc crate version (expected `{}`):\n{}",
+        ver_line,
+        lua
+    );
+    // __MLLC_COMMIT is a full 40-char git hash, or "unknown" for a non-git
+    // (e.g. crates.io tarball) build.
+    let commit = lua
+        .lines()
+        .find_map(|l| l.strip_prefix("local __MLLC_COMMIT = \"").and_then(|r| r.strip_suffix('"')))
+        .expect("module must stamp a __MLLC_COMMIT local");
+    assert!(
+        commit == "unknown"
+            || (commit.len() == 40 && commit.chars().all(|c| c.is_ascii_hexdigit())),
+        "__MLLC_COMMIT must be a full 40-hex commit or \"unknown\", got `{commit}`"
+    );
+
+    // An exporting module surfaces the stamps as module properties, so a Lua
+    // host can read them from the required table.
+    let module = "export answer :: Integer\nanswer :: Integer\nanswer = 42\n";
+    let lua = mllc::compile(module, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    assert!(
+        lua.contains("__MLLC_VERSION = __MLLC_VERSION"),
+        "export table must expose __MLLC_VERSION as a module property:\n{}",
+        lua
+    );
+    assert!(
+        lua.contains("__MLLC_COMMIT = __MLLC_COMMIT"),
+        "export table must expose __MLLC_COMMIT as a module property:\n{}",
+        lua
+    );
+}
+
 fn run_mll_file_with_lib(path: &Path) {
     let path = path.to_path_buf();
     let lib_path = Path::new("../lib").to_path_buf();
