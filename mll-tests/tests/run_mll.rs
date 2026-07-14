@@ -2964,6 +2964,132 @@ main = do
         .expect("ffi maybe-field program should run and pass its assertions");
 }
 
+// Regression (long-standing FFI bug): a `HashMap` argument crossing OUT to a
+// host must marshal its VALUES by the value type — `HashMap String [Integer]`
+// reaches the host as a dict of plain arrays, `HashMap String (Maybe X)` as a
+// dict of bare values, `HashMap String Record` as a dict of dicts — recursively
+// at any nesting. The argument marshaller descended into lists/tuples/records/
+// Maybe but not HashMap, so each value arrived as a raw cons cell / wrapper.
+// Keys are scalars already usable as Lua keys and are kept (like the decoder).
+#[test]
+fn ffi_hashmap_structured_values_marshalled() {
+    let source = r#"
+import qualified Data.Map as Map
+
+data V = V { vName as "name" :: String, vNums as "nums" :: [Integer] }
+    deriving (Show, LuaDict)
+
+mapLists  :: HashMap String [Integer]      -> LuaPure "mp_lists"  Integer
+mapMaybes :: HashMap String (Maybe Integer) -> LuaPure "mp_maybes" Integer
+mapRecs   :: HashMap String V              -> LuaPure "mp_recs"   Integer
+
+main :: IO ()
+main = do
+  assert (mapLists  (Map.fromList [("a", [1, 2]), ("b", [3, 4, 5])]) == 15) "hashmap of lists -> arrays"
+  assert (mapMaybes (Map.fromList [("x", Just 7), ("z", Just 3)]) == 10)   "hashmap of Maybe -> bare values"
+  assert (mapRecs   (Map.fromList [("r", V "n" [10, 20])]) == 30)          "hashmap of records -> nested dict/array"
+  putStrLn "ffi hashmap-structured-values ok"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("ffi hashmap program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let host = r#"
+        local function checkArray(a, who)
+            if type(a) ~= "table" then error(who .. ": not a table, got " .. type(a)) end
+            if getmetatable(a) ~= nil then error(who .. ": got a metatable-tagged value (raw cons cell), not a plain array") end
+        end
+        function mp_lists(m)
+            local s = 0
+            for k, v in pairs(m) do
+                checkArray(v, "mp_lists value " .. k)
+                for i = 1, #v do
+                    if type(v[i]) ~= "number" then error("mp_lists: element not a number: " .. type(v[i])) end
+                    s = s + v[i]
+                end
+            end
+            return s
+        end
+        function mp_maybes(m)
+            local s = 0
+            for k, v in pairs(m) do
+                if type(v) ~= "number" then error("mp_maybes: value for " .. k .. " must be a bare number (Just unwrapped), got " .. type(v)) end
+                s = s + v
+            end
+            return s
+        end
+        function mp_recs(m)
+            local s = 0
+            for k, v in pairs(m) do
+                if type(v) ~= "table" or type(v.name) ~= "string" then error("mp_recs: value must be a record dict") end
+                checkArray(v.nums, "mp_recs nums of " .. k)
+                for i = 1, #v.nums do s = s + v.nums[i] end
+            end
+            return s
+        end
+    "#;
+    lua.load(host).set_name("ffi_hashmap_host").exec().expect("host definitions load");
+    lua.load(&lua_code).set_name("ffi_hashmap_structured_values_marshalled").exec()
+        .expect("ffi hashmap program should run and pass its assertions");
+}
+
+// Parity test: the argument marshaller is a COMPLETE structural dual of the
+// result decoder, so a value built in mata-ll, passed to an echo host (which
+// returns it unchanged), and decoded back is IDENTICAL — for every container
+// (list, tuple, LuaDict record, Maybe, HashMap) and their nestings (HashMap of
+// lists, list of records with Maybe fields). This is the test that catches a
+// missed container in either direction at once: if the marshaller fails to
+// encode a container the decoder expects, the echo round-trip diverges.
+#[test]
+fn ffi_arg_marshal_roundtrips_all_containers() {
+    let source = r#"
+import qualified Data.Map as Map
+
+data Rec = Rec { rTag as "tag" :: String, rMaybe as "m" :: Maybe Integer }
+    deriving (Show, Eq, LuaDict)
+
+echoList  :: [Integer]                 -> LuaPure "echo" [Integer]
+echoPairs :: [(Integer, String)]       -> LuaPure "echo" [(Integer, String)]
+echoRec   :: Rec                        -> LuaPure "echo" Rec
+echoRecs  :: [Rec]                      -> LuaPure "echo" [Rec]
+echoMap   :: HashMap String [Integer]  -> LuaPure "echo" (HashMap String [Integer])
+
+lk :: String -> HashMap String [Integer] -> [Integer]
+lk k m = case Map.lookup k m of
+           Just v  -> v
+           Nothing -> []
+
+main :: IO ()
+main = do
+  -- list; list of tuples (nested tuple decodes as a single table, unlike a
+  -- top-level tuple result which uses Lua multi-return); record with Just and
+  -- Nothing Maybe fields; list of records.
+  assert (echoList [1, 2, 3] == [1, 2, 3]) "list round-trips"
+  assert (echoPairs [(1, "a"), (2, "b")] == [(1, "a"), (2, "b")]) "list of tuples round-trips (nested tuple)"
+  assert (echoRec (Rec "a" (Just 9)) == Rec "a" (Just 9)) "record with Just field round-trips"
+  assert (echoRec (Rec "b" Nothing) == Rec "b" Nothing) "record with Nothing field round-trips"
+  assert (echoRecs [Rec "a" (Just 1), Rec "b" Nothing] == [Rec "a" (Just 1), Rec "b" Nothing]) "list of records round-trips"
+  -- HashMap of lists: compare by lookup (HashMap has no derived Eq here)
+  let m = echoMap (Map.fromList [("a", [1, 2]), ("b", [3, 4, 5])])
+  assert (lk "a" m == [1, 2]) "hashmap-of-lists round-trips (key a)"
+  assert (lk "b" m == [3, 4, 5]) "hashmap-of-lists round-trips (key b)"
+  putStrLn "ffi arg-marshal round-trip parity ok"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("ffi parity program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    // A pure echo: whatever the marshaller hands the host, hand it straight back.
+    // Round-trip identity then depends ENTIRELY on the marshaller and decoder
+    // being exact duals.
+    lua.load("function echo(x) return x end").set_name("ffi_echo_host").exec()
+        .expect("echo host loads");
+    lua.load(&lua_code).set_name("ffi_arg_marshal_roundtrips_all_containers").exec()
+        .expect("ffi parity program should run and pass its assertions");
+}
+
 // Regression: a locally-bound name (function parameter, case-pattern var, or
 // let-bound var) must shadow a same-named top-level/prelude function. The
 // monomorphizer's specialization paths and the codegen Let/Case arms used to

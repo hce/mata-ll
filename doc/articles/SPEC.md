@@ -389,24 +389,33 @@ type variable, it is the scoped monad. These are represented as
 distinct AST nodes internally.
 
 Arguments crossing OUT to the host are marshalled from the mata-ll
-representation by their declared type: a **list** becomes a plain 1-based
-Lua array (its elements forced and recursively marshalled); a **tuple**
-or **`LuaDict` record** — which already share Lua's positional/named table
-layout — has its lazy fields forced in place, with any nested structure
-converted; and a **`Maybe`** field (or any `Maybe` reached through this
-structural descent) is *unwrapped* — `Just x` becomes the bare `x`
-(recursively marshalled by `x`'s type, so `Just [1,2,3]` is a real array and
-`Just "s"` a native string), and `Nothing` becomes `nil` (an absent field).
-This is the exact inverse of the result decoder and matches `__mll_to_lua`.
-It applies at every depth: a list argument, a list or `Maybe` inside a record
-field, a list of lists, and so on. An **opaque** argument — a polymorphic
-type variable, `LuaData`, a function, or a plain (non-`LuaDict`) ADT — is
-passed through raw with only a shallow force, so a value the host holds
-without inspecting (a fold's threaded state) round-trips untouched. Because
-an FFI call is strict in its arguments, forcing what the host reads evaluates
-nothing the call does not already demand. The result crossing back IN is
-decoded by the dual mechanism (arrays → cons lists, host tables →
-records/tuples, a present field → `Just`/a missing one → `Nothing`),
+representation by their declared type. **The argument marshaller is a complete
+structural dual of the result decoder: it descends into exactly the container
+types the decoder converts, so encode-then-decode is identity at every nesting
+depth.** Those containers are:
+
+- a **list** becomes a plain 1-based Lua array (its elements recursively
+  marshalled);
+- a **tuple** becomes a positional table, a **`LuaDict` record** a name-keyed
+  table (their lazy fields forced, nested structure converted);
+- a **`HashMap`** becomes a string-keyed dict — each *value* recursively
+  marshalled by the value type; keys are scalars already usable as Lua keys and
+  are kept (the decoder likewise validates but does not convert keys);
+- a **`Maybe`** reached through this structural descent is *unwrapped* — `Just x`
+  becomes the bare `x` (recursively marshalled, so `Just [1,2,3]` is a real
+  array and `Just "s"` a native string), `Nothing` becomes `nil` (an absent
+  field), matching `__mll_to_lua`.
+
+An **opaque** argument — a polymorphic type variable, `LuaData`, a function, or
+a plain (non-`LuaDict`) ADT — is left raw with only a shallow force (the decoder
+likewise leaves these untouched), so a value the host holds without inspecting
+(a fold's threaded state) round-trips unchanged. A converted container is
+rebuilt into a **fresh** Lua value, never mutating the mata-ll value, so a value
+passed to a host and then reused in mata-ll code is not corrupted. Because an
+FFI call is strict in its arguments, forcing what the host reads evaluates
+nothing the call does not already demand. The result crossing back IN is decoded
+by the dual mechanism (arrays → cons lists, host tables → records/tuples, dict
+values → `HashMap` values, a present field → `Just`/a missing one → `Nothing`),
 validating each declared scalar's Lua type.
 
 (A *top-level optional positional argument* declared `Maybe` in the FFI

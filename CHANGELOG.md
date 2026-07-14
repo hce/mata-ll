@@ -59,6 +59,30 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- The FFI argument marshaller is now a complete structural dual of the result
+  decoder, closing a class of bugs where a container type the decoder converts
+  was not converted on the way out. The concrete gap: a `HashMap` with
+  structured values (`HashMap String [Integer]`, `HashMap String (Maybe X)`,
+  `HashMap String Record`, nested maps) passed to a host had its values left
+  unmarshalled — each reached the host as a raw cons cell / `Just` wrapper /
+  lazy field instead of a plain array / bare value / dict, so a host iterating
+  `pairs(m)` saw `getmetatable(v) ~= nil`. HashMap values are now marshalled by
+  the value type at any nesting (keys, being scalars already usable as Lua keys,
+  are kept, matching the decoder and `__mll_to_lua`). This is a long-standing
+  gap, not a regression — `HashMap` was never in the argument marshaller, so no
+  released version marshalled a structured map value. The marshaller now covers
+  every container the decoder descends into — list, tuple, `LuaDict` record,
+  `HashMap`, `Maybe` — so encode-then-decode is identity at every depth
+  (regression test `ffi_arg_marshal_roundtrips_all_containers` echoes each
+  container and nesting through a host and asserts identity). Two further
+  correctness fixes landed in the same pass: (1) the marshaller is now
+  **non-destructive** — a converted container is rebuilt into a fresh Lua value
+  instead of mutating the mata-ll value in place, so a value passed to a host
+  and then reused in mata-ll code is no longer corrupted (previously the reused
+  value found a Lua array where a cons list was expected and crashed in `show`);
+  (2) an opaque value (type variable, `LuaData`, function, plain ADT) is still
+  left raw, so the fold-state opaque round-trip (`examples/ffi_fold`) is intact.
+  Test: ffi_hashmap_structured_values_marshalled.
 - List-typed FFI arguments crossing OUT to a Lua host are now marshalled into
   plain Lua arrays. A list passed to a host function — on its own
   (`f [1,2,3]`), nested inside a `LuaDict` record field, or nested inside

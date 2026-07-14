@@ -410,28 +410,32 @@ impl CodeGen {
     /// Lua host reads — the argument-direction dual of `ffi_decode_desc_inner`,
     /// interpreted at runtime by `__mll_arg_marshal`.
     ///
-    /// A host reads:
-    ///   - a **list** as a plain 1-based Lua array, so a cons list (lazy spine,
-    ///     metatable-tagged cells, head/tail at `[1]`/`[2]`) must be walked and
-    ///     rebuilt into an array with each element forced and recursively
-    ///     marshalled (`{k="list",e=..}`);
-    ///   - a **tuple** as a positional array — the layout already matches, so
-    ///     only its lazy fields are forced in place and nested lists inside them
-    ///     converted (`{k="tuple",n=N,es={..}}`);
-    ///   - a **LuaDict record** as a name-keyed table — again the layout matches,
-    ///     so its lazy fields are forced in place and nested structure converted
-    ///     (`{k="record",fs={..}}`);
-    ///   - a **`Maybe`** payload is marshalled while the `Just` wrapper is left
-    ///     intact (`{k="maybe",e=..}`): the wrapper's unwrap happens later in
-    ///     `__mll_opt`/`__mll_opt_tail` for optional arguments, so descending
-    ///     here must not strip it.
+    /// PARITY INVARIANT: this must descend into exactly the same container types
+    /// the result decoder (`ffi_decode_desc_inner`) descends into, so that
+    /// encode-then-decode is identity at every nesting depth. The decoder
+    /// converts: **list**, **tuple**, **`Maybe`**, **`HashMap`** (values; keys
+    /// are validated but not converted), and **`LuaDict` record**. Each has its
+    /// dual here. Anything the decoder leaves opaque — a type variable,
+    /// `LuaData`, a function, a plain (non-`LuaDict`) ADT, or a bare scalar —
+    /// this leaves opaque too (returns `None` → a shallow `__force` at the
+    /// boundary), so an opaque round-trip value (a fold's threaded state, a
+    /// polymorphic argument) passes through untouched and is never mangled.
     ///
-    /// `None` when the type is opaque — a type variable, `LuaData`, a function,
-    /// or a plain (non-`LuaDict`) ADT — or a bare scalar: those cross the
-    /// boundary with a shallow `__force` (existing behavior), so an opaque
-    /// round-trip value (a fold's threaded state, a polymorphic argument) is
-    /// passed through untouched and never mangled. `stack` guards against a
-    /// recursive record type expanding forever.
+    /// A host reads:
+    ///   - a **list** as a plain 1-based Lua array — a cons list (lazy spine,
+    ///     metatable-tagged cells, head/tail at `[1]`/`[2]`) is walked and
+    ///     rebuilt into an array with each element marshalled (`{k="list",e=..}`);
+    ///   - a **tuple** as a positional array (`{k="tuple",n=N,es={..}}`);
+    ///   - a **`LuaDict` record** as a name-keyed table (`{k="record",fs={..}}`);
+    ///   - a **`HashMap`** as a string-keyed dict — each value marshalled by the
+    ///     value type, keys kept (`{k="hashmap",v=..}`);
+    ///   - a structural **`Maybe`** UNWRAPPED (`{k="maybe",e=..}`): `Just x` → the
+    ///     bare marshalled `x`, `Nothing` → nil (see the Maybe arm).
+    ///
+    /// `__mll_arg_marshal` rebuilds each converted container into a FRESH Lua
+    /// value rather than mutating the mata-ll value in place, so a value passed
+    /// to a host and then reused in mata-ll code is not corrupted. `stack` guards
+    /// against a recursive record type expanding forever.
     fn ffi_arg_marshal_desc(&self, ty: &Ty, stack: &mut Vec<String>) -> Option<String> {
         // A nested position marshals when it has its own descriptor; otherwise
         // it is opaque or a bare scalar and the runtime simply forces it
@@ -445,8 +449,9 @@ impl CodeGen {
                 let e = child(self, inner, stack);
                 Some(format!("{{k=\"list\",e={}}}", e))
             }
-            // A tuple shares Lua's positional layout; force its lazy fields in
-            // place (and convert any nested list/record/tuple field).
+            // A tuple shares Lua's positional layout; force its lazy fields (and
+            // convert any nested list/record/tuple/map/Maybe field) into a fresh
+            // positional table.
             Ty::Tuple(elems) => {
                 let es: Vec<String> = elems.iter().map(|e| child(self, e, stack)).collect();
                 Some(format!("{{k=\"tuple\",n={},es={{{}}}}}", elems.len(), es.join(",")))
@@ -474,9 +479,9 @@ impl CodeGen {
                 } else if let Some(name) = head.filter(|n| self.luadict_type_fields.contains_key(*n)) {
                     // A LuaDict record is a name-keyed table; force its lazy
                     // fields (the host reads `rec.field`) and convert nested
-                    // structure. Cycle guard: a recursive record (e.g. a tree)
-                    // would otherwise expand forever — treat the re-entry as
-                    // opaque (shallow force).
+                    // structure into a fresh table. Cycle guard: a recursive
+                    // record (e.g. a tree) would otherwise expand forever — treat
+                    // the re-entry as opaque (shallow force).
                     if stack.iter().any(|s| s == name) {
                         return None;
                     }
@@ -493,6 +498,17 @@ impl CodeGen {
                     }).collect();
                     stack.pop();
                     Some(format!("{{k=\"record\",fs={{{}}}}}", fs.join(",")))
+                } else if head == Some("HashMap") && args.len() == 2 {
+                    // A HashMap is a string-keyed Lua table the host reads as a
+                    // dict. Keys are scalars already usable as Lua keys — like the
+                    // result decoder (and __mll_to_lua), we never convert keys,
+                    // only marshal each VALUE by the value type. Always Some, the
+                    // dual of the decoder, which always descends a HashMap: a
+                    // `HashMap String [Integer]` must reach the host as a dict of
+                    // real arrays, `HashMap String (Maybe X)` / `HashMap String
+                    // Record` / nested maps marshal recursively.
+                    let vdesc = child(self, args[1], stack);
+                    Some(format!("{{k=\"hashmap\",v={}}}", vdesc))
                 } else {
                     None
                 }
@@ -5104,31 +5120,39 @@ end
 -- untouched. FFI calls are strict in their arguments, so forcing here evaluates
 -- nothing the call does not already demand.
 --
+-- NON-DESTRUCTIVE: a converted container is rebuilt into a FRESH Lua value; the
+-- mata-ll value is never mutated in place, so a value passed to a host and then
+-- reused in mata-ll code keeps its original representation. (A blanket __force
+-- on an opaque/scalar leaf is idempotent and returns the leaf itself — shared
+-- by reference into the fresh parent — which is correct: opaque leaves are not
+-- rewritten.)
+--
 --   {k="list",e=..}    a cons list becomes a fresh 1-based Lua array; each
 --                      element is forced and (if e is a descriptor, not false)
 --                      recursively marshalled. Empty list (nil) -> {}.
---   {k="tuple",n=N,es} a tuple shares Lua's positional layout, so its N lazy
---                      fields are forced in place (es[i] a nested descriptor,
---                      or false to just force).
---   {k="record",fs=..} a LuaDict record is a name-keyed table; each declared
---                      field is forced in place (fs[i].d a nested descriptor,
---                      or false to just force) so the host reads real values.
+--   {k="tuple",n=N,es} a fresh positional table; each of the N fields is forced
+--                      (es[i] a nested descriptor, or false to just force).
+--   {k="record",fs=..} a fresh name-keyed table; each declared field is forced
+--                      (fs[i].d a nested descriptor, or false to just force) so
+--                      the host reads real values.
+--   {k="hashmap",v=..} a fresh string-keyed dict; each value is marshalled by v
+--                      (or forced when v is false). Keys are scalars already
+--                      usable as Lua keys and are kept as-is, matching the
+--                      result decoder and __mll_to_lua.
 --   {k="maybe",e=..}   a STRUCTURAL Maybe (record field, list element, tuple
---                      field): UNWRAP it for the host — `Just x` becomes the
---                      bare `x` recursively marshalled by e (or forced when e is
---                      false), `Nothing` (nil) becomes nil. Matches __mll_to_lua
---                      and inverts the result decoder's Maybe case.
+--                      field, map value): UNWRAP it for the host — `Just x`
+--                      becomes the bare `x` recursively marshalled by e (or
+--                      forced when e is false), `Nothing` (nil) becomes nil.
+--                      Matches __mll_to_lua and inverts the result decoder.
 --   {k="just",e=..}    an OPTIONAL positional argument's payload: KEEP the `Just`
 --                      wrapper (its unwrap happens later in __mll_opt/
---                      __mll_opt_tail) and marshal the payload in place, so e.g.
---                      a list inside a Just still becomes an array.
---
--- In-place forcing writes each value back into its field/cell — the same
--- memoization __force performs — so a shared value is marshalled at most once.
+--                      __mll_opt_tail), rebuilding a fresh wrapper around the
+--                      marshalled payload, so e.g. a list inside a Just still
+--                      becomes an array.
 local function __mll_arg_marshal(v, d)
     v = __force(v)
     if d.k == "list" then
-        -- Walk the (possibly lazy) cons spine into a plain array, exactly the
+        -- Walk the (possibly lazy) cons spine into a fresh array, exactly the
         -- conversion __mll_to_lua performs, but marshalling each element by the
         -- element descriptor so an opaque element type is passed raw rather than
         -- mangled (which a blanket __mll_to_lua would not distinguish).
@@ -5144,32 +5168,49 @@ local function __mll_arg_marshal(v, d)
         end
         return arr
     elseif d.k == "tuple" then
+        local t = {}
         for i = 1, d.n do
             local sub = d.es[i]
-            if sub then v[i] = __mll_arg_marshal(v[i], sub) else v[i] = __force(v[i]) end
+            local x = __force(v[i])
+            if sub then x = __mll_arg_marshal(x, sub) end
+            t[i] = x
         end
-        return v
+        return t
     elseif d.k == "record" then
-        if v ~= nil then
-            for _, f in ipairs(d.fs) do
-                if f.d then v[f.n] = __mll_arg_marshal(v[f.n], f.d) else v[f.n] = __force(v[f.n]) end
-            end
+        if v == nil then return nil end
+        local t = {}
+        for _, f in ipairs(d.fs) do
+            local x = __force(v[f.n])
+            if f.d then x = __mll_arg_marshal(x, f.d) end
+            t[f.n] = x
         end
-        return v
+        return t
+    elseif d.k == "hashmap" then
+        if v == nil then return nil end
+        local t = {}
+        for k, val in pairs(v) do
+            local x = __force(val)
+            if d.v then x = __mll_arg_marshal(x, d.v) end
+            t[k] = x
+        end
+        return t
     elseif d.k == "maybe" then
         -- Structural Maybe: unwrap to the bare payload the host reads. A nested
         -- Maybe payload recurses (so `Just Nothing` flattens to nil, matching
         -- __mll_to_lua); Nothing (nil) or an already-bare value stays as-is.
         if getmetatable(v) == __just_mt then
-            local p = v[1]
-            if d.e then return __mll_arg_marshal(p, d.e) else return __force(p) end
+            local p = __force(v[1])
+            if d.e then return __mll_arg_marshal(p, d.e) else return p end
         end
         return v
     elseif d.k == "just" then
         -- Optional positional argument's payload: keep the Just wrapper (unwrapped
-        -- later by __mll_opt/__mll_opt_tail), marshalling the payload in place.
+        -- later by __mll_opt/__mll_opt_tail), rebuilding a fresh wrapper so the
+        -- mata-ll Maybe is not mutated.
         if getmetatable(v) == __just_mt then
-            v[1] = __mll_arg_marshal(v[1], d.e)
+            local p = __force(v[1])
+            if d.e then p = __mll_arg_marshal(p, d.e) end
+            return setmetatable({p}, __just_mt)
         end
         return v
     end
