@@ -233,6 +233,116 @@ fn compiled_module_carries_mllc_provenance() {
     );
 }
 
+/// A `module M (…) where` header export list scopes .mll import visibility
+/// only — by design it does not export anything to the Lua host (that is the
+/// `export` keyword's job; see SPEC.md "Module and import syntax"). A module
+/// whose only "exports" are header-listed therefore has no host surface when
+/// compiled standalone: no `main`, nothing in the return table, and dead-code
+/// elimination removes every definition. That used to produce an empty Lua
+/// shell *silently*; the compiler must now say so via `CompileResult.warnings`.
+#[test]
+fn header_only_root_module_warns_instead_of_silent_empty_output() {
+    let src = "module C (addup) where\n\n\
+               addup :: Integer -> Integer -> Integer\n\
+               addup a b = a + b\n";
+    let result = mllc::compile(src, Path::new("tests/cases"), &[])
+        .expect("a header-form library must still compile");
+
+    // Documented semantics: the header list creates no host surface.
+    assert!(!result.has_main);
+    assert!(
+        result.exports.is_empty(),
+        "header export lists must not populate the Lua exports: {:?}",
+        result.exports
+    );
+    assert!(
+        !result.lua_code.contains("-- Exports"),
+        "no export table may be emitted for a header-only module:\n{}",
+        result.lua_code
+    );
+    assert!(
+        !result.lua_code.contains("addup"),
+        "with no main/export roots, the definition is dead code:\n{}",
+        result.lua_code
+    );
+
+    // ... but not silently: the result must carry a warning that names the
+    // mixup and the fix.
+    assert_eq!(
+        result.warnings.len(),
+        1,
+        "exactly one no-host-surface warning expected"
+    );
+    let rendered = format!("{}", result.warnings[0]);
+    assert!(
+        rendered.contains("no runnable or callable code"),
+        "warning must state the consequence:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("module … (addup) where"),
+        "warning must point at the header export list:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("export addup"),
+        "warning must show the `export` keyword fix:\n{}",
+        rendered
+    );
+}
+
+/// The generic form of the same warning: a bare library (no module header at
+/// all) compiled as the root also has nothing to run or call.
+#[test]
+fn bare_library_root_warns_with_generic_guidance() {
+    let src = "addup :: Integer -> Integer -> Integer\naddup a b = a + b\n";
+    let result = mllc::compile(src, Path::new("tests/cases"), &[])
+        .expect("compile should succeed");
+    assert_eq!(result.warnings.len(), 1);
+    let rendered = format!("{}", result.warnings[0]);
+    assert!(rendered.contains("no runnable or callable code"), "{}", rendered);
+    assert!(rendered.contains("main :: IO ()"), "{}", rendered);
+    assert!(rendered.contains("export"), "{}", rendered);
+}
+
+/// Modules with a host surface must stay warning-free — a program with
+/// `main`, an `export`-keyword module, and (critically) a root program that
+/// *imports* a header-form library: the library's header exports must neither
+/// warn nor leak into the importer's return table.
+#[test]
+fn modules_with_a_host_surface_do_not_warn() {
+    // Program root.
+    let prog = "main :: IO ()\nmain = putStrLn \"hi\"\n";
+    let result = mllc::compile(prog, Path::new("tests/cases"), &[])
+        .expect("compile should succeed");
+    assert!(result.warnings.is_empty(), "program with main must not warn");
+
+    // `export`-keyword module root.
+    let module = "export answer :: Integer\nanswer :: Integer\nanswer = 42\n";
+    let result = mllc::compile(module, Path::new("tests/cases"), &[])
+        .expect("compile should succeed");
+    assert!(result.warnings.is_empty(), "exporting module must not warn");
+    assert_eq!(result.exports, vec!["answer".to_string()]);
+
+    // Program root importing a header-form library (ExportHelper's header
+    // lists publicFn and PublicType(..)).
+    let importer = "import ExportHelper\n\n\
+                    main :: IO ()\n\
+                    main = putStrLn (show (publicFn 4))\n";
+    let result = mllc::compile(importer, Path::new("tests/cases"), &[])
+        .expect("compile should succeed");
+    assert!(
+        result.warnings.is_empty(),
+        "importing a header-form library must not warn"
+    );
+    assert!(
+        result.exports.is_empty() && !result.lua_code.contains("-- Exports"),
+        "an imported library's header exports must not leak into the \
+         importer's return table:\n{}",
+        result.lua_code
+    );
+}
+
 fn run_mll_file_with_lib(path: &Path) {
     let path = path.to_path_buf();
     let lib_path = Path::new("../lib").to_path_buf();

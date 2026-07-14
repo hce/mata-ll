@@ -40,6 +40,17 @@ API of the `mllc` library crate.)
   by a new `mllc` build script (`git rev-parse HEAD`), degrading to `"unknown"`
   when git or the `.git` directory is absent (e.g. a packaged tarball build),
   so the build never fails.
+- Compiling a module with neither a `main` nor any `export` declaration now
+  emits a warning instead of silently producing a Lua file with no runnable or
+  callable code (dead-code elimination is rooted at exactly `main` and the
+  exports, so such a module compiles to an empty shell). The warning's notes
+  call out the classic mixup: a `module M (foo) where` header export list
+  controls only which names other `.mll` modules may import — as documented,
+  it does not export anything to the Lua host, which is exclusively the
+  `export` keyword's job. Warnings are carried on a new
+  `CompileResult.warnings` field; the `mll` CLI prints them to stderr and the
+  wasm playground shows them as a leading comment block. The compile still
+  succeeds and the file is still written.
 
 ### Fixed
 

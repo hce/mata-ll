@@ -161,6 +161,13 @@ fn run_compiler(cli: Cli) {
         }
     };
 
+    // Non-fatal diagnostics (e.g. the module compiled, but with no `main` and
+    // no `export` there is nothing in it to run or call). The compile itself
+    // succeeded, so these go to stderr and the output is still produced.
+    for warning in &result.warnings {
+        eprintln!("Warning: {}", warning);
+    }
+
     // Write .lua file if requested or if not running
     if cli.emit_lua || !cli.run {
         // --recompile rewrites the emitted .lua in place

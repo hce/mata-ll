@@ -144,7 +144,14 @@ pub fn compile(
 ) -> Result<CompileResult, CompileError>
 \end{lstlisting}
 
-Returning \texttt{CompileResult \{ lua\_code, has\_main, exports \}}.
+Returning \texttt{CompileResult \{ lua\_code, has\_main, exports, warnings \}}.
+The \texttt{warnings} are non-fatal diagnostics the frontend should surface;
+currently: the module has neither \texttt{main} nor any \texttt{export}, so
+dead-code elimination (rooted at exactly those two) removed every definition
+and the emitted Lua contains nothing to run or call.  A module-header export
+list (\texttt{module M (foo) where}) does not prevent this --- it scopes
+\texttt{.mll}-level import visibility only and never populates the Lua
+export table.
 
 %----------------------------------------------------------------------
 \subsection{Lexer (\texttt{mllc/src/lexer.rs})}

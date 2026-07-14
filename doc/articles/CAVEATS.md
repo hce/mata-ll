@@ -193,3 +193,22 @@ runtime crash. To capture it instead:
   style), not raised errors.
 - Wrapping a `LuaIO` call in **`try`** also catches errors as
   `IO (Either String a)`.
+
+## The module-header export list does not export to Lua
+
+`module M (addup) where` looks like it publishes `addup`, and inside
+mata-ll it does: the list controls which of the module's names other
+`.mll` files may import (anything omitted is private to the module).
+But that is its entire job. It puts nothing in the compiled module's
+Lua `return { … }` table — only `export` declarations do that:
+
+    export addup :: Integer -> Integer -> Integer
+    addup a b = a + b
+
+A module with a header export list but neither a `main` nor any
+`export` therefore compiles, standalone, to a Lua file with no
+runnable or callable code — dead-code elimination is rooted at `main`
+and the exports, so every definition is removed. The compiler warns
+when this happens rather than writing the empty shell silently. Such
+library modules are meant to be *imported* by another `.mll` module
+(the compilation root), not compiled on their own.

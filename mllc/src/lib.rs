@@ -25,6 +25,12 @@ pub struct CompileResult {
     pub lua_code: String,
     pub has_main: bool,
     pub exports: Vec<String>,
+    /// Non-fatal diagnostics about the compiled result. Frontends should
+    /// surface these to the user (the `mll` CLI prints them to stderr).
+    /// Currently emitted: the module compiled to Lua with no runnable or
+    /// callable code because it has neither `main` nor any `export`
+    /// declaration (see `no_host_surface_warning`).
+    pub warnings: Vec<types::Diagnostic>,
 }
 
 /// Options controlling the emitted Lua.
@@ -128,6 +134,16 @@ pub fn compile_with_options(
     // with a clear message, rather than letting the clash surface downstream.
     loader.check_import_collisions(&parsed, &prelude_shapes)
         .map_err(CompileError::Import)?;
+
+    // The module-header export list (`module M (foo, Bar(..)) where`), kept
+    // from the parsed source before the merge below discards it. It controls
+    // which of this module's names other .mll modules may import (enforced in
+    // modules.rs / the typechecker) and nothing else — in particular it does
+    // NOT export anything to the Lua host; that is exclusively the `export`
+    // keyword's job. It is retained here only to diagnose the classic mixup:
+    // a library written with a header export list and compiled standalone,
+    // which yields no host-callable code at all (see the warning below).
+    let header_exports = parsed.exports.clone();
 
     // Count own (non-import) declarations from the parsed source before
     // import resolution merges everything together.
@@ -236,6 +252,18 @@ pub fn compile_with_options(
     // and instance methods) not reachable from main/exports.
     let mono_module = dce::eliminate(mono_module);
 
+    // A module with neither `main` nor any `export` declaration compiles to a
+    // Lua file with no entry point and an empty (or absent) return table:
+    // dead-code elimination — whose only roots are `main` and the exports —
+    // just removed every definition. Emitting that shell silently is never
+    // what the author meant, so say so. A module-header export list does not
+    // prevent this: it only scopes .mll-level imports (see `header_exports`
+    // above), which is precisely the mixup the warning's notes explain.
+    let mut warnings = Vec::new();
+    if !mono_module.has_main && mono_module.exports.is_empty() {
+        warnings.push(no_host_surface_warning(header_exports.as_deref()));
+    }
+
     // Generate Lua
     let embed = options.embed_source.map(|mode| (mode, source));
     let lua_code = codegen::generate(&mono_module, embed);
@@ -244,7 +272,54 @@ pub fn compile_with_options(
         lua_code,
         has_main: mono_module.has_main,
         exports: mono_module.exports,
+        warnings,
     })
+}
+
+/// The warning for a compilation root that offers the outside world nothing:
+/// no `main` to run and no `export` to call. When the module has a header
+/// export list (`module M (foo) where`), the notes additionally explain that
+/// the list governs .mll import visibility only — the GHC habit it mimics
+/// does not carry over to exporting for the Lua host.
+fn no_host_surface_warning(header_exports: Option<&[String]>) -> types::Diagnostic {
+    let mut d = types::Diagnostic::new(types::DiagnosticKind::Other(
+        "this module defines no `main` and no `export`, so the compiled Lua file \
+         contains no runnable or callable code"
+            .to_string(),
+    ));
+    d.notes.push(
+        "the compiler keeps only code reachable from `main` or from an `export` \
+         declaration; with neither present, every definition was removed as dead code."
+            .to_string(),
+    );
+    // A value-level (lowercase) name from the header list makes the guidance
+    // concrete; type/constructor entries (`Bar(..)`) are import-visibility
+    // items with no value to export, so they can't serve as the example.
+    let example = header_exports.and_then(|names| {
+        names.iter().find(|n| n.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_'))
+    });
+    if let Some(exports) = header_exports {
+        d.notes.push(format!(
+            "the export list in the `module … ({}) where` header only controls which \
+             names other mata-ll modules may import — unlike in GHC, it does not export \
+             anything to the Lua host.",
+            exports.join(", "),
+        ));
+    }
+    if let Some(name) = example {
+        d.notes.push(format!(
+            "to make `{name}` callable from Lua (via `require`), declare it with the \
+             `export` keyword: `export {name} :: <its type>`. To make this file a \
+             runnable program instead, define `main :: IO ()`.",
+        ));
+    } else {
+        d.notes.push(
+            "define `main :: IO ()` to make this a runnable program, or declare \
+             `export <name> :: <type>` to expose a function to the Lua host."
+                .to_string(),
+        );
+    }
+    d
 }
 
 /// One user top-level value definition that reuses a baseline-provided name

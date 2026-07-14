@@ -959,8 +959,20 @@ Two caveats on the forms above:
   constructors are always exposed regardless of whether `Tree(..)` is
   written. `hiding (...)` is enforced for functions.
 
-re-exports are supported but the scope is limited to within .mll. No
-exports to plain Lua are allowed that way.
+A module-header export list — `module M (foo, Bar(..)) where` —
+controls which of the module's names *other .mll modules* may import:
+names the list omits are private to the module. That is all it does.
+In particular it does not export anything to plain Lua — the module's
+Lua return table is populated exclusively by `export` declarations
+(see "Export" below). re-exports are supported but the scope is
+limited to within .mll. No exports to plain Lua are allowed that way.
+
+Consequently, compiling a module that has neither a `main` nor any
+`export` declaration (a header export list does not count) produces a
+Lua file with no runnable or callable code: dead-code elimination is
+rooted at `main` and the exports, so every definition is removed. The
+compiler emits a warning explaining this instead of writing the empty
+shell silently.
 
 # Minimal prelude
 

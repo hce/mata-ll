@@ -679,6 +679,26 @@ import qualified Data.Map as M
 Modules map to file paths: \texttt{Data.List} resolves to
 \texttt{Data/List.mll} relative to source or library directories.
 
+\subsection{Export Lists}
+
+A module header may carry a Haskell-style export list:
+
+\begin{lstlisting}
+module Geometry (area, Shape(..)) where
+\end{lstlisting}
+
+The list controls \emph{import visibility within mata-ll}: other
+\texttt{.mll} modules can import only the listed names; everything
+else is private to the module.  Unlike in GHC, the list does
+\emph{not} export anything to the Lua host --- the compiled module's
+\texttt{return} table is populated exclusively by \texttt{export}
+declarations (see \emph{Exporting to Lua}).  A module with neither a
+\texttt{main} nor any \texttt{export} compiles, standalone, to a Lua
+file with no runnable or callable code (dead-code elimination keeps
+only what \texttt{main} or an \texttt{export} can reach); the
+compiler warns when that happens.  Such library modules are meant to
+be imported by the module you actually compile.
+
 \subsection{Available Library Modules}
 
 \begin{tabular}{@{}ll@{}}
