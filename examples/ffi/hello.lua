@@ -1,5 +1,7 @@
 function handle_me(parameters)
+	print(parameters.message)
 	local operation = parameters.operation
+	print(operation)
 	local operands = parameters.operands
 	print(operands[1], operands[2])
 	local res = { }

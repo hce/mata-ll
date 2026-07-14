@@ -2832,6 +2832,61 @@ main = do
         .expect("ffi list-argument program should run and pass its assertions");
 }
 
+// Regression (broke at c3cf855 "make cons heads lazy", worked in 0.1.2, fixed
+// by the FFI argument marshaller): a String that is BUILT rather than written
+// as a literal — e.g. decoded from JSON — is a `[Char]` structure, not a native
+// Lua string. When cons heads became lazy, such a String began crossing the FFI
+// argument boundary as a raw cons table instead of a native string, so a host
+// reading it (e.g. `params.hostname`) received a table and failed with
+// "converting Lua table to String". A String *literal* never reproduced this
+// (it is already native), which is exactly why it slipped past the literal-only
+// tests — the trigger has to be a constructed String. Here a `[String]` is
+// decoded from JSON and each element is passed to a host that requires a native
+// Lua string, so a regression to the raw cons table fails loudly.
+#[test]
+fn ffi_json_decoded_string_argument_is_native_string() {
+    let source = r#"
+import JSON
+
+data Cfg = Cfg { cfgHosts as "hostnames" :: [String] }
+    deriving (FromJSON, Show)
+
+data HostParam = HostParam { hpName as "name" :: String }
+    deriving (LuaDict)
+
+sendHost :: HostParam -> LuaPure "send_host" String
+
+cfg :: Cfg
+cfg = case decodeJSON "{\"hostnames\": [\"hce.li\", \"example.com\"]}" of
+        Right r -> r
+        Left e  -> error e
+
+main :: IO ()
+main = do
+  mapM_ (\h -> assert (sendHost (HostParam h) == h) "json-decoded string arg reaches host as a native string") (cfgHosts cfg)
+  putStrLn "ffi json-decoded string argument ok"
+"#;
+    let lib_path = Path::new("../lib");
+    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+        .expect("ffi json-string program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    // Host REQUIRES a native Lua string. A raw cons cell (a table) fails the guard.
+    let host = r#"
+        function send_host(p)
+            if type(p) ~= "table" then error("send_host: params not a table") end
+            if type(p.name) ~= "string" then
+                error("send_host: name is " .. type(p.name) .. ", not a string "
+                      .. "(regression: JSON-decoded String crossed as a raw cons table)")
+            end
+            return p.name
+        end
+    "#;
+    lua.load(host).set_name("ffi_json_host").exec().expect("host definitions load");
+    lua.load(&lua_code).set_name("ffi_json_decoded_string_argument_is_native_string").exec()
+        .expect("ffi json-string program should run and pass its assertions");
+}
+
 // Regression: a locally-bound name (function parameter, case-pattern var, or
 // let-bound var) must shadow a same-named top-level/prelude function. The
 // monomorphizer's specialization paths and the codegen Let/Case arms used to

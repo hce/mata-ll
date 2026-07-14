@@ -65,18 +65,28 @@ API of the `mllc` library crate.)
   another list — reached the host as a raw mata-ll cons cell (head at `[1]`,
   the spine's tail thunk at `[2]`) instead of a 1-based array, so the host read
   `arr[1]` as the first element but `arr[2]` as the tail function and any use of
-  it failed (`attempt to perform arithmetic on a function value`). This is a
-  long-standing bug — list-typed FFI arguments never worked; the argument
-  marshaller only descended into tuples and `Maybe` and skipped lists and
-  records entirely. It is not a regression from any recent change (the released
-  0.1.2 fails the same way). The argument-direction marshaller is now the dual
-  of the result decoder: a list becomes an array with its elements forced and
+  it failed (`attempt to perform arithmetic on a function value`). The argument
+  marshaller only descended into tuples and `Maybe`, skipping lists and records
+  entirely, so any list crossing to a host was affected. The argument-direction
+  marshaller is now the dual of the result decoder: a list becomes an array
+  with its elements forced and
   recursively marshalled, and a tuple's or record's lazy fields are forced in
   place (with nested lists converted), at every depth. Opaque arguments — a
   polymorphic type variable, `LuaData`, a function, a plain ADT — still pass
   through raw with a shallow force, so a fold's threaded state (including a
-  tuple state) round-trips untouched exactly as before. Test:
-  ffi_list_argument_marshalled_to_array; example: examples/ffi.
+  tuple state) round-trips untouched exactly as before.
+  This also repairs a regression within the 0.1.x line: a `String` that is
+  *built* rather than written as a literal — decoded from JSON, or produced by
+  any `[Char]` list operation — is a cons structure, not a native Lua string.
+  Passing such a `String` as an FFI argument worked in 0.1.2 but, after cons
+  heads were made lazy during this cycle, it began reaching the host as a raw
+  cons table, so a host reading e.g. `params.hostname` got a table and failed
+  with `error converting Lua table to String`. The marshaller now collapses a
+  declared-`String` argument to a native Lua string regardless of how it was
+  constructed. (A `String` *literal* is already native, which is why the earlier
+  literal-only tests never caught this.) Tests:
+  ffi_list_argument_marshalled_to_array,
+  ffi_json_decoded_string_argument_is_native_string; example: examples/ffi.
 - `return`/`pure` are now non-strict, matching GHC and the eagerness contract:
   a returned value is left unforced until it is demanded. Previously the IO
   bind/`return` path forced the value to WHNF eagerly, so `_ <- return (error

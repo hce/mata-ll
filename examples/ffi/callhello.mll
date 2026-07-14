@@ -6,7 +6,8 @@ data HandleMeOperation = Addition       as "+"
     deriving (Show, LuaDict)
 
 data HandleMeParams = HandleMeParams
-        { hmpOperation   as "operation" :: HandleMeOperation
+        { hmpMessage     as "message"   :: String
+        , hmpOperation   as "operation" :: HandleMeOperation
         , hmpOperands    as "operands"  :: [Integer] }
     deriving (Show, LuaDict)
 
@@ -19,5 +20,4 @@ handleMe :: HandleMeParams -> LuaPure "handle_me" HandleMeRet
 
 export doit :: IO ()
 doit = do
-    print $ handleMe $ HandleMeParams Division [42, 3]
-    print $ handleMe $ HandleMeParams Power [2, 10]
+    mapM_ (\(a, b, c) -> print $ handleMe $ HandleMeParams a b c) [("Hi", Division, [42, 3]), ("Ho", Power, [2, 10])]
