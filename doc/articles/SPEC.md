@@ -1123,15 +1123,13 @@ optimization must respect it:
 > (`error`, `undefined`, non-termination, or a trapping `div`/`mod`) and
 > is not covered by (a) stays lazy.
 
-> **Known hole (bug, tracked in TODO.md):** the IO bind/`return` path
-> currently forces the returned value to WHNF eagerly —
-> `_ <- return (error "x")`, a bare `return (error "x")` statement in a
-> do-block, and `fmap f (return ⊥)` all raise, where GHC leaves the value
-> unforced. This violates the contract above for exactly that path; the
-> contract remains the specification and the implementation is wrong. The
-> hole is scalar WHNF through IO only: a returned tuple keeps its field
-> laziness, and the Maybe monad is properly lazy. See CAVEATS.md for the
-> user-facing consequences.
+The contract holds through `return` / `pure` as well: a returned value is
+left unforced, so `_ <- return (error "x")`, a bare `return (error "x")`
+statement in a do-block, and `fmap f (return ⊥)` do not raise — the bottom
+raises only when the value is demanded (matching GHC). One user-facing
+consequence: a bottom returned inside `try` is not caught, because it is not
+forced there — force it with `seq` (or, in GHC, `evaluate`) inside the tried
+action to make it catchable. See CAVEATS.md.
 
 Consequently, an argument the callee ignores is never forced by the call:
 

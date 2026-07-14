@@ -690,7 +690,7 @@ impl CodeGen {
             "try_", "catch_",
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
             "__mll_shl", "__mll_shr", "__mll_math_type",
-            "__mll_div", "__mll_mod",
+            "__mll_div", "__mll_mod", "__mll_div_fn", "__mll_mod_fn",
             "__mll_array_from_list", "__mll_array_index", "__mll_array_length",
             "__mll_bs_empty", "__mll_bs",
             "__mll_ma_new", "__mll_ma_read", "__mll_ma_write",
@@ -2451,19 +2451,53 @@ impl CodeGen {
     /// - SpecCall for ST primitives → emit operation directly
     /// - pure/return → emit the value
     /// Falls back to __force(expr)() for unknown actions.
+    /// Whether performing `action` yields a value already in WHNF (a forced
+    /// value) rather than a possibly-suspended thunk. A `<-`-bound variable is
+    /// marked `concrete` (read force-free downstream) only when this holds.
+    ///
+    /// Nearly every action yields a forced value — IO primitives, FFI results,
+    /// and ST effects all return WHNF. The exception is `return e` / `pure e`,
+    /// whose result is `e` left UNFORCED per the non-strict contract (see
+    /// gen_action): it is WHNF only when `e` is itself provably total
+    /// (`is_cheap_to_force`), otherwise gen_action suspends it in a thunk and
+    /// the binder must keep the variable non-concrete so its uses force it.
+    fn action_result_is_whnf(&self, action: &TExpr) -> bool {
+        let mut a = action;
+        while let TExprKind::Paren(inner) = &a.kind {
+            a = inner.as_ref();
+        }
+        match &a.kind {
+            TExprKind::App(func, arg)
+                if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
+                self.is_cheap_to_force(arg),
+            TExprKind::InfixApp { op, lhs, rhs }
+                if op == "$"
+                    && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
+                self.is_cheap_to_force(rhs),
+            _ => true,
+        }
+    }
+
     fn gen_action(&mut self, expr: &TExpr) {
         // Structural checks FIRST — the monad type variable may be
         // unresolved in bind chains, so we can't rely on the type alone.
-        // pure(x) / return(x): performing it just returns x
+        // pure(x) / return(x): performing it just yields x — and yields it
+        // UNFORCED, per the eagerness contract (`return ⊥` must not raise until
+        // the value is demanded). gen_arg with strict=false suspends a possibly-⊥
+        // x in a thunk and leaves a provably-total x (literal, concrete var,
+        // constructor of such) eager, so the common `return 0` stays a bare
+        // value while `return (error "x")` / `return (n `div` 0)` become inert.
+        // A bind site marks the resulting `<-` variable concrete only when this
+        // yields WHNF (see action_result_is_whnf).
         if let TExprKind::App(func, arg) = &expr.kind
             && matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                self.gen_expr(arg);
+                self.gen_arg(arg, false);
                 return;
             }
         // return $ x / pure $ x: same as return(x)
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
             && op == "$" && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                self.gen_expr(rhs);
+                self.gen_arg(rhs, false);
                 return;
             }
         // ST primitive calls now return closures — go through __mll_run like everything else
@@ -2700,7 +2734,16 @@ impl CodeGen {
                         self.emit(&format!("{} = ", decl));
                         self.gen_action(lhs);
                         self.emit("\n");
-                        self.concrete_vars.insert(param_name);
+                        // The bound value is force-free downstream only if the
+                        // action yields WHNF. A `return ⊥` binds a thunk (kept
+                        // lazy per the eagerness contract), so its uses must
+                        // force it — do NOT mark it concrete (and clear any
+                        // concreteness a same-named outer binding left).
+                        if self.action_result_is_whnf(lhs) {
+                            self.concrete_vars.insert(param_name);
+                        } else {
+                            self.concrete_vars.remove(&param_name);
+                        }
                         expr = body;
                         inside_action = true;
                         continue;
@@ -2840,6 +2883,11 @@ impl CodeGen {
                 // First-class / partially-applied `seq` as a callee resolves to
                 // the runtime primitive (see the gen_expr Var arm).
                 "seq" => self.emit("__mll_seq"),
+                // Prefix / partially-applied / first-class `div` and `mod`
+                // resolve to their forcing wrappers (see the gen_expr Var arm);
+                // the inline backtick form stays on the strict core.
+                "div" => self.emit("__mll_div_fn"),
+                "mod" => self.emit("__mll_mod_fn"),
                 _ => {
                     let sname = sanitize_name(name);
                     let lref = self.lua_ref(&sname);
@@ -3080,6 +3128,10 @@ impl CodeGen {
             // (see the gen_expr Var arm) — this is the path taken when `seq` is
             // passed as a bare argument, e.g. `foldr seq z xs`.
             TExprKind::Var(name) if name == "seq" => self.emit("__mll_seq"),
+            // First-class `div` / `mod` references resolve to their forcing
+            // wrappers (see the gen_expr Var arm), e.g. `foldr div z xs`.
+            TExprKind::Var(name) if name == "div" => self.emit("__mll_div_fn"),
+            TExprKind::Var(name) if name == "mod" => self.emit("__mll_mod_fn"),
             TExprKind::Var(name) => {
                 let lref = self.lua_ref(&sanitize_name(name));
                 self.emit(&lref);
@@ -3225,6 +3277,15 @@ impl CodeGen {
                     // function to the rest). The fully-applied prefix and
                     // backtick forms are lowered inline before reaching here.
                     "seq" => self.emit("__mll_seq"),
+                    // A first-class / partially-applied / prefix `div` or `mod`
+                    // (`div 7 2`, `map (div 10) xs`, `foldr div z`) resolves to
+                    // its forcing wrapper, which forces both arguments to WHNF
+                    // then runs the strict core. Only the inline backtick
+                    // `a `div` b` (InfixApp) stays on the bare strict core with
+                    // pre-forced operands, keeping the arithmetic hot path free
+                    // of redundant forces.
+                    "div" => self.emit("__mll_div_fn"),
+                    "mod" => self.emit("__mll_mod_fn"),
                     _ => {
                         let sname = sanitize_name(name);
                         let lref = self.lua_ref(&sname);
@@ -3340,18 +3401,21 @@ impl CodeGen {
                             return;
                         }
 
-                // return/pure are identity — emit the argument directly.
-                // Thunk arguments that contain calls to unknown functions
-                // (parameters, locally-bound variables) to preserve non-strict
-                // semantics: `return (f x)` must not eagerly evaluate `f x`
-                // when f could be an arbitrary expensive function.
-                // Calls to known top-level/prelude functions are safe to
-                // evaluate eagerly.
-                // return/pure wrap their argument in an IO action closure.
+                // return/pure wrap their argument in an IO action closure whose
+                // performed value is the argument, left UNFORCED per the
+                // eagerness contract: running `return ⊥` must not raise until
+                // something demands the value. gen_arg(strict=false) suspends a
+                // possibly-⊥ argument in a thunk and keeps a provably-total one
+                // eager, so `return 0` still yields a bare `0` while
+                // `return (error "x")` yields an inert thunk. This is the
+                // first-class / higher-order path (e.g. `fmap f (return e)`,
+                // `mapM (\x -> return (g x)) xs`); the do-block bind chain
+                // flattens its own returns through gen_action, which suspends
+                // the same way.
                 if let TExprKind::Var(name) = &func.kind
                     && (name == "return" || name == "pure") {
                         self.emit("(function() return ");
-                        self.gen_expr(arg);
+                        self.gen_arg(arg, false);
                         self.emit(" end)");
                         return;
                     }
@@ -5596,6 +5660,19 @@ do
         return a % b
     end
 end
+
+-- First-class `div` / `mod`. The inline `a `div` b` / prefix-inline path passes
+-- operands already forced (gen_operand), so __mll_div/__mll_mod above are the
+-- strict cores and never re-force — keeping the arithmetic hot path (e.g. the
+-- tracker mixer) free of redundant forces. But a first-class, partially applied,
+-- or higher-order use — `div 7 2`, `map (div 10) xs`, `foldr div z xs` — reaches
+-- the callee as a plain value and may be handed unforced (thunk) arguments by
+-- its caller (a lazy list element, a passed-through parameter). These wrappers
+-- force both arguments to WHNF before the strict core, so `div`/`mod` are total
+-- functions in every application form, exactly as the backtick form is. `__force`
+-- is idempotent, so an already-forced argument costs only the metatable probe.
+local function __mll_div_fn(a, b) return __mll_div(__force(a), __force(b)) end
+local function __mll_mod_fn(a, b) return __mll_mod(__force(a), __force(b)) end
 
 -- Number subtype probe (Lua 5.3+ native math.type, else a portable fallback).
 -- LuaJIT and Lua 5.1/5.2 have no integer subtype: every number is an IEEE-754

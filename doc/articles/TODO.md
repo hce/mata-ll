@@ -108,13 +108,20 @@ MATA-LL TODO
 
 ## Open
 
-- [ ] **Prefix/partial `div`/`mod` crash at runtime.** `div 7 2` and
-      `map (div 10) xs` type-check but emit `__force(div)(...)` against a
-      Lua global that does not exist ("attempt to call a nil value"). The
-      backtick form and backtick sections work. Fix: reify `div`/`mod` as
-      first-class functions (the same treatment `seq` got), backed by the
-      `__mll_div`/`__mll_mod` runtime helpers. Found by the 0.1.3
-      soundness audit; documented in CAVEATS.md.
+- [x] **Prefix/partial `div`/`mod` crash at runtime — fixed.** `div 7 2` and
+      `map (div 10) xs` type-checked but emitted `__force(div)(...)` against a
+      Lua global that does not exist ("attempt to call a nil value"); only the
+      backtick form and backtick sections worked. Fixed by reifying `div`/`mod`
+      as first-class functions (the same treatment `seq` got): a prefix, partial,
+      or first-class `div`/`mod` now resolves to the runtime wrappers
+      `__mll_div_fn`/`__mll_mod_fn`, which force both arguments to WHNF and run
+      the existing strict cores `__mll_div`/`__mll_mod`. The inline backtick
+      `` a `div` b `` stays on the bare strict core with pre-forced operands, so
+      the arithmetic hot path (e.g. the tracker mixer) is byte-identical — no
+      redundant force. Regression test: `div_mod_prefix_forms.mll` (prefix,
+      partial-via-`map`, first-class-via-`foldr`/higher-order with thunked
+      operands, floor semantics on negatives, and zero-divisor raising through
+      the prefix/first-class path).
 - [ ] **Existential unpacking does not skolemize — type-soundness hole.**
       `data ShowBox = forall a. MkShowBox a (a -> String)` with
       `coerce (MkShowBox x _) = x` is ACCEPTED and coerces anything to
@@ -126,14 +133,25 @@ MATA-LL TODO
       too). SPEC.md's "cannot escape the branch" promise is annotated as
       currently not holding; restore it. Found by the 0.1.3 soundness
       audit; documented in CAVEATS.md.
-- [ ] **IO bind/`return` forces the bound value eagerly.**
+- [x] **IO bind/`return` forces the bound value eagerly — fixed.**
       `_ <- return (error "x")`, a bare `return (error "x")` statement in
-      a do-block, and `fmap f (return ⊥)` all raise, where GHC leaves the
-      value unforced. Violates SPEC.md's eagerness contract ("bottom is
-      never evaluated eagerly"), which is annotated with this hole until
-      fixed. Scope is exactly scalar WHNF through the IO path: returned
-      tuples keep field laziness and the Maybe monad is properly lazy.
-      Found by the 0.1.3 soundness audit; documented in CAVEATS.md.
+      a do-block, and `fmap f (return ⊥)` all raised, where GHC leaves the
+      value unforced — violating SPEC.md's eagerness contract ("bottom is
+      never evaluated eagerly"). Fixed by making `return`/`pure` suspend a
+      possibly-⊥ argument: gen_action and the first-class return/pure closure
+      now emit the argument through the eagerness weighing (gen_arg,
+      strict=false), so a provably-total value stays eager (`return 0` is a
+      bare `0`) while a possibly-⊥ one is thunked and stays inert until
+      demanded. A `<-`-bound variable is marked concrete only when the action
+      yields WHNF (action_result_is_whnf), so a bound `return ⊥` is forced on
+      use, not at the bind. One observable consequence, now matching GHC: a
+      bottom returned inside `try` is not caught unless forced there (with
+      `seq`) — the two IO tests that pinned the old eager behavior
+      (div_mod_by_zero_raises, exceptions test 7) were updated to force inside
+      the `try` via `seq`, the same idiom div_exact_and_zero.mll already used.
+      Regression test: `return_non_strict.mll` (discarded/bound/`$`/terminal/
+      fmap/tuple-field/Maybe forms stay lazy; a demanded returned bottom still
+      raises). Found by the 0.1.3 soundness audit; documented in CAVEATS.md.
 - [x] **Non-deterministic codegen — fixed.** Generated `.lua` was not
       reproducible: identical source compiled twice could differ, because some
       emission order followed `HashMap` iteration order. Three sources, all

@@ -37,12 +37,18 @@ main = do
         Right v -> assert (v == 3) "nested try"
         Left _  -> error "should not fail"
 
-    -- Test 7: try catches non-exhaustive pattern
+    -- Test 7: try catches a demanded bottom (non-exhaustive pattern / head []).
+    -- `seq` forces `head xs` to WHNF INSIDE the tried action, so the error is
+    -- raised (and caught) there. This is the Haskell-correct way to force a
+    -- pure value inside `try`: `pure`/`return` are non-strict (a returned ⊥ is
+    -- inert until demanded, per SPEC's eagerness contract), so a bare
+    -- `pure (head xs)` would return `Right <thunk>` and the error would escape
+    -- the `try` — exactly as in GHC, where you would write `try (evaluate ...)`.
     result7 <- try (do
         let xs = [] :: [Integer]
-        pure (head xs))
+        head xs `seq` pure ())
     case result7 of
-        Right _ -> error "head [] should fail"
-        Left _  -> putStrLn "caught head []"
+        Right () -> error "head [] should fail"
+        Left _   -> putStrLn "caught head []"
 
     putStrLn "ok"

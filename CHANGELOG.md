@@ -57,6 +57,35 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- `return`/`pure` are now non-strict, matching GHC and the eagerness contract:
+  a returned value is left unforced until it is demanded. Previously the IO
+  bind/`return` path forced the value to WHNF eagerly, so `_ <- return (error
+  "x")`, a bare `return (error "x")` do-block statement, and `fmap f (return ⊥)`
+  all raised where GHC leaves the value untouched. `return`/`pure` now emit their
+  argument through the same eagerness weighing used for call arguments — a
+  provably-total value stays eager (`return 0` is still a bare `0`, no thunk),
+  while a possibly-⊥ value is suspended and raises only when forced; a `<-`-bound
+  returned value is forced at its use site rather than at the bind. One
+  user-visible consequence, also matching GHC: a bottom returned *inside* `try`
+  is no longer caught unless it is forced there — use `` e `seq` pure () `` (GHC's
+  `evaluate`) to demand a pure value inside the tried action. Structured laziness
+  is unchanged (a returned tuple keeps its field laziness; the Maybe monad stays
+  lazy). Test: return_non_strict.
+- Prefix and partially applied `div`/`mod` now work, not just the backtick
+  forms. `div 7 2`, `map (div 10) xs`, and any first-class or higher-order use
+  (`foldr div z xs`, passing `div` to another function) previously type-checked
+  and then crashed at runtime with "attempt to call a nil value" — they compiled
+  to a call of a Lua global `div`/`mod` that does not exist; only ``a `div` b``
+  and its backtick section worked. `div`/`mod` are now reified as first-class
+  functions the same way `seq` was this cycle: a prefix, partial, or first-class
+  occurrence resolves to a runtime wrapper (`__mll_div_fn`/`__mll_mod_fn`) that
+  forces both arguments to WHNF and then runs the existing strict core, so the
+  result is identical to the backtick form in every shape — floor semantics on
+  negative operands and the divide-by-zero error included, and safe when a caller
+  hands the operator unforced (thunk) arguments (`map` over a lazy list). The
+  inline backtick `` a `div` b `` is unchanged: it stays on the bare strict core
+  with pre-forced operands, so the arithmetic hot path (e.g. the tracker mixer)
+  is byte-identical and carries no extra force. Test: div_mod_prefix_forms.
 - Redefining a name the Prelude or a builtin provides (`error`, `map`, `sum`,
   …) at the top level is now reported once, clearly, at the user's own
   definition site: `'error' is already provided by the Prelude and cannot be
@@ -115,6 +144,7 @@ API of the `mllc` library crate.)
   exactness past 2^53 is a documented host limitation (CAVEATS.md), not
   something division can recover there. Tracker benchmark timing is unchanged
   and its decoded output byte-identical. Test: div_exact_and_zero.
+- An operator in type position is now rejected with a clear parse error instead
   of being silently parsed as the unit type. `f :: (+) -> Integer` previously
   compiled — the `(+)` was read as `()`, so the signature meant something
   entirely different from what was written and `f ()` ran without complaint.

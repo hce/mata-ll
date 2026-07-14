@@ -69,24 +69,6 @@ representation, not something the division operator can recover; if you
 need exact 62-bit quotients, run on a Lua 5.3+ host (the embedded runner
 is Lua 5.4).
 
-## Prefix and partially applied `div`/`mod` crash at runtime (known bug)
-
-Only the backtick forms of `div` and `mod` work: ``a `div` b`` and the
-backtick section ``(`div` 2)``. The prefix and partially applied forms —
-
-    div 7 2            -- type-checks, then crashes
-    map (div 10) xs    -- type-checks, then crashes
-
-type-check but compile to a call to a Lua global named `div` that does not
-exist, so they fail at runtime with:
-
-    attempt to call a nil value
-
-This is a compiler bug (the operator is not reified as a first-class
-function the way `seq` and the arithmetic operators are); it is tracked in
-TODO.md. Until it is fixed, write the backtick form, or wrap it in a
-lambda: `map (\x -> 10 `div` x) xs`.
-
 ## Existential type variables can escape (known type-soundness hole)
 
 Unpacking an existential constructor does not skolemize the hidden type
@@ -106,21 +88,25 @@ correctly rejected — only existential unpacking is affected. SPEC.md's
 promise that the hidden variable "cannot escape the branch" does not
 currently hold; this is a bug tracked in TODO.md, not intended behavior.
 
-## IO `return` forces its argument eagerly (known laziness hole)
+## `try (pure e)` does not catch an error inside `e`
 
-Binding or sequencing a `return`ed value through the IO path evaluates it
-to WHNF immediately, where GHC would leave it unforced:
+`return` / `pure` are non-strict, exactly as in GHC: `return e` yields `e`
+unforced, so a bottom in `e` does not raise until something demands the value.
+This is the correct eagerness-contract behavior, but it has a consequence for
+exception handling — a bottom returned inside `try` escapes the `try`:
 
-    _ <- return (error "x")       -- raises here; GHC does not
-    return (error "x")            -- bare in a do-block: same
-    fmap f (return (error "x"))   -- same
+    r <- try (pure (1 `div` 0))   -- r is Right <thunk>, NOT caught
+    case r of
+        Right v -> print v        -- the divide-by-zero raises HERE, uncaught
+        Left _  -> ...
 
-This contradicts the eagerness contract in SPEC.md ("bottom is never
-evaluated eagerly") for exactly this path: the hole is scalar WHNF through
-IO bind/`return`. Structured values keep their laziness — a returned tuple
-does not force its fields (`fst`/`snd` laziness is preserved), and the
-Maybe monad is properly lazy throughout. Tracked in TODO.md; until it is
-fixed, do not rely on `return ⊥` being inert in IO code.
+To catch an error in a *pure* value, force it to WHNF inside the tried action —
+`seq` is the portable way (GHC would use `evaluate`):
+
+    r <- try (1 `div` 0 `seq` pure ())   -- forced inside try: r is Left ...
+
+IO effects inside `try` are still caught normally; only a lazily-returned pure
+value needs the explicit force.
 
 ## Lazy evaluation can cause space leaks
 

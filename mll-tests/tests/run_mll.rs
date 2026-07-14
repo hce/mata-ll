@@ -375,6 +375,15 @@ mll_test!(div_mod_fold_runtime, "div_mod_fold_runtime.mll");
 // past 2^53 on the embedded Lua 5.4 (native // floor division)
 mll_test!(div_exact_and_zero, "div_exact_and_zero.mll");
 
+// prefix (`div 7 2`), partial (`map (div 10) xs`), and first-class div/mod
+// work — not just the backtick infix — with forcing of thunked operands
+// (audit finding 4)
+mll_test!(div_mod_prefix_forms, "div_mod_prefix_forms.mll");
+
+// return/pure are non-strict: a returned bottom is not forced until demanded
+// (audit finding 6)
+mll_test!(return_non_strict, "return_non_strict.mll");
+
 // Independently-authored regression coverage for the same three findings
 // (broader shapes than the case files above).
 //
