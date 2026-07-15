@@ -482,6 +482,7 @@ mll_test!(derive_functor, "derive_functor.mll");
 mll_test!(foldable, "foldable.mll");
 mll_test!(traversable, "traversable.mll");
 mll_test!(foldable_user_instance, "foldable_user_instance.mll");
+mll_test!(monoid_instances, "monoid_instances.mll");
 mll_test!(derive_eq, "derive_eq.mll");
 mll_test!(derive_ord, "derive_ord.mll");
 mll_test!(rank2, "rank2.mll");
@@ -4714,6 +4715,63 @@ fn kind_phantom_param_defaults_to_type_and_higher_kinded_use_rejected() {
         e.contains("'Phantom' needs an argument of kind Type, but 'Maybe' has kind Type -> Type"),
         "got: {e}"
     );
+}
+
+// --- Semigroup/Monoid instances moved to the Prelude ------------------------
+// The String and [a] Semigroup/Monoid instances are now ordinary source
+// declarations in lib/Prelude.mll (not Rust registrations). These guard the
+// two behaviors that must survive the move: the deliberate `<>`-on-lists
+// rejection, and mempty's ambiguity handling. (Positive runtime behavior over
+// constructed values is covered by tests/cases/monoid_instances.mll.)
+
+#[test]
+fn list_semigroup_operator_still_rejected_after_move() {
+    // mata-ll deliberately rejects `<>` on a concrete list and directs the
+    // user to `++`, even though a `Semigroup [a]` instance exists (it is there
+    // for polymorphic dispatch and for `mappend`). Moving the instance to the
+    // Prelude must not make `<>` start dispatching on concrete lists — the
+    // rejection lives in the monomorphizer, independent of instance source.
+    let e = compile_err(
+        "main :: IO ()\nmain = putStrLn (show ([1, 2] <> [3, 4]))\n",
+    );
+    assert!(e.contains("No instance for '<>' on type '[Integer]'"), "got: {e}");
+    assert!(
+        e.contains("lists are concatenated with ++"),
+        "the ++ guidance note must still fire, got: {e}"
+    );
+}
+
+#[test]
+fn mappend_on_lists_still_works_after_move() {
+    // The complement: `mappend` (the Monoid method) DOES work on concrete
+    // lists — polymorphic Monoid code depends on it — and now resolves through
+    // the source `instance Monoid [a]` (whose body is `xs ++ ys`).
+    let src = "main :: IO ()\nmain = putStrLn (show (mappend [1, 2] [3, 4]))\n";
+    assert!(
+        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        "mappend on lists must still compile after the instance move"
+    );
+}
+
+#[test]
+fn mempty_ambiguity_preserved_after_move() {
+    // An undetermined `mempty` is still ambiguous with the same guidance —
+    // the `Monoid` method-constraint machinery stays in the compiler; only the
+    // instances moved.
+    let e = compile_err("main :: IO ()\nmain = putStrLn (show mempty)\n");
+    assert!(e.contains("Ambiguous type"), "got: {e}");
+    assert!(e.contains("Monoid"), "the Monoid ambiguity must still be reported, got: {e}");
+
+    // A determined `mempty` still resolves at each element type.
+    for src in [
+        "main :: IO ()\nmain = putStrLn (mempty :: String)\n",
+        "main :: IO ()\nmain = putStrLn (show (mempty :: [Integer]))\n",
+    ] {
+        assert!(
+            mllc::compile(src, Path::new("."), &[]).is_ok(),
+            "determined mempty should resolve:\n{src}"
+        );
+    }
 }
 
 // Top-level redefinition of a name the Prelude/builtins provide. Historically

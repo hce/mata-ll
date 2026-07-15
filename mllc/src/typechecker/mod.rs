@@ -1527,27 +1527,26 @@ impl Checker {
             ty: semigroup_ty,
         });
 
-        // Semigroup instances
-        {
-            // String: <> is string concatenation
-            let mut method_fns = HashMap::new();
-            method_fns.insert("<>".to_string(), "semigroup_String".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Semigroup".to_string(),
-                target_type: Ty::Con("String".into()),
-                method_fns,
-                context: None,
-            });
-            // []: <> is list append (same as ++)
-            let mut method_fns = HashMap::new();
-            method_fns.insert("<>".to_string(), "semigroup_List".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Semigroup".to_string(),
-                target_type: Ty::list(ta.clone()),
-                method_fns,
-                context: None,
-            });
-        }
+        // `semigroup_String` is the runtime string-concatenation primitive
+        // (Lua `..`, defined in codegen's preamble and inlined at call sites).
+        // mata-ll String is opaque — unlike GHC's `[Char]` it has no `++` — so
+        // this is the ONLY way to concatenate two Strings, and the Prelude's
+        // `instance Semigroup String` / `instance Monoid String` bodies call
+        // it by name. Registering it in the environment makes those source
+        // instance bodies type-check; codegen already knows the name. (The
+        // list instances use the ordinary `++` operator instead, so no such
+        // primitive is exposed for lists.)
+        self.env.insert("semigroup_String".to_string(), Scheme {
+            vars: vec![],
+            ty: Ty::fun(&[Ty::Con("String".into()), Ty::Con("String".into())], Ty::Con("String".into())),
+        });
+
+        // The Semigroup instances for String and [a] are ordinary
+        // `instance Semigroup …` declarations in lib/Prelude.mll now (kind
+        // system checks their heads), like Foldable/Traversable. The
+        // deliberate mata-ll divergence — `<>` on a concrete list type is
+        // rejected in favour of `++` — lives in the monomorphizer's dispatch
+        // (`resolve_at_type`), independent of where the instance is declared.
 
         // Built-in Monoid typeclass (superclass: Semigroup)
         // mempty  :: a
@@ -1556,6 +1555,9 @@ impl Checker {
         // `<>` on concrete list types is deliberately rejected (lists are
         // concatenated with ++, see mono.rs), but `mappend` dispatches on
         // lists — polymorphic Monoid code (foldMap) needs a working append.
+        // The String/[a] Monoid INSTANCES live in lib/Prelude.mll; only the
+        // class registration, the method env entries, and the `mempty`/
+        // `mappend` ambiguity constraints stay here.
         let mempty_ty = ta.clone();
         let mappend_ty = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
         self.classes.insert("Monoid".to_string(), ClassInfo {
@@ -1585,30 +1587,11 @@ impl Checker {
             type_var: "a".to_string(),
         }]);
 
-        // Monoid instances: String and [a]. mempty impls live in the Prelude;
-        // mappend reuses the runtime Semigroup concatenation helpers.
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("mempty".to_string(), "mempty_String".to_string());
-            method_fns.insert("mappend".to_string(), "semigroup_String".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Monoid".to_string(),
-                target_type: Ty::Con("String".into()),
-                method_fns,
-                context: None,
-            });
-            let mut method_fns = HashMap::new();
-            method_fns.insert("mempty".to_string(), "mempty_List".to_string());
-            method_fns.insert("mappend".to_string(), "semigroup_List".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Monoid".to_string(),
-                target_type: Ty::list(ta.clone()),
-                method_fns,
-                // Empty context: Monoid [a] demands nothing of the element
-                // type (see the Functor Either instance for the rationale).
-                context: Some(vec![]),
-            });
-        }
+        // The Monoid instances for String and [a] are ordinary source
+        // `instance Monoid …` declarations in lib/Prelude.mll (their `mempty`
+        // provides the identity, their `mappend` the append). Nothing else is
+        // needed here: `mempty`'s ambiguity is governed by the
+        // `method_constraints` entry above, which is unchanged by the move.
 
         // Show instances for base types and parameterized types
         for type_name in &["Integer", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {

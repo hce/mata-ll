@@ -189,7 +189,14 @@ generic over them, as in GHC. The differences:
   cannot shadow Prelude names.
 - **`mempty`/`mappend` (Monoid) have `String` and `[a]` instances.**
   `mappend` works on lists, but the `(<>)` operator on lists remains
-  an error directing you to `(++)` (see Strings above).
+  an error directing you to `(++)` (see Strings above). These
+  instances — and the matching `Semigroup String`/`Semigroup [a]` — are
+  ordinary `instance` declarations in `lib/Prelude.mll`; only the
+  `Semigroup`/`Monoid` *class* declarations stay compiler-defined
+  (`mempty`'s ambiguity check is a builtin: an undetermined `mempty` is
+  a compile error, as in GHC). The `String` instance's append is the
+  Lua string-concatenation primitive, because a mata-ll `String` is
+  opaque and has no `(++)`; the list instances use `(++)`.
 - **`liftA2` is the Applicative method to reach for in generic
   code.** A `f <$> x <*> y` chain routes a function *through* the
   applicative (an `f (b -> c)` intermediate); at `f = IO` the runtime

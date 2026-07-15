@@ -176,13 +176,32 @@ minimum t = case foldr (\x xs -> x : xs) [] t of
 foldMap :: (Monoid m, Foldable t) => (a -> m) -> t a -> m
 foldMap f t = foldr (\x acc -> mappend (f x) acc) mempty t
 
--- Monoid instance implementations (mappend uses the runtime
--- concatenation helpers; mempty impls live here).
-mempty_String :: String
-mempty_String = ""
+-- Semigroup and Monoid instances for the builtin containers.
+--
+-- String is opaque (Lua's string type), NOT `[Char]`, so it has no `++`:
+-- its append is the runtime string-concatenation primitive `semigroup_String`
+-- (Lua `..`), which the compiler exposes for exactly this purpose. Lists use
+-- the ordinary `++` operator. (The class declarations, and `mempty`'s
+-- ambiguity handling, are registered by the compiler; only these instances
+-- are source.)
+--
+-- Note: `<>` on a concrete list is deliberately a compile error in mata-ll
+-- (use `++`); the `Semigroup [a]` instance exists so polymorphic
+-- Semigroup/Monoid code (e.g. foldMap) still resolves, and `mappend` gives
+-- lists a working append.
+instance Semigroup String where
+    (<>) x y = semigroup_String x y
 
-mempty_List :: [a]
-mempty_List = []
+instance Semigroup [a] where
+    (<>) xs ys = xs ++ ys
+
+instance Monoid String where
+    mempty = ""
+    mappend x y = semigroup_String x y
+
+instance Monoid [a] where
+    mempty = []
+    mappend xs ys = xs ++ ys
 
 
 

@@ -789,7 +789,7 @@ impl CodeGen {
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList", "hashmap_toList",
-            "__mll_list_append", "__mll_list_index", "semigroup_String", "semigroup_List",
+            "__mll_list_append", "__mll_list_index", "semigroup_String",
             "__mll_show_list", "__mll_show_arg", "__mll_show_maybe", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_pcall", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
@@ -3600,17 +3600,6 @@ impl CodeGen {
                         }
                     }
 
-                // semigroup_List → __mll_list_append
-                if args.len() == 2
-                    && let TExprKind::Var(name) = &f.kind
-                        && name == "semigroup_List" {
-                            self.emit("__mll_list_append(");
-                            self.gen_expr(args[0]);
-                            self.emit(", function() return ");
-                            self.gen_expr(args[1]);
-                            self.emit(" end)");
-                            return;
-                        }
 
                 // Inline small pure functions at call site
                 if let TExprKind::Var(name) = &f.kind
@@ -5478,7 +5467,6 @@ local function ord_compare__Number(a, b) a = __force(a); b = __force(b); if a < 
 local function ord_compare__String(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function ord_compare__ByteString(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .. b end
-local function semigroup_List(a, b) return __mll_list_append(a, function() return __force(b) end) end
 -- head forces the element (a value-consumer under the head-consumption
 -- contract): it RETURNS the head as its result, and the WHNF-return invariant
 -- says a function may never return a raw thunk — the caller's one-level

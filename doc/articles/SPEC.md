@@ -1066,7 +1066,11 @@ class (superclass `Semigroup`) provides `mempty` and the *named*
 method `mappend`, with instances for `String` and `[a]` — `mappend`
 does dispatch on lists (polymorphic `Monoid` code like `foldMap`
 needs a working append), while the `(<>)` operator on lists stays
-rejected in favour of `(++)`.
+rejected in favour of `(++)`. The `Semigroup`/`Monoid` instances for
+`String` and `[a]` are ordinary `instance` declarations in the
+Prelude source (like the `Foldable`/`Traversable` ones); the
+`Semigroup`/`Monoid` *class* declarations are compiler-defined so that
+an undetermined `mempty` is reported as an ambiguity at compile time.
 
 `Foldable` (methods `foldr`, `foldl`; instances `[]`, `Maybe`,
 `Either` — folding over `Right`) generalizes the container folds, and

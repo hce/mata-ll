@@ -450,11 +450,10 @@ fn demanded_vars_mode(
             // every call site, regardless of the callee's semantic
             // strictness — so their reads happen when the call is emitted.
             // Excluded: inlined callees (arguments are substituted into the
-            // body, where a branch-only use is not forced) and
-            // semigroup_List (codegen thunks its second argument).
+            // body, where a branch-only use is not forced).
             if mode == DemandMode::Emission {
                 let skip = match &f.kind {
-                    TExprKind::Var(name) => inlined(name) || name == "semigroup_List",
+                    TExprKind::Var(name) => inlined(name),
                     _ => false,
                 };
                 if !skip {

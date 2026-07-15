@@ -56,15 +56,28 @@ API of the `mllc` library crate.)
   higher_kinded_* suites.
 - The bare list constructor `[]` is now valid type syntax (kind
   `Type -> Type`), so instance heads can name it: `instance Foldable []`.
-- The builtin `Foldable` and `Traversable` instances for `[]`, `Maybe` and
-  `Either` moved out of the compiler's Rust tables into ordinary
-  `instance Foldable [] where …`-style declarations in `lib/Prelude.mll`,
-  now that the kind system can check their heads. The Prelude is exempt from
-  the orphan-instance rule (it is the home module of the builtin classes and
+- The builtin `Foldable`, `Traversable`, `Semigroup` and `Monoid` instances
+  for `[]`/`Maybe`/`Either` (Foldable/Traversable) and `String`/`[a]`
+  (Semigroup/Monoid) moved out of the compiler's Rust tables into ordinary
+  `instance … where …` declarations in `lib/Prelude.mll`, now that the kind
+  system can check their heads. The Prelude is exempt from the
+  orphan-instance rule (it is the home module of the builtin classes and
   types, so its instances are never orphans — GHC's rule). No user-visible
-  change; the `Monoid`/`Semigroup` instances and the class registrations
-  themselves remain builtin for now (their methods are wired to runtime
-  helpers).
+  change. The list `Semigroup`/`Monoid` bodies use the ordinary `(++)`
+  operator; the `String` bodies call the runtime string-concatenation
+  primitive `semigroup_String` (Lua `..`), now exposed to source because a
+  mata-ll `String` is opaque and has no `(++)`. The now-unused
+  `semigroup_List` runtime helper was removed. The `Semigroup`/`Monoid`
+  *class* declarations stay compiler-defined: `mempty`'s compile-time
+  ambiguity check depends on a builtin per-method class-constraint that
+  `register_class` does not synthesize for source classes, so moving the
+  class itself would silently drop that check. `mappend` still works on
+  lists, and the `(<>)` operator on a concrete list is still a compile error
+  directing to `(++)` (the divergence lives in the monomorphizer's dispatch,
+  independent of where the instance is declared). Tests: monoid_instances.mll
+  (constructed-value append/mempty/foldMap) plus the
+  list_semigroup_operator_still_rejected / mappend_on_lists_still_works /
+  mempty_ambiguity_preserved suite.
 - `Foldable` and `Traversable` typeclasses, with instances for lists, `Maybe`
   and `Either` (folding/traversing `Right`), plus the `Monoid` class
   (superclass `Semigroup`; methods `mempty`/`mappend`; `String` and `[a]`
