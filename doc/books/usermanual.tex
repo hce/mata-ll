@@ -806,9 +806,18 @@ clock :: LuaIO "os.clock" Number
 Colon prefix generates Lua method calls (\texttt{obj:method()}):
 
 \begin{lstlisting}
+newtype Handle = Handle LuaUserData
+
 fileWrite :: Handle -> String -> LuaIO ":write" ()
 fileClose :: Handle -> LuaIO ":close" ()
 \end{lstlisting}
+
+The receiver is opaque: \texttt{LuaUserData} is the builtin type for a
+Lua value (such as a file handle) that MATA-LL holds but never
+inspects, and wrapping it in a \texttt{newtype} gives each kind of
+handle its own distinct type.  This is the idiom the standard library
+uses (\texttt{newtype FileHandle = FileHandle LuaUserData} in
+\texttt{LIO}).
 
 \subsection{Optional Parameters}
 
@@ -843,7 +852,7 @@ is structural and recursive, at every depth:
   \item A \texttt{String} always arrives as a native Lua string, however
     it was built --- a literal, a concatenation, or a JSON-decoded value.
   \item Opaque values --- a type variable, a plain (non-\texttt{LuaDict})
-    ADT, a function, \texttt{LuaData} --- pass through unchanged, so a
+    ADT, a function, \texttt{LuaUserData} --- pass through unchanged, so a
     value the host only stores and hands back (such as a fold's threaded
     state) round-trips intact.
 \end{itemize}
@@ -883,7 +892,7 @@ depth.
     unwrapping on the way out: a present value decodes to \texttt{Just}
     (its payload recursively decoded), \texttt{nil} to \texttt{Nothing}.
   \item Opaque values --- a type variable, a plain
-    (non-\texttt{LuaDict}) ADT, a function, \texttt{LuaData} --- pass
+    (non-\texttt{LuaDict}) ADT, a function, \texttt{LuaUserData} --- pass
     through untouched, so a mata-ll value the host merely held and
     handed back round-trips intact.
 \end{itemize}

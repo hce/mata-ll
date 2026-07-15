@@ -416,7 +416,7 @@ impl CodeGen {
     /// converts: **list**, **tuple**, **`Maybe`**, **`HashMap`** (values; keys
     /// are validated but not converted), and **`LuaDict` record**. Each has its
     /// dual here. Anything the decoder leaves opaque — a type variable,
-    /// `LuaData`, a function, a plain (non-`LuaDict`) ADT, or a bare scalar —
+    /// `LuaUserData`, a function, a plain (non-`LuaDict`) ADT, or a bare scalar —
     /// this leaves opaque too (returns `None` → a shallow `__force` at the
     /// boundary), so an opaque round-trip value (a fold's threaded state, a
     /// polymorphic argument) passes through untouched and is never mangled.
@@ -556,7 +556,7 @@ impl CodeGen {
     /// declared type pins one down. Used to emit `chk` leaf descriptors inside
     /// structures so a wrong-typed or missing host value fails with a clear
     /// message instead of surfacing later as an arbitrary Lua error. Opaque
-    /// types (type variables, LuaData, functions, plain ADTs, …) return None —
+    /// types (type variables, LuaUserData, functions, plain ADTs, …) return None —
     /// nothing can be checked for them, so they stay pass-through.
     fn scalar_lua_type(ty: &Ty) -> Option<&'static str> {
         match con_name(ty) {

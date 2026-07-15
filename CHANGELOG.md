@@ -327,7 +327,7 @@ API of the `mllc` library crate.)
   instead of mutating the mata-ll value in place, so a value passed to a host
   and then reused in mata-ll code is no longer corrupted (previously the reused
   value found a Lua array where a cons list was expected and crashed in `show`);
-  (2) an opaque value (type variable, `LuaData`, function, plain ADT) is still
+  (2) an opaque value (type variable, `LuaUserData`, function, plain ADT) is still
   left raw, so the fold-state opaque round-trip (`examples/ffi_fold`) is intact.
   Test: ffi_hashmap_structured_values_marshalled.
 - List-typed FFI arguments crossing OUT to a Lua host are now marshalled into
@@ -343,7 +343,7 @@ API of the `mllc` library crate.)
   with its elements forced and
   recursively marshalled, and a tuple's or record's lazy fields are forced in
   place (with nested lists converted), at every depth. Opaque arguments — a
-  polymorphic type variable, `LuaData`, a function, a plain ADT — still pass
+  polymorphic type variable, `LuaUserData`, a function, a plain ADT — still pass
   through raw with a shallow force, so a fold's threaded state (including a
   tuple state) round-trips untouched exactly as before.
   This also repairs a regression within the 0.1.x line: a `String` that is

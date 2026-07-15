@@ -180,7 +180,7 @@ MATA-LL TODO
 - [x] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
 - [x] Reject bare type signatures with no definition (was silently compiling to nil at runtime; now a compile error, FFI sigs still allowed body-less)
 - [ ] Strict ST monad variant (LuaStrictArray or similar) for performance-critical code — to be discussed; current closure-based ST is only ~4% slower than direct mutations
-- [x] Well-defined runtime errors when decoding a LuaData/LuaDict value that
+- [x] Well-defined runtime errors when decoding a LuaUserData/LuaDict value that
       crosses the Lua FFI boundary. The type-directed FFI-result decoder
       (`__mll_ffi_decode`) now raises a descriptive
       "declared T but the host returned X" error for *every* shape mismatch —

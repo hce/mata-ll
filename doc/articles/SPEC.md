@@ -475,7 +475,7 @@ depth.** Those containers are:
   array and `Just "s"` a native string), `Nothing` becomes `nil` (an absent
   field), matching `__mll_to_lua`.
 
-An **opaque** argument — a polymorphic type variable, `LuaData`, a function, or
+An **opaque** argument — a polymorphic type variable, `LuaUserData`, a function, or
 a plain (non-`LuaDict`) ADT — is left raw with only a shallow force (the decoder
 likewise leaves these untouched), so a value the host holds without inspecting
 (a fold's threaded state) round-trips unchanged. A converted container is
