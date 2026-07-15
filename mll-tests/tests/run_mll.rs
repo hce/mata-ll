@@ -395,6 +395,7 @@ mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(datakinds, "datakinds.mll");
 mll_test!(kinds_hkt, "kinds_hkt.mll");
 mll_test!(type_level_nats, "type_level_nats.mll");
+mll_test!(vec_nat, "vec_nat.mll");
 mll_test!(type_family_arithmetic, "type_family_arithmetic.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(section_composition, "section_composition.mll");
@@ -1028,6 +1029,128 @@ main = exit (Err 1)
                 "Expected an ExitValue/Foo unification error, got: {}", msg);
         }
         Ok(_) => panic!("Expected `exit (Err 1)` with a shadowing local Err to be a type error"),
+    }
+}
+
+// Length-indexed vector (Peano Nat) rejection tests: the type-level length
+// index must make these compile-time errors, not runtime crashes. The
+// positive counterpart is vec_nat.mll. Length ARITHMETIC (Plus/type
+// families) is intentionally not covered here.
+const VEC_NAT_PREAMBLE: &str = r#"
+data Nat = Z | S Nat
+
+data Vec n a where
+    VNil  :: Vec 'Z a
+    VCons :: a -> Vec n a -> Vec ('S n) a
+"#;
+
+#[test]
+fn vec_nat_rejects_vhead_of_empty() {
+    // vhead demands Vec ('S n) a; VNil is Vec 'Z a. 'S n and 'Z can never
+    // unify, so taking the head of an empty vector is a compile error.
+    let source = format!(
+        "{}{}",
+        VEC_NAT_PREAMBLE,
+        r#"
+vhead :: Vec ('S n) a -> a
+vhead (VCons x _) = x
+
+main :: IO ()
+main = print (vhead VNil)
+"#
+    );
+    match mllc::compile(&source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify") && msg.contains("''S") && msg.contains("''Z'"),
+                "Expected a 'S-vs-'Z unification error, got: {}", msg);
+            assert!(msg.contains("in definition of 'main'"),
+                "The error must point at the offending definition, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected `vhead VNil` to be rejected at compile time"),
+    }
+}
+
+#[test]
+fn vec_nat_rejects_vtail_of_empty() {
+    // Same non-empty precondition as vhead, checked through a consumer of
+    // the result so the call is genuinely demanded by the program's types.
+    let source = format!(
+        "{}{}",
+        VEC_NAT_PREAMBLE,
+        r#"
+vtail :: Vec ('S n) a -> Vec n a
+vtail (VCons _ xs) = xs
+
+vlen :: Vec n a -> Integer
+vlen VNil = 0
+vlen (VCons _ xs) = 1 + vlen xs
+
+main :: IO ()
+main = print (vlen (vtail VNil))
+"#
+    );
+    match mllc::compile(&source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify") && msg.contains("''S") && msg.contains("''Z'"),
+                "Expected a 'S-vs-'Z unification error, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected `vtail VNil` to be rejected at compile time"),
+    }
+}
+
+#[test]
+fn vec_nat_rejects_overlong_vector_literal() {
+    // The annotation claims length two but the value carries three
+    // elements; the innermost VCons forces 'S 'Z ~ 'Z, which must fail.
+    let source = format!(
+        "{}{}",
+        VEC_NAT_PREAMBLE,
+        r#"
+v2 :: Vec ('S ('S 'Z)) Integer
+v2 = VCons 1 (VCons 2 (VCons 3 VNil))
+
+main :: IO ()
+main = putStrLn "should not compile"
+"#
+    );
+    match mllc::compile(&source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify") && msg.contains("''S 'Z'") && msg.contains("''Z'"),
+                "Expected a 'S 'Z-vs-'Z unification error, got: {}", msg);
+            assert!(msg.contains("in definition of 'v2'"),
+                "The error must point at the lying binding, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected a 3-element vector annotated as length 2 to be rejected"),
+    }
+}
+
+#[test]
+fn vec_nat_rejects_short_vector_literal() {
+    // The mirror image: annotation claims length two, value has one
+    // element, so VNil is used where 'S 'Z more elements are promised.
+    let source = format!(
+        "{}{}",
+        VEC_NAT_PREAMBLE,
+        r#"
+v2 :: Vec ('S ('S 'Z)) Integer
+v2 = VCons 1 VNil
+
+main :: IO ()
+main = putStrLn "should not compile"
+"#
+    );
+    match mllc::compile(&source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("Cannot unify") && msg.contains("''Z'") && msg.contains("''S 'Z'"),
+                "Expected a 'Z-vs-'S 'Z unification error, got: {}", msg);
+            assert!(msg.contains("in definition of 'v2'"),
+                "The error must point at the lying binding, got: {}", msg);
+        }
+        Ok(_) => panic!("Expected a 1-element vector annotated as length 2 to be rejected"),
     }
 }
 
