@@ -176,14 +176,23 @@ minimum t = case foldr (\x xs -> x : xs) [] t of
 foldMap :: (Monoid m, Foldable t) => (a -> m) -> t a -> m
 foldMap f t = foldr (\x acc -> mappend (f x) acc) mempty t
 
+-- The Semigroup and Monoid classes. Ordinary source classes: the compiler
+-- synthesizes each method's class constraint from these declarations (like
+-- any user class), which is what makes an undetermined `mempty` an ambiguity
+-- error at compile time. `mappend` is the named form of `(<>)`; both concat.
+class Semigroup a where
+    (<>) :: a -> a -> a
+
+class Semigroup a => Monoid a where
+    mempty  :: a
+    mappend :: a -> a -> a
+
 -- Semigroup and Monoid instances for the builtin containers.
 --
 -- String is opaque (Lua's string type), NOT `[Char]`, so it has no `++`:
 -- its append is the runtime string-concatenation primitive `semigroup_String`
 -- (Lua `..`), which the compiler exposes for exactly this purpose. Lists use
--- the ordinary `++` operator. (The class declarations, and `mempty`'s
--- ambiguity handling, are registered by the compiler; only these instances
--- are source.)
+-- the ordinary `++` operator.
 --
 -- Note: `<>` on a concrete list is deliberately a compile error in mata-ll
 -- (use `++`); the `Semigroup [a]` instance exists so polymorphic

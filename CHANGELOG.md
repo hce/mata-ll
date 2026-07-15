@@ -68,16 +68,39 @@ API of the `mllc` library crate.)
   primitive `semigroup_String` (Lua `..`), now exposed to source because a
   mata-ll `String` is opaque and has no `(++)`. The now-unused
   `semigroup_List` runtime helper was removed. The `Semigroup`/`Monoid`
-  *class* declarations stay compiler-defined: `mempty`'s compile-time
-  ambiguity check depends on a builtin per-method class-constraint that
-  `register_class` does not synthesize for source classes, so moving the
-  class itself would silently drop that check. `mappend` still works on
-  lists, and the `(<>)` operator on a concrete list is still a compile error
-  directing to `(++)` (the divergence lives in the monomorphizer's dispatch,
-  independent of where the instance is declared). Tests: monoid_instances.mll
-  (constructed-value append/mempty/foldMap) plus the
-  list_semigroup_operator_still_rejected / mappend_on_lists_still_works /
+  *class declarations themselves* also moved to `lib/Prelude.mll` (see the
+  source-class constraint-synthesis entry below, which is what let the
+  classes move while keeping `mempty`'s ambiguity check). `mappend` still
+  works on lists, and the `(<>)` operator on a concrete list is still a
+  compile error directing to `(++)` (the divergence lives in the
+  monomorphizer's dispatch, independent of where the instance is declared).
+  Tests: monoid_instances.mll (constructed-value append/mempty/foldMap) plus
+  the list_semigroup_operator_still_rejected / mappend_on_lists_still_works /
   mempty_ambiguity_preserved suite.
+- **Source-defined classes now get the same class-constraint synthesis the
+  builtin classes had.** `register_class` synthesizes, for each method that
+  mentions the class variable, the constraint `ClassName classVar` (the same
+  `method_constraints` mechanism the builtins registered by hand for
+  `show`/`==`/`mempty`/…). A use of a class method therefore emits a wanted
+  the solver must discharge to a concrete instance. The payoff: a
+  return-position-only method whose type variable nothing determines — e.g. a
+  user `class Default a where def :: a`, used without an annotation — is now
+  a compile-time **ambiguity** error with the usual "add a type annotation"
+  guidance, instead of silently compiling and crashing at runtime with
+  "attempt to call a nil value". A use at a concrete instance-less type is a
+  compile-time "No instance" error. Scoped precisely so nothing over-
+  constrains: the constraint is emitted only when the method's signature
+  mentions the class variable, and the existing discharge machinery
+  (`binder_types` / signature variables) still leaves it satisfied whenever an
+  argument determines the variable — so `op :: t a -> Integer` resolves
+  silently, exactly as before. This is what enabled the `Semigroup`/`Monoid`
+  class declarations to move to the Prelude (above). It also fixed a latent
+  gap in `has_instance` that this newly exercised: a user
+  `instance C (Maybe a)` for a non-structural class `C` is now recognized
+  (the `Maybe` shortcut previously ignored the instance registry, unlike the
+  `[a]` path). Tests: source_class_nullary.mll plus
+  source_class_nullary_ambiguity_rejected /
+  source_class_method_resolves_when_determined.
 - `Foldable` and `Traversable` typeclasses, with instances for lists, `Maybe`
   and `Either` (folding/traversing `Right`), plus the `Monoid` class
   (superclass `Semigroup`; methods `mempty`/`mappend`; `String` and `[a]`

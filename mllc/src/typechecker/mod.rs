@@ -1513,19 +1513,15 @@ impl Checker {
             });
         }
 
-        // Built-in Semigroup typeclass
-        let semigroup_ty = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
-        self.classes.insert("Semigroup".to_string(), ClassInfo {
-            name: "Semigroup".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec![],
-            methods: vec![("<>".to_string(), semigroup_ty.clone())],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("<>".to_string(), Scheme {
-            vars: vec![a.clone()],
-            ty: semigroup_ty,
-        });
+        // The Semigroup and Monoid CLASS declarations are now ordinary source
+        // classes in lib/Prelude.mll (`class Semigroup a where (<>) :: …` and
+        // `class Semigroup a => Monoid a where { mempty; mappend }`). Their
+        // method env entries and their per-method class constraints —
+        // including the `mempty` ambiguity check — are synthesized by
+        // `register_class` exactly as for any user class, so nothing about
+        // them needs to be hard-registered here anymore. Only the runtime
+        // string-concatenation primitive their String instances call stays a
+        // builtin (below), because Lua `..` has no source-level spelling.
 
         // `semigroup_String` is the runtime string-concatenation primitive
         // (Lua `..`, defined in codegen's preamble and inlined at call sites).
@@ -1541,57 +1537,15 @@ impl Checker {
             ty: Ty::fun(&[Ty::Con("String".into()), Ty::Con("String".into())], Ty::Con("String".into())),
         });
 
-        // The Semigroup instances for String and [a] are ordinary
-        // `instance Semigroup …` declarations in lib/Prelude.mll now (kind
-        // system checks their heads), like Foldable/Traversable. The
-        // deliberate mata-ll divergence — `<>` on a concrete list type is
-        // rejected in favour of `++` — lives in the monomorphizer's dispatch
-        // (`resolve_at_type`), independent of where the instance is declared.
-
-        // Built-in Monoid typeclass (superclass: Semigroup)
-        // mempty  :: a
-        // mappend :: a -> a -> a
-        // mappend is the named method form of <>. Note the mata-ll divergence:
-        // `<>` on concrete list types is deliberately rejected (lists are
-        // concatenated with ++, see mono.rs), but `mappend` dispatches on
-        // lists — polymorphic Monoid code (foldMap) needs a working append.
-        // The String/[a] Monoid INSTANCES live in lib/Prelude.mll; only the
-        // class registration, the method env entries, and the `mempty`/
-        // `mappend` ambiguity constraints stay here.
-        let mempty_ty = ta.clone();
-        let mappend_ty = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
-        self.classes.insert("Monoid".to_string(), ClassInfo {
-            name: "Monoid".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec!["Semigroup".to_string()],
-            methods: vec![
-                ("mempty".to_string(), mempty_ty.clone()),
-                ("mappend".to_string(), mappend_ty.clone()),
-            ],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("mempty".to_string(), Scheme {
-            vars: vec![a.clone()],
-            ty: mempty_ty,
-        });
-        self.env.insert("mappend".to_string(), Scheme {
-            vars: vec![a.clone()],
-            ty: mappend_ty,
-        });
-        self.method_constraints.insert("mempty".to_string(), vec![TyConstraint {
-            class_name: "Monoid".to_string(),
-            type_var: "a".to_string(),
-        }]);
-        self.method_constraints.insert("mappend".to_string(), vec![TyConstraint {
-            class_name: "Monoid".to_string(),
-            type_var: "a".to_string(),
-        }]);
-
-        // The Monoid instances for String and [a] are ordinary source
-        // `instance Monoid …` declarations in lib/Prelude.mll (their `mempty`
-        // provides the identity, their `mappend` the append). Nothing else is
-        // needed here: `mempty`'s ambiguity is governed by the
-        // `method_constraints` entry above, which is unchanged by the move.
+        // The Semigroup/Monoid classes and their String/[a] instances all
+        // live in lib/Prelude.mll now. The deliberate mata-ll divergence —
+        // `<>` on a concrete list type is rejected in favour of `++` — lives
+        // in the monomorphizer's dispatch (`resolve_at_type`), keyed on the
+        // class name from the (now source) class registration, so it is
+        // unaffected by the move. `mappend` still dispatches on lists (its
+        // instance body is `xs ++ ys`), and an undetermined `mempty` is an
+        // ambiguity error via the constraint `register_class` synthesizes for
+        // it, exactly as for the builtin `mempty` before.
 
         // Show instances for base types and parameterized types
         for type_name in &["Integer", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {

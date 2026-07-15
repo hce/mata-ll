@@ -1066,11 +1066,14 @@ class (superclass `Semigroup`) provides `mempty` and the *named*
 method `mappend`, with instances for `String` and `[a]` — `mappend`
 does dispatch on lists (polymorphic `Monoid` code like `foldMap`
 needs a working append), while the `(<>)` operator on lists stays
-rejected in favour of `(++)`. The `Semigroup`/`Monoid` instances for
-`String` and `[a]` are ordinary `instance` declarations in the
-Prelude source (like the `Foldable`/`Traversable` ones); the
-`Semigroup`/`Monoid` *class* declarations are compiler-defined so that
-an undetermined `mempty` is reported as an ambiguity at compile time.
+rejected in favour of `(++)`. The `Semigroup`/`Monoid` *classes* and
+their `String`/`[a]` instances are ordinary declarations in the Prelude
+source (like the `Foldable`/`Traversable` ones). An undetermined
+`mempty` is still reported as an ambiguity at compile time: the
+compiler synthesizes the class constraint carried by every method of a
+source class (a use emits a wanted `ClassName classVar`), so a
+return-position-only method whose type variable nothing determines is
+rejected, exactly as for the builtin classes — and exactly as GHC does.
 
 `Foldable` (methods `foldr`, `foldl`; instances `[]`, `Maybe`,
 `Either` — folding over `Right`) generalizes the container folds, and

@@ -79,9 +79,18 @@ impl Checker {
                     head = f.as_ref();
                 }
                 match head {
-                    // Maybe is structural for Show/Eq like lists are; its built-in
-                    // Eq isn't a registered instance, so check it the same way.
-                    Ty::Con(base) if base == "Maybe" =>
+                    // Maybe is structural for Show/Eq like lists are: its
+                    // built-in Eq is NOT a registered instance, so a structural
+                    // class checks the element directly. But this shortcut only
+                    // applies when nothing is registered for `(class, Maybe)` —
+                    // a user `instance C (Maybe a)` (or the builtin Show Maybe)
+                    // must be honoured via the registry, like any other Con
+                    // head, so fall through to the `Con(_)` arm below when one
+                    // exists. (Before source-class methods emitted wanteds this
+                    // path was never taken for a user class, so the omission
+                    // stayed latent.)
+                    Ty::Con(base) if base == "Maybe"
+                        && !self.instances.contains_key(&(class.to_string(), InstHead::Con("Maybe".into()))) =>
                         structural_container_class(class) && args.iter().all(|a| self.has_instance(class, a)),
                     // Other type constructors need a registered instance. What
                     // the instance then demands of the type ARGUMENTS depends
@@ -301,8 +310,39 @@ impl Checker {
             // Register class method in env as polymorphic
             self.env.insert(method.name.clone(), Scheme {
                 vars: vec![tv.clone()],
-                ty,
+                ty: ty.clone(),
             });
+
+            // Synthesize the class constraint carried by this method, exactly
+            // as the builtin classes register it by hand (method_constraints
+            // for show/==/foldr/mempty/…): a use of the method emits a wanted
+            // `ClassName classVar`, mapped through the instantiation at the use
+            // site. This is what makes an *undetermined* use — a
+            // return-position-only method such as a nullary `def :: a`, whose
+            // class variable no argument pins — a compile-time ambiguity error
+            // (via check_function's discharge) instead of a runtime crash, and
+            // a use at a concrete instance-less type a compile-time NoInstance.
+            //
+            // Scoped precisely to avoid over-constraining: emit ONLY when the
+            // method's signature actually mentions the class variable. When it
+            // does not (a degenerate `foo :: Integer`), the wanted's variable
+            // would be pinned by nothing and *every* use would be ambiguous —
+            // so we leave such a method exactly as it compiles today rather
+            // than newly rejecting it. When the variable appears in an
+            // ARGUMENT (`op :: t a -> Integer`), the constraint is still
+            // emitted but the discharge machinery leaves it satisfied: the
+            // argument's type is a `binder_type`, so the variable is
+            // "determined" and never reported as ambiguous — the same reason
+            // `show x` resolves silently while `show (read s)` does not.
+            let mentions_class_var = ty.free_vars().iter().any(|v| v.name == type_var);
+            if mentions_class_var {
+                self.method_constraints
+                    .entry(method.name.clone())
+                    .or_insert_with(|| vec![TyConstraint {
+                        class_name: name.to_string(),
+                        type_var: type_var.to_string(),
+                    }]);
+            }
 
             // Store default implementation if present
             if let Some(clauses) = &method.default_clauses {

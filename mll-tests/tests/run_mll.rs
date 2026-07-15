@@ -483,6 +483,7 @@ mll_test!(foldable, "foldable.mll");
 mll_test!(traversable, "traversable.mll");
 mll_test!(foldable_user_instance, "foldable_user_instance.mll");
 mll_test!(monoid_instances, "monoid_instances.mll");
+mll_test!(source_class_nullary, "source_class_nullary.mll");
 mll_test!(derive_eq, "derive_eq.mll");
 mll_test!(derive_ord, "derive_ord.mll");
 mll_test!(rank2, "rank2.mll");
@@ -4772,6 +4773,75 @@ fn mempty_ambiguity_preserved_after_move() {
             "determined mempty should resolve:\n{src}"
         );
     }
+}
+
+// --- Source-class constraint synthesis --------------------------------------
+// A user class's methods now carry their class constraint, so an undetermined
+// use of a return-position-only method is a compile-time ambiguity error (not
+// a runtime crash), while an argument-determined method still resolves
+// silently. (The positive/runtime side is source_class_nullary.mll.) This is
+// the same mechanism that let the Semigroup/Monoid *classes* move to source.
+
+#[test]
+fn source_class_nullary_ambiguity_rejected() {
+    // `class Default a where def :: a; name :: a -> String`. `name def` leaves
+    // `a` undetermined — nothing (no annotation, no argument, no context) can
+    // pin which instance — so it must be a compile-time ambiguity error, the
+    // same as `show mempty`, NOT a silent compile that crashes at runtime.
+    let src = "class Default a where\n    def :: a\n    name :: a -> String\ndata Foo = Foo\ndata Bar = Bar\ninstance Default Foo where\n    def = Foo\n    name _ = \"foo\"\ninstance Default Bar where\n    def = Bar\n    name _ = \"bar\"\nambiguous :: String\nambiguous = name def\nmain :: IO ()\nmain = putStrLn ambiguous\n";
+    let e = compile_err(src);
+    assert!(e.contains("Ambiguous type"), "must be a compile-time ambiguity, got: {e}");
+    assert!(
+        e.contains("'Default'"),
+        "the ambiguity must name the user class, got: {e}"
+    );
+    // The guidance must be present, exactly like the builtin mempty case.
+    assert!(e.contains("add a type annotation"), "got: {e}");
+}
+
+#[test]
+fn source_class_method_resolves_when_determined() {
+    // The complement, and the anti-over-constraining guard: a method whose
+    // class variable IS determined must still resolve silently — no spurious
+    // ambiguity. Three ways the variable gets fixed: an annotation on the
+    // nullary method, and an argument that carries the variable.
+    for src in [
+        // nullary `def` pinned by annotation
+        "class Default a where\n    def :: a\n    name :: a -> String\ndata Foo = Foo\ninstance Default Foo where\n    def = Foo\n    name _ = \"foo\"\nmain :: IO ()\nmain = putStrLn (name (def :: Foo))\n",
+        // argument-carrying method: the variable is fixed by the argument, so
+        // no ambiguity even though `greet` carries a synthesized `Greet a`.
+        "class Greet a where\n    greet :: a -> String\ndata Foo = Foo\ninstance Greet Foo where\n    greet _ = \"hi\"\nmain :: IO ()\nmain = putStrLn (greet Foo)\n",
+    ] {
+        assert!(
+            mllc::compile(src, Path::new("."), &[]).is_ok(),
+            "a determined class-method use must resolve, not be reported ambiguous:\n{src}"
+        );
+    }
+}
+
+#[test]
+fn source_class_method_no_instance_rejected_at_compile_time() {
+    // A class-method use at a concrete type with no instance is now a
+    // compile-time "No instance" error (was caught in the monomorphizer
+    // before; now the synthesized wanted catches it in the type checker,
+    // consistent with how `show`/`==` report).
+    let e = compile_err(
+        "class Greet a where\n    greet :: a -> String\ndata Foo = Foo\ninstance Greet Foo where\n    greet _ = \"hi\"\ndata Bar = Bar\nuseBar :: String\nuseBar = greet Bar\nmain :: IO ()\nmain = putStrLn useBar\n",
+    );
+    assert!(e.contains("No instance for 'Greet Bar'"), "got: {e}");
+}
+
+#[test]
+fn non_structural_instance_on_maybe_is_recognized() {
+    // Regression for the has_instance gap the synthesis exposed: a user
+    // `instance C (Maybe a)` for a non-structural class C must be recognized
+    // (the Maybe branch previously ignored the instance registry, unlike the
+    // list branch, and wrongly reported "No instance").
+    let src = "class C a where\n    cname :: a -> String\ninstance C [a] where\n    cname _ = \"list\"\ninstance C (Maybe a) where\n    cname _ = \"maybe\"\nmain :: IO ()\nmain = do\n    putStrLn (cname [1, 2, 3])\n    putStrLn (cname (Just True))\n";
+    assert!(
+        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        "instance C (Maybe a) must be recognized"
+    );
 }
 
 // Top-level redefinition of a name the Prelude/builtins provide. Historically
