@@ -217,12 +217,22 @@ until n = n > 100
 \texttt{Number}  & float       & \texttt{3.14}, \texttt{-0.5} \\
 \texttt{String}  & string      & \texttt{"hello\textbackslash n"} \\
 \texttt{Bool}    & boolean     & \texttt{True}, \texttt{False} \\
+\texttt{ByteString} & string   & \texttt{bsFromString "hi"} \\
 \bottomrule
 \end{tabular}
 
 \begin{note}
 There is no \texttt{Char} type.  Strings are native Lua strings, not
 \texttt{[Char]}.  Use \texttt{<>} for string concatenation (not \texttt{++}).
+\end{note}
+
+\begin{note}
+\texttt{ByteString} is an intrinsic type with the same runtime
+representation as \texttt{String} (a Lua string) but a distinct type
+with explicit, encoding-agnostic byte semantics and 0-based indexing.
+It has no literal syntax; build one with \texttt{bsFromString} or
+\texttt{bsPack}, and \texttt{import ByteString} for its operations.
+Only strict \texttt{ByteString}s are supported.
 \end{note}
 
 \subsection{Lists}
