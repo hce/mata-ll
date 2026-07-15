@@ -13,8 +13,15 @@ lib/*.lua
 mllc/lib/*.lua
 # Proprietary commercial test code — must never be committed to this public repo.
 proprietary-tests/
-doc/*.pdf
-doc/*.aux
-doc/*.log
-doc/*.out
-doc/*.toc
+# Built PDFs are products, not source — never tracked (any doc subdirectory).
+doc/**/*.pdf
+# LaTeX build intermediates (any doc subdirectory: books/, slides/, ...)
+doc/**/*.aux
+doc/**/*.log
+doc/**/*.out
+doc/**/*.toc
+doc/**/*.fls
+doc/**/*.fdb_latexmk
+texput.log
+# Slides live in their own repo (/Users/hc/builds/mll-slides); never commit them here.
+doc/slides/
