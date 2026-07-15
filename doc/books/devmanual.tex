@@ -168,8 +168,8 @@ A hand-written recursive-descent parser with operator-precedence climbing for
 infix expressions.  Fixity is tracked in a \texttt{HashMap<String, (Assoc, u8)>}
 and respects user \texttt{infixl}/\texttt{infixr}/\texttt{infix} declarations.
 
-Layout handling: continuation lines indented past the definition's start column
-are merged into the same declaration.
+Layout handling: a wrapped line indented past the definition's start column
+is merged into the same declaration.
 
 Declaration forms: \texttt{TypeSig}, \texttt{FunDef}, \texttt{DataDef},
 \texttt{NewtypeDef}, \texttt{ClassDecl}, \texttt{InstanceDecl},

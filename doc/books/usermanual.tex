@@ -170,13 +170,13 @@ Multi-line input: end a line with \texttt{\textbackslash}.
 \subsection{Layout Rule}
 
 MATA-LL uses indentation-sensitive layout, like Haskell or Python.
-Continuation lines must be indented past the start column of their
-definition:
+When a definition spans more than one line, each wrapped line must be
+indented past the definition's start column:
 
 \begin{lstlisting}
 longExpression :: Integer
 longExpression = 1 + 2
-    + 3 + 4    -- continuation: indented past 'l'
+    + 3 + 4    -- wrapped line: indented past 'l'
 \end{lstlisting}
 
 \subsection{Type Signatures}
