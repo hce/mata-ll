@@ -574,6 +574,33 @@ keyword:
         Element [a]           = a
         Element (HashMap k v) = v
 
+These are closed families: equations are matched top-to-bottom, and a
+pattern constructor (`[a]`, `'S n`, …) matches only an argument of that
+exact shape. The compiler reduces a family application both eagerly on
+ground arguments AND **symbolically during unification** — including
+when arguments contain type variables — so length arithmetic works:
+
+    data Nat = Z | S Nat
+    type family Plus n m where
+        Plus 'Z     m = m
+        Plus ('S n) m = 'S (Plus n m)
+    data Vec n a where
+        VNil  :: Vec 'Z a
+        VCons :: a -> Vec n a -> Vec ('S n) a
+    -- type-checks: Plus 'Z m ~ m, and Plus ('S n) m ~ 'S (Plus n m)
+    vappend :: Vec n a -> Vec m a -> Vec (Plus n m) a
+    vappend VNil        ys = ys
+    vappend (VCons x xs) ys = VCons x (vappend xs ys)
+
+A family application whose scrutinee is still a variable no equation
+matches is *stuck*: it is left irreducible and deferred, not an error.
+Families are NOT assumed injective — `F a ~ F b` does not imply
+`a ~ b` — so two distinct stuck applications do not unify. A
+non-terminating family (`Loop x = Loop x`) is reported as a
+"did not terminate" error rather than looping. (What is NOT yet
+supported: promoting `Nat` to a real kind — `'S`/`'Z` are classified
+at kind `Type`, as with all DataKinds promotion here.)
+
 ## FFI using type families
 
 With the above, FFI declarations become:

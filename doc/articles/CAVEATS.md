@@ -232,3 +232,21 @@ and the exports, so every definition is removed. The compiler warns
 when this happens rather than writing the empty shell silently. Such
 library modules are meant to be *imported* by another `.mll` module
 (the compilation root), not compiled on their own.
+
+## Type families reduce, but non-injectively and with a termination bound
+
+Closed type families reduce during type checking, including over type
+variables (so `Vec (Plus n m) a`-style length arithmetic works — see
+SPEC.md). Two consequences to be aware of:
+
+- **A family is not injective.** From `F a ~ F b` the compiler will not
+  conclude `a ~ b`, and two *stuck* family applications (each blocked on
+  a type variable no equation matches) will not unify. A program that
+  silently relies on such an equality is rejected with a "Cannot unify"
+  error naming the two family applications — annotate to pin the types.
+- **A non-terminating family is rejected, not run forever.** Reduction
+  is bounded; a family whose equation reduces to itself
+  (`Loop x = Loop x`) is reported as "type family '…' did not
+  terminate" instead of hanging or overflowing the stack. A genuinely
+  huge (but terminating) type-level computation could in principle hit
+  the same bound — keep type-level arithmetic small.

@@ -121,6 +121,27 @@ errors). Differences from GHC:
   "Expecting one more argument to ..." or
   "Expected kind ..., but ... has kind ...".
 
+## Closed type families reduce, but there is no real Nat kind (yet)
+
+Closed type families reduce both on ground arguments and *symbolically
+during unification* (over type variables), so type-level arithmetic like
+a length-indexed `vappend :: Vec n a -> Vec m a -> Vec (Plus n m) a`
+type-checks and stays sound. Differences from GHC:
+
+- **Only closed families.** There are no open type families and no
+  associated types; equations are matched top-to-bottom in one `type
+  family … where` block.
+- **No injectivity.** GHC's injective type families
+  (`type family F a = r | r -> a`) do not exist; `F a ~ F b` never
+  concludes `a ~ b`, and two distinct *stuck* family applications do not
+  unify.
+- **No promoted `Nat` kind.** Promotion classifies `'Z`/`'S` at kind
+  `Type` (see the DataKinds point above), so a family over "naturals" is
+  not kind-checked against a `Nat` kind — it just reduces structurally.
+- **A non-terminating family is rejected**, not run forever: reduction
+  is fuel-bounded and reports "type family did not terminate". GHC has a
+  reduction-depth limit too (`-freduction-depth`).
+
 ## Monomorphization instead of dictionary passing
 
 mata-ll compiles polymorphic functions by specializing them for each

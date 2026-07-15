@@ -395,6 +395,7 @@ mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(datakinds, "datakinds.mll");
 mll_test!(kinds_hkt, "kinds_hkt.mll");
 mll_test!(type_level_nats, "type_level_nats.mll");
+mll_test!(type_family_arithmetic, "type_family_arithmetic.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(section_composition, "section_composition.mll");
 mll_test!(guards, "guards.mll");
@@ -4841,6 +4842,109 @@ fn non_structural_instance_on_maybe_is_recognized() {
     assert!(
         mllc::compile(src, Path::new("."), &[]).is_ok(),
         "instance C (Maybe a) must be recognized"
+    );
+}
+
+// --- Type-family reduction during unification -------------------------------
+// The unifier reduces closed type families symbolically (over type variables),
+// so length arithmetic like `Plus 'Z m ~ m` and `Plus ('S n) m ~ 'S (Plus n m)`
+// works. The positive/runtime side is type_family_arithmetic.mll; these guard
+// the soundness edges: concrete reduction still works, mismatches are rejected,
+// non-injectivity is not assumed, and divergence errors rather than hangs.
+
+/// The `Plus` family + a length-indexed `Vec`, shared by the tests below.
+const TF_VEC_PRELUDE: &str = "\
+data Nat = Z | S Nat\n\
+type family Plus n m where\n\
+    Plus 'Z     m = m\n\
+    Plus ('S n) m = 'S (Plus n m)\n\
+data Vec n a where\n\
+    VNil  :: Vec 'Z a\n\
+    VCons :: a -> Vec n a -> Vec ('S n) a\n\
+vappend :: Vec n a -> Vec m a -> Vec (Plus n m) a\n\
+vappend VNil ys = ys\n\
+vappend (VCons x xs) ys = VCons x (vappend xs ys)\n";
+
+#[test]
+fn type_family_concrete_reduction_still_works() {
+    // The pre-existing concrete/ground reduction (reduced eagerly at
+    // AST-to-Ty conversion) must not regress now that the unifier also
+    // reduces symbolically.
+    let src = "type family Id x where\n    Id x = x\nf :: Id Integer -> Integer\nf n = n + 1\nmain :: IO ()\nmain = putStrLn (show (f 41))\n";
+    let lua = mllc::compile(src, Path::new("."), &[])
+        .expect("concrete type-family reduction should compile")
+        .lua_code;
+    let l = mlua::Lua::new();
+    l.load(&lua).set_name("tf_id").exec().expect("Id Integer program should run");
+}
+
+#[test]
+fn type_family_length_mismatch_rejected() {
+    // `needsTwo` demands a length-2 vector; a `vappend` of lengths 1 and 2 has
+    // length `Plus 1 2 = 3`. The reduction must compute 3 and reject the
+    // mismatch against 2 — the length stays soundly enforced.
+    let src = format!(
+        "{TF_VEC_PRELUDE}\
+needsTwo :: Vec ('S ('S 'Z)) a -> a\n\
+needsTwo (VCons x _) = x\n\
+main :: IO ()\n\
+main = print (needsTwo (vappend (VCons 1 VNil) (VCons 2 (VCons 3 VNil))))\n"
+    );
+    let e = compile_err(&src);
+    assert!(e.contains("Cannot unify"), "length mismatch must be rejected, got: {e}");
+    // The rejection is between the reduced lengths (2 vs 3), i.e. it saw
+    // through the family application rather than treating it as opaque.
+    assert!(
+        e.contains("'Z") && e.contains("'S"),
+        "the mismatch should be between concrete Nat lengths, got: {e}"
+    );
+}
+
+#[test]
+fn type_family_head_of_empty_append_rejected() {
+    // `vhead` needs a non-empty vector; `vappend` of two empties has length
+    // `Plus 'Z 'Z = 'Z` (empty), so `vhead` of it must be rejected.
+    let src = format!(
+        "{TF_VEC_PRELUDE}\
+vhead :: Vec ('S n) a -> a\n\
+vhead (VCons x _) = x\n\
+main :: IO ()\n\
+main = print (vhead (vappend (VNil :: Vec 'Z Integer) (VNil :: Vec 'Z Integer)))\n"
+    );
+    let e = compile_err(&src);
+    assert!(e.contains("Cannot unify"), "vhead of empty vappend must be rejected, got: {e}");
+}
+
+#[test]
+fn type_family_non_injectivity_not_assumed() {
+    // A family is NOT assumed injective: `coerce` would need
+    // `Plus n 'Z ~ Plus m 'Z ⟹ n ~ m`, which does not hold, so the two STUCK
+    // family applications must not be unified structurally. Rejected.
+    let src = format!(
+        "{TF_VEC_PRELUDE}\
+coerce :: Vec (Plus n 'Z) a -> Vec (Plus m 'Z) a\n\
+coerce v = v\n\
+main :: IO ()\n\
+main = pure ()\n"
+    );
+    let e = compile_err(&src);
+    assert!(
+        e.contains("Cannot unify") && e.contains("Plus"),
+        "two different stuck family apps must not unify (no injectivity), got: {e}"
+    );
+}
+
+#[test]
+fn type_family_divergence_errors_not_hangs() {
+    // A non-terminating family (`Loop x = Loop x`) must be reported as a
+    // divergence, not loop or overflow the stack. (compile_err runs the
+    // compiler in-process; if reduction were unbounded this test would hang or
+    // crash the harness — so reaching the assertion is itself the guarantee.)
+    let src = "type family Loop x where\n    Loop x = Loop x\nf :: Loop Integer -> Integer\nf n = 0\nmain :: IO ()\nmain = pure ()\n";
+    let e = compile_err(src);
+    assert!(
+        e.contains("did not terminate") && e.contains("Loop"),
+        "divergent family must report a termination error, got: {e}"
     );
 }
 

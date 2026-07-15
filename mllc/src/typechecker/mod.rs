@@ -139,8 +139,22 @@ pub struct Checker {
     /// Type names that derive `LuaDict` (validated in `derive_luadict`): their
     /// constructor emits a name-keyed Lua table rather than a positional one.
     luadict_types: HashSet<String>,
-    /// User-defined type families: name -> equations
+    /// User-defined type families: name -> equations (AST form). Reduced
+    /// eagerly on CONCRETE arguments during `ast_type_to_ty`.
     type_families: HashMap<String, Vec<TypeFamilyEq>>,
+    /// The same families lowered to `Ty` form for reduction DURING
+    /// unification (symbolic reduction over type variables). Built once by
+    /// `build_ty_families` after pass 2 registers `type_families`, and handed
+    /// to the unifier via `Checker::unify`. Empty for programs with no
+    /// families, in which case unification takes its plain syntactic path.
+    ty_families: TyFamilies,
+    /// While true, `try_reduce_type_family` does not reduce — used to lower a
+    /// family's own equations to raw `Ty` form (for `ty_families`) without the
+    /// eager AST reduction firing on them.
+    tf_lowering: bool,
+    /// True once a divergent family has been reported, so the same divergence
+    /// is not reported repeatedly.
+    tf_reported_divergence: bool,
     /// Type aliases: name -> (params, expanded type)
     type_aliases: HashMap<String, (Vec<String>, Type)>,
     /// Kind table: type constructor name -> kind. Builtins are seeded by
@@ -277,6 +291,9 @@ impl Checker {
             record_fields: HashMap::new(),
             luadict_types: HashSet::new(),
             type_families: HashMap::new(),
+            ty_families: TyFamilies::new(),
+            tf_lowering: false,
+            tf_reported_divergence: false,
             type_aliases: HashMap::new(),
             kinds: HashMap::new(),
             class_kinds: HashMap::new(),
@@ -409,6 +426,12 @@ impl Checker {
     /// Collects the head and arguments from nested App nodes,
     /// then tries to match against type family equations.
     fn try_reduce_type_family(&mut self, ty: &Type) -> Option<Ty> {
+        // While lowering a family's own equations to raw `Ty` form for
+        // `ty_families`, do not reduce — the equations must stay unreduced so
+        // the unifier's normalizer can reduce them (with fuel) later.
+        if self.tf_lowering {
+            return None;
+        }
         // Collect the head and args from nested App: F a b -> (F, [a, b])
         let mut args = Vec::new();
         let mut head = ty;
@@ -445,13 +468,67 @@ impl Checker {
                 }
             }
             if matched {
-                // Apply bindings to the result type
+                // Apply bindings to the result type, then lower it to `Ty`
+                // WITHOUT further eager reduction (tf_lowering) and reduce it
+                // to normal form through the shared ITERATIVE normalizer. That
+                // normalizer is fuel-bounded and loops rather than recurses on
+                // the head, so a non-terminating family (`Loop x = Loop x`)
+                // reports a divergence instead of overflowing the stack — the
+                // old recursive `ast_type_to_ty` re-reduction could do neither.
                 let result = self.substitute_type(&eq.result, &bindings);
-                return Some(self.ast_type_to_ty(&result));
+                let saved = self.tf_lowering;
+                self.tf_lowering = true;
+                let raw = self.ast_type_to_ty(&result);
+                self.tf_lowering = saved;
+                return Some(match reduce_type_families(&raw, &self.ty_families) {
+                    Ok(reduced) => reduced,
+                    Err(_diverged) => {
+                        if !self.tf_reported_divergence {
+                            self.tf_reported_divergence = true;
+                            self.push_error_ctx(
+                                DiagnosticKind::TypeFamilyDivergence(family_name.clone()),
+                                format!("the type family '{}'", family_name),
+                            );
+                        }
+                        raw
+                    }
+                });
             }
         }
 
         None
+    }
+
+    /// Lower every registered type family's equations to raw `Ty` form (no
+    /// reduction, so a family application in a result stays a `Con`-headed
+    /// application the unifier's normalizer can reduce later) and store them
+    /// in `ty_families`. Run once after pass 2 registers the families, before
+    /// any unification can see a family-typed signature.
+    fn build_ty_families(&mut self) {
+        if self.type_families.is_empty() {
+            return;
+        }
+        let families = self.type_families.clone();
+        self.tf_lowering = true;
+        for (name, eqs) in &families {
+            let lowered: Vec<(Vec<Ty>, Ty)> = eqs
+                .iter()
+                .map(|eq| {
+                    let pats = eq.args.iter().map(|p| self.ast_type_to_ty(p)).collect();
+                    let result = self.ast_type_to_ty(&eq.result);
+                    (pats, result)
+                })
+                .collect();
+            self.ty_families.insert(name.clone(), lowered);
+        }
+        self.tf_lowering = false;
+    }
+
+    /// Unification that reduces closed type families (from `ty_families`)
+    /// while matching — the checker's standard entry point, replacing the bare
+    /// `unify` free function at call sites that may see family-typed values.
+    pub(super) fn unify(&self, t1: &Ty, t2: &Ty) -> Result<Subst, DiagnosticKind> {
+        unify_tf(t1, t2, &self.ty_families)
     }
 
     /// Expand a type alias application: `AliasName arg1 arg2` → substituted body.
@@ -2113,6 +2190,26 @@ impl Checker {
     pub fn check_module(&mut self, module: &Module) -> TModule {
         // Register hidden names from import export control
         self.hidden_names.extend(module.hidden.iter().cloned());
+
+        // Register type families and aliases and lower the families to `Ty`
+        // form BEFORE anything converts a type: the eager (concrete) family
+        // reduction in `ast_type_to_ty` now goes through the shared iterative
+        // normalizer, which needs `ty_families` populated. (Both are also
+        // re-registered in passes 1/2 — idempotent — where they logically
+        // belong; this early pass only makes reduction available from the very
+        // first `ast_type_to_ty`, e.g. a data field of family type in pass 1.)
+        for decl in &module.decls {
+            match decl {
+                Decl::TypeFamily { name, equations } => {
+                    self.type_families.insert(name.clone(), equations.clone());
+                }
+                Decl::TypeAlias { name, params, ty } => {
+                    self.type_aliases.insert(name.clone(), (params.clone(), ty.clone()));
+                }
+                _ => {}
+            }
+        }
+        self.build_ty_families();
 
         // Pass 1a: infer the kind of everything the module declares at the
         // type level (data, newtype, alias, type family), solving all their

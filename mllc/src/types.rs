@@ -508,8 +508,221 @@ impl Subst {
     }
 }
 
-/// Unification: find a substitution that makes two types equal
+/// Closed type-family equations in `Ty` form, used to reduce family
+/// applications DURING unification (not just at AST-conversion time). Each
+/// family maps to its equations in declaration order; an equation is
+/// `(argument patterns, result)`, both already lowered to `Ty` with the
+/// equation's pattern variables as `Ty::Var`. Built once by the typechecker
+/// after type families are registered (see `Checker::build_ty_families`); the
+/// unifier holds a borrow of it.
+#[derive(Debug, Clone, Default)]
+pub struct TyFamilies {
+    eqs: HashMap<String, Vec<(Vec<Ty>, Ty)>>,
+}
+
+impl TyFamilies {
+    pub fn new() -> TyFamilies {
+        TyFamilies { eqs: HashMap::new() }
+    }
+    pub fn insert(&mut self, name: String, equations: Vec<(Vec<Ty>, Ty)>) {
+        self.eqs.insert(name, equations);
+    }
+    pub fn is_empty(&self) -> bool {
+        self.eqs.is_empty()
+    }
+    fn get(&self, name: &str) -> Option<&Vec<(Vec<Ty>, Ty)>> {
+        self.eqs.get(name)
+    }
+    fn contains(&self, name: &str) -> bool {
+        self.eqs.contains_key(name)
+    }
+}
+
+/// Reduction fuel for one `tf_normalize` call: an upper bound on the number of
+/// family-reduction steps, so a non-terminating family (`Loop x = Loop x`)
+/// is reported as a divergence instead of looping (or overflowing the stack)
+/// forever. Real programs reduce a small, bounded number of steps.
+const TF_FUEL: u32 = 100_000;
+
+/// Peel an application spine `F a1 a2 … an` into `(F, [a1, …, an])`.
+fn peel_app(ty: &Ty) -> (&Ty, Vec<&Ty>) {
+    let mut head = ty;
+    let mut args = Vec::new();
+    while let Ty::App(f, a) = head {
+        args.push(a.as_ref());
+        head = f.as_ref();
+    }
+    args.reverse();
+    (head, args)
+}
+
+/// Is `ty` an application headed by a type family that did NOT reduce — i.e.
+/// a STUCK family application? (Its outermost head is a family name, but no
+/// equation matched, typically because a scrutinee position holds a type
+/// variable.) Such an application is irreducible for now and must NOT be
+/// unified structurally: a family is not assumed injective, so `F a ~ F b`
+/// may not conclude `a ~ b`. It behaves like an opaque, rigid-ish type that
+/// only unifies with a syntactically identical one (or binds a variable).
+fn is_stuck_family_app(ty: &Ty, fams: &TyFamilies) -> bool {
+    let (head, _args) = peel_app(ty);
+    matches!(head, Ty::Con(name) if fams.contains(name))
+}
+
+/// Match a family-equation pattern against an actual `Ty` argument, binding
+/// the pattern's variables (by NAME — an equation's variables are its own
+/// fresh names). A pattern constructor/promoted/app position requires the
+/// actual to have that exact shape: a `Ty::Var` in the actual where the
+/// pattern expects `'Z` or `'S _` does NOT match, which is exactly how a
+/// closed family gets "stuck" on an unknown type variable rather than
+/// committing to an equation. Non-linear patterns (a variable used twice)
+/// must bind consistently.
+fn tf_match(pat: &Ty, actual: &Ty, binds: &mut HashMap<String, Ty>) -> bool {
+    match pat {
+        Ty::Var(v) => match binds.get(&v.name) {
+            Some(prev) => prev == actual,
+            None => {
+                binds.insert(v.name.clone(), actual.clone());
+                true
+            }
+        },
+        Ty::Con(n) => matches!(actual, Ty::Con(m) if m == n),
+        Ty::Promoted(n) => matches!(actual, Ty::Promoted(m) if m == n),
+        Ty::Unit => matches!(actual, Ty::Unit),
+        Ty::App(pf, pa) => matches!(actual, Ty::App(af, aa)
+            if tf_match(pf, af, binds) && tf_match(pa, aa, binds)),
+        Ty::List(pe) => matches!(actual, Ty::List(ae) if tf_match(pe, ae, binds)),
+        Ty::IO(pe) => matches!(actual, Ty::IO(ae) if tf_match(pe, ae, binds)),
+        Ty::Tuple(ps) => matches!(actual, Ty::Tuple(as_)
+            if ps.len() == as_.len()
+                && ps.iter().zip(as_).all(|(p, a)| tf_match(p, a, binds))),
+        // Arrows, foralls, skolems etc. in a family pattern are not supported
+        // as matchable shapes — treat as non-matching (stuck).
+        _ => false,
+    }
+}
+
+/// Substitute an equation's matched pattern variables into its result type.
+fn tf_subst(ty: &Ty, binds: &HashMap<String, Ty>) -> Ty {
+    match ty {
+        Ty::Var(v) => binds.get(&v.name).cloned().unwrap_or_else(|| ty.clone()),
+        Ty::App(f, a) => Ty::app(tf_subst(f, binds), tf_subst(a, binds)),
+        Ty::Arrow(a, b) => Ty::arrow(tf_subst(a, binds), tf_subst(b, binds)),
+        Ty::List(e) => Ty::list(tf_subst(e, binds)),
+        Ty::IO(e) => Ty::io(tf_subst(e, binds)),
+        Ty::LuaIO(s, e) => Ty::lua_io(s.clone(), tf_subst(e, binds)),
+        Ty::Tuple(es) => Ty::Tuple(es.iter().map(|e| tf_subst(e, binds)).collect()),
+        Ty::Forall(v, inner) => Ty::Forall(v.clone(), Box::new(tf_subst(inner, binds))),
+        Ty::Con(_) | Ty::Promoted(_) | Ty::Unit | Ty::Skolem(..) => ty.clone(),
+    }
+}
+
+/// Try to reduce ONE outermost step of a family application. Returns the
+/// reduced type, or `None` when `ty` is not a (saturated) family application
+/// or is stuck (no equation matched). Equations are tried top-to-bottom.
+fn tf_reduce_head(ty: &Ty, fams: &TyFamilies) -> Option<Ty> {
+    let (head, args) = peel_app(ty);
+    let Ty::Con(name) = head else { return None };
+    let equations = fams.get(name)?;
+    for (pats, result) in equations {
+        if pats.len() != args.len() {
+            continue;
+        }
+        let mut binds: HashMap<String, Ty> = HashMap::new();
+        if pats.iter().zip(&args).all(|(p, a)| tf_match(p, a, &mut binds)) {
+            return Some(tf_subst(result, &binds));
+        }
+    }
+    None
+}
+
+/// Normalize the SUB-TERMS of `ty` (recursively) without touching `ty`'s own
+/// head — so an inner family application is reduced before an outer one tries
+/// to match on it (`Plus (Plus 'Z 'Z) m` needs the inner reduced first). The
+/// recursion depth here is bounded by the type's structural nesting, never by
+/// the number of reduction steps.
+fn tf_normalize_children(ty: &Ty, fams: &TyFamilies, fuel: &mut u32) -> Result<Ty, DiagnosticKind> {
+    Ok(match ty {
+        Ty::App(f, a) =>
+            Ty::app(tf_normalize(f, fams, fuel)?, tf_normalize(a, fams, fuel)?),
+        Ty::Arrow(a, b) =>
+            Ty::arrow(tf_normalize(a, fams, fuel)?, tf_normalize(b, fams, fuel)?),
+        Ty::List(e) => Ty::list(tf_normalize(e, fams, fuel)?),
+        Ty::IO(e) => Ty::io(tf_normalize(e, fams, fuel)?),
+        Ty::LuaIO(s, e) => Ty::lua_io(s.clone(), tf_normalize(e, fams, fuel)?),
+        Ty::Tuple(es) => Ty::Tuple(
+            es.iter().map(|e| tf_normalize(e, fams, fuel)).collect::<Result<_, _>>()?,
+        ),
+        Ty::Forall(v, inner) =>
+            Ty::Forall(v.clone(), Box::new(tf_normalize(inner, fams, fuel)?)),
+        other => other.clone(),
+    })
+}
+
+/// Reduce every closed-type-family application in `ty` to normal form: first
+/// its sub-terms, then its head repeatedly, until nothing reduces (a fixpoint)
+/// or `fuel` is exhausted (divergence). A family application that gets stuck on
+/// a type variable is left in place — a normal, deferred outcome, not an error.
+///
+/// The head-reduction fixpoint is an ITERATIVE loop, not recursion: a
+/// non-terminating family (`Loop x = Loop x`) must burn fuel and report a
+/// divergence, never grow the call stack until it overflows.
+fn tf_normalize(ty: &Ty, fams: &TyFamilies, fuel: &mut u32) -> Result<Ty, DiagnosticKind> {
+    let mut cur = tf_normalize_children(ty, fams, fuel)?;
+    loop {
+        match tf_reduce_head(&cur, fams) {
+            None => return Ok(cur),
+            Some(reduced) => {
+                if *fuel == 0 {
+                    let (head, _) = peel_app(&cur);
+                    let name = match head { Ty::Con(n) => n.clone(), _ => "?".to_string() };
+                    return Err(DiagnosticKind::TypeFamilyDivergence(name));
+                }
+                *fuel -= 1;
+                // The reduced result may expose new inner family apps.
+                cur = tf_normalize_children(&reduced, fams, fuel)?;
+            }
+        }
+    }
+}
+
+/// Reduce every closed-type-family application in `ty` to normal form using
+/// `fams`. Public entry point for the typechecker's eager (concrete)
+/// reduction, which shares this ITERATIVE, fuel-bounded normalizer with the
+/// unifier so a divergent family reports an error instead of overflowing the
+/// stack. Returns the normal form, or a `TypeFamilyDivergence` error.
+pub fn reduce_type_families(ty: &Ty, fams: &TyFamilies) -> Result<Ty, DiagnosticKind> {
+    if fams.is_empty() {
+        return Ok(ty.clone());
+    }
+    let mut fuel = TF_FUEL;
+    tf_normalize(ty, fams, &mut fuel)
+}
+
+/// Unification with no type families in scope — the fast path used by
+/// `Subst::merge` and preserved for callers that never see family types.
 pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, DiagnosticKind> {
+    unify_tf(t1, t2, &TyFamilies::new())
+}
+
+/// Unification that reduces closed-type-family applications to normal form on
+/// both sides before matching, so length arithmetic like `Plus 'Z m ~ m` and
+/// `Plus ('S n) m ~ 'S (Plus n m)` succeeds. When `fams` is empty this is the
+/// plain syntactic unifier (no normalization overhead).
+pub fn unify_tf(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticKind> {
+    if fams.is_empty() {
+        return unify_inner(t1, t2, fams);
+    }
+    let mut fuel = TF_FUEL;
+    let n1 = tf_normalize(t1, fams, &mut fuel)?;
+    let n2 = tf_normalize(t2, fams, &mut fuel)?;
+    unify_inner(&n1, &n2, fams)
+}
+
+/// The structural core of unification. `t1`/`t2` are already in
+/// family-normal-form when `fams` is non-empty; recursive calls go back
+/// through `unify_tf` so a substitution that exposes a new reduction is
+/// re-normalized.
+fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticKind> {
     match (t1, t2) {
         (Ty::Con(a), Ty::Con(b)) if a == b => Ok(Subst::empty()),
         (Ty::Promoted(a), Ty::Promoted(b)) if a == b => Ok(Subst::empty()),
@@ -525,30 +738,48 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, DiagnosticKind> {
             }
         }
 
+        // Stuck (irreducible) type-family applications. After normalization
+        // these did not reduce — a scrutinee is a type variable no equation
+        // matches yet. A family is NOT assumed injective, so we must not unify
+        // two family applications structurally (that would wrongly conclude
+        // `a ~ b` from `F a ~ F b`). Two stuck applications unify only when
+        // they are syntactically identical (e.g. `Plus n m ~ Plus n m`, which
+        // is exactly what a length-tracking recursion produces); anything else
+        // is left as an unprovable equality and rejected. A stuck app versus a
+        // type variable was already handled by the `Var` arm above (which
+        // binds it, with the ordinary occurs check).
+        (a, b) if is_stuck_family_app(a, fams) || is_stuck_family_app(b, fams) => {
+            if a == b {
+                Ok(Subst::empty())
+            } else {
+                Err(DiagnosticKind::Mismatch(a.clone(), b.clone()))
+            }
+        }
+
         (Ty::Arrow(a1, b1), Ty::Arrow(a2, b2)) => {
-            let s1 = unify(a1, a2)?;
-            let s2 = unify(&b1.apply_subst(&s1), &b2.apply_subst(&s1))?;
+            let s1 = unify_tf(a1, a2, fams)?;
+            let s2 = unify_tf(&b1.apply_subst(&s1), &b2.apply_subst(&s1), fams)?;
             Ok(s1.compose(&s2))
         }
 
         (Ty::App(a1, b1), Ty::App(a2, b2)) => {
-            let s1 = unify(a1, a2)?;
-            let s2 = unify(&b1.apply_subst(&s1), &b2.apply_subst(&s1))?;
+            let s1 = unify_tf(a1, a2, fams)?;
+            let s2 = unify_tf(&b1.apply_subst(&s1), &b2.apply_subst(&s1), fams)?;
             Ok(s1.compose(&s2))
         }
 
-        (Ty::List(a), Ty::List(b)) => unify(a, b),
-        (Ty::IO(a), Ty::IO(b)) => unify(a, b),
+        (Ty::List(a), Ty::List(b)) => unify_tf(a, b, fams),
+        (Ty::IO(a), Ty::IO(b)) => unify_tf(a, b, fams),
         (Ty::LuaIO(s1, a), Ty::LuaIO(s2, b)) => {
-            let s = unify(&Ty::Var(s1.clone()), &Ty::Var(s2.clone()))?;
-            let s2 = unify(&a.apply_subst(&s), &b.apply_subst(&s))?;
+            let s = unify_tf(&Ty::Var(s1.clone()), &Ty::Var(s2.clone()), fams)?;
+            let s2 = unify_tf(&a.apply_subst(&s), &b.apply_subst(&s), fams)?;
             Ok(s.compose(&s2))
         }
 
         (Ty::Tuple(a), Ty::Tuple(b)) if a.len() == b.len() => {
             let mut s = Subst::empty();
             for (ea, eb) in a.iter().zip(b.iter()) {
-                let si = unify(&ea.apply_subst(&s), &eb.apply_subst(&s))?;
+                let si = unify_tf(&ea.apply_subst(&s), &eb.apply_subst(&s), fams)?;
                 s = s.compose(&si);
             }
             Ok(s)
@@ -556,23 +787,23 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, DiagnosticKind> {
 
         // Allow App(f, a) to unify with List(b) by treating [] as App(Con("[]"), ...)
         (Ty::App(f, a), Ty::List(b)) | (Ty::List(b), Ty::App(f, a)) => {
-            let s1 = unify(f, &Ty::Con("[]".into()))?;
-            let s2 = unify(&a.apply_subst(&s1), &b.apply_subst(&s1))?;
+            let s1 = unify_tf(f, &Ty::Con("[]".into()), fams)?;
+            let s2 = unify_tf(&a.apply_subst(&s1), &b.apply_subst(&s1), fams)?;
             Ok(s1.compose(&s2))
         }
 
         // Allow App(m, a) to unify with IO(b) by treating IO as App(Con("IO"), ...)
         (Ty::App(f, a), Ty::IO(b)) | (Ty::IO(b), Ty::App(f, a)) => {
-            let s1 = unify(f, &Ty::Con("IO".into()))?;
-            let s2 = unify(&a.apply_subst(&s1), &b.apply_subst(&s1))?;
+            let s1 = unify_tf(f, &Ty::Con("IO".into()), fams)?;
+            let s2 = unify_tf(&a.apply_subst(&s1), &b.apply_subst(&s1), fams)?;
             Ok(s1.compose(&s2))
         }
 
         // Allow App(m, a) to unify with LuaIO(s, b) by treating LuaIO as App(App(Con("LuaIO"), s), ...)
         (Ty::App(f, a), Ty::LuaIO(s, b)) | (Ty::LuaIO(s, b), Ty::App(f, a)) => {
             let lua_io_s = Ty::App(Box::new(Ty::Con("LuaIO".into())), Box::new(Ty::Var(s.clone())));
-            let s1 = unify(f, &lua_io_s)?;
-            let s2 = unify(&a.apply_subst(&s1), &b.apply_subst(&s1))?;
+            let s1 = unify_tf(f, &lua_io_s, fams)?;
+            let s2 = unify_tf(&a.apply_subst(&s1), &b.apply_subst(&s1), fams)?;
             Ok(s1.compose(&s2))
         }
 
@@ -581,7 +812,7 @@ pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, DiagnosticKind> {
             // The forall-bound variable is already a rigid skolem (id=MAX).
             // Unify the body directly — the variable will unify with whatever
             // the concrete type provides, enforcing that it can't escape.
-            unify(inner, t)
+            unify_tf(inner, t, fams)
         }
 
         // Skolem: rigid type constant, only unifies with itself
@@ -702,6 +933,11 @@ pub enum DiagnosticKind {
     /// `Type -> Type` constructor) or `instance Show Maybe` (Show constrains
     /// complete types).
     InstanceKindMismatch { class: String, class_var: String, target: String, expected: Kind, found: Kind },
+    /// A closed type family did not terminate while reducing (e.g.
+    /// `type family Loop x where Loop x = Loop x`): reduction hit its step
+    /// bound. The string is the family's name. Reported instead of looping
+    /// (or overflowing the stack) forever.
+    TypeFamilyDivergence(String),
     /// A syntax error. The message is rendered verbatim, with the span (when
     /// present) appended inline as ` at line:col` — the parser's historical
     /// format, unlike type errors which put the location on its own line.
@@ -896,6 +1132,8 @@ impl fmt::Display for Diagnostic {
             }
             DiagnosticKind::UnknownType(name) =>
                 write!(f, "Unknown type '{}': nothing in this program or its imports defines a type with this name — it is not a builtin, and no data, newtype, type alias, or type family declaration for it is in scope", name)?,
+            DiagnosticKind::TypeFamilyDivergence(name) =>
+                write!(f, "Type family '{}' did not terminate: reducing an application of it exceeded the reduction step limit, so it appears to be non-terminating (e.g. an equation whose result reduces to itself)", name)?,
             DiagnosticKind::KindMismatch { ty, expected, found } => {
                 // Tailor the two common shapes: an unsaturated constructor
                 // where a complete type belongs, and the reverse.

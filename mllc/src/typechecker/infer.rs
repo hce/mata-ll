@@ -41,7 +41,7 @@ impl Checker {
                 // If we have a scrutinee type, check if this constructor's
                 // result type can unify with it (i.e., is reachable)
                 if let Some(sty) = scrutinee_ty {
-                    unify(&info.result_type, sty).is_ok()
+                    self.unify(&info.result_type, sty).is_ok()
                 } else {
                     true
                 }
@@ -375,7 +375,7 @@ impl Checker {
                 // class constraint on it — spuriously unresolved.
                 let cond_env = local_env.apply_subst(&subst);
                 let (tcond, cond_ty, s1) = self.infer_expr(&guard.condition, &cond_env)?;
-                let s2 = unify(&cond_ty.apply_subst(&s1), &Ty::Con("Bool".into()))?;
+                let s2 = self.unify(&cond_ty.apply_subst(&s1), &Ty::Con("Bool".into()))?;
                 let combined = s1.compose(&s2);
                 subst = subst.compose(&combined);
                 let body_env = local_env.apply_subst(&subst);
@@ -427,7 +427,7 @@ impl Checker {
                 // the body already failed above, where a second message about
                 // the Unit placeholder would only be noise).
                 if let Some(scheme) = local_env.lookup(&ld.name) {
-                    match unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
+                    match self.unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
                         Ok(us) => subst = subst.compose(&us),
                         Err(e) => if !binding_errored {
                             self.push_error_span(
@@ -506,7 +506,7 @@ impl Checker {
                 // (suppressed only when the body already failed, to avoid a
                 // second message about the placeholder).
                 if let Some(scheme) = local_env.lookup(&ld.name) {
-                    match unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
+                    match self.unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
                         Ok(us) => subst = subst.compose(&us),
                         Err(e) => if !binding_errored {
                             self.push_error_span(
@@ -598,7 +598,7 @@ impl Checker {
             let env_i = rec_env.apply_subst(&subst);
             let (te, bind_ty, s) = self.infer_expr(&bind.body, &env_i)?;
             subst = subst.compose(&s);
-            let us = unify(&fresh_tys[i].apply_subst(&subst), &bind_ty.apply_subst(&subst))?;
+            let us = self.unify(&fresh_tys[i].apply_subst(&subst), &bind_ty.apply_subst(&subst))?;
             subst = subst.compose(&us);
             tbinds.push(TLocalDef { name: bind.name.clone(), patterns: vec![], body: te });
         }
@@ -657,7 +657,7 @@ impl Checker {
             Pattern::Wildcard => Ok((TPattern::Wildcard, Subst::empty())),
             Pattern::LitPat(lit) => {
                 let lit_ty = self.literal_type(lit);
-                let s = unify(expected, &lit_ty)?;
+                let s = self.unify(expected, &lit_ty)?;
                 Ok((TPattern::LitPat(Self::convert_literal(lit)), s))
             }
             Pattern::Constructor { name, args } => {
@@ -708,7 +708,7 @@ impl Checker {
                 }
                 let tv_subst = Subst::from_map(tv_map);
                 let result_ty = con_info.result_type.apply_subst(&tv_subst);
-                let mut subst = unify(expected, &result_ty)?;
+                let mut subst = self.unify(expected, &result_ty)?;
 
                 let mut targs = Vec::new();
                 for (arg_pat, field_ty) in args.iter().zip(&con_info.field_types) {
@@ -725,7 +725,7 @@ impl Checker {
                 // Expect a Tuple type with matching arity
                 let elem_types: Vec<Ty> = pats.iter().map(|_| self.fresh_var("_t")).collect();
                 let tuple_ty = Ty::Tuple(elem_types.clone());
-                let s = unify(expected, &tuple_ty)?;
+                let s = self.unify(expected, &tuple_ty)?;
                 let mut subst = s;
                 let mut tpats = Vec::new();
                 for (p, et) in pats.iter().zip(elem_types.iter()) {
@@ -827,9 +827,9 @@ impl Checker {
                             );
                         }
                         // Directly check the argument against the skolemized param type
-                        let s_arg = unify(&arg_ty, &skolem_body)?;
+                        let s_arg = self.unify(&arg_ty, &skolem_body)?;
                         // Connect return type
-                        let s_ret = unify(&ret_ty, &func_ret.apply_subst(&s_arg))?;
+                        let s_ret = self.unify(&ret_ty, &func_ret.apply_subst(&s_arg))?;
                         let combined = s_arg.compose(&s_ret);
                         // Escape check: skolems must not appear in the return type
                         let final_ret = ret_ty.apply_subst(&combined);
@@ -842,10 +842,10 @@ impl Checker {
                         }
                         combined
                     } else {
-                        unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
+                        self.unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
                     }
                 } else {
-                    unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
+                    self.unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
                 };
 
                 let final_ty = ret_ty.apply_subst(&s3);
@@ -915,13 +915,13 @@ impl Checker {
             }
             Expr::If { cond, then_branch, else_branch } => {
                 let (tc, cond_ty, s1) = self.infer_expr(cond, env)?;
-                let sb = unify(&cond_ty, &Ty::Con("Bool".into()))?;
+                let sb = self.unify(&cond_ty, &Ty::Con("Bool".into()))?;
                 let s1 = s1.compose(&sb);
                 let env2 = env.apply_subst(&s1);
                 let (tt, then_ty, s2) = self.infer_expr(then_branch, &env2)?;
                 let env3 = env2.apply_subst(&s2);
                 let (te, else_ty, s3) = self.infer_expr(else_branch, &env3)?;
-                let s4 = unify(&then_ty.apply_subst(&s3), &else_ty)?;
+                let s4 = self.unify(&then_ty.apply_subst(&s3), &else_ty)?;
                 let final_ty = then_ty.apply_subst(&s3).apply_subst(&s4);
                 Ok((
                     TExpr::new(TExprKind::If {
@@ -955,12 +955,12 @@ impl Checker {
                         for guard in &branch.guards {
                             let genv = branch_env.apply_subst(&subst);
                             let (tcond, cond_ty, gs1) = self.infer_expr(&guard.condition, &genv)?;
-                            let gs2 = unify(&cond_ty.apply_subst(&gs1), &Ty::Con("Bool".into()))?;
+                            let gs2 = self.unify(&cond_ty.apply_subst(&gs1), &Ty::Con("Bool".into()))?;
                             subst = subst.compose(&gs1).compose(&gs2);
                             let genv2 = branch_env.apply_subst(&subst);
                             let (tgbody, gbody_ty, gbs) = self.infer_expr(&guard.body, &genv2)?;
                             subst = subst.compose(&gbs);
-                            let gu = unify(&result_ty.apply_subst(&subst), &gbody_ty)?;
+                            let gu = self.unify(&result_ty.apply_subst(&subst), &gbody_ty)?;
                             subst = subst.compose(&gu);
                             tguards.push(TGuard { condition: tcond, body: tgbody });
                         }
@@ -968,7 +968,7 @@ impl Checker {
 
                     let (tb, body_ty, body_subst) = self.infer_expr(&branch.body, &branch_env)?;
                     subst = subst.compose(&body_subst);
-                    let s = unify(&result_ty.apply_subst(&subst), &body_ty)?;
+                    let s = self.unify(&result_ty.apply_subst(&subst), &body_ty)?;
                     subst = subst.compose(&s);
                     // The case's result outlives the branch, so an unpacked
                     // existential's skolem must not appear in it (e.g.
@@ -1033,7 +1033,7 @@ impl Checker {
                 let expected = self.ast_type_to_ty(declared_ty);
                 let expected = self.freshen_sig_type(&expected);
                 let (te, inferred, subst) = self.infer_expr(inner, env)?;
-                let s = unify(&inferred, &expected)?;
+                let s = self.unify(&inferred, &expected)?;
                 let final_ty = inferred.apply_subst(&s);
                 let full_subst = subst.compose(&s);
                 let resolved_te = te.apply_subst(&full_subst);
@@ -1255,7 +1255,7 @@ impl Checker {
                         Ty::arrow(param_ty.clone(), result_ty.clone()),
                         result_ty.clone(),
                     ));
-                    let s_unify = unify(&op_ty, &expected_op)?;
+                    let s_unify = self.unify(&op_ty, &expected_op)?;
                     subst = subst.compose(&s_unify);
                     local_env = local_env.apply_subst(&s_unify);
                     let bound_ty = param_ty.apply_subst(&s_unify);
@@ -1302,7 +1302,7 @@ impl Checker {
         for tstmt in typed_stmts.iter().rev() {
             if let TypedStmt::Bind(tb) = tstmt {
                 let rt = tb.result_ty.apply_subst(&subst);
-                let s = unify(&rt, &cont_ty.apply_subst(&subst))?;
+                let s = self.unify(&rt, &cont_ty.apply_subst(&subst))?;
                 subst = subst.compose(&s);
                 cont_ty = rt.apply_subst(&s);
             }
@@ -1357,7 +1357,7 @@ impl Checker {
 
     pub(super) fn check_expr_typed(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), DiagnosticKind> {
         let (te, inferred, subst) = self.infer_expr(expr, env)?;
-        let s = unify(&inferred.apply_subst(&subst), &expected.apply_subst(&subst))?;
+        let s = self.unify(&inferred.apply_subst(&subst), &expected.apply_subst(&subst))?;
         let final_ty = inferred.apply_subst(&subst).apply_subst(&s);
         // Apply the full composed substitution to inner types so that type
         // variables resolved by the expected type (e.g. monad type from function

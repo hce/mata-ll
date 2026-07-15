@@ -31,6 +31,30 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **Closed type families now reduce during unification, symbolically.**
+  Previously a family only reduced on ground/concrete arguments (at
+  AST-to-`Ty` conversion) and the unifier treated a family application as
+  opaque, so length arithmetic failed (`Plus 'Z m` would not become `m`, and
+  the occurs check spuriously fired on `m occurs in Plus 'Z m`). The unifier
+  now reduces closed-family applications to normal form on both sides before
+  matching — including when arguments contain type variables — so a
+  length-indexed `vappend :: Vec n a -> Vec m a -> Vec (Plus n m) a`
+  type-checks, runs with correct lengths, and keeps length mismatches a
+  compile error. A family application stuck on an unknown variable is left
+  irreducible and deferred (not an occurs-check failure); families are NOT
+  assumed injective (`F a ~ F b` does not give `a ~ b`, and two distinct
+  stuck applications do not unify); and a non-terminating family
+  (`Loop x = Loop x`) is reported as "type family did not terminate" rather
+  than looping (the reduction is a fuel-bounded, iterative normalizer shared
+  by the eager and unification paths, so it cannot overflow the stack — which
+  the old recursive concrete reduction did). Eager concrete reduction (the
+  `Id`-style case) and the FFI type families (`LuaIO`, …) are unchanged. This
+  is step 1 of type-level naturals; a real promoted `Nat` kind is future
+  work (`'Z`/`'S` are still classified at kind `Type`). New diagnostic:
+  `TypeFamilyDivergence`. Tests: type_family_arithmetic.mll plus
+  type_family_concrete_reduction_still_works / _length_mismatch_rejected /
+  _head_of_empty_append_rejected / _non_injectivity_not_assumed /
+  _divergence_errors_not_hangs.
 - **A full kind system.** Kinds (`Type`, `Symbol`, and arrow kinds like
   `Type -> Type`) are now inferred for everything declared at the type level
   and every written type is kind-checked. A `data`/`newtype` parameter's kind
