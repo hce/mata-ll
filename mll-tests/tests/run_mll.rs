@@ -397,6 +397,7 @@ mll_test!(kinds_hkt, "kinds_hkt.mll");
 mll_test!(type_level_nats, "type_level_nats.mll");
 mll_test!(vec_nat, "vec_nat.mll");
 mll_test!(type_family_arithmetic, "type_family_arithmetic.mll");
+mll_test!(promoted_nat_kind, "promoted_nat_kind.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(section_composition, "section_composition.mll");
 mll_test!(guards, "guards.mll");
@@ -5068,6 +5069,132 @@ fn type_family_divergence_errors_not_hangs() {
     assert!(
         e.contains("did not terminate") && e.contains("Loop"),
         "divergent family must report a termination error, got: {e}"
+    );
+}
+
+// --- Promoted data types have real kinds (DataKinds step 2) ------------------
+// A parameterless data type promotes to a kind named after it (`data Nat`
+// gives kind `Nat`, `'Z :: Nat`, `'S :: Nat -> Nat`), so an index is checked
+// to be specifically that kind — a promoted tag of another type is a clear
+// kind error, not a lucky "unknown constructor". The positive/runtime side is
+// promoted_nat_kind.mll (and vec_nat.mll / type_family_arithmetic.mll).
+
+/// A Nat-indexed `Vec`, shared by the tests below.
+const PROMOTED_VEC_PRELUDE: &str = "\
+data Nat = Z | S Nat\n\
+data Vec n a where\n\
+    VNil  :: Vec 'Z a\n\
+    VCons :: a -> Vec n a -> Vec ('S n) a\n";
+
+#[test]
+fn promoted_kind_rejects_bool_tag_for_nat_index() {
+    // `'True :: Bool`, but `Vec`'s index has kind `Nat`.
+    let src = format!("{PROMOTED_VEC_PRELUDE}bad :: Vec 'True Integer -> Integer\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err(&src);
+    assert!(e.contains("Kind error"), "got: {e}");
+    assert!(
+        e.contains("needs an argument of kind Nat") && e.contains("'True has kind Bool"),
+        "expected a Nat-vs-Bool kind error, got: {e}"
+    );
+}
+
+#[test]
+fn promoted_kind_rejects_wrong_user_tag_for_nat_index() {
+    // A promoted constructor of ANOTHER user data type (`'Red :: Color`) where
+    // a `Nat` is required.
+    let src = format!("data Color = Red | Blue\n{PROMOTED_VEC_PRELUDE}bad :: Vec 'Red Integer -> Integer\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err(&src);
+    assert!(
+        e.contains("needs an argument of kind Nat") && e.contains("'Red has kind Color"),
+        "expected a Nat-vs-Color kind error, got: {e}"
+    );
+}
+
+#[test]
+fn promoted_kind_rejects_nested_wrong_tag() {
+    // The ill-kinded tag is nested inside `'S`, which itself has kind
+    // `Nat -> Nat`, so `'S 'True` fails at the inner application.
+    let src = format!("{PROMOTED_VEC_PRELUDE}bad :: Vec ('S 'True) a -> a\nbad _ = undefined\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err(&src);
+    assert!(
+        e.contains("'S") && e.contains("needs an argument of kind Nat") && e.contains("'True has kind Bool"),
+        "expected 'S to reject a Bool argument, got: {e}"
+    );
+}
+
+#[test]
+fn promoted_kind_type_family_argument_is_checked() {
+    // A type family over naturals is inferred at kind `Nat -> Nat -> Nat`, so
+    // applying it to a `Bool` tag is a kind error (this is the step-1/step-2
+    // interaction: reduction is unchanged, but the family's arg kinds are now
+    // checked).
+    let src = format!(
+        "{PROMOTED_VEC_PRELUDE}\
+type family Plus n m where\n\
+    Plus 'Z     m = m\n\
+    Plus ('S n) m = 'S (Plus n m)\n\
+bad :: Vec (Plus 'True 'Z) a -> a\n\
+bad _ = undefined\n\
+main :: IO ()\n\
+main = pure ()\n"
+    );
+    let e = compile_err(&src);
+    assert!(
+        e.contains("'Plus' needs an argument of kind Nat") && e.contains("'True has kind Bool"),
+        "the family's Nat argument kind must be checked, got: {e}"
+    );
+}
+
+#[test]
+fn promoted_kind_well_kinded_index_accepted() {
+    // The complement / anti-over-eagerness guard: a correctly Nat-kinded index
+    // (bare variable, `'Z`, and `'S`-applied) must still compile.
+    let src = format!(
+        "{PROMOTED_VEC_PRELUDE}\
+vlen :: Vec n a -> Integer\n\
+vlen VNil = 0\n\
+vlen (VCons _ xs) = 1 + vlen xs\n\
+v2 :: Vec ('S ('S 'Z)) Integer\n\
+v2 = VCons 1 (VCons 2 VNil)\n\
+main :: IO ()\n\
+main = print (vlen v2)\n"
+    );
+    assert!(
+        mllc::compile(&src, Path::new("."), &[]).is_ok(),
+        "a well-kinded Nat index must compile"
+    );
+}
+
+#[test]
+fn promoted_type_still_usable_as_a_value_type() {
+    // Promoting `Nat` to a kind must not stop it being an ordinary value type:
+    // `S (S Z)` is still a runtime value of type `Nat`. (Type/kind duality.)
+    let src = "data Nat = Z | S Nat\ntoInt :: Nat -> Integer\ntoInt Z = 0\ntoInt (S n) = 1 + toInt n\nmain :: IO ()\nmain = print (toInt (S (S Z)))\n";
+    assert!(
+        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        "a promoted data type must still work as a value type"
+    );
+}
+
+#[test]
+fn promoted_kind_non_gadt_phantom_tag_rejected_but_gadt_pins_it() {
+    // KNOWN, GHC-consistent limitation: a NON-GADT type parameter used only as
+    // a phantom has its kind DEFAULTED to `Type` (mata-ll has no kind-signature
+    // syntax to say otherwise), so a promoted tag of another kind cannot be its
+    // index. GHC rejects this too without a `data Tagged (a :: Color)` kind
+    // signature. The escape hatch is a GADT that PINS the index through a
+    // constructor return type (as `datakinds.mll` does), which is checked and
+    // accepted.
+    let phantom = "data Color = Red | Blue\ndata Tagged a = Tagged Integer\nf :: Tagged 'Red -> Integer\nf (Tagged n) = n\nmain :: IO ()\nmain = pure ()\n";
+    let e = compile_err(phantom);
+    assert!(e.contains("Kind error"), "phantom promoted tag should be rejected, got: {e}");
+    assert!(e.contains("'Red has kind Color"), "got: {e}");
+
+    // The GADT form pins the index's kind and is accepted.
+    let gadt = "data Color = Red | Blue\ndata Tagged a where\n    MkTagged :: Integer -> Tagged 'Red\nf :: Tagged 'Red -> Integer\nf (MkTagged n) = n\nmain :: IO ()\nmain = print (f (MkTagged 7))\n";
+    assert!(
+        mllc::compile(gadt, Path::new("."), &[]).is_ok(),
+        "a GADT that pins a promoted index must compile"
     );
 }
 

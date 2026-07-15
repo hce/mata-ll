@@ -250,3 +250,27 @@ SPEC.md). Two consequences to be aware of:
   terminate" instead of hanging or overflowing the stack. A genuinely
   huge (but terminating) type-level computation could in principle hit
   the same bound — keep type-level arithmetic small.
+
+## A promoted index must be pinned by a GADT, not a bare phantom
+
+Promoted data types have real kinds (`data Nat` gives the kind `Nat`;
+see SPEC.md), so a type-level index is checked to be exactly the right
+kind — `Vec 'True Integer` is a kind error because `'True :: Bool`, not
+`Nat`. Because mata-ll has no kind-signature syntax, the *only* way to
+give a type parameter a promoted kind is to pin it through a GADT
+constructor's return type:
+
+    -- OK: 'S / 'Z in the return types force  n : Nat
+    data Vec n a where
+        VNil  :: Vec 'Z a
+        VCons :: a -> Vec n a -> Vec ('S n) a
+
+A NON-GADT type parameter used only as a phantom defaults to kind
+`Type`, so it cannot carry a promoted tag:
+
+    data Tagged a = Tagged Integer
+    f :: Tagged 'Red -> Integer   -- KIND ERROR: 'Red :: Color, param : Type
+
+GHC rejects this too without a `data Tagged (a :: Color)` kind
+signature; mata-ll has no such signature, so make `Tagged` a GADT that
+pins the tag in its constructor's result type instead.

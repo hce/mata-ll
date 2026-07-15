@@ -23,6 +23,13 @@ pub enum Kind {
     Symbol,
     /// Function type constructor: Type -> Type (e.g., Maybe, [])
     Arrow(Box<Kind>, Box<Kind>),
+    /// The kind a monomorphic data type promotes to under DataKinds: `data Nat
+    /// = Z | S Nat` gives the kind `Nat`, inhabited by the promoted
+    /// constructors `'Z :: Nat` and `'S :: Nat -> Nat`. The string is the data
+    /// type's name. (Only parameterless, non-GADT, non-existential data types
+    /// promote to a real kind — that keeps promotion monomorphic, with no kind
+    /// polymorphism; every other data type keeps the `Type` approximation.)
+    Promoted(String),
     /// A kind-unification variable, used only DURING kind inference
     /// (typechecker/kind.rs). Every variable left unconstrained when a
     /// declaration has been fully walked is defaulted to `Type` — exactly
@@ -58,6 +65,7 @@ impl fmt::Display for Kind {
                 Kind::Arrow(..) => write!(f, "({}) -> {}", a, b),
                 _ => write!(f, "{} -> {}", a, b),
             },
+            Kind::Promoted(name) => write!(f, "{}", name),
             Kind::Var(id) => write!(f, "k{}", id),
         }
     }
@@ -945,6 +953,13 @@ pub enum DiagnosticKind {
     Other(String),
 }
 
+/// Quote a rendered type for a message, but not a promoted constructor: its
+/// leading tick already sets it off, so `'True` prints as `'True`, not the
+/// doubled `''True'`.
+fn quote_ty(s: &str) -> String {
+    if s.starts_with('\'') { s.to_string() } else { format!("'{}'", s) }
+}
+
 /// Render the i-th friendly type-variable name: a, b, … z, a1, b1, …
 fn pretty_var_name(i: usize) -> String {
     let letter = (b'a' + (i % 26) as u8) as char;
@@ -1161,8 +1176,10 @@ impl fmt::Display for Diagnostic {
                 }
             }
             DiagnosticKind::KindArgMismatch { func, arg, expected, found } =>
-                write!(f, "Kind error: in this type application, '{}' needs an argument of kind {}, but '{}' has kind {}",
-                    func, expected, arg, found)?,
+                // `arg` may be a promoted constructor (`'True`), whose leading
+                // tick already delimits it — avoid the doubled `''True'`.
+                write!(f, "Kind error: in this type application, '{}' needs an argument of kind {}, but {} has kind {}",
+                    func, expected, quote_ty(arg), found)?,
             DiagnosticKind::InstanceKindMismatch { class, class_var, target, expected, found } =>
                 write!(f, "Kind error: 'instance {} {}' is ill-kinded: the methods of class '{}' use its type variable '{}' at kind {}, but '{}' has kind {}",
                     class, target, class, class_var, expected, target, found)?,

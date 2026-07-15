@@ -31,6 +31,31 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **Promoted data types now have real kinds (DataKinds).** A parameterless,
+  non-GADT data type promotes to a kind named after it: `data Nat = Z | S Nat`
+  gives the kind `Nat`, with `'Z :: Nat` and `'S :: Nat -> Nat` (each field
+  type promoted — a field that is itself a promotable type contributes its
+  kind); the builtin `Bool` promotes too (`'True`/`'False :: Bool`). An index
+  variable's kind is inferred from promoted constructors in GADT return types
+  (`n : Nat` from `VNil :: Vec 'Z a`) and type-family patterns
+  (`Plus :: Nat -> Nat -> Nat`), replacing the previous approximation that
+  classified every promoted constructor at kind `Type`. Consequences: an index
+  at the wrong promoted kind is a clear error — `Vec 'True Integer` reports
+  *"Vec needs an argument of kind Nat, but 'True has kind Bool"* — and a
+  natural-number family applied to a `Bool` tag (`Plus 'True 'Z`) is rejected;
+  a promoted data type stays usable as an ordinary value type (type/kind
+  duality). Type-family REDUCTION is unchanged (it still matches promoted
+  constructors structurally); only argument/result kinds are now checked. New
+  kind `Kind::Promoted`. Honest limits (documented in HASKDIFF/SPEC/CAVEATS):
+  only parameterless, non-GADT data types promote to a real kind (others keep
+  the `Type` approximation — a precise promotion would need kind polymorphism,
+  which mata-ll does not have); and, with no kind-signature syntax, a non-GADT
+  phantom parameter's kind defaults to `Type`, so a promoted tag must be pinned
+  through a GADT constructor return type (as `Vec`/`Light`/`Input` do — GHC
+  requires a kind signature in the same case). Tests: promoted_nat_kind.mll
+  plus promoted_kind_rejects_* / _type_family_argument_is_checked /
+  _well_kinded_index_accepted / _non_gadt_phantom_tag_rejected_but_gadt_pins_it
+  / promoted_type_still_usable_as_a_value_type.
 - **Closed type families now reduce during unification, symbolically.**
   Previously a family only reduced on ground/concrete arguments (at
   AST-to-`Ty` conversion) and the unifier treated a family application as

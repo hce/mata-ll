@@ -112,11 +112,21 @@ errors). Differences from GHC:
   applies without `PolyKinds`).
 - **No kind polymorphism** (`PolyKinds`): a definition cannot be
   generic over kinds.
-- **Promoted constructors are kind-approximate.** DataKinds-style
-  promotion exists (`'Red`, `'S n`), but promoted constructors are
-  classified at kind `Type` rather than at their promoted data kind —
-  mata-ll will not reject `Vec 'Red a` where GHC (tracking
-  `'Red : Color` vs `n : Nat`) would.
+- **Promoted data types have real kinds** (DataKinds). A parameterless
+  data type promotes to a kind named after it: `data Nat = Z | S Nat`
+  gives the kind `Nat` with `'Z :: Nat` and `'S :: Nat -> Nat`, and the
+  builtin `Bool` promotes too (`'True`/`'False :: Bool`). An index is
+  checked to be exactly that kind, so `Vec 'True Integer` is a kind
+  error (`'True :: Bool`, but the index has kind `Nat`) — as in GHC.
+  Limitations: only *parameterless, non-GADT* data types promote (a
+  parameterised type would need kind polymorphism, which mata-ll lacks —
+  such a type keeps the `Type` approximation for its promoted
+  constructors); and, because there is no kind-signature syntax, a NON-
+  GADT phantom parameter's kind defaults to `Type`, so a promoted tag of
+  another kind cannot index it (`data Tagged a = Tagged Int` cannot be
+  used as `Tagged 'Red` — GHC rejects that too without a `(a :: Color)`
+  kind signature; pin the index via a GADT constructor return type
+  instead, as `Vec`/`Light`/`Input` do).
 - Kind errors are worded in plain language; GHC's equivalent is usually
   "Expecting one more argument to ..." or
   "Expected kind ..., but ... has kind ...".
@@ -135,9 +145,11 @@ type-checks and stays sound. Differences from GHC:
   (`type family F a = r | r -> a`) do not exist; `F a ~ F b` never
   concludes `a ~ b`, and two distinct *stuck* family applications do not
   unify.
-- **No promoted `Nat` kind.** Promotion classifies `'Z`/`'S` at kind
-  `Type` (see the DataKinds point above), so a family over "naturals" is
-  not kind-checked against a `Nat` kind — it just reduces structurally.
+- **Family argument kinds are checked** now that promoted data types
+  have real kinds: a family over naturals is inferred at
+  `Nat -> … -> Nat` and applying it to a `Bool` tag (`Plus 'True 'Z`) is
+  a kind error. Reduction itself is unchanged — it still matches promoted
+  constructors structurally.
 - **A non-terminating family is rejected**, not run forever: reduction
   is fuel-bounded and reports "type family did not terminate". GHC has a
   reduction-depth limit too (`-freduction-depth`).

@@ -364,13 +364,27 @@ User-defined closed type families (equation-based reduction) are also supported.
 
 \subsection{DataKinds}
 
-Promoted constructors serve as type-level tags:
+A parameterless, non-GADT data type promotes to a REAL kind named after
+it (\texttt{Kind::Promoted}): \texttt{data Nat = Z | S Nat} gives the
+kind \texttt{Nat} with \texttt{'Z :: Nat} and \texttt{'S :: Nat -> Nat}
+(the builtin \texttt{Bool} promotes too). The promoted constructor kinds
+are registered before \texttt{infer\_declared\_kinds}, so an index
+variable's kind is inferred from a promoted constructor in a GADT return
+type, and a wrong-kind index is a clear error:
 \begin{lstlisting}[language=MLL]
-data Safety = Safe | Unsafe
-data Handle (s :: Safety) = MkHandle String
+data Nat = Z | S Nat
+data Vec n a where          -- n : Nat inferred from 'Z / 'S below
+    VNil  :: Vec 'Z a
+    VCons :: a -> Vec n a -> Vec ('S n) a
 
-lock :: Handle 'Unsafe -> Handle 'Safe
+bad :: Vec 'True Integer -> Integer   -- kind error: 'True :: Bool, not Nat
 \end{lstlisting}
+mata-ll has no kind-signature syntax (no \texttt{data Handle (s ::
+Safety)}), so a promoted index is pinned through a GADT constructor
+return type as above. Limits: parameterised / GADT data types keep the
+older \texttt{Type -> ... -> Type} approximation for their promoted
+constructors (a precise promotion would need kind polymorphism), and a
+non-GADT phantom parameter's kind defaults to \texttt{Type}.
 
 %----------------------------------------------------------------------
 \section{FFI}

@@ -38,6 +38,20 @@
 //! `Checker::class_kinds` (builtin classes are seeded in `init_kinds`; user
 //! classes are inferred by `infer_class_kinds`), parallel to the constructor
 //! kind table `Checker::kinds`.
+//!
+//! PROMOTED KINDS (DataKinds): a parameterless, non-GADT data type promotes to
+//! a real kind named after it — `data Nat = Z | S Nat` gives the kind `Nat`
+//! (`Kind::Promoted("Nat")`), with `'Z :: Nat` and `'S :: Nat -> Nat`. Those
+//! promoted constructor kinds are registered (`register_data_type` /
+//! `promoted_constructor_kind`) BEFORE `infer_declared_kinds` runs, so an index
+//! variable's kind is inferred from a promoted constructor in a GADT return
+//! type: `n : Nat` from `VNil :: Vec 'Z a`. An index at the wrong promoted kind
+//! (`Vec 'True`, `'True :: Bool`) is then a `Nat`-vs-`Bool` kind error, and a
+//! natural-number type family is checked at `Nat -> … -> Nat`. Parameterised
+//! and GADT data types keep the older `Type -> … -> Type` approximation for
+//! their promoted constructors (promoting them precisely would need kind
+//! polymorphism); and a non-GADT phantom parameter still defaults to `Type`
+//! (no kind-signature syntax to say otherwise — pin the index with a GADT).
 
 use super::*;
 
@@ -99,7 +113,7 @@ impl KindCtx {
                 None => k.clone(),
             },
             Kind::Arrow(a, b) => Kind::arrow(self.zonk(a), self.zonk(b)),
-            Kind::Type | Kind::Symbol => k.clone(),
+            Kind::Type | Kind::Symbol | Kind::Promoted(_) => k.clone(),
         }
     }
 
@@ -109,7 +123,7 @@ impl KindCtx {
         match k {
             Kind::Var(other) => *other == id,
             Kind::Arrow(a, b) => Self::occurs(id, a) || Self::occurs(id, b),
-            Kind::Type | Kind::Symbol => false,
+            Kind::Type | Kind::Symbol | Kind::Promoted(_) => false,
         }
     }
 
@@ -120,6 +134,10 @@ impl KindCtx {
         let b = self.zonk(b);
         match (a, b) {
             (Kind::Type, Kind::Type) | (Kind::Symbol, Kind::Symbol) => Ok(()),
+            // Two promoted kinds unify only when they name the same data type:
+            // `Nat` and `Bool` are distinct kinds (this is what rejects a
+            // `Bool`-tagged index where a `Nat` one is required).
+            (Kind::Promoted(x), Kind::Promoted(y)) if x == y => Ok(()),
             (Kind::Var(i), k) | (k, Kind::Var(i)) => {
                 if k == Kind::Var(i) {
                     Ok(())
@@ -145,6 +163,7 @@ impl KindCtx {
         match self.zonk(k) {
             Kind::Var(_) => Kind::Type,
             Kind::Arrow(a, b) => Kind::arrow(self.default(&a), self.default(&b)),
+            // Type, Symbol, Promoted are already ground.
             other => other,
         }
     }
@@ -284,7 +303,7 @@ impl Checker {
                         }
                         res
                     }
-                    Kind::Type | Kind::Symbol => {
+                    Kind::Type | Kind::Symbol | Kind::Promoted(_) => {
                         if kctx.report {
                             // A VARIABLE head only reaches kind Type through
                             // another use in the same declaration — say so,
@@ -724,6 +743,11 @@ impl Checker {
         }
 
         // Step 3: default what nothing constrained and finalize the tables.
+        // An unconstrained parameter (a phantom, never used in a field)
+        // defaults to `Type`, matching GHC without a kind signature — so a
+        // promoted tag of a non-`Type` kind cannot be an index of a phantom
+        // parameter (pin the index via a GADT constructor return type instead;
+        // see the note in CAVEATS/HASKDIFF and the `datakinds.mll` pattern).
         for name in declared {
             if let Some(kind) = self.kinds.get(&name).cloned() {
                 self.kinds.insert(name, kctx.default(&kind));

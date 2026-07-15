@@ -162,6 +162,15 @@ pub struct Checker {
     /// type family) is inferred by `infer_declared_kinds` (typechecker/kind.rs)
     /// before pass 1 registers anything else.
     kinds: HashMap<String, Kind>,
+    /// Names of data types that promote to a REAL kind under DataKinds: the
+    /// parameterless, non-GADT, non-existential ones (so their promoted kind is
+    /// monomorphic — `Nat`, `Color`, plus the builtin `Bool`). A promoted
+    /// constructor of such a type gets a `Kind::Promoted` result kind, and its
+    /// field types are promoted to kinds through this same set. Every other
+    /// data type keeps the historical `Type -> … -> Type` approximation for its
+    /// promoted constructors (promoting them would need kind polymorphism).
+    /// Computed at the start of `check_module`; seeded with `Bool`.
+    promotable_kinds: HashSet<String>,
     /// Class-variable kind table: class name -> the kind its type variable
     /// was inferred at (Show's `a` is Type, Foldable's `t` is Type -> Type).
     /// The class-side counterpart of `kinds`: builtin classes are seeded in
@@ -296,6 +305,7 @@ impl Checker {
             tf_reported_divergence: false,
             type_aliases: HashMap::new(),
             kinds: HashMap::new(),
+            promotable_kinds: HashSet::from(["Bool".to_string()]),
             class_kinds: HashMap::new(),
             hidden_names: HashSet::new(),
             enforce_hidden: false,
@@ -1728,6 +1738,46 @@ impl Checker {
         // Int as alias for Integer (Lua has no fixed-width integers)
         self.type_aliases.insert("Int".to_string(),
             (vec![], Type::Con("Integer".to_string())));
+
+        // The builtin `Bool` promotes (DataKinds) like any parameterless data
+        // type: `'True`/`'False` have kind `Bool`. `Bool` is already in
+        // `promotable_kinds` (seeded in `new`); register the promoted
+        // constructor kinds so a `Bool`-kinded index is recognized (and a
+        // `Bool` tag used where a `Nat` is expected is a clear kind error).
+        self.kinds.insert("'True".to_string(), Kind::Promoted("Bool".to_string()));
+        self.kinds.insert("'False".to_string(), Kind::Promoted("Bool".to_string()));
+    }
+
+    /// The kind a data type's promoted constructor `con` receives: its result
+    /// is the promoted kind `Promoted(data_type)`, preceded by one arrow per
+    /// field, each field type promoted to a kind via `promote_field_kind`. So
+    /// `Z` (of `Nat`) gives `Nat`, and `S Nat` gives `Nat -> Nat`. Only called
+    /// for promotable (parameterless, non-GADT) data types.
+    fn promoted_constructor_kind(&self, con: &Constructor, data_type: &str) -> Kind {
+        let field_types: Vec<&Type> = match &con.fields {
+            ConstructorFields::Positional(tys) => tys.iter().collect(),
+            ConstructorFields::Named(fields) => fields.iter().map(|f| &f.ty).collect(),
+        };
+        let mut kind = Kind::Promoted(data_type.to_string());
+        for ft in field_types.iter().rev() {
+            kind = Kind::arrow(self.promote_field_kind(ft), kind);
+        }
+        kind
+    }
+
+    /// Promote a constructor field TYPE to the KIND it contributes to the
+    /// promoted constructor. A field whose type is itself a promotable data
+    /// type (`Nat` in `S Nat`) promotes to that type's kind (`Nat`); anything
+    /// else (a builtin like `Integer`, a compound type) is approximated as
+    /// `Type` — such a field is not a usable type-level index anyway, and the
+    /// constructor's RESULT kind (what indexing checks against) is still exact.
+    fn promote_field_kind(&self, ty: &Type) -> Kind {
+        match ty {
+            Type::Con(name) if self.promotable_kinds.contains(name) =>
+                Kind::Promoted(name.clone()),
+            Type::Paren(inner) => self.promote_field_kind(inner),
+            _ => Kind::Type,
+        }
     }
 
     /// Get the kind of a type constructor, or infer Type for unknowns.
@@ -1956,18 +2006,29 @@ impl Checker {
             .collect();
         let result_type = tvars.iter().fold(Ty::Con(name.to_string()), |acc, tv| Ty::app(acc, Ty::Var(tv.clone())));
 
-        // DataKinds: register promoted constructors with appropriate kinds
-        // Nullary constructors get Kind::Type; constructors with N fields
-        // get Kind::Arrow^N(Type, Type) so they can be applied at the type level.
+        // DataKinds: register the kinds of this type's promoted constructors.
+        // A promotable data type (parameterless, non-GADT, non-existential —
+        // see `promotable_kinds`) promotes to a REAL kind named after it, so
+        // its constructors get promoted kinds ending in that kind (`'Z :: Nat`,
+        // `'S :: Nat -> Nat`). Every other data type keeps the historical
+        // approximation: each promoted constructor with N fields gets
+        // `Type -> … -> Type` (promoting it precisely would need kind
+        // polymorphism, which mata-ll does not have).
+        let promotable = self.promotable_kinds.contains(name);
         for con in constructors {
-            let field_count = match &con.fields {
-                crate::ast::ConstructorFields::Positional(fs) => fs.len(),
-                crate::ast::ConstructorFields::Named(fs) => fs.len(),
+            let kind = if promotable {
+                self.promoted_constructor_kind(con, name)
+            } else {
+                let field_count = match &con.fields {
+                    crate::ast::ConstructorFields::Positional(fs) => fs.len(),
+                    crate::ast::ConstructorFields::Named(fs) => fs.len(),
+                };
+                let mut kind = Kind::Type;
+                for _ in 0..field_count {
+                    kind = Kind::Arrow(Box::new(Kind::Type), Box::new(kind));
+                }
+                kind
             };
-            let mut kind = Kind::Type;
-            for _ in 0..field_count {
-                kind = Kind::Arrow(Box::new(Kind::Type), Box::new(kind));
-            }
             self.kinds.insert(format!("'{}", con.name), kind);
         }
 
@@ -2210,6 +2271,33 @@ impl Checker {
             }
         }
         self.build_ty_families();
+
+        // Determine which data types promote to a REAL kind (DataKinds): the
+        // parameterless, non-GADT, non-existential ones — so the promoted kind
+        // is monomorphic (`Nat`, `Color`, …). Do this BEFORE `infer_declared_kinds`
+        // and pass 1, and register the promoted constructor kinds now, so the
+        // kind-inference prepass can infer an index variable's kind from a
+        // promoted constructor in a GADT return type (`n : Nat` from `Vec 'Z a`).
+        for decl in &module.decls {
+            if let Decl::DataDef { name, type_vars, constructors, .. } = decl {
+                let promotable = type_vars.is_empty()
+                    && constructors.iter().all(|c|
+                        c.gadt_type.is_none() && c.existential_vars.is_empty());
+                if promotable {
+                    self.promotable_kinds.insert(name.clone());
+                }
+            }
+        }
+        for decl in &module.decls {
+            if let Decl::DataDef { name, constructors, .. } = decl {
+                if self.promotable_kinds.contains(name) {
+                    for con in constructors {
+                        let kind = self.promoted_constructor_kind(con, name);
+                        self.kinds.insert(format!("'{}", con.name), kind);
+                    }
+                }
+            }
+        }
 
         // Pass 1a: infer the kind of everything the module declares at the
         // type level (data, newtype, alias, type family), solving all their

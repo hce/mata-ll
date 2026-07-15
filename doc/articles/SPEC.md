@@ -348,10 +348,17 @@ purpose:
     instance Foldable [a] where ...         -- KIND ERROR: [a] : Type
     instance Show Maybe where ...           -- KIND ERROR: Show wants Type
 
-Promoted data constructors (DataKinds, see below) are approximated at
-kind `Type` (a promoted constructor with N fields is
-`Type -> ... -> Type`); mata-ll does not track promoted kinds like
-`Nat` separately.
+Promoted data types (DataKinds, see below) have REAL kinds. A
+parameterless data type `T` promotes to a kind named `T`: `data Nat =
+Z | S Nat` gives the kind `Nat` with `'Z :: Nat` and `'S :: Nat -> Nat`
+(and the builtin `Bool` promotes, `'True`/`'False :: Bool`). An index is
+checked to have exactly that kind, so `Vec 'True Integer` is a kind
+error (expected `Nat`, got `Bool`). Two limits: only parameterless,
+non-GADT data types promote (others keep the `Type` approximation, as
+promoting them would need kind polymorphism), and — with no kind-
+signature syntax — a non-GADT phantom parameter's kind defaults to
+`Type`, so a promoted tag of another kind must be pinned through a GADT
+constructor return type (as `Vec`, `Light`, `Input` do below).
 
 ## The engage restriction (spec-level "Fn")
 
@@ -597,9 +604,9 @@ matches is *stuck*: it is left irreducible and deferred, not an error.
 Families are NOT assumed injective — `F a ~ F b` does not imply
 `a ~ b` — so two distinct stuck applications do not unify. A
 non-terminating family (`Loop x = Loop x`) is reported as a
-"did not terminate" error rather than looping. (What is NOT yet
-supported: promoting `Nat` to a real kind — `'S`/`'Z` are classified
-at kind `Type`, as with all DataKinds promotion here.)
+"did not terminate" error rather than looping. The family above is
+kind-checked at `Plus :: Nat -> Nat -> Nat` (see the Kinds section on
+promoted data types), so `Plus 'True 'Z` is a kind error.
 
 ## FFI using type families
 
