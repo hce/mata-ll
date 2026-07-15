@@ -310,9 +310,13 @@ silent prepass (\texttt{infer\_declared\_kinds}, before pass~1 of
 provisional kind built from fresh kind variables, walks all their
 bodies against one shared substitution (so mutually recursive
 declarations constrain each other), then defaults leftover variables to
-\texttt{Type} --- Haskell-2010 defaulting.  Class-variable kinds are
-inferred from method signatures in \texttt{register\_class} and stored
-in \texttt{Checker::class\_kinds} (builtins are seeded in
+\texttt{Type} --- Haskell-2010 defaulting.  A second such prepass
+(\texttt{infer\_class\_kinds}, pass~1b) infers every class's
+type-variable kind the same way --- provisional variables plus one
+shared substitution --- from both the method signatures AND the
+superclasses, so the result is order-independent (a superclass declared
+\emph{after} its subclass still constrains it).  Results are stored in
+\texttt{Checker::class\_kinds} (builtins are seeded in
 \texttt{init\_kinds}: the container classes at \texttt{Type -> Type}).
 Reporting walks then kind-check every written type --- signatures, data
 fields, class methods, instance heads and contexts, alias and family

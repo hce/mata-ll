@@ -4581,6 +4581,141 @@ fn higher_kinded_class_variable_inferred_from_constraint() {
     );
 }
 
+// --- Adversarial kind-inference probes --------------------------------------
+// These stress the two load-bearing assumptions in typechecker/kind.rs that
+// cannot be trusted on inspection alone: (1) class-variable kind inference is
+// ORDER-INDEPENDENT — a superclass declared later in the module still
+// constrains its subclass's kind (this exercised a real bug that is now
+// fixed by the shared-substitution `infer_class_kinds` prepass); (2) the
+// silent-inference / reporting-check two-phase contract never SWALLOWS an
+// ill-kinded declaration — a wrongly-registered first-solution kind must not
+// let a later check spuriously pass.
+
+#[test]
+fn kind_class_var_from_superclass_declared_after_is_order_independent() {
+    // The adversarial case for `infer_class_kinds`: `Sub`'s own method does
+    // NOT mention its type variable `t`, so the method signatures cannot pin
+    // `t`'s kind. The kind is knowable ONLY through the superclass `Super t`,
+    // which forces `t : Type -> Type` (`op :: t Integer -> Integer`) — and
+    // `Super` is declared AFTER `Sub` in source order. Before the
+    // shared-substitution prepass, `Sub`'s `t` wrongly defaulted to `Type`
+    // (the later superclass was skipped), so this exact program failed while
+    // the superclass-first spelling compiled. Both orders must now behave
+    // identically: `Sub`'s `t` is `Type -> Type`, and an instance on a
+    // `Type -> Type` type (Box) is accepted.
+    let after = "class Super t => Sub t where\n    marker :: Integer\n\nclass Super t where\n    op :: t Integer -> Integer\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
+    assert!(
+        mllc::compile(after, Path::new("."), &[]).is_ok(),
+        "subclass kind must be inferred from a superclass declared LATER (was order-dependent)"
+    );
+
+    // Control: the SAME program with the superclass declared first. This
+    // always worked; it must keep working, and both orders must agree.
+    let before = "class Super t where\n    op :: t Integer -> Integer\n\nclass Super t => Sub t where\n    marker :: Integer\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
+    assert!(
+        mllc::compile(before, Path::new("."), &[]).is_ok(),
+        "control: superclass-first ordering must still compile"
+    );
+}
+
+#[test]
+fn kind_class_var_from_superclass_after_still_rejects_wrong_instance() {
+    // Proves the fix infers the RIGHT kind, not merely "accepts everything":
+    // with `Sub`'s `t` correctly `Type -> Type` (from a superclass declared
+    // after), an instance head at kind `Type` (Integer) is still a kind
+    // error. A regression that made class kinds default to `Type` would make
+    // this program compile — this test would then fail loudly.
+    let e = compile_err(
+        "class Super t => Sub t where\n    marker :: Integer\n\nclass Super t where\n    op :: t Integer -> Integer\n\ninstance Sub Integer where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("'instance Sub Integer' is ill-kinded"), "got: {e}");
+    assert!(
+        e.contains("use its type variable 't' at kind Type -> Type"),
+        "got: {e}"
+    );
+}
+
+#[test]
+fn kind_class_genuine_superclass_conflict_is_reported() {
+    // A genuine, unsatisfiable conflict: `Sub`'s own method uses `t` bare
+    // (`bad :: t -> Integer`, so `t : Type`) while its superclass `Super`
+    // uses it applied (`op :: t Integer -> Integer`, so `t : Type -> Type`).
+    // The two constraints share one variable and cannot both hold. The
+    // silent prepass keeps a first solution; the reporting pass 2b MUST
+    // still surface the clash rather than swallow it.
+    let e = compile_err(
+        "class Super t => Sub t where\n    bad :: t -> Integer\n\nclass Super t where\n    op :: t Integer -> Integer\n\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("Kind error"), "conflict must not be swallowed, got: {e}");
+}
+
+#[test]
+fn kind_mutually_recursive_data_conflict_is_reported() {
+    // Two mutually-recursive data types whose parameter kinds conflict
+    // THROUGH the shared substitution: `P a` uses `a` applied (`a Integer`,
+    // so `a : Type -> Type`) and references `Q a`; `Q b` uses `b` bare
+    // (a field of type `b`, so `b : Type`) and references `P b`. The
+    // cross-references force `P`'s and `Q`'s parameters to the same kind,
+    // which is simultaneously `Type` and `Type -> Type`. The silent prepass
+    // registers a first-solution kind for each; the reporting checking pass
+    // must still find the conflict.
+    let e = compile_err(
+        "data P a = MkP (a Integer) (Q a)\ndata Q b = MkQ b (P b)\n\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("Kind error"), "mutual conflict must not be swallowed, got: {e}");
+}
+
+#[test]
+fn kind_ill_kinded_use_at_wrong_arity_surfaces_at_use_site() {
+    // `T` is legitimately higher-kinded: `data T a = MkT (a Integer)` gives
+    // `T : (Type -> Type) -> Type` (a valid kind, no error at T itself).
+    // A LATER declaration then applies it at the wrong argument kind
+    // (`T Integer`, where `Integer : Type`). The registered kind of `T` must
+    // drive the check at the use site so the misuse surfaces there — the
+    // first (well-kinded) declaration must not mask the second's error.
+    let e = compile_err(
+        "data T a = MkT (a Integer)\ndata U = MkU (T Integer)\n\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(
+        e.contains("'T' needs an argument of kind Type -> Type, but 'Integer' has kind Type"),
+        "got: {e}"
+    );
+    assert!(e.contains("in the definition of data type 'U'"), "got: {e}");
+}
+
+#[test]
+fn kind_intra_declaration_conflict_caught_in_both_field_orders() {
+    // One constructor that uses its parameter at two kinds — bare AND
+    // applied — in the SAME declaration. This must be a kind error no matter
+    // which field comes first, so the silent prepass's arbitrary
+    // first-solution choice cannot mask the conflict.
+    let e_bare_first = compile_err(
+        "data Bad a = MkBad a (a Integer)\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e_bare_first.contains("Kind error"), "bare-first order, got: {e_bare_first}");
+
+    let e_applied_first = compile_err(
+        "data Bad2 a = MkBad2 (a Integer) a\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e_applied_first.contains("Kind error"), "applied-first order, got: {e_applied_first}");
+}
+
+#[test]
+fn kind_phantom_param_defaults_to_type_and_higher_kinded_use_rejected() {
+    // A phantom parameter that no field constrains defaults to `Type`
+    // (GHC-consistent: without a use it is `Type`). A later use at a
+    // higher kind (`Phantom Maybe`, where `Maybe : Type -> Type`) is then a
+    // kind error caught at the use site — the default must not be silently
+    // widened to fit the use.
+    let e = compile_err(
+        "data Phantom a = MkPhantom Integer\nuseHK :: Phantom Maybe -> Integer\nuseHK _ = 0\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(
+        e.contains("'Phantom' needs an argument of kind Type, but 'Maybe' has kind Type -> Type"),
+        "got: {e}"
+    );
+}
+
 // Top-level redefinition of a name the Prelude/builtins provide. Historically
 // the collision surfaced as unification errors at Prelude-internal source
 // lines ("in clause 2 of 'assert'" at 15:8 for a redefined `error`), blaming

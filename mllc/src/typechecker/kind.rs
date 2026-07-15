@@ -16,12 +16,14 @@
 //!   `check_module` and computes the kind of every data type, newtype, type
 //!   alias and type family in the merged module, handling mutual recursion by
 //!   solving all their constraints against one shared substitution.
-//!   `infer_class_var_kind` does the same for a class declaration's type
-//!   variable, from how the variable is used in the method signatures (in
+//!   `infer_class_kinds` (pass 1b) does the same for class declarations: it
+//!   infers every class's type-variable kind together, from how the variable
+//!   is used in the method signatures (in
 //!   `class Foldable t where foldr :: (a -> b -> b) -> b -> t a -> b`, the
 //!   use `t a` at a complete-type position forces `t : Type -> Type` — no
-//!   annotation needed). Failures are NOT reported here; the checking walk
-//!   below re-finds them with the final kinds and better context.
+//!   annotation needed) AND from superclass agreement, order-independently.
+//!   Failures are NOT reported here; the checking walk below re-finds them
+//!   with the final kinds and better context.
 //!
 //! * CHECKING (reporting): pass 2b and pass 3 of `check_module` walk every
 //!   type the user wrote — data fields, newtype bodies, alias bodies, class
@@ -34,7 +36,7 @@
 //! Foldable's `t : Type -> Type`, while `instance Foldable Integer` and
 //! `instance Show Maybe` are kind errors. Class kinds live in
 //! `Checker::class_kinds` (builtin classes are seeded in `init_kinds`; user
-//! classes are inferred in `register_class`), parallel to the constructor
+//! classes are inferred by `infer_class_kinds`), parallel to the constructor
 //! kind table `Checker::kinds`.
 
 use super::*;
@@ -523,39 +525,77 @@ impl Checker {
         seed
     }
 
-    /// Infer a class's type-variable kind from its superclasses and from how
-    /// the variable is used in the method signatures. Silent: any genuinely
-    /// conflicting use keeps the first solution here and is reported by the
-    /// checking walk in pass 2b (which seeds the class variable with this
-    /// result, so the deviating method gets the error).
-    pub(super) fn infer_class_var_kind(
-        &mut self,
-        type_var: &str,
-        superclasses: &[String],
-        methods: &[ClassMethod],
-    ) -> Kind {
+    /// Infer the type-variable kind of EVERY class the module declares —
+    /// BEFORE pass 2 registers them — solving all their constraints against
+    /// one shared substitution so the result does not depend on declaration
+    /// order.
+    ///
+    /// A class variable's kind is pinned by two things: how the variable is
+    /// used in the method signatures (`foldr :: … -> t a -> b` forces
+    /// `t : Type -> Type`), and its superclasses (`class Super t => Sub t`
+    /// makes Sub's `t` share Super's kind — the constraint applies the same
+    /// variable). The subtle case is a subclass whose OWN methods never pin
+    /// the variable's kind (they may not even mention it), so the kind is
+    /// knowable only through a superclass: if that superclass is declared
+    /// LATER in the module, a naive per-class pass would not yet know its
+    /// kind and would wrongly default the subclass to `Type`. Giving every
+    /// class a provisional kind variable up front and unifying against the
+    /// shared substitution fixes both the forward and backward reference,
+    /// exactly as `infer_declared_kinds` does for data types.
+    ///
+    /// Silent by design: a genuinely conflicting class declaration keeps its
+    /// first-solved kind here, and the checking walk in pass 2b (seeded with
+    /// this result) reports the deviating method where the user can see it.
+    pub(super) fn infer_class_kinds(&mut self, decls: &[Decl]) {
         let mut kctx = KindCtx::new(false);
-        let kv = kctx.fresh();
-        // `class Functor f => C f`: the superclass constraint applies its
-        // class to the same variable, so the kinds must agree. A superclass
-        // declared later in the module is skipped (its kind is not known
-        // yet); the method signatures almost always pin the kind anyway.
-        for sup in superclasses {
-            if self.class_kinds.contains_key(sup) {
-                let sk = self.class_kind_of(sup);
-                let _ = kctx.unify(&kv, &sk);
+
+        // Step 1: a provisional kind variable for every class this module
+        // declares, registered so cross-references (a superclass declared
+        // either before OR after) resolve to the same shared variable.
+        let mut class_kv: HashMap<String, Kind> = HashMap::new();
+        let mut declared: Vec<String> = Vec::new();
+        for decl in decls {
+            if let Decl::ClassDecl { name, .. } = decl {
+                let kv = kctx.fresh();
+                class_kv.insert(name.clone(), kv.clone());
+                self.class_kinds.insert(name.clone(), kv);
+                declared.push(name.clone());
             }
         }
-        for method in methods {
-            // Each method signature is its own scope for ITS variables, but
-            // the class variable's kind is shared across all of them.
-            let mut seed = HashMap::new();
-            seed.insert(type_var.to_string(), kv.clone());
-            kctx.begin_scope(seed);
-            let mk = self.infer_type_kind(&method.ty, &mut kctx, "");
-            let _ = kctx.unify(&mk, &Kind::Type);
+
+        // Step 2: walk every class against the shared substitution.
+        for decl in decls {
+            if let Decl::ClassDecl { name, type_var, superclasses, methods } = decl {
+                let kv = class_kv[name].clone();
+                // A superclass constrains the SAME variable, so their kinds
+                // must agree. Its kind is the provisional variable when the
+                // superclass is declared in this module (order-independent),
+                // otherwise the finalized/builtin kind.
+                for sup in superclasses {
+                    let sk = class_kv.get(sup)
+                        .cloned()
+                        .unwrap_or_else(|| self.class_kind_of(sup));
+                    let _ = kctx.unify(&kv, &sk);
+                }
+                for method in methods {
+                    // Each method signature is its own scope for ITS
+                    // variables, but the class variable's kind is shared
+                    // across all of them and across the superclasses.
+                    let mut seed = HashMap::new();
+                    seed.insert(type_var.to_string(), kv.clone());
+                    kctx.begin_scope(seed);
+                    let mk = self.infer_type_kind(&method.ty, &mut kctx, "");
+                    let _ = kctx.unify(&mk, &Kind::Type);
+                }
+            }
         }
-        kctx.default(&kv)
+
+        // Step 3: default what nothing constrained and finalize the table.
+        for name in declared {
+            if let Some(kind) = self.class_kinds.get(&name).cloned() {
+                self.class_kinds.insert(name, kctx.default(&kind));
+            }
+        }
     }
 
     /// Infer the kinds of every data type, newtype, type alias and type

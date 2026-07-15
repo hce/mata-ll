@@ -285,15 +285,11 @@ impl Checker {
     // --- Typeclass handling ---
 
     pub(super) fn register_class(&mut self, name: &str, type_var: &str, superclasses: &[String], methods: &[ClassMethod]) {
-        // Infer the class variable's kind from the method signatures (and
-        // superclasses): `class Foldable t where foldr :: … -> t a -> b`
-        // forces `t : Type -> Type` from the use `t a`, with no annotation.
-        // Instance heads are later checked against this kind. Silent — an
-        // inconsistent class declaration is reported by pass 2b's method
-        // checks, which seed the class variable with this result.
-        let class_kind = self.infer_class_var_kind(type_var, superclasses, methods);
-        self.class_kinds.insert(name.to_string(), class_kind);
-
+        // The class variable's kind was already inferred, order-independently
+        // and with superclass agreement, by `infer_class_kinds` (pass 1b)
+        // and lives in `class_kinds`. `class Foldable t where foldr :: … ->
+        // t a -> b` gives `t : Type -> Type` from the use `t a`, with no
+        // annotation. Instance heads are later checked against this kind.
         let tv = TyVar { name: type_var.to_string(), id: u32::MAX };
         let mut method_types = Vec::new();
         let mut default_methods = HashMap::new();

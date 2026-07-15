@@ -151,8 +151,10 @@ pub struct Checker {
     /// Class-variable kind table: class name -> the kind its type variable
     /// was inferred at (Show's `a` is Type, Foldable's `t` is Type -> Type).
     /// The class-side counterpart of `kinds`: builtin classes are seeded in
-    /// `init_kinds`, user classes inferred from their method signatures in
-    /// `register_class`. Instance heads are checked against this.
+    /// `init_kinds`, user classes inferred order-independently from their
+    /// method signatures and superclasses by `infer_class_kinds` (pass 1b,
+    /// before pass 2 registers the classes). Instance heads are checked
+    /// against this.
     class_kinds: HashMap<String, Kind>,
     /// Names hidden by module export control (imported but not exported).
     /// Only enforced when `enforce_hidden` is true (local code, not imported code).
@@ -1693,7 +1695,7 @@ impl Checker {
         // Bounded, Read, Semigroup, Monoid) constrains complete types and
         // defaults to Type via `class_kind_of`, so only the higher-kinded
         // ones need an entry. User-declared classes get their kind inferred
-        // from their method signatures in `register_class`.
+        // from their method signatures and superclasses by `infer_class_kinds`.
         for name in &["Functor", "Applicative", "Monad", "Foldable", "Traversable"] {
             self.class_kinds.insert(name.to_string(), type_to_type.clone());
         }
@@ -2208,6 +2210,15 @@ impl Checker {
         }
         self.checking_local = false;
         self.checking_prelude = false;
+
+        // Pass 1b: infer the type-variable kind of every class the module
+        // declares, order-independently (a superclass declared later still
+        // constrains its subclass — see `infer_class_kinds`). Runs after
+        // pass 1 so method signatures can look up data-type kinds, and
+        // before pass 2 so `register_class` and every instance-head kind
+        // check read the finalized `class_kinds` table. Silent — an
+        // inconsistent class is reported by pass 2b.
+        self.infer_class_kinds(&module.decls);
 
         // Pass 2: register typeclass declarations and type families
         for decl in &module.decls {
