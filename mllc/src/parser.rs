@@ -1373,6 +1373,17 @@ impl Parser {
             }
             Token::LeftBracket => {
                 self.advance();
+                // The bare, UNAPPLIED list constructor `[]` (kind
+                // Type -> Type), for positions that need the constructor
+                // itself rather than a list of something — chiefly instance
+                // heads: `instance Foldable []`. The typechecker registers
+                // the list constructor as `Con "[]"`, so this wires straight
+                // into instance resolution (InstHead::List). `[a]` below
+                // stays the ordinary applied list type.
+                if self.at(&Token::RightBracket) {
+                    self.advance();
+                    return Ok(Type::Con("[]".to_string()));
+                }
                 let inner = self.parse_type()?;
                 self.expect(&Token::RightBracket)?;
                 Ok(Type::List(Box::new(inner)))

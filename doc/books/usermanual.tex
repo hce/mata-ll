@@ -536,6 +536,46 @@ interop --- see Section~\ref{sec:luadict}.
 \bottomrule
 \end{tabular}
 
+\subsection{Kinds and Higher-Kinded Classes}
+
+Kinds classify types the way types classify values: a complete type
+such as \texttt{Integer} or \texttt{Maybe String} has kind
+\texttt{Type}, while a type constructor that still needs arguments has
+an arrow kind (\texttt{Maybe} is \texttt{Type -> Type}, \texttt{Either}
+is \texttt{Type -> Type -> Type}). There is no syntax for kinds ---
+the compiler infers every kind from how a type or class variable is
+used, and anything unconstrained defaults to \texttt{Type}.
+
+A class variable's kind comes from the method signatures. In
+
+\begin{lstlisting}
+class Collapse t where
+    collapse :: t Integer -> Integer
+\end{lstlisting}
+
+the use \texttt{t Integer} forces \texttt{t} to kind
+\texttt{Type -> Type}, so instances must supply a type
+\emph{constructor}, not a complete type. The bare, unapplied list
+constructor is written \texttt{[]}, and constructors may be partially
+applied:
+
+\begin{lstlisting}
+instance Collapse [] where ...          -- lists
+instance Collapse Maybe where ...
+instance Collapse (Either c) where ...  -- Either, one argument short
+
+instance Collapse [a] where ...       -- KIND ERROR: [a] is complete
+instance Collapse Integer where ...   -- KIND ERROR
+\end{lstlisting}
+
+Data types may take higher-kinded parameters the same way ---
+\texttt{data Wrap f = Wrap (f Integer)} infers \texttt{f} at
+\texttt{Type -> Type} --- and every type you write (signatures, fields,
+ascriptions) is kind-checked, so applying a complete type to an
+argument (\texttt{Maybe Integer Bool}) or using an unsaturated
+constructor where a complete type is required
+(\texttt{f :: Maybe -> Integer}) is a compile-time error.
+
 %======================================================================
 \section{Monads and IO}
 

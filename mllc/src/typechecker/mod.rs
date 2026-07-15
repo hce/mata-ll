@@ -6,6 +6,7 @@ use crate::types::*;
 mod solve;
 mod derive;
 mod infer;
+mod kind;
 
 /// Type environment: maps names to type schemes
 #[derive(Debug, Clone)]
@@ -142,8 +143,17 @@ pub struct Checker {
     type_families: HashMap<String, Vec<TypeFamilyEq>>,
     /// Type aliases: name -> (params, expanded type)
     type_aliases: HashMap<String, (Vec<String>, Type)>,
-    /// Kind table: type constructor name -> kind
+    /// Kind table: type constructor name -> kind. Builtins are seeded by
+    /// `init_kinds`; everything a module declares (data, newtype, alias,
+    /// type family) is inferred by `infer_declared_kinds` (typechecker/kind.rs)
+    /// before pass 1 registers anything else.
     kinds: HashMap<String, Kind>,
+    /// Class-variable kind table: class name -> the kind its type variable
+    /// was inferred at (Show's `a` is Type, Foldable's `t` is Type -> Type).
+    /// The class-side counterpart of `kinds`: builtin classes are seeded in
+    /// `init_kinds`, user classes inferred from their method signatures in
+    /// `register_class`. Instance heads are checked against this.
+    class_kinds: HashMap<String, Kind>,
     /// Names hidden by module export control (imported but not exported).
     /// Only enforced when `enforce_hidden` is true (local code, not imported code).
     hidden_names: HashSet<String>,
@@ -267,6 +277,7 @@ impl Checker {
             type_families: HashMap::new(),
             type_aliases: HashMap::new(),
             kinds: HashMap::new(),
+            class_kinds: HashMap::new(),
             hidden_names: HashSet::new(),
             enforce_hidden: false,
             local_decl_start: 0,
@@ -1245,22 +1256,13 @@ impl Checker {
             }]);
         }
 
-        // Foldable instances: [], Maybe, Either (folds over Right, like GHC).
-        // Tuples deliberately have no instance: the class variable has kind
+        // The Foldable instances for [], Maybe and Either (folds over Right,
+        // like GHC) are ordinary `instance Foldable …` declarations in
+        // Prelude.mll — the kind system checks their heads against the class
+        // variable's Type -> Type kind like any user instance. Tuples
+        // deliberately have no instance: the class variable has kind
         // Type -> Type and mata-ll has no partially-applied tuple constructor
         // (consistent with tuples having no Ord instance either).
-        for (tc_name, suffix) in &[("[]", "List"), ("Maybe", "Maybe"), ("Either", "Either")] {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("foldr".to_string(), format!("foldr_{}", suffix));
-            method_fns.insert("foldl".to_string(), format!("foldl_{}", suffix));
-            self.register_instance(InstanceInfo {
-                class_name: "Foldable".to_string(),
-                target_type: Ty::Con(tc_name.to_string()),
-                method_fns,
-                // Empty context, not None — see the Functor Either instance.
-                context: Some(vec![]),
-            });
-        }
 
         // Built-in Traversable typeclass (superclasses: Functor, Foldable)
         // traverse :: Applicative f => (a -> f b) -> t a -> f (t b)
@@ -1285,17 +1287,9 @@ impl Checker {
             TyConstraint { class_name: "Traversable".to_string(), type_var: "t".to_string() },
             TyConstraint { class_name: "Applicative".to_string(), type_var: "f".to_string() },
         ]);
-        for (tc_name, suffix) in &[("[]", "List"), ("Maybe", "Maybe"), ("Either", "Either")] {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("traverse".to_string(), format!("traverse_{}", suffix));
-            self.register_instance(InstanceInfo {
-                class_name: "Traversable".to_string(),
-                target_type: Ty::Con(tc_name.to_string()),
-                method_fns,
-                // Empty context, not None — see the Functor Either instance.
-                context: Some(vec![]),
-            });
-        }
+        // Like Foldable, the Traversable instances for [], Maybe and Either
+        // live in Prelude.mll as ordinary `instance Traversable …`
+        // declarations.
 
         // Built-in Enum typeclass
         // succ :: a -> a
@@ -1691,6 +1685,18 @@ impl Checker {
         self.kinds.insert("HashMap".to_string(),
             Kind::Arrow(Box::new(Kind::Type),
                 Box::new(Kind::Arrow(Box::new(Kind::Type), Box::new(Kind::Type)))));
+
+        // Builtin CLASS-variable kinds (see `class_kinds`). The container
+        // classes apply their variable to an element type in every method
+        // (`fmap :: (a -> b) -> f a -> f b`), so their variable is
+        // Type -> Type; every other builtin class (Show, Eq, Ord, Enum,
+        // Bounded, Read, Semigroup, Monoid) constrains complete types and
+        // defaults to Type via `class_kind_of`, so only the higher-kinded
+        // ones need an entry. User-declared classes get their kind inferred
+        // from their method signatures in `register_class`.
+        for name in &["Functor", "Applicative", "Monad", "Foldable", "Traversable"] {
+            self.class_kinds.insert(name.to_string(), type_to_type.clone());
+        }
         // Show instance for HashMap (uses Lua show fallback)
         self.register_instance(InstanceInfo {
             class_name: "Show".to_string(),
@@ -1745,100 +1751,21 @@ impl Checker {
         }
     }
 
-    /// Infer the kind of an AST type expression and report errors, including
-    /// references to type names that were never defined. `ctx` names the
-    /// declaration being checked for the error message.
-    fn check_type_kind(&mut self, ty: &Type, ctx: &str) -> Kind {
-        match ty {
-            Type::Con(name) => {
-                self.check_con_defined(name, ctx);
-                self.kind_of(name)
-            }
-            Type::Var(_) => Kind::Type, // type variables are assumed to be Type
-            Type::Arrow(a, b) => {
-                let ka = self.check_type_kind(a, ctx);
-                let kb = self.check_type_kind(b, ctx);
-                if ka != Kind::Type {
-                    self.push_error_ctx(
-                        DiagnosticKind::Other(format!("Kind error: argument of '->' has kind {}, expected Type", ka)),
-                        ctx.to_string(),
-                    );
-                }
-                if kb != Kind::Type {
-                    self.push_error_ctx(
-                        DiagnosticKind::Other(format!("Kind error: result of '->' has kind {}, expected Type", kb)),
-                        ctx.to_string(),
-                    );
-                }
-                Kind::Type
-            }
-            Type::App(f, a) => {
-                let kf = self.check_type_kind(f, ctx);
-                let _ka = self.check_type_kind(a, ctx);
-                match kf {
-                    Kind::Arrow(_, result) => *result,
-                    Kind::Type => {
-                        // Applying a Type-kinded thing — this is a kind error
-                        // but only report if it's a known constructor
-                        if let Type::Con(name) = f.as_ref()
-                            && self.kinds.contains_key(name) {
-                                self.push_error_ctx(
-                                    DiagnosticKind::Other(format!(
-                                        "Kind error: '{}' has kind Type and cannot be applied to an argument",
-                                        name
-                                    )),
-                                    ctx.to_string(),
-                                );
-                            }
-                        Kind::Type
-                    }
-                    _ => Kind::Type,
-                }
-            }
-            Type::List(a) | Type::IO(a) => {
-                self.check_type_kind(a, ctx);
-                Kind::Type
-            }
-            Type::Unit => Kind::Type,
-            Type::Tuple(elems) => {
-                for e in elems {
-                    self.check_type_kind(e, ctx);
-                }
-                Kind::Type
-            }
-            Type::ScopedLuaIO { inner, .. } => {
-                self.check_type_kind(inner, ctx);
-                Kind::Type
-            }
-            Type::LuaPure { result, .. }
-            | Type::LuaIO { result, .. }
-            | Type::LuaIterator { result, .. }
-            | Type::LuaTry { result, .. }
-            | Type::LuaCatch { result, .. }
-            | Type::LuaIOCatch { result, .. } => {
-                self.check_type_kind(result, ctx);
-                Kind::Type
-            }
-            Type::Paren(inner) => self.check_type_kind(inner, ctx),
-            Type::Forall { inner, .. } => self.check_type_kind(inner, ctx),
-            Type::Constrained { ty, .. } => self.check_type_kind(ty, ctx),
-            Type::Promoted(name) => {
-                let key = format!("'{}", name);
-                if let Some(kind) = self.kinds.get(&key).cloned() {
-                    kind
-                } else {
-                    self.push_error_ctx(
-                        DiagnosticKind::Other(format!("Unknown promoted constructor '{}'", name)),
-                        ctx.to_string(),
-                    );
-                    Kind::Type
-                }
-            }
-        }
-    }
+    // (Kind inference and the kind-checking walks live in typechecker/kind.rs:
+    // `check_type_kind` and its siblings replace the old per-declaration
+    // arity-based checks that lived here.)
 
-    /// Register a data type's kind based on its type parameters.
+    /// Fallback kind registration for a data type: `Type -> … -> Type` from
+    /// its parameter count. `infer_declared_kinds` (pass 1a) has already
+    /// registered the real, inferred kind for every declaration in the
+    /// module — which may be higher-kinded (`data Wrap f = Wrap (f Integer)`
+    /// gives `(Type -> Type) -> Type`) — so this only fills the gap if a
+    /// registration path was somehow not covered by that pass, and never
+    /// overwrites an inferred kind.
     fn register_kind(&mut self, name: &str, num_params: usize) {
+        if self.kinds.contains_key(name) {
+            return;
+        }
         let mut kind = Kind::Type;
         for _ in 0..num_params {
             kind = Kind::Arrow(Box::new(Kind::Type), Box::new(kind));
@@ -2248,6 +2175,14 @@ impl Checker {
         // Register hidden names from import export control
         self.hidden_names.extend(module.hidden.iter().cloned());
 
+        // Pass 1a: infer the kind of everything the module declares at the
+        // type level (data, newtype, alias, type family), solving all their
+        // constraints together so mutual recursion and cross-references work.
+        // Must run before pass 1: registration converts field types with
+        // these kinds in place, and every later kind check reads this table.
+        // Silent — ill-kinded declarations are reported by pass 2b.
+        self.infer_declared_kinds(&module.decls);
+
         // Pass 1: register type aliases, data types, and newtypes
         // Type aliases must be registered first so that data constructors
         // referencing aliases (e.g. `data Foo = Foo MyAlias`) expand correctly.
@@ -2299,7 +2234,7 @@ impl Checker {
         // later as a misleading missing-instance error.
         for decl in &module.decls {
             match decl {
-                Decl::DataDef { name, constructors, .. } => {
+                Decl::DataDef { name, type_vars, constructors, .. } => {
                     let ctx = format!("the definition of data type '{}'", name);
                     for con in constructors {
                         // Validate the constraints on this constructor's
@@ -2380,51 +2315,65 @@ impl Checker {
                                     }
                                 }
                             }
+                            // A GADT signature scopes its own type variables
+                            // (the header parameters are arity markers), so
+                            // it is checked as a standalone complete type.
                             self.check_type_kind(gadt_ty, &ctx);
                             continue;
                         }
-                        match &con.fields {
-                            ConstructorFields::Positional(tys) => {
-                                for t in tys {
-                                    self.check_type_kind(t, &ctx);
-                                }
-                            }
-                            ConstructorFields::Named(fields) => {
-                                for field in fields {
-                                    self.check_type_kind(&field.ty, &ctx);
-                                }
-                            }
-                        }
+                        // All of one constructor's fields share a scope: the
+                        // data parameters come in at their inferred kinds
+                        // (higher-kinded parameters included), and the
+                        // constructor's existential variables must be used
+                        // at one consistent kind across its fields.
+                        let field_types: Vec<&Type> = match &con.fields {
+                            ConstructorFields::Positional(tys) => tys.iter().collect(),
+                            ConstructorFields::Named(fields) =>
+                                fields.iter().map(|f| &f.ty).collect(),
+                        };
+                        let params = self.param_kind_seed(name, type_vars);
+                        self.check_constructor_kinds(&field_types, params, &ctx);
                     }
                 }
-                Decl::NewtypeDef { name, inner, .. } => {
-                    self.check_type_kind(inner, &format!("the definition of newtype '{}'", name));
+                Decl::NewtypeDef { name, type_vars, inner } => {
+                    let params = self.param_kind_seed(name, type_vars);
+                    self.check_constructor_kinds(
+                        &[inner],
+                        params,
+                        &format!("the definition of newtype '{}'", name),
+                    );
                 }
-                Decl::TypeAlias { name, ty, .. } => {
-                    self.check_type_kind(ty, &format!("the definition of type alias '{}'", name));
+                Decl::TypeAlias { name, params, ty } => {
+                    self.check_alias_kinds(
+                        name,
+                        params,
+                        ty,
+                        &format!("the definition of type alias '{}'", name),
+                    );
                 }
-                Decl::ClassDecl { name, methods, .. } => {
+                Decl::ClassDecl { name, type_var, methods, .. } => {
+                    // Each method is checked with the class variable at the
+                    // class's inferred kind, so a method that disagrees with
+                    // its siblings is the one that gets the error.
                     for method in methods {
-                        self.check_type_kind(
+                        self.check_class_method_kind(
+                            name,
+                            type_var,
                             &method.ty,
                             &format!("the signature of method '{}' in class '{}'", method.name, name),
                         );
                     }
                 }
-                Decl::InstanceDecl { class_name, target_type, .. } => {
-                    self.check_type_kind(
-                        target_type,
-                        &format!("the instance declaration 'instance {} …'", class_name),
-                    );
+                Decl::InstanceDecl { class_name, target_type, context, .. } => {
+                    // The head must have the class variable's kind, and the
+                    // context must use the head's variables consistently.
+                    self.check_instance_kind(class_name, target_type, context);
                 }
                 Decl::TypeFamily { name, equations } => {
-                    let ctx = format!("the definition of type family '{}'", name);
-                    for eq in equations {
-                        for arg in &eq.args {
-                            self.check_type_kind(arg, &ctx);
-                        }
-                        self.check_type_kind(&eq.result, &ctx);
-                    }
+                    self.check_family_kinds(
+                        equations,
+                        &format!("the definition of type family '{}'", name),
+                    );
                 }
                 _ => {}
             }
@@ -2434,6 +2383,11 @@ impl Checker {
         let mut sigs: HashMap<String, Ty> = HashMap::new();
         let mut ffi_info: HashMap<String, (String, FfiKind)> = HashMap::new();
         for decl in &module.decls {
+            // An export signature is a type the user wrote too; it must be a
+            // well-kinded complete type just like an ordinary signature.
+            if let Decl::ExportSig { name, ty } = decl {
+                self.check_type_kind(ty, &format!("the export signature for '{}'", name));
+            }
             if let Decl::TypeSig { name, ty } = decl {
                 // Kind-check the type signature (also rejects unknown type names)
                 self.check_type_kind(ty, &format!("the type signature for '{}'", name));

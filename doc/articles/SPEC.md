@@ -306,21 +306,60 @@ typeclasses with a single type argument for now.
 
 # Kinds
 
-MATA-LL supports a small, fixed set of kinds. There is no kind
-polymorphism and no promotion.
+MATA-LL has a full kind system. Kinds classify types the way types
+classify values:
 
-    Type   -- the kind of normal types (Integer, Bool, Maybe String, ...)
-    Symbol -- the kind of type-level strings, used in FFI declarations
-    Fn     -- the kind of function types ending in IO (a -> ... -> IO b)
+    Type          -- complete types (Integer, Bool, Maybe String, ...)
+    Symbol        -- type-level strings, used in FFI declarations
+    k1 -> k2      -- type constructors (Maybe : Type -> Type,
+                  --   Either : Type -> Type -> Type,
+                  --   [] : Type -> Type)
 
-Kind annotations use the `::` syntax within type signatures:
+There is no surface syntax for kinds: every kind is INFERRED from use,
+and anything left unconstrained defaults to `Type` (GHC's Haskell-2010
+kind defaulting). There is no kind polymorphism.
 
-    intrinsic engage :: LuaFunction s -> (a :: Fn)
+- A `data`/`newtype` parameter's kind comes from how the parameter is
+  used in the fields: `data Wrap f = Wrap (f Integer)` gives
+  `Wrap : (Type -> Type) -> Type`. Mutually recursive declarations are
+  solved together.
+- A class variable's kind comes from the method signatures:
+  in `class Foldable t where foldr :: (a -> b -> b) -> b -> t a -> b`
+  the use `t a` forces `t : Type -> Type`. A constraint fixes kinds the
+  same way (`Foldable t => …` makes `t : Type -> Type` in that
+  signature). Superclasses must agree with the subclass's variable kind.
+- Type aliases and type families get kinds from their definitions.
 
-`Fn` constrains `a` to types of the form `x -> ... -> IO y`. The
-compiler rejects any `a` that does not end in `IO`. This ensures
-that Lua functions called through `engage` are always treated as
-effectful.
+Every type the program writes is then kind-checked: signatures, data
+fields, class methods, instance declarations, type-family equations and
+expression ascriptions. Applying a complete type to an argument
+(`Maybe Integer Bool`), using an unsaturated constructor where a
+complete type is required (`f :: Maybe -> Integer`), and using one type
+variable at two kinds (`g :: t -> t a`) are all compile-time kind
+errors.
+
+An instance head must have exactly the kind of the class's variable.
+The bare, unapplied list constructor `[]` is valid type syntax for this
+purpose:
+
+    instance Foldable [] where ...          -- [] : Type -> Type
+    instance Foldable Maybe where ...       -- Maybe : Type -> Type
+    instance Foldable (Either c) where ...  -- partial application
+    instance Foldable [a] where ...         -- KIND ERROR: [a] : Type
+    instance Show Maybe where ...           -- KIND ERROR: Show wants Type
+
+Promoted data constructors (DataKinds, see below) are approximated at
+kind `Type` (a promoted constructor with N fields is
+`Type -> ... -> Type`); mata-ll does not track promoted kinds like
+`Nat` separately.
+
+## The engage restriction (spec-level "Fn")
+
+The `engage` intrinsic additionally constrains its result to function
+types ending in `IO` (`x -> ... -> IO y`); the compiler rejects any
+instantiation that does not end in `IO`, so Lua functions called
+through `engage` are always treated as effectful. This restriction is
+enforced by the FFI validation pass, not by the kind language above.
 
 ## LuaFunction, engage, and scope safety
 
@@ -1049,6 +1088,11 @@ classes with ordinary `instance` declarations:
         foldr f z (Node l x r) = foldr f (f x (foldr f z r)) l
         foldl _ z Leaf = z
         foldl f z (Node l x r) = foldl f (f (foldl f z l) x) r
+
+The builtin instances for `[]`, `Maybe` and `Either` are themselves
+ordinary `instance` declarations in the Prelude (`instance Foldable []`
+uses the bare list constructor at kind `Type -> Type`; see the Kinds
+section).
 
 Tuples have no Foldable/Traversable instance: the class variable has
 kind `Type -> Type`, and mata-ll has no partially-applied tuple

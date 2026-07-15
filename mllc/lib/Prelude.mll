@@ -33,33 +33,28 @@ const x _ = x
 flip :: (a -> b -> c) -> b -> a -> c
 flip f b a = f a b
 
--- Foldable instances. foldr and foldl are Foldable class methods
--- (instances: lists, Maybe, Either); these are the per-type
--- implementations the compiler dispatches to.
-foldr_List :: (a -> b -> b) -> b -> [a] -> b
-foldr_List _ acc [] = acc
-foldr_List f acc (x:xs) = f x (foldr_List f acc xs)
+-- Foldable instances for the builtin containers. `[]` in an instance head
+-- is the bare, unapplied list constructor (kind Type -> Type), and
+-- `Either c` is the partially applied Either — both must match the kind of
+-- Foldable's class variable, which the compiler checks.
+instance Foldable [] where
+    foldr _ acc [] = acc
+    foldr f acc (x:xs) = f x (foldr f acc xs)
+    foldl _ acc [] = acc
+    foldl f acc (x:xs) = foldl f (f acc x) xs
 
-foldl_List :: (b -> a -> b) -> b -> [a] -> b
-foldl_List _ acc [] = acc
-foldl_List f acc (x:xs) = foldl_List f (f acc x) xs
-
-foldr_Maybe :: (a -> b -> b) -> b -> Maybe a -> b
-foldr_Maybe _ acc Nothing = acc
-foldr_Maybe f acc (Just x) = f x acc
-
-foldl_Maybe :: (b -> a -> b) -> b -> Maybe a -> b
-foldl_Maybe _ acc Nothing = acc
-foldl_Maybe f acc (Just x) = f acc x
+instance Foldable Maybe where
+    foldr _ acc Nothing = acc
+    foldr f acc (Just x) = f x acc
+    foldl _ acc Nothing = acc
+    foldl f acc (Just x) = f acc x
 
 -- Folding an Either folds over Right and ignores Left, like GHC.
-foldr_Either :: (a -> b -> b) -> b -> Either c a -> b
-foldr_Either _ acc (Left _) = acc
-foldr_Either f acc (Right x) = f x acc
-
-foldl_Either :: (b -> a -> b) -> b -> Either c a -> b
-foldl_Either _ acc (Left _) = acc
-foldl_Either f acc (Right x) = f acc x
+instance Foldable (Either c) where
+    foldr _ acc (Left _) = acc
+    foldr f acc (Right x) = f x acc
+    foldl _ acc (Left _) = acc
+    foldl f acc (Right x) = f acc x
 
 -- Length-generic Foldable functions, defined over foldr/foldl.
 -- (toList lives in Data.Foldable, matching GHC's Prelude exports.)
@@ -250,23 +245,22 @@ ap_Either (Right f) (Right x) = Right (f x)
 ap_Either (Left e) _ = Left e
 ap_Either _ (Left e) = Left e
 
--- Traversable instances. traverse is a Traversable class method
--- (instances: lists, Maybe, Either); these are the per-type
--- implementations the compiler dispatches to.
+-- Traversable instances for the builtin containers (heads at kind
+-- Type -> Type, like Foldable's).
 -- Built on liftA2 rather than <$>/<*> so the applicative never carries
 -- a function-valued intermediate (which the IO runtime cannot represent).
-traverse_List :: Applicative f => (a -> f b) -> [a] -> f [b]
-traverse_List _ [] = pure []
-traverse_List f (x:xs) = liftA2 (\y ys -> y : ys) (f x) (traverse_List f xs)
+instance Traversable [] where
+    traverse _ [] = pure []
+    traverse f (x:xs) = liftA2 (\y ys -> y : ys) (f x) (traverse f xs)
 
-traverse_Maybe :: Applicative f => (a -> f b) -> Maybe a -> f (Maybe b)
-traverse_Maybe _ Nothing = pure Nothing
-traverse_Maybe f (Just x) = fmap (\y -> Just y) (f x)
+instance Traversable Maybe where
+    traverse _ Nothing = pure Nothing
+    traverse f (Just x) = fmap (\y -> Just y) (f x)
 
 -- Traversing an Either visits Right and passes Left through, like GHC.
-traverse_Either :: Applicative f => (a -> f b) -> Either c a -> f (Either c b)
-traverse_Either _ (Left e) = pure (Left e)
-traverse_Either f (Right x) = fmap (\y -> Right y) (f x)
+instance Traversable (Either c) where
+    traverse _ (Left e) = pure (Left e)
+    traverse f (Right x) = fmap (\y -> Right y) (f x)
 
 -- Evaluate each action in the structure and collect the results.
 sequenceA :: (Traversable t, Applicative f) => t (f a) -> f (t a)

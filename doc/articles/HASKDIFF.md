@@ -96,6 +96,31 @@ enum). There is no `deriving` for `Read`, `Generic`, `Hashable`,
 `NFData`, or arbitrary classes. There is no `GeneralizedNewtypeDeriving`
 or `DeriveAnyClass`.
 
+## Kinds are inferred; there are no kind annotations
+
+mata-ll has a real kind system — data/newtype parameters, class
+variables, aliases and type families all get kinds inferred from use,
+every written type is kind-checked, and an instance head must match the
+class variable's kind (`instance Foldable []` is well-formed,
+`instance Foldable [a]` and `instance Foldable Integer` are kind
+errors). Differences from GHC:
+
+- **No kind annotations or signatures.** GHC's
+  `data T (f :: Type -> Type)` and standalone kind signatures do not
+  exist; the kind always comes from how the parameter is used, with
+  unconstrained kinds defaulting to `Type` (the same defaulting GHC
+  applies without `PolyKinds`).
+- **No kind polymorphism** (`PolyKinds`): a definition cannot be
+  generic over kinds.
+- **Promoted constructors are kind-approximate.** DataKinds-style
+  promotion exists (`'Red`, `'S n`), but promoted constructors are
+  classified at kind `Type` rather than at their promoted data kind —
+  mata-ll will not reject `Vec 'Red a` where GHC (tracking
+  `'Red : Color` vs `n : Nat`) would.
+- Kind errors are worded in plain language; GHC's equivalent is usually
+  "Expecting one more argument to ..." or
+  "Expected kind ..., but ... has kind ...".
+
 ## Monomorphization instead of dictionary passing
 
 mata-ll compiles polymorphic functions by specializing them for each

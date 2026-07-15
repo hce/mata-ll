@@ -285,6 +285,15 @@ impl Checker {
     // --- Typeclass handling ---
 
     pub(super) fn register_class(&mut self, name: &str, type_var: &str, superclasses: &[String], methods: &[ClassMethod]) {
+        // Infer the class variable's kind from the method signatures (and
+        // superclasses): `class Foldable t where foldr :: … -> t a -> b`
+        // forces `t : Type -> Type` from the use `t a`, with no annotation.
+        // Instance heads are later checked against this kind. Silent — an
+        // inconsistent class declaration is reported by pass 2b's method
+        // checks, which seed the class variable with this result.
+        let class_kind = self.infer_class_var_kind(type_var, superclasses, methods);
+        self.class_kinds.insert(name.to_string(), class_kind);
+
         let tv = TyVar { name: type_var.to_string(), id: u32::MAX };
         let mut method_types = Vec::new();
         let mut default_methods = HashMap::new();
@@ -464,7 +473,12 @@ impl Checker {
 
         // Orphan instance detection: either the class or the type must be local.
         // Only checked when check_module_with_local_start was used (local_start tracking active).
-        if self.orphan_check_enabled {
+        // The implicit Prelude is exempt: it is the home module of the builtin
+        // classes and types (Foldable, [], Maybe, …), and every program imports
+        // it, so a Prelude instance can never be the "unseen elsewhere" orphan
+        // the check exists to reject — this is GHC's rule that an instance in
+        // the defining module of its class or type is not an orphan.
+        if self.orphan_check_enabled && !self.checking_prelude {
             let type_head = Self::type_head_name(target_type);
             let class_is_local = self.local_classes.contains(class_name);
             let type_is_local = type_head.as_ref().is_some_and(|t| self.local_types.contains(t));

@@ -8,7 +8,13 @@ pub struct TyConstraint {
     pub type_var: String,
 }
 
-/// Kind of a type expression.
+/// Kind of a type expression. Kinds classify types the way types classify
+/// values: a complete type (`Integer`, `Maybe String`) has kind `Type`, and a
+/// type constructor that still needs arguments has an arrow kind (`Maybe` is
+/// `Type -> Type`, `Either` is `Type -> Type -> Type`). Kinds are written the
+/// way GHC writes them (`Type`, `Type -> Type`); mata-ll has no surface
+/// syntax for kind annotations — every kind is inferred (see
+/// typechecker/kind.rs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
     /// Regular types: Integer, String, Maybe Integer
@@ -17,6 +23,28 @@ pub enum Kind {
     Symbol,
     /// Function type constructor: Type -> Type (e.g., Maybe, [])
     Arrow(Box<Kind>, Box<Kind>),
+    /// A kind-unification variable, used only DURING kind inference
+    /// (typechecker/kind.rs). Every variable left unconstrained when a
+    /// declaration has been fully walked is defaulted to `Type` — exactly
+    /// GHC's Haskell-2010 kind defaulting — so no `Var` ever survives into
+    /// the registered kind tables or into a diagnostic.
+    Var(u32),
+}
+
+impl Kind {
+    /// Build `k1 -> k2`.
+    pub fn arrow(from: Kind, to: Kind) -> Kind {
+        Kind::Arrow(Box::new(from), Box::new(to))
+    }
+
+    /// Number of arguments this kind still expects: `Type` is 0,
+    /// `Type -> Type` is 1, `(Type -> Type) -> Type` is 1.
+    pub fn arity(&self) -> usize {
+        match self {
+            Kind::Arrow(_, rest) => 1 + rest.arity(),
+            _ => 0,
+        }
+    }
 }
 
 impl fmt::Display for Kind {
@@ -24,7 +52,13 @@ impl fmt::Display for Kind {
         match self {
             Kind::Type => write!(f, "Type"),
             Kind::Symbol => write!(f, "Symbol"),
-            Kind::Arrow(a, b) => write!(f, "{} -> {}", a, b),
+            // Arrow kinds are right-associative like arrow types, so a
+            // higher-kinded argument needs parentheses: (Type -> Type) -> Type.
+            Kind::Arrow(a, b) => match a.as_ref() {
+                Kind::Arrow(..) => write!(f, "({}) -> {}", a, b),
+                _ => write!(f, "{} -> {}", a, b),
+            },
+            Kind::Var(id) => write!(f, "k{}", id),
         }
     }
 }
@@ -644,6 +678,30 @@ pub enum DiagnosticKind {
     /// type and resurface as a misleading error (e.g. a missing Show
     /// instance on a type that does not exist).
     UnknownType(String),
+    /// A type expression sits in a position that requires a different kind
+    /// than the one it has — a bare `Maybe` (kind `Type -> Type`) where a
+    /// complete type is required, or a type variable used both applied
+    /// (`t a`) and bare (`t`) in the same signature. The strings are the
+    /// type as the user wrote it; the kinds are fully defaulted.
+    KindMismatch { ty: String, expected: Kind, found: Kind },
+    /// A complete type (kind `Type`) is applied to a type argument, e.g.
+    /// `Maybe Integer Bool` (the inner `Maybe Integer` is already complete,
+    /// so the application to `Bool` is meaningless) or `Integer a`.
+    /// `is_var` selects the wording: applying a type VARIABLE that another
+    /// use in the same declaration already fixed at kind Type is a
+    /// two-kinds-for-one-variable conflict, not a saturated constructor.
+    KindSaturatedApp { ty: String, arg: String, is_var: bool },
+    /// A type application whose argument has the wrong kind for the
+    /// constructor's parameter, e.g. `HashMap Maybe Integer`: HashMap's
+    /// first parameter must be a complete type, but `Maybe` still needs an
+    /// argument.
+    KindArgMismatch { func: String, arg: String, expected: Kind, found: Kind },
+    /// An instance head whose kind does not match the class variable's kind:
+    /// `instance Foldable Integer` (Foldable's methods apply the class
+    /// variable to an element type, so an instance must supply a
+    /// `Type -> Type` constructor) or `instance Show Maybe` (Show constrains
+    /// complete types).
+    InstanceKindMismatch { class: String, class_var: String, target: String, expected: Kind, found: Kind },
     /// A syntax error. The message is rendered verbatim, with the span (when
     /// present) appended inline as ` at line:col` — the parser's historical
     /// format, unlike type errors which put the location on its own line.
@@ -731,6 +789,25 @@ impl Diagnostic {
                       constructor, so no code outside the match can know what it is. Use \
                       the value inside the match (e.g. apply the functions packed \
                       alongside it), or repack it into the existential before returning."),
+            DiagnosticKind::InstanceKindMismatch { expected, found, .. } => match (expected, found) {
+                (Kind::Arrow(..), Kind::Type) =>
+                    Some("a class over containers takes the bare, unapplied constructor \
+                          as its instance head: write 'instance C []', not \
+                          'instance C [a]' (and 'instance C Maybe', not \
+                          'instance C (Maybe a)'). The class variable stands for the \
+                          container itself; the element type stays polymorphic."),
+                (Kind::Type, Kind::Arrow(..)) =>
+                    Some("this class constrains complete types, so the instance head \
+                          must apply the constructor to type arguments, e.g. \
+                          'instance C (T a)'. GHC reports this as \"Expecting one \
+                          more argument\"."),
+                _ => None,
+            },
+            DiagnosticKind::KindMismatch { expected: Kind::Type, found: Kind::Arrow(..), .. } =>
+                Some("mata-ll infers every kind from how types are used — there are \
+                      no kind annotations — so the fix is to apply the constructor \
+                      to its missing argument(s). GHC reports this as \"Expecting \
+                      one more argument\"."),
             DiagnosticKind::UnknownType(name) => match name.as_str() {
                 "Boolean" =>
                     Some("the boolean type is spelled 'Bool', as in Haskell."),
@@ -819,6 +896,38 @@ impl fmt::Display for Diagnostic {
             }
             DiagnosticKind::UnknownType(name) =>
                 write!(f, "Unknown type '{}': nothing in this program or its imports defines a type with this name — it is not a builtin, and no data, newtype, type alias, or type family declaration for it is in scope", name)?,
+            DiagnosticKind::KindMismatch { ty, expected, found } => {
+                // Tailor the two common shapes: an unsaturated constructor
+                // where a complete type belongs, and the reverse.
+                match (expected, found) {
+                    (Kind::Type, Kind::Arrow(..)) => {
+                        let n = found.arity();
+                        write!(f, "Kind error: '{}' has kind {} — it is a type constructor that still needs {} more type argument{} before it is a complete type — but it is used here where a complete type (kind Type) is required",
+                            ty, found, n, if n == 1 { "" } else { "s" })?
+                    }
+                    (Kind::Arrow(..), Kind::Type) =>
+                        write!(f, "Kind error: '{}' has kind Type (a complete type), but it is used here as a type constructor of kind {} — something that must still be applied to type arguments",
+                            ty, expected)?,
+                    _ =>
+                        write!(f, "Kind error: '{}' has kind {}, but its position here requires kind {}",
+                            ty, found, expected)?,
+                }
+            }
+            DiagnosticKind::KindSaturatedApp { ty, arg, is_var } => {
+                if *is_var {
+                    write!(f, "Kind error: the type variable '{}' is applied to the type argument '{}' here, but its use elsewhere in this declaration makes it a complete type (kind Type) — a single type variable cannot be used at two different kinds",
+                        ty, arg)?
+                } else {
+                    write!(f, "Kind error: '{}' is applied to the type argument '{}', but '{}' has kind Type — it is already a complete type and takes no type arguments",
+                        ty, arg, ty)?
+                }
+            }
+            DiagnosticKind::KindArgMismatch { func, arg, expected, found } =>
+                write!(f, "Kind error: in this type application, '{}' needs an argument of kind {}, but '{}' has kind {}",
+                    func, expected, arg, found)?,
+            DiagnosticKind::InstanceKindMismatch { class, class_var, target, expected, found } =>
+                write!(f, "Kind error: 'instance {} {}' is ill-kinded: the methods of class '{}' use its type variable '{}' at kind {}, but '{}' has kind {}",
+                    class, target, class, class_var, expected, target, found)?,
             DiagnosticKind::Parse(msg) => {
                 // Parse errors keep their historical inline rendering:
                 // `Expected X, found Y at 3:7`.

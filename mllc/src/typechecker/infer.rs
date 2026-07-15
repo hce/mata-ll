@@ -1025,6 +1025,11 @@ impl Checker {
                 }
             }
             Expr::Ascription(inner, declared_ty) => {
+                // The ascribed type is user-written type syntax like any
+                // signature: it must be a well-kinded complete type
+                // (`x :: Maybe` or `xs :: [] Integer Integer` is a kind
+                // error, not a unification puzzle).
+                self.check_type_kind(declared_ty, "a type ascription");
                 let expected = self.ast_type_to_ty(declared_ty);
                 let expected = self.freshen_sig_type(&expected);
                 let (te, inferred, subst) = self.infer_expr(inner, env)?;

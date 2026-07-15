@@ -393,6 +393,7 @@ mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(datakinds, "datakinds.mll");
+mll_test!(kinds_hkt, "kinds_hkt.mll");
 mll_test!(type_level_nats, "type_level_nats.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(section_composition, "section_composition.mll");
@@ -4439,6 +4440,145 @@ fn operator_in_type_position_rejected() {
     // Same rejection for other operators and positions inside the type.
     let e = compile_err("g :: Integer -> (<>)\ng x = x\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("The operator '<>' cannot appear in a type"), "got: {e}");
+}
+
+// --- Kind system -----------------------------------------------------------
+// Every type the user writes must be well-kinded: an unsaturated constructor
+// cannot stand where a complete type is required, a complete type cannot be
+// applied to arguments, and an instance head must have the kind the class
+// variable was inferred at. The positive side (higher-kinded classes and
+// data, `instance C []`) is covered by kinds_hkt.mll.
+
+#[test]
+fn kind_error_unsaturated_constructor_in_signature() {
+    // `Maybe` alone is not a type — it still needs its element type.
+    let e = compile_err("f :: Maybe -> Integer\nf _ = 1\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Kind error"), "got: {e}");
+    assert!(e.contains("'Maybe' has kind Type -> Type"), "got: {e}");
+    assert!(e.contains("still needs 1 more type argument"), "got: {e}");
+    assert!(e.contains("in the type signature for 'f'"), "got: {e}");
+}
+
+#[test]
+fn kind_error_saturated_type_applied_to_argument() {
+    // `Maybe Integer` is complete; applying it to `Bool` is a kind error.
+    let e = compile_err("x :: Maybe Integer Bool\nx = undefined\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Kind error"), "got: {e}");
+    assert!(
+        e.contains("'Maybe Integer' is applied to the type argument 'Bool'"),
+        "got: {e}"
+    );
+    assert!(e.contains("takes no type arguments"), "got: {e}");
+}
+
+#[test]
+fn kind_error_type_application_argument_kind() {
+    // HashMap's parameters are complete types; a bare `Maybe` is not one.
+    let e = compile_err("h :: HashMap Maybe Integer -> Integer\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(
+        e.contains("'HashMap' needs an argument of kind Type, but 'Maybe' has kind Type -> Type"),
+        "got: {e}"
+    );
+}
+
+#[test]
+fn kind_error_data_field_must_be_complete_type() {
+    let e = compile_err("data T = MkT Maybe\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Kind error"), "got: {e}");
+    assert!(e.contains("'Maybe' has kind Type -> Type"), "got: {e}");
+    assert!(e.contains("in the definition of data type 'T'"), "got: {e}");
+}
+
+#[test]
+fn kind_error_type_variable_used_at_two_kinds() {
+    // `t` is used bare (kind Type) AND applied (`t a`) in one signature.
+    let e = compile_err("g :: t -> t a -> Integer\ng _ _ = 1\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Kind error"), "got: {e}");
+    assert!(
+        e.contains("a single type variable cannot be used at two different kinds"),
+        "got: {e}"
+    );
+}
+
+#[test]
+fn kind_error_ascription_checked() {
+    // Ascribed types are user-written type syntax like any signature.
+    let e = compile_err("main :: IO ()\nmain = print (Nothing :: Maybe)\n");
+    assert!(e.contains("Kind error"), "got: {e}");
+    assert!(e.contains("in a type ascription"), "got: {e}");
+}
+
+#[test]
+fn kind_error_instance_head_needs_unapplied_constructor() {
+    // A Type -> Type class rejects a complete type as its instance head —
+    // and the note must point at the [] / Maybe spelling.
+    let e = compile_err(
+        "class Collapse t where\n    collapse :: t Integer -> Integer\ninstance Collapse Integer where\n    collapse x = x\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(
+        e.contains("'instance Collapse Integer' is ill-kinded"),
+        "got: {e}"
+    );
+    assert!(
+        e.contains("use its type variable 't' at kind Type -> Type"),
+        "got: {e}"
+    );
+
+    // The classic trap: `instance C [a]` where `instance C []` is meant.
+    let e = compile_err(
+        "class Collapse t where\n    collapse :: t Integer -> Integer\ninstance Collapse [a] where\n    collapse _ = 0\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("'instance Collapse [a]' is ill-kinded"), "got: {e}");
+    assert!(
+        e.contains("note:") && e.contains("write 'instance C []', not 'instance C [a]'"),
+        "got: {e}"
+    );
+}
+
+#[test]
+fn kind_error_instance_head_needs_complete_type() {
+    // The reverse direction: a Type class rejects an unapplied constructor.
+    let e = compile_err(
+        "data T a = MkT a\nclass Pretty a where\n    pretty :: a -> String\ninstance Pretty T where\n    pretty _ = \"t\"\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("'instance Pretty T' is ill-kinded"), "got: {e}");
+    assert!(e.contains("'T' has kind Type -> Type"), "got: {e}");
+    assert!(e.contains("note:") && e.contains("Expecting one more argument"), "got: {e}");
+}
+
+#[test]
+fn bare_list_constructor_parses_and_kind_checks_in_instance_head() {
+    // `instance Foldable []` — the bare list constructor in an instance
+    // head — used to be a PARSE error ("[" demanded an element type). It
+    // must now parse and kind-check: [] has kind Type -> Type, exactly what
+    // Foldable's class variable requires. In USER code the declaration is
+    // still rejected, but only by the orphan rule (Foldable and [] both live
+    // in the Prelude, whose own instance declarations use exactly this
+    // spelling) — there must be no parse error and no kind error.
+    let e = compile_err(
+        "instance Foldable [] where\n    foldr _ z [] = z\n    foldr f z (x:xs) = f x (foldr f z xs)\n    foldl _ z [] = z\n    foldl f z (x:xs) = foldl f (f z x) xs\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("Orphan instance"), "got: {e}");
+    assert!(!e.contains("Kind error"), "must kind-check, got: {e}");
+    assert!(!e.contains("Expected type"), "must parse, got: {e}");
+}
+
+#[test]
+fn higher_kinded_class_variable_inferred_from_constraint() {
+    // A constraint alone fixes the variable's kind: `Foldable t` forces
+    // `t : Type -> Type`, so using `t` bare in the same signature is a kind
+    // error even though the body never applies it.
+    let e = compile_err(
+        "f :: Foldable t => t -> Integer\nf _ = 0\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("Kind error"), "got: {e}");
+
+    // And the well-kinded spelling still compiles.
+    let src = "f :: Foldable t => t Integer -> Integer\nf t = sum t\nmain :: IO ()\nmain = print (f [1, 2, 3])\n";
+    assert!(
+        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        "well-kinded Foldable signature should compile"
+    );
 }
 
 // Top-level redefinition of a name the Prelude/builtins provide. Historically

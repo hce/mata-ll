@@ -31,6 +31,40 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **A full kind system.** Kinds (`Type`, `Symbol`, and arrow kinds like
+  `Type -> Type`) are now inferred for everything declared at the type level
+  and every written type is kind-checked. A `data`/`newtype` parameter's kind
+  comes from its use in the fields (`data Wrap f = Wrap (f Integer)` infers
+  `Wrap : (Type -> Type) -> Type`; mutually recursive declarations are solved
+  together); a class variable's kind comes from the method signatures
+  (`foldr :: (a -> b -> b) -> b -> t a -> b` forces `t : Type -> Type`) and
+  from superclass agreement; constraints fix kinds too (`Foldable t => t ->
+  Integer` is now a kind error). Unconstrained kinds default to `Type`
+  (Haskell-2010 defaulting); there are no kind annotations and no kind
+  polymorphism. Checked positions: type signatures, export signatures, data
+  fields (per-constructor scope, so existential variables must be used
+  consistently), newtype bodies, alias bodies, class method signatures,
+  instance heads AND instance contexts, type-family equations, and expression
+  ascriptions. An instance head must have exactly the class variable's kind:
+  `instance Foldable []` (the new bare-`[]` type syntax, kind `Type -> Type`)
+  is well-formed, while `instance Foldable [a]`, `instance Foldable Integer`
+  and `instance Show Maybe` are compile-time kind errors with plain-language
+  explanations (the `[a]`-for-`[]` trap gets a targeted note). Breaking only
+  for programs that were silently ill-kinded before (e.g. applying a
+  `Type`-kinded alias, or a bare unsaturated constructor in a field). Tests:
+  kinds_hkt.mll plus the kind_error_* / bare_list_constructor_* /
+  higher_kinded_* suites.
+- The bare list constructor `[]` is now valid type syntax (kind
+  `Type -> Type`), so instance heads can name it: `instance Foldable []`.
+- The builtin `Foldable` and `Traversable` instances for `[]`, `Maybe` and
+  `Either` moved out of the compiler's Rust tables into ordinary
+  `instance Foldable [] where …`-style declarations in `lib/Prelude.mll`,
+  now that the kind system can check their heads. The Prelude is exempt from
+  the orphan-instance rule (it is the home module of the builtin classes and
+  types, so its instances are never orphans — GHC's rule). No user-visible
+  change; the `Monoid`/`Semigroup` instances and the class registrations
+  themselves remain builtin for now (their methods are wired to runtime
+  helpers).
 - `Foldable` and `Traversable` typeclasses, with instances for lists, `Maybe`
   and `Either` (folding/traversing `Right`), plus the `Monoid` class
   (superclass `Semigroup`; methods `mempty`/`mappend`; `String` and `[a]`
