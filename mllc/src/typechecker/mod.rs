@@ -222,6 +222,13 @@ pub struct Checker {
     /// each constraint to the freshly-instantiated type). E.g. with `needsShow
     /// :: Show a => …` freshened to `a519`, this holds [Show a519].
     fn_use_constraints: HashMap<String, Vec<TyConstraint>>,
+    /// The declared constraints of each checked function, re-expressed a
+    /// second time over the FINAL (post-solve, generalized) type's variable
+    /// names — the names that appear on the TFunction handed to the
+    /// monomorphizer. The dictionary-passing rewrite matches these against
+    /// that type; both earlier spellings (source names, freshened sig names)
+    /// can disagree with it after unification.
+    pub(super) fn_dict_constraints: HashMap<String, Vec<TyConstraint>>,
     /// Wanted class constraints collected while checking the current function:
     /// (class name, the instantiated type the constraint applies to). Discharged
     /// at the function boundary once unification has resolved the type.
@@ -327,6 +334,7 @@ impl Checker {
             fn_constraints: HashMap::new(),
             method_constraints: HashMap::new(),
             fn_use_constraints: HashMap::new(),
+            fn_dict_constraints: HashMap::new(),
             wanted: Vec::new(),
             binder_types: Vec::new(),
             fromjson_types: HashSet::new(),

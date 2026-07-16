@@ -749,6 +749,15 @@ impl Checker {
         &self.fn_constraints
     }
 
+    /// The declared constraints re-expressed over each checked function's
+    /// FINAL type variable names (see check_function) — the names on the
+    /// TFunction the monomorphizer sees. The dictionary-passing rewrite
+    /// matches constraint variables against that type, so it must use these;
+    /// the source-name spelling in `fn_constraints` never matches it.
+    pub fn get_fn_dict_constraints(&self) -> &HashMap<String, Vec<TyConstraint>> {
+        &self.fn_dict_constraints
+    }
+
     /// Expose class definitions for the monomorphizer
     pub fn get_classes(&self) -> &HashMap<String, ClassInfo> {
         &self.classes

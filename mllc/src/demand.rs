@@ -614,6 +614,8 @@ fn demanded_vars_mode(
             s
         }
 
+        TExprKind::DictMethod { dict, .. } => rec(dict),
+
         TExprKind::DictAccess { .. } => {
             HashSet::new()
         }

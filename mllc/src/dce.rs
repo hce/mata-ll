@@ -83,6 +83,10 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
         TExprKind::DictAccess { method_name, .. } => {
             refs.insert(method_name.clone());
         }
+        TExprKind::DictMethod { dict, method_name } => {
+            refs.insert(method_name.clone());
+            collect_expr(dict, refs);
+        }
         TExprKind::App(a, b) => { collect_expr(a, refs); collect_expr(b, refs); }
         TExprKind::Lambda { body, .. } => collect_expr(body, refs),
         TExprKind::InfixApp { op, lhs, rhs } => {

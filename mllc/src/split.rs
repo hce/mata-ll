@@ -115,6 +115,12 @@ fn flatten_expr(e: TExpr, binds: &mut Vec<TLocalDef>, ctr: &mut usize) -> TExpr 
         TExprKind::Paren(inner) => {
             TExprKind::Paren(Box::new(flatten_expr(*inner, binds, ctr)))
         }
+        // A constructed dictionary's method: recurse into the dictionary
+        // expression but never hoist it (it carries dictionary structure).
+        TExprKind::DictMethod { dict, method_name } => TExprKind::DictMethod {
+            dict: Box::new(flatten_expr(*dict, binds, ctr)),
+            method_name,
+        },
         TExprKind::Negate(inner) => {
             // Negation forces its operand — a strict position.
             TExprKind::Negate(Box::new(hoist(*inner, true, binds, ctr)))
@@ -383,6 +389,7 @@ fn depth(e: &TExpr) -> usize {
         | TExprKind::Lit(_)
         | TExprKind::OpFunc(_)
         | TExprKind::DictAccess { .. } => 1,
+        TExprKind::DictMethod { dict, .. } => 1 + depth(dict),
         TExprKind::Paren(inner) | TExprKind::Negate(inner) => 1 + depth(inner),
         TExprKind::App(f, a) => 1 + depth(f).max(depth(a)),
         TExprKind::InfixApp { lhs, rhs, .. } => 1 + depth(lhs).max(depth(rhs)),

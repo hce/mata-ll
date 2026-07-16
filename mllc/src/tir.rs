@@ -367,6 +367,14 @@ pub enum TExprKind {
         dict_param: String,
         method_name: String,
     },
+    /// Access a method from a dictionary EXPRESSION (a constructed
+    /// dictionary, e.g. the `[a]` dictionary built from the element
+    /// dictionary inside a dictionary-passing body). The `dict_param`
+    /// form above is the common special case of a plain parameter.
+    DictMethod {
+        dict: Box<TExpr>,
+        method_name: String,
+    },
     /// Call a dictionary-passing function with explicit dictionaries.
     DictCall {
         func_name: String,

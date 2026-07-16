@@ -192,6 +192,28 @@ impl Checker {
         // Apply the combined substitution to the function type and all clauses,
         // resolving type variables that were unified during clause checking.
         let final_ty = fresh_ty.apply_subst(&overall_subst);
+
+        // Record this function's declared constraints over the FINAL type's
+        // variable names. Clause checking may unify a freshened signature
+        // variable with a fresh unification variable, and it is THAT
+        // variable's name the generalized function type carries — so neither
+        // the source-name nor the freshened-sig-name spelling of the
+        // constraints reliably matches the type. The dictionary-passing
+        // rewrite needs the spelling that does.
+        if let Some(cs) = self.fn_use_constraints.get(name).cloned() {
+            let fresh_vars: HashMap<String, TyVar> = fresh_ty.free_vars()
+                .into_iter().map(|v| (v.name.clone(), v)).collect();
+            let renamed: Vec<TyConstraint> = cs.into_iter().map(|c| {
+                let final_name = fresh_vars.get(&c.type_var)
+                    .map(|tv| Ty::Var(tv.clone()).apply_subst(&overall_subst))
+                    .and_then(|t| if let Ty::Var(v) = t { Some(v.name) } else { None });
+                TyConstraint {
+                    class_name: c.class_name,
+                    type_var: final_name.unwrap_or(c.type_var),
+                }
+            }).collect();
+            self.fn_dict_constraints.insert(name.to_string(), renamed);
+        }
         let tclauses: Vec<TClause> = tclauses.into_iter()
             .map(|c| c.apply_subst(&overall_subst))
             .collect();

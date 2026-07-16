@@ -4229,6 +4229,46 @@ impl CodeGen {
                         }
                     }
                     self.emit(" }");
+                } else if let Some(rest) = specialized.strip_prefix("__mll_dictc:") {
+                    // A CONSTRUCTED dictionary for a parameterized instance
+                    // (`instance C a => C [a]`): each method is the instance's
+                    // dictionary-form implementation partially applied to the
+                    // context's dictionaries, which arrive as `args` (one per
+                    // context constraint, in declaration order). Emits
+                    //   (function(__cd1, …) return { m = function(...)
+                    //       return impl(__cd1, …, ...) end, … } end)(<dicts>)
+                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
+                    let methods = if parts.len() > 1 { parts[1] } else { "" };
+                    let n_dicts = args.len();
+                    let dict_params: Vec<String> =
+                        (0..n_dicts).map(|i| format!("__cd{}", i + 1)).collect();
+                    self.emit("(function(");
+                    self.emit(&dict_params.join(", "));
+                    self.emit(") return { ");
+                    let mut first = true;
+                    for entry in methods.split(',') {
+                        if entry.is_empty() { continue; }
+                        let kv: Vec<&str> = entry.splitn(2, '=').collect();
+                        if kv.len() == 2 {
+                            if !first { self.emit(", "); }
+                            first = false;
+                            let sv = sanitize_name(kv[1]);
+                            let impl_ref = self.lua_ref(&sv);
+                            self.emit(&format!(
+                                "{} = function(...) return {}({}{}...) end",
+                                sanitize_name(kv[0]),
+                                impl_ref,
+                                dict_params.join(", "),
+                                if n_dicts > 0 { ", " } else { "" },
+                            ));
+                        }
+                    }
+                    self.emit(" } end)(");
+                    for (i, a) in args.iter().enumerate() {
+                        if i > 0 { self.emit(", "); }
+                        self.gen_expr(a);
+                    }
+                    self.emit(")");
                 } else if let Some(elem_eq) = specialized.strip_prefix("__mll_list_eq:") {
                     // List eq: recursive element-wise comparison
                     self.emit(&format!("__mll_list_eq({}, ", self.lua_ref(elem_eq)));
@@ -4499,6 +4539,15 @@ impl CodeGen {
             }
             TExprKind::DictAccess { dict_param, method_name } => {
                 self.emit(&format!("{}.{}", sanitize_name(dict_param), sanitize_name(method_name)));
+            }
+            TExprKind::DictMethod { dict, method_name } => {
+                // A method of a CONSTRUCTED dictionary (e.g. the `[a]`
+                // dictionary built from the element dictionary). Parenthesized
+                // because the dictionary may be a table literal, which Lua
+                // cannot index directly.
+                self.emit("(");
+                self.gen_expr(dict);
+                self.emit(&format!(").{}", sanitize_name(method_name)));
             }
             TExprKind::DictCall { func_name, dict_args, value_args } => {
                 let sfn = sanitize_name(func_name);
@@ -4984,6 +5033,7 @@ fn expr_references_name(expr: &TExpr, name: &str) -> bool {
         TExprKind::SpecCall { args, .. } => args.iter().any(|a| expr_references_name(a, name)),
         TExprKind::Tuple(elems) => elems.iter().any(|e| expr_references_name(e, name)),
         TExprKind::DictAccess { .. } => false,
+        TExprKind::DictMethod { dict, .. } => expr_references_name(dict, name),
         TExprKind::DictCall { dict_args, value_args, .. } => {
             dict_args.iter().any(|a| expr_references_name(a, name)) ||
             value_args.iter().any(|a| expr_references_name(a, name))

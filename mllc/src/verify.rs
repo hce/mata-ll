@@ -92,6 +92,7 @@ impl Verifier {
         match &e.kind {
             TExprKind::Var(_) | TExprKind::Con(_) | TExprKind::Lit(_)
             | TExprKind::OpFunc(_) | TExprKind::DictAccess { .. } => {}
+            TExprKind::DictMethod { dict, .. } => self.walk(dict, ctx),
             TExprKind::App(a, b) => { self.walk(a, ctx); self.walk(b, ctx); }
             TExprKind::Lambda { body, .. } => self.walk(body, ctx),
             TExprKind::InfixApp { lhs, rhs, .. } => { self.walk(lhs, ctx); self.walk(rhs, ctx); }
