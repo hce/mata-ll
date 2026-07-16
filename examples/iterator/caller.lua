@@ -1,12 +1,10 @@
 local myCoroutine = coroutine.wrap(function()
 		local callme
-		callme = function()
-			local x = 0
-			coroutine.yield(y)
-			x = x + 1
-			callme()
+		callme = function(x)
+			coroutine.yield(x)
+			callme(x + 1)
 		end
-		callme()
+		callme(0)
 	end)
 
 function myiterator()
