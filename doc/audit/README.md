@@ -1,9 +1,10 @@
 # Audit findings — reproductions (2026-07)
 
-Minimal, **independently verified** reproductions of bugs found by an adversarial
-per-feature audit. These are NOT wired into the cargo test suite — **each one
-currently FAILS on the compiler and demonstrates an open bug.** They are being
-fixed; as each fix lands, its repro should become a proper regression test in
+Minimal, **independently verified** reproductions of bugs found by an
+adversarial per-feature audit. These are NOT wired into the cargo test
+suite — **each one currently FAILS on the compiler and demonstrates an
+open bug.** They are being fixed; as each fix is completed, its
+reproduction should become a proper regression test in
 `mll-tests/tests/run_mll.rs` and be removed from here.
 
 Every entry below was reproduced by hand with `./target/debug/mll` (the `-r`
