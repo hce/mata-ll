@@ -1154,11 +1154,38 @@ impl CodeGen {
                 if !self.forward_declared.contains(&lua_name) {
                     self.emit_line(&format!("local {}", lua_name));
                 }
-                self.emit_indent();
-                self.emit(&format!("{} = ", lua_name));
-                self.gen_expr_lazy(&clauses[0].body, &func.name);
-                self.emit("\n");
-                is_concrete = true;
+                if Self::is_cons_headed(&clauses[0].body) {
+                    // Cons-headed (`xs = 0 : xs`): the value is an eagerly built
+                    // cons cell whose TAIL self-reference `gen_expr_lazy` defers
+                    // into a thunk. The cell itself is a concrete value, so the
+                    // deferred self-reference reads it after assignment.
+                    self.emit_indent();
+                    self.emit(&format!("{} = ", lua_name));
+                    self.gen_expr_lazy(&clauses[0].body, &func.name);
+                    self.emit("\n");
+                    is_concrete = true;
+                } else {
+                    // General self-reference (`xs = myCons 0 xs`, `s = S 1 s`,
+                    // `xs = map (+1) (0:xs)`): the RHS is not a lazy constructor
+                    // application we can build eagerly, and reading the binding
+                    // by name in `local xs = f(xs)` reads `xs` BEFORE the
+                    // assignment completes (the Lua `local x = <reads x>`
+                    // gotcha), yielding a one-step or nil result. Emit the whole
+                    // RHS as a thunk so every self-reference resolves after the
+                    // binding is assigned. The self-reference INSIDE the thunk
+                    // must stay a bare (deferred) name, not `__force(xs)` — that
+                    // would force the in-progress thunk and loop — so mark it
+                    // concrete only while emitting the body; external uses of
+                    // the (thunked) binding still force it.
+                    self.emit_indent();
+                    self.emit(&format!("{} = __thunk(function() return ", lua_name));
+                    let was_concrete = self.concrete_vars.contains(&lua_name);
+                    self.concrete_vars.insert(lua_name.clone());
+                    self.gen_expr(&clauses[0].body);
+                    if !was_concrete { self.concrete_vars.remove(&lua_name); }
+                    self.emit(" end)\n");
+                    is_concrete = false;
+                }
             } else if clauses[0].where_binds.is_empty() && Self::is_cheap(&clauses[0].body)
                 && !expr_evaluates_global_ref(&clauses[0].body) {
                 // Cheap value binding that does not eagerly dereference another
@@ -4421,6 +4448,20 @@ impl CodeGen {
 
     /// Generate an expression with lazy cons tails for self-referencing definitions.
     /// Cons operations wrap the tail in a thunk via __mll_lazy_cons.
+    /// Is `expr` a cons application at its head (`x : xs`, either the infix
+    /// form or `App(App(Con ":"), _)`)? A cons-headed self-referential CAF is
+    /// built eagerly with a deferred tail (`gen_expr_lazy`); any other head is
+    /// thunked so the by-name self-reference resolves after assignment.
+    fn is_cons_headed(expr: &TExpr) -> bool {
+        match &expr.kind {
+            TExprKind::InfixApp { op, .. } => op == ":",
+            TExprKind::App(f, _) => matches!(&f.kind,
+                TExprKind::App(c, _) if matches!(&c.kind, TExprKind::Con(n) if n == ":")),
+            TExprKind::Paren(inner) => Self::is_cons_headed(inner),
+            _ => false,
+        }
+    }
+
     fn gen_expr_lazy(&mut self, expr: &TExpr, self_name: &str) {
         // Check for infix cons: x : rest
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind

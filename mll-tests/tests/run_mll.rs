@@ -423,6 +423,7 @@ mll_test!(case_guards, "case_guards.mll");
 mll_test!(infix_def, "infix_def.mll");
 mll_test!(seq_tco, "seq_tco.mll");
 mll_test!(seq_forms, "seq_forms.mll");
+mll_test!(self_referential_caf, "self_referential_caf.mll");
 mll_test!(dict, "dict.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
