@@ -134,6 +134,14 @@ pub struct Checker {
     /// instance's target type (see `InstHead`). One instance per (class, head):
     /// this is the canonical instance identity shared with the monomorphizer.
     instances: HashMap<(String, InstHead), InstanceInfo>,
+    /// (class, head) keys of the SOURCE `instance` declarations already
+    /// checked, to reject a second declaration for the same head. Instance
+    /// dispatch keys on the head constructor alone (`InstHead`), so two
+    /// declarations that share a head — a genuine duplicate (`instance Greet
+    /// Integer` twice) or two argument-specialized heads (`Pretty [Integer]`
+    /// and `Pretty [Bool]`, both `List`) — would silently mis-dispatch. Caught
+    /// at declaration instead, like GHC's duplicate/overlapping-instance error.
+    checked_instance_heads: HashSet<(String, InstHead)>,
     /// Record field accessors: field_name -> (type_name, lua_index)
     pub record_fields: HashMap<String, (String, usize)>,
     /// Type names that derive `LuaDict` (validated in `derive_luadict`): their
@@ -297,6 +305,7 @@ impl Checker {
             current_fn: None,
             classes: HashMap::new(),
             instances: HashMap::new(),
+            checked_instance_heads: HashSet::new(),
             record_fields: HashMap::new(),
             luadict_types: HashSet::new(),
             type_families: HashMap::new(),

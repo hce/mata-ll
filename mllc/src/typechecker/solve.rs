@@ -479,6 +479,30 @@ impl Checker {
         });
     }
 
+    /// Is `ty` a valid instance HEAD — a type constructor applied only to
+    /// DISTINCT type variables (`Integer`, `[a]`, `Maybe a`, `(a, b)`, `Pair a
+    /// b`)? Not `[Integer]`, `Maybe Bool`, `Pair a a`. Dispatch keys on the
+    /// head constructor alone, so anything more specific is ambiguous with the
+    /// general head and is rejected.
+    fn instance_head_general(ty: &Ty) -> bool {
+        let args: Vec<&Ty> = match ty {
+            Ty::List(e) => vec![e.as_ref()],
+            Ty::Tuple(es) => es.iter().collect(),
+            Ty::IO(e) => vec![e.as_ref()],
+            Ty::App(_, _) => {
+                let mut a = Vec::new();
+                let mut cur = ty;
+                while let Ty::App(f, x) = cur { a.push(x.as_ref()); cur = f.as_ref(); }
+                a
+            }
+            // Con (nullary like Integer), Unit, LuaIO, etc.: no ordinary type
+            // arguments to constrain here — accept.
+            _ => return true,
+        };
+        let mut seen = HashSet::new();
+        args.iter().all(|arg| matches!(arg, Ty::Var(v) if seen.insert(v.name.clone())))
+    }
+
     pub(super) fn check_instance(
         &mut self,
         class_name: &str,
@@ -506,6 +530,57 @@ impl Checker {
                 return vec![];
             }
         };
+
+        // Instance dispatch keys on the head constructor alone (InstHead), so
+        // the head's type arguments must be DISTINCT type variables — an
+        // argument-specialized head like `Pretty [Integer]` or `Pretty (Pair
+        // Integer Integer)` shares its head (`List`, `Pair`) with `Pretty [a]`
+        // / `Pretty (Pair a b)` and every other argument choice, and would
+        // silently mis-dispatch (`pretty [True]` running the `[Integer]` body).
+        // Reject it — GHC needs FlexibleInstances/OverlappingInstances for such
+        // heads, which mata-ll does not have.
+        if !Self::instance_head_general(&target_ty) {
+            self.push_error_ctx(
+                DiagnosticKind::Other(format!(
+                    "Instance head '{}' is too specific: an instance must be for a \
+                     type constructor applied to DISTINCT type variables (e.g. \
+                     '[a]', 'Maybe a', 'Pair a b'), not to concrete or repeated \
+                     type arguments\nnote: mata-ll resolves an instance by its head \
+                     constructor only, so '{}' would be indistinguishable from every \
+                     other argument choice at the same head and could silently \
+                     mis-dispatch. GHC accepts this only with FlexibleInstances / \
+                     OverlappingInstances, which mata-ll does not support.",
+                    ty_str, ty_str
+                )),
+                format!("instance {} {}", class_name, ty_str),
+            );
+            return vec![];
+        }
+
+        // A second SOURCE instance for the same (class, head) — a duplicate or
+        // an overlap that shares a head — is a compile error (GHC rejects
+        // duplicate/overlapping instances). Registration is last-writer-wins, so
+        // without this the later declaration would silently shadow the earlier.
+        // Only local/imported instances are tracked: a user instance that
+        // duplicates a Prelude one (e.g. `instance Foldable []`) shares the
+        // Prelude's non-local class AND type, so the orphan check below already
+        // rejects it — reporting it as a duplicate too would be redundant.
+        if !self.checking_prelude
+            && !self.checked_instance_heads.insert((class_name.to_string(), target_head.clone()))
+        {
+            self.push_error_ctx(
+                DiagnosticKind::Other(format!(
+                    "Duplicate instance '{} {}': an instance for this class and head \
+                     constructor is already declared\nnote: mata-ll allows one \
+                     instance per (class, head constructor); two declarations that \
+                     share a head — a repeat, or overlapping heads like '[a]' and \
+                     '[Integer]' — would mis-dispatch. Remove or merge one.",
+                    class_name, ty_str
+                )),
+                format!("instance {} {}", class_name, ty_str),
+            );
+            return vec![];
+        }
 
         // Orphan instance detection: either the class or the type must be local.
         // Only checked when check_module_with_local_start was used (local_start tracking active).

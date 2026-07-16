@@ -1657,6 +1657,46 @@ main = do
 }
 
 #[test]
+fn argument_specialized_instance_head_rejected() {
+    // Dispatch keys on the head constructor alone, so `Pretty [Integer]` would
+    // silently run for `pretty [True]` — reject it. (Was: `pretty [True]` ran
+    // the `[Integer]` body.)
+    let e = compile_err(
+        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty [Integer] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = putStrLn (pretty ([True] :: [Bool]))\n",
+    );
+    assert!(e.contains("too specific"), "got: {e}");
+    assert!(e.contains("[Integer]"), "got: {e}");
+
+    // Repeated type argument (`Pair a a`) is likewise rejected.
+    let e = compile_err(
+        "data Pair a b = Pair a b\nclass Pretty a where\n    pretty :: a -> String\ninstance Pretty (Pair a a) where\n    pretty _ = \"pair\"\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("too specific") || e.contains("DISTINCT"), "got: {e}");
+}
+
+#[test]
+fn duplicate_instance_is_hard_error() {
+    // Two instances for the same (class, head) silently overwrote (last wins);
+    // now a compile error, like GHC's duplicate-instance rejection. (Strict
+    // version of `duplicate_instance_rejected`, which tolerated the old gap.)
+    let e = compile_err(
+        "class Greet a where\n    greet :: a -> String\ninstance Greet Integer where\n    greet _ = \"first\"\ninstance Greet Integer where\n    greet _ = \"second\"\nmain :: IO ()\nmain = putStrLn (greet (1 :: Integer))\n",
+    );
+    assert!(e.contains("Duplicate instance") && e.contains("Greet Integer"), "got: {e}");
+}
+
+#[test]
+fn overlapping_instances_rejected() {
+    // `instance Pretty [a]` and `instance Pretty [Integer]` overlap at head
+    // `[]`; both `pretty [1]` and `pretty [True]` used to pick the
+    // last-declared body. Now the specific head is rejected.
+    let e = compile_err(
+        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty a => Pretty [a] where\n    pretty _ = \"generic\"\ninstance Pretty [Integer] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = pure ()\n",
+    );
+    assert!(e.contains("too specific") || e.contains("Duplicate instance"), "got: {e}");
+}
+
+#[test]
 fn instance_context_unsatisfied_rejected() {
     // Using a context-constrained instance at a type that lacks the required
     // instance must fail with a located error naming the full type, and a
