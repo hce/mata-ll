@@ -307,9 +307,21 @@ impl Checker {
             let ty = self.ast_type_to_ty(&method.ty);
             method_types.push((method.name.clone(), ty.clone()));
 
-            // Register class method in env as polymorphic
+            // Register class method in env as polymorphic. Quantify EVERY
+            // type variable of the signature — the class variable AND the
+            // method's own variables (`myfmap :: (a -> b) -> f a -> f b`
+            // quantifies a, b, f). Quantifying only the class variable left
+            // a and b as shared free variables, so two uses of the method in
+            // one definition had to agree on them: `myfmap (+1) (Just 1)`
+            // then `myfmap not (Just True)` failed with a false
+            // "Cannot unify Integer with Bool". Each occurrence must get a
+            // fresh instantiation of the full scheme, as GHC does.
+            let mut qvars: Vec<TyVar> = ty.free_vars();
+            if !qvars.iter().any(|v| v.name == tv.name) {
+                qvars.push(tv.clone());
+            }
             self.env.insert(method.name.clone(), Scheme {
-                vars: vec![tv.clone()],
+                vars: qvars,
                 ty: ty.clone(),
             });
 

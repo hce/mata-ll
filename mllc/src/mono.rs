@@ -883,6 +883,26 @@ impl Monomorphizer {
                     Box::new(self.mono_expr(*arg)),
                 )
             }
+            TExprKind::OpFunc(ref op) => {
+                // A FIRST-CLASS section of a class-method operator
+                // (`foldr (<>) mempty`, `zipWith (<+>) xs ys`): dispatch it
+                // exactly like an infix use, from the operator type the
+                // checker recorded on this node. Without this, codegen's
+                // OpFunc fallback hard-codes a Lua operator — `<>` becomes
+                // string concatenation regardless of the instance, and a
+                // user-defined operator symbol would be emitted verbatim (a
+                // Lua syntax error). Only a successful resolution rewrites;
+                // deferred/missing uses keep the old fallback.
+                let op = op.clone();
+                if self.class_methods.contains(&op)
+                    && !self.locals.contains(&op)
+                    && !self.is_polymorphic(&ty)
+                    && let MethodDispatch::Resolved(mangled) = self.resolve_op_use(&op, &ty)
+                {
+                    return TExpr { kind: TExprKind::Var(mangled), ty };
+                }
+                expr.kind
+            }
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // Typeclass method dispatch on infix operators. The TIR drops
                 // the operator's own instantiated type, but it is exactly

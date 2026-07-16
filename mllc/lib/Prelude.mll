@@ -170,6 +170,10 @@ minimum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "minimum: empty structure"
     (x:xs) -> foldl (\m y -> if y < m then y else m) x xs
 
+-- Fold a list of monoid values into one (GHC's mconcat).
+mconcat :: Monoid a => [a] -> a
+mconcat xs = foldr mappend mempty xs
+
 -- Map each element to a monoid and combine the results.
 -- Monoid instances: String (concatenation, mempty "") and lists
 -- (append, mempty []).
@@ -183,9 +187,13 @@ foldMap f t = foldr (\x acc -> mappend (f x) acc) mempty t
 class Semigroup a where
     (<>) :: a -> a -> a
 
+-- GHC's default: mappend is the named form of the superclass (<>). A user
+-- instance that defines only mempty (the common, GHC-idiomatic shape) still
+-- gets a working mappend — and with it foldMap/mconcat.
 class Semigroup a => Monoid a where
     mempty  :: a
     mappend :: a -> a -> a
+    mappend x y = x <> y
 
 -- Semigroup and Monoid instances for the builtin containers.
 --
