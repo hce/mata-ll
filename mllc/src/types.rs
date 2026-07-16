@@ -680,17 +680,43 @@ fn tf_normalize(ty: &Ty, fams: &TyFamilies, fuel: &mut u32) -> Result<Ty, Diagno
         match tf_reduce_head(&cur, fams) {
             None => return Ok(cur),
             Some(reduced) => {
-                if *fuel == 0 {
+                // Charge fuel by the SIZE of the reduced type, not a flat 1 per
+                // step. A GROWING family (`Grow x = Grow (Maybe x)`) enlarges
+                // its argument every step, so a flat per-step budget lets it
+                // build an enormous type before the step limit — O(fuel^2) work,
+                // effectively a hang. Charging by size bounds total work and
+                // reports the divergence quickly, the same as a same-size loop.
+                let cost = ty_size_up_to(&reduced, *fuel);
+                if cost >= *fuel {
                     let (head, _) = peel_app(&cur);
                     let name = match head { Ty::Con(n) => n.clone(), _ => "?".to_string() };
                     return Err(DiagnosticKind::TypeFamilyDivergence(name));
                 }
-                *fuel -= 1;
+                *fuel -= cost;
                 // The reduced result may expose new inner family apps.
                 cur = tf_normalize_children(&reduced, fams, fuel)?;
             }
         }
     }
+}
+
+/// Count the nodes in `ty`, stopping as soon as the count reaches `cap`
+/// (returns `cap` then). Used to charge type-family reduction fuel by the size
+/// of each reduced type without ever walking a runaway (growing) type in full.
+fn ty_size_up_to(ty: &Ty, cap: u32) -> u32 {
+    fn go(ty: &Ty, cap: u32, acc: &mut u32) {
+        if *acc >= cap { return; }
+        *acc += 1;
+        match ty {
+            Ty::Arrow(a, b) | Ty::App(a, b) => { go(a, cap, acc); go(b, cap, acc); }
+            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => go(a, cap, acc),
+            Ty::Tuple(es) => for e in es { go(e, cap, acc); if *acc >= cap { break; } },
+            _ => {}
+        }
+    }
+    let mut acc = 0;
+    go(ty, cap, &mut acc);
+    acc
 }
 
 /// Reduce every closed-type-family application in `ty` to normal form using

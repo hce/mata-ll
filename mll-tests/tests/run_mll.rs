@@ -3272,6 +3272,22 @@ main = do
         .expect("[Maybe a] argument must preserve element positions, not compact");
 }
 
+#[test]
+fn growing_type_family_is_bounded() {
+    // A type family that grows its argument every step (Grow x = Grow (Maybe x))
+    // must be bounded by reduction fuel and reported as divergent -- never hang
+    // or stack-overflow the compiler (the flat per-step budget let it build an
+    // enormous type first). Charging fuel by reduced-type size bounds it.
+    let src = "\
+type family Grow x where\n  Grow x = Grow (Maybe x)\nf :: Grow Integer -> Integer\nf _ = 0\nmain :: IO ()\nmain = putStrLn \"x\"\n";
+    match mllc::compile(src, Path::new("."), &[]) {
+        Err(e) => assert!(
+            format!("{}", e).contains("did not terminate"),
+            "expected a type-family divergence error, got: {}", e),
+        Ok(_) => panic!("a growing type family must be rejected as divergent, not accepted"),
+    }
+}
+
 // port back into a `Maybe Integer` result field, which the decoder must
 // reconstruct as Just/Nothing — encode-then-decode identity.
 #[test]
