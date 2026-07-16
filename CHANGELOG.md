@@ -29,6 +29,22 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Changed
+
+- **`LuaIterator`'s type argument now names the RESULT list, and each yielded
+  element is decoded.** A list argument `LuaIterator "f" [E]` reduces to `[E]`
+  (the iterator yields one `E` per step) rather than the old `[[E]]`; a bare
+  element type `T` remains the `[T]` shorthand, so existing scalar-argument
+  bindings (`LuaIterator "string.gmatch" String -> [String]`) are unchanged.
+  Each yielded value is now decoded as the element type through the same
+  `__mll_ffi_decode` path as any other FFI result, so a structured element
+  (chiefly a list — `LuaIterator "f" [[Integer]]`, whose host yields Lua
+  arrays) becomes a proper cons list instead of a raw Lua table; before, such
+  a value surfaced later as `show: expected a list but got a raw … value`.
+  Scalar/opaque elements need no decode and keep their exact old codegen.
+  Fixes the `examples/iterator/` example. Regression test:
+  `lua_iterator_type_argument_is_the_result_list_and_elements_decode`.
+
 ### Added
 
 - **Promoted data types now have real kinds (DataKinds).** A parameterless,

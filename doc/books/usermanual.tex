@@ -961,11 +961,27 @@ these constraints.
 
 \subsection{Iterators}
 
-Wrap Lua iterator protocols:
+Wrap Lua iterator protocols. The type argument to \texttt{LuaIterator}
+names the RESULT list --- the iterator yields its ELEMENTS, one per
+step, each decoded as the element type (a structured element such as a
+list is decoded like any other FFI result):
 
 \begin{lstlisting}
-gmatch :: String -> String -> LuaIterator "string.gmatch" String
+-- host yields plain strings -> a list of strings
+gmatch :: String -> String -> LuaIterator "string.gmatch" [String]
+
+-- host yields plain integers -> a list of integers
+counter :: LuaIterator "count" [Integer]
+
+-- host yields Lua arrays of ints -> a list of lists
+rows :: LuaIterator "rows" [[Integer]]
 \end{lstlisting}
+
+A bare element type is accepted as a shorthand for the
+one-element-deep case: \texttt{LuaIterator "string.gmatch" String} also
+reduces to \texttt{[String]} (the iterator yields \texttt{String}s).
+Prefer writing the result list (\texttt{[String]}); the bare form is
+kept for compatibility.
 
 \subsection{Error-Capturing FFI}
 

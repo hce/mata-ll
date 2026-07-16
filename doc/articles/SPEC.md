@@ -1534,6 +1534,9 @@ The following are known limitations of the current implementation:
 - `LuaIterator` is for pure Lua iterators only (e.g. `string.gmatch`).
   IO-producing iterators like `io.lines` must use `IO` and read
   eagerly — lazy IO is not supported. Use `fileLines :: String -> IO
-  [String]` from LIO for file reading.
+  [String]` from LIO for file reading. The `LuaIterator "f" R` type
+  argument names the RESULT list: a list `[E]` reduces to `[E]` (the
+  iterator yields one `E` per step, each decoded as the element type),
+  and a bare element type `T` is the `[T]` shorthand.
 - No lazy IO. File and stream operations read eagerly into lists.
   For streaming, a conduit-style approach may be added in the future.

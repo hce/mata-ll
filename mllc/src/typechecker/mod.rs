@@ -415,8 +415,22 @@ impl Checker {
             Type::LuaPure { result, .. } => self.ast_type_to_ty(result),
             // LuaIO "name" T  reduces to  IO T
             Type::LuaIO { result, .. } => Ty::io(self.ast_type_to_ty(result)),
-            // LuaIterator "name" T  reduces to  [T]
-            Type::LuaIterator { result, .. } => Ty::list(self.ast_type_to_ty(result)),
+            // LuaIterator "name" R  reduces to a LIST: the type argument names
+            // the RESULT of collecting the iterator. When `R` is already a list
+            // `[E]`, the result IS `[E]` and the iterator yields one `E` per
+            // step (`LuaIterator "f" [Integer]` -> `[Integer]`, yielding ints).
+            // When `R` is a bare element type `T`, the result is `[T]` — the
+            // backward-compatible shorthand where the argument names the ELEMENT
+            // (`LuaIterator "string.gmatch" String` -> `[String]`). Either way
+            // the result is `[element]` and each yielded value is decoded as
+            // that element type at the call site (see codegen `__mll_iter:`).
+            Type::LuaIterator { result, .. } => {
+                let r = self.ast_type_to_ty(result);
+                match r {
+                    Ty::List(_) => r,
+                    other => Ty::list(other),
+                }
+            }
             Type::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| self.ast_type_to_ty(t)).collect()),
             // LuaTry "name" T  reduces to  IO (Either String T)
             Type::LuaTry { result, .. } => {

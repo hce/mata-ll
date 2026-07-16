@@ -3711,6 +3711,65 @@ fn compile_ffi_module(source: &str) -> (mlua::Lua, mlua::Table) {
 }
 
 #[test]
+fn lua_iterator_type_argument_is_the_result_list_and_elements_decode() {
+    // examples/iterator/ regression, two properties in one:
+    //
+    // 1. The `LuaIterator "f" T` type argument names the RESULT list. A list
+    //    argument `[Integer]` reduces to `[Integer]` (the iterator yields the
+    //    ELEMENTS, one Integer per step) — NOT `[[Integer]]`. So `yields`,
+    //    whose host yields plain ints, is a flat `[Integer]`.
+    // 2. A structured element type is DECODED per element, exactly as an
+    //    ordinary FFI result: `arrs :: LuaIterator "…" [[Integer]]` reduces to
+    //    `[[Integer]]`, and each yielded Lua array becomes a cons list (so
+    //    `map sum` works). Before the fix elements were stored raw and any
+    //    list op failed with "expected a list but got a raw … value".
+    let src = r#"
+yields :: LuaIterator "yieldints" [Integer]
+arrs   :: LuaIterator "yieldarrs" [[Integer]]
+
+main :: IO ()
+main = do
+    -- (1) list-arg iterator over a scalar-yielding host is a FLAT [Integer].
+    assert (take 3 yields == [10, 20, 30]) "list-arg iterator yields a flat [Integer]"
+    -- (2) structured element (a list) is decoded to a cons list.
+    assert (map sum (take 2 arrs) == [3, 7]) "each yielded array decoded to a cons list"
+    putStrLn "ok"
+"#;
+    let lua_code = mllc::compile(src, Path::new("."), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    // Host factories: `yieldints` yields plain ints 10,20,30; `yieldarrs`
+    // yields Lua arrays {1,2},{3,4}.
+    lua.load(
+        r#"
+        function yieldints()
+            local n = 0
+            return function()
+                n = n + 1
+                if n > 3 then return nil end
+                return n * 10
+            end
+        end
+        function yieldarrs()
+            local n = 0
+            return function()
+                n = n + 1
+                if n > 2 then return nil end
+                return { 2 * n - 1, 2 * n }
+            end
+        end
+        "#,
+    )
+    .exec()
+    .expect("define host iterator factories");
+    lua.load(&lua_code)
+        .set_name("iter_semantics")
+        .exec()
+        .expect("LuaIterator result must be the flat list of decoded elements");
+}
+
+#[test]
 fn ffi_export_pure_functions() {
     let source = r#"
 export add :: Integer -> Integer -> Integer

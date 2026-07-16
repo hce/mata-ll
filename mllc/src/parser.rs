@@ -1284,7 +1284,8 @@ impl Parser {
                         Ok(Type::LuaIO { lua_name, result: Box::new(result) })
                     }
                     "LuaIterator" => {
-                        // LuaIterator "lua.func.name" ElementType
+                        // LuaIterator "lua.func.name" ResultListType
+                        // (a bare element type is the [T] shorthand — see ast.rs)
                         let lua_name = match self.peek().clone() {
                             Token::StrLit(s) => { self.advance(); s }
                             _ => return Err(self.err_here("LuaIterator expects a string literal".to_string())),

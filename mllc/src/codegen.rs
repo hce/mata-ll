@@ -4185,9 +4185,29 @@ impl CodeGen {
                     }
                     self.emit(" end)()");
                 } else if let Some(lua_func) = specialized.strip_prefix("__mll_iter:") {
-                    // Iterator FFI: __mll_iter(lua_factory, arg0, arg1, ...)
+                    // Iterator FFI: the result type is a list `[element]` (see the
+                    // LuaIterator reduction). Each iterator step yields one
+                    // `element`, which must be decoded the same way an ordinary
+                    // FFI result is — a list element becomes a cons list, a Maybe
+                    // is wrapped, a structured element is validated. Without this,
+                    // a structured element (a list, chiefly) was stored as a raw
+                    // Lua value, so `show`/any consumer failed later with a
+                    // baffling "raw value" error. A scalar/opaque element needs
+                    // no descriptor (`nil`), keeping the common iterator's exact
+                    // old codegen.
+                    let elem_desc = match &expr.ty {
+                        Ty::List(elem) =>
+                            self.ffi_decode_desc_inner(elem, &mut Vec::new(), None).map(|d| d.0),
+                        _ => None,
+                    };
+                    // __mll_iter(factory, decode_desc, root, arg0, arg1, ...)
                     self.emit("__mll_iter(");
                     self.emit(lua_func);
+                    match &elem_desc {
+                        Some(desc) =>
+                            self.emit(&format!(", {}, {:?}", desc, Self::ffi_root_name(lua_func))),
+                        None => self.emit(", nil, nil"),
+                    }
                     self.gen_ffi_args(args, true);
                     self.emit(")");
                 } else if let Some(lua_func) = specialized.strip_prefix("__mll_try:") {
@@ -5832,12 +5852,18 @@ end
 
 -- Iterator-to-lazy-list: calls a Lua iterator factory and builds a lazy MLL list.
 -- Single-value iterators produce a flat list; multi-value iterators pack into tuples.
-local function __mll_iter(factory, ...)
+-- `decode_desc` (may be nil) is the type-directed decoder for the ELEMENT type:
+-- each yielded value crosses the FFI boundary and is decoded exactly as an
+-- ordinary FFI result is (a list element -> cons list, a Maybe -> Just/Nothing,
+-- a mismatched shape -> a clear localized error). nil means the element already
+-- matches the mata-ll representation (a scalar/opaque element) -- pass it raw.
+local function __mll_iter(factory, decode_desc, root, ...)
     local iter = factory(...)
     local function go()
         local vals = {iter()}
         if vals[1] == nil then return nil end
         local val = #vals == 1 and vals[1] or vals
+        if decode_desc ~= nil then val = __mll_ffi_decode(decode_desc, val, root) end
         return __mll_lazy_cons(val, go)
     end
     return go()
