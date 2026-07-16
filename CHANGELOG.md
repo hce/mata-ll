@@ -291,6 +291,64 @@ API of the `mllc` library crate.)
   on the CI benchmark and dropping decode speed from ~1.4x to ~0.9x realtime on
   the development machine, below the 0.5x CI gate on slower runners. Decoded
   output is byte-identical; the gate is back to ~1.4-1.6x realtime at ~20 MB.
+- **Every Lua string literal is now escaped through one canonical routine.**
+  String escaping had been hand-written in three places and only the expression
+  path (`gen_literal`) was correct: a string literal used in a *pattern* was
+  emitted with no escaping at all, and a `LuaDict` record `as` key escaped only
+  the quote and backslash. A quote, newline, or other control character in a
+  string pattern (`f "a\"b" = …`) or an `as` key (`field as "a\nb"`) therefore
+  produced generated Lua that would not even load. The expression path, the
+  pattern-literal path, `lua_key_string`, and the two FFI decode-descriptor
+  field-name sites now all route through a single `lua_quoted_string`, which
+  also emits control characters as three-digit `\ddd` escapes so a short escape
+  can never silently merge with a following digit (`"\01"` is now `"\0"`
+  followed by `"1"`, not the single byte `\1`). Regression tests:
+  `string_pattern_literal_with_quote_and_newline_is_escaped`,
+  `luadict_as_key_with_control_chars_is_escaped`.
+- **FFI target names are validated as well-formed Lua callees.** An FFI target
+  string (`LuaPure`/`LuaIO`/`LuaIterator`/`LuaTry`/`LuaCatch`/`LuaIOCatch`) is
+  emitted verbatim as the thing being called in the generated Lua, so a
+  malformed name such as `LuaPure "a b" Int` produced `a b(...)` — broken Lua
+  that fails to load — instead of a clear error. The target is now checked once
+  at the declaration (`validate_ffi_callee`), accepting exactly the well-formed
+  callee shapes — a bare name, a dotted path (`math.floor`), an indexed path
+  (`handlers[1].run`), and a trailing or bare `:method` — and rejecting anything
+  else with a compile-time diagnostic that names the offending string and lists
+  the valid forms. The legitimate dotted and method forms are unaffected.
+  Regression tests: `ffi_target_with_space_is_rejected_at_compile_time`,
+  `ffi_target_other_malformed_forms_are_rejected`,
+  `ffi_target_dotted_and_method_forms_still_work`,
+  `ffi_target_indexed_and_trailing_method_forms_compile`.
+- **Deeply nested input yields a clean error instead of crashing the compiler.**
+  The parser, the typechecker, and codegen all recursed on the native stack with
+  no depth bound, so pathologically nested input — thousands of nested parens, a
+  long operator spine (`1+1+1+…`), a deep signature or pattern — aborted the
+  whole process with a stack overflow. The compiler thread now runs on a large
+  shared stack (`COMPILER_STACK_SIZE`) and every recursive-descent traversal
+  that could overflow carries a depth guard (`MAX_NESTING_DEPTH`): the parser's
+  expression/type/pattern productions, `ast_type_to_ty`, `infer_expr` /
+  `check_expr_typed`, and codegen's `gen_expr` walk. Stack size and the depth
+  limit are sized together, so input past the limit reports a plain "nested too
+  deeply" diagnostic while realistic code — including a 1000-plus-element list
+  literal — still compiles. The test harness and REPL compile on the same stack
+  size so the limit behaves identically there. Regression tests:
+  `deeply_nested_parens_yield_clean_depth_error`,
+  `deeply_nested_types_yield_clean_depth_error`,
+  `operator_spine_past_limit_yields_clean_depth_error`,
+  `thousand_element_list_literal_still_compiles_and_runs`.
+- **Type-alias expansion is bounded by size, so a doubling alias tower no longer
+  hangs the compiler.** A self-doubling tower (`type Pi a = P(i-1) (P(i-1) a)`)
+  expands to a type whose *size* is exponential in the number of levels while
+  its *depth* stays small — so the recursion-depth guard above never saw it, and
+  the compiler ground through the exponential expansion for a long time (it had
+  previously masked itself as a stack overflow, and became a hang once the stack
+  grew). Type-alias expansion is now charged fuel by the size of each expanded
+  body — mirroring the closed-type-family reducer's size-charged fuel — and
+  reports a clean "type alias expansion did not terminate" diagnostic once the
+  per-signature budget is exhausted; the same guard catches a self-referential
+  alias (`type A = [A]`). Ordinary multi-level alias use charges only a few
+  hundred units and is unaffected. Regression test:
+  `doubling_alias_tower_yields_clean_size_error`.
 
 ## [0.1.3] - 2026-07-14
 
