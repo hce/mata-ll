@@ -1239,6 +1239,37 @@ impl Parser {
         if matched { Some(name) } else { None }
     }
 
+    /// Parse the FFI target string of `LuaPure "…"`, `LuaIO "…"`,
+    /// `LuaIterator "…"`, `LuaTry "…"`, `LuaCatch "…"`, `LuaIOCatch "…"`.
+    ///
+    /// The string is emitted VERBATIM as the callee of a Lua call, so it must
+    /// be a well-formed Lua callee expression — otherwise the compiler would
+    /// silently produce a .lua file that Lua refuses to load. Validating here,
+    /// at the declaration, gives one early error that covers every FFI form.
+    fn parse_ffi_lua_name(&mut self, kw: &str) -> PResult<String> {
+        let lua_name = match self.peek().clone() {
+            Token::StrLit(s) => { self.advance(); s }
+            _ => return Err(self.err_here(format!("{} expects a string literal", kw))),
+        };
+        if let Err(why) = validate_ffi_callee(&lua_name) {
+            let mut diag = self.err_here(format!(
+                "invalid Lua target in `{} \"{}\"`: {}. The string is emitted \
+                 verbatim as the thing being called in the generated Lua, so it \
+                 must be a well-formed Lua callee",
+                kw, lua_name, why
+            ));
+            diag.notes.push(
+                "valid forms: a bare name (`floor`), a dotted path (`math.floor`), \
+                 an indexed path (`handlers[1].run`, `t[\"key\"].f`), any of those \
+                 with a trailing method (`obj.stream:read`), or a bare method \
+                 (`:read`) applied to the function's first argument"
+                    .to_string(),
+            );
+            return Err(diag);
+        }
+        Ok(lua_name)
+    }
+
     fn parse_type_atom(&mut self) -> PResult<Type> {
         match self.peek().clone() {
             Token::UpperIdent(name) => {
@@ -1267,38 +1298,26 @@ impl Parser {
                     }
                     "LuaPure" => {
                         // LuaPure "lua.func.name" ReturnType
-                        let lua_name = match self.peek().clone() {
-                            Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err(self.err_here("LuaPure expects a string literal".to_string())),
-                        };
+                        let lua_name = self.parse_ffi_lua_name("LuaPure")?;
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaPure { lua_name, result: Box::new(result) })
                     }
                     "LuaIO" => {
                         // LuaIO "lua.func.name" ReturnType
-                        let lua_name = match self.peek().clone() {
-                            Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err(self.err_here("LuaIO expects a string literal".to_string())),
-                        };
+                        let lua_name = self.parse_ffi_lua_name("LuaIO")?;
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaIO { lua_name, result: Box::new(result) })
                     }
                     "LuaIterator" => {
                         // LuaIterator "lua.func.name" ResultListType
                         // (a bare element type is the [T] shorthand — see ast.rs)
-                        let lua_name = match self.peek().clone() {
-                            Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err(self.err_here("LuaIterator expects a string literal".to_string())),
-                        };
+                        let lua_name = self.parse_ffi_lua_name("LuaIterator")?;
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaIterator { lua_name, result: Box::new(result) })
                     }
                     "LuaTry" => {
                         // LuaTry "lua.func.name" ResultType
-                        let lua_name = match self.peek().clone() {
-                            Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err(self.err_here("LuaTry expects a string literal".to_string())),
-                        };
+                        let lua_name = self.parse_ffi_lua_name("LuaTry")?;
                         let result = self.parse_type_atom()?;
                         Ok(Type::LuaTry { lua_name, result: Box::new(result) })
                     }
@@ -1306,10 +1325,7 @@ impl Parser {
                         // LuaCatch    "lua.func.name" (Either String T)  ->  Either String T
                         // LuaIOCatch  "lua.func.name" (Either String T)  ->  IO (Either String T)
                         // A raised Lua error is captured as `Left msg` via pcall.
-                        let lua_name = match self.peek().clone() {
-                            Token::StrLit(s) => { self.advance(); s }
-                            _ => return Err(self.err_here(format!("{} expects a string literal", name))),
-                        };
+                        let lua_name = self.parse_ffi_lua_name(&name)?;
                         let result = self.parse_type_atom()?;
                         if !is_either_string_type(&result) {
                             return Err(self.err_here(format!(
@@ -2800,6 +2816,135 @@ fn is_either_string_type(ty: &Type) -> bool {
                 return matches!(fst, Type::Con(s) if s == "String");
             }
             _ => return false,
+        }
+    }
+}
+
+/// Validate that an FFI target string is a well-formed Lua *callee*
+/// expression. The accepted grammar (deliberately an expression, not just a
+/// name — see `parse_ffi_lua_name`):
+///
+/// ```text
+/// callee := ":" ident                          -- method on the 1st argument
+///         | path ( ":" ident )?                -- global path (+ method)
+/// path   := ident ( "." ident | "[" index "]" )*
+/// index  := digits | '"' chars '"' | "'" chars "'"
+/// ident  := [A-Za-z_][A-Za-z0-9_]*  and not a Lua reserved word
+/// ```
+///
+/// Anything else (spaces, operators, empty segments, reserved words, …) would
+/// be emitted verbatim into a call position and produce Lua that fails to
+/// load, so it is rejected with an explanation of what is wrong.
+fn validate_ffi_callee(s: &str) -> Result<(), String> {
+    fn take_ident(chars: &[char], mut i: usize) -> Result<usize, String> {
+        let start = i;
+        match chars.get(i) {
+            Some(c) if c.is_ascii_alphabetic() || *c == '_' => i += 1,
+            Some(c) => {
+                return Err(format!(
+                    "expected a Lua name to start here, found '{}' (a Lua name \
+                     starts with a letter or '_')",
+                    c
+                ))
+            }
+            None => return Err("the target ends where a Lua name was expected".to_string()),
+        }
+        while matches!(chars.get(i), Some(c) if c.is_ascii_alphanumeric() || *c == '_') {
+            i += 1;
+        }
+        let word: String = chars[start..i].iter().collect();
+        if crate::codegen::is_lua_keyword(&word) {
+            return Err(format!(
+                "'{}' is a Lua reserved word and cannot be used as a name",
+                word
+            ));
+        }
+        Ok(i)
+    }
+
+    let chars: Vec<char> = s.chars().collect();
+    if chars.is_empty() {
+        return Err("the target is empty".to_string());
+    }
+
+    let mut i = 0;
+    // Bare-method form `:read` — the method is called on the 1st argument.
+    if chars[0] == ':' {
+        i = take_ident(&chars, 1)?;
+        return if i == chars.len() {
+            Ok(())
+        } else {
+            Err(format!(
+                "unexpected '{}' after the method name (a `:name` target is a \
+                 single method name, nothing may follow it)",
+                chars[i]
+            ))
+        };
+    }
+
+    i = take_ident(&chars, i)?;
+    loop {
+        match chars.get(i) {
+            None => return Ok(()),
+            Some('.') => {
+                i = take_ident(&chars, i + 1)?;
+            }
+            Some('[') => {
+                i += 1;
+                match chars.get(i) {
+                    Some(c) if c.is_ascii_digit() => {
+                        while matches!(chars.get(i), Some(c) if c.is_ascii_digit()) {
+                            i += 1;
+                        }
+                    }
+                    Some(q @ ('"' | '\'')) => {
+                        let q = *q;
+                        i += 1;
+                        while let Some(c) = chars.get(i) {
+                            if *c == q {
+                                break;
+                            }
+                            if *c == '\\' || *c == '\n' {
+                                return Err(
+                                    "a quoted index may not contain backslashes or newlines"
+                                        .to_string(),
+                                );
+                            }
+                            i += 1;
+                        }
+                        if chars.get(i) != Some(&q) {
+                            return Err("a quoted index is missing its closing quote".to_string());
+                        }
+                        i += 1;
+                    }
+                    _ => {
+                        return Err(
+                            "an index in '[…]' must be a number or a quoted string".to_string()
+                        )
+                    }
+                }
+                if chars.get(i) != Some(&']') {
+                    return Err("an index is missing its closing ']'".to_string());
+                }
+                i += 1;
+            }
+            // Trailing method: everything before ':' locates the object,
+            // the name after it is the method.
+            Some(':') => {
+                i = take_ident(&chars, i + 1)?;
+                return if i == chars.len() {
+                    Ok(())
+                } else {
+                    Err(format!(
+                        "unexpected '{}' after the method name (a `:method` may \
+                         only end the target)",
+                        chars[i]
+                    ))
+                };
+            }
+            Some(c) => {
+                return Err(format!("unexpected character '{}'", c));
+            }
         }
     }
 }

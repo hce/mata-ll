@@ -7292,3 +7292,93 @@ main = if field1 (Rec 5) == 5
         .exec()
         .expect("the emitted Lua must load and the renamed field must round-trip");
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests: the FFI target string is emitted verbatim as a Lua
+// callee, so it is validated at the declaration (see parser.rs
+// `validate_ffi_callee`) — a malformed target is a clean compile error, never
+// broken Lua.
+// ---------------------------------------------------------------------------
+
+/// An FFI target that is not a well-formed Lua callee (here: contains a
+/// space) used to be pasted into a call position, emitting `a b(...)` — Lua
+/// that failed to load. It must now be rejected at compile time with a
+/// diagnostic naming the offending string and declaration form.
+#[test]
+fn ffi_target_with_space_is_rejected_at_compile_time() {
+    let e = compile_err(
+        r#"
+foo :: Integer -> LuaPure "a b" Integer
+
+export doit :: IO ()
+doit = print (foo 3)
+"#,
+    );
+    assert!(
+        e.contains("invalid Lua target") && e.contains("LuaPure \"a b\""),
+        "expected a clean diagnostic naming the malformed FFI target, got: {}",
+        e
+    );
+}
+
+/// Other malformed shapes must be rejected the same way: an empty path
+/// segment (`math..floor`) and a Lua reserved word as a name component.
+#[test]
+fn ffi_target_other_malformed_forms_are_rejected() {
+    let e = compile_err(
+        "foo :: Integer -> LuaIO \"math..floor\" Integer\nmain :: IO ()\nmain = foo 3 >>= print\n",
+    );
+    assert!(
+        e.contains("invalid Lua target") && e.contains("math..floor"),
+        "expected a clean diagnostic for the empty path segment, got: {}",
+        e
+    );
+    let e = compile_err(
+        "foo :: Integer -> LuaPure \"os.end\" Integer\nmain :: IO ()\nmain = print (foo 3)\n",
+    );
+    assert!(
+        e.contains("invalid Lua target") && e.contains("reserved word"),
+        "expected a clean diagnostic for the reserved-word segment, got: {}",
+        e
+    );
+}
+
+/// The FFI target is deliberately a Lua callee EXPRESSION, not just a name:
+/// dotted paths and the arg0-method form must keep compiling — and running.
+#[test]
+fn ffi_target_dotted_and_method_forms_still_work() {
+    let source = r#"
+floorN :: Number -> LuaPure "math.floor" Integer
+
+repS :: String -> Integer -> LuaPure ":rep" String
+
+main :: IO ()
+main = if floorN 3.7 == 3 && repS "ab" 2 == "abab"
+         then putStrLn "ok"
+         else error "dotted-path or method-form FFI produced a wrong result"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("dotted-path and :method FFI targets must keep compiling")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code)
+        .exec()
+        .expect("math.floor and the string :rep method must run correctly");
+}
+
+/// Indexed paths and a dotted path with a trailing method are also legitimate
+/// callee shapes; they must pass validation (compile-only — the host objects
+/// don't exist in the test harness).
+#[test]
+fn ffi_target_indexed_and_trailing_method_forms_compile() {
+    let source = r#"
+runFirst :: Integer -> LuaPure "handlers[1].run" Integer
+
+readCfg :: Integer -> LuaPure "cfg[\"main\"].stream:read" Integer
+
+export doit :: IO ()
+doit = print (runFirst 1 + readCfg 2)
+"#;
+    mllc::compile(source, Path::new("."), &[])
+        .expect("indexed-path and path:method FFI targets must pass validation");
+}

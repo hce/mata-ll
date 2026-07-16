@@ -4745,8 +4745,9 @@ impl CodeGen {
     }
 }
 
-/// Lua reserved words — cannot be used as a bare `.field` key or `{field = …}`.
-fn is_lua_keyword(s: &str) -> bool {
+/// Lua reserved words — cannot be used as a bare `.field` key or `{field = …}`,
+/// nor as a name component of an FFI callee path (see `parser::validate_ffi_callee`).
+pub(crate) fn is_lua_keyword(s: &str) -> bool {
     matches!(s,
         "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for"
         | "function" | "goto" | "if" | "in" | "local" | "nil" | "not" | "or"
