@@ -485,6 +485,7 @@ mll_test!(existentials, "existentials.mll");
 // existential_unpacking_* tests below.
 mll_test!(existential_constraints, "existential_constraints.mll");
 mll_test!(derive_functor, "derive_functor.mll");
+mll_test!(derive_functor_nested, "derive_functor_nested.mll");
 // Foldable/Traversable: class methods (foldr/foldl/traverse), the generic
 // Prelude functions over them, the Monoid class behind foldMap, liftA2,
 // and user-defined instances of all three on a custom type
@@ -4999,6 +5000,58 @@ main = pure ()
         Ok(_) => panic!(
             "IsZero n (symbolic) must stay stuck, not reduce via the catch-all"
         ),
+    }
+}
+
+// --- deriving Functor rejects contravariant occurrences (audit finding 15).
+
+#[test]
+fn derive_functor_contravariant_rejected() {
+    // `data F a = F (a -> Integer)`: the class variable in a function
+    // ARGUMENT position has no lawful fmap. GHC rejects the deriving clause;
+    // mata-ll used to accept it and crash at the first fmap use.
+    let source = r#"
+data F a = F (a -> Integer) deriving (Functor)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("Cannot derive 'Functor' for 'F'")
+                    && msg.contains("argument of a function field"),
+                "expected the contravariance rejection, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("deriving Functor over a contravariant field must be rejected"),
+    }
+}
+
+#[test]
+fn derive_functor_non_last_argument_rejected() {
+    // The class variable used in a non-last argument of a constructor
+    // (`Either a Integer`): fmap only reaches the last argument, so GHC
+    // rejects this deriving too.
+    let source = r#"
+data W a = W (Either a Integer) deriving (Functor)
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("Cannot derive 'Functor' for 'W'")
+                    && msg.contains("position other than the last argument"),
+                "expected the non-last-argument rejection, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("deriving Functor with the variable in a non-last argument must be rejected"),
     }
 }
 

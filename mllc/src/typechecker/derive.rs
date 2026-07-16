@@ -1108,64 +1108,197 @@ impl Checker {
         }
     }
 
-    /// Generate the expression to map a field value through the functor function.
-    /// For a field of type `t` in a Functor-derived constructor:
-    /// - If `t` doesn't mention the last type var: pass through unchanged
-    /// - If `t` IS the last type var: apply `_f x`
-    /// - Otherwise (e.g. `Tree a`, `[a]`): apply `resolved_fmap _f x`
-    /// The fmap_name is resolved at derive time to avoid polymorphic resolution issues.
-    pub(super) fn functor_map_field(&self, field_ty: &Ty, last_var: &str, var_name: &str, b_ty: &Ty, self_fmap: &str) -> TExpr {
+    /// Generate the expression that maps a field VALUE through the functor
+    /// function — recursing structurally, GHC-style, so the function reaches
+    /// every occurrence of the class variable no matter how deeply nested
+    /// (`Maybe [a]` maps the list's elements, `[Rose a]` maps each subtree,
+    /// tuples map their relevant components, and a covariant function field
+    /// `Int -> a` post-composes). Positions a Functor cannot map — the class
+    /// variable in a function ARGUMENT (contravariant) or in a non-last
+    /// argument of a type constructor — are reported as errors, exactly the
+    /// cases GHC's DeriveFunctor rejects.
+    ///
+    /// `value` must be a pure, cheaply duplicable expression (a variable or a
+    /// projection of one); tuple fields duplicate it per component.
+    pub(super) fn functor_map_value(
+        &self,
+        field_ty: &Ty,
+        last_var: &str,
+        value: TExpr,
+        b_ty: &Ty,
+        self_fmap: &str,
+        fresh: &mut usize,
+    ) -> Result<TExpr, String> {
         if !Self::ty_mentions_var(field_ty, last_var) {
-            // Field doesn't mention the functor parameter → pass through
-            TExpr::new(TExprKind::Var(var_name.to_string()), field_ty.clone())
-        } else if let Ty::Var(tv) = field_ty {
-            if tv.name == last_var {
-                // Field IS the functor parameter → apply _f
-                TExpr::new(
+            // No occurrence of the functor parameter → pass through.
+            return Ok(value);
+        }
+        match field_ty {
+            Ty::Var(tv) if tv.name == last_var => {
+                // The field IS the functor parameter → apply _f.
+                Ok(TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(
                             TExprKind::Var("_f".to_string()),
                             Ty::arrow(field_ty.clone(), b_ty.clone()),
                         )),
-                        Box::new(TExpr::new(
-                            TExprKind::Var(var_name.to_string()),
-                            field_ty.clone(),
-                        )),
+                        Box::new(value),
                     ),
                     b_ty.clone(),
-                )
-            } else {
-                TExpr::new(TExprKind::Var(var_name.to_string()), field_ty.clone())
+                ))
             }
-        } else {
-            // Complex type mentioning the var (e.g. Tree a, [a], Maybe a)
-            // Resolve the fmap function name at derive time
-            let fmap_resolved = self.resolve_functor_fmap(field_ty, self_fmap);
-            let a_ty = Ty::Var(TyVar { name: last_var.to_string(), id: u32::MAX });
-            let fmap_f = TExpr::new(
-                TExprKind::App(
-                    Box::new(TExpr::new(
-                        TExprKind::Var(fmap_resolved),
-                        Ty::arrow(Ty::arrow(a_ty.clone(), b_ty.clone()), Ty::arrow(field_ty.clone(), field_ty.clone())),
-                    )),
-                    Box::new(TExpr::new(
-                        TExprKind::Var("_f".to_string()),
-                        Ty::arrow(a_ty, b_ty.clone()),
-                    )),
-                ),
-                Ty::arrow(field_ty.clone(), field_ty.clone()),
-            );
-            TExpr::new(
-                TExprKind::App(
-                    Box::new(fmap_f),
-                    Box::new(TExpr::new(
-                        TExprKind::Var(var_name.to_string()),
-                        field_ty.clone(),
-                    )),
-                ),
-                field_ty.clone(),
-            )
+            Ty::Var(_) => Ok(value),
+            Ty::Tuple(elems) => {
+                // Map each component that mentions the variable; the others
+                // pass through. Components are reached by projection.
+                let mut mapped = Vec::new();
+                for (i, ety) in elems.iter().enumerate() {
+                    let proj = TExpr::new(
+                        TExprKind::SpecCall {
+                            original: format!("_t_{}", i),
+                            specialized: format!("__mll_tup_get:{}", i + 1),
+                            args: vec![value.clone()],
+                        },
+                        ety.clone(),
+                    );
+                    mapped.push(self.functor_map_value(ety, last_var, proj, b_ty, self_fmap, fresh)?);
+                }
+                Ok(TExpr::new(TExprKind::Tuple(mapped), field_ty.clone()))
+            }
+            Ty::Arrow(arg, res) => {
+                if Self::ty_mentions_var(arg, last_var) {
+                    // Contravariant occurrence: fmap would have to transform
+                    // the function's ARGUMENT backwards, which no Functor can.
+                    return Err(format!(
+                        "the type variable '{}' appears in the argument of a function \
+                         field ({}). fmap can only transform values a structure \
+                         CONTAINS; here it would have to transform values the field \
+                         CONSUMES, running the mapping backwards. GHC rejects this \
+                         deriving for the same reason",
+                        last_var, field_ty
+                    ));
+                }
+                // Covariant function field (`Int -> a`): post-compose.
+                *fresh += 1;
+                let g_name = format!("_g{}", fresh);
+                let x_name = format!("_x{}", fresh);
+                let applied = TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(TExprKind::Var(g_name.clone()), field_ty.clone())),
+                        Box::new(TExpr::new(TExprKind::Var(x_name.clone()), (**arg).clone())),
+                    ),
+                    (**res).clone(),
+                );
+                let mapped_res = self.functor_map_value(res, last_var, applied, b_ty, self_fmap, fresh)?;
+                let inner = TExpr::new(
+                    TExprKind::Lambda {
+                        params: vec![(x_name, (**arg).clone())],
+                        body: Box::new(mapped_res),
+                    },
+                    field_ty.clone(),
+                );
+                let wrap = TExpr::new(
+                    TExprKind::Lambda {
+                        params: vec![(g_name, field_ty.clone())],
+                        body: Box::new(inner),
+                    },
+                    Ty::arrow(field_ty.clone(), field_ty.clone()),
+                );
+                Ok(TExpr::new(
+                    TExprKind::App(Box::new(wrap), Box::new(value)),
+                    field_ty.clone(),
+                ))
+            }
+            Ty::List(elem) | Ty::IO(elem) => {
+                self.functor_map_container(field_ty, elem, last_var, value, b_ty, self_fmap, fresh)
+            }
+            Ty::App(_, _) => {
+                // Peel the application spine: every occurrence of the class
+                // variable must be inside the LAST argument (GHC's rule) —
+                // fmap for the head container only reaches that position.
+                let mut head = field_ty;
+                let mut args: Vec<&Ty> = Vec::new();
+                while let Ty::App(f, a) = head {
+                    args.push(a.as_ref());
+                    head = f.as_ref();
+                }
+                args.reverse();
+                if Self::ty_mentions_var(head, last_var)
+                    || args[..args.len() - 1].iter().any(|a| Self::ty_mentions_var(a, last_var))
+                {
+                    return Err(format!(
+                        "the type variable '{}' is used in a position other than the \
+                         last argument of '{}'. fmap can only map over a type \
+                         constructor's last argument, so no lawful Functor exists for \
+                         this shape. GHC rejects this deriving for the same reason",
+                        last_var, field_ty
+                    ));
+                }
+                let elem = *args.last().unwrap();
+                self.functor_map_container(field_ty, elem, last_var, value, b_ty, self_fmap, fresh)
+            }
+            _ => Err(format!(
+                "the type variable '{}' occurs in a field of shape '{}' that \
+                 fmap cannot map over",
+                last_var, field_ty
+            )),
         }
+    }
+
+    /// Map over a container field (`[u]`, `Maybe u`, `Tree u`, `IO u`): apply
+    /// the container's fmap (resolved at derive time) to the mapping function
+    /// for the ELEMENT type — `_f` itself when the element is the class
+    /// variable, a recursive mapping lambda otherwise (this is what makes
+    /// `Maybe [a]` and `[Rose a]` map every level, where the old single-level
+    /// code applied `_f` to the whole inner structure).
+    #[allow(clippy::too_many_arguments)]
+    fn functor_map_container(
+        &self,
+        container_ty: &Ty,
+        elem_ty: &Ty,
+        last_var: &str,
+        value: TExpr,
+        b_ty: &Ty,
+        self_fmap: &str,
+        fresh: &mut usize,
+    ) -> Result<TExpr, String> {
+        let a_ty = Ty::Var(TyVar { name: last_var.to_string(), id: u32::MAX });
+        let mapper = if matches!(elem_ty, Ty::Var(tv) if tv.name == last_var) {
+            TExpr::new(
+                TExprKind::Var("_f".to_string()),
+                Ty::arrow(a_ty.clone(), b_ty.clone()),
+            )
+        } else {
+            *fresh += 1;
+            let e_name = format!("_e{}", fresh);
+            let e_var = TExpr::new(TExprKind::Var(e_name.clone()), elem_ty.clone());
+            let mapped = self.functor_map_value(elem_ty, last_var, e_var, b_ty, self_fmap, fresh)?;
+            TExpr::new(
+                TExprKind::Lambda {
+                    params: vec![(e_name, elem_ty.clone())],
+                    body: Box::new(mapped),
+                },
+                Ty::arrow(elem_ty.clone(), elem_ty.clone()),
+            )
+        };
+        let fmap_resolved = self.resolve_functor_fmap(container_ty, self_fmap);
+        let fmap_f = TExpr::new(
+            TExprKind::App(
+                Box::new(TExpr::new(
+                    TExprKind::Var(fmap_resolved),
+                    Ty::arrow(
+                        Ty::arrow(a_ty, b_ty.clone()),
+                        Ty::arrow(container_ty.clone(), container_ty.clone()),
+                    ),
+                )),
+                Box::new(mapper),
+            ),
+            Ty::arrow(container_ty.clone(), container_ty.clone()),
+        );
+        Ok(TExpr::new(
+            TExprKind::App(Box::new(fmap_f), Box::new(value)),
+            container_ty.clone(),
+        ))
     }
 
     /// Resolve the concrete fmap function for a type constructor at derive time.
@@ -1277,9 +1410,25 @@ impl Checker {
             );
 
             let b_ty_val = Ty::Var(b_tv.clone());
+            let mut fresh = 0usize;
             for (i, pname) in param_names.iter().enumerate() {
                 let field_ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
-                let mapped = self.functor_map_field(&field_ty, &last_tv_name, pname, &b_ty_val, &mangled);
+                let value = TExpr::new(TExprKind::Var(pname.clone()), field_ty.clone());
+                let mapped = match self.functor_map_value(
+                    &field_ty, &last_tv_name, value, &b_ty_val, &mangled, &mut fresh,
+                ) {
+                    Ok(m) => m,
+                    Err(reason) => {
+                        self.push_error_ctx(
+                            DiagnosticKind::Other(format!(
+                                "Cannot derive 'Functor' for '{}': {}",
+                                type_name, reason
+                            )),
+                            format!("data {}", type_name),
+                        );
+                        return vec![];
+                    }
+                };
                 body = TExpr::new(
                     TExprKind::App(Box::new(body), Box::new(mapped)),
                     output_type.clone(),
