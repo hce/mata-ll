@@ -197,23 +197,39 @@ fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
                 };
             }
             DoStmt::PatternDoLet { pattern, expr } => {
-                // let (a, b) = expr => let __tup = expr in case __tup of { (a, b) -> rest }
+                // `let (a, b) = expr` becomes ONE recursive binding group:
+                // a fresh binding for the scrutinee plus a lazy SELECTOR
+                // binding per pattern variable
+                // (`a = case __tup of (a, b) -> a`). Haskell pattern
+                // bindings are recursive — the variables are in scope for
+                // the right-hand side itself (`let (a, b) = (1, a)`) — and
+                // lazy: the match happens on first demand of a variable,
+                // not eagerly the way wrapping the continuation in a case
+                // would force it.
                 let expr = desugar_expr(expr.clone());
                 let fresh = format!("__tup_{}", i);
-                result = Expr::Let {
-                    binds: vec![LocalDef {
-                        name: fresh.clone(),
+                let mut binds = vec![LocalDef {
+                    name: fresh.clone(),
+                    patterns: vec![],
+                    body: expr,
+                }];
+                for v in crate::ast::pattern_var_names(pattern) {
+                    binds.push(LocalDef {
+                        name: v.clone(),
                         patterns: vec![],
-                        body: expr,
-                    }],
-                    body: Box::new(Expr::Case {
-                        scrutinee: Box::new(Expr::Var(fresh)),
-                        branches: vec![CaseBranch {
-                            pattern: pattern.clone(),
-                            guards: vec![],
-                            body: result,
-                        }],
-                    }),
+                        body: Expr::Case {
+                            scrutinee: Box::new(Expr::Var(fresh.clone())),
+                            branches: vec![CaseBranch {
+                                pattern: pattern.clone(),
+                                guards: vec![],
+                                body: Expr::Var(v),
+                            }],
+                        },
+                    });
+                }
+                result = Expr::Let {
+                    binds,
+                    body: Box::new(result),
                 };
             }
             DoStmt::PatternBind { pattern, expr } => {

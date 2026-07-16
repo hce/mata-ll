@@ -181,6 +181,32 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
+/// The variable names a pattern binds, in source order. Used by the
+/// pattern-binding desugar (`let (a, b) = e`) to synthesize one selector
+/// binding per variable.
+pub fn pattern_var_names(p: &Pattern) -> Vec<String> {
+    fn go(p: &Pattern, out: &mut Vec<String>) {
+        match p {
+            Pattern::Var(n) => out.push(n.clone()),
+            Pattern::Wildcard | Pattern::LitPat(_) => {}
+            Pattern::Constructor { args, .. } => {
+                for a in args {
+                    go(a, out);
+                }
+            }
+            Pattern::Paren(inner) => go(inner, out),
+            Pattern::Tuple(elems) => {
+                for e in elems {
+                    go(e, out);
+                }
+            }
+        }
+    }
+    let mut out = Vec::new();
+    go(p, &mut out);
+    out
+}
+
 /// Expressions.
 #[derive(Debug, Clone)]
 pub enum Expr {

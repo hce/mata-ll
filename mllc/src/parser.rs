@@ -2227,7 +2227,6 @@ impl Parser {
                 let saved_block = self.block_indent;
                 self.block_indent = self.peek_loc().col.saturating_sub(1);
                 // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
-                let mut tuple_binds: Vec<(String, Pattern)> = Vec::new();
                 let mut fresh_counter = 0usize;
 
                 loop {
@@ -2238,7 +2237,14 @@ impl Parser {
                     if self.at(&Token::In) {
                         break;
                     }
-                    // Tuple pattern: let (a, b) = expr
+                    // Tuple pattern: let (a, b) = expr. Desugared into the
+                    // SAME recursive binding group as one fresh binding for
+                    // the scrutinee plus one lazy SELECTOR binding per
+                    // pattern variable (`a = case __tup of (a, b) -> a`), so
+                    // — as in Haskell — the pattern's variables are in scope
+                    // for the right-hand side itself, for sibling bindings,
+                    // and the match happens lazily on first demand (never
+                    // eagerly, the way wrapping the body in a case would).
                     if matches!(self.peek(), Token::LeftParen) {
                         let pat = self.parse_pattern_atom()?;
                         if matches!(pat, Pattern::Tuple(_)) {
@@ -2247,7 +2253,20 @@ impl Parser {
                             let fresh = format!("__tup_{}", fresh_counter);
                             fresh_counter += 1;
                             binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
-                            tuple_binds.push((fresh, pat));
+                            for v in crate::ast::pattern_var_names(&pat) {
+                                binds.push(LocalDef {
+                                    name: v.clone(),
+                                    patterns: vec![],
+                                    body: Expr::Case {
+                                        scrutinee: Box::new(Expr::Var(fresh.clone())),
+                                        branches: vec![CaseBranch {
+                                            pattern: pat.clone(),
+                                            guards: vec![],
+                                            body: Expr::Var(v),
+                                        }],
+                                    },
+                                });
+                            }
                             continue;
                         }
                         return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
@@ -2281,19 +2300,7 @@ impl Parser {
                 self.block_indent = saved_block;
                 self.expect(&Token::In)?;
                 self.skip_newlines_and_indent();
-                let mut body = self.parse_expr()?;
-
-                // Wrap body in case expressions for tuple patterns (innermost last)
-                for (fresh, pat) in tuple_binds.into_iter().rev() {
-                    body = Expr::Case {
-                        scrutinee: Box::new(Expr::Var(fresh)),
-                        branches: vec![CaseBranch {
-                            pattern: pat,
-                            guards: vec![],
-                            body,
-                        }],
-                    };
-                }
+                let body = self.parse_expr()?;
 
                 Ok(Expr::Let {
                     binds,
