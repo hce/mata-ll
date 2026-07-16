@@ -7238,3 +7238,57 @@ fn extract_from_plain_lua_rejected() {
         Ok(_) => panic!("extraction from a plain compile must fail"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests: string escaping is canonical (one escaper for expression
+// literals, pattern literals, and LuaDict table keys — see codegen.rs
+// `lua_quoted_string`).
+// ---------------------------------------------------------------------------
+
+/// A string literal in a PATTERN used to be emitted with no escaping at all,
+/// so `f "a\"b" = 1` produced `if _arg0 == "a"b" then` — Lua that failed to
+/// load. The pattern path must go through the same canonical escaper as
+/// expression literals: the program must compile, load, AND match correctly.
+#[test]
+fn string_pattern_literal_with_quote_and_newline_is_escaped() {
+    let source = r#"
+f :: String -> Integer
+f "a\"b\nc" = 1
+f _ = 0
+
+main :: IO ()
+main = if f "a\"b\nc" == 1 && f "x" == 0
+         then putStrLn "ok"
+         else error "string pattern with escapes matched incorrectly"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("a string pattern containing a quote and a newline must compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code)
+        .exec()
+        .expect("the emitted Lua must load and the pattern must match correctly");
+}
+
+/// A LuaDict `as`-renamed field key containing control characters used to be
+/// emitted raw inside `["…"]` (only `"` and `\` were escaped), producing an
+/// unfinished-string Lua syntax error. The key path must use the canonical
+/// escaper too: construct, read the field back, and check the wire key.
+#[test]
+fn luadict_as_key_with_control_chars_is_escaped() {
+    let source = r#"
+data Rec = Rec { field1 as "a\nb\tc" :: Integer } deriving (Show, LuaDict)
+
+main :: IO ()
+main = if field1 (Rec 5) == 5
+         then putStrLn "ok"
+         else error "field behind a control-character as-key read back wrong"
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("an as-key containing \\n and \\t must compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code)
+        .exec()
+        .expect("the emitted Lua must load and the renamed field must round-trip");
+}

@@ -494,7 +494,7 @@ impl CodeGen {
                     let fs: Vec<String> = fields.iter().map(|(fname, fty)| {
                         let fty = subst_tyvars(fty, &smap);
                         let d = child(self, &fty, stack);
-                        format!("{{n={:?},d={}}}", fname, d)
+                        format!("{{n={},d={}}}", lua_quoted_string(fname), d)
                     }).collect();
                     stack.pop();
                     Some(format!("{{k=\"record\",fs={{{}}}}}", fs.join(",")))
@@ -718,7 +718,7 @@ impl CodeGen {
                             );
                             converts |= c;
                             any |= d != "false";
-                            fs.push(format!("{{n={:?},d={}}}", fname, d));
+                            fs.push(format!("{{n={},d={}}}", lua_quoted_string(fname), d));
                         }
                         stack.pop();
                         // If every field is opaque there is nothing to convert
@@ -1889,7 +1889,10 @@ impl CodeGen {
                     TLiteral::Integer(i64::MIN) => "0x8000000000000000".to_string(),
                     TLiteral::Integer(n) => format!("{}", n),
                     TLiteral::Number(n) => format!("{}", n),
-                    TLiteral::Str(s) => format!("\"{}\"", s),
+                    // The canonical escaper: an unescaped quote or control
+                    // character in a string PATTERN would otherwise emit
+                    // unloadable Lua (`if _arg0 == "a"b" then`).
+                    TLiteral::Str(s) => lua_quoted_string(s),
                     TLiteral::Bool(b) => if *b { "true".into() } else { "false".into() },
                     TLiteral::Unit => "nil".into(),
                 };
@@ -4732,21 +4735,9 @@ impl CodeGen {
             TLiteral::Integer(i64::MIN) => self.emit("0x8000000000000000"),
             TLiteral::Integer(n) => self.emit(&format!("{}", n)),
             TLiteral::Number(n) => self.emit(&format!("{}", n)),
-            TLiteral::Str(s) => {
-                self.emit("\"");
-                for c in s.chars() {
-                    match c {
-                        '\n' => self.emit("\\n"),
-                        '\r' => self.emit("\\r"),
-                        '\t' => self.emit("\\t"),
-                        '\\' => self.emit("\\\\"),
-                        '"' => self.emit("\\\""),
-                        '\0' => self.emit("\\0"),
-                        _ => self.emit(&c.to_string()),
-                    }
-                }
-                self.emit("\"");
-            }
+            // Routed through the canonical escaper shared with pattern
+            // literals and table keys (see `lua_quoted_string`).
+            TLiteral::Str(s) => self.emit(&lua_quoted_string(s)),
             TLiteral::Bool(true) => self.emit("true"),
             TLiteral::Bool(false) => self.emit("false"),
             TLiteral::Unit => self.emit("nil"),
@@ -4772,9 +4763,20 @@ fn lua_bare_key_ok(name: &str) -> bool {
     name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') && !is_lua_keyword(name)
 }
 
-/// A bracketed Lua string-literal table key: `["na\"me"]`. Always valid.
-/// A Lua double-quoted string literal for `s`, with the escaping used
-/// throughout codegen (mirrors `gen_literal`'s `TLiteral::Str`).
+/// The ONE canonical Lua double-quoted string literal for `s`. Every place
+/// that emits a source string into the generated Lua — expression literals
+/// (`gen_literal`), pattern-match literals (`collect_pattern_conditions`),
+/// LuaDict `as`-renamed table keys (`lua_key_string`) — must go through this
+/// function: string escaping used to live in three hand-rolled copies, and
+/// the two incomplete ones let a quote or a control character through raw,
+/// producing Lua that would not even load.
+///
+/// Escapes `\` and `"` (the literal's own metacharacters), spells `\n`, `\r`
+/// and `\t` by name, and turns every other control character (U+0000–U+001F,
+/// U+007F) into a Lua `\ddd` decimal escape. The decimal form is always
+/// emitted with all three digits (`\000`, not `\0`): Lua greedily reads up to
+/// three digits after `\`, so a short escape followed by a literal digit
+/// character would silently change the string's value.
 fn lua_quoted_string(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
@@ -4784,7 +4786,9 @@ fn lua_quoted_string(s: &str) -> String {
             '\t' => out.push_str("\\t"),
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            '\0' => out.push_str("\\0"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                out.push_str(&format!("\\{:03}", c as u32));
+            }
             _ => out.push(c),
         }
     }
@@ -4792,17 +4796,10 @@ fn lua_quoted_string(s: &str) -> String {
     out
 }
 
+/// A bracketed Lua string-literal table key: `["na\"me"]`. Always valid —
+/// the key text is escaped by the canonical `lua_quoted_string`.
 fn lua_key_string(name: &str) -> String {
-    let mut s = String::from("[\"");
-    for c in name.chars() {
-        match c {
-            '"' => s.push_str("\\\""),
-            '\\' => s.push_str("\\\\"),
-            _ => s.push(c),
-        }
-    }
-    s.push_str("\"]");
-    s
+    format!("[{}]", lua_quoted_string(name))
 }
 
 /// Decompose a type-application spine into its head constructor name and its
