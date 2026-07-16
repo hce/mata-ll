@@ -5248,13 +5248,21 @@ local function __mll_arg_marshal(v, d)
         -- element descriptor so an opaque element type is passed raw rather than
         -- mangled (which a blanket __mll_to_lua would not distinguish).
         local arr = {}
+        local i = 0
         local cur = v
         while cur ~= nil do
             cur = __force(cur)
             if getmetatable(cur) ~= __cons_mt then break end
             local h = __force(cur[1])
             if d.e then h = __mll_arg_marshal(h, d.e) end
-            arr[#arr + 1] = h
+            -- Use an EXPLICIT index, never `#arr + 1`: an element that marshals
+            -- to nil (a `Nothing` in a `[Maybe a]`) must keep its position, not
+            -- vanish and let the following element compact into its slot. (A
+            -- Lua array cannot carry a length past its last non-nil element, so
+            -- a *trailing* Nothing is still lost — an inherent nil limitation —
+            -- but interior positions are now preserved, no shifting.)
+            i = i + 1
+            arr[i] = h
             cur = __mll_tail(cur)
         end
         return arr

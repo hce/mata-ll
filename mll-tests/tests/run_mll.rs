@@ -3249,6 +3249,29 @@ main = do
 // host received the raw `{x}` __just_mt table and `p.port + 1` crashed with
 // "arithmetic on a table value". This exercises the OUT direction (host sees a
 // bare number / a real array / nil) AND the round-trip: the host echoes the
+#[test]
+fn ffi_maybe_list_argument_preserves_positions() {
+    // A `[Maybe a]` FFI argument marshals `Nothing` -> nil AT ITS POSITION with
+    // no compaction: `[Just 1, Nothing, Just 3]` reaches the host with 3 at
+    // index 3, not shifted to index 2. Was: silently compacted to {1, 3}.
+    let src = r#"
+at :: Integer -> [Maybe Integer] -> LuaPure "at" Integer
+main :: IO ()
+main = do
+    let xs = [Just 1, Nothing, Just 3]
+    assert (at 3 xs == 3) "Just 3 stays at index 3 (no compaction)"
+    assert (at 1 xs == 1) "Just 1 stays at index 1"
+    putStrLn "ok"
+"#;
+    let lua_code = mllc::compile(src, Path::new("."), &[])
+        .expect("compile should succeed").lua_code;
+    let lua = mlua::Lua::new();
+    lua.load("function at(i, arr) return arr[i] or -1 end")
+        .exec().expect("define host at");
+    lua.load(&lua_code).set_name("ml_pos").exec()
+        .expect("[Maybe a] argument must preserve element positions, not compact");
+}
+
 // port back into a `Maybe Integer` result field, which the decoder must
 // reconstruct as Just/Nothing — encode-then-decode identity.
 #[test]
