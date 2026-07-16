@@ -30,6 +30,11 @@ pub struct Parser {
     block_indent: usize,
     /// User-defined operator fixity: op -> (assoc, precedence)
     fixities: HashMap<String, (Assoc, u8)>,
+    /// Current recursion depth of the nesting productions (expressions,
+    /// types, patterns). Bounded by `crate::MAX_NESTING_DEPTH` via
+    /// `enter_nested`, so absurdly nested input yields a clean diagnostic
+    /// instead of overflowing the native stack.
+    depth: usize,
 }
 
 impl Parser {
@@ -41,6 +46,7 @@ impl Parser {
             expr_min_indent: 0,
             block_indent: 0,
             fixities: HashMap::new(),
+            depth: 0,
         }
     }
 
@@ -63,6 +69,32 @@ impl Parser {
     fn err_here(&self, msg: String) -> Box<Diagnostic> {
         let loc = self.peek_loc();
         Box::new(Diagnostic::parse_at(msg, Span::new(loc.line, loc.col)))
+    }
+
+    /// Depth guard for the recursive-descent productions. Checked BEFORE
+    /// descending, so the parser itself can never overflow the native stack:
+    /// past the limit it stops and reports a clean diagnostic. Every
+    /// production that can recurse into itself (directly or through the
+    /// atom rules) calls this on entry; a successful call must be paired
+    /// with `self.depth -= 1` on exit.
+    fn enter_nested(&mut self, what: &str) -> PResult<()> {
+        if self.depth >= crate::MAX_NESTING_DEPTH {
+            let mut diag = self.err_here(format!(
+                "{} nested too deeply (limit {})",
+                what,
+                crate::MAX_NESTING_DEPTH
+            ));
+            diag.notes.push(
+                "the compiler reads nested syntax with bounded recursion so it \
+                 can report this error instead of crashing on pathological \
+                 input; restructure the code to nest less, e.g. by splitting \
+                 it into smaller definitions"
+                    .to_string(),
+            );
+            return Err(diag);
+        }
+        self.depth += 1;
+        Ok(())
     }
 
     fn expect(&mut self, expected: &Token) -> PResult<()> {
@@ -1115,7 +1147,17 @@ impl Parser {
 
     // --- Type parsing ---
 
+    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
+    // `parse_type_inner`; recursive calls throughout the parser go through this
+    // wrapper, so the counter tracks the real recursion depth.
     fn parse_type(&mut self) -> PResult<Type> {
+        self.enter_nested("type")?;
+        let r = self.parse_type_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_type_inner(&mut self) -> PResult<Type> {
         // Check for forall: `forall s. type`
         if let Token::Ident(ref name) = self.peek().clone()
             && name == "forall" {
@@ -1167,7 +1209,17 @@ impl Parser {
         Ok(constraints)
     }
 
+    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
+    // `parse_type_arrow_inner`; recursive calls throughout the parser go through this
+    // wrapper, so the counter tracks the real recursion depth.
     fn parse_type_arrow(&mut self) -> PResult<Type> {
+        self.enter_nested("type")?;
+        let r = self.parse_type_arrow_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_type_arrow_inner(&mut self) -> PResult<Type> {
         let lhs = self.parse_type_app()?;
         self.skip_newlines_and_indent();
         if self.at(&Token::Arrow) {
@@ -1270,7 +1322,17 @@ impl Parser {
         Ok(lua_name)
     }
 
+    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
+    // `parse_type_atom_inner`; recursive calls throughout the parser go through this
+    // wrapper, so the counter tracks the real recursion depth.
     fn parse_type_atom(&mut self) -> PResult<Type> {
+        self.enter_nested("type")?;
+        let r = self.parse_type_atom_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_type_atom_inner(&mut self) -> PResult<Type> {
         match self.peek().clone() {
             Token::UpperIdent(name) => {
                 self.advance();
@@ -1442,7 +1504,17 @@ impl Parser {
         Ok(expr)
     }
 
+    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
+    // `parse_expr_infix_inner`; recursive calls throughout the parser go through this
+    // wrapper, so the counter tracks the real recursion depth.
     fn parse_expr_infix(&mut self, min_prec: u8) -> PResult<Expr> {
+        self.enter_nested("expression")?;
+        let r = self.parse_expr_infix_inner(min_prec);
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_expr_infix_inner(&mut self, min_prec: u8) -> PResult<Expr> {
         let lhs = self.parse_expr_prefix()?;
         self.continue_infix(lhs, min_prec)
     }
@@ -1813,7 +1885,17 @@ impl Parser {
             | Token::RightParen | Token::RightBracket)
     }
 
+    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
+    // `parse_expr_atom_inner`; recursive calls throughout the parser go through this
+    // wrapper, so the counter tracks the real recursion depth.
     fn parse_expr_atom(&mut self) -> PResult<Expr> {
+        self.enter_nested("expression")?;
+        let r = self.parse_expr_atom_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_expr_atom_inner(&mut self) -> PResult<Expr> {
         // Negative literal: -N where - is not preceded by an expression-ending token
         if let Token::Operator(op) = self.peek()
             && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
@@ -2541,7 +2623,17 @@ impl Parser {
 
     // --- Pattern parsing ---
 
+    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
+    // `parse_pattern_inner`; recursive calls throughout the parser go through this
+    // wrapper, so the counter tracks the real recursion depth.
     fn parse_pattern(&mut self) -> PResult<Pattern> {
+        self.enter_nested("pattern")?;
+        let r = self.parse_pattern_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_pattern_inner(&mut self) -> PResult<Pattern> {
         let lhs = if let Token::UpperIdent(name) = self.peek().clone() {
             self.advance();
             // True/False are literal patterns, not constructors
@@ -2618,7 +2710,17 @@ impl Parser {
         false
     }
 
+    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
+    // `parse_pattern_atom_inner`; recursive calls throughout the parser go through this
+    // wrapper, so the counter tracks the real recursion depth.
     fn parse_pattern_atom(&mut self) -> PResult<Pattern> {
+        self.enter_nested("pattern")?;
+        let r = self.parse_pattern_atom_inner();
+        self.depth -= 1;
+        r
+    }
+
+    fn parse_pattern_atom_inner(&mut self) -> PResult<Pattern> {
         // Negative literal pattern: -N
         if let Token::Operator(op) = self.peek()
             && op == "-" && self.pos + 1 < self.tokens.len() {

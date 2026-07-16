@@ -85,11 +85,13 @@ fn main() {
     let cli = Cli::parse();
 
     // Run compilation on a thread with a large stack to handle deeply
-    // nested ASTs (e.g. 256-element list literals desugar into 256
-    // nested cons applications, each requiring a stack frame during
-    // type inference).
+    // nested ASTs (e.g. list literals desugar into nested cons
+    // applications, each requiring a stack frame during type inference).
+    // The size is defined next to mllc::MAX_NESTING_DEPTH: the two are
+    // calibrated together so that input nested up to the depth limit
+    // compiles (or is cleanly diagnosed) instead of overflowing the stack.
     let builder = std::thread::Builder::new()
-        .stack_size(64 * 1024 * 1024); // 64 MB stack
+        .stack_size(mllc::COMPILER_STACK_SIZE);
     let handler = builder.spawn(move || {
         run_compiler(cli);
     }).expect("Failed to spawn compiler thread");

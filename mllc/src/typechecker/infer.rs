@@ -763,7 +763,37 @@ impl Checker {
 
     // --- Expression inference (returns typed expr) ---
 
+    /// Depth-guard wrapper around `infer_expr_inner`: expression inference
+    /// recurses along the desugared expression structure, whose depth is not
+    /// bounded by the parser (a 10,000-element list literal is flat source
+    /// but a 10,000-deep cons chain here). Past the limit the walk stops with
+    /// a clean diagnostic BEFORE recursing deeper, so it can never overflow
+    /// the native stack. See `crate::MAX_NESTING_DEPTH` /
+    /// `crate::COMPILER_STACK_SIZE` for how limit and stack are calibrated.
     pub(super) fn infer_expr(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), DiagnosticKind> {
+        if self.expr_depth >= crate::MAX_NESTING_DEPTH {
+            return Err(Self::expr_too_deep());
+        }
+        self.expr_depth += 1;
+        let r = self.infer_expr_inner(expr, env);
+        self.expr_depth -= 1;
+        r
+    }
+
+    /// The "expression nested too deeply" diagnostic shared by `infer_expr`
+    /// and `check_expr_typed`.
+    fn expr_too_deep() -> DiagnosticKind {
+        DiagnosticKind::Other(format!(
+            "expression nested too deeply (limit {}): the compiler walks \
+             expressions with bounded recursion so it can report this error \
+             instead of crashing; note that a long chain also counts — a list \
+             literal nests one level per element, an operator chain one level \
+             per operand — so split the expression into smaller definitions",
+            crate::MAX_NESTING_DEPTH
+        ))
+    }
+
+    fn infer_expr_inner(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), DiagnosticKind> {
         match expr {
             Expr::Var(name) => {
                 if self.enforce_hidden && self.hidden_names.contains(name) {
@@ -1377,7 +1407,20 @@ impl Checker {
         Ok((result_te, result_ty, subst))
     }
 
+    // Depth-guard wrapper; see `infer_expr`. Bidirectional checking recurses
+    // into itself (lambda bodies, branches) without passing through
+    // `infer_expr`, so it maintains the same counter.
     pub(super) fn check_expr_typed(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), DiagnosticKind> {
+        if self.expr_depth >= crate::MAX_NESTING_DEPTH {
+            return Err(Self::expr_too_deep());
+        }
+        self.expr_depth += 1;
+        let r = self.check_expr_typed_inner(expr, expected, env);
+        self.expr_depth -= 1;
+        r
+    }
+
+    pub(super) fn check_expr_typed_inner(&mut self, expr: &Expr, expected: &Ty, env: &TypeEnv) -> Result<(TExpr, Subst), DiagnosticKind> {
         let (te, inferred, subst) = self.infer_expr(expr, env)?;
         let s = self.unify(&inferred.apply_subst(&subst), &expected.apply_subst(&subst))?;
         let final_ty = inferred.apply_subst(&subst).apply_subst(&s);

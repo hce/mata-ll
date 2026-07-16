@@ -20,6 +20,31 @@ use std::path::Path;
 
 pub use embed::EmbedMode;
 
+/// Stack size (bytes) for the thread that runs `compile`. Sized together with
+/// [`MAX_NESTING_DEPTH`]: the compiler walks nested syntax with native
+/// recursion, and every pass must be able to reach the depth limit — and
+/// report a clean "nested too deeply" diagnostic — without exhausting the
+/// stack. The heaviest frames are the typechecker's expression inference on
+/// an operator spine (`1+1+1+…`), measured at roughly 170 KB per nesting
+/// level in a debug build; the reservation is virtual memory on a single
+/// thread, so a generous size costs nothing until pages are actually touched.
+/// Empirically (debug build, arm64 macOS): the `+`-spine overflows this stack
+/// between 12,000 and 13,000 levels, so MAX_NESTING_DEPTH = 6,000 leaves a
+/// 2x margin.
+/// Every front-end that calls `compile` (the mll CLI, the REPL, the test
+/// harness) must run it on a thread of this size.
+pub const COMPILER_STACK_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
+
+/// Maximum syntactic/structural nesting depth accepted by the compiler's
+/// recursive passes (parser productions, `ast_type_to_ty`, expression
+/// inference, codegen's `gen_expr`). Deeper input gets a clean
+/// "nested too deeply" diagnostic instead of a native stack overflow
+/// (SIGABRT). Sized together with [`COMPILER_STACK_SIZE`] — see there for the
+/// measurements — and far above real code: a 1000-element list literal
+/// desugars to a cons chain of ~1,000 levels of inference recursion and
+/// still compiles with 6x headroom.
+pub const MAX_NESTING_DEPTH: usize = 6000;
+
 /// Result of compilation
 pub struct CompileResult {
     pub lua_code: String,
@@ -264,9 +289,15 @@ pub fn compile_with_options(
         warnings.push(no_host_surface_warning(header_exports.as_deref()));
     }
 
-    // Generate Lua
+    // Generate Lua. The only error codegen can produce is its depth-guard
+    // backstop (see CodeGen::gen_expr) — a user-input limit, reported like
+    // the equivalent parser/typechecker diagnostics.
     let embed = options.embed_source.map(|mode| (mode, source));
-    let lua_code = codegen::generate(&mono_module, embed);
+    let lua_code = codegen::generate(&mono_module, embed).map_err(|msg| {
+        CompileError::Type(vec![types::Diagnostic::new(
+            types::DiagnosticKind::Other(msg),
+        )])
+    })?;
 
     Ok(CompileResult {
         lua_code,

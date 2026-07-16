@@ -57,8 +57,11 @@ impl ReplState {
 
         // Compile
         let lib_refs: Vec<&Path> = self.lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
+        // The compiler's nesting-depth limit is calibrated against this
+        // stack size (see mllc::COMPILER_STACK_SIZE) — a smaller stack could
+        // overflow on input the mll CLI handles.
         let result = std::thread::Builder::new()
-            .stack_size(32 * 1024 * 1024)
+            .stack_size(mllc::COMPILER_STACK_SIZE)
             .spawn({
                 let source = source.clone();
                 let lib_refs: Vec<std::path::PathBuf> = lib_refs.iter().map(|p| p.to_path_buf()).collect();

@@ -5,6 +5,15 @@ use crate::types::Ty;
 
 /// Tracks constructor info for code generation.
 struct CodeGen {
+    /// Current `gen_expr` recursion depth, bounded by
+    /// `crate::MAX_NESTING_DEPTH`. Upstream passes (the parser's and the
+    /// typechecker's own depth guards) already bound the structural depth of
+    /// what reaches codegen, so this is the last-line backstop: if it ever
+    /// fires, `depth_error` carries a clean diagnostic out of `generate`
+    /// instead of the walk overflowing the native stack.
+    expr_depth: usize,
+    /// Set once when the depth guard fires; surfaced by `generate`.
+    depth_error: Option<String>,
     /// (con_name, type_name, variant_index, total, is_enum)
     constructors: Vec<(String, String, usize, usize, bool)>,
     /// Newtype constructor names (identity at runtime)
@@ -76,6 +85,8 @@ struct CodeGen {
 impl CodeGen {
     fn new() -> Self {
         CodeGen {
+            expr_depth: 0,
+            depth_error: None,
             constructors: Vec::new(), newtypes: Vec::new(),
             forward_declared: std::collections::HashSet::new(),
             concrete_vars: std::collections::HashSet::new(),
@@ -192,6 +203,14 @@ impl CodeGen {
     }
 
     /// Create a sub-CodeGen that shares lookup tables but has its own output buffer.
+    /// Carry a sub-generator's depth-guard error (if any) into this
+    /// generator, so `generate` sees it no matter where it fired.
+    fn absorb_sub_error(&mut self, sub: &mut CodeGen) {
+        if self.depth_error.is_none() {
+            self.depth_error = sub.depth_error.take();
+        }
+    }
+
     fn new_sub(&self) -> CodeGen {
         let mut sub = CodeGen::new();
         sub.constructors = self.constructors.clone();
@@ -1695,6 +1714,7 @@ impl CodeGen {
                         self.emit_indent(); self.emit(&format!("{} ", gkw));
                         let mut sub = self.new_sub();
                         sub.gen_expr(&guard.condition);
+                        self.absorb_sub_error(&mut sub);
                         self.emit(&sub.output);
                         self.emit(" then\n");
                         self.indent += 1;
@@ -1718,6 +1738,7 @@ impl CodeGen {
                         self.emit_indent(); self.emit(&format!("{} ", gkw));
                         let mut sub = self.new_sub();
                         sub.gen_expr(&guard.condition);
+                        self.absorb_sub_error(&mut sub);
                         self.emit(&sub.output);
                         self.emit(" then\n");
                         self.indent += 1;
@@ -1815,6 +1836,7 @@ impl CodeGen {
                     self.emit_indent(); self.emit(&format!("{} ", gkw));
                     let mut sub = self.new_sub();
                     sub.gen_expr(&guard.condition);
+                    self.absorb_sub_error(&mut sub);
                     self.emit(&sub.output);
                     self.emit(" then\n");
                     self.indent += 1;
@@ -3530,7 +3552,30 @@ impl CodeGen {
         }
     }
 
+    /// Depth-guard wrapper around `gen_expr_inner` (the whole expression
+    /// walk): checked BEFORE recursing deeper, so past the limit it records a
+    /// clean diagnostic (surfaced by `generate`) and emits a placeholder
+    /// instead of overflowing the native stack.
     fn gen_expr(&mut self, expr: &TExpr) {
+        if self.expr_depth >= crate::MAX_NESTING_DEPTH {
+            if self.depth_error.is_none() {
+                self.depth_error = Some(format!(
+                    "expression nested too deeply during code generation \
+                     (limit {}): the compiler walks expressions with bounded \
+                     recursion so it can report this error instead of \
+                     crashing; split the expression into smaller definitions",
+                    crate::MAX_NESTING_DEPTH
+                ));
+            }
+            self.emit("nil");
+            return;
+        }
+        self.expr_depth += 1;
+        self.gen_expr_inner(expr);
+        self.expr_depth -= 1;
+    }
+
+    fn gen_expr_inner(&mut self, expr: &TExpr) {
         match &expr.kind {
             TExprKind::Var(name) => {
                 match name.as_str() {
@@ -5082,13 +5127,19 @@ fn is_builtin_op(op: &str) -> bool {
         | "div" | "mod")
 }
 
-pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> String {
+/// Generate the Lua module. `Err` carries the codegen depth-guard
+/// diagnostic (see `CodeGen::gen_expr`) — the only error this pass can
+/// produce; everything else was rejected by earlier passes.
+pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> Result<String, String> {
     let mut cg = CodeGen::new();
     cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
     cg.demand_info = crate::demand::analyze(module);
     // Generate the program body first so we can see which runtime-prelude
     // functions it actually references, then prepend only those (transitively).
     cg.generate_module(module);
+    if let Some(msg) = cg.depth_error {
+        return Err(msg);
+    }
     let body = cg.output;
     let prelude = ondemand_prelude(&body);
     // The embedded-source block goes at the very top of the file: extraction
@@ -5102,7 +5153,7 @@ pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> St
     out.push_str(&prelude);
     out.push('\n');
     out.push_str(&body);
-    out
+    Ok(out)
 }
 
 /// One top-level runtime-prelude definition: the names it introduces and its

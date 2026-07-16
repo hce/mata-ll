@@ -123,6 +123,18 @@ pub struct InstanceInfo {
 
 /// The type checker — validates types and produces typed IR
 pub struct Checker {
+    /// Current recursion depth of expression inference (`infer_expr` /
+    /// `check_expr_typed`), bounded by `crate::MAX_NESTING_DEPTH`. The
+    /// desugared AST can nest far deeper than the source text (a list
+    /// literal becomes a cons chain, one level per element), so the parser's
+    /// own depth guard does not bound this walk — it needs its own.
+    pub(super) expr_depth: usize,
+    /// Current recursion depth of `ast_type_to_ty`, bounded by
+    /// `crate::MAX_NESTING_DEPTH`. Type-alias and type-family expansion can
+    /// deepen a type far beyond its written form (and a self-referential
+    /// alias would recurse forever), so the guard counts recursion here, not
+    /// source syntax.
+    type_depth: usize,
     env: TypeEnv,
     next_var: u32,
     constructors: HashMap<String, ConInfo>,
@@ -305,6 +317,8 @@ impl Default for Checker {
 impl Checker {
     pub fn new() -> Self {
         let mut checker = Checker {
+            expr_depth: 0,
+            type_depth: 0,
             env: TypeEnv::new(),
             next_var: 0,
             constructors: HashMap::new(),
@@ -388,7 +402,40 @@ impl Checker {
         Scheme { vars, ty: ty.clone() }
     }
 
+    /// Depth-guard wrapper around `ast_type_to_ty_inner`: past the limit it
+    /// reports a clean "type nested too deeply" diagnostic (once) and returns
+    /// a placeholder instead of recursing further — the errors list is
+    /// non-empty, so compilation stops after this pass. Checked BEFORE
+    /// descending, so the walk itself can never overflow the native stack.
     fn ast_type_to_ty(&mut self, ast_ty: &Type) -> Ty {
+        if self.type_depth >= crate::MAX_NESTING_DEPTH {
+            let already_reported = self.errors.iter().any(|e| {
+                matches!(&e.kind, DiagnosticKind::Other(m) if m.starts_with("type nested too deeply"))
+            });
+            if !already_reported {
+                let mut diag = Diagnostic::new(DiagnosticKind::Other(format!(
+                    "type nested too deeply (limit {})",
+                    crate::MAX_NESTING_DEPTH
+                )));
+                diag.notes.push(
+                    "the compiler resolves types (including type-alias and \
+                     type-family expansion) with bounded recursion so it can \
+                     report this error instead of crashing; a self-referential \
+                     alias like `type A = [A]` also ends up here, because its \
+                     expansion never terminates"
+                        .to_string(),
+                );
+                self.errors.push(diag);
+            }
+            return Ty::Unit;
+        }
+        self.type_depth += 1;
+        let ty = self.ast_type_to_ty_inner(ast_ty);
+        self.type_depth -= 1;
+        ty
+    }
+
+    fn ast_type_to_ty_inner(&mut self, ast_ty: &Type) -> Ty {
         match ast_ty {
             Type::Con(name) => {
                 // Check for type alias expansion

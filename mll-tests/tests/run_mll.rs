@@ -6,9 +6,12 @@ use std::path::Path;
 
 fn run_mll_file(path: &Path) {
     let path = path.to_path_buf();
-    // Run on a thread with a larger stack to handle deeply nested expressions
+    // Run on a thread with the same stack size as the mll CLI driver: the
+    // compiler's nesting-depth limit (mllc::MAX_NESTING_DEPTH) is calibrated
+    // against mllc::COMPILER_STACK_SIZE, so a smaller test stack would
+    // overflow on input the real compiler handles (or cleanly rejects).
     let result = std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(mllc::COMPILER_STACK_SIZE)
         .spawn(move || {
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
@@ -346,8 +349,9 @@ fn modules_with_a_host_surface_do_not_warn() {
 fn run_mll_file_with_lib(path: &Path) {
     let path = path.to_path_buf();
     let lib_path = Path::new("../lib").to_path_buf();
+    // Same stack size as the mll CLI driver (see run_mll_file).
     let result = std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(mllc::COMPILER_STACK_SIZE)
         .spawn(move || {
             let source = std::fs::read_to_string(&path)
                 .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
@@ -3285,10 +3289,10 @@ fn growing_type_family_is_bounded() {
     // A type family that grows its argument every step (Grow x = Grow (Maybe x))
     // must be bounded by reduction fuel and reported as divergent -- never hang
     // or stack-overflow the compiler. Charging fuel by reduced-type size bounds
-    // the work; the deep (but bounded) reduction still needs the 32MB stack the
-    // fixture runner uses, so run it on such a thread.
+    // the work; the deep (but bounded) reduction still needs a large stack, so
+    // run it on a compiler-sized thread like the fixture runner does.
     std::thread::Builder::new()
-        .stack_size(32 * 1024 * 1024)
+        .stack_size(mllc::COMPILER_STACK_SIZE)
         .spawn(|| {
             let src = "type family Grow x where\n  Grow x = Grow (Maybe x)\nf :: Grow Integer -> Integer\nf _ = 0\nmain :: IO ()\nmain = putStrLn \"x\"\n";
             match mllc::compile(src, Path::new("."), &[]) {
@@ -7381,4 +7385,145 @@ doit = print (runFirst 1 + readCfg 2)
 "#;
     mllc::compile(source, Path::new("."), &[])
         .expect("indexed-path and path:method FFI targets must pass validation");
+}
+
+// ---------------------------------------------------------------------------
+// Regression tests: recursion-depth guard. Nesting past
+// mllc::MAX_NESTING_DEPTH must produce the clean "nested too deeply"
+// diagnostic — never a native stack overflow (SIGABRT). Reaching the limit
+// still consumes (limit x frame) native stack, so these run on a thread with
+// the SAME stack size as the mll CLI driver (mllc::COMPILER_STACK_SIZE, which
+// the limit is calibrated against).
+// ---------------------------------------------------------------------------
+
+/// Compile `source` on a compiler-sized thread and return the result.
+fn compile_on_compiler_stack(source: String) -> Result<mllc::CompileResult, mllc::CompileError> {
+    std::thread::Builder::new()
+        .stack_size(mllc::COMPILER_STACK_SIZE)
+        .spawn(move || mllc::compile(&source, Path::new("."), &[]))
+        .expect("failed to spawn compiler-sized thread")
+        .join()
+        .expect("the compiler must not crash on deeply nested input")
+}
+
+/// Parser face of the guard: nested parentheses beyond the limit.
+#[test]
+fn deeply_nested_parens_yield_clean_depth_error() {
+    let n = mllc::MAX_NESTING_DEPTH + 1000;
+    let source = format!(
+        "main :: IO ()\nmain = print {}1{}\n",
+        "(".repeat(n),
+        ")".repeat(n)
+    );
+    match compile_on_compiler_stack(source) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("expression nested too deeply")
+                    && msg.contains(&format!("limit {}", mllc::MAX_NESTING_DEPTH)),
+                "expected the clean depth diagnostic, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("parens nested past the limit must be rejected"),
+    }
+}
+
+/// Type faces of the recursion-DEPTH guard: a deeply parenthesised signature
+/// (parser) and a LINEAR deep type-alias chain whose expansion is deep while
+/// the source is shallow (`ast_type_to_ty` — the parser cannot see this one
+/// coming). The alias chain here grows LINEARLY (`type Ai = [A(i-1)]`), so its
+/// expanded SIZE stays within the alias-expansion fuel budget and it is the
+/// recursion-depth guard, not the size guard, that must catch it. (The
+/// exponential-SIZE tower is a distinct case — see
+/// `doubling_alias_tower_yields_clean_size_error`.)
+#[test]
+fn deeply_nested_types_yield_clean_depth_error() {
+    let n = mllc::MAX_NESTING_DEPTH + 1000;
+    let source = format!(
+        "f :: {}Integer{} -> Integer\nf y = y\nmain :: IO ()\nmain = print (f 1)\n",
+        "(".repeat(n),
+        ")".repeat(n)
+    );
+    match compile_on_compiler_stack(source) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("type nested too deeply"),
+                "expected the clean type-depth diagnostic, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("a type nested past the limit must be rejected"),
+    }
+
+    // A linear alias chain past the depth limit: `type Ai = [A(i-1)]` expands
+    // to a list nested `n` deep — deep structure, shallow source text, but
+    // only linear SIZE (one node per level), so it stays within the alias
+    // fuel and must hit the ast_type_to_ty depth guard, not the stack.
+    let mut source = String::from("type A0 = Integer\n");
+    for i in 1..=n {
+        source.push_str(&format!("type A{} = [A{}]\n", i, i - 1));
+    }
+    source.push_str(&format!(
+        "f :: A{} -> Integer\nf _ = 1\nmain :: IO ()\nmain = print (f [])\n",
+        n
+    ));
+    match compile_on_compiler_stack(source) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("type nested too deeply"),
+                "expected the clean type-depth diagnostic for the linear alias chain, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("a linear alias chain past the depth limit must be rejected"),
+    }
+}
+
+/// Expression-structure face of the guard: a `+`-operator spine. The source
+/// is flat (the parser folds left-associative chains iteratively) but the AST
+/// is one level deep per operand, so this exercises the expression-walk guard
+/// (typechecker inference — the pass with the heaviest frames, which the
+/// stack size is calibrated against).
+#[test]
+fn operator_spine_past_limit_yields_clean_depth_error() {
+    let n = mllc::MAX_NESTING_DEPTH + 1000;
+    let source = format!(
+        "x :: Integer\nx = {}\nmain :: IO ()\nmain = print x\n",
+        vec!["1"; n].join("+")
+    );
+    match compile_on_compiler_stack(source) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("expression nested too deeply")
+                    && msg.contains(&format!("limit {}", mllc::MAX_NESTING_DEPTH)),
+                "expected the clean depth diagnostic, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("an operator spine past the limit must be rejected"),
+    }
+}
+
+/// The limit must stay generous: a 1200-element list literal (which desugars
+/// to a ~1200-deep cons chain, far past the old 256-element promise) must
+/// still compile AND run.
+#[test]
+fn thousand_element_list_literal_still_compiles_and_runs() {
+    let n = 1200;
+    let source = format!(
+        "xs :: [Integer]\nxs = [{}]\nmain :: IO ()\nmain = if sum xs == {} then putStrLn \"ok\" else error \"wrong sum\"\n",
+        vec!["2"; n].join(","),
+        2 * n
+    );
+    let lua_code = compile_on_compiler_stack(source)
+        .expect("a 1200-element list literal must compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code)
+        .exec()
+        .expect("the 1200-element list program must run");
 }
