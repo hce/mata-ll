@@ -1054,7 +1054,7 @@ pub enum DiagnosticKind {
     /// `is_var` selects the wording: applying a type VARIABLE that another
     /// use in the same declaration already fixed at kind Type is a
     /// two-kinds-for-one-variable conflict, not a saturated constructor.
-    KindSaturatedApp { ty: String, arg: String, is_var: bool },
+    KindSaturatedApp { ty: String, arg: String, is_var: bool, kind: Kind },
     /// A type application whose argument has the wrong kind for the
     /// constructor's parameter, e.g. `HashMap Maybe Integer`: HashMap's
     /// first parameter must be a complete type, but `Maybe` still needs an
@@ -1291,13 +1291,13 @@ impl fmt::Display for Diagnostic {
                             ty, found, expected)?,
                 }
             }
-            DiagnosticKind::KindSaturatedApp { ty, arg, is_var } => {
+            DiagnosticKind::KindSaturatedApp { ty, arg, is_var, kind } => {
                 if *is_var {
                     write!(f, "Kind error: the type variable '{}' is applied to the type argument '{}' here, but its use elsewhere in this declaration makes it a complete type (kind Type) — a single type variable cannot be used at two different kinds",
                         ty, arg)?
                 } else {
-                    write!(f, "Kind error: '{}' is applied to the type argument '{}', but '{}' has kind Type — it is already a complete type and takes no type arguments",
-                        ty, arg, ty)?
+                    write!(f, "Kind error: '{}' is applied to the type argument '{}', but '{}' has kind {} — it is already a complete type and takes no type arguments",
+                        ty, arg, ty, kind)?
                 }
             }
             DiagnosticKind::KindArgMismatch { func, arg, expected, found } =>

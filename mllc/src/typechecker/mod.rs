@@ -1800,6 +1800,25 @@ impl Checker {
                 )),
                 ctx.to_string(),
             );
+        } else if let Some(ci) = self.constructors.get(name) {
+            // An UN-TICKED promoted pun: no TYPE with this name exists, but a
+            // data CONSTRUCTOR does (`Vec (S Z)` written for `Vec ('S 'Z)`).
+            // Point at the tick instead of a bare unknown-type error.
+            let type_name = ci.type_name.clone();
+            let baseline = self.checking_prelude;
+            self.errors.push(Diagnostic {
+                kind: DiagnosticKind::Other(format!(
+                    "Unknown type '{}' — but a data constructor of that name exists (declared by 'data {}'). To use a constructor at the type level it must be PROMOTED, written with a leading tick: '{}",
+                    name, type_name, name
+                )),
+                context: Some(ctx.to_string()),
+                span: None,
+                file: None,
+                notes: vec![format!(
+                    "GHC (with DataKinds) accepts the un-ticked pun when the name is unambiguous; mata-ll always requires the tick."
+                )],
+                baseline,
+            });
         } else {
             self.push_error_ctx(DiagnosticKind::UnknownType(name.to_string()), ctx.to_string());
         }

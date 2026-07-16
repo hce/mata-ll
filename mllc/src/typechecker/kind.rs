@@ -314,6 +314,7 @@ impl Checker {
                                     ty: show_ast_type(f),
                                     arg: show_ast_type(a),
                                     is_var,
+                                    kind: kctx.default(&kf),
                                 },
                                 ctx.to_string(),
                             );
