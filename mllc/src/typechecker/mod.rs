@@ -492,52 +492,42 @@ impl Checker {
             _ => return None,
         };
 
-        let equations = self.type_families.get(&family_name)?.clone();
-
-        // Try each equation
-        for eq in &equations {
-            if eq.args.len() != args.len() {
-                continue;
-            }
-            // Try to match each arg pattern against the actual arg
-            let mut bindings: HashMap<String, &Type> = HashMap::new();
-            let mut matched = true;
-            for (pattern, actual) in eq.args.iter().zip(args.iter()) {
-                if !self.match_type_pattern(pattern, actual, &mut bindings) {
-                    matched = false;
-                    break;
-                }
-            }
-            if matched {
-                // Apply bindings to the result type, then lower it to `Ty`
-                // WITHOUT further eager reduction (tf_lowering) and reduce it
-                // to normal form through the shared ITERATIVE normalizer. That
-                // normalizer is fuel-bounded and loops rather than recurses on
-                // the head, so a non-terminating family (`Loop x = Loop x`)
-                // reports a divergence instead of overflowing the stack — the
-                // old recursive `ast_type_to_ty` re-reduction could do neither.
-                let result = self.substitute_type(&eq.result, &bindings);
-                let saved = self.tf_lowering;
-                self.tf_lowering = true;
-                let raw = self.ast_type_to_ty(&result);
-                self.tf_lowering = saved;
-                return Some(match reduce_type_families(&raw, &self.ty_families) {
-                    Ok(reduced) => reduced,
-                    Err(_diverged) => {
-                        if !self.tf_reported_divergence {
-                            self.tf_reported_divergence = true;
-                            self.push_error_ctx(
-                                DiagnosticKind::TypeFamilyDivergence(family_name.clone()),
-                                format!("the type family '{}'", family_name),
-                            );
-                        }
-                        raw
-                    }
-                });
-            }
+        if !self.type_families.contains_key(&family_name) {
+            return None;
         }
 
-        None
+        // Delegate to the ONE Ty-level reduction engine (tf_reduce_head via
+        // reduce_type_families) instead of a second, AST-level matcher. The
+        // AST matcher was a duplicated engine with its own gaps — it had no
+        // promoted-constructor case, so `F 'Z` failed its specific clause
+        // and fell through to a catch-all — and no apartness rule. Lower the
+        // whole application to raw `Ty` form (no eager reduction) and let
+        // the shared iterative, fuel-bounded, apartness-checking normalizer
+        // do the reduction.
+        //
+        // Families are registered across several passes, so the lowered
+        // `ty_families` may lag `type_families`; rebuild when they disagree
+        // so this eager path never reduces against a stale set.
+        if self.ty_families.len() != self.type_families.len() {
+            self.build_ty_families();
+        }
+        let saved = self.tf_lowering;
+        self.tf_lowering = true;
+        let raw = self.ast_type_to_ty(ty);
+        self.tf_lowering = saved;
+        Some(match reduce_type_families(&raw, &self.ty_families) {
+            Ok(reduced) => reduced,
+            Err(_diverged) => {
+                if !self.tf_reported_divergence {
+                    self.tf_reported_divergence = true;
+                    self.push_error_ctx(
+                        DiagnosticKind::TypeFamilyDivergence(family_name.clone()),
+                        format!("the type family '{}'", family_name),
+                    );
+                }
+                raw
+            }
+        })
     }
 
     /// Lower every registered type family's equations to raw `Ty` form (no
@@ -598,39 +588,6 @@ impl Checker {
     }
 
     /// Match a type pattern against an actual type, collecting variable bindings.
-    fn match_type_pattern<'a>(&self, pattern: &Type, actual: &'a Type, bindings: &mut HashMap<String, &'a Type>) -> bool {
-        match pattern {
-            Type::Var(name) => {
-                if let Some(existing) = bindings.get(name) {
-                    // Variable already bound — check consistency
-                    format!("{:?}", existing) == format!("{:?}", actual)
-                } else {
-                    bindings.insert(name.clone(), actual);
-                    true
-                }
-            }
-            Type::Con(name) => matches!(actual, Type::Con(n) if n == name),
-            Type::List(inner_pat) => {
-                if let Type::List(inner_act) = actual {
-                    self.match_type_pattern(inner_pat, inner_act, bindings)
-                } else {
-                    false
-                }
-            }
-            Type::App(f_pat, a_pat) => {
-                if let Type::App(f_act, a_act) = actual {
-                    self.match_type_pattern(f_pat, f_act, bindings)
-                        && self.match_type_pattern(a_pat, a_act, bindings)
-                } else {
-                    false
-                }
-            }
-            Type::Paren(inner) => self.match_type_pattern(inner, actual, bindings),
-            // Wildcards or underscore vars
-            _ => false,
-        }
-    }
-
     /// Substitute type variables in a type with bound values.
     fn substitute_type(&self, ty: &Type, bindings: &HashMap<String, &Type>) -> Type {
         // Every node that can contain a nested type is handled explicitly. A
@@ -2535,6 +2492,7 @@ impl Checker {
                 }
                 Decl::TypeFamily { name, equations } => {
                     self.check_family_kinds(
+                        name,
                         equations,
                         &format!("the definition of type family '{}'", name),
                     );

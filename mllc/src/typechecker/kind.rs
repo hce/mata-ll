@@ -421,6 +421,64 @@ impl Checker {
     pub(super) fn check_type_kind(&mut self, ty: &Type, ctx: &str) {
         let mut kctx = KindCtx::new(true);
         self.expect_type_kind(ty, &Kind::Type, &mut kctx, ctx);
+        self.check_family_saturation(ty, ctx);
+    }
+
+    /// Reject UNSATURATED type-family applications anywhere in `ty`. A type
+    /// family is not a first-class type constructor: it is a compile-time
+    /// function over types, evaluable only when it has all its arguments, so
+    /// it cannot be passed unapplied where a type constructor is expected
+    /// (`data Wrap f = Wrap (f Integer)` with `Wrap SomeFamily`). GHC
+    /// rejects partial family application for the same reason; silently
+    /// accepting it left the application stuck forever and produced baffling
+    /// downstream errors (or none at all).
+    pub(super) fn check_family_saturation(&mut self, ty: &Type, ctx: &str) {
+        // Walk the application spine to count how many arguments the head
+        // receives, checking each argument subtree along the way.
+        let mut head = strip_paren(ty);
+        let mut nargs = 0usize;
+        while let Type::App(f, a) = head {
+            self.check_family_saturation(a, ctx);
+            nargs += 1;
+            head = strip_paren(f);
+        }
+        match head {
+            Type::Con(name) => {
+                if let Some(eqs) = self.type_families.get(name) {
+                    let arity = eqs.first().map(|e| e.args.len()).unwrap_or(0);
+                    if nargs < arity {
+                        let name = name.clone();
+                        self.push_error_ctx(
+                            DiagnosticKind::Other(format!(
+                                "Type family '{}' is applied to {} of its {} argument{} here. A type family is not a first-class type constructor — it is a compile-time function over types that can only be evaluated once fully applied — so it cannot be passed unapplied where a type constructor is expected. GHC rejects unsaturated type families for the same reason",
+                                name, nargs, arity, if arity == 1 { "" } else { "s" }
+                            )),
+                            ctx.to_string(),
+                        );
+                    }
+                }
+            }
+            Type::Arrow(a, b) => {
+                self.check_family_saturation(a, ctx);
+                self.check_family_saturation(b, ctx);
+            }
+            Type::List(a) | Type::IO(a) => self.check_family_saturation(a, ctx),
+            Type::ScopedLuaIO { inner, .. } => self.check_family_saturation(inner, ctx),
+            Type::Forall { inner, .. } => self.check_family_saturation(inner, ctx),
+            Type::Constrained { ty, .. } => self.check_family_saturation(ty, ctx),
+            Type::Tuple(elems) => {
+                for e in elems {
+                    self.check_family_saturation(e, ctx);
+                }
+            }
+            Type::LuaPure { result, .. }
+            | Type::LuaIO { result, .. }
+            | Type::LuaIterator { result, .. }
+            | Type::LuaTry { result, .. }
+            | Type::LuaCatch { result, .. }
+            | Type::LuaIOCatch { result, .. } => self.check_family_saturation(result, ctx),
+            _ => {}
+        }
     }
 
     /// Kind-check the field types of one data constructor. All fields share
@@ -437,6 +495,7 @@ impl Checker {
         kctx.begin_scope(params);
         for ft in field_types {
             self.expect_type_kind(ft, &Kind::Type, &mut kctx, ctx);
+            self.check_family_saturation(ft, ctx);
         }
     }
 
@@ -509,19 +568,58 @@ impl Checker {
         // No top-level expectation: an alias may abbreviate a constructor of
         // any kind (its own kind was inferred as params -> body kind).
         self.infer_type_kind(ty, &mut kctx, ctx);
+        self.check_family_saturation(ty, ctx);
     }
 
-    /// Kind-check a type family's equations. Each equation is its own
-    /// variable scope; argument patterns and results are only walked (they
-    /// bind fresh pattern variables), reporting undefined names and
-    /// ill-kinded applications.
-    pub(super) fn check_family_kinds(&mut self, equations: &[TypeFamilyEq], ctx: &str) {
+    /// Kind-check a type family's equations AGAINST THE FAMILY'S OWN KIND
+    /// (as inferred by the silent prepass — pinned by the first equation
+    /// that constrains each position). Each equation is its own variable
+    /// scope. Every pattern must sit at the family's argument kind and every
+    /// result at its result kind, so an ill-kinded equation (`Mix 'Z = …;
+    /// Mix 'True = …` mixing Nat and Bool patterns) is an error AT THE
+    /// DEFINITION — even when the bad equation is never used. Merely walking
+    /// the patterns (the old behavior) reported nothing until a USE site
+    /// tripped over the family's inferred kind, blaming the user's code for
+    /// the library's ill-formed definition.
+    pub(super) fn check_family_kinds(&mut self, name: &str, equations: &[TypeFamilyEq], ctx: &str) {
+        let family_kind = self.kinds.get(name).cloned().unwrap_or(Kind::Type);
         for eq in equations {
             let mut kctx = KindCtx::new(true);
+            let mut kind = family_kind.clone();
             for arg in &eq.args {
-                self.infer_type_kind(arg, &mut kctx, ctx);
+                let ka = self.infer_type_kind(arg, &mut kctx, ctx);
+                match kind {
+                    Kind::Arrow(dom, rest) => {
+                        if kctx.unify(&ka, &dom).is_err() {
+                            self.push_error_ctx(
+                                DiagnosticKind::KindArgMismatch {
+                                    func: name.to_string(),
+                                    arg: show_ast_type(arg),
+                                    expected: kctx.default(&dom),
+                                    found: kctx.default(&ka),
+                                },
+                                ctx.to_string(),
+                            );
+                        }
+                        kind = *rest;
+                    }
+                    other => kind = other,
+                }
             }
-            self.infer_type_kind(&eq.result, &mut kctx, ctx);
+            self.check_family_saturation(&eq.result, ctx);
+            let kr = self.infer_type_kind(&eq.result, &mut kctx, ctx);
+            if kctx.unify(&kr, &kind).is_err() {
+                self.push_error_ctx(
+                    DiagnosticKind::Other(format!(
+                        "Kind error: this equation's result '{}' has kind {}, but the type family '{}' returns kind {} (pinned by its other equations)",
+                        show_ast_type(&eq.result),
+                        kctx.default(&kr),
+                        name,
+                        kctx.default(&kind),
+                    )),
+                    ctx.to_string(),
+                );
+            }
         }
     }
 

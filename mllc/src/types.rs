@@ -538,6 +538,9 @@ impl TyFamilies {
     pub fn is_empty(&self) -> bool {
         self.eqs.is_empty()
     }
+    pub fn len(&self) -> usize {
+        self.eqs.len()
+    }
     fn get(&self, name: &str) -> Option<&Vec<(Vec<Ty>, Ty)>> {
         self.eqs.get(name)
     }
@@ -624,19 +627,115 @@ fn tf_subst(ty: &Ty, binds: &HashMap<String, Ty>) -> Ty {
     }
 }
 
+/// Could `pat` and `actual` be made EQUAL by some substitution of their
+/// variables? The negation is GHC's *apartness*: a closed-family clause may
+/// only be skipped in favor of a later one when the argument can never come
+/// to match it. Variables on either side are flexible and bind through one
+/// shared map (pattern variables are renamed apart first — an equation's
+/// names are its own and may collide with the argument's). A family
+/// application on the ARGUMENT side is a wildcard: it could reduce to
+/// anything later, so it is never apart from anything. Conservative in the
+/// stuck direction — when unsure, the reduction stays stuck rather than
+/// committing to a possibly-wrong later clause.
+fn tf_maybe_unifiable(pat: &Ty, actual: &Ty, binds: &mut HashMap<String, Ty>, fams: &TyFamilies) -> bool {
+    // Resolve a variable through the binding map (one step at a time).
+    fn walk(t: &Ty, binds: &HashMap<String, Ty>) -> Ty {
+        let mut cur = t.clone();
+        while let Ty::Var(v) = &cur {
+            match binds.get(&v.name) {
+                Some(next) if next != &cur => cur = next.clone(),
+                _ => break,
+            }
+        }
+        cur
+    }
+    let a = walk(pat, binds);
+    let b = walk(actual, binds);
+    if is_stuck_family_app(&b, fams) || is_stuck_family_app(&a, fams) {
+        return true;
+    }
+    match (&a, &b) {
+        (Ty::Var(v), other) | (other, Ty::Var(v)) => {
+            // Bind (no occurs check: an occurs failure would make them
+            // apart, but claiming "maybe unifiable" only errs toward stuck).
+            if other == &Ty::Var(v.clone()) {
+                return true;
+            }
+            binds.insert(v.name.clone(), other.clone());
+            true
+        }
+        (Ty::Con(x), Ty::Con(y)) => x == y,
+        (Ty::Promoted(x), Ty::Promoted(y)) => x == y,
+        (Ty::Unit, Ty::Unit) => true,
+        (Ty::App(f1, a1), Ty::App(f2, a2)) => {
+            tf_maybe_unifiable(f1, f2, binds, fams) && tf_maybe_unifiable(a1, a2, binds, fams)
+        }
+        (Ty::List(x), Ty::List(y)) | (Ty::IO(x), Ty::IO(y)) => {
+            tf_maybe_unifiable(x, y, binds, fams)
+        }
+        (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => {
+            xs.iter().zip(ys).all(|(x, y)| tf_maybe_unifiable(x, y, binds, fams))
+        }
+        (Ty::Arrow(f1, a1), Ty::Arrow(f2, a2)) => {
+            tf_maybe_unifiable(f1, f2, binds, fams) && tf_maybe_unifiable(a1, a2, binds, fams)
+        }
+        // Different shapes (constructor vs list, promoted vs con, …): apart.
+        _ => false,
+    }
+}
+
+/// Rename an equation pattern's variables so they can never collide with the
+/// argument's variables inside the shared apartness binding map.
+fn tf_rename_pat_vars(ty: &Ty) -> Ty {
+    match ty {
+        Ty::Var(v) => Ty::Var(TyVar { name: format!("__tfpat_{}", v.name), id: v.id }),
+        Ty::App(f, a) => Ty::app(tf_rename_pat_vars(f), tf_rename_pat_vars(a)),
+        Ty::Arrow(a, b) => Ty::arrow(tf_rename_pat_vars(a), tf_rename_pat_vars(b)),
+        Ty::List(e) => Ty::list(tf_rename_pat_vars(e)),
+        Ty::IO(e) => Ty::io(tf_rename_pat_vars(e)),
+        Ty::LuaIO(s, e) => Ty::lua_io(s.clone(), tf_rename_pat_vars(e)),
+        Ty::Tuple(es) => Ty::Tuple(es.iter().map(tf_rename_pat_vars).collect()),
+        Ty::Forall(v, inner) => Ty::Forall(v.clone(), Box::new(tf_rename_pat_vars(inner))),
+        _ => ty.clone(),
+    }
+}
+
 /// Try to reduce ONE outermost step of a family application. Returns the
 /// reduced type, or `None` when `ty` is not a (saturated) family application
-/// or is stuck (no equation matched). Equations are tried top-to-bottom.
+/// or is stuck (no equation matched, or the matching equation cannot FIRE).
+///
+/// GHC closed-family semantics: equations are tried top-to-bottom, and the
+/// first whose pattern MATCHES fires only if the argument is *apart* from
+/// every earlier equation's pattern — i.e. no substitution of the argument's
+/// variables could make an earlier equation apply. A symbolic argument that
+/// merely fails to match an earlier, more specific clause (`IsZero n` against
+/// `IsZero 'Z`) is NOT apart from it, so the application stays STUCK instead
+/// of wrongly committing to the catch-all. For ground arguments matching and
+/// unifiability coincide, so ground reductions are unchanged.
 fn tf_reduce_head(ty: &Ty, fams: &TyFamilies) -> Option<Ty> {
     let (head, args) = peel_app(ty);
     let Ty::Con(name) = head else { return None };
     let equations = fams.get(name)?;
-    for (pats, result) in equations {
+    for (i, (pats, result)) in equations.iter().enumerate() {
         if pats.len() != args.len() {
             continue;
         }
         let mut binds: HashMap<String, Ty> = HashMap::new();
         if pats.iter().zip(&args).all(|(p, a)| tf_match(p, a, &mut binds)) {
+            // Apartness against every EARLIER equation: if some earlier
+            // pattern could still come to match the argument under a
+            // substitution, this clause must not fire — stuck.
+            for (ppats, _) in &equations[..i] {
+                if ppats.len() != args.len() {
+                    continue;
+                }
+                let mut ubinds: HashMap<String, Ty> = HashMap::new();
+                if ppats.iter().zip(&args).all(|(p, a)| {
+                    tf_maybe_unifiable(&tf_rename_pat_vars(p), a, &mut ubinds, fams)
+                }) {
+                    return None;
+                }
+            }
             return Some(tf_subst(result, &binds));
         }
     }

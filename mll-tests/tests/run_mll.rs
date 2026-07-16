@@ -397,6 +397,7 @@ mll_test!(kinds_hkt, "kinds_hkt.mll");
 mll_test!(type_level_nats, "type_level_nats.mll");
 mll_test!(vec_nat, "vec_nat.mll");
 mll_test!(type_family_arithmetic, "type_family_arithmetic.mll");
+mll_test!(type_family_clause_priority, "type_family_clause_priority.mll");
 mll_test!(promoted_nat_kind, "promoted_nat_kind.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(section_composition, "section_composition.mll");
@@ -4862,6 +4863,141 @@ main = pure ()
     let scalar_acc: mlua::Function = module.get("scalarAcc").unwrap();
     let v: i64 = scalar_acc.call(4).unwrap();
     assert_eq!(v, 10);
+}
+
+// --- Type-family definitions are validated at the definition (audit 18, 19).
+
+#[test]
+fn ill_kinded_family_equation_rejected_at_definition() {
+    // `Mix 'Z = Integer; Mix 'True = Bool` uses the family argument at kind
+    // Nat in one equation and Bool in another. This must be an error AT THE
+    // DEFINITION — even with the bad equation never used — not a deferred
+    // use-site error blaming the user's signature.
+    let source = r#"
+data Nat = Z | S Nat
+
+type family Mix a where
+    Mix 'Z    = Integer
+    Mix 'True = Bool
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("in the definition of type family 'Mix'"),
+                "the kind error must be located at the family definition, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("needs an argument of kind Nat, but 'True has kind Bool"),
+                "the error must explain the kind conflict, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("a family whose equations use an argument at two kinds must be rejected"),
+    }
+}
+
+#[test]
+fn kind_conflicting_family_results_rejected_at_definition() {
+    // Equation RESULTS at two different kinds ('Z :: Nat vs Bool-promoted).
+    let source = r#"
+data Nat = Z | S Nat
+
+type family Bad a where
+    Bad Integer = 'Z
+    Bad Bool    = 'True
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("in the definition of type family 'Bad'"),
+                "the result-kind error must be located at the definition, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("a family whose equation results disagree in kind must be rejected"),
+    }
+}
+
+#[test]
+fn unsaturated_type_family_rejected() {
+    // GHC forbids partial application of a type family: it is a compile-time
+    // function, not a first-class constructor, so `Wrap Ident` (Ident used
+    // with 0 of its 1 argument) must be rejected instead of compiling to a
+    // forever-stuck application.
+    let source = r#"
+type family Ident x where
+    Ident x = x
+
+data Wrap f = Wrap (f Integer)
+
+bad :: Wrap Ident -> Integer
+bad (Wrap n) = n
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("Type family 'Ident' is applied to 0 of its 1 argument"),
+                "expected the unsaturated-family rejection, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("an unsaturated type family must be rejected"),
+    }
+}
+
+// --- Closed-type-family clause selection (audit finding 12): apartness.
+
+#[test]
+fn symbolic_family_argument_not_apart_from_earlier_clause_stays_stuck() {
+    // GHC closed-family semantics: a clause fires only when the argument is
+    // APART from every earlier clause. A symbolic `n` is not apart from the
+    // earlier `IsZero 'Z` clause (n could be 'Z), so `IsZero n` must stay
+    // STUCK — it must NOT reduce via the catch-all to 'False. The program
+    // below is therefore ill-typed and must be rejected, exactly as GHC
+    // rejects it. Before the fix the catch-all fired and this compiled.
+    let source = r#"
+data Nat = Z | S Nat
+
+type family IsZero n where
+    IsZero 'Z = 'True
+    IsZero n  = 'False
+
+data Foo b where
+    FTrue  :: Foo 'True
+    FFalse :: Foo 'False
+
+bad :: Foo (IsZero n)
+bad = FFalse
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("IsZero"),
+                "the stuck family application should appear in the error, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!(
+            "IsZero n (symbolic) must stay stuck, not reduce via the catch-all"
+        ),
+    }
 }
 
 #[test]
