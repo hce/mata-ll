@@ -2898,22 +2898,17 @@ fn is_maybe_ty(ty: &Ty) -> bool {
     matches!(ty, Ty::App(f, _) if matches!(f.as_ref(), Ty::Con(c) if c == "Maybe"))
 }
 
-/// Compute the OutgoingCallback flags for a callback parameter type.
-/// Returns (arity, marshal_args, run_io, marshal_ret). A position is marshalled
-/// across the boundary only when it is a `List` or nested `Arrow`; everything
-/// else (foreign types, tuples, primitives, and the opaque polymorphic state)
-/// is passed raw. Type-variable results are opaque state and returned raw.
-fn outgoing_cb_flags(cb_ty: &Ty) -> (usize, Vec<bool>, bool, bool) {
+/// Compute the OutgoingCallback shape for a callback parameter type.
+/// Returns (arity, run_io). WHAT to convert at each boundary position is not
+/// decided here: it is derived at codegen time from the callback's
+/// monomorphized type, so a polymorphic accumulator instantiated at a
+/// structured type is converted identically at the FFI edge and the callback
+/// edge (see TExprKind::OutgoingCallback). Arity and IO-ness never change
+/// under instantiation, so they may safely be read off the declared type.
+fn outgoing_cb_flags(cb_ty: &Ty) -> (usize, bool) {
     let (args, ret) = cb_ty.peel_arrows();
-    let marshal_args = args.iter()
-        .map(|a| matches!(a, Ty::List(_) | Ty::Arrow(_, _)))
-        .collect();
-    let (run_io, produced) = match ret {
-        Ty::IO(inner) | Ty::LuaIO(_, inner) => (true, inner.as_ref()),
-        other => (false, other),
-    };
-    let marshal_ret = !matches!(produced, Ty::Var(_));
-    (args.len(), marshal_args, run_io, marshal_ret)
+    let run_io = matches!(ret, Ty::IO(_) | Ty::LuaIO(_, _));
+    (args.len(), run_io)
 }
 
 /// Free type variables a callback carries through its argument and result

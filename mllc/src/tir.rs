@@ -277,10 +277,10 @@ impl TExpr {
                 updates: updates.into_iter().map(|(n, idx, e)| (n, idx, e.apply_subst(subst))).collect(),
                 num_fields,
             },
-            TExprKind::OutgoingCallback { callee, arity, marshal_args, run_io, marshal_ret } =>
+            TExprKind::OutgoingCallback { callee, arity, run_io } =>
                 TExprKind::OutgoingCallback {
                     callee: Box::new(callee.apply_subst(subst)),
-                    arity, marshal_args, run_io, marshal_ret,
+                    arity, run_io,
                 },
             TExprKind::FfiMaybeArg { value } =>
                 TExprKind::FfiMaybeArg { value: Box::new(value.apply_subst(subst)) },
@@ -383,20 +383,20 @@ pub enum TExprKind {
     /// An mata-ll callback passed *out* to a Lua FFI function. Lowers to an
     /// n-ary Lua function that uncurries `callee`, marshals each argument and
     /// the result, and (for effectful callbacks) runs the returned action.
-    /// Flags are computed before monomorphization (where the threaded state is
-    /// still a type variable) and must be copied verbatim by later passes.
+    /// The marshalling itself is TYPE-DIRECTED and derived at codegen time
+    /// from `callee.ty` — which monomorphization has by then instantiated —
+    /// so both boundary directions of a callback (host→callback arguments,
+    /// callback→host result) use exactly the same descriptors as the
+    /// enclosing FFI call's edges. Deriving it earlier (from the declared
+    /// signature, pre-mono) made the two edges disagree for polymorphic
+    /// state instantiated at a structured type: the FFI edge marshalled a
+    /// `[a]`-instantiated accumulator while the callback edge passed it raw.
     OutgoingCallback {
         callee: Box<TExpr>,
         /// Number of positional arguments the Lua host will pass.
         arity: usize,
-        /// Per-argument: convert across the FFI boundary (lists/nested fns)
-        /// rather than passing the raw value (opaque polymorphic state).
-        marshal_args: Vec<bool>,
         /// The callback returns an action that must be run for its effect.
         run_io: bool,
-        /// Convert the result for the host rather than returning it raw
-        /// (raw = opaque polymorphic state, must round-trip untouched).
-        marshal_ret: bool,
     },
     /// An FFI argument whose *declared* type in the FFI signature is `Maybe a`
     /// — an optional Lua parameter. At the boundary `Just x` unwraps to `x`

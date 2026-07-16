@@ -543,12 +543,15 @@ impl CodeGen {
         }
     }
 
-    /// The name an FFI decode error uses for "in the result of …": the host
-    /// function's own name, or a readable phrase for a `:method` call.
+    /// The location phrase an FFI decode error appends — "in the result of …"
+    /// with the host function's own name, or a readable phrase for a
+    /// `:method` call. A full phrase, because the decoder is also used for
+    /// values crossing in the other direction (exported-function arguments),
+    /// where "the result of" would be wrong.
     fn ffi_root_name(lua_func: &str) -> String {
         match lua_func.strip_prefix(':') {
-            Some(method) => format!("the :{} method call", method),
-            None => lua_func.to_string(),
+            Some(method) => format!("in the result of the :{} method call", method),
+            None => format!("in the result of {}", lua_func),
         }
     }
 
@@ -993,17 +996,17 @@ impl CodeGen {
             }
             for name in &module.exports {
                 let sname = sanitize_name(name);
-                // Extract argument types from function type
-                let arg_tys = if let Some(ty) = export_types.get(name) {
+                // Extract argument and result types from the function type
+                let (arg_tys, res_ty) = if let Some(ty) = export_types.get(name) {
                     let mut args = Vec::new();
                     let mut t = ty;
                     while let Ty::Arrow(a, b) = t {
                         args.push(a.as_ref().clone());
                         t = b.as_ref();
                     }
-                    args
+                    (args, Some(t.clone()))
                 } else {
-                    Vec::new()
+                    (Vec::new(), None)
                 };
 
                 let n_args = arg_tys.len();
@@ -1014,15 +1017,62 @@ impl CodeGen {
                 self.emit(&format!("{} = function({params_str})\n", sanitize_name(name)));
                 self.indent += 1;
 
-                // Type-directed argument conversion
+                // Type-directed argument conversion: every host-supplied
+                // argument crosses the Lua→mata-ll boundary here and is
+                // decoded by its declared type with the same descriptors an
+                // FFI result uses — a `Maybe` gets its tagged wrapper, a
+                // list becomes a cons list at every depth, structure nested
+                // inside tuples/records/maps is decoded in place, and shape
+                // mismatches fail with a localized error instead of
+                // corrupting silently.
                 for (i, ty) in arg_tys.iter().enumerate() {
-                    let arg = &params[i];
-                    if matches!(ty, Ty::List(_)) {
+                    let arg = params[i].clone();
+                    if matches!(ty, Ty::Arrow(_, _)) {
+                        // A host callback: mata-ll code will call it, so its
+                        // arguments cross mata-ll→Lua (marshalled by their
+                        // declared types) and its result crosses Lua→mata-ll
+                        // (decoded by the declared result type).
+                        let (cb_args, cb_ret) = ty.peel_arrows();
+                        let out_descs: Vec<String> = cb_args.iter()
+                            .map(|t| {
+                                if matches!(t, Ty::Arrow(_, _)) {
+                                    // A nested mata-ll function handed to the
+                                    // host callback: wrap it for positional
+                                    // Lua calls (deep-force convention).
+                                    "false".to_string()
+                                } else {
+                                    self.ffi_arg_marshal_desc(t, &mut Vec::new())
+                                        .unwrap_or_else(|| "false".into())
+                                }
+                            })
+                            .collect();
+                        let produced = match cb_ret {
+                            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+                            other => other,
+                        };
+                        let ret_desc = self
+                            .ffi_decode_desc_inner(produced, &mut Vec::new(), None)
+                            .map(|d| d.0)
+                            .unwrap_or_else(|| "false".into());
+                        let root = format!(
+                            "in the result of a callback passed to the exported function '{}'",
+                            name
+                        );
                         self.emit_indent();
-                        self.emit(&format!("{arg} = __lua_to_mll({arg})\n"));
-                    } else if matches!(ty, Ty::Arrow(_, _)) {
+                        self.emit(&format!(
+                            "if type({arg}) == \"function\" then {arg} = __mll_wrap_callback_in({arg}, {}, {{{}}}, {}, {:?}) end\n",
+                            cb_args.len(), out_descs.join(", "), ret_desc, root));
+                    } else if let Some((desc, _)) =
+                        self.ffi_decode_desc_inner(ty, &mut Vec::new(), None)
+                    {
+                        let root = format!(
+                            "in argument {} of the exported function '{}'",
+                            i + 1, name
+                        );
                         self.emit_indent();
-                        self.emit(&format!("if type({arg}) == \"function\" then {arg} = __mll_wrap_callback({arg}) end\n"));
+                        self.emit(&format!(
+                            "{arg} = __mll_ffi_decode({desc}, {arg}, {root:?}, \"argument\")\n"
+                        ));
                     }
                 }
 
@@ -1040,8 +1090,39 @@ impl CodeGen {
                 self.emit(&format!("local __result = __force({})({call_args})\n", fn_ref));
                 self.emit_indent();
                 self.emit("if type(__result) == \"function\" then __result = __result() end\n");
-                self.emit_indent();
-                self.emit("return __mll_to_lua(__result)\n");
+                // Type-directed result conversion (mata-ll→Lua): the same
+                // marshal descriptors an FFI argument of this type would get,
+                // so e.g. interior Nothings in a [Maybe a] keep their
+                // positions. Types without a descriptor (scalars, plain ADTs,
+                // opaque values) keep the legacy deep-force conversion.
+                let res_marshal = res_ty.as_ref().and_then(|t| {
+                    let produced = match t {
+                        Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+                        other => other,
+                    };
+                    self.ffi_arg_marshal_desc(produced, &mut Vec::new())
+                });
+                match res_marshal {
+                    Some(desc) => {
+                        // An empty MLL list (and Nothing) is nil at the Lua
+                        // boundary — the documented export contract — so keep
+                        // the top-level nil short-circuit the legacy deep-force
+                        // conversion had. (At the FFI *argument* edge an empty
+                        // list is a fresh {} so hosts can ipairs it; the export
+                        // result contract predates that and is pinned by
+                        // ffi_export_string_lists.)
+                        self.emit_indent();
+                        self.emit("__result = __force(__result)\n");
+                        self.emit_indent();
+                        self.emit("if __result == nil then return nil end\n");
+                        self.emit_indent();
+                        self.emit(&format!("return __mll_arg_marshal(__result, {})\n", desc));
+                    }
+                    None => {
+                        self.emit_indent();
+                        self.emit("return __mll_to_lua(__result)\n");
+                    }
+                }
                 self.indent -= 1;
                 self.emit_indent();
                 self.emit("end,\n");
@@ -4252,18 +4333,46 @@ impl CodeGen {
                         _ => None,
                     };
                     // __mll_iter(factory, decode_desc, root, arg0, arg1, ...)
-                    self.emit("__mll_iter(");
-                    self.emit(lua_func);
-                    match &elem_desc {
-                        Some(desc) =>
-                            self.emit(&format!(", {}, {:?}", desc, Self::ffi_root_name(lua_func))),
-                        None => self.emit(", nil, nil"),
+                    if let Some(method) = lua_func.strip_prefix(':') {
+                        // Method-form iterator (`LuaIterator ":gmatch" [...]`):
+                        // the factory is a method on the first argument. A
+                        // method name is not a Lua expression, so bind the
+                        // receiver once and pass the method function with the
+                        // receiver as the factory's first argument
+                        // (`__recv.m(__recv, ...)` ≡ `__recv:m(...)`).
+                        self.emit("(function() local __recv = __force(");
+                        self.gen_expr(&args[0]);
+                        self.emit(&format!("); return __mll_iter(__recv.{}", method));
+                        match &elem_desc {
+                            Some(desc) =>
+                                self.emit(&format!(", {}, {:?}", desc, Self::ffi_root_name(lua_func))),
+                            None => self.emit(", nil, nil"),
+                        }
+                        self.emit(", __recv");
+                        self.gen_ffi_args(&args[1..], true);
+                        self.emit(") end)()");
+                    } else {
+                        self.emit("__mll_iter(");
+                        self.emit(lua_func);
+                        match &elem_desc {
+                            Some(desc) =>
+                                self.emit(&format!(", {}, {:?}", desc, Self::ffi_root_name(lua_func))),
+                            None => self.emit(", nil, nil"),
+                        }
+                        self.gen_ffi_args(args, true);
+                        self.emit(")");
                     }
-                    self.gen_ffi_args(args, true);
-                    self.emit(")");
                 } else if let Some(lua_func) = specialized.strip_prefix("__mll_try:") {
-                    // Try FFI: wrap result in Either via __mll_try
-                    self.emit("__mll_try(");
+                    // Try FFI: wrap the (val, err) convention in Either via
+                    // __mll_try. The SUCCESS payload crosses the FFI boundary
+                    // like any other result, so it carries the same
+                    // type-directed decode descriptor (a raw Lua array where
+                    // [Integer] was declared must become a cons list, not be
+                    // walked as a cons cell later).
+                    let desc = self.ffi_catch_decode_desc(&expr.ty);
+                    let desc_str = desc.as_deref().unwrap_or("false");
+                    let root = Self::ffi_root_name(lua_func);
+                    self.emit(&format!("__mll_try({}, {:?}, ", desc_str, root));
                     if let Some(method) = lua_func.strip_prefix(':') {
                         // Method call try: handle:method(args)
                         self.emit("__force(");
@@ -4450,14 +4559,63 @@ impl CodeGen {
                 }
                 self.emit("; return _u end)()");
             }
-            TExprKind::OutgoingCallback { callee, arity, marshal_args, run_io, marshal_ret } => {
+            TExprKind::OutgoingCallback { callee, arity, run_io } => {
+                // Type-directed callback boundary, derived from the callback's
+                // MONOMORPHIZED type so it agrees with the enclosing FFI
+                // call's edges. What the host passes for each argument crosses
+                // Lua→mata-ll and gets the same decode descriptor an FFI
+                // result of that type would; the result crosses mata-ll→Lua
+                // and gets the same marshal descriptor an FFI argument of
+                // that type would. A position that is opaque at the FFI edge
+                // (a type variable, plain ADT, userdata) is therefore opaque
+                // here too, and round-tripped state — including polymorphic
+                // state instantiated at a structured type, which the old
+                // declared-type flags silently corrupted — keeps one
+                // representation across both edges.
+                //
+                // Peel exactly `arity` arrows: the declared arity is fixed,
+                // but instantiation may have substituted a function type for
+                // the result, growing the arrow spine.
+                let mut cur: &Ty = &callee.ty;
+                let mut arg_descs: Vec<String> = Vec::new();
+                for _ in 0..*arity {
+                    if let Ty::Arrow(a, b) = cur {
+                        let d = if matches!(a.as_ref(), Ty::Arrow(_, _)) {
+                            // A host-passed Lua function nested in a callback
+                            // argument: wrap it so mata-ll can call it.
+                            "{k=\"func\"}".to_string()
+                        } else {
+                            self.ffi_decode_desc_inner(a, &mut Vec::new(), None)
+                                .map(|d| d.0)
+                                .unwrap_or_else(|| "false".into())
+                        };
+                        arg_descs.push(d);
+                        cur = b.as_ref();
+                    } else {
+                        arg_descs.push("false".into());
+                    }
+                }
+                let produced = match cur {
+                    Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+                    other => other,
+                };
+                let ret_desc = if let Some(d) =
+                    self.ffi_arg_marshal_desc(produced, &mut Vec::new())
+                {
+                    d
+                } else if Self::scalar_lua_type(produced).is_some() {
+                    // A scalar result only needs forcing for the host.
+                    "true".to_string()
+                } else {
+                    // Opaque result (type variable, plain ADT, userdata):
+                    // return it raw — the exact representation the enclosing
+                    // FFI edge passes for the same type.
+                    "false".to_string()
+                };
                 self.emit("__mll_wrap_callback_out(");
                 self.gen_expr(callee);
-                let flags = marshal_args.iter()
-                    .map(|b| if *b { "true" } else { "false" })
-                    .collect::<Vec<_>>().join(", ");
                 self.emit(&format!(", {}, {{{}}}, {}, {})",
-                    arity, flags, run_io, marshal_ret));
+                    arity, arg_descs.join(", "), run_io, ret_desc));
             }
             TExprKind::FfiMaybeArg { value } => {
                 // Normally consumed by gen_ffi_args inside a SpecCall argument
@@ -5226,6 +5384,181 @@ local function __mll_opt_tail(...)
     return __unpack(t, 1, n)
 end
 
+-- A plain-language description of a raw host value, for FFI decode errors.
+local function __mll_ffi_describe(v)
+    if v == nil then return "nil" end
+    local t = type(v)
+    if t == "string" then return string.format("the string %q", v) end
+    if t == "number" then return "the number " .. tostring(v) end
+    if t == "boolean" then return "the boolean " .. tostring(v) end
+    return "a " .. t .. " value"
+end
+-- Raise a shape-mismatch error for a value crossing the Lua FFI boundary.
+-- Says WHAT was declared (desc.t), WHAT actually arrived, WHY that cannot
+-- decode (`why`, optional), and WHERE: the position baked into the descriptor
+-- at compile time (desc.w, e.g. "field 'ip' of record Cert") plus the
+-- boundary being crossed (`root`, a full phrase such as
+-- "in the result of host.cert"). `dir` = "argument" flips the wording for a
+-- host-SUPPLIED value (an exported function's argument, a callback argument);
+-- nil means the value is a host-returned result.
+local function __mll_ffi_mismatch(desc, v, root, why, dir)
+    local msg
+    if dir == "argument" then
+        msg = "FFI argument: declared " .. desc.t .. " but the host passed " ..
+            __mll_ffi_describe(v)
+    else
+        msg = "FFI result: declared " .. desc.t .. " but the host returned " ..
+            __mll_ffi_describe(v)
+    end
+    if why then msg = msg .. "; " .. why end
+    local loc = {}
+    if desc.w then loc[#loc + 1] = desc.w end
+    if root then loc[#loc + 1] = root end
+    if #loc > 0 then msg = msg .. " (" .. table.concat(loc, "; ") .. ")" end
+    error(msg)
+end
+-- Type-directed decoder for a value that has just crossed the Lua FFI boundary
+-- in the host→mata-ll direction: an FFI/LuaIO result, a LuaTry/LuaCatch
+-- success payload, an exported function's argument, or a callback result.
+-- `desc` is a descriptor emitted by codegen from the declared type;
+-- `false`/`nil` means "already in mata-ll form, pass through". `root` is a
+-- location phrase (e.g. "in the result of host.cert") threaded through for
+-- error messages, and `dir` flips the message wording for host-supplied
+-- arguments (see __mll_ffi_mismatch). Converts Lua arrays into cons lists,
+-- validates HashMap key types, rebuilds LuaDict records field-by-field,
+-- recurses through Maybe/tuples, and checks scalar leaves (`chk`) inside
+-- structures. Every shape mismatch — a scalar where a list/record was
+-- declared, a record field that is missing or of the wrong type — fails here,
+-- localized, instead of surfacing as an arbitrary Lua error (nil index,
+-- arithmetic on nil) deep in user code. Records/tuples with `rb=false` are
+-- validation-only: the host's own table is returned, keeping its metatable
+-- and undeclared fields.
+local function __mll_ffi_decode(desc, v, root, dir)
+    if not desc then return v end
+    -- A thunk is a value only mata-ll itself can create (__thunk_mt is a local
+    -- upvalue the host cannot reach), so meeting one here means a mata-ll
+    -- value is round-tripping through the host unchanged — e.g. the threaded
+    -- state of an outgoing-callback fold, whose lazy tuple fields are thunk
+    -- tables. Its type was already checked at compile time; pass it through
+    -- untouched. Forcing it to inspect it would both raise spurious mismatch
+    -- errors and destroy the laziness the program may rely on.
+    if getmetatable(v) == __thunk_mt then return v end
+    local k = desc.k
+    if k == "chk" then
+        -- Scalar leaf inside a structure: the declared type pins down the Lua
+        -- runtime type. nil (a missing field/element) also fails here.
+        if type(v) ~= desc.lt then
+            __mll_ffi_mismatch(desc, v, root, nil, dir)
+        end
+        return v
+    elseif k == "list" then
+        -- Lua array (1-based, possibly empty/absent) -> cons list. An empty or
+        -- absent array decodes to the empty list (nil), never a bogus element.
+        if v == nil then return nil end
+        if type(v) ~= "table" then
+            __mll_ffi_mismatch(desc, v, root,
+                "a list must arrive from the host as a Lua array", dir)
+        end
+        local n = #v
+        if desc.e and desc.e.k == "maybe" then
+            -- A [Maybe a] element arrives as nil for Nothing, and `#` is not
+            -- defined past a hole: scan for the maximal integer key so
+            -- interior Nothings keep their positions instead of truncating
+            -- the list at the first hole. (A TRAILING Nothing has no key in
+            -- a Lua table at all and cannot be recovered — the inherent nil
+            -- limitation, same as the argument direction.)
+            for key in pairs(v) do
+                if type(key) == "number" and key > n and key % 1 == 0 then
+                    n = key
+                end
+            end
+        end
+        if n == 0 and next(v) ~= nil then
+            __mll_ffi_mismatch(desc, v, root,
+                "the table has no array part, only non-sequential keys, so it is not a Lua array", dir)
+        end
+        local r = nil
+        for i = n, 1, -1 do
+            local e = v[i]
+            if desc.e then e = __mll_ffi_decode(desc.e, e, root, dir) end
+            r = __mll_cons(e, r)
+        end
+        return r
+    elseif k == "maybe" then
+        -- Host nil -> Nothing; any other value -> Just <decoded payload>. `Just`
+        -- is a tagged wrapper, so it must be constructed here (desc.e may be
+        -- false, meaning the payload needs no further decoding). Built with
+        -- __just_mt directly (the Just constructor is defined later in the
+        -- prelude than this decoder).
+        if v == nil then return nil end
+        if desc.e then v = __mll_ffi_decode(desc.e, v, root, dir) end
+        return setmetatable({v}, __just_mt)
+    elseif k == "hashmap" then
+        if type(v) ~= "table" then
+            __mll_ffi_mismatch(desc, v, root,
+                "a HashMap must arrive from the host as a keyed Lua table", dir)
+        end
+        local r = {}
+        for key, val in pairs(v) do
+            local kt = type(key)
+            if (desc.kt == "String" or desc.kt == "ByteString") and kt ~= "string" then
+                __mll_ffi_mismatch(desc, key, root,
+                    "the map is declared with String keys but this key is a " .. kt ..
+                    " (e.g. a plain array); return a string-keyed table from the Lua host, " ..
+                    "or declare the field as a list", dir)
+            elseif (desc.kt == "Integer" or desc.kt == "Number" or desc.kt == "Double") and kt ~= "number" then
+                __mll_ffi_mismatch(desc, key, root,
+                    "the map is declared with numeric keys but this key is a " .. kt, dir)
+            end
+            if desc.v then val = __mll_ffi_decode(desc.v, val, root, dir) end
+            r[key] = val
+        end
+        return r
+    elseif k == "tuple" then
+        if type(v) ~= "table" then
+            __mll_ffi_mismatch(desc, v, root,
+                "a tuple must arrive from the host as a Lua array", dir)
+        end
+        if desc.rb then
+            local r = {}
+            for i = 1, #desc.es do
+                local e = v[i]
+                if desc.es[i] then e = __mll_ffi_decode(desc.es[i], e, root, dir) end
+                r[i] = e
+            end
+            return r
+        end
+        -- Validation-only: check the elements, keep the host's array.
+        for i = 1, #desc.es do
+            if desc.es[i] then __mll_ffi_decode(desc.es[i], v[i], root, dir) end
+        end
+        return v
+    elseif k == "record" then
+        if type(v) ~= "table" then
+            __mll_ffi_mismatch(desc, v, root,
+                "a record must arrive from the host as a Lua table with its declared fields", dir)
+        end
+        if desc.rb then
+            local r = {}
+            for i = 1, #desc.fs do
+                local f = desc.fs[i]
+                local val = v[f.n]
+                if f.d then val = __mll_ffi_decode(f.d, val, root, dir) end
+                r[f.n] = val
+            end
+            return r
+        end
+        -- Validation-only: check the declared fields, keep the host's table
+        -- (its metatable and any undeclared fields stay intact).
+        for i = 1, #desc.fs do
+            local f = desc.fs[i]
+            if f.d then __mll_ffi_decode(f.d, v[f.n], root, dir) end
+        end
+        return v
+    end
+    return v
+end
+
 -- Type-directed marshalling of an mata-ll value crossing the FFI boundary in
 -- the ARGUMENT direction — the dual of __mll_ffi_decode. `d` is the descriptor
 -- built from the declared FFI argument type by ffi_arg_marshal_desc; it names
@@ -5403,21 +5736,35 @@ __mll_wrap_callback = function(f)
 end
 
 -- Wrap an mata-ll callback `f` so a Lua host can call it with `n` positional
--- arguments (mata-ll → Lua direction). mata-ll functions are n-ary, so the n
--- arguments are applied in a single call. `marshal[i]` converts argument i
--- across the boundary (lists/nested callbacks) versus passing it raw (an opaque
--- polymorphic value such as a fold's threaded state must round-trip untouched).
--- `run_io` runs the returned action for effectful callbacks; `marshal_ret`
--- converts the result for the host versus returning it raw (opaque state stays
--- raw).
-__mll_wrap_callback_out = function(f, n, marshal, run_io, marshal_ret)
+-- arguments (an outgoing callback: mata-ll function, Lua caller). mata-ll
+-- functions are n-ary, so the n arguments are applied in a single call. The
+-- conversions are TYPE-DIRECTED, from the callback's monomorphized type, so
+-- both edges of an FFI call agree on the representation of every value:
+--   descs[i]   what the host passes for argument i crosses Lua→mata-ll and is
+--              decoded exactly like an FFI result ({k=...} decode descriptor);
+--              {k="func"} wraps a host-passed Lua function; false passes the
+--              raw value through (a scalar or an opaque value — a plain ADT,
+--              userdata — which the enclosing FFI edge also passes raw).
+--   run_io     the callback returns an action that must be run for its effect.
+--   ret        the result crosses mata-ll→Lua: an argument-marshal descriptor
+--              (see __mll_arg_marshal), true to deep-force (a scalar), or
+--              false to return the raw value (opaque state round-trips
+--              untouched, exactly as the enclosing FFI edge passed it in).
+__mll_wrap_callback_out = function(f, n, descs, run_io, ret)
     return function(...)
         -- mata-ll functions are n-ary (all arguments at once), so collect the
         -- host's n positional arguments and apply them in a single call.
         local args = {}
         for i = 1, n do
             local v = select(i, ...)
-            if marshal[i] then v = __lua_to_mll(v) end
+            local d = descs[i]
+            if d then
+                if d.k == "func" then
+                    if type(v) == "function" then v = __mll_wrap_callback(v) end
+                else
+                    v = __mll_ffi_decode(d, v, "in an argument of a mata-ll callback", "argument")
+                end
+            end
             args[i] = v
         end
         local r = __force(f)(__unpack(args, 1, n))
@@ -5425,7 +5772,32 @@ __mll_wrap_callback_out = function(f, n, marshal, run_io, marshal_ret)
             r = __force(r)
             if type(r) == "function" then r = r() end
         end
-        if marshal_ret then return __mll_to_lua(r) end
+        if ret == true then return __mll_to_lua(r) end
+        if ret then return __mll_arg_marshal(r, ret) end
+        return r
+    end
+end
+
+-- Wrap a HOST-provided Lua callback so mata-ll code can call it (an incoming
+-- callback: Lua function, mata-ll caller — the dual of
+-- __mll_wrap_callback_out). Used for function-typed arguments of exported
+-- functions, where the declared type is known. Each of the n arguments
+-- crosses mata-ll→Lua and is marshalled by its declared type (out_descs[i]:
+-- an argument-marshal descriptor, or false to shallow-force an opaque/scalar
+-- value); the host's result crosses Lua→mata-ll and is decoded by the
+-- declared result type (ret_desc: an FFI decode descriptor, or false to pass
+-- the raw value through). `root` locates decode errors.
+__mll_wrap_callback_in = function(f, n, out_descs, ret_desc, root)
+    return function(...)
+        local args = {}
+        for i = 1, n do
+            local v = select(i, ...)
+            local d = out_descs[i]
+            if d then v = __mll_arg_marshal(v, d) else v = __force(v) end
+            args[i] = v
+        end
+        local r = f(__unpack(args, 1, n))
+        if ret_desc then r = __mll_ffi_decode(ret_desc, r, root) end
         return r
     end
 end
@@ -5744,157 +6116,21 @@ local function __mll_show_list(elem_show, xs)
     return "[" .. table.concat(parts, ", ") .. "]"
 end
 
--- A plain-language description of a raw host value, for FFI decode errors.
-local function __mll_ffi_describe(v)
-    if v == nil then return "nil" end
-    local t = type(v)
-    if t == "string" then return string.format("the string %q", v) end
-    if t == "number" then return "the number " .. tostring(v) end
-    if t == "boolean" then return "the boolean " .. tostring(v) end
-    return "a " .. t .. " value"
-end
--- Raise a shape-mismatch error for a value crossing the Lua FFI boundary.
--- Says WHAT was declared (desc.t), WHAT actually arrived, WHY that cannot
--- decode (`why`, optional), and WHERE: the position baked into the descriptor
--- at compile time (desc.w, e.g. "field 'ip' of record Cert") plus the FFI
--- function whose result was being decoded (`root`).
-local function __mll_ffi_mismatch(desc, v, root, why)
-    local msg = "FFI result: declared " .. desc.t .. " but the host returned " ..
-        __mll_ffi_describe(v)
-    if why then msg = msg .. "; " .. why end
-    local loc = {}
-    if desc.w then loc[#loc + 1] = desc.w end
-    if root then loc[#loc + 1] = "in the result of " .. root end
-    if #loc > 0 then msg = msg .. " (" .. table.concat(loc, "; ") .. ")" end
-    error(msg)
-end
--- Type-directed decoder for a value that has just crossed the Lua FFI boundary
--- (an FFI/LuaIO result). `desc` is a descriptor emitted by codegen from the
--- declared result type; `false`/`nil` means "already in mata-ll form, pass
--- through". `root` is the Lua-side name of the FFI function, threaded through
--- for error messages. Converts Lua arrays into cons lists, validates HashMap
--- key types, rebuilds LuaDict records field-by-field, recurses through
--- Maybe/tuples, and checks scalar leaves (`chk`) inside structures. Every
--- shape mismatch — a scalar where a list/record was declared, a record field
--- that is missing or of the wrong type — fails here, localized, instead of
--- surfacing as an arbitrary Lua error (nil index, arithmetic on nil) deep in
--- user code. Records/tuples with `rb=false` are validation-only: the host's
--- own table is returned, keeping its metatable and undeclared fields.
-local function __mll_ffi_decode(desc, v, root)
-    if not desc then return v end
-    -- A thunk is a value only mata-ll itself can create (__thunk_mt is a local
-    -- upvalue the host cannot reach), so meeting one here means a mata-ll
-    -- value is round-tripping through the host unchanged — e.g. the threaded
-    -- state of an outgoing-callback fold, whose lazy tuple fields are thunk
-    -- tables. Its type was already checked at compile time; pass it through
-    -- untouched. Forcing it to inspect it would both raise spurious mismatch
-    -- errors and destroy the laziness the program may rely on.
-    if getmetatable(v) == __thunk_mt then return v end
-    local k = desc.k
-    if k == "chk" then
-        -- Scalar leaf inside a structure: the declared type pins down the Lua
-        -- runtime type. nil (a missing field/element) also fails here.
-        if type(v) ~= desc.lt then
-            __mll_ffi_mismatch(desc, v, root)
-        end
-        return v
-    elseif k == "list" then
-        -- Lua array (1-based, possibly empty/absent) -> cons list. An empty or
-        -- absent array decodes to the empty list (nil), never a bogus element.
-        if v == nil then return nil end
-        if type(v) ~= "table" then
-            __mll_ffi_mismatch(desc, v, root,
-                "a list must arrive from the host as a Lua array")
-        end
-        local n = #v
-        if n == 0 and next(v) ~= nil then
-            __mll_ffi_mismatch(desc, v, root,
-                "the table has no array part, only non-sequential keys, so it is not a Lua array")
-        end
-        local r = nil
-        for i = n, 1, -1 do
-            local e = v[i]
-            if desc.e then e = __mll_ffi_decode(desc.e, e, root) end
-            r = __mll_cons(e, r)
-        end
-        return r
-    elseif k == "maybe" then
-        -- Host nil -> Nothing; any other value -> Just <decoded payload>. `Just`
-        -- is a tagged wrapper, so it must be constructed here (desc.e may be
-        -- false, meaning the payload needs no further decoding).
-        if v == nil then return nil end
-        if desc.e then v = __mll_ffi_decode(desc.e, v, root) end
-        return Just(v)
-    elseif k == "hashmap" then
-        if type(v) ~= "table" then
-            __mll_ffi_mismatch(desc, v, root,
-                "a HashMap must arrive from the host as a keyed Lua table")
-        end
-        local r = {}
-        for key, val in pairs(v) do
-            local kt = type(key)
-            if (desc.kt == "String" or desc.kt == "ByteString") and kt ~= "string" then
-                __mll_ffi_mismatch(desc, key, root,
-                    "the map is declared with String keys but this key is a " .. kt ..
-                    " (e.g. a plain array); return a string-keyed table from the Lua host, " ..
-                    "or declare the field as a list")
-            elseif (desc.kt == "Integer" or desc.kt == "Number" or desc.kt == "Double") and kt ~= "number" then
-                __mll_ffi_mismatch(desc, key, root,
-                    "the map is declared with numeric keys but this key is a " .. kt)
-            end
-            if desc.v then val = __mll_ffi_decode(desc.v, val, root) end
-            r[key] = val
-        end
-        return r
-    elseif k == "tuple" then
-        if type(v) ~= "table" then
-            __mll_ffi_mismatch(desc, v, root,
-                "a tuple must arrive from the host as a Lua array")
-        end
-        if desc.rb then
-            local r = {}
-            for i = 1, #desc.es do
-                local e = v[i]
-                if desc.es[i] then e = __mll_ffi_decode(desc.es[i], e, root) end
-                r[i] = e
-            end
-            return r
-        end
-        -- Validation-only: check the elements, keep the host's array.
-        for i = 1, #desc.es do
-            if desc.es[i] then __mll_ffi_decode(desc.es[i], v[i], root) end
-        end
-        return v
-    elseif k == "record" then
-        if type(v) ~= "table" then
-            __mll_ffi_mismatch(desc, v, root,
-                "a record must arrive from the host as a Lua table with its declared fields")
-        end
-        if desc.rb then
-            local r = {}
-            for i = 1, #desc.fs do
-                local f = desc.fs[i]
-                local val = v[f.n]
-                if f.d then val = __mll_ffi_decode(f.d, val, root) end
-                r[f.n] = val
-            end
-            return r
-        end
-        -- Validation-only: check the declared fields, keep the host's table
-        -- (its metatable and any undeclared fields stay intact).
-        for i = 1, #desc.fs do
-            local f = desc.fs[i]
-            if f.d then __mll_ffi_decode(f.d, v[f.n], root) end
-        end
-        return v
+-- Lua error convention wrapper: converts (val, err) to Either String a.
+-- Success: Right (decoded val), Failure: Left errmsg. `desc` is the FFI decode
+-- descriptor for the success payload (false = pass through) and `root` the
+-- location phrase for decode error messages — a structured success value (a
+-- list, a record) crosses the FFI boundary here exactly like any other FFI
+-- result and must be decoded the same way. The error value is tostring'd:
+-- hosts may signal failure with a non-string error object, while Left is
+-- declared String.
+local function __mll_try(desc, root, val, err)
+    if val == nil then
+        if err == nil then return {1, "unknown error"} end
+        return {1, tostring(err)}
     end
-    return v
-end
-
--- Lua error convention wrapper: converts (val, err) to Either String a
--- Success: Right val, Failure: Left errmsg
-local function __mll_try(val, err)
-    if val == nil then return {1, err or "unknown error"} else return {2, val} end
+    if desc then val = __mll_ffi_decode(desc, val, root) end
+    return {2, val}
 end
 -- LuaCatch/LuaIOCatch: run a Lua function under pcall, returning Either String a.
 -- Success: Right (decoded), Failure: Left errmsg. `desc` is the FFI decode

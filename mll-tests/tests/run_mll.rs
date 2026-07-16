@@ -410,6 +410,7 @@ mll_test!(let_exprs, "let_exprs.mll");
 mll_test!(ffi, "ffi.mll");
 mll_test!(ffi_maybe_args, "ffi_maybe_args.mll");
 mll_test!(luacatch, "luacatch.mll");
+mll_test!(lua_iterator_method, "lua_iterator_method.mll");
 mll_test!(tuple_ctor, "tuple_ctor.mll");
 mll_test!(lua_keywords, "lua_keywords.mll");
 mll_test!(mapm, "mapm.mll");
@@ -4550,6 +4551,316 @@ main = pure ()
         "got: {e}"
     );
     assert!(e.contains("element 2 of the tuple declared (String, Integer)"), "got: {e}");
+}
+
+// --- The FFI boundary is uniformly type-directed (audit findings 4, 5, 7, 8,
+// --- 10, 17): every edge a value crosses — LuaTry success payloads, exported
+// --- functions' arguments and results, host callbacks passed to exports, and
+// --- both edges of an outgoing callback — runs the same type-directed
+// --- decode/marshal machinery an ordinary FFI result/argument does.
+
+#[test]
+fn luatry_success_payload_decodes_and_error_is_stringified() {
+    // Audit finding 7 (doc/audit/t9): a structured LuaTry success payload
+    // (a raw Lua array where [Integer] was declared) was returned undecoded
+    // and later walked as a cons cell -> "attempt to index a number value".
+    // And finding 17 (the LuaTry half): a non-string `err` in the Lua
+    // (val, err) convention landed raw in Left :: String.
+    let source = r#"
+tryList   :: Integer -> LuaTry "try_list" [Integer]
+tryNested :: Integer -> LuaTry "try_nested" [[Integer]]
+
+export sumTry :: Integer -> IO Integer
+sumTry n = do
+    r <- tryList n
+    case r of
+        Right xs -> pure (sum xs)
+        Left _   -> pure (0 - 1)
+
+export sumNestedTry :: Integer -> IO Integer
+sumNestedTry n = do
+    r <- tryNested n
+    case r of
+        Right xs -> pure (sum (map sum xs))
+        Left _   -> pure (0 - 1)
+
+export errText :: Integer -> IO String
+errText n = do
+    r <- tryList n
+    case r of
+        Right _ -> pure "no error"
+        Left e  -> pure e
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+    lua.load(
+        r#"
+        function try_list(n)
+            if n == 0 then return nil, { code = 42 } end   -- non-string error object
+            local r = {}
+            for k = 1, n do r[k] = k end
+            return r
+        end
+        function try_nested(n)
+            local r = {}
+            for k = 1, n do r[k] = { k, k * 10 } end
+            return r
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    let sum_try: mlua::Function = module.get("sumTry").unwrap();
+    let s: i64 = sum_try.call(3).expect("structured Right payload must decode");
+    assert_eq!(s, 6, "Right [1,2,3] sums to 6");
+
+    let sum_nested: mlua::Function = module.get("sumNestedTry").unwrap();
+    let s: i64 = sum_nested.call(2).expect("nested Right payload must decode");
+    assert_eq!(s, 33, "Right [[1,10],[2,20]] sums to 33");
+
+    // A non-string error object must arrive in Left as a STRING (tostring'd),
+    // so String operations on it work instead of crashing.
+    let err_text: mlua::Function = module.get("errText").unwrap();
+    let e: String = err_text.call(0).expect("Left of a table error must be a string");
+    assert!(e.starts_with("table:"), "err tostring'd, got: {e}");
+}
+
+#[test]
+fn export_arguments_decode_type_directed() {
+    // Audit finding 5: exported functions cons-ified every table argument and
+    // only when the TOP-LEVEL type was a list. A `Maybe Integer` argument
+    // never got its tagged wrapper, and structure nested under a non-list
+    // argument (a tuple's list element, a record's list field, a [record])
+    // crashed or corrupted.
+    let source = r#"
+data Tag = Tag { tName :: String, tVals :: [Integer] }
+    deriving (Show, Eq, LuaDict)
+
+export pairSum :: (Integer, [Integer]) -> Integer
+pairSum (n, xs) = n + sum xs
+
+export tagSum :: Tag -> Integer
+tagSum t = sum (tVals t)
+
+export tagSums :: [Tag] -> Integer
+tagSums ts = sum (map tagSum ts)
+
+export maybeOr :: Maybe Integer -> Integer
+maybeOr (Just v) = v * 2
+maybeOr Nothing  = 0 - 5
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+
+    // A tuple argument with a nested list element.
+    let pair_sum: mlua::Function = module.get("pairSum").unwrap();
+    let tup = lua.create_table().unwrap();
+    tup.push(5).unwrap();
+    tup.push(lua.create_sequence_from([1, 2, 3]).unwrap()).unwrap();
+    let s: i64 = pair_sum.call(tup).expect("tuple with nested list decodes");
+    assert_eq!(s, 11, "pairSum (5, [1,2,3])");
+
+    // A record argument with a list field.
+    let tag_sum: mlua::Function = module.get("tagSum").unwrap();
+    let rec = lua.create_table().unwrap();
+    rec.set("tName", "a").unwrap();
+    rec.set("tVals", lua.create_sequence_from([1, 2, 3]).unwrap()).unwrap();
+    let s: i64 = tag_sum.call(&rec).expect("record with list field decodes");
+    assert_eq!(s, 6, "tagSum Tag with tVals=[1,2,3]");
+
+    // A LIST of records: elements are decoded as records, not cons-ified.
+    let tag_sums: mlua::Function = module.get("tagSums").unwrap();
+    let rec2 = lua.create_table().unwrap();
+    rec2.set("tName", "b").unwrap();
+    rec2.set("tVals", lua.create_sequence_from([10, 20]).unwrap()).unwrap();
+    let list = lua.create_table().unwrap();
+    list.push(&rec).unwrap();
+    list.push(&rec2).unwrap();
+    let s: i64 = tag_sums.call(list).expect("[record] decodes per element");
+    assert_eq!(s, 36, "tagSums over two records");
+
+    // A Maybe argument gets its tagged wrapper: a bare host value is Just,
+    // nil is Nothing.
+    let maybe_or: mlua::Function = module.get("maybeOr").unwrap();
+    let j: i64 = maybe_or.call(21).expect("bare value becomes Just");
+    assert_eq!(j, 42, "maybeOr (Just 21)");
+    let n: i64 = maybe_or.call(mlua::Value::Nil).expect("nil becomes Nothing");
+    assert_eq!(n, -5, "maybeOr Nothing");
+
+    // A shape mismatch fails with a localized ARGUMENT-direction error, not
+    // silent corruption or a bare Lua error.
+    let e = tag_sum.call::<i64>("oops").unwrap_err().to_string();
+    assert!(e.contains("declared Tag but the host passed the string \"oops\""), "got: {e}");
+    assert!(e.contains("in argument 1 of the exported function 'tagSum'"), "got: {e}");
+}
+
+#[test]
+fn export_results_marshal_type_directed() {
+    // Companion to finding 5, result direction: exported results went through
+    // the shape-based deep-force conversion, which compacted interior
+    // Nothings in a [Maybe a] (elements shifted into their slots).
+    let source = r#"
+export mkML :: Integer -> [Maybe Integer]
+mkML n = map (\k -> if k `mod` 2 == 0 then Nothing else Just k) (enumFromTo 1 n)
+
+export emptyOut :: Integer -> [Integer]
+emptyOut n = filter (\k -> k > 100) (enumFromTo 1 n)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Interior Nothing keeps its position as a hole; the following Just does
+    // not shift into its slot. (A trailing Nothing has no Lua representation
+    // — nil is the absence of a key — and stays lost, the inherent limit.)
+    let mk_ml: mlua::Function = module.get("mkML").unwrap();
+    let t: mlua::Table = mk_ml.call(3).expect("mkML returns a table");
+    assert_eq!(t.get::<i64>(1).unwrap(), 1, "position 1 is Just 1");
+    assert!(matches!(t.get::<mlua::Value>(2).unwrap(), mlua::Value::Nil),
+        "position 2 is Nothing (a hole), not a shifted element");
+    assert_eq!(t.get::<i64>(3).unwrap(), 3, "position 3 is Just 3");
+
+    // The documented export contract stays: an empty list is nil.
+    let empty_out: mlua::Function = module.get("emptyOut").unwrap();
+    let v: mlua::Value = empty_out.call(3).unwrap();
+    assert!(v.is_nil(), "empty exported list is still nil at the boundary");
+}
+
+#[test]
+fn exported_callback_results_decode_type_directed() {
+    // Audit finding 8: a host callback passed to an exported function had its
+    // result converted by SHAPE (__lua_to_mll cons-ified every table), so a
+    // callback returning a string-keyed table where a HashMap/record was
+    // declared became nil and crashed the mata-ll consumer.
+    let source = r#"
+import qualified Data.Map as Map
+
+data Pt = Pt { px :: Integer, py :: Integer } deriving (Show, LuaDict)
+
+export applyM :: forall s. (Integer -> LuaIO s (Map.Map String Integer)) -> LuaIO s Integer
+applyM f = do
+    mp <- f 3
+    case Map.lookup "a" mp of
+        Just v  -> pure v
+        Nothing -> pure (0 - 99)
+
+export applyR :: forall s. (Integer -> LuaIO s Pt) -> LuaIO s Integer
+applyR f = do
+    p <- f 2
+    pure (px p * 100 + py p)
+
+export applyMaybe :: forall s. (Integer -> LuaIO s (Maybe Integer)) -> LuaIO s Integer
+applyMaybe f = do
+    m <- f 1
+    case m of
+        Just v  -> pure v
+        Nothing -> pure (0 - 1)
+
+export feed :: forall s. ([Integer] -> LuaIO s Integer) -> Integer -> LuaIO s Integer
+feed f n = f (map (\k -> k * n) (enumFromTo 1 3))
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+
+    // Map-returning callback: the string-keyed table decodes as a map.
+    let apply_m: mlua::Function = module.get("applyM").unwrap();
+    let cb = lua
+        .load("function(n) return { a = n * 2, b = 0 } end")
+        .eval::<mlua::Function>()
+        .unwrap();
+    let v: i64 = apply_m.call(cb).expect("map-returning callback decodes");
+    assert_eq!(v, 6, "Map.lookup \"a\" finds the callback's value");
+
+    // Record-returning callback.
+    let apply_r: mlua::Function = module.get("applyR").unwrap();
+    let cb = lua
+        .load("function(n) return { px = n, py = n + 1 } end")
+        .eval::<mlua::Function>()
+        .unwrap();
+    let v: i64 = apply_r.call(cb).expect("record-returning callback decodes");
+    assert_eq!(v, 203, "Pt 2 3 -> 203");
+
+    // Maybe-returning callback: bare value -> Just, nil -> Nothing.
+    let apply_maybe: mlua::Function = module.get("applyMaybe").unwrap();
+    let cb = lua.load("function(n) return n + 41 end").eval::<mlua::Function>().unwrap();
+    let v: i64 = apply_maybe.call(cb).expect("bare callback result becomes Just");
+    assert_eq!(v, 42);
+    let cb = lua.load("function(n) return nil end").eval::<mlua::Function>().unwrap();
+    let v: i64 = apply_maybe.call(cb).expect("nil callback result becomes Nothing");
+    assert_eq!(v, -1);
+
+    // And the ARGUMENT direction of the same wrapper: a list argument reaches
+    // the host callback as a real Lua array it can ipairs.
+    let feed: mlua::Function = module.get("feed").unwrap();
+    let cb = lua
+        .load("function(xs) local s = 0; for _, x in ipairs(xs) do s = s + x end; return s end")
+        .eval::<mlua::Function>()
+        .unwrap();
+    let v: i64 = feed.call((cb, 10)).expect("list marshals out to the callback");
+    assert_eq!(v, 60, "callback receives [10,20,30] as a Lua array");
+}
+
+#[test]
+fn outgoing_callback_edges_agree_with_ffi_edges() {
+    // Audit finding 4: an outgoing callback (a mata-ll function handed to a
+    // Lua FFI function) marshalled by flags computed from the DECLARED type,
+    // while the FFI call's own edges used the instantiated type. A fold whose
+    // polymorphic accumulator was instantiated at a structured type had the
+    // initial accumulator converted at the FFI edge but passed raw at the
+    // callback edge — corrupting it silently. Both edges must use the same
+    // (monomorphized) type-directed descriptors.
+    let source = r#"
+foldHost :: [Integer] -> (Integer -> acc -> acc) -> acc -> LuaPure "fold_host" acc
+
+export listAcc :: Integer -> Integer
+listAcc n = sum (foldHost (enumFromTo 1 n) (\x xs -> x : xs) [])
+
+export tupleAcc :: Integer -> Integer
+tupleAcc n =
+    case foldHost (enumFromTo 1 n) (\x st -> case st of (c, xs) -> (c + 1, x : xs)) (0, []) of
+        (c, xs) -> c * 1000 + sum xs
+
+export scalarAcc :: Integer -> Integer
+scalarAcc n = foldHost (enumFromTo 1 n) (\x c -> c + x) 0
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+    lua.load(
+        r#"
+        function fold_host(xs, f, st)
+            for _, x in ipairs(xs) do st = f(x, st) end
+            return st
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+
+    // acc instantiated at [Integer]: the accumulator list survives the
+    // round trips through the host intact.
+    let list_acc: mlua::Function = module.get("listAcc").unwrap();
+    let v: i64 = list_acc.call(4).expect("[Integer] accumulator round-trips");
+    assert_eq!(v, 10, "sum of the accumulated list");
+
+    // acc instantiated at (Integer, [Integer]): structure nested in a tuple.
+    let tuple_acc: mlua::Function = module.get("tupleAcc").unwrap();
+    let v: i64 = tuple_acc.call(3).expect("tuple accumulator round-trips");
+    assert_eq!(v, 3006, "count 3, sum 6");
+
+    // The scalar instantiation keeps working.
+    let scalar_acc: mlua::Function = module.get("scalarAcc").unwrap();
+    let v: i64 = scalar_acc.call(4).unwrap();
+    assert_eq!(v, 10);
 }
 
 #[test]

@@ -974,10 +974,10 @@ impl Monomorphizer {
                 updates: updates.into_iter().map(|(n, idx, e)| (n, idx, self.mono_expr(e))).collect(),
                 num_fields,
             },
-            TExprKind::OutgoingCallback { callee, arity, marshal_args, run_io, marshal_ret } =>
+            TExprKind::OutgoingCallback { callee, arity, run_io } =>
                 TExprKind::OutgoingCallback {
                     callee: Box::new(self.mono_expr(*callee)),
-                    arity, marshal_args, run_io, marshal_ret,
+                    arity, run_io,
                 },
             TExprKind::FfiMaybeArg { value } =>
                 TExprKind::FfiMaybeArg { value: Box::new(self.mono_expr(*value)) },
@@ -1372,10 +1372,10 @@ impl Monomorphizer {
                     .collect(),
                 num_fields,
             },
-            TExprKind::OutgoingCallback { callee, arity, marshal_args, run_io, marshal_ret } =>
+            TExprKind::OutgoingCallback { callee, arity, run_io } =>
                 TExprKind::OutgoingCallback {
                     callee: Box::new(self.revert_purged(*callee)),
-                    arity, marshal_args, run_io, marshal_ret,
+                    arity, run_io,
                 },
             TExprKind::FfiMaybeArg { value } =>
                 TExprKind::FfiMaybeArg { value: Box::new(self.revert_purged(*value)) },

@@ -1421,8 +1421,9 @@ impl Checker {
 
         // Build the call expression: lua_func(_ffi0, _ffi1, ...). Function-typed
         // (callback) parameters are wrapped so the Lua host can call them with
-        // positional arguments — see OutgoingCallback. Flags are computed here,
-        // before monomorphization, while the threaded state is still a type var.
+        // positional arguments — see OutgoingCallback. Only the arity and
+        // IO-ness are fixed here; the boundary conversions are derived at
+        // codegen time from the monomorphized callback type.
         //
         // A parameter *declared* `Maybe a` is an optional Lua parameter (see
         // SPEC "Optional parameters"): it is marked with FfiMaybeArg so codegen
@@ -1437,11 +1438,11 @@ impl Checker {
             .map(|(i, (n, t))| {
                 let var = TExpr::new(TExprKind::Var(n.clone()), t.clone());
                 if matches!(t, Ty::Arrow(_, _)) {
-                    let (arity, marshal_args, run_io, marshal_ret) = outgoing_cb_flags(t);
+                    let (arity, run_io) = outgoing_cb_flags(t);
                     TExpr::new(
                         TExprKind::OutgoingCallback {
                             callee: Box::new(var),
-                            arity, marshal_args, run_io, marshal_ret,
+                            arity, run_io,
                         },
                         t.clone(),
                     )

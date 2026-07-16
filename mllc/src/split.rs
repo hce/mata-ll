@@ -223,10 +223,10 @@ fn flatten_expr(e: TExpr, binds: &mut Vec<TLocalDef>, ctr: &mut usize) -> TExpr 
         // A callback lowered out to Lua: recurse into the callee in its own
         // scope but do not hoist it (it carries closure/marshalling structure).
         TExprKind::OutgoingCallback {
-            callee, arity, marshal_args, run_io, marshal_ret,
+            callee, arity, run_io,
         } => TExprKind::OutgoingCallback {
             callee: Box::new(flatten_scope(*callee, ctr)),
-            arity, marshal_args, run_io, marshal_ret,
+            arity, run_io,
         },
         // An optional FFI argument: recurse but never hoist the wrapper itself
         // — it must stay directly inside its SpecCall argument list.
