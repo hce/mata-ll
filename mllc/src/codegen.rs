@@ -1357,7 +1357,14 @@ impl CodeGen {
         for (i, p) in params.iter().enumerate() {
             if i >= num_params { break; }
             let always_cheap = call_site_cheap.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
-            let needs_force = clauses.iter().any(|c| {
+            // Force at entry ONLY if the FIRST clause scrutinizes this arg — it
+            // is then forced on every path (clause 0 is always tried first). An
+            // arg scrutinized only by LATER clauses stays lazy and is forced
+            // inside those clauses' conditions (an `elseif` reached only after
+            // clause 0 fails), so a matching earlier clause never forces it.
+            // This is GHC's top-to-bottom, left-to-right laziness: `zip [] _`
+            // must return `[]` without forcing the second argument.
+            let needs_force = clauses.first().is_some_and(|c| {
                 c.patterns.get(i).is_some_and(|pat| {
                     !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
                 })
@@ -1587,7 +1594,7 @@ impl CodeGen {
                 let mut bindings = Vec::new();
                 let mut conditions = Vec::new();
                 for (pi, pat) in clause.patterns.iter().enumerate() {
-                    self.collect_pattern_conditions(&params[pi], pat, &mut conditions, &mut bindings);
+                    self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
                 }
                 if !conditions.is_empty() {
                     // Wrap in a pattern-matching if block, then test guards inside
@@ -1641,7 +1648,7 @@ impl CodeGen {
                 let mut conditions = Vec::new();
                 let mut bindings = Vec::new();
                 for (pi, pat) in clause.patterns.iter().enumerate() {
-                    self.collect_pattern_conditions(&params[pi], pat, &mut conditions, &mut bindings);
+                    self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
                 }
 
                 if conditions.is_empty() {
@@ -1702,7 +1709,7 @@ impl CodeGen {
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
             for (pi, pat) in clause.patterns.iter().enumerate() {
-                self.collect_pattern_conditions(&params[pi], pat, &mut conditions, &mut bindings);
+                self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
             }
             self.emit_indent();
             if conditions.is_empty() {
@@ -1771,6 +1778,23 @@ impl CodeGen {
             format!("__force({})", path)
         } else {
             path
+        }
+    }
+
+    /// The scrutinee expression to match `pat` against for top-level parameter
+    /// `param`. A refutable pattern (constructor/literal) needs the value
+    /// forced to WHNF to inspect its tag; if the param was not already forced
+    /// at entry (it is scrutinized only by a later clause — see `needs_force`),
+    /// force it HERE, inside the clause's `elseif` condition, so a matching
+    /// earlier clause never forces it. An irrefutable pattern (Var/Wildcard)
+    /// binds lazily and must stay the raw (unforced) param.
+    fn match_scrutinee(&self, param: &str, pat: &TPattern) -> String {
+        if matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
+            || self.concrete_vars.contains(param)
+        {
+            param.to_string()
+        } else {
+            format!("__force({})", param)
         }
     }
 
@@ -5562,8 +5586,12 @@ local function filter(pred, xs)
     end
 end
 local function take(n, xs)
-    n = __force(n); xs = __force(xs)
-    if n <= 0 or xs == nil then return nil end
+    -- GHC: `take n _ | n <= 0 = []` — do NOT force the list when nothing is
+    -- taken, so `take 0 (error "x")` is `[]`, not a crash.
+    n = __force(n)
+    if n <= 0 then return nil end
+    xs = __force(xs)
+    if xs == nil then return nil end
     if xs.__lazy then
         return __mll_lazy_cons(__mll_head(xs), function() return take(n - 1, __mll_tail(xs)) end)
     else
