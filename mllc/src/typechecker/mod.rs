@@ -8,6 +8,26 @@ mod derive;
 mod infer;
 mod kind;
 
+/// Fuel for type-alias expansion while resolving one top-level type (reset at
+/// each depth-0 `ast_type_to_ty`). Charged by the size of every expanded alias
+/// body, so the running total tracks the SIZE of the type being built —
+/// mirroring the type-family reducer, which charges `ty_size_up_to` per
+/// reduced type (`types.rs`). A self-doubling alias tower
+/// (`type Pi a = P{i-1} (P{i-1} a)`) expands to a type whose size is
+/// exponential in the number of levels, so it drains this budget and is
+/// reported as non-terminating; ordinary alias use (a handful of levels, tens
+/// of nodes) charges only a few hundred units and never comes close.
+///
+/// The value is calibrated empirically. Each charge unit here costs more real
+/// work than a type-family reduction step (a full `substitute_type` clone of
+/// the body plus the size walk), so the budget is set BELOW `TF_FUEL` (100k):
+/// at 30k a doubling tower (P4 and up) trips in well under half a second on a
+/// debug build, while a P3 tower (256 expanded nodes) and every realistic
+/// signature still resolve. Even a deliberately large — but terminating —
+/// hand-written alias would need tens of thousands of expanded nodes to trip,
+/// which no hand-written type approaches; that is the safety margin.
+const ALIAS_EXPAND_FUEL: u32 = 30_000;
+
 /// Type environment: maps names to type schemes
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
@@ -135,6 +155,21 @@ pub struct Checker {
     /// alias would recurse forever), so the guard counts recursion here, not
     /// source syntax.
     type_depth: usize,
+    /// Fuel for type-alias expansion within resolving ONE top-level type,
+    /// reset each time `ast_type_to_ty` is entered at depth 0. The depth
+    /// guard alone cannot bound alias expansion: a self-doubling tower
+    /// (`type Pi a = P{i-1} (P{i-1} a)`) expands to a type whose SIZE is
+    /// exponential in the number of levels while its DEPTH stays small (P8
+    /// has depth ~256 but ~2^256 nodes), so it would grind for ages —
+    /// exponential WORK, not deep recursion. Charged by the size of each
+    /// expanded alias body (see `charge_alias_expansion`), mirroring the
+    /// type-family reducer's size-charged fuel (`types::ty_size_up_to`), so
+    /// an exponential tower exhausts it almost immediately while ordinary
+    /// (few-level) alias use is unaffected.
+    alias_fuel: u32,
+    /// True once the alias-expansion-too-large diagnostic has been pushed for
+    /// the current module, so the same error is not reported repeatedly.
+    alias_reported: bool,
     env: TypeEnv,
     next_var: u32,
     constructors: HashMap<String, ConInfo>,
@@ -319,6 +354,8 @@ impl Checker {
         let mut checker = Checker {
             expr_depth: 0,
             type_depth: 0,
+            alias_fuel: 0,
+            alias_reported: false,
             env: TypeEnv::new(),
             next_var: 0,
             constructors: HashMap::new(),
@@ -408,6 +445,13 @@ impl Checker {
     /// non-empty, so compilation stops after this pass. Checked BEFORE
     /// descending, so the walk itself can never overflow the native stack.
     fn ast_type_to_ty(&mut self, ast_ty: &Type) -> Ty {
+        // Fresh alias-expansion fuel per top-level type resolution, so a big
+        // program with many small types never accumulates a false trip, while
+        // any single type that expands exponentially exhausts it (see
+        // `charge_alias_expansion` / `ALIAS_EXPAND_FUEL`).
+        if self.type_depth == 0 {
+            self.alias_fuel = ALIAS_EXPAND_FUEL;
+        }
         if self.type_depth >= crate::MAX_NESTING_DEPTH {
             let already_reported = self.errors.iter().any(|e| {
                 matches!(&e.kind, DiagnosticKind::Other(m) if m.starts_with("type nested too deeply"))
@@ -435,6 +479,49 @@ impl Checker {
         ty
     }
 
+    /// Charge alias-expansion fuel by the size of a freshly expanded alias
+    /// body, BEFORE recursing into it. Returns `true` while fuel remains and
+    /// `false` once it is exhausted — in which case a clean "type alias
+    /// expansion did not terminate" diagnostic is pushed (once) and the caller
+    /// must stop expanding (return a placeholder) rather than build the rest of
+    /// the exponentially large type. Charging by size (mirroring the
+    /// type-family reducer, which charges `ty_size_up_to` per reduced type)
+    /// means a self-doubling tower — which produces exponentially many, and
+    /// exponentially larger, expansions — drains the budget almost at once.
+    fn charge_alias_expansion(&mut self, expanded: &Type) -> bool {
+        let cost = ast_type_size_up_to(expanded, self.alias_fuel);
+        if cost >= self.alias_fuel {
+            self.alias_fuel = 0;
+            if !self.alias_reported {
+                self.alias_reported = true;
+                let ctx = match &self.current_fn {
+                    Some(name) => format!("the type signature of '{}'", name),
+                    None => "a type signature".to_string(),
+                };
+                let mut diag = Diagnostic::new(DiagnosticKind::Other(
+                    "type alias expansion did not terminate: expanding the type \
+                     aliases in this signature produced a type too large to \
+                     represent (it exceeded the alias-expansion size limit), so \
+                     the aliases appear to grow without bound"
+                        .to_string(),
+                ));
+                diag.context = Some(ctx);
+                diag.notes.push(
+                    "a self-referential alias (`type A = [A]`) or a doubling \
+                     tower (`type Pi a = P(i-1) (P(i-1) a)`, where each level \
+                     doubles the expanded size) has no finite normal form; \
+                     mata-ll bounds alias expansion by the size of the result \
+                     so it reports this instead of looping"
+                        .to_string(),
+                );
+                self.errors.push(diag);
+            }
+            return false;
+        }
+        self.alias_fuel -= cost;
+        true
+    }
+
     fn ast_type_to_ty_inner(&mut self, ast_ty: &Type) -> Ty {
         match ast_ty {
             Type::Con(name) => {
@@ -443,6 +530,12 @@ impl Checker {
                     && params.is_empty() {
                         if name == "Int" {
                             eprintln!("Warning: Int is treated as Integer (Lua has no fixed-width integers)");
+                        }
+                        // Charge by the size of the alias body before expanding
+                        // — a nullary self-referential alias (`type A = [A]`)
+                        // grows without bound and must be reported, not looped.
+                        if !self.charge_alias_expansion(&alias_ty) {
+                            return Ty::Unit;
                         }
                         return self.ast_type_to_ty(&alias_ty);
                     }
@@ -631,6 +724,13 @@ impl Checker {
             bindings.insert(param.clone(), arg);
         }
         let expanded = self.substitute_type(&alias_body, &bindings);
+        // Charge by the size of the expanded body before recursing into it. A
+        // doubling tower expands to an exponentially large type; charging per
+        // expansion drains the fuel and trips the diagnostic long before the
+        // full type is built (which would otherwise take exponential time).
+        if !self.charge_alias_expansion(&expanded) {
+            return Some(Ty::Unit);
+        }
         Some(self.ast_type_to_ty(&expanded))
     }
 
@@ -2961,4 +3061,42 @@ fn callback_value_vars(cb_ty: &Ty) -> Vec<TyVar> {
         if !vars.contains(&v) { vars.push(v); }
     }
     vars
+}
+
+/// Node count of an AST `Type`, but stops counting at `cap` (returns `cap`
+/// then) so a runaway (exponentially expanding) type is never walked in full.
+/// The AST analogue of `types::ty_size_up_to`; used to charge type-alias
+/// expansion fuel by the size of each expanded body (see
+/// `Checker::charge_alias_expansion`). A cost of at least 1 per expansion is
+/// guaranteed (`Con`/`Var`/`Unit` count 1), so exponentially many expansions
+/// exhaust the budget even when each individual body is small.
+fn ast_type_size_up_to(ty: &Type, cap: u32) -> u32 {
+    fn go(ty: &Type, cap: u32, acc: &mut u32) {
+        if *acc >= cap { return; }
+        *acc += 1;
+        match ty {
+            Type::App(a, b) | Type::Arrow(a, b) => { go(a, cap, acc); go(b, cap, acc); }
+            Type::List(a) | Type::IO(a) => go(a, cap, acc),
+            Type::Paren(inner) => go(inner, cap, acc),
+            Type::ScopedLuaIO { inner, .. } => go(inner, cap, acc),
+            Type::Forall { inner, .. } => go(inner, cap, acc),
+            Type::LuaPure { result, .. }
+            | Type::LuaIO { result, .. }
+            | Type::LuaIterator { result, .. }
+            | Type::LuaTry { result, .. }
+            | Type::LuaCatch { result, .. }
+            | Type::LuaIOCatch { result, .. } => go(result, cap, acc),
+            Type::Constrained { constraints, ty } => {
+                for c in constraints { go(&c.type_arg, cap, acc); if *acc >= cap { return; } }
+                go(ty, cap, acc);
+            }
+            Type::Tuple(elems) => {
+                for e in elems { go(e, cap, acc); if *acc >= cap { break; } }
+            }
+            Type::Con(_) | Type::Var(_) | Type::Unit | Type::Promoted(_) => {}
+        }
+    }
+    let mut acc = 0;
+    go(ty, cap, &mut acc);
+    acc
 }

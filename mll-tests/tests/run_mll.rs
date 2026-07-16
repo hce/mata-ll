@@ -7482,6 +7482,48 @@ fn deeply_nested_types_yield_clean_depth_error() {
     }
 }
 
+/// Type-alias expansion is bounded by WORK/SIZE, not just depth. A self-
+/// doubling alias tower (`type Pi a = P(i-1) (P(i-1) a)`) expands to a type
+/// whose SIZE is exponential in the number of levels while its DEPTH stays
+/// small (P10 has depth ~1024, well under MAX_NESTING_DEPTH), so the
+/// recursion-depth guard never sees it — it used to grind through the
+/// exponential expansion (SIGABRT before the big stack, then a multi-second
+/// hang after). The size-charged alias-expansion fuel
+/// (typechecker `charge_alias_expansion` / `ALIAS_EXPAND_FUEL`) must catch it
+/// quickly with a clean "did not terminate" diagnostic — distinct from the
+/// depth guard above. Runs on a compiler-sized stack like the depth tests.
+#[test]
+fn doubling_alias_tower_yields_clean_size_error() {
+    // 10-level doubling tower: P10 expands to ~2^1024 nodes but depth ~1024.
+    let mut source = String::from("type P0 a = (a, a)\n");
+    for i in 1..=10 {
+        source.push_str(&format!("type P{} a = P{} (P{} a)\n", i, i - 1, i - 1));
+    }
+    source.push_str("x :: P10 Integer\nx = undefined\nmain :: IO ()\nmain = putStrLn \"ok\"\n");
+    match compile_on_compiler_stack(source) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("type alias expansion did not terminate"),
+                "expected the clean alias-expansion-size diagnostic, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("an exponentially expanding alias tower must be rejected"),
+    }
+
+    // A shallow doubling tower (P3 -> 256 expanded nodes) is well within the
+    // budget and must still compile: the size bound rejects the pathological
+    // case without punishing ordinary multi-level alias use.
+    let mut ok = String::from("type Q0 a = (a, a)\n");
+    for i in 1..=3 {
+        ok.push_str(&format!("type Q{} a = Q{} (Q{} a)\n", i, i - 1, i - 1));
+    }
+    ok.push_str("y :: Q3 Integer -> Integer\ny _ = 0\nmain :: IO ()\nmain = print (y undefined)\n");
+    compile_on_compiler_stack(ok)
+        .expect("a shallow (Q3) alias tower is small and must still compile");
+}
+
 /// Expression-structure face of the guard: a `+`-operator spine. The source
 /// is flat (the parser folds left-associative chains iteratively) but the AST
 /// is one level deep per operand, so this exercises the expression-walk guard
