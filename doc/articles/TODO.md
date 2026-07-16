@@ -1,6 +1,43 @@
 MATA-LL TODO
 ============
 
+## Planned — top priority
+
+- [ ] **Linear (or affine) types.** The next language feature to add, and the
+      current top priority. Rationale: linear types earn their keep in
+      *high-level* settings — resource and protocol discipline, "use exactly
+      once", session-style APIs — that are not CPU-bound. So mata-ll's Lua back
+      end and GC-guest execution cost them nothing, unlike ST, whose whole point
+      is compute-heavy in-place mutation where the closure overhead is what
+      matters. Linear types give mata-ll a genuinely useful capability that
+      plays to its strengths instead of fighting them. The one concrete payoff
+      for a Lua guest specifically: enforcing correct use of external resources
+      across the FFI — a handle or socket closed exactly once.
+
+      Design assessment (from the 2026-07 discussion):
+        * Cheap: a multiplicity-annotated arrow (`a %1 -> b` / `⊸`), and the
+          entire back end — linearity ERASES after type checking, so
+          monomorphize / verify / constant-fold / split / DCE / codegen and the
+          emitted Lua are all untouched.
+        * Hard and invasive: usage accounting in the inference engine. The
+          checker is Algorithm-W with a `HashMap<String, Scheme>` env passed by
+          shared reference and NO use counting; linear checking needs that env
+          threaded as a CONSUMABLE context (env-in → type + subst + usage-out),
+          split and re-merged at every branch / `case` / `let` / `where` /
+          lambda / guard, plus a second unification lattice for multiplicities
+          (0 / 1 / ω, with multiplicity polymorphism). This changes inference's
+          interface, not just adds a case — bigger than GADTs was.
+        * Subtle under OUR semantics: mata-ll is lazy, so "used exactly once" is
+          NOT "occurs once syntactically" under thunks and `__force`. That is
+          the real correctness trap (GHC's "consumed once if the result is
+          consumed" definition is the precedent). Must also reconcile with
+          dictionary-passing typeclasses (dictionaries as hidden arguments — are
+          they linear?) and GADT / existential pattern binds.
+        * Pragmatic path: AFFINE (use AT MOST once) drops the must-consume
+          obligation that is most entangled with laziness, and can be scoped to
+          a restricted fragment (e.g. only FFI resource types) — a week-scale
+          experiment rather than a quarter-scale full linear system.
+
 ## Completed
 
 - [x] Lambda-calculus reducer — examples/lambda.mll; untyped de Bruijn lambda calculus, capture-free substitution + index shifting, normal-order reduction (fuel-bounded), deriving Eq on recursive Term; Church-encoding oracle (identity, boolean not/and, succ/plus/mult). Targeted the laziness/forcing machinery and found NO bug — that area now handles its hardest workload cleanly. Test: example_lambda_reduction.
