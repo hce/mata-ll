@@ -3,6 +3,33 @@ MATA-LL TODO
 
 ## Planned — top priority
 
+- [ ] **Linear types phase 3: close the scalar-laundering accept-gap (full GHC
+      parity on scalars).** The one known ACCEPT-direction hole in the linear
+      checker: a scalar VALUE (`Integer`/`Bool`/`Char`/… — the memoization-
+      exempt types) derived from a `%1` binding and then laundered *multi-step*
+      through unrestricted code can be counted as consumed even though laziness
+      may never force it, so a leak slips through. Narrow: every direct form
+      rejects (unused binding, unused scalar alias/field, wildcard, discarded
+      result, a one-step `constUnit (useOnce t)`); only the untracked multi-step
+      chain escapes. Documented in `usage.rs`, and GHC rejects all of these —
+      GHC has no scalar exemption at all.
+      Root cause: the scalar-memoization relaxation from the affine phase — a
+      scalar alias is `Bound::AtLeastOnce` (usable repeatedly, must be forced
+      once) rather than exactly-once, because the runtime memoizes the thunk so
+      duplicating a scalar is operationally harmless. The exemption stops
+      tracking a scalar once it flows into unrestricted position, which is where
+      the multi-step chain loses the obligation.
+      Fix direction: track a `%1`-derived scalar's consumption obligation
+      through unrestricted contexts (or drop the exemption entirely for
+      scalars). NOT a pure win — dropping the exemption also rejects the
+      operationally-harmless scalar-duplication cases the design intentionally
+      allows (`go + go where go = useOnce t`), moving mata-ll from
+      "more permissive than GHC but operationally sound" to strict GHC parity.
+      So this is a deliberate semantics decision (parity vs. the memoization
+      relaxation), not just a bug fix — decide the target before implementing.
+      Soundness note: the current gap is accept-direction (a leak may pass),
+      unlike every other approximation in the checker, which rejects.
+
 ## Completed
 
 - [x] **Linear types (`a %1 -> b`), full — exactly-once + multiplicity
