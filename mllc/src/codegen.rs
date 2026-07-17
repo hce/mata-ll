@@ -1119,8 +1119,14 @@ impl CodeGen {
                 let fn_ref = self.lua_ref(&sname);
                 let call_args = if n_args > 0 { params.join(", ") } else { "__unpack(args, 1, args.n)".to_string() };
                 self.emit(&format!("local __result = __force({})({call_args})\n", fn_ref));
+                // Run the result if it is an action, unwrapping a pure box the
+                // same way __mll_run does — a body ending in `pure e` hands back
+                // its result boxed (not forced), and the marshalling below must
+                // see the value, not the box.
                 self.emit_indent();
-                self.emit("if type(__result) == \"function\" then __result = __result() end\n");
+                self.emit("if getmetatable(__result) == __mll_pure_mt then __result = __result[1]\n");
+                self.emit_indent();
+                self.emit("elseif type(__result) == \"function\" then __result = __mll_unbox(__result()) end\n");
                 // Type-directed result conversion (mata-ll→Lua): the same
                 // marshal descriptors an FFI argument of this type would get,
                 // so e.g. interior Nothings in a [Maybe a] keep their
@@ -2827,6 +2833,104 @@ impl CodeGen {
         }
     }
 
+    /// Whether a `pure e` / `return e` value may be emitted as a BARE value in
+    /// an escaping-action position — i.e. one that flows out of its defining
+    /// function to a caller's `__mll_run`. `__mll_run` must force-and-inspect
+    /// an action to tell an action *closure* (call it) from a *value* (return
+    /// it); leaving a pure value bare is sound only when that forcing is a
+    /// harmless no-op AND the value is never a Lua function that would be
+    /// wrongly called. Both hold exactly when `e` is provably WHNF
+    /// (`is_cheap_to_force`) and its type's runtime representation is never a
+    /// Lua function. Otherwise the value is wrapped in `__mll_pure` so
+    /// `__mll_run` hands it back untouched — this is what keeps `mk n = do …;
+    /// pure ⊥` from raising at an interprocedural `v <- mk n` bind, and a
+    /// returned `pure (\x -> …)` from being called with no arguments.
+    fn pure_value_bare_is_safe(&self, arg: &TExpr) -> bool {
+        Self::ty_never_lua_function(&arg.ty) && self.pure_payload_force_is_total(arg)
+    }
+
+    /// Whether `__force` applied to what `gen_arg(arg, false)` emits cannot
+    /// bottom — i.e. the emitted form is already WHNF. `gen_arg` suspends a
+    /// possibly-⊥ payload in a thunk (so forcing it could raise) EXCEPT for two
+    /// forms it emits directly, both provably total to WHNF: a `is_cheap_to_force`
+    /// expression, and a TUPLE literal (building the table forces nothing — each
+    /// field is independently suspended, so a ⊥ field stays inert until demanded).
+    /// For those two, `__mll_run`'s force is a harmless no-op and the value is
+    /// safe to leave bare; everything else must be boxed. This mirrors the
+    /// gen_arg emission arms exactly.
+    fn pure_payload_force_is_total(&self, arg: &TExpr) -> bool {
+        let mut a = arg;
+        while let TExprKind::Paren(inner) = &a.kind {
+            a = inner.as_ref();
+        }
+        matches!(&a.kind, TExprKind::Tuple(_)) || self.is_cheap_to_force(arg)
+    }
+
+    /// A type whose every WHNF value is a plain datum (number / string /
+    /// boolean / nil / table) and NEVER a Lua function. Deliberately narrow:
+    /// only known scalars, unit, lists and tuples qualify. Anything that could
+    /// be an arrow, an IO / ST / LuaIO action, a newtype that may wrap a
+    /// function (`App` / a non-scalar `Con`), or an unresolved variable is
+    /// excluded — a value of such a type may be a Lua closure at runtime, so it
+    /// must be boxed rather than handed to `__mll_run`'s function test.
+    fn ty_never_lua_function(ty: &Ty) -> bool {
+        match ty {
+            Ty::Unit | Ty::List(_) | Ty::Tuple(_) => true,
+            Ty::Con(n) => matches!(
+                n.as_str(),
+                "Integer" | "Int" | "Word" | "Number" | "Double" | "Float"
+                    | "Bool" | "Char" | "String" | "Ordering"
+            ),
+            _ => false,
+        }
+    }
+
+    /// Emit the action produced by `pure arg` / `return arg` in a position
+    /// where it may ESCAPE to a caller's `__mll_run` (a function's terminal
+    /// action, a discarded statement). The value is left bare when that is
+    /// provably safe (see `pure_value_bare_is_safe`) and otherwise wrapped in
+    /// `__mll_pure`, which `__mll_run` unwraps without forcing or calling it.
+    /// `arg` is still emitted through the eagerness weighing (`gen_arg`,
+    /// non-strict), so a possibly-⊥ payload stays suspended inside the box.
+    fn gen_pure_action(&mut self, arg: &TExpr) {
+        if self.pure_value_bare_is_safe(arg) {
+            self.gen_arg(arg, false);
+        } else {
+            self.emit("__mll_pure(");
+            self.gen_arg(arg, false);
+            self.emit(")");
+        }
+    }
+
+    /// Emit the RHS of an `x <- action` bind whose result is assigned DIRECTLY
+    /// to `x` (no enclosing runner). A syntactic `pure e` / `return e`
+    /// short-circuits to its payload — bound as a value/thunk and forced only
+    /// on use — and must stay UNBOXED here, since nothing will unwrap a
+    /// `__mll_pure` box on this path. Every other action goes through
+    /// `gen_action`, which emits its own `__mll_run` (unwrapping any box
+    /// produced deeper). This mirrors `action_result_is_whnf`'s pure arms, so
+    /// the concreteness decision that follows the bind stays exact.
+    fn gen_bound_action(&mut self, action: &TExpr) {
+        let mut a = action;
+        while let TExprKind::Paren(inner) = &a.kind {
+            a = inner.as_ref();
+        }
+        let payload = match &a.kind {
+            TExprKind::App(func, arg)
+                if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
+                Some(arg.as_ref()),
+            TExprKind::InfixApp { op, lhs, rhs }
+                if op == "$"
+                    && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
+                Some(rhs.as_ref()),
+            _ => None,
+        };
+        match payload {
+            Some(p) => self.gen_arg(p, false),
+            None => self.gen_action(a),
+        }
+    }
+
     fn gen_action(&mut self, expr: &TExpr) {
         // Structural checks FIRST — the monad type variable may be
         // unresolved in bind chains, so we can't rely on the type alone.
@@ -2840,13 +2944,13 @@ impl CodeGen {
         // yields WHNF (see action_result_is_whnf).
         if let TExprKind::App(func, arg) = &expr.kind
             && matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                self.gen_arg(arg, false);
+                self.gen_pure_action(arg);
                 return;
             }
         // return $ x / pure $ x: same as return(x)
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
             && op == "$" && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                self.gen_arg(rhs, false);
+                self.gen_pure_action(rhs);
                 return;
             }
         // ST primitive calls now return closures — go through __mll_run like everything else
@@ -3091,7 +3195,7 @@ impl CodeGen {
                         // result — no deep result demand inside it.
                         let saved_rd = std::mem::replace(
                             &mut self.cur_result_demand, crate::demand::Demand::Head);
-                        self.gen_action(lhs);
+                        self.gen_bound_action(lhs);
                         self.cur_result_demand = saved_rd;
                         self.emit("\n");
                         // The bound value is force-free downstream only if the
@@ -5587,6 +5691,19 @@ local __cons_mt = {}
 -- Tags a `Just` wrapper (see the Maybe constructor below); declared here so the
 -- generic `show`/`__mll_to_lua` can identify it as an upvalue.
 local __just_mt = {}
+-- Tags a suspended `pure`/`return` value — a "pure action" that has escaped its
+-- defining function. `__mll_run` (and __mll_perform) unwrap it WITHOUT forcing
+-- or calling the payload, so a `pure ⊥` bound across a function boundary does
+-- not raise until demanded, and a returned `pure <function>` is delivered as a
+-- value rather than mistaken for an action closure to invoke. See gen_action.
+local __mll_pure_mt = {}
+local function __mll_pure(v) return setmetatable({v}, __mll_pure_mt) end
+-- Unwrap a pure box to its payload (leaving anything else untouched, and NOT
+-- forcing). Applied wherever the result of running an action is obtained.
+local function __mll_unbox(v)
+    if getmetatable(v) == __mll_pure_mt then return v[1] end
+    return v
+end
 local function __thunk(f) return setmetatable({f, false}, __thunk_mt) end
 local function __force(x)
     if getmetatable(x) == __thunk_mt then
@@ -6113,8 +6230,15 @@ __mll_wrap_callback_out = function(f, n, descs, run_io, ret)
         end
         local r = __force(f)(__unpack(args, 1, n))
         if run_io then
-            r = __force(r)
-            if type(r) == "function" then r = r() end
+            -- Run the effectful callback's action, unwrapping a pure box the
+            -- same way __mll_run does (a terminal `pure e` in the callback body
+            -- returns its result boxed, not forced/called).
+            if getmetatable(r) == __mll_pure_mt then r = r[1]
+            else
+                r = __force(r)
+                if getmetatable(r) == __mll_pure_mt then r = r[1]
+                elseif type(r) == "function" then r = __mll_unbox(r()) end
+            end
         end
         if ret == true then return __mll_to_lua(r) end
         if ret then return __mll_arg_marshal(r, ret) end
@@ -6148,13 +6272,26 @@ end
 
 -- Run an IO action: force thunks, then call the action closure
 local function __mll_run(action)
+    -- A pure action (`pure e`/`return e` that escaped its defining function)
+    -- already carries its result — hand it back UNFORCED. This is the only way
+    -- to distinguish "a thunk that computes which action to run" (force it to
+    -- reach the closure) from "a value-action whose result happens to be a
+    -- thunk or a function" (must NOT force or call it). Check before AND after
+    -- forcing: the action may itself be a thunk that, once run, yields a box.
+    if getmetatable(action) == __mll_pure_mt then return action[1] end
     action = __force(action)
-    if type(action) == "function" then return action() else return action end
+    if getmetatable(action) == __mll_pure_mt then return action[1] end
+    -- A closure whose body is a pure action returns a box (e.g. a first-class
+    -- `let a = pure e`); unwrap the result of running it too.
+    if type(action) == "function" then return __mll_unbox(action()) else return action end
 end
--- Perform an IO action (guaranteed to be a function closure)
+-- Perform an IO action (normally a function closure; a pure action carries its
+-- result and is returned unforced, exactly as in __mll_run)
 local function __mll_perform(action)
+    if getmetatable(action) == __mll_pure_mt then return action[1] end
     action = __force(action)
-    return action()
+    if getmetatable(action) == __mll_pure_mt then return action[1] end
+    return __mll_unbox(action())
 end
 -- runST: run the state thread AND force its result to WHNF. Demanding
 -- `runST m` to WHNF is, in GHC, demanding the returned value to WHNF —
@@ -6495,14 +6632,14 @@ end
 local function try_(action)
     return function()
         local ok, result = pcall(action)
-        if ok then return {2, result} else return {1, tostring(result)} end
+        if ok then return {2, __mll_unbox(result)} else return {1, tostring(result)} end
     end
 end
 -- catch runs an IO action; on error, passes the message to a handler
 local function catch_(action, handler)
     return function()
         local ok, result = pcall(action)
-        if ok then return result
+        if ok then return __mll_unbox(result)
         else return __mll_run(__force(__force(handler)(tostring(result)))) end
     end
 end
