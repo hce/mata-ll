@@ -612,6 +612,7 @@ mll_test!(div_mod_small_exact, "div_mod_small_exact.mll");
 mll_test!(div_large_exact, "div_large_exact.mll");
 mll_test!(div_large_interaction, "div_large_interaction.mll");
 mll_test!(div_mod_negative_literal_folding, "div_mod_negative_literal_folding.mll");
+mll_test!(linear_affine_basic, "linear_affine_basic.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -7568,4 +7569,228 @@ fn thousand_element_list_literal_still_compiles_and_runs() {
     lua.load(&lua_code)
         .exec()
         .expect("the 1200-element list program must run");
+}
+
+// ---------------------------------------------------------------------------
+// Linear (affine) types: `a %1 -> b`. The positive side (programs that use
+// `%1` correctly compile and run, and the annotation erases) lives in
+// linear_affine_basic.mll; the tests here assert REJECTION — a program that
+// can use a `%1`-bound value more than once must fail to compile with a
+// diagnostic that names the variable and explains the overuse in plain
+// language. See mllc/src/typechecker/usage.rs for the enforced fragment.
+// ---------------------------------------------------------------------------
+
+/// Compile expecting a linearity rejection; return the rendered error.
+fn expect_linear_reject(src: &str) -> String {
+    match mllc::compile(src, Path::new("tests/cases"), &[]) {
+        Ok(_) => panic!(
+            "this program double-uses a %1 value and must NOT compile:\n{}",
+            src
+        ),
+        Err(e) => format!("{}", e),
+    }
+}
+
+/// The simplest violation: a `%1` argument mentioned twice.
+#[test]
+fn linear_rejects_plain_double_use() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         dup :: Token %1 -> (Token, Token)\n\
+         dup t = (t, t)\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'t' is limited to at most one use"), "{}", msg);
+    assert!(msg.contains("declares this argument '%1'"), "{}", msg);
+    assert!(msg.contains("more than once"), "{}", msg);
+}
+
+/// Passing a `%1` value to an unrestricted function is an over-use even when
+/// it occurs only once: the callee's plain arrow makes no single-use promise.
+#[test]
+fn linear_rejects_flow_into_unrestricted_function() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         count :: Token -> Integer\n\
+         count (Token n) = n\n\
+         g :: Token %1 -> Integer\n\
+         g t = count t\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("passed to 'count'"), "{}", msg);
+    assert!(msg.contains("'->', not '%1 ->'"), "{}", msg);
+}
+
+/// Aliasing through a pattern match: the binder inherits the restriction.
+#[test]
+fn linear_rejects_case_alias_double_use() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         data Box = Box Token\n\
+         f :: Box %1 -> (Token, Token)\n\
+         f b = case b of\n\
+         \x20 Box t -> (t, t)\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("pattern-bound from 'b'"), "{}", msg);
+}
+
+/// Aliasing through `let`: using the alias twice consumes the original twice
+/// (the laziness rule — the thunk memoizes the FORCE, not the consumption).
+#[test]
+fn linear_rejects_let_alias_double_use() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         f :: Token %1 -> (Token, Token)\n\
+         f t = let u = t in (u, u)\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("local binding 'u'"), "{}", msg);
+}
+
+/// Capture by a returned closure: the closure may be called any number of
+/// times, each call handing out the same `%1` value again.
+#[test]
+fn linear_rejects_closure_capture() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         f :: Token %1 -> (Integer -> Token)\n\
+         f t = \\x -> t\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("captured by a function value"), "{}", msg);
+}
+
+/// The propagation soundness case: a lambda checked against a `%1`
+/// parameter learns the restriction through unification and its binder is
+/// enforced — an ω-style lambda cannot sneak in through a %1 HOF.
+#[test]
+fn linear_rejects_duplicating_lambda_at_linear_hof() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         withToken :: (Token %1 -> (Token, Token)) -> (Token, Token)\n\
+         withToken f = f (Token 1)\n\
+         main :: IO ()\n\
+         main = case withToken (\\t -> (t, t)) of\n\
+         \x20 (Token a, Token b) -> print (a + b)\n",
+    );
+    assert!(msg.contains("'t' is limited to at most one use"), "{}", msg);
+    assert!(msg.contains("'%1' arrow at this parameter"), "{}", msg);
+}
+
+/// A named unrestricted function cannot flow into a `%1` position at all —
+/// the arrows are different types (invariant multiplicities, as in GHC).
+#[test]
+fn linear_rejects_unrestricted_function_at_linear_type() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         useOnce :: Token %1 -> Integer\n\
+         useOnce (Token n) = n\n\
+         applyMany :: (Token -> Integer) -> Integer\n\
+         applyMany f = f (Token 1) + f (Token 2)\n\
+         main :: IO ()\n\
+         main = print (applyMany useOnce)\n",
+    );
+    assert!(msg.contains("arrows disagree"), "{}", msg);
+    assert!(msg.contains("at most once"), "{}", msg);
+}
+
+/// Sequential double use across a do-block: `>>`-chained statements add up.
+#[test]
+fn linear_rejects_double_use_across_do_block() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         shred :: Token %1 -> IO ()\n\
+         shred (Token n) = print n\n\
+         f :: Token %1 -> IO ()\n\
+         f t = do\n\
+         \x20 shred t\n\
+         \x20 shred t\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'t' is limited to at most one use"), "{}", msg);
+}
+
+/// A `<-` binder aliasing an affine value inherits the restriction.
+#[test]
+fn linear_rejects_bind_alias_double_use() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         data Box = Box Token\n\
+         unbox :: Box %1 -> Token\n\
+         unbox (Box t) = t\n\
+         shred :: Token %1 -> IO ()\n\
+         shred (Token n) = print n\n\
+         f :: Box %1 -> IO ()\n\
+         f b = do\n\
+         \x20 t <- pure (unbox b)\n\
+         \x20 shred t\n\
+         \x20 shred t\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("bound (with '<-')"), "{}", msg);
+}
+
+/// A locally shadowed Prelude name must not inherit the Prelude's
+/// consume-once whitelisting (`pure`, `id`, `fst`, …).
+#[test]
+fn linear_rejects_shadowed_prelude_whitelist_name() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         f :: Token %1 -> (Token, Token)\n\
+         f t = let pure = \\x -> (x, x) in pure t\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'t' is limited to at most one use"), "{}", msg);
+}
+
+/// A `%1` class-method signature is enforced on instance methods too.
+#[test]
+fn linear_rejects_instance_method_double_use() {
+    let msg = expect_linear_reject(
+        "data Pair = Pair Integer Integer\n\
+         data Token = Token Pair\n\
+         class Consume a where\n\
+         \x20 consume :: a %1 -> (a, a)\n\
+         instance Consume Token where\n\
+         \x20 consume t = (t, t)\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("limited to at most one use"), "{}", msg);
+}
+
+/// Erasure: multiplicities are a type-checking discipline only. The same
+/// program with `%1` arrows and with plain arrows must emit byte-identical
+/// Lua.
+#[test]
+fn linear_annotations_erase_to_identical_lua() {
+    let with_mult = "data Token = Token Integer\n\
+         shred :: Token %1 -> IO ()\n\
+         shred (Token n) = print n\n\
+         step :: Token %1 -> (Token, Integer)\n\
+         step t = (t, 5)\n\
+         main :: IO ()\n\
+         main = do\n\
+         \x20 let t = Token 42\n\
+         \x20 case step t of\n\
+         \x20\x20 (t2, n) -> do\n\
+         \x20\x20\x20 print n\n\
+         \x20\x20\x20 shred t2\n";
+    let without_mult = with_mult.replace("%1 ->", "->");
+    let a = mllc::compile(with_mult, Path::new("tests/cases"), &[])
+        .expect("the %1 program must compile")
+        .lua_code;
+    let b = mllc::compile(&without_mult, Path::new("tests/cases"), &[])
+        .expect("the plain-arrow program must compile")
+        .lua_code;
+    assert!(a == b, "%1 must erase: emitted Lua differs");
 }
