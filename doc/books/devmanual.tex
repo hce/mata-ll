@@ -386,7 +386,7 @@ older \texttt{Type -> ... -> Type} approximation for their promoted
 constructors (a precise promotion would need kind polymorphism), and a
 non-GADT phantom parameter's kind defaults to \texttt{Type}.
 
-\subsection{Linear (Affine) Types}
+\subsection{Linear Types}
 
 \texttt{Ty::Arrow} carries a \texttt{Mult} (\texttt{One},
 \texttt{Many}, or an inference variable \texttt{Var}) as its third
@@ -415,9 +415,20 @@ the binder's use count.  That last rule is the laziness answer: a
 thunk's FORCE is memoized (once), but the value it yields is consumed
 once per use of the binder, so the binder's use count is the sound
 bound; a memoized binding of builtin-scalar type relaxes back to 1.
+The discipline is \emph{exactly-once} (GHC's linear semantics), so the
+pass enforces a lower bound as well: the usage count is kept separate
+from the per-binder policy, a tracked binder ABSENT from its scope's
+usage at a check point (lambda exit, case-branch exit, bind-frame
+unwind, clause end) is a leak, and the branch join additionally
+requires a binder consumed in one alternative to be consumed in
+\emph{all} of them (the per-variable max alone cannot see the
+dropping path).  Skippable contexts --- Maybe-bind continuations,
+short-circuited \texttt{\&\&}/\texttt{||} right operands, wildcard
+matches over linear values, discarded non-unit results, local-function
+parameters with a never-using clause --- are rejected outright.
 The module comment in \texttt{usage.rs} states the enforced fragment
 and every conservative boundary precisely.  Dictionaries are never
-affine: dictionary-passing is introduced by the monomorphizer AFTER
+linear: dictionary-passing is introduced by the monomorphizer AFTER
 this pass, and class-method arrows default to \texttt{Many}.
 Everything erases after type checking --- the backend ignores the
 \texttt{Mult} field entirely and the emitted Lua is byte-identical

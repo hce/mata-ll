@@ -29,6 +29,27 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Added
+
+- **Linear types (`%1`), matching GHC's `LinearTypes`.** A function arrow may
+  carry a multiplicity: `a %1 -> b` promises its argument is consumed *exactly
+  once*, while `a -> b` (= `a %Many -> b`) stays unrestricted. A `%1` value used
+  zero times — dropped, left in a `let`/`where` binding that is never forced,
+  consumed in only some branches of a `case`/`if`/guard group, partly matched
+  by a wildcard, discarded as a non-`()` action result, or consumed inside a
+  Maybe bind's continuation (skipped on `Nothing`) — is a compile error, as is
+  using it more than once. This catches the double-free / leak class of
+  resource bug: e.g. a file handle closed exactly once across the FFI. Scalar
+  aliases destructured from a `%1` value may be used repeatedly (they are
+  memoized) but must be forced at least once. Diagnostics name the variable and
+  explain both failure directions (leak vs. double-free) in plain language.
+- **Multiplicity polymorphism.** A function may be generic over a multiplicity:
+  `apply :: (a %m -> b) -> a %m -> b` lets each caller choose `m`, so a linear
+  value threads through helpers, local `where`/`let` functions, and IO/ST/Maybe
+  binds without losing its exactly-once guarantee.
+- Multiplicities are checked only — they **erase** entirely after type checking,
+  so the emitted Lua is byte-identical with or without annotations.
+
 ## [0.1.4] - 2026-07-17
 
 ### Changed
