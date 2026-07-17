@@ -5,34 +5,41 @@ MATA-LL TODO
 
 ## Completed
 
-- [x] **Affine types (`a %1 -> b`)** — the pragmatic-path implementation of
-      the linear-types item below: AT MOST once, enforced completely and
-      soundly within a documented fragment. Syntax: `%1`, `%Many`, `%'Many`
-      before `->` (GHC LinearTypes surface syntax). Multiplicity lives on
+- [x] **Linear types (`a %1 -> b`), full — exactly-once + multiplicity
+      polymorphism.** `%1` is GHC's linear arrow: consumed EXACTLY once
+      (using it zero times leaks, more than once double-frees; both reject);
+      `%Many` / `->` are unrestricted. Syntax: `%1`, `%Many`, `%'Many`, and
+      `%m` (a named multiplicity variable) before `->`. Multiplicity lives on
       `Ty::Arrow` with identity-blind Eq/Hash and its own unification lattice
-      (One / Many / Var, invariant like GHC — a plain-arrow function is
-      rejected at a `%1` type); inference-invented arrows carry multiplicity
-      variables so a lambda checked against a `%1` parameter learns its
-      binder's restriction through ordinary unification. Enforcement is a
-      dedicated usage pass over the final typed IR
-      (`mllc/src/typechecker/usage.rs`), NOT a re-threading of Algorithm-W:
-      0/1/ω counting with sequential add, branch join, and context scaling
-      (unrestricted call = ω, constructor field = 1, closure capture = ω,
-      IO-bind continuation = 1, let/where RHS scaled by the binder's use
-      count — the sound rule under laziness, since thunks memoize the FORCE
-      but not the consumption; memoized scalar bindings relax to 1). Case and
-      `<-` binders inherit the restriction from an affine scrutinee/action
-      (scalar-typed binders exempt — plain data, no resource obligation).
-      Dictionaries stay unrestricted (they are introduced after this pass,
-      and class-method arrows default to ω). Everything erases after type
-      checking: the emitted Lua is byte-identical with or without `%1`
-      (regression-tested). Boundary (all deviations REJECT, never
-      false-accept): no exactly-once obligation, no multiplicity
-      polymorphism (helpers need their own `%1` to forward affine values),
-      local where/let functions and non-IO monadic binds charge ω, and the
-      Lua host side of a `%1` FFI signature is trusted. Tests:
-      linear_affine_basic.mll + the linear_rejects_* / erasure tests in
-      run_mll.rs.
+      (One / Many / flexible Var / rigid `%m`, invariant like GHC — a
+      plain-arrow function is rejected at a `%1` type). Multiplicity
+      polymorphism: schemes quantify rigid `%m` ids (minus those free in the
+      env, closing an alias-laundering hole), instantiate to fresh flexible
+      vars per use, and a rigid var is caller-chosen — so `apply :: (a %m -> b)
+      -> a %m -> b` threads a linear value through helpers, local `where`/`let`
+      functions (per-parameter multiplicity inferred to a fixpoint), and
+      IO/ST/Maybe binds. Enforcement is a dedicated usage pass over the final
+      typed IR (`mllc/src/typechecker/usage.rs`), NOT a re-threading of
+      Algorithm-W: 0/1/ω counting with sequential add, context scaling, a
+      branch-join LOWER bound (used in every `case`/`if`/guard alternative or
+      it is dropped on some path), and an absence-is-leak check at every scope
+      exit. Under laziness a `let`/`where` RHS is scaled by its binder's use
+      count, so a never-forced binding counts zero and leaks; consumption
+      reachable only through a bypassable path (Maybe continuation,
+      short-circuit operand, wildcard, discarded non-`()` result) rejects.
+      Scalar aliases keep the memoization relaxation (usable repeatedly, forced
+      at least once). Dictionaries stay unrestricted. Everything erases: the
+      emitted Lua is byte-identical (regression-tested against the tracker
+      decode). Boundary (all deviations REJECT, never false-accept — except the
+      one noted): the Lua host side of a `%1` FFI signature is trusted; some
+      constructs over-reject conservatively (wildcard over a tainted scalar
+      scrutinee, non-`()` result discards, record updates on tainted records).
+      One documented ACCEPT-direction gap inherited from the scalar-memoization
+      exemption: an *untracked* scalar laundered multi-step through unrestricted
+      code can be counted as consumed though laziness may not force it (GHC has
+      no scalar exemption; direct forms all reject). Tests:
+      linear_affine_basic.mll, linear_mult_poly.mll + the linear_rejects_* /
+      erasure tests in run_mll.rs.
 
 - [x] Lambda-calculus reducer — examples/lambda.mll; untyped de Bruijn lambda calculus, capture-free substitution + index shifting, normal-order reduction (fuel-bounded), deriving Eq on recursive Term; Church-encoding oracle (identity, boolean not/and, succ/plus/mult). Targeted the laziness/forcing machinery and found NO bug — that area now handles its hardest workload cleanly. Test: example_lambda_reduction.
 - [x] Forcing-gap audit: a thunk-valued field reached by projection/destructuring must be forced before structural use. Fixed two cases (record accessor result; nested case-pattern fields) and verified the rest force at the consumer (tuple-get via show, tuple/struct Eq, cons elements, newtype-in-arithmetic, if-conditions, ==). Audit also found that record accessors were not first-class.
