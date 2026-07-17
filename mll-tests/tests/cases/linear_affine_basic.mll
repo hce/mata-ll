@@ -1,13 +1,16 @@
--- Linear (affine) types: `a %1 -> b` arrows. Everything here must COMPILE
--- and behave exactly as the same program with plain arrows would — the
--- multiplicity is a type-checking discipline that erases after checking.
--- The rejection side (double use, unrestricted flow, aliasing) is covered by
--- the linear_rejects_* tests in run_mll.rs.
+-- Linear types: `a %1 -> b` arrows — a `%1` value must be consumed EXACTLY
+-- once. Everything here must COMPILE and behave exactly as the same program
+-- with plain arrows would — the multiplicity is a type-checking discipline
+-- that erases after checking. The rejection side (double use, zero uses,
+-- unrestricted flow, aliasing, dropped paths) is covered by the
+-- linear_rejects_* tests in run_mll.rs.
 
 data Token = Token Integer
+data Box = Box Token
 
 -- A %1 consumer may destructure its argument; the scalar field is plain
--- data and may be used freely (scalar exemption — n carries no resource).
+-- data and may be duplicated freely (memoized — the destructuring consumed
+-- the Token, and n must merely be forced at least once).
 useOnce :: Token %1 -> Integer
 useOnce (Token n) = n + n
 
@@ -19,9 +22,23 @@ step t = (t, 5)
 branchy :: Token %1 -> Integer -> Integer
 branchy t n = if n > 0 then useOnce t else useOnce t + 1
 
--- Recursion: each path still uses the argument at most once.
+-- Recursion: each path still consumes the argument exactly once.
 countdown :: Token %1 -> Integer -> Integer
 countdown t n = if n > 0 then countdown t (n - 1) else useOnce t
+
+-- A tainted case: the binder aliases the %1 value and is itself consumed
+-- exactly once.
+unwrap :: Box %1 -> Integer
+unwrap b = case b of
+  Box t -> useOnce t
+
+-- Exactly-once through every alternative of a case (only one branch runs,
+-- and each consumes the tainted binder once).
+caseBoth :: Box %1 -> Integer -> Integer
+caseBoth b n = case b of
+  Box t -> case n > 0 of
+    True -> useOnce t
+    False -> useOnce t + 1
 
 -- A %1 function applied through a higher-order %1 parameter, with the
 -- lambda's binder checked against the propagated multiplicity.
@@ -60,6 +77,9 @@ main = do
   assert (branchy (Token 4) 1 == 8) "branch join, then-side"
   assert (branchy (Token 4) 0 == 9) "branch join, else-side"
   assert (countdown (Token 2) 3 == 4) "recursion uses once per path"
+  assert (unwrap (Box (Token 9)) == 18) "tainted case binder consumed once"
+  assert (caseBoth (Box (Token 4)) 1 == 8) "case join, True side"
+  assert (caseBoth (Box (Token 4)) 0 == 9) "case join, False side"
   assert (withToken (\t -> useOnce t) == 42) "lambda through %1 HOF"
   assert (memoized (Token 5) == 20) "memoized scalar where-binding"
   assert (plainManyTick (Token 8) == 17) "%Many and %'Many spellings"
