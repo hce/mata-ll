@@ -386,6 +386,44 @@ older \texttt{Type -> ... -> Type} approximation for their promoted
 constructors (a precise promotion would need kind polymorphism), and a
 non-GADT phantom parameter's kind defaults to \texttt{Type}.
 
+\subsection{Linear (Affine) Types}
+
+\texttt{Ty::Arrow} carries a \texttt{Mult} (\texttt{One},
+\texttt{Many}, or an inference variable \texttt{Var}) as its third
+field.  \texttt{Mult}'s \texttt{PartialEq}/\texttt{Hash} are
+deliberately identity-blind (any \texttt{Mult} equals any other), so a
+\texttt{\%1} arrow and a plain arrow are the SAME type for every
+existing comparison, map key and cache --- only the unifier, which
+handles the slot explicitly (\texttt{unify\_mult}), and the usage pass
+ever read it.  Multiplicity variables have their own id namespace
+(\texttt{Checker::next\_mult}) and their own map inside \texttt{Subst},
+so minting them never perturbs type-variable numbering.  Unification is
+invariant (\texttt{One} $\neq$ \texttt{Many}, as in GHC's
+LinearTypes); arrows the inference engine invents --- the expected
+arrow at an application, a lambda's own arrows --- get fresh
+multiplicity variables, which is how a lambda checked against a
+\texttt{\%1} parameter learns its binder's restriction.
+
+Enforcement is NOT threaded through Algorithm-W: it is a separate
+usage pass (\texttt{typechecker/usage.rs}) over the final,
+fully-substituted typed IR of each function, run at the end of
+\texttt{check\_function}.  It counts 0/1/$\omega$ uses per variable
+(sequential add, branch join) and scales by context: unrestricted call
+$\omega$, constructor field 1, closure capture $\omega$, IO-bind
+continuation 1, \texttt{let}/\texttt{where} right-hand side scaled by
+the binder's use count.  That last rule is the laziness answer: a
+thunk's FORCE is memoized (once), but the value it yields is consumed
+once per use of the binder, so the binder's use count is the sound
+bound; a memoized binding of builtin-scalar type relaxes back to 1.
+The module comment in \texttt{usage.rs} states the enforced fragment
+and every conservative boundary precisely.  Dictionaries are never
+affine: dictionary-passing is introduced by the monomorphizer AFTER
+this pass, and class-method arrows default to \texttt{Many}.
+Everything erases after type checking --- the backend ignores the
+\texttt{Mult} field entirely and the emitted Lua is byte-identical
+with or without annotations (regression-tested in \texttt{run\_mll.rs},
+\texttt{linear\_annotations\_erase\_to\_identical\_lua}).
+
 %----------------------------------------------------------------------
 \section{FFI}
 

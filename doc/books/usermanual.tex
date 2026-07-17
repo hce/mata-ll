@@ -1601,6 +1601,63 @@ processEvent f n = do
 The \texttt{forall s.} scope parameter prevents the callback from being
 stored or used outside its invocation.
 
+\subsection{Linear (Affine) Types}
+
+A function arrow can carry a \emph{multiplicity}: \texttt{a \%1 -> b}
+promises that the function uses its argument \emph{at most once}. A
+plain \texttt{->} is unrestricted (spelled explicitly as \texttt{\%Many}
+or \texttt{\%'Many}). This is the surface syntax of GHC's
+\texttt{LinearTypes}; mata-ll enforces the affine (at-most-once) half,
+which is what catches the double-close/double-free class of bug:
+
+\begin{lstlisting}
+data Conn = Conn Integer
+
+close :: Conn %1 -> IO ()
+close (Conn fd) = putStrLn ("closed " <> show fd)
+
+good :: Conn %1 -> IO ()
+good c = close c            -- fine: one use
+
+bad :: Conn %1 -> IO ()
+bad c = do
+    close c
+    close c                 -- rejected: c used twice
+\end{lstlisting}
+
+The compiler counts uses along every evaluation path: branches of a
+\texttt{case}/\texttt{if} are alternatives (one use in each branch is
+still one use), sequential statements add up, and aliases inherit the
+restriction --- a pattern binder from a match on a \texttt{\%1} value,
+a \texttt{<-} binder from an action that consumed one, or a
+\texttt{let} binding whose right-hand side did. Binders of builtin
+scalar type (\texttt{Integer}, \texttt{Number}, \texttt{Bool},
+\texttt{String}, \texttt{()}) are exempt from the inherited
+restriction: a scalar is plain data and cannot double-use a resource.
+
+Passing a \texttt{\%1} value to a function whose own arrow is a plain
+\texttt{->} counts as unlimited use and is rejected --- the callee made
+no promise. Conversely a \texttt{\%1} function is not interchangeable
+with an unrestricted one (\texttt{map close conns} is a type error, as
+in GHC); wrap it in a lambda when you deliberately want to drop the
+promise. Returning the value, storing it in a constructor or tuple
+exactly once, and consuming it through another \texttt{\%1} function
+are all single uses. Capturing it in a lambda, using it inside a local
+\texttt{where}/\texttt{let} \emph{function}, or using it under a
+non-\texttt{IO} monadic bind is rejected conservatively (the closure or
+continuation may run any number of times).
+
+Multiplicities are a type-checking discipline only: they erase after
+checking, and the compiled Lua is byte-identical with or without the
+annotations.
+
+\emph{Boundary.} mata-ll enforces at-most-once, not exactly-once:
+dropping a \texttt{\%1} value without consuming it is always allowed.
+There is no multiplicity polymorphism --- a helper that merely forwards
+an affine value needs its own \texttt{\%1} annotation. Every
+approximation in the checker errs toward rejection, never toward
+accepting a double use.
+
 %======================================================================
 \section{HashMap}
 

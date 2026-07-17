@@ -3,42 +3,36 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Linear (or affine) types.** The next language feature to add, and the
-      current top priority. Rationale: linear types earn their keep in
-      *high-level* settings — resource and protocol discipline, "use exactly
-      once", session-style APIs — that are not CPU-bound. So mata-ll's Lua back
-      end and GC-guest execution cost them nothing, unlike ST, whose whole point
-      is compute-heavy in-place mutation where the closure overhead is what
-      matters. Linear types give mata-ll a genuinely useful capability that
-      plays to its strengths instead of fighting them. The one concrete payoff
-      for a Lua guest specifically: enforcing correct use of external resources
-      across the FFI — a handle or socket closed exactly once.
-
-      Design assessment (from the 2026-07 discussion):
-        * Cheap: a multiplicity-annotated arrow (`a %1 -> b` / `⊸`), and the
-          entire back end — linearity ERASES after type checking, so
-          monomorphize / verify / constant-fold / split / DCE / codegen and the
-          emitted Lua are all untouched.
-        * Hard and invasive: usage accounting in the inference engine. The
-          checker is Algorithm-W with a `HashMap<String, Scheme>` env passed by
-          shared reference and NO use counting; linear checking needs that env
-          threaded as a CONSUMABLE context (env-in → type + subst + usage-out),
-          split and re-merged at every branch / `case` / `let` / `where` /
-          lambda / guard, plus a second unification lattice for multiplicities
-          (0 / 1 / ω, with multiplicity polymorphism). This changes inference's
-          interface, not just adds a case — bigger than GADTs was.
-        * Subtle under OUR semantics: mata-ll is lazy, so "used exactly once" is
-          NOT "occurs once syntactically" under thunks and `__force`. That is
-          the real correctness trap (GHC's "consumed once if the result is
-          consumed" definition is the precedent). Must also reconcile with
-          dictionary-passing typeclasses (dictionaries as hidden arguments — are
-          they linear?) and GADT / existential pattern binds.
-        * Pragmatic path: AFFINE (use AT MOST once) drops the must-consume
-          obligation that is most entangled with laziness, and can be scoped to
-          a restricted fragment (e.g. only FFI resource types) — a week-scale
-          experiment rather than a quarter-scale full linear system.
-
 ## Completed
+
+- [x] **Affine types (`a %1 -> b`)** — the pragmatic-path implementation of
+      the linear-types item below: AT MOST once, enforced completely and
+      soundly within a documented fragment. Syntax: `%1`, `%Many`, `%'Many`
+      before `->` (GHC LinearTypes surface syntax). Multiplicity lives on
+      `Ty::Arrow` with identity-blind Eq/Hash and its own unification lattice
+      (One / Many / Var, invariant like GHC — a plain-arrow function is
+      rejected at a `%1` type); inference-invented arrows carry multiplicity
+      variables so a lambda checked against a `%1` parameter learns its
+      binder's restriction through ordinary unification. Enforcement is a
+      dedicated usage pass over the final typed IR
+      (`mllc/src/typechecker/usage.rs`), NOT a re-threading of Algorithm-W:
+      0/1/ω counting with sequential add, branch join, and context scaling
+      (unrestricted call = ω, constructor field = 1, closure capture = ω,
+      IO-bind continuation = 1, let/where RHS scaled by the binder's use
+      count — the sound rule under laziness, since thunks memoize the FORCE
+      but not the consumption; memoized scalar bindings relax to 1). Case and
+      `<-` binders inherit the restriction from an affine scrutinee/action
+      (scalar-typed binders exempt — plain data, no resource obligation).
+      Dictionaries stay unrestricted (they are introduced after this pass,
+      and class-method arrows default to ω). Everything erases after type
+      checking: the emitted Lua is byte-identical with or without `%1`
+      (regression-tested). Boundary (all deviations REJECT, never
+      false-accept): no exactly-once obligation, no multiplicity
+      polymorphism (helpers need their own `%1` to forward affine values),
+      local where/let functions and non-IO monadic binds charge ω, and the
+      Lua host side of a `%1` FFI signature is trusted. Tests:
+      linear_affine_basic.mll + the linear_rejects_* / erasure tests in
+      run_mll.rs.
 
 - [x] Lambda-calculus reducer — examples/lambda.mll; untyped de Bruijn lambda calculus, capture-free substitution + index shifting, normal-order reduction (fuel-bounded), deriving Eq on recursive Term; Church-encoding oracle (identity, boolean not/and, succ/plus/mult). Targeted the laziness/forcing machinery and found NO bug — that area now handles its hardest workload cleanly. Test: example_lambda_reduction.
 - [x] Forcing-gap audit: a thunk-valued field reached by projection/destructuring must be forced before structural use. Fixed two cases (record accessor result; nested case-pattern fields) and verified the rest force at the consumer (tuple-get via show, tuple/struct Eq, cons elements, newtype-in-arithmetic, if-conditions, ==). Audit also found that record accessors were not first-class.
