@@ -74,6 +74,14 @@ struct CodeGen {
     var_table_emitted: bool,
     /// Demand analysis: per-function parameter strictness.
     demand_info: DemandInfo,
+    /// The demand the program provably places on the CURRENT function's
+    /// result (see `Rows::result_demand`): deep for functions in the
+    /// whole-program deep-result set, plain WHNF otherwise. Seeds the
+    /// demanded-binding computation for result-position expressions; any
+    /// emission whose result is NOT the current function's result (lambdas,
+    /// first-class action closures, value-position lets) must reset it to
+    /// `Head` around the nested generation.
+    cur_result_demand: crate::demand::Demand,
     /// Source embedding in `EmbedMode::Var`: the emitted file starts with a
     /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
     /// return table must export it — even when there are no other exports.
@@ -104,7 +112,11 @@ impl CodeGen {
             var_slots: std::collections::HashMap::new(),
             var_slots_next: 0,
             var_table_emitted: false,
-            demand_info: DemandInfo { strict_params: std::collections::HashMap::new() },
+            demand_info: DemandInfo {
+                strict_params: std::collections::HashMap::new(),
+                rows: crate::demand::Rows::default(),
+            },
+            cur_result_demand: crate::demand::Demand::Head,
             embed_var_export: false,
             output: String::new(), indent: 0,
         }
@@ -1208,6 +1220,10 @@ impl CodeGen {
         self.var_slots.clear();
         self.var_slots_next = 0;
         self.var_table_emitted = false;
+        // The demand the whole program provably places on this function's
+        // result (deep only when every call site applies it) — seeds the
+        // demanded-binding analysis of result-position expressions.
+        self.cur_result_demand = self.demand_info.rows.result_demand(&func.name);
 
         if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; self.local_count = saved_local_count; self.var_slots = saved_var_slots; self.var_slots_next = saved_var_slots_next; self.var_table_emitted = saved_var_table_emitted; return; }
 
@@ -1494,7 +1510,7 @@ impl CodeGen {
     /// `demanded` seeds which where-bound names are provably forced by the
     /// clause body/guards (see clause_demanded); such bindings may be
     /// assigned strictly even when they read suspended values.
-    fn gen_where_binds(&mut self, binds: &[TLocalDef], demanded: std::collections::HashSet<String>) {
+    fn gen_where_binds(&mut self, binds: &[TLocalDef], demanded: crate::demand::DemandMap) {
         // Forward-declare ALL where-bound names — values as well as functions —
         // before emitting any definition. A where/let group is mutually
         // recursive in Haskell, and a value may reference itself (e.g. a
@@ -1560,6 +1576,10 @@ impl CodeGen {
         // forward or self reference); otherwise it must be thunked so the read
         // happens after every assignment in the group has run.
         let lref = self.lua_ref(&sname);
+        // A where-binding's RHS is not the function's result — a first-class
+        // action closure inside it must not inherit the deep result demand.
+        let saved_rd =
+            std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
         self.emit_indent();
         if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
             self.emit(&format!("{} = ", lref));
@@ -1574,6 +1594,7 @@ impl CodeGen {
             self.emit(" end)");
         }
         self.emit("\n");
+        self.cur_result_demand = saved_rd;
     }
 
     fn gen_where_func_group_assign(&mut self, binds: &[TLocalDef], start: usize) {
@@ -1582,6 +1603,15 @@ impl CodeGen {
     }
 
     fn gen_where_func_group_impl(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) {
+        // A local function's result is not the enclosing function's result:
+        // its body must not inherit the outer deep result demand.
+        let saved_result_demand =
+            std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
+        self.gen_where_func_group_body(binds, start, pre_declared);
+        self.cur_result_demand = saved_result_demand;
+    }
+
+    fn gen_where_func_group_body(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) {
         let name = &binds[start].name;
         let mut clauses = Vec::new();
         let num_params = binds[start].patterns.len();
@@ -2161,40 +2191,64 @@ impl CodeGen {
     fn demanded_bindings(
         &self,
         binds: &[TLocalDef],
-        seed: std::collections::HashSet<String>,
+        seed: crate::demand::DemandMap,
     ) -> std::collections::HashSet<String> {
         let inlined = |n: &str| self.inline_fns.contains_key(n);
         let mut demanded = seed;
+        // Re-walk a binding when its own demand deepens (a later sibling can
+        // raise e.g. a Head demand to an element demand). Terminates: demands
+        // only deepen and the lattice is finite for a finite program.
+        let mut walked: std::collections::HashMap<String, crate::demand::Demand> =
+            std::collections::HashMap::new();
         loop {
             let mut changed = false;
             for b in binds {
-                if b.patterns.is_empty() && demanded.contains(&b.name) {
-                    for v in crate::demand::forced_vars(
-                        &b.body,
-                        &self.demand_info.strict_params,
-                        &inlined,
-                    ) {
-                        if demanded.insert(v) {
+                if b.patterns.is_empty()
+                    && let Some(d) = demanded.get(&b.name).cloned() {
+                        let redo = match walked.get(&b.name) {
+                            Some(prev) => !prev.subsumes(&d),
+                            None => true,
+                        };
+                        if redo {
+                            walked.insert(b.name.clone(), d.clone());
+                            let m = crate::demand::demanded_map(
+                                &b.body,
+                                &self.demand_info.rows,
+                                &inlined,
+                                &d,
+                            );
+                            crate::demand::map_join(&mut demanded, m);
                             changed = true;
                         }
                     }
-                }
             }
             if !changed {
                 break;
             }
         }
-        demanded
+        demanded.into_keys().collect()
     }
 
     /// Demand seed for a clause's where bindings: the variables the emitted
-    /// code for the clause body (or its guards) forces when evaluated.
-    fn clause_demanded(&self, clause: &TClause) -> std::collections::HashSet<String> {
+    /// code for the clause body (or its guards) forces when evaluated. The
+    /// result demand is the current function's (deep only when the
+    /// whole-program analysis proved every call site applies it).
+    fn clause_demanded(&self, clause: &TClause) -> crate::demand::DemandMap {
         let inlined = |n: &str| self.inline_fns.contains_key(n);
         if clause.guards.is_empty() {
-            crate::demand::forced_vars(&clause.body, &self.demand_info.strict_params, &inlined)
+            crate::demand::demanded_map(
+                &clause.body,
+                &self.demand_info.rows,
+                &inlined,
+                &self.cur_result_demand,
+            )
         } else {
-            crate::demand::forced_guards(&clause.guards, &self.demand_info.strict_params, &inlined)
+            crate::demand::demanded_map_guards(
+                &clause.guards,
+                &self.demand_info.rows,
+                &inlined,
+                &self.cur_result_demand,
+            )
         }
     }
 
@@ -2848,14 +2902,21 @@ impl CodeGen {
                 // read, or write through a thunk — so passing them eagerly is
                 // sound and, on the tracker's hot loop (four writes per note,
                 // every audio frame), removes a thunk allocation per index
-                // expression like `ch * 14 + off`. The *stored value* stays
-                // lazy, matching Haskell's `writeArray`/`newArray`, which store
-                // the value without forcing it; only `modify`'s function is
-                // forced (it must be called).
+                // expression like `ch * 14 + off`. The *stored value* and the
+                // initializer are strict too: the fused runtime forces them ON
+                // THIS CALL (`__mll_st_write` stores `__force(val)` — that is
+                // the invariant that keeps every slot, and hence every read
+                // result, in WHNF), so evaluating the argument in place only
+                // moves the force a few instructions earlier within the same
+                // run-once statement — it cannot change what is forced. This
+                // applies ONLY to the fused (provably run-once) form; the
+                // first-class `__mll_ma_*` closures keep lazy value arguments
+                // because a built-but-never-run action must not force anything
+                // (see STRICT_BUILTINS in demand.rs).
                 let strict_mask: &[bool] = match fused {
-                    "__mll_st_new" => &[true, false],        // size strict, init lazy
+                    "__mll_st_new" => &[true, true],         // size, init (forced on store)
                     "__mll_st_read" => &[true, true],        // arr, idx
-                    "__mll_st_write" => &[true, true, false],// arr, idx strict; val lazy
+                    "__mll_st_write" => &[true, true, true], // arr, idx, val (forced on store)
                     "__mll_st_modify" => &[true, true, true],// arr, idx, f (f is called)
                     "__mll_st_length" => &[true],
                     "__mll_st_from_list" => &[true],
@@ -3019,7 +3080,12 @@ impl CodeGen {
                         let decl = self.declare_local(&param_name);
                         self.emit_indent();
                         self.emit(&format!("{} = ", decl));
+                        // A statement action's result is not the function's
+                        // result — no deep result demand inside it.
+                        let saved_rd = std::mem::replace(
+                            &mut self.cur_result_demand, crate::demand::Demand::Head);
                         self.gen_action(lhs);
+                        self.cur_result_demand = saved_rd;
                         self.emit("\n");
                         // The bound value is force-free downstream only if the
                         // action yields WHNF. A `return ⊥` binds a thunk (kept
@@ -3044,7 +3110,11 @@ impl CodeGen {
                             TExprKind::Var(n) if n == "pure" || n == "return"));
                     if !is_pure_discard {
                         self.emit_indent();
+                        // Statement position — see the ">>=" arm above.
+                        let saved_rd = std::mem::replace(
+                            &mut self.cur_result_demand, crate::demand::Demand::Head);
                         self.gen_action(lhs_unwrapped);
+                        self.cur_result_demand = saved_rd;
                         self.emit("\n");
                     }
                     expr = rhs;
@@ -3068,12 +3138,16 @@ impl CodeGen {
                     // Bindings demanded by the rest of the chain may be
                     // evaluated eagerly even when they read suspended values —
                     // the force happens regardless (see demanded_bindings).
+                    // The chain terminal carries the current function's result
+                    // demand, so a binding that is only forced THROUGH the
+                    // result (a tuple field every caller scrutinizes) counts.
                     let demanded = self.demanded_bindings(
                         binds,
-                        crate::demand::forced_vars(
+                        crate::demand::demanded_map(
                             body,
-                            &self.demand_info.strict_params,
+                            &self.demand_info.rows,
                             &|n| self.inline_fns.contains_key(n),
+                            &self.cur_result_demand,
                         ),
                     );
                     for (i, bind) in binds.iter().enumerate() {
@@ -3103,11 +3177,18 @@ impl CodeGen {
                             self.gen_expr(else_branch);
                             self.emit(" end\n");
                         } else if Self::is_nullary_action_type(&bind.body.ty) {
+                            // First-class action binding — its result is not
+                            // the function's result (see cur_result_demand).
+                            let saved_rd = std::mem::replace(
+                                &mut self.cur_result_demand, crate::demand::Demand::Head);
                             self.emit_indent();
                             self.emit(&format!("{} = function() return ", lval));
                             self.gen_action(&bind.body);
                             self.emit(" end\n");
+                            self.cur_result_demand = saved_rd;
                         } else {
+                            let saved_rd = std::mem::replace(
+                                &mut self.cur_result_demand, crate::demand::Demand::Head);
                             self.emit_indent();
                             if self.strict_binding_ok(bind, &demanded) && strict_ok {
                                 self.emit(&format!("{} = ", lval));
@@ -3122,6 +3203,7 @@ impl CodeGen {
                                 self.gen_expr(&bind.body);
                                 self.emit(" end)\n");
                             }
+                            self.cur_result_demand = saved_rd;
                         }
                     }
                     expr = body;
@@ -3503,6 +3585,16 @@ impl CodeGen {
     }
 
     fn gen_arg(&mut self, expr: &TExpr, strict: bool) {
+        // An argument is never the current function's result: a first-class
+        // action closure emitted inside it must not inherit the deep result
+        // demand (see cur_result_demand).
+        let saved_result_demand =
+            std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
+        self.gen_arg_inner(expr, strict);
+        self.cur_result_demand = saved_result_demand;
+    }
+
+    fn gen_arg_inner(&mut self, expr: &TExpr, strict: bool) {
         // Eagerness weight wins: the callee forces it anyway, or it is provably
         // total (cannot be ⊥). Evaluate in place — no thunk.
         if strict || self.is_cheap_to_force(expr) {
@@ -3979,6 +4071,14 @@ impl CodeGen {
                         // IO actions: do-blocks produce function() closures.
                         // Bind chain flattens into sequential statements inside
                         // the action closure; each sub-action is called with ().
+                        // NOTE on cur_result_demand: this arm is reached either
+                        // for a clause body in result position (the guarded /
+                        // multi-clause emission path wraps the ST body here) —
+                        // where the ambient result demand is exactly the demand
+                        // on the action's yielded value — or for a first-class
+                        // action, whose enclosing context (gen_arg, statement
+                        // actions, value-binding RHSes, lambdas) has already
+                        // reset the ambient demand to Head. So it is used as-is.
                         if let TExprKind::Lambda { .. } = &rhs.kind {
                             self.emit("function()\n");
                             self.indent += 1;
@@ -3993,7 +4093,8 @@ impl CodeGen {
                         return;
                     }
                     ">>" => {
-                        // IO-then: produce action closure
+                        // IO-then: produce action closure (see the ">>=" arm
+                        // for the cur_result_demand rationale).
                         self.emit("function()\n");
                         self.indent += 1;
                         self.gen_bind_chain_io(expr);
@@ -4168,12 +4269,15 @@ impl CodeGen {
                 }
                 // Bindings demanded by the let body may be evaluated eagerly
                 // even when they read suspended values (see demanded_bindings).
+                // Value position: this let's result is not the function's
+                // result, so the demand on it is plain WHNF.
                 let demanded = self.demanded_bindings(
                     binds,
-                    crate::demand::forced_vars(
+                    crate::demand::demanded_map(
                         body,
-                        &self.demand_info.strict_params,
+                        &self.demand_info.rows,
                         &|n| self.inline_fns.contains_key(n),
+                        &crate::demand::Demand::Head,
                     ),
                 );
                 for (i, bind) in binds.iter().enumerate() {
@@ -4208,6 +4312,10 @@ impl CodeGen {
                     (0..eta_count).map(|i| format!("_eta{}", i)).collect();
                 let saved_locals = self.local_vars.clone();
                 let saved_concrete = self.concrete_vars.clone();
+                // A first-class lambda's result is not the enclosing
+                // function's result — no deep result demand inside.
+                let saved_result_demand =
+                    std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
                 // A lambda parameter is NOT guaranteed forced: when the lambda
                 // is invoked through a higher-order position the caller cannot
                 // see its strictness and may pass a thunk. Drop the params from
@@ -4236,6 +4344,7 @@ impl CodeGen {
                 self.emit_indent(); self.emit("end");
                 self.local_vars = saved_locals;
                 self.concrete_vars = saved_concrete;
+                self.cur_result_demand = saved_result_demand;
             }
             TExprKind::Paren(inner) => {
                 self.emit("("); self.gen_expr(inner); self.emit(")");
