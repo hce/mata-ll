@@ -18,13 +18,11 @@
 //!   * a lambda parameter whose lambda type resolved to a `%1` (or rigid
 //!     `%m`) arrow, or
 //!   * a *derived* alias of a linear value: a pattern binder of a `case`
-//!     whose scrutinee uses a linear variable, or a `<-` binder whose
-//!     action uses one. A non-scalar derived binder inherits the source
-//!     binder's bound (`%1` or `%m`); a scalar-typed derived binder is held
-//!     to a LOWER bound only — consumed at least once — because forcing it
-//!     is what makes the pending `%1` consumption actually happen, while
-//!     duplicating it is free (the runtime memoizes the thunk; see the
-//!     SCALAR RULE below).
+//!     whose scrutinee uses a linear variable, a `<-` binder whose action
+//!     uses one, or a `let`/`where` value binding whose right-hand side
+//!     uses one. A derived binder inherits the source binder's bound (`%1`
+//!     or `%m`) at EVERY type — scalars included; only `()`-typed derived
+//!     binders are exempt (see SCALARS AND UNIT below).
 //!
 //! THE EXACTLY-ONCE OBLIGATION (where the lower bound attaches). The usage
 //! COUNT (absent / one / ω) is tracked separately from the per-binder
@@ -60,9 +58,9 @@
 //! link of the chain separately: a `let`/`where` right-hand side is scaled
 //! by its binder's use count (an unused binding is never forced, so it
 //! contributes zero — which the absence check then reports); a derived
-//! alias must itself be consumed (exactly once, or at-least-once for
-//! scalars); and constructs that sever the chain (wildcards, discarded
-//! results, skippable continuations) are rejected outright.
+//! alias must itself be consumed exactly once; and constructs that sever
+//! the chain (wildcards, discarded results, skippable continuations) are
+//! rejected outright.
 //!
 //! HOW USES ARE COUNTED (the 0/1/ω lattice). Sequential composition adds
 //! usages; the alternatives of a `case`/`if`/guard take the per-variable
@@ -85,10 +83,7 @@
 //!     is the sound bound. An unused binding charges nothing (never forced,
 //!     never consumed) — under exactly-once that zero then trips the
 //!     absence check at clause end: a `%1` value parked in a binding that
-//!     is never forced is a leak. One relaxation: a binding whose value is
-//!     a builtin scalar charges once even when used repeatedly — its
-//!     right-hand side still runs at most once (memoization), and the
-//!     scalar result duplicates harmlessly;
+//!     is never forced is a leak;
 //!   * an argument to a local where/let function (including the desugared
 //!     `let g x = …`, a lambda-bodied value binding) charges by the
 //!     function's INFERRED per-parameter multiplicity: the pass measures how
@@ -126,20 +121,22 @@
 //!     rejected (skippable path). (The Prelude cannot be redefined — the
 //!     typechecker rejects that separately — so the set is stable.)
 //!
-//! SCALAR RULE. A *derived* binder (case/`<-`/clause-pattern taint
-//! propagation) whose type is a builtin scalar — Integer, Number, Bool,
-//! String — is not held to the UPPER bound: a scalar is plain data,
-//! duplicating it cannot double-use a resource, and its thunk is memoized
-//! so the computation that produced it (which may be the `%1` consumption
-//! itself, e.g. the field of `step t = (Token 0, useOnce t)`) still runs
-//! at most once. It IS held to the LOWER bound (`Bound::AtLeastOnce`):
-//! until the scalar is forced at least once, the consumption pending
-//! inside its thunk never happens, so dropping it unforced would leak the
-//! resource. `()`-typed derived binders are fully exempt — the
+//! SCALARS AND UNIT. A *derived* binder of builtin scalar type — Integer,
+//! Number, Bool, String — gets NO exemption: it is tracked exactly-once
+//! like every other derived alias, matching GHC (which has no Movable-style
+//! scalar rule in the type system). Duplicating such a scalar would be
+//! operationally harmless under the memoizing lazy runtime — the thunk
+//! that carries the pending `%1` consumption runs at most once — but an
+//! earlier at-least-once relaxation for exactly that reason stopped
+//! tracking the scalar once it flowed into unrestricted position, and a
+//! pending consumption parked in its never-forced thunk could then be
+//! counted as consumed (a leak accepted). Holding scalars to exactly-once
+//! closes that laundering hole at the price of also rejecting the harmless
+//! duplication (`go + go where go = useOnce t`), a deliberate parity
+//! decision. `()`-typed derived binders remain fully exempt — the
 //! run-for-effect idiom (`shred t >> …`) discards unit results by design.
-//! This is the pragmatic counterpart of linear-base's `Movable`; a binder
-//! the user annotates `%1` DIRECTLY (`f :: Integer %1 -> …; f n = …`) is
-//! still enforced as written, exactly once.
+//! A binder the user annotates `%1` DIRECTLY (`f :: Integer %1 -> …;
+//! f n = …`) is enforced as written, exactly once — as it always was.
 //!
 //! MULTIPLICITY POLYMORPHISM. A signature may quantify over a multiplicity
 //! (`apply :: (a %m -> b) -> a %m -> b`). Inside `apply`'s own body `m` is
@@ -157,23 +154,11 @@
 //!
 //! WHAT IS NOT COVERED (documented boundary; all deviations are in the
 //! REJECT direction except where noted):
-//!   * A scalar that is NOT taint-tracked can smuggle a pending consumption
-//!     past the checker (ACCEPT direction — the one known hole, inherited
-//!     from the Movable-style scalar rule): a scalar produced from a linear
-//!     value and then laundered through an unrestricted function (e.g.
-//!     `constUnit (useOnce t)` where `constUnit :: Integer -> ()`) is
-//!     charged as a consumption even though the thunk may never be forced.
-//!     Direct forms of this are all caught (unused bindings scale to zero;
-//!     derived scalars are `AtLeastOnce`; discarded results and wildcards
-//!     are rejected); only the multi-step untracked-scalar chain escapes.
-//!     Similarly, a tracked SCALAR captured by a lambda is charged ω and
-//!     accepted, though the closure may never run (a non-scalar capture is
-//!     rejected). GHC rejects both — it has no scalar exemption at all.
 //!   * `case scalar_expr of 0 -> …; _ -> …` over a TAINTED scalar scrutinee
 //!     is rejected (the wildcard rule is blanket), although forcing the
-//!     scrutinee to compare literals would in fact consume it. Bind the
-//!     scrutinee first (`let n = useOnce t in case n of …`) to branch on a
-//!     consumed scalar.
+//!     scrutinee to compare literals would in fact consume it. Replace the
+//!     `_` with a variable pattern and consume that binder in its branch
+//!     (`case n of 0 -> …; m -> … m …`) to branch on a tracked scalar.
 //!   * GHC's typing rule for unannotated `let`/`where` charges the
 //!     right-hand side at ω, rejecting e.g. `let u = t in useOnce t` even
 //!     though `u` is never forced. mata-ll's use-count scaling ACCEPTS such
@@ -368,16 +353,6 @@ const CONSUME_ONCE_OPS: &[&str] = &[
 /// guaranteed.
 const CONSUME_ONCE_FNS: &[&str] = &["pure", "return", "id"];
 
-/// Builtin scalar types: plain data with no resource obligation, exempt
-/// from *derived* (taint) affinity. See the module comment.
-fn is_scalar(ty: &Ty) -> bool {
-    match ty {
-        Ty::Unit => true,
-        Ty::Con(n) => matches!(n.as_str(), "Integer" | "Number" | "Bool" | "String"),
-        _ => false,
-    }
-}
-
 /// Which direction a linearity violation went.
 enum ViolKind {
     /// Used beyond the bound (more than once, or once at a multiplicity the
@@ -394,13 +369,11 @@ enum ViolKind {
     PathDrop(String),
 }
 
-/// One linearity violation: which binder, why it is restricted, its bound
-/// (for the "exactly once" / "at least once" phrasing), and which direction
-/// it was violated in.
+/// One linearity violation: which binder, why it is restricted, and which
+/// direction it was violated in.
 struct Violation {
     name: String,
     origin: String,
-    bound: Bound,
     /// Only read for `Overuse`: why the context may use it more than once,
     /// when the overuse came from scaling rather than plain repetition.
     cause: Option<String>,
@@ -408,20 +381,15 @@ struct Violation {
 }
 
 /// How much use a tracked binder requires and allows: exactly one (`%1`),
-/// exactly one at a rigid signature multiplicity `%m` (`OnceAt` — the one
-/// use must be at multiplicity `1` or at that same `m`; see
-/// `Count::OneAt`), or at least one with duplication free (`AtLeastOnce` —
-/// a scalar alias of a linear value: memoization makes extra uses
-/// harmless, but it must be forced at least once or the consumption
-/// pending in its thunk never happens; see SCALAR RULE in the module
-/// comment). Tracked alongside the origin message; the usage COUNT is kept
-/// separately in `Usage`, so the exactly-once policy attaches at the
-/// `check_binder` / join points without re-architecture.
+/// or exactly one at a rigid signature multiplicity `%m` (`OnceAt` — the
+/// one use must be at multiplicity `1` or at that same `m`; see
+/// `Count::OneAt`). Tracked alongside the origin message; the usage COUNT
+/// is kept separately in `Usage`, so the exactly-once policy attaches at
+/// the `check_binder` / join points without re-architecture.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Bound {
     Once,
     OnceAt(u32),
-    AtLeastOnce,
 }
 
 /// Why a binder is tracked (`origin`, for the diagnostic) and how much use
@@ -448,7 +416,7 @@ fn pattern_has_wildcard(p: &TPattern) -> bool {
 
 /// The variables a typed pattern binds, with their types. `direct` is true
 /// only for a bare top-level `Var` pattern — the binder that IS the `%1`
-/// argument itself (enforced even at scalar type, because the user wrote the
+/// argument itself (enforced even at `()` type, because the user wrote the
 /// annotation on it), as opposed to a binder destructured out of it.
 fn pattern_binders(p: &TPattern, direct: bool, out: &mut Vec<(String, Ty, bool)>) {
     match p {
@@ -555,7 +523,6 @@ impl<'a> UsageCk<'a> {
             self.viols.push(Violation {
                 name: name.to_string(),
                 origin: ai.origin.clone(),
-                bound: ai.bound,
                 cause: None,
                 kind: ViolKind::Unused(
                     "nothing on this evaluation path consumes it".to_string()),
@@ -563,9 +530,6 @@ impl<'a> UsageCk<'a> {
             return;
         };
         let exceeded = match (info.count, ai.bound) {
-            // A scalar alias of a linear value: duplication is free (the
-            // thunk is memoized), only the lower bound above applies.
-            (_, Bound::AtLeastOnce) => false,
             (Count::Many, _) => true,
             (Count::One, _) => false,
             // One use through a `%m` arrow: within bounds only when the
@@ -576,7 +540,7 @@ impl<'a> UsageCk<'a> {
         if exceeded {
             let cause = info.cause.clone().or_else(|| match info.count {
                 Count::OneAt(_) => Some(match ai.bound {
-                    Bound::Once | Bound::AtLeastOnce =>
+                    Bound::Once =>
                         "it is passed to a function whose arrow multiplicity \
                          is a signature variable ('%m'), which a caller may \
                          instantiate to 'Many' — so that function may use \
@@ -592,7 +556,6 @@ impl<'a> UsageCk<'a> {
             self.viols.push(Violation {
                 name: name.to_string(),
                 origin: ai.origin.clone(),
-                bound: ai.bound,
                 cause,
                 kind: ViolKind::Overuse,
             });
@@ -621,7 +584,6 @@ impl<'a> UsageCk<'a> {
                     self.viols.push(Violation {
                         name,
                         origin: ai.origin,
-                        bound: ai.bound,
                         cause: None,
                         kind: ViolKind::PathDrop(format!(
                             "it is consumed in only {} of the {} {}, and \
@@ -653,7 +615,6 @@ impl<'a> UsageCk<'a> {
             self.viols.push(Violation {
                 name,
                 origin: ai.origin,
-                bound: ai.bound,
                 cause: None,
                 kind: ViolKind::PathDrop(path.to_string()),
             });
@@ -669,7 +630,6 @@ impl<'a> UsageCk<'a> {
         self.viols.push(Violation {
             name: src.to_string(),
             origin: ai.origin,
-            bound: ai.bound,
             cause: None,
             kind: ViolKind::PathDrop(
                 "the result of an action that consumes it is discarded (a \
@@ -684,15 +644,14 @@ impl<'a> UsageCk<'a> {
     /// name whose bound is STRICTEST, and that bound (for the taint-origin
     /// message and the inherited restriction): a derived binder must
     /// inherit the strongest obligation among everything the expression
-    /// consumed — inheriting a scalar's dup-friendly `AtLeastOnce` when a
-    /// `%1` value also feeds the expression would launder duplication.
-    /// Alphabetical within a strictness class for stable diagnostics.
+    /// consumed — a plain `%1` (`Once`) over a rigid `%m` (`OnceAt`), whose
+    /// one use is additionally pinned to that same variable. Alphabetical
+    /// within a strictness class for stable diagnostics.
     fn taint_source(&self, u: &Usage) -> Option<(String, Bound)> {
         fn rank(b: Bound) -> u8 {
             match b {
                 Bound::Once => 0,
                 Bound::OnceAt(_) => 1,
-                Bound::AtLeastOnce => 2,
             }
         }
         let mut names: Vec<(&String, Bound)> = u
@@ -801,10 +760,9 @@ impl<'a> UsageCk<'a> {
             TExprKind::Case { scrutinee, branches } => {
                 let u_s = self.expr_usage(scrutinee);
                 // Taint: pattern binders of a match on a linear value alias
-                // parts of that value, so they inherit the restriction
-                // (scalar-typed binders are held to the at-least-once lower
-                // bound only — see SCALAR RULE in the module comment; unit
-                // binders are exempt).
+                // parts of that value, so they inherit the restriction at
+                // every type — only unit binders are exempt (see SCALARS
+                // AND UNIT in the module comment).
                 let taint_src = self.taint_source(&u_s);
                 let mut alts: Vec<Usage> = Vec::with_capacity(branches.len());
                 for br in branches {
@@ -818,7 +776,6 @@ impl<'a> UsageCk<'a> {
                             self.viols.push(Violation {
                                 name: src.clone(),
                                 origin: ai.origin,
-                                bound: ai.bound,
                                 cause: None,
                                 kind: ViolKind::PathDrop(
                                     "part (or all) of its value is matched by \
@@ -834,27 +791,17 @@ impl<'a> UsageCk<'a> {
                     let mut checked: Vec<String> = Vec::new();
                     for (name, ty, _) in &binders {
                         saved.push(self.shadow(name));
-                        if let Some((src, bound)) = &taint_src {
-                            if !is_scalar(ty) {
-                                self.linear.insert(name.clone(), LinearInfo {
-                                    origin: format!(
-                                        "it is pattern-bound from '{}', which \
-                                         must itself be consumed exactly \
-                                         once", src),
-                                    bound: *bound,
-                                });
-                                checked.push(name.clone());
-                            } else if !matches!(ty, Ty::Unit) {
-                                self.linear.insert(name.clone(), LinearInfo {
-                                    origin: format!(
-                                        "it is a scalar destructured from \
-                                         '{}', and the consumption that \
-                                         produces its value only happens \
-                                         when this binder is forced", src),
-                                    bound: Bound::AtLeastOnce,
-                                });
-                                checked.push(name.clone());
-                            }
+                        if let Some((src, bound)) = &taint_src
+                            && !matches!(ty, Ty::Unit)
+                        {
+                            self.linear.insert(name.clone(), LinearInfo {
+                                origin: format!(
+                                    "it is pattern-bound from '{}', which \
+                                     must itself be consumed exactly \
+                                     once", src),
+                                bound: *bound,
+                            });
+                            checked.push(name.clone());
                         }
                     }
                     let mut bu = self.branch_usage(&br.guards, &br.body);
@@ -979,7 +926,6 @@ impl<'a> UsageCk<'a> {
                     origin: "the function that binds it has a '%1' (or \
                              multiplicity-variable '%m') arrow at this \
                              parameter".to_string(),
-                    bound: Bound::Once,
                     cause: None,
                     kind: ViolKind::Unused(
                         "the parameter is a wildcard ('_'), which discards \
@@ -1200,8 +1146,8 @@ impl<'a> UsageCk<'a> {
     /// Enter a (mutually recursive) binding group: shadow the bound names,
     /// walk every right-hand side, and mark the names whose value was built
     /// from a linear variable as linear themselves (taint), iterating to a
-    /// fixpoint so sibling/recursive references are seen. Scalar-typed
-    /// bindings are exempt from the taint, like scalar pattern binders.
+    /// fixpoint so sibling/recursive references are seen. Only `()`-typed
+    /// bindings are exempt from the taint, like unit pattern binders.
     ///
     /// The same fixpoint infers each local FUNCTION's per-parameter charge
     /// factors (see the module comment): factors start at the optimistic
@@ -1287,7 +1233,7 @@ impl<'a> UsageCk<'a> {
             // Grow the taint set.
             for (b, u) in binds.iter().zip(&rhs_usages) {
                 if b.patterns.is_empty()
-                    && !is_scalar(&b.body.ty)
+                    && !matches!(b.body.ty, Ty::Unit)
                     && !tainted.contains_key(&b.name)
                     && let Some((_, bound)) = self.taint_source(u)
                 {
@@ -1441,20 +1387,24 @@ impl<'a> UsageCk<'a> {
                 // times: everything the right-hand side consumed is consumed
                 // up to m times too.
                 (Factor::Rigid(id), None)
-            } else if is_scalar(&b.body.ty) {
-                // Used many times, but the value is a SCALAR: the runtime
-                // memoizes thunks (see codegen's __force) and strict
-                // assignment evaluates once, so the right-hand side — and
-                // whatever linear value it consumed — runs at most once,
-                // and duplicating the scalar result cannot double-use a
-                // resource.
-                (Factor::Once, None)
             } else {
-                (Factor::Any, Some(format!(
-                    "it is used through the local binding '{}', and '{}' is \
-                     used more than once — each use of '{}' is another use \
-                     of everything its definition consumed",
-                    b.name, b.name, b.name)))
+                // The binder's count is ω — literally used more than once,
+                // or used once in a context that may duplicate (or drop) it,
+                // in which case the count carries the recorded reason and
+                // that reason is the accurate one to report.
+                let inflated = result.get(&b.name).and_then(|i| i.cause.clone());
+                let cause = match inflated {
+                    Some(why) => format!(
+                        "it is used through the local binding '{}', and '{}' \
+                         may itself be consumed more than once (or never): \
+                         {}", b.name, b.name, why),
+                    None => format!(
+                        "it is used through the local binding '{}', and '{}' \
+                         is used more than once — each use of '{}' is \
+                         another use of everything its definition consumed",
+                        b.name, b.name, b.name),
+                };
+                (Factor::Any, Some(cause))
             };
             add_usage(&mut result, scale_usage(u_rhs, factor, &cause));
         }
@@ -1568,8 +1518,8 @@ impl<'a> UsageCk<'a> {
                         // The continuation lambda of a do-bind. Its binder
                         // aliases the action's result: linear when the
                         // action consumed a linear variable (inheriting that
-                        // variable's bound; scalar binders get the
-                        // at-least-once lower bound, unit binders none).
+                        // variable's bound at every type; only unit binders
+                        // are exempt).
                         let mut saved: SavedBinders = Vec::new();
                         let mut checked: Vec<String> = Vec::new();
                         let mut names: Vec<String> = Vec::new();
@@ -1584,29 +1534,18 @@ impl<'a> UsageCk<'a> {
                             }
                             names.push(name.clone());
                             saved.push(self.shadow(name));
-                            if let Some((src, bound)) = &taint_src {
-                                if !is_scalar(pty) {
-                                    self.linear.insert(name.clone(), LinearInfo {
-                                        origin: format!(
-                                            "it was bound (with '<-') from an \
-                                             action that consumes '{}', which \
-                                             must itself be consumed exactly \
-                                             once", src),
-                                        bound: *bound,
-                                    });
-                                    checked.push(name.clone());
-                                } else if !matches!(pty, Ty::Unit) {
-                                    self.linear.insert(name.clone(), LinearInfo {
-                                        origin: format!(
-                                            "it is a scalar bound (with '<-') \
-                                             from an action that consumes \
-                                             '{}', and the consumption that \
-                                             produces its value only happens \
-                                             when this binder is forced", src),
-                                        bound: Bound::AtLeastOnce,
-                                    });
-                                    checked.push(name.clone());
-                                }
+                            if let Some((src, bound)) = &taint_src
+                                && !matches!(pty, Ty::Unit)
+                            {
+                                self.linear.insert(name.clone(), LinearInfo {
+                                    origin: format!(
+                                        "it was bound (with '<-') from an \
+                                         action that consumes '{}', which \
+                                         must itself be consumed exactly \
+                                         once", src),
+                                    bound: *bound,
+                                });
+                                checked.push(name.clone());
                             }
                         }
                         frames.push(BindFrame::Bind {
@@ -1634,7 +1573,6 @@ impl<'a> UsageCk<'a> {
                                 self.viols.push(Violation {
                                     name: src.clone(),
                                     origin: ai.origin,
-                                    bound: ai.bound,
                                     cause: Some(
                                         "the value bound from an action that \
                                          consumes it flows to a '>>=' \
@@ -1775,12 +1713,12 @@ impl Checker {
             // Arguments bound at the function type's `%1` arrows — and its
             // rigid `%m` arrows, whose binders are held to the polymorphic
             // budget (a caller may instantiate m to 1; see the module
-            // comment). A binder that IS the argument (a bare variable
-            // pattern) is enforced even at scalar type — the user annotated
-            // it directly; a scalar binder destructured out of it gets the
-            // at-least-once lower bound (SCALAR RULE), and a wildcard
-            // anywhere in the pattern is an immediate leak (whatever it
-            // matches is discarded unconsumed).
+            // comment). Every binder in the pattern is enforced exactly
+            // once — scalars destructured out of the argument included
+            // (only `()`-typed non-direct binders are exempt; SCALARS AND
+            // UNIT in the module comment) — and a wildcard anywhere in the
+            // pattern is an immediate leak (whatever it matches is
+            // discarded unconsumed).
             let mut cur = &fun.ty;
             while let Ty::Forall(_, inner) = cur {
                 cur = inner;
@@ -1803,7 +1741,6 @@ impl Checker {
                         walker.viols.push(Violation {
                             name: "_".to_string(),
                             origin: origin.clone(),
-                            bound,
                             cause: None,
                             kind: ViolKind::Unused(
                                 "a wildcard ('_') in this argument's pattern \
@@ -1814,21 +1751,10 @@ impl Checker {
                     let mut binders = Vec::new();
                     pattern_binders(pat, true, &mut binders);
                     for (name, ty, direct) in binders {
-                        if direct || !is_scalar(&ty) {
+                        if direct || !matches!(ty, Ty::Unit) {
                             walker.linear.insert(name.clone(), LinearInfo {
                                 origin: origin.clone(),
                                 bound,
-                            });
-                            top_linear.push(name);
-                        } else if !matches!(ty, Ty::Unit) {
-                            walker.linear.insert(name.clone(), LinearInfo {
-                                origin: format!(
-                                    "it is a scalar destructured out of an \
-                                     argument that the type of '{}' declares \
-                                     '%1' (or '%m'), and the consumption of \
-                                     that part only happens when this binder \
-                                     is forced", fun.name),
-                                bound: Bound::AtLeastOnce,
                             });
                             top_linear.push(name);
                         }
@@ -1856,10 +1782,7 @@ impl Checker {
             // end); report each rendered message once.
             let mut seen: HashSet<String> = HashSet::new();
             for v in viols {
-                let req = match v.bound {
-                    Bound::Once | Bound::OnceAt(_) => "must be consumed exactly once",
-                    Bound::AtLeastOnce => "must be consumed at least once",
-                };
+                let req = "must be consumed exactly once";
                 let (problem, note) = match &v.kind {
                     ViolKind::Overuse => {
                         let cause = v.cause.clone().unwrap_or_else(|| {

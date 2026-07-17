@@ -7860,7 +7860,7 @@ fn linear_rejects_instance_method_double_use() {
 fn linear_annotations_erase_to_identical_lua() {
     let with_mult = "data Token = Token Integer\n\
          shred :: Token %1 -> IO ()\n\
-         shred (Token n) = print n\n\
+         shred (Token n) = if n == 42 then putStrLn \"ok\" else putStrLn \"bad\"\n\
          step :: Token %1 -> (Token, Integer)\n\
          step t = (t, 5)\n\
          main :: IO ()\n\
@@ -8412,8 +8412,9 @@ fn linear_rejects_fst_on_linear_pair() {
     assert!(msg.contains("passed to 'fst'"), "{}", msg);
 }
 
-/// A scalar destructured from a `%1` match must be forced at least once:
-/// the callee may have parked the consumption in that component's thunk
+/// A scalar destructured from a `%1` match is tracked exactly-once like
+/// any other alias (GHC parity — no scalar exemption): the callee may have
+/// parked the consumption in that component's thunk
 /// (`step t = (Token 0, useOnce t)` — dropping n means t is never used).
 #[test]
 fn linear_rejects_unused_scalar_alias() {
@@ -8429,7 +8430,7 @@ fn linear_rejects_unused_scalar_alias() {
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
     );
-    assert!(msg.contains("'n' must be consumed at least once"), "{}", msg);
+    assert!(msg.contains("'n' must be consumed exactly once"), "{}", msg);
     assert!(msg.contains("consumed zero times"), "{}", msg);
 }
 
@@ -8443,8 +8444,101 @@ fn linear_rejects_unused_scalar_field() {
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
     );
-    assert!(msg.contains("'n' must be consumed at least once"), "{}", msg);
+    assert!(msg.contains("'n' must be consumed exactly once"), "{}", msg);
     assert!(msg.contains("consumed zero times"), "{}", msg);
+}
+
+// ---------------------------------------------------------------------------
+// Strict GHC parity on scalars: a scalar derived from a `%1` value is held
+// to exactly-once like every other alias — there is no scalar-memoization
+// exemption. These programs were ACCEPTED under the old at-least-once
+// scalar rule (duplication was considered free because the runtime
+// memoizes the thunk); GHC rejects all of them, and so does mata-ll now.
+// The legitimate exactly-once scalar shapes still compile — see useOnce /
+// onceVia in linear_affine_basic.mll and viaMaybe in linear_mult_poly.mll.
+// ---------------------------------------------------------------------------
+
+/// The canonical scalar duplication: a where-binding built from a `%1`
+/// value read twice. Operationally harmless under memoization, but GHC
+/// has no scalar exemption — parity rejects it.
+#[test]
+fn linear_rejects_scalar_where_binding_double_use() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         useOnce :: Token %1 -> Integer\n\
+         useOnce (Token n) = n\n\
+         bad :: Token %1 -> Integer\n\
+         bad t = go + go\n\
+         \x20 where go = useOnce t\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'t' must be consumed exactly once"), "{}", msg);
+    assert!(msg.contains("local binding 'go'"), "{}", msg);
+    assert!(msg.contains("more than once"), "{}", msg);
+}
+
+/// The multi-step scalar launder that was the one known ACCEPT-direction
+/// hole: the pending consumption of 't' sits in the thunk of the scalar
+/// binding 'n', and the unrestricted 'constUnit' may never force it — the
+/// leak used to slip through because scalar bindings were untracked.
+#[test]
+fn linear_rejects_scalar_laundered_through_let_binding() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         useOnce :: Token %1 -> Integer\n\
+         useOnce (Token n) = n\n\
+         constUnit :: Integer -> ()\n\
+         constUnit x = ()\n\
+         bad :: Token %1 -> ()\n\
+         bad t = let n = useOnce t in constUnit n\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'t' must be consumed exactly once"), "{}", msg);
+    assert!(msg.contains("local binding 'n'"), "{}", msg);
+    assert!(msg.contains("constUnit"), "{}", msg);
+}
+
+/// The derived-alias form of the launder: a scalar pattern-bound from a
+/// tainted match handed to an unrestricted function, which may drop (or
+/// duplicate) it — its one obligated consumption may never happen.
+#[test]
+fn linear_rejects_scalar_alias_flow_into_unrestricted_function() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         useOnce :: Token %1 -> Integer\n\
+         useOnce (Token n) = n\n\
+         step :: Token %1 -> (Token, Integer)\n\
+         step t = (t, 5)\n\
+         constInt :: Integer -> Integer\n\
+         constInt x = 7\n\
+         bad :: Token %1 -> Integer\n\
+         bad t = case step t of\n\
+         \x20 (t2, n) -> useOnce t2 + constInt n\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'n' must be consumed exactly once"), "{}", msg);
+    assert!(msg.contains("pattern-bound from 't'"), "{}", msg);
+    assert!(msg.contains("constInt"), "{}", msg);
+}
+
+/// A tracked scalar captured by a lambda: the closure may run any number
+/// of times — or never, leaking the consumption parked in the scalar's
+/// thunk. (Was charged ω but accepted under the old scalar rule; a
+/// non-scalar capture was always rejected.)
+#[test]
+fn linear_rejects_scalar_captured_by_lambda() {
+    let msg = expect_linear_reject(
+        "data Token = Token Integer\n\
+         bad :: Token %1 -> (Integer -> Integer)\n\
+         bad (Token n) = \\x -> n + x\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'n' must be consumed exactly once"), "{}", msg);
+    assert!(msg.contains("captured by a function value"), "{}", msg);
 }
 
 /// A `>>=` whose continuation is a NAMED function with an unrestricted
@@ -8469,13 +8563,13 @@ fn linear_rejects_unrestricted_bind_continuation() {
     assert!(msg.contains("not '%1'"), "{}", msg);
 }
 
-/// A derived binder inherits the STRICTEST bound among everything the
-/// scrutinee consumed: here the scrutinee touches both a dup-friendly
-/// scalar alias ('a', at-least-once) and a `%1` value ('t'), and 'a' sorts
-/// first alphabetically — the alias must still be held to exactly-once, or
-/// the pair would launder duplication of 't'.
+/// A scrutinee that consumes two tracked values (the scalar field 'a' and
+/// the `%1` value 't' — both exactly-once, scalars included) taints the
+/// tuple's binders; a double use of the aliased 'tok' is a double use of
+/// 't' and rejects. (The origin names 'a': among equal-rank sources the
+/// taint picks the alphabetically first for stable diagnostics.)
 #[test]
-fn linear_rejects_double_use_through_mixed_bound_taint() {
+fn linear_rejects_double_use_through_multi_source_taint() {
     let msg = expect_linear_reject(
         "data Token = Token Integer\n\
          useOnce :: Token %1 -> Integer\n\
@@ -8487,7 +8581,7 @@ fn linear_rejects_double_use_through_mixed_bound_taint() {
          main = putStrLn \"no\"\n",
     );
     assert!(msg.contains("'tok' must be consumed exactly once"), "{}", msg);
-    assert!(msg.contains("pattern-bound from 't'"), "{}", msg);
+    assert!(msg.contains("pattern-bound from 'a'"), "{}", msg);
 }
 
 /// Erasure of the exactly-once positive shapes: a tainted case consumed in

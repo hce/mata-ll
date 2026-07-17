@@ -60,18 +60,19 @@ viaRecursion t n = go t n
 -- continuation: Maybe's bind skips the continuation on Nothing, so a
 -- consumption there would leak on that path and is rejected (exactly-once,
 -- as in GHC — Maybe's bind cannot promise to run a linear continuation).
--- The scalar `n` aliases the consumption and is forced by the continuation.
+-- The scalar `n` aliases the consumption and is itself tracked
+-- exactly-once; the continuation's single `n + 1` is that one use.
 viaMaybe :: Token %1 -> Maybe Integer
 viaMaybe t = do
   n <- Just (useOnce t)
   pure (n + 1)
 
 -- A `%1` consumer defined via the polymorphic helper in IO, mixed into an
--- ordinary do-block. (The scalar where-binding consumes the token exactly
--- once; only the plain Integer is handed to assert.)
+-- ordinary do-block. The scalar result of the linear chain stays tracked,
+-- so it is consumed by the strict `==` in the if-condition — handing it to
+-- an unrestricted function (like `assert`) would be rejected.
 shred :: Token %1 -> IO ()
-shred t = assert (v == 7) "shred: consumed the right token"
-  where v = apply useOnce t
+shred t = if apply useOnce t == 7 then putStrLn "shred: consumed the right token" else putStrLn "shred: WRONG TOKEN"
 
 main :: IO ()
 main = do
@@ -87,4 +88,5 @@ main = do
   shred (Token 7)
   putStrLn "after"
 -- expect: before
+-- expect: shred: consumed the right token
 -- expect: after

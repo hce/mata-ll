@@ -3,34 +3,36 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Linear types phase 3: close the scalar-laundering accept-gap (full GHC
-      parity on scalars).** The one known ACCEPT-direction hole in the linear
-      checker: a scalar VALUE (`Integer`/`Bool`/`Char`/… — the memoization-
-      exempt types) derived from a `%1` binding and then laundered *multi-step*
-      through unrestricted code can be counted as consumed even though laziness
-      may never force it, so a leak slips through. Narrow: every direct form
-      rejects (unused binding, unused scalar alias/field, wildcard, discarded
-      result, a one-step `constUnit (useOnce t)`); only the untracked multi-step
-      chain escapes. Documented in `usage.rs`, and GHC rejects all of these —
-      GHC has no scalar exemption at all.
-      Root cause: the scalar-memoization relaxation from the affine phase — a
-      scalar alias is `Bound::AtLeastOnce` (usable repeatedly, must be forced
-      once) rather than exactly-once, because the runtime memoizes the thunk so
-      duplicating a scalar is operationally harmless. The exemption stops
-      tracking a scalar once it flows into unrestricted position, which is where
-      the multi-step chain loses the obligation.
-      Fix direction: track a `%1`-derived scalar's consumption obligation
-      through unrestricted contexts (or drop the exemption entirely for
-      scalars). NOT a pure win — dropping the exemption also rejects the
-      operationally-harmless scalar-duplication cases the design intentionally
-      allows (`go + go where go = useOnce t`), moving mata-ll from
-      "more permissive than GHC but operationally sound" to strict GHC parity.
-      So this is a deliberate semantics decision (parity vs. the memoization
-      relaxation), not just a bug fix — decide the target before implementing.
-      Soundness note: the current gap is accept-direction (a leak may pass),
-      unlike every other approximation in the checker, which rejects.
-
 ## Completed
+
+- [x] **Linear types phase 3: scalar-laundering accept-gap closed — strict GHC
+      parity on scalars.** The scalar-memoization exemption is GONE: a scalar
+      (`Integer`/`Number`/`Bool`/`String`) derived from a `%1`/`%m` value —
+      pattern-bound, `<-`-bound, or a `let`/`where` value binding — is now
+      tracked exactly-once like every other alias, exactly as GHC does (GHC has
+      no Movable-style scalar rule in the type system). This was a deliberate
+      semantics decision, not a pure win: the operationally-harmless
+      scalar-duplication the design previously allowed (`go + go where
+      go = useOnce t` — memoization forces the thunk once) now REJECTS, the
+      accepted price of parity. What it buys: the one ACCEPT-direction hole is
+      closed — a pending consumption parked in a scalar's thunk can no longer
+      be counted as consumed after the scalar flows into unrestricted position
+      (the multi-step `let n = useOnce t in constUnit n` launder, the
+      derived-alias flow into an unrestricted function, and a tracked scalar
+      captured by a lambda all reject now). Implementation: derived binders
+      inherit the source bound at every non-`()` type; scalar-typed value
+      bindings join the taint set; the used-many-times-scalar acceptance in the
+      binding-group scaling is gone; `Bound::AtLeastOnce` (and the vacuous
+      `Violation::bound`) are deleted outright — nothing produces them anymore.
+      The `()` run-for-effect exemption is untouched, and the unannotated-`let`
+      use-count scaling (dead bindings charge zero; more permissive than GHC
+      but operationally sound) deliberately remains. Checker-only: codegen is
+      byte-identical (erasure tests unchanged and green). Tests:
+      linear_rejects_scalar_where_binding_double_use,
+      linear_rejects_scalar_laundered_through_let_binding,
+      linear_rejects_scalar_alias_flow_into_unrestricted_function,
+      linear_rejects_scalar_captured_by_lambda, plus the updated positive
+      fixtures (linear_affine_basic.mll, linear_mult_poly.mll).
 
 - [x] **Linear types (`a %1 -> b`), full — exactly-once + multiplicity
       polymorphism.** `%1` is GHC's linear arrow: consumed EXACTLY once
@@ -54,17 +56,16 @@ MATA-LL TODO
       count, so a never-forced binding counts zero and leaks; consumption
       reachable only through a bypassable path (Maybe continuation,
       short-circuit operand, wildcard, discarded non-`()` result) rejects.
-      Scalar aliases keep the memoization relaxation (usable repeatedly, forced
-      at least once). Dictionaries stay unrestricted. Everything erases: the
+      Scalar aliases are tracked exactly-once like everything else — the
+      scalar-memoization relaxation was removed in phase 3 (see the entry
+      above): strict GHC parity, no remaining accept-direction gap.
+      Dictionaries stay unrestricted. Everything erases: the
       emitted Lua is byte-identical (regression-tested against the tracker
-      decode). Boundary (all deviations REJECT, never false-accept — except the
-      one noted): the Lua host side of a `%1` FFI signature is trusted; some
+      decode). Boundary (all deviations REJECT, never false-accept): the Lua
+      host side of a `%1` FFI signature is trusted; some
       constructs over-reject conservatively (wildcard over a tainted scalar
       scrutinee, non-`()` result discards, record updates on tainted records).
-      One documented ACCEPT-direction gap inherited from the scalar-memoization
-      exemption: an *untracked* scalar laundered multi-step through unrestricted
-      code can be counted as consumed though laziness may not force it (GHC has
-      no scalar exemption; direct forms all reject). Tests:
+      Tests:
       linear_affine_basic.mll, linear_mult_poly.mll + the linear_rejects_* /
       erasure tests in run_mll.rs.
 

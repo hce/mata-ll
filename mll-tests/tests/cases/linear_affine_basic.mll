@@ -8,11 +8,11 @@
 data Token = Token Integer
 data Box = Box Token
 
--- A %1 consumer may destructure its argument; the scalar field is plain
--- data and may be duplicated freely (memoized — the destructuring consumed
--- the Token, and n must merely be forced at least once).
+-- A %1 consumer may destructure its argument; the scalar field is tracked
+-- exactly-once like every other part of the value (GHC parity — no scalar
+-- exemption), and the one strict `*` here is its one consumption.
 useOnce :: Token %1 -> Integer
-useOnce (Token n) = n + n
+useOnce (Token n) = n * 2
 
 -- Session style: consume the resource once and hand it back.
 step :: Token %1 -> (Token, Integer)
@@ -45,10 +45,13 @@ caseBoth b n = case b of
 withToken :: (Token %1 -> Integer) -> Integer
 withToken f = f (Token 21)
 
--- A scalar where-binding may be used repeatedly: the thunk is memoized, so
--- the %1 argument is consumed exactly once no matter how often `go` is read.
-memoized :: Token %1 -> Integer
-memoized t = go + go
+-- A scalar where-binding built from a %1 value is tracked exactly-once
+-- like the value itself: used once here, so the token is consumed exactly
+-- once. (Reading `go` twice — the old scalar-memoization relaxation — now
+-- rejects; see linear_rejects_scalar_where_binding_double_use in
+-- run_mll.rs.)
+onceVia :: Token %1 -> Integer
+onceVia t = go + 1
   where go = useOnce t
 
 -- The explicit unrestricted spellings are accepted and mean a plain arrow.
@@ -63,9 +66,12 @@ both :: (Token, Token) %1 -> Integer
 both (a, b) = useOnce a + useOnce b
 
 -- IO: a %1 action consumer, used once inside a do-block, with the argument
--- threaded through other statements.
+-- threaded through other statements. The tracked scalar `n` is consumed by
+-- the strict `==` in the if-condition — handing it to an unrestricted
+-- function (like `assert`) would be rejected, since a plain arrow makes no
+-- exactly-once promise.
 shred :: Token %1 -> IO ()
-shred (Token n) = assert (n == 7) "shred: consumed the right token"
+shred (Token n) = if n == 7 then putStrLn "shred: consumed the right token" else putStrLn "shred: WRONG TOKEN"
 
 main :: IO ()
 main = do
@@ -81,11 +87,12 @@ main = do
   assert (caseBoth (Box (Token 4)) 1 == 8) "case join, True side"
   assert (caseBoth (Box (Token 4)) 0 == 9) "case join, False side"
   assert (withToken (\t -> useOnce t) == 42) "lambda through %1 HOF"
-  assert (memoized (Token 5) == 20) "memoized scalar where-binding"
+  assert (onceVia (Token 5) == 11) "scalar where-binding consumed once"
   assert (plainManyTick (Token 8) == 17) "%Many and %'Many spellings"
   assert (both (Token 1, Token 2) == 6) "tuple-pattern %1 argument"
   putStrLn "before"
   shred (Token 7)
   putStrLn "after"
 -- expect: before
+-- expect: shred: consumed the right token
 -- expect: after
