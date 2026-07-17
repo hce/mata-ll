@@ -394,9 +394,9 @@ impl CodeGen {
                 self.gen_expr(a);
                 self.emit(&format!(", {})", desc));
             } else {
-                self.emit("__force(");
-                self.gen_expr(a);
-                self.emit(")");
+                // The host must see a value, never a thunk — but skip the
+                // wrapper when gen_expr's own emission already yields WHNF.
+                self.gen_forced(a);
             }
         }
         if tail_start < args.len() {
@@ -559,10 +559,10 @@ impl CodeGen {
         let desc_str = desc.as_deref().unwrap_or("false");
         let root = Self::ffi_root_name(lua_func);
         if let Some(method) = lua_func.strip_prefix(':') {
-            self.emit("(function() local __recv = __force(");
-            self.gen_expr(&args[0]);
+            self.emit("(function() local __recv = ");
+            self.gen_forced(&args[0]);
             self.emit(&format!(
-                "); return __mll_pcall({}, {:?}, __recv.{}, __recv",
+                "; return __mll_pcall({}, {:?}, __recv.{}, __recv",
                 desc_str, root, method
             ));
             self.gen_ffi_args(&args[1..], true);
@@ -2530,9 +2530,9 @@ impl CodeGen {
                     // error on a zero divisor and use native integer floor
                     // division (Lua 5.3+ `//`) when the host has it.
                     self.emit(if op == "div" { "__mll_div(" } else { "__mll_mod(" });
-                    self.gen_operand_subst(lhs, subst);
+                    self.gen_forced_subst(lhs, subst);
                     self.emit(", ");
-                    self.gen_operand_subst(rhs, subst);
+                    self.gen_forced_subst(rhs, subst);
                     self.emit(")");
                     return;
                 }
@@ -2584,9 +2584,9 @@ impl CodeGen {
                 };
                 if is_builtin_op(op) {
                     self.emit("(");
-                    self.gen_operand_subst(lhs, subst);
+                    self.gen_forced_subst(lhs, subst);
                     self.emit(&format!(" {} ", lua_op));
-                    self.gen_operand_subst(rhs, subst);
+                    self.gen_forced_subst(rhs, subst);
                     self.emit(")");
                 } else {
                     let sop = sanitize_name(op);
@@ -2635,9 +2635,17 @@ impl CodeGen {
                 self.indent += 1;
                 self.emit_indent(); self.emit("return ");
                 if eta_count > 0 {
-                    self.emit("__force(");
-                    self.gen_expr_subst(inner_body, &inner_subst);
-                    self.emit(&format!(")({})", eta_params.join(", ")));
+                    // The callee position needs a WHNF function value; when
+                    // the emission already yields one, gen_callee_subst only
+                    // adds the parens a bare fn literal needs to be called.
+                    if self.gen_expr_subst_yields_whnf(inner_body, &inner_subst) {
+                        self.gen_callee_subst(inner_body, &inner_subst);
+                    } else {
+                        self.emit("__force(");
+                        self.gen_expr_subst(inner_body, &inner_subst);
+                        self.emit(")");
+                    }
+                    self.emit(&format!("({})", eta_params.join(", ")));
                 } else {
                     self.gen_expr_subst(inner_body, &inner_subst);
                 }
@@ -2872,9 +2880,8 @@ impl CodeGen {
                     self.emit(&format!("__mll_ffi_decode({}, ", desc));
                 }
                 if let Some(method) = lua_func.strip_prefix(':') {
-                    self.emit("__force(");
-                    self.gen_expr(&args[0]);
-                    self.emit(&format!("):{}", method));
+                    self.gen_forced_prefix(&args[0]);
+                    self.emit(&format!(":{}", method));
                     self.emit("(");
                     self.gen_ffi_args(&args[1..], false);
                     self.emit(")");
@@ -3412,77 +3419,173 @@ impl CodeGen {
         if needs_wrap { self.emit(")"); }
     }
 
-    /// Emit an operand of a strict primitive (arithmetic, comparison) so the
-    /// emitted Lua yields a forced scalar rather than a thunk.
+    /// True when the Lua that `gen_expr` emits for `expr` is GUARANTEED to
+    /// evaluate to a WHNF (non-thunk) value, so wrapping that emission in
+    /// `__force` is provably redundant.
     ///
-    /// gen_expr emits "concrete" variables bare, on the assumption the caller
-    /// already forced them (the strict-parameter convention). That assumption
-    /// can fail: a parameter reaches a function as an unevaluated thunk when
-    /// the strictness analysis is incomplete, or when the function is invoked
-    /// through a higher-order position the caller could not specialize. A
-    /// strict operator must see a value, so force variables (even concrete
-    /// ones) and any other potentially-thunk expression. Literals, negations
-    /// and nested primitive operations already denote values and are emitted
-    /// directly.
-    fn gen_operand(&mut self, expr: &TExpr) {
+    /// This is the single point of truth every "I need a forced value here"
+    /// emission site consults (see gen_forced / gen_forced_prefix): without
+    /// it, sites wrapped `__force(` around gen_expr output blindly, which
+    /// re-forced already-concrete variables and produced nonsensical
+    /// `__force(__force(x))` doubles — pure waste on hot paths (`__force`
+    /// was 27% of the tracker benchmark's runtime).
+    ///
+    /// `__force` is idempotent, so a `false` here only costs a cheap probe;
+    /// soundness requires NO false positives — every `true` arm below must be
+    /// justified by the corresponding gen_expr emission:
+    ///   - Lit: denotes a value. Negate: emits `(-…)`, a number.
+    ///   - Var: the gen_expr Var arm emits a bare name only when it is in
+    ///     `concrete_vars` (provably WHNF) and `__force(name)` otherwise;
+    ///     the special names (`otherwise`, `seq`, `div`, `mod`) emit a
+    ///     boolean or a runtime function value.
+    ///   - Con: `[]` is nil; a nullary constructor is a prebuilt table; a
+    ///     constructor with fields references a Lua function value.
+    ///   - Tuple: emits a Lua table literal (fields may be lazy, but WHNF is
+    ///     about the head, and a table already is one).
+    ///   - Lambda / OpFunc: emit Lua function literals.
+    ///   - InfixApp: see infix_yields_whnf.
+    ///   - App of a record accessor: emitted as `__force(container[i])`.
+    ///   - App of a resolved primitive eq/ord/concat method (2 args): inlined
+    ///     as a native Lua operator over forced operands (see the gen_expr
+    ///     App arm and primitive_method_lua_op).
+    /// Everything else (general calls, if/case/let IIFEs, SpecCalls) may
+    /// legitimately yield a thunk and reports false.
+    fn gen_expr_yields_whnf(&self, expr: &TExpr) -> bool {
         match &expr.kind {
-            TExprKind::Lit(_) | TExprKind::Negate(_) => self.gen_expr(expr),
-            TExprKind::InfixApp { op, .. }
-                if is_builtin_op(op) || op == "div" || op == "mod" => self.gen_expr(expr),
-            TExprKind::Paren(inner) => self.gen_operand(inner),
-            TExprKind::Var(name) if name == "otherwise" => self.emit("true"),
-            TExprKind::Var(name) => {
-                // Trust the concrete marking: a genuinely-concrete variable is
-                // already a forced value, so emitting it bare (as gen_expr does)
-                // avoids a redundant __force on the arithmetic hot path. A
-                // non-concrete variable is forced.
-                let sname = sanitize_name(name);
-                let lref = self.lua_ref(&sname);
-                if self.concrete_vars.contains(&sname) {
-                    self.emit(&lref);
-                } else {
-                    self.emit("__force(");
-                    self.emit(&lref);
-                    self.emit(")");
+            TExprKind::Lit(_) | TExprKind::Negate(_) | TExprKind::Var(_)
+            | TExprKind::Con(_) | TExprKind::Tuple(_)
+            | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
+            TExprKind::Paren(inner) => self.gen_expr_yields_whnf(inner),
+            TExprKind::InfixApp { op, .. } => Self::infix_yields_whnf(op),
+            TExprKind::App(func, _) => {
+                if let TExprKind::Var(name) = &func.kind
+                    && self.record_accessors.contains_key(&sanitize_name(name)) {
+                        return true;
+                    }
+                // Fully-applied primitive typeclass method → native operator.
+                let mut n_args = 0usize;
+                let mut f = expr;
+                while let TExprKind::App(inner_f, _) = &f.kind {
+                    n_args += 1;
+                    f = inner_f.as_ref();
                 }
+                n_args == 2
+                    && matches!(&f.kind, TExprKind::Var(name)
+                        if primitive_method_lua_op(name).is_some())
             }
-            _ => {
-                self.emit("__force(");
-                self.gen_expr(expr);
-                self.emit(")");
-            }
+            _ => false,
         }
     }
 
-    /// Substituting counterpart of gen_operand, for the inline path.
-    fn gen_operand_subst(
+    /// Whether the gen_expr emission for an InfixApp with this operator
+    /// always yields WHNF. `div`/`mod` lower to `__mll_div`/`__mll_mod`,
+    /// which return numbers. The specially-lowered operators (`$`
+    /// application, `.` composition applied later, `++`/`!!`/`:` list
+    /// runtime calls, `seq`'s returned second operand, `>>=`/`>>` action
+    /// results) may yield an unforced value even though some are listed in
+    /// is_builtin_op for cheapness, so they must be excluded explicitly.
+    /// The remaining builtins emit native Lua operators over operands that
+    /// gen_forced already forced, so the result is a scalar/boolean/string.
+    fn infix_yields_whnf(op: &str) -> bool {
+        match op {
+            "div" | "mod" => true,
+            "$" | "." | "++" | "!!" | ":" | "seq" | ">>=" | ">>" => false,
+            o => is_builtin_op(o),
+        }
+    }
+
+    /// Substituting counterpart of gen_expr_yields_whnf: WHNF-ness of the
+    /// gen_expr_subst emission. The arms mirror gen_expr_subst exactly; note
+    /// its App arm always emits a generic call (no accessor / primitive-op
+    /// inline), so App is never WHNF here, and a substituted variable stands
+    /// for its replacement, emitted by plain gen_expr.
+    fn gen_expr_subst_yields_whnf(
+        &self,
+        expr: &TExpr,
+        subst: &std::collections::HashMap<String, &TExpr>,
+    ) -> bool {
+        if !subst.keys().any(|k| expr_references_name(expr, k)) {
+            // gen_expr_subst delegates wholesale to gen_expr in this case.
+            return self.gen_expr_yields_whnf(expr);
+        }
+        match &expr.kind {
+            TExprKind::Var(name) => match subst.get(name.as_str()) {
+                Some(repl) => self.gen_expr_yields_whnf(repl),
+                None => true, // gen_expr Var arm — see gen_expr_yields_whnf
+            },
+            TExprKind::Lit(_) | TExprKind::Negate(_) | TExprKind::Con(_)
+            | TExprKind::Tuple(_) | TExprKind::Lambda { .. } => true,
+            TExprKind::Paren(inner) => self.gen_expr_subst_yields_whnf(inner, subst),
+            TExprKind::InfixApp { op, .. } => Self::infix_yields_whnf(op),
+            _ => false,
+        }
+    }
+
+    /// Emit `expr` so the result is guaranteed WHNF, forcing it EXACTLY as
+    /// often as needed: no `__force` wrapper when gen_expr's own output
+    /// already yields WHNF (a concrete variable stays bare, a non-concrete
+    /// variable keeps its single force, a native-operator inline stays
+    /// unwrapped), and one wrapper otherwise. Used for strict-primitive
+    /// operands, scrutinees, FFI arguments — every value-position that must
+    /// not see a thunk.
+    fn gen_forced(&mut self, expr: &TExpr) {
+        if self.gen_expr_yields_whnf(expr) {
+            self.gen_expr(expr);
+        } else {
+            self.emit("__force(");
+            self.gen_expr(expr);
+            self.emit(")");
+        }
+    }
+
+    /// Substituting counterpart of gen_forced, for the inline path. A
+    /// substituted parameter is emitted as its call-site replacement,
+    /// weighed exactly like gen_forced would weigh it directly — this is
+    /// what used to blindly emit `__force(<replacement>)` and produced the
+    /// hot-loop `__force(__force(ch))` doubles.
+    fn gen_forced_subst(
         &mut self,
         expr: &TExpr,
         subst: &std::collections::HashMap<String, &TExpr>,
     ) {
-        match &expr.kind {
-            TExprKind::Lit(_) | TExprKind::Negate(_) => self.gen_expr_subst(expr, subst),
-            TExprKind::InfixApp { op, .. }
-                if is_builtin_op(op) || op == "div" || op == "mod" => {
-                    self.gen_expr_subst(expr, subst)
-                }
-            TExprKind::Paren(inner) => self.gen_operand_subst(inner, subst),
-            TExprKind::Var(name) if name == "otherwise" => self.emit("true"),
-            TExprKind::Var(name) => {
-                self.emit("__force(");
-                if let Some(repl) = subst.get(name.as_str()) {
-                    self.gen_expr(repl);
-                } else {
-                    let lref = self.lua_ref(&sanitize_name(name));
-                    self.emit(&lref);
-                }
-                self.emit(")");
-            }
-            _ => {
-                self.emit("__force(");
-                self.gen_expr_subst(expr, subst);
-                self.emit(")");
-            }
+        if self.gen_expr_subst_yields_whnf(expr, subst) {
+            self.gen_expr_subst(expr, subst);
+        } else {
+            self.emit("__force(");
+            self.gen_expr_subst(expr, subst);
+            self.emit(")");
+        }
+    }
+
+    /// Emit an expression in Lua *prefixexp* position (a method-call
+    /// receiver `<here>:m(...)` or an indexing base `<here>[i]`) so the
+    /// result is guaranteed WHNF. Lua only permits a name, an index, a
+    /// call, or a parenthesised expression there, so this cannot simply
+    /// delegate to gen_forced: a bare literal/table/function emission would
+    /// be a syntax error before `:`/`[`. A variable is safe — gen_expr
+    /// emits a bare name (concrete) or a `__force(...)` call, both valid
+    /// prefixexps — as is a record-accessor projection, whose emission is
+    /// itself a `__force(...)` call. Everything else keeps the `__force`
+    /// wrapper, whose call syntax doubles as the required prefix.
+    fn gen_forced_prefix(&mut self, expr: &TExpr) {
+        let mut e = expr;
+        while let TExprKind::Paren(inner) = &e.kind {
+            e = inner.as_ref();
+        }
+        let bare_ok = match &e.kind {
+            // `otherwise` emits `true` and `[]` emits `nil` — not prefixexps.
+            TExprKind::Var(name) => name != "otherwise",
+            TExprKind::Con(name) => name != "[]",
+            TExprKind::App(func, _) => matches!(&func.kind, TExprKind::Var(name)
+                if self.record_accessors.contains_key(&sanitize_name(name))),
+            _ => false,
+        };
+        if bare_ok {
+            self.gen_expr(e);
+        } else {
+            self.emit("__force(");
+            self.gen_expr(e);
+            self.emit(")");
         }
     }
 
@@ -3569,9 +3672,21 @@ impl CodeGen {
     /// idempotent, so an already-evaluated `a` costs nothing extra; a lazy `a`
     /// (a thunk of `error`/loop) is run here, exactly as `seq` requires.
     fn gen_seq_inline(&mut self, a: &TExpr, b: &TExpr) {
-        self.emit("(function() __force(");
-        self.gen_expr(a);
-        self.emit("); return ");
+        // Force `a` to WHNF for effect. When gen_expr's own emission already
+        // yields WHNF (a variable — bare if concrete, singly forced
+        // otherwise — or a native operation), evaluating it IS the force;
+        // bind it to a throwaway local because a bare expression is not a
+        // Lua statement. Only an emission that can yield a thunk needs the
+        // explicit `__force(...)` call (which is also statement syntax).
+        if self.gen_expr_yields_whnf(a) {
+            self.emit("(function() local _ = ");
+            self.gen_expr(a);
+            self.emit("; return ");
+        } else {
+            self.emit("(function() __force(");
+            self.gen_expr(a);
+            self.emit("); return ");
+        }
         // Strip redundant source parens around the returned expression: in Lua
         // `return f(x)` is a proper tail call but `return (f(x))` is not, so a
         // parenthesised call here would defeat TCO and blow the stack on deep
@@ -3851,22 +3966,15 @@ impl CodeGen {
                 }
 
                 // Typeclass methods on primitive types → inline as Lua operators
+                // (primitive_method_lua_op is also what gen_expr_yields_whnf
+                // keys on to know this emission is a forced native operation).
                 if args.len() == 2
                     && let TExprKind::Var(name) = &f.kind {
-                        let lua_op = match name.as_str() {
-                            "eq_Integer" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
-                            "ord_lt__Integer" | "ord_lt__Number" | "ord_lt__String" | "ord_lt__ByteString" => Some("<"),
-                            "ord_gt__Integer" | "ord_gt__Number" | "ord_gt__String" | "ord_gt__ByteString" => Some(">"),
-                            "ord_le__Integer" | "ord_le__Number" | "ord_le__String" | "ord_le__ByteString" => Some("<="),
-                            "ord_ge__Integer" | "ord_ge__Number" | "ord_ge__String" | "ord_ge__ByteString" => Some(">="),
-                            "semigroup_String" => Some(".."),
-                            _ => None,
-                        };
-                        if let Some(op) = lua_op {
+                        if let Some(op) = primitive_method_lua_op(name) {
                             self.emit("(");
-                            self.gen_operand(args[0]);
+                            self.gen_forced(args[0]);
                             self.emit(&format!(" {} ", op));
-                            self.gen_operand(args[1]);
+                            self.gen_forced(args[1]);
                             self.emit(")");
                             return;
                         }
@@ -3965,9 +4073,9 @@ impl CodeGen {
                     // error on a zero divisor and use native integer floor
                     // division (Lua 5.3+ `//`) when the host has it.
                     self.emit(if op == "div" { "__mll_div(" } else { "__mll_mod(" });
-                    self.gen_operand(lhs);
+                    self.gen_forced(lhs);
                     self.emit(", ");
-                    self.gen_operand(rhs);
+                    self.gen_forced(rhs);
                     self.emit(")");
                     return;
                 }
@@ -3983,7 +4091,7 @@ impl CodeGen {
                     self.emit("__mll_list_index(");
                     self.gen_expr(lhs);
                     self.emit(", ");
-                    self.gen_operand(rhs);
+                    self.gen_forced(rhs);
                     self.emit(")");
                     return;
                 }
@@ -4169,9 +4277,9 @@ impl CodeGen {
                     // Lua-native operator: emit as infix. Operands are forced —
                     // a thunk is a table, which would corrupt arithmetic and
                     // comparison, and is truthy under `and`/`or`.
-                    self.emit("("); self.gen_operand(lhs);
+                    self.emit("("); self.gen_forced(lhs);
                     self.emit(&format!(" {} ", lua_op));
-                    self.gen_operand(rhs); self.emit(")");
+                    self.gen_forced(rhs); self.emit(")");
                 } else {
                     // User-defined or non-Lua operator: emit as function call
                     let sop = sanitize_name(op);
@@ -4197,7 +4305,11 @@ impl CodeGen {
                 let saved_locals = self.local_vars.clone();
                 let saved_concrete = self.concrete_vars.clone();
                 self.emit("(function(_cg)\n"); self.indent += 1;
-                self.emit_line("_cg = __force(_cg)");
+                // Entry force, skipped when the argument emission below
+                // (gen_expr at the call parens) already yields WHNF.
+                if !self.gen_expr_yields_whnf(scrutinee) {
+                    self.emit_line("_cg = __force(_cg)");
+                }
                 self.local_vars.insert("_cg".to_string());
                 self.concrete_vars.insert("_cg".to_string());
                 let clauses: Vec<TClause> = branches.iter().map(|b| TClause {
@@ -4215,7 +4327,7 @@ impl CodeGen {
             }
             TExprKind::Case { scrutinee, branches } => {
                 self.emit("(function()\n"); self.indent += 1;
-                self.emit_indent(); self.emit("local _s = __force("); self.gen_expr(scrutinee); self.emit(")\n");
+                self.emit_indent(); self.emit("local _s = "); self.gen_forced(scrutinee); self.emit("\n");
                 for (i, branch) in branches.iter().enumerate() {
                     let mut conditions = Vec::new();
                     let mut bindings = Vec::new();
@@ -4333,9 +4445,17 @@ impl CodeGen {
                     // The body still has function type (e.g. `\x -> f x` at
                     // type a -> b -> c): apply the eta params to its value,
                     // mirroring the top-level eta-expansion in gen_function.
-                    self.emit("__force(");
-                    self.gen_expr(inner_body);
-                    self.emit(&format!(")({})", eta_params.join(", ")));
+                    // The callee must be WHNF; when the emission already
+                    // yields that, gen_callee only adds the parens a bare fn
+                    // literal needs to be called.
+                    if self.gen_expr_yields_whnf(inner_body) {
+                        self.gen_callee(inner_body);
+                    } else {
+                        self.emit("__force(");
+                        self.gen_expr(inner_body);
+                        self.emit(")");
+                    }
+                    self.emit(&format!("({})", eta_params.join(", ")));
                 } else {
                     // Lambda body is in tail position — strip parens for PTC.
                     self.gen_tail(inner_body, false);
@@ -4450,11 +4570,14 @@ impl CodeGen {
                     for i in 0..n {
                         if i > 0 { self.emit(" and "); }
                         self.emit(&self.lua_ref(eq_fns[i]));
-                        self.emit("(__force(");
-                        self.gen_expr(&args[0]);
-                        self.emit(&format!(")[{}], __force(", i + 1));
-                        self.gen_expr(&args[1]);
-                        self.emit(&format!(")[{}])", i + 1));
+                        self.emit("(");
+                        // Indexing base: the tuple cell must be WHNF, but a
+                        // concrete variable / already-forcing emission needs
+                        // no extra wrapper (see gen_forced_prefix).
+                        self.gen_forced_prefix(&args[0]);
+                        self.emit(&format!("[{}], ", i + 1));
+                        self.gen_forced_prefix(&args[1]);
+                        self.emit(&format!("[{}])", i + 1));
                     }
                     self.emit(")");
                 } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_list:") {
@@ -4481,9 +4604,9 @@ impl CodeGen {
                     // (Tuple `==` does the same via its `__force(a)[i]` inline;
                     // this projection is otherwise the sole `__mll_tup_get`
                     // consumer, generated only by generate_tuple_show.)
-                    self.emit("__force(__force(");
-                    self.gen_expr(&args[0]);
-                    self.emit(&format!(")[{}])", idx));
+                    self.emit("__force(");
+                    self.gen_forced_prefix(&args[0]);
+                    self.emit(&format!("[{}])", idx));
                 } else if let Some(rest) = specialized.strip_prefix("__mll_tup_ret:") {
                     // Multi-return FFI: pack Lua multiple returns into a tuple table
                     // Format: __mll_tup_ret:N:lua_func
@@ -4537,9 +4660,9 @@ impl CodeGen {
                         // receiver once and pass the method function with the
                         // receiver as the factory's first argument
                         // (`__recv.m(__recv, ...)` ≡ `__recv:m(...)`).
-                        self.emit("(function() local __recv = __force(");
-                        self.gen_expr(&args[0]);
-                        self.emit(&format!("); return __mll_iter(__recv.{}", method));
+                        self.emit("(function() local __recv = ");
+                        self.gen_forced(&args[0]);
+                        self.emit(&format!("; return __mll_iter(__recv.{}", method));
                         match &elem_desc {
                             Some(desc) =>
                                 self.emit(&format!(", {}, {:?}", desc, Self::ffi_root_name(lua_func))),
@@ -4572,9 +4695,8 @@ impl CodeGen {
                     self.emit(&format!("__mll_try({}, {:?}, ", desc_str, root));
                     if let Some(method) = lua_func.strip_prefix(':') {
                         // Method call try: handle:method(args)
-                        self.emit("__force(");
-                        self.gen_expr(&args[0]);
-                        self.emit(&format!("):{}", method));
+                        self.gen_forced_prefix(&args[0]);
+                        self.emit(&format!(":{}", method));
                         self.emit("(");
                         self.gen_ffi_args(&args[1..], false);
                         self.emit(")");
@@ -4599,9 +4721,8 @@ impl CodeGen {
                     self.emit(" end");
                 } else if let Some(method) = specialized.strip_prefix(':') {
                     // Method call FFI: arg0:method(arg1, arg2, ...)
-                    self.emit("__force(");
-                    self.gen_expr(&args[0]);
-                    self.emit(&format!("):{}", method));
+                    self.gen_forced_prefix(&args[0]);
+                    self.emit(&format!(":{}", method));
                     self.emit("(");
                     self.gen_ffi_args(&args[1..], false);
                     self.emit(")");
@@ -4618,9 +4739,8 @@ impl CodeGen {
                     }
                     if let Some(method) = lua_func.strip_prefix(':') {
                         // Method call IO: handle:method(args)
-                        self.emit("__force(");
-                        self.gen_expr(&args[0]);
-                        self.emit(&format!("):{}", method));
+                        self.gen_forced_prefix(&args[0]);
+                        self.emit(&format!(":{}", method));
                         self.emit("(");
                         self.gen_ffi_args(&args[1..], false);
                         self.emit(")");
@@ -4731,9 +4851,9 @@ impl CodeGen {
                     .map(|(fname, _, _)| self.luadict_field_key.contains_key(&sanitize_name(fname)))
                     .unwrap_or(false);
                 if is_luadict {
-                    self.emit("(function() local _r = __force(");
-                    self.gen_expr(record);
-                    self.emit("); local _u = {}; for _k, _v in pairs(_r) do _u[_k] = _v end");
+                    self.emit("(function() local _r = ");
+                    self.gen_forced(record);
+                    self.emit("; local _u = {}; for _k, _v in pairs(_r) do _u[_k] = _v end");
                     for (fname, _, val) in updates {
                         // Resolve the Haskell field name to its effective Lua
                         // key (`as "key"` rename) — the copied table is keyed
@@ -4751,9 +4871,9 @@ impl CodeGen {
                 }
                 // Generate: (function() local _r = __force(record)
                 //   local _u = {_r[1], _r[2], ...}; _u[i] = val; ...; return _u end)()
-                self.emit("(function() local _r = __force(");
-                self.gen_expr(record);
-                self.emit("); local _u = {");
+                self.emit("(function() local _r = ");
+                self.gen_forced(record);
+                self.emit("; local _u = {");
                 for i in 1..=*num_fields {
                     if i > 1 { self.emit(", "); }
                     self.emit(&format!("_r[{}]", i));
@@ -5227,6 +5347,22 @@ fn count_arrows(ty: &Ty) -> usize {
     match ty {
         Ty::Arrow(_, rest) => 1 + count_arrows(rest),
         _ => 0,
+    }
+}
+
+/// The native Lua operator a fully-applied (two-argument) resolved primitive
+/// typeclass method inlines to, or None. Single point of truth shared by the
+/// gen_expr App-arm inline and gen_expr_yields_whnf, so the two can never
+/// disagree about which calls become forced native operations.
+fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
+    match name {
+        "eq_Integer" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
+        "ord_lt__Integer" | "ord_lt__Number" | "ord_lt__String" | "ord_lt__ByteString" => Some("<"),
+        "ord_gt__Integer" | "ord_gt__Number" | "ord_gt__String" | "ord_gt__ByteString" => Some(">"),
+        "ord_le__Integer" | "ord_le__Number" | "ord_le__String" | "ord_le__ByteString" => Some("<="),
+        "ord_ge__Integer" | "ord_ge__Number" | "ord_ge__String" | "ord_ge__ByteString" => Some(">="),
+        "semigroup_String" => Some(".."),
+        _ => None,
     }
 }
 
@@ -6455,7 +6591,7 @@ do
 end
 
 -- First-class `div` / `mod`. The inline `a `div` b` / prefix-inline path passes
--- operands already forced (gen_operand), so __mll_div/__mll_mod above are the
+-- operands already forced (gen_forced), so __mll_div/__mll_mod above are the
 -- strict cores and never re-force — keeping the arithmetic hot path (e.g. the
 -- tracker mixer) free of redundant forces. But a first-class, partially applied,
 -- or higher-order use — `div 7 2`, `map (div 10) xs`, `foldr div z xs` — reaches

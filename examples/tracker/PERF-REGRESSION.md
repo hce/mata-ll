@@ -365,19 +365,17 @@ A/B on this machine (LuaJIT, `HongKong_Music.it`, 2-arg disk mode):
 | Build | Wall | Real-time | Peak RSS | Output md5 |
 |---|---|---|---|---|
 | regressed HEAD (before) | 338 s | 2.50× | 78 MB | `cdd386f…` |
-| **per-field demand (after)** | **120 s** | **0.89×** | **15.0 MB** | `cdd386f…` (identical) |
+| per-field demand | 120 s | 0.89× | 15.0 MB | `cdd386f…` (identical) |
+| **+ redundant-force fix** | **102 s** | **0.76×** | **15.0 MB** | `cdd386f…` (identical) |
 | `341b878` eager reference | 101 s | 0.75× | 14.7 MB | `cdd386f…` |
 
-2.8× faster, byte-identical, and the 5× thunk memory bloat is fully
-recovered (15.0 vs 14.7 MB). `luajit -jv` confirms the mixer's arithmetic
-lines no longer abort traces; the aborts that remain are closure sites the
-eager reference build shares (the per-call action closures, `advPos`'s
-first-class `when` argument, `mixFrames`' per-frame `pcm` thunk). The
-remaining ~19% gap to the eager build is `d3ef741`'s `__mll_div`/`__mll_mod`
-calls in place of inline `math.floor` (a deliberate correctness trade —
-div-by-zero must raise) plus those shared closures; candidates if it ever
-matters: a `when`/`unless` statement-position inline (same run-once
-justification as the ST fusion), and a checked inline div/mod.
+3.3× faster than the regression, byte-identical, and the 5× thunk memory
+bloat is fully recovered. `luajit -jv` confirms the mixer's arithmetic lines
+no longer abort traces. The demand fix alone left a ~19% gap to the eager
+build; the residual investigation below traced it — NOT to `d3ef741`'s
+`__mll_div`/`__mll_mod` calls (measured ~2 s) but to redundant `__force`
+emission — and a follow-up codegen fix closed it, landing at the eager
+build's 101 s.
 
 One latent bug surfaced and fixed along the way: the demand analysis'
 fixed-point env is name-keyed, and a user function SHADOWING a prelude name
@@ -386,3 +384,43 @@ harmlessly converging while both computed identical rows, oscillating
 forever once the new seeds made them differ. Same-named functions now share
 the MEET of their rows (a call site cannot be attributed to one of them),
 which is also the sound semantics.
+
+# Residual to the eager build: redundant `__force` (fixed)
+
+The demand fix left ~19 s between HEAD (120 s) and the `341b878` eager
+reference (101 s). Triangulating with a LuaJIT `-jp` profile plus A/B code
+diffs against the eager build (same source for `advPos`/`mixFrame`) placed
+it precisely:
+
+- **Profile:** 38% `__mll_run` (the ST-action `type(x)=="function"` dispatch)
+  + 27% `__force` — two-thirds of runtime is machinery, not mixing math.
+- **NOT div/mod:** stripping `__mll_div`/`__mll_mod` to branchless inline on a
+  copy saved only ~2 s. In a traced loop LuaJIT already inlines the
+  monomorphic call and constant-folds the `b == 0` guard (every hot divisor
+  is a literal), so that earlier `~19% is d3ef741` guess was wrong.
+- **NOT the `when`→`__mll_run` path:** byte-identical in the eager build, so
+  it is inherent ST-monad overhead, not a regression.
+- **The real cause — redundant forcing.** vs the eager build (same source)
+  the generator emitted 349 `__force(` sites vs 219, and 57
+  `__force(__force(x))` doubles vs 20. `__force` is idempotent, so
+  `__force(__force(ch))` on a parameter already forced at entry is pure
+  waste. Collapsing just the simple doubles on a copy (byte-identical)
+  recovered ~7 s.
+
+Root cause: `b0c9c5f` threaded demand-driven eager emission through codegen,
+but the knowledge of what `gen_expr`'s own output already guarantees stayed
+local to `gen_operand`. Every other "I need a forced value here" site — and
+especially the inline/substitution path `gen_operand_subst` — blindly
+wrapped `__force(` around `gen_expr(...)`, which itself already emits
+concrete vars bare and non-concrete vars as `__force(x)`, producing the
+doubles and re-forcing known-concrete values.
+
+Fix: a single `gen_expr_yields_whnf` predicate (the one source of truth for
+"this emission provably evaluates to WHNF" — literals, concrete/singly-forced
+vars, constructors, tuples, native-operator infix, record projections,
+inlined primitive eq/ord), plus `gen_forced`/`gen_forced_subst`/
+`gen_forced_prefix` helpers that force exactly once and never wrap a
+WHNF-yielding emission. Every blind wrap site routes through them and falls
+back to the old wrapper whenever WHNF cannot be proven, so no load-bearing
+force is dropped. Result: zero simple `__force(__force(x))` doubles remain,
+tracker 120 s → 102 s (byte-identical), suite 550 / 0.

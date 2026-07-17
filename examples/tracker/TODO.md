@@ -2,8 +2,9 @@ Tracker TODO
 ============
 
 Current: 135.5s of audio (HongKong_Music.it, 22 channels) rendered in
-120s (0.88x real-time on fast machine). 64-channel files are ~3x slower.
-(See PERF-REGRESSION.md for the 338s->120s per-field-demand recovery.)
+102s (0.76x real-time on fast machine). 64-channel files are ~3x slower.
+(See PERF-REGRESSION.md for the 338s->120s->102s recovery: per-field
+demand analysis plus redundant-force elimination.)
 
 ## Done
 
