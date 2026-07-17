@@ -29,6 +29,8 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+## [0.1.4] - 2026-07-17
+
 ### Changed
 
 - **`LuaIterator`'s type argument now names the RESULT list, and each yielded
@@ -288,9 +290,10 @@ API of the `mllc` library crate.)
   every per-frame cons cell and arithmetic thunk alive until the chunk was
   finally written — the classic lazy-accumulator space leak (GHC behaves
   identically on the same code) — inflating peak heap from ~20 MB to ~4.3 GB
-  on the CI benchmark and dropping decode speed from ~1.4x to ~0.9x realtime on
-  the development machine, below the 0.5x CI gate on slower runners. Decoded
-  output is byte-identical; the gate is back to ~1.4-1.6x realtime at ~20 MB.
+  on the CI benchmark. Decoded output is byte-identical and peak heap is back
+  to ~15 MB. (A separate speed regression that also shipped in 0.1.3 — the
+  thunked mixer that got JIT-blacklisted — is addressed by the demand-analysis
+  and redundant-force work under Performance below, not by this fix.)
 - **Every Lua string literal is now escaped through one canonical routine.**
   String escaping had been hand-written in three places and only the expression
   path (`gen_literal`) was correct: a string literal used in a *pattern* was
@@ -349,6 +352,26 @@ API of the `mllc` library crate.)
   alias (`type A = [A]`). Ordinary multi-level alias use charges only a few
   hundred units and is unaffected. Regression test:
   `doubling_alias_tower_yields_clean_size_error`.
+
+### Performance
+
+- **The tracker recovers the JIT multiplier it lost in 0.1.3.** Two changes in
+  0.1.3 — thunking the audio mixer's per-frame results (the non-strict-argument
+  work) and routing `div`/`mod` through a runtime wrapper — made the mixer's hot
+  loop allocate closures each iteration, which LuaJIT cannot compile: the trace
+  aborted on `NYI: bytecode FNEW`, the loop was blacklisted, and the whole inner
+  mixer fell back to the interpreter, losing roughly the entire ~4× JIT speedup.
+  Decoding `HongKong_Music.it` had regressed to **338 s wall (2.50× real-time),
+  78 MB peak RSS**. Two fixes restore it: (1) per-field demand analysis — a
+  greatest-fixpoint, branch-aware pass that keeps a provably-demanded binding
+  eager instead of thunked, so the mixer's arithmetic no longer builds closures
+  (338 s → 120 s); and (2) a WHNF-emission predicate that is the single source of
+  truth for "this expression is already forced", suppressing redundant `__force`
+  wraps at every strict site (120 s → **102 s / 0.76× real-time / 15 MB**). That
+  matches the pre-regression eager build (101 s) and the decoded output stays
+  byte-identical (`cdd386f6985dca3561fe1a2689231c78`) throughout. The demand
+  pass and the WHNF predicate are general codegen improvements, not
+  tracker-specific. See `examples/tracker/PERF-REGRESSION.md`.
 
 ## [0.1.3] - 2026-07-14
 

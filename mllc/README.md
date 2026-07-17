@@ -20,29 +20,37 @@ crate (which provides the `mll` command).
 
 ## Changelog
 
-Latest release — 0.1.3:
+Latest release — 0.1.4:
 
-- Correctness: non-strict semantics now hold for arguments the callee does not
-  demand — `g _ = 42; g (error "boom")` returns `42`. Argument and binding
-  evaluation uses a soundness-first weighing in which bottom is never forced
-  eagerly, trading some throughput for correct laziness.
-- Correctness: `return`/`pure` are non-strict — a returned value is left unforced
-  until it is demanded, matching GHC and the eagerness contract, so
-  `_ <- return (error "x")` and a bare `return (error "x")` statement no longer
-  raise. (A bottom returned inside `try` is caught only if it is forced there, as
-  in GHC.)
-- Performance: recursive calls in tail position compile to Lua proper tail calls
-  (deep tail recursion runs in constant stack); a greatest-fixpoint strictness
-  analysis stops tail accumulators from leaking thunks; the ByteString and
-  ST-array primitives are seeded as strict in their value/index arguments.
-- Correctness: `seq` now works in every application form — backtick infix
-  (``a `seq` b``), partial application (`seq a`), and first-class uses
-  (`foldr seq z xs`) — not just prefix. The other forms previously crashed at
-  runtime calling a nonexistent global `seq`. The prefix and backtick forms are
-  lowered inline so a `seq`-strict tail call stays a proper tail call.
-- Correctness: prefix and partially applied `div`/`mod` now work — `div 7 2`,
-  `map (div 10) xs`, and first-class uses (`foldr div z xs`) previously
-  type-checked then crashed at runtime; only the backtick forms worked.
+- Types: a full kind system. Kinds (`Type`, `Symbol`, `Type -> Type`, …) are
+  inferred for every type-level declaration and every written type is
+  kind-checked, so an ill-kinded instance head or signature (`instance Show
+  Maybe`, `Foldable Integer`) is now a compile-time error with a plain-language
+  explanation instead of silently miscompiling.
+- Types: promoted data types now have real kinds (DataKinds), and closed type
+  families reduce symbolically during unification — so a length-indexed
+  `Vec (Plus n m)` type-checks, runs with correct lengths, and keeps a length
+  mismatch a compile error.
+- Types: `Foldable`, `Traversable`, `Semigroup` and `Monoid` are now proper
+  typeclasses. `foldr`/`foldl` are Foldable methods; `length`/`null`/`elem`/
+  `sum`/`product` are generic over Foldable; user types join with ordinary
+  `instance` declarations. New `Data.Foldable`/`Data.Traversable` modules.
+- Soundness: unpacking an existential constructor now skolemizes the hidden
+  type variable, closing a hole where `coerce (MkShowBox x _) = x` coerced any
+  type to any type. Constructor contexts (`forall a. Show a => …`) are enforced
+  both ways.
+- Correctness: a `<-`-bound result of a user action is no longer assumed
+  already-forced (fixing a runtime "arithmetic on a table value" crash on a
+  strict use), and `runST` forces the state thread's result to WHNF.
+- Performance: the tracker benchmark recovers the JIT multiplier a 0.1.3
+  regression cost it — per-field demand analysis plus redundant-force
+  elimination take `HongKong_Music.it` from 338 s to 102 s (2.50× → 0.76×
+  real-time) at 15 MB, decoded output byte-identical.
+- Robustness: pathologically nested input and self-doubling type aliases now
+  report clean depth/size errors instead of crashing or hanging the compiler;
+  every Lua string literal escapes through one canonical routine; FFI target
+  names are validated at compile time; and every compiled module carries
+  `__MLLC_VERSION`/`__MLLC_COMMIT` provenance.
 
 See [CHANGELOG.md](https://github.com/hce/mata-ll/blob/main/CHANGELOG.md) for the
 full history.
