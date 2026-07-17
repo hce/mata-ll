@@ -576,6 +576,7 @@ mll_test!(div_mod_prefix_forms, "div_mod_prefix_forms.mll");
 // return/pure are non-strict: a returned bottom is not forced until demanded
 // (audit finding 6)
 mll_test!(return_non_strict, "return_non_strict.mll");
+mll_test!(return_bottom_interproc, "return_bottom_interproc.mll");
 
 // A <-bound user-action result may be a thunk (non-strict return): the binder
 // must not mark it concrete, and runST must force the thread's result to WHNF.
