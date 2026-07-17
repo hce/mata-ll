@@ -217,6 +217,24 @@ MATA-LL TODO
 - [x] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
 - [x] Reject bare type signatures with no definition (was silently compiling to nil at runtime; now a compile error, FFI sigs still allowed body-less)
 - [ ] Strict ST monad variant (LuaStrictArray or similar) for performance-critical code — to be discussed; current closure-based ST is only ~4% slower than direct mutations
+- [ ] **Constructor-level dead-code elimination (low priority).** DCE
+      (`dce.rs`) prunes only the function call-graph (`functions` +
+      `instance_fns`); data constructors are explicitly out of scope
+      (`dce.rs:32-33`) and codegen emits *every* `module.data_defs`
+      unconditionally (`codegen.rs:930-931`). So the four Prelude datatypes with
+      constructor slots — `ExitValue`, `Any`, `Either`, `Ordering` — ship in
+      every compiled file whether or not any live code references them (12
+      `__mll_fn` slots; `Maybe`/`Bool`/lists are builtins and add nothing). A
+      module that exports only code using `Either` still carries all 12. Bounded,
+      fixed cost — left in when function-DCE was added because the big win was
+      dropping the function-level Prelude. Fix: mark a constructor reachable iff a
+      kept function constructs it (a `Con` name, already collected in
+      `collect_expr`, `dce.rs:79`) or matches it in a pattern, then filter
+      `module.data_defs` (drop a whole `data` only when none of its constructors
+      are reached). The one gap to close: `collect_clause` (`dce.rs:64-73`) does
+      not walk case-branch *patterns* today (function-DCE never needed pattern
+      names), so constructor-DCE must also traverse patterns. ~15 emitted lines
+      saved per file; new surface area, so not worth it until it matters.
 - [x] Well-defined runtime errors when decoding a LuaUserData/LuaDict value that
       crosses the Lua FFI boundary. The type-directed FFI-result decoder
       (`__mll_ffi_decode`) now raises a descriptive
