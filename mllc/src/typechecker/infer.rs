@@ -866,7 +866,7 @@ impl Checker {
                 // The expected arrow at an application carries a FLEXIBLE
                 // multiplicity: it adopts the applied function's own (so a
                 // `%1` function can be applied like any other), and the
-                // affine-usage pass later reads the resolved multiplicity to
+                // linear-usage pass later reads the resolved multiplicity to
                 // decide how the application charges the argument (usage.rs).
                 let app_mult = self.fresh_mult();
 
@@ -966,8 +966,8 @@ impl Checker {
                     // Each lambda arrow gets a fresh multiplicity variable so
                     // the lambda can be used at a `%1` type: checking it
                     // against `a %1 -> b` binds the variable to One, and the
-                    // affine-usage pass then reads the resolved arrow to know
-                    // the binder is limited to one use (usage.rs).
+                    // linear-usage pass then reads the resolved arrow to know
+                    // the binder must be consumed exactly once (usage.rs).
                     let mult = self.fresh_mult();
                     if param != "_" {
                         local_env.insert(param.clone(), Scheme::mono(param_ty.clone()));

@@ -554,7 +554,7 @@ impl Qual<'_> {
             }
             Type::Var(_) | Type::Unit | Type::Promoted(_) => t.clone(),
             Type::App(a, b) => Type::App(Box::new(self.ty(a)), Box::new(self.ty(b))),
-            Type::Arrow(a, b, m) => Type::Arrow(Box::new(self.ty(a)), Box::new(self.ty(b)), *m),
+            Type::Arrow(a, b, m) => Type::Arrow(Box::new(self.ty(a)), Box::new(self.ty(b)), m.clone()),
             Type::List(x) => Type::List(Box::new(self.ty(x))),
             Type::IO(x) => Type::IO(Box::new(self.ty(x))),
             Type::ScopedLuaIO { scope_var, inner } => Type::ScopedLuaIO {

@@ -1223,7 +1223,7 @@ impl Parser {
         let lhs = self.parse_type_app()?;
         self.skip_newlines_and_indent();
         // A multiplicity annotation before the arrow: `a %1 -> b` (the
-        // argument is used at most once) or the explicit unrestricted
+        // argument is consumed exactly once) or the explicit unrestricted
         // spellings `a %Many -> b` / `a %'Many -> b`. `%` only ever means
         // this in a type — types have no operators.
         if self.at(&Token::Operator("%".to_string())) {
@@ -1243,25 +1243,34 @@ impl Parser {
             self.advance();
             self.skip_newlines_and_indent();
             let rhs = self.parse_type_arrow()?;
-            Ok(Type::Arrow(Box::new(lhs), Box::new(rhs), crate::types::Mult::Many))
+            Ok(Type::Arrow(Box::new(lhs), Box::new(rhs), MultAnn::Many))
         } else {
             Ok(lhs)
         }
     }
 
     /// Parse the multiplicity spelling after a `%` in a type: `1` (linear /
-    /// affine — the argument may be used at most once), or `Many` / `'Many`
-    /// (explicitly unrestricted, the same as a plain arrow).
-    fn parse_multiplicity(&mut self) -> PResult<crate::types::Mult> {
+    /// linear — the argument must be consumed exactly once), `Many` / `'Many`
+    /// (explicitly unrestricted, the same as a plain arrow), or a lowercase
+    /// name (`a %m -> b`: a multiplicity VARIABLE the signature is
+    /// polymorphic over — each caller decides whether it is `%1` or
+    /// unrestricted).
+    fn parse_multiplicity(&mut self) -> PResult<MultAnn> {
         self.advance(); // consume '%'
         match self.peek().clone() {
             Token::IntLit(1) => {
                 self.advance();
-                Ok(crate::types::Mult::One)
+                Ok(MultAnn::One)
             }
             Token::UpperIdent(ref name) if name == "Many" => {
                 self.advance();
-                Ok(crate::types::Mult::Many)
+                Ok(MultAnn::Many)
+            }
+            // A named multiplicity variable, like a type variable but in the
+            // multiplicity namespace.
+            Token::Ident(name) => {
+                self.advance();
+                Ok(MultAnn::Var(name))
             }
             // The DataKinds-style promoted spelling `%'Many`.
             Token::Tick => {
@@ -1269,19 +1278,21 @@ impl Parser {
                 match self.peek().clone() {
                     Token::UpperIdent(ref name) if name == "Many" => {
                         self.advance();
-                        Ok(crate::types::Mult::Many)
+                        Ok(MultAnn::Many)
                     }
                     other => Err(self.err_here(format!(
                         "unknown multiplicity '%'{}': the only multiplicities are \
-                         '%1' (the function uses the argument at most once) and \
-                         '%Many' (no restriction — the same as a plain '->')",
+                         '%1' (the function consumes the argument exactly once), \
+                         '%Many' (no restriction — the same as a plain '->'), and \
+                         a lowercase multiplicity variable like '%m'",
                         other))),
                 }
             }
             other => Err(self.err_here(format!(
                 "unknown multiplicity '%{}': the only multiplicities are \
-                 '%1' (the function uses the argument at most once) and \
-                 '%Many' (no restriction — the same as a plain '->')",
+                 '%1' (the function consumes the argument exactly once), \
+                 '%Many' (no restriction — the same as a plain '->'), and \
+                 a lowercase multiplicity variable like '%m'",
                 other))),
         }
     }

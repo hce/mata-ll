@@ -303,6 +303,18 @@ pub enum Literal {
     Unit,
 }
 
+/// A multiplicity annotation as written in a source type: `%1`, `%Many` /
+/// `%'Many`, or a named multiplicity VARIABLE (`a %m -> b` — multiplicity
+/// polymorphism). The named form carries the source name; the typechecker's
+/// `ast_type_to_ty` resolves each distinct name of a signature to one rigid
+/// multiplicity variable (`types::Mult::Rigid`).
+#[derive(Debug, Clone)]
+pub enum MultAnn {
+    One,
+    Many,
+    Var(String),
+}
+
 /// Type representation.
 #[derive(Debug, Clone)]
 pub enum Type {
@@ -312,11 +324,11 @@ pub enum Type {
     Var(String),
     /// Type application: `Maybe String`, `Tree a`
     App(Box<Type>, Box<Type>),
-    /// Function type: `a -> b`. The multiplicity is `Many` for a plain `->`
-    /// and `One` for a `%1`-annotated arrow (`a %1 -> b`: the function uses
-    /// the argument at most once — see `types::Mult`). The parser never
-    /// produces `Mult::Var`; that form exists only inside inference.
-    Arrow(Box<Type>, Box<Type>, crate::types::Mult),
+    /// Function type: `a -> b`. The multiplicity is `Many` for a plain `->`,
+    /// `One` for a `%1`-annotated arrow (`a %1 -> b`: the function consumes
+    /// the argument exactly once — see `types::Mult`), and `Var` for a named
+    /// multiplicity variable (`a %m -> b`).
+    Arrow(Box<Type>, Box<Type>, MultAnn),
     /// List/Array type: `[a]`
     List(Box<Type>),
     /// IO type: `IO a` (Pure provenance)

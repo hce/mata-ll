@@ -75,6 +75,25 @@ impl TypeEnv {
         }
         vars
     }
+
+    /// The rigid multiplicity variables free in this environment: every
+    /// `Mult::Rigid` id on a scheme's type that the scheme does not itself
+    /// quantify. The multiplicity counterpart of `free_vars`, consulted by
+    /// `generalize` so an inner binding never captures an enclosing
+    /// signature's `%m`.
+    pub fn free_rigid_mults(&self) -> Vec<u32> {
+        let mut ids = Vec::new();
+        for scheme in self.bindings.values() {
+            let mut ty_ids = Vec::new();
+            scheme.ty.collect_rigid_mults(&mut ty_ids);
+            for id in ty_ids {
+                if !scheme.mult_vars.contains(&id) && !ids.contains(&id) {
+                    ids.push(id);
+                }
+            }
+        }
+        ids
+    }
 }
 
 /// Constructor info
@@ -178,6 +197,11 @@ pub struct Checker {
     /// perturbs type-variable numbering (and therefore diagnostics) in
     /// programs that never mention `%1`.
     next_mult: u32,
+    /// Named multiplicity variables of the signature currently being
+    /// converted by `ast_type_to_ty`: source name → rigid id, so every `%m`
+    /// of one signature is the same `Mult::Rigid`. Reset at each top-level
+    /// conversion (`type_depth == 0`).
+    sig_mult_vars: HashMap<String, u32>,
     constructors: HashMap<String, ConInfo>,
     pub errors: Vec<Diagnostic>,
     current_fn: Option<String>,
@@ -365,6 +389,7 @@ impl Checker {
             env: TypeEnv::new(),
             next_var: 0,
             next_mult: 0,
+            sig_mult_vars: HashMap::new(),
             constructors: HashMap::new(),
             errors: Vec::new(),
             current_fn: None,
@@ -437,6 +462,11 @@ impl Checker {
 
     /// Instantiate a scheme, also returning the var→fresh-type map so callers
     /// can relate a class constraint's bound variable to its fresh type.
+    /// Quantified multiplicity variables (`Scheme::mult_vars`) are freshened
+    /// too: each use of a multiplicity-polymorphic function gets its own
+    /// flexible `Mult::Var` per quantified `%m`, which then unifies with
+    /// whatever the call site provides — `One` from a `%1` context, `Many`
+    /// from an unrestricted one.
     fn instantiate_with_map(&mut self, scheme: &Scheme) -> (Ty, HashMap<TyVar, Ty>) {
         let mut map = HashMap::new();
         for v in &scheme.vars {
@@ -444,7 +474,11 @@ impl Checker {
                 map.insert(v.clone(), Ty::Var(fresh));
             }
         }
-        (scheme.ty.apply_subst(&Subst::from_map(map.clone())), map)
+        let mut mults = HashMap::new();
+        for id in &scheme.mult_vars {
+            mults.insert(*id, self.fresh_mult());
+        }
+        (scheme.ty.apply_subst(&Subst::from_parts(map.clone(), mults)), map)
     }
 
 
@@ -453,7 +487,20 @@ impl Checker {
         let vars: Vec<TyVar> = ty.free_vars().into_iter()
             .filter(|v| !env_vars.contains(v))
             .collect();
-        Scheme { vars, ty: ty.clone() }
+        // Multiplicity polymorphism: quantify the RIGID multiplicity
+        // variables (a signature's `%m`), except those an enclosing binder's
+        // type still mentions — a local alias of a `%m`-typed value must keep
+        // sharing the enclosing signature's variable, or a use of the alias
+        // could re-instantiate it and claim a multiplicity the value does not
+        // have. Flexible `Mult::Var`s are deliberately NOT quantified (see
+        // `Scheme::mult_vars`).
+        let env_mults = env.free_rigid_mults();
+        let mut ty_mults = Vec::new();
+        ty.collect_rigid_mults(&mut ty_mults);
+        let mult_vars: Vec<u32> = ty_mults.into_iter()
+            .filter(|id| !env_mults.contains(id))
+            .collect();
+        Scheme { vars, mult_vars, ty: ty.clone() }
     }
 
     /// Depth-guard wrapper around `ast_type_to_ty_inner`: past the limit it
@@ -468,6 +515,10 @@ impl Checker {
         // `charge_alias_expansion` / `ALIAS_EXPAND_FUEL`).
         if self.type_depth == 0 {
             self.alias_fuel = ALIAS_EXPAND_FUEL;
+            // Named multiplicity variables are scoped to one signature: each
+            // top-level type conversion starts a fresh name→id map, so `%m`
+            // in two different signatures is two different variables.
+            self.sig_mult_vars.clear();
         }
         if self.type_depth >= crate::MAX_NESTING_DEPTH {
             let already_reported = self.errors.iter().any(|e| {
@@ -560,7 +611,28 @@ impl Checker {
                 Ty::Con(name.clone())
             }
             Type::Var(name) => Ty::Var(TyVar { name: name.clone(), id: u32::MAX }),
-            Type::Arrow(a, b, m) => Ty::arrow_m(self.ast_type_to_ty(a), self.ast_type_to_ty(b), *m),
+            Type::Arrow(a, b, m) => {
+                // Multiplicity annotations: `%1`/`%Many` are the constants; a
+                // named variable (`a %m -> b`) resolves to ONE rigid
+                // multiplicity variable per distinct name within the type
+                // currently being converted (`sig_mult_vars`, reset at each
+                // top-level entry) — the multiplicity counterpart of a
+                // signature type variable.
+                let mult = match m {
+                    MultAnn::One => Mult::One,
+                    MultAnn::Many => Mult::Many,
+                    MultAnn::Var(name) => {
+                        if let Some(id) = self.sig_mult_vars.get(name) {
+                            Mult::Rigid(*id)
+                        } else {
+                            let Mult::Var(id) = self.fresh_mult() else { unreachable!() };
+                            self.sig_mult_vars.insert(name.clone(), id);
+                            Mult::Rigid(id)
+                        }
+                    }
+                };
+                Ty::arrow_m(self.ast_type_to_ty(a), self.ast_type_to_ty(b), mult)
+            }
             Type::App(f, a) => {
                 // Check for type family reduction: FamilyName arg1 arg2 ...
                 if let Some(result) = self.try_reduce_type_family(ast_ty) {
@@ -775,7 +847,7 @@ impl Checker {
             Type::Arrow(a, b, m) => Type::Arrow(
                 Box::new(self.substitute_type(a, bindings)),
                 Box::new(self.substitute_type(b, bindings)),
-                *m,
+                m.clone(),
             ),
             Type::List(a) => Type::List(Box::new(self.substitute_type(a, bindings))),
             Type::IO(a) => Type::IO(Box::new(self.substitute_type(a, bindings))),
@@ -858,7 +930,7 @@ impl Checker {
         if vars.is_empty() {
             Scheme::mono(ty.clone())
         } else {
-            Scheme { vars, ty: current.clone() }
+            Scheme { vars, mult_vars: vec![], ty: current.clone() }
         }
     }
 
@@ -1022,7 +1094,7 @@ impl Checker {
             ], Ty::io(ta.clone()))),
         ];
         for (name, vars, ty) in entries {
-            self.env.insert(name.into(), Scheme { vars, ty });
+            self.env.insert(name.into(), Scheme { vars, mult_vars: vec![], ty });
         }
         // HashMap operations (backed by Lua tables)
         let hm = |k: Ty, v: Ty| Ty::app(Ty::app(Ty::Con("HashMap".into()), k), v);
@@ -1040,7 +1112,7 @@ impl Checker {
             ("hmToList", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(Ty::Tuple(vec![ta.clone(), tb.clone()])))),
         ];
         for (name, vars, ty) in hm_entries {
-            self.env.insert(name.into(), Scheme { vars, ty });
+            self.env.insert(name.into(), Scheme { vars, mult_vars: vec![], ty });
         }
 
         // ByteString operations (backed by Lua strings as byte arrays)
@@ -1076,36 +1148,36 @@ impl Checker {
             ("bsPutI16LE",  vec![], Ty::arrow(int.clone(), bs.clone())),
         ];
         for (name, vars, ty) in bs_entries {
-            self.env.insert(name.into(), Scheme { vars, ty });
+            self.env.insert(name.into(), Scheme { vars, mult_vars: vec![], ty });
         }
 
         for name in &["max", "min"] {
-            self.env.insert(name.to_string(), Scheme { vars: vec![a.clone()], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
+            self.env.insert(name.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
         }
         for op in &["+", "-", "*", "/"] {
-            self.env.insert(op.to_string(), Scheme { vars: vec![a.clone()], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
+            self.env.insert(op.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
         }
         // Comparison operators will be registered as Ord methods below
         for op in &["&&", "||"] {
-            self.env.insert(op.to_string(), Scheme { vars: vec![], ty: Ty::fun(&[Ty::Con("Bool".into()), Ty::Con("Bool".into())], Ty::Con("Bool".into())) });
+            self.env.insert(op.to_string(), Scheme { vars: vec![], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Bool".into()), Ty::Con("Bool".into())], Ty::Con("Bool".into())) });
         }
         for name in &["mod", "div"] {
-            self.env.insert(name.to_string(), Scheme { vars: vec![], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::Con("Integer".into())], Ty::Con("Integer".into())) });
+            self.env.insert(name.to_string(), Scheme { vars: vec![], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::Con("Integer".into())], Ty::Con("Integer".into())) });
         }
         // List functions that need lazy cons (implemented in Lua runtime)
-        self.env.insert("head".into(), Scheme { vars: vec![a.clone()], ty: Ty::arrow(Ty::list(ta.clone()), ta.clone()) });
-        self.env.insert("tail".into(), Scheme { vars: vec![a.clone()], ty: Ty::arrow(Ty::list(ta.clone()), Ty::list(ta.clone())) });
-        self.env.insert("map".into(), Scheme { vars: vec![a.clone(), b.clone()], ty: Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), Ty::list(ta.clone())], Ty::list(tb.clone())) });
-        self.env.insert("filter".into(), Scheme { vars: vec![a.clone(), b.clone()], ty: Ty::fun(&[Ty::arrow(ta.clone(), Ty::Con("Bool".into())), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("take".into(), Scheme { vars: vec![a.clone()], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("drop".into(), Scheme { vars: vec![a.clone()], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("zipWith".into(), Scheme { vars: vec![a.clone(), b.clone(), c.clone()], ty: Ty::fun(&[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), Ty::list(ta.clone()), Ty::list(tb.clone())], Ty::list(tc.clone())) });
+        self.env.insert("head".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(Ty::list(ta.clone()), ta.clone()) });
+        self.env.insert("tail".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(Ty::list(ta.clone()), Ty::list(ta.clone())) });
+        self.env.insert("map".into(), Scheme { vars: vec![a.clone(), b.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), Ty::list(ta.clone())], Ty::list(tb.clone())) });
+        self.env.insert("filter".into(), Scheme { vars: vec![a.clone(), b.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::arrow(ta.clone(), Ty::Con("Bool".into())), Ty::list(ta.clone())], Ty::list(ta.clone())) });
+        self.env.insert("take".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
+        self.env.insert("drop".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
+        self.env.insert("zipWith".into(), Scheme { vars: vec![a.clone(), b.clone(), c.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), Ty::list(ta.clone()), Ty::list(tb.clone())], Ty::list(tc.clone())) });
 
         // Maybe
         self.constructors.insert("Just".into(), ConInfo { type_name: "Maybe".into(), variant_index: 1, total_variants: 2, field_types: vec![ta.clone()], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![], existential_constraints: vec![] });
         self.constructors.insert("Nothing".into(), ConInfo { type_name: "Maybe".into(), variant_index: 2, total_variants: 2, field_types: vec![], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![], existential_constraints: vec![] });
-        self.env.insert("Just".into(), Scheme { vars: vec![a.clone()], ty: Ty::arrow(ta.clone(), Ty::app(Ty::Con("Maybe".into()), ta.clone())) });
-        self.env.insert("Nothing".into(), Scheme { vars: vec![a.clone()], ty: Ty::app(Ty::Con("Maybe".into()), ta.clone()) });
+        self.env.insert("Just".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(ta.clone(), Ty::app(Ty::Con("Maybe".into()), ta.clone())) });
+        self.env.insert("Nothing".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::app(Ty::Con("Maybe".into()), ta.clone()) });
         self.env.insert("True".into(), Scheme::mono(Ty::Con("Bool".into())));
         self.env.insert("False".into(), Scheme::mono(Ty::Con("Bool".into())));
 
@@ -1129,11 +1201,13 @@ impl Checker {
         // (:) :: a -> [a] -> [a]
         self.env.insert(":".into(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[ta.clone(), Ty::list(ta.clone())], Ty::list(ta.clone())),
         });
         // [] :: [a]
         self.env.insert("[]".into(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: Ty::list(ta.clone()),
         });
 
@@ -1150,6 +1224,7 @@ impl Checker {
         // liftIO :: IO a -> LuaIO s a
         self.env.insert("liftIO".into(), Scheme {
             vars: vec![a.clone(), s.clone()],
+            mult_vars: vec![],
             ty: Ty::arrow(Ty::io(ta.clone()), Ty::lua_io(s.clone(), ta.clone())),
         });
 
@@ -1159,6 +1234,7 @@ impl Checker {
         // already a Lua function, engage just satisfies the type system.
         self.env.insert("engage".into(), Scheme {
             vars: vec![a.clone(), s.clone()],
+            mult_vars: vec![],
             ty: Ty::arrow(
                 Ty::app(Ty::Con("LuaFunction".into()), Ty::Var(s.clone())),
                 ta.clone(),
@@ -1174,6 +1250,7 @@ impl Checker {
         // Rank-2: the s is universally quantified in the argument
         self.env.insert("runST".into(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: Ty::arrow(
                 Ty::Forall(s.clone(), Box::new(st_s(ta.clone()))),
                 ta.clone(),
@@ -1182,36 +1259,43 @@ impl Checker {
         // newSTArray :: Integer -> Integer -> ST s (STArray s)
         self.env.insert("newSTArray".into(), Scheme {
             vars: vec![s.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[int.clone(), int.clone()], st_s(sta_s.clone())),
         });
         // readSTArray :: STArray s -> Integer -> ST s Integer
         self.env.insert("readSTArray".into(), Scheme {
             vars: vec![s.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[sta_s.clone(), int.clone()], st_s(int.clone())),
         });
         // writeSTArray :: STArray s -> Integer -> Integer -> ST s ()
         self.env.insert("writeSTArray".into(), Scheme {
             vars: vec![s.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[sta_s.clone(), int.clone(), int.clone()], st_s(Ty::Unit)),
         });
         // modifySTArray :: STArray s -> Integer -> (Integer -> Integer) -> ST s ()
         self.env.insert("modifySTArray".into(), Scheme {
             vars: vec![s.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[sta_s.clone(), int.clone(), Ty::arrow(int.clone(), int.clone())], st_s(Ty::Unit)),
         });
         // stArrayLength :: STArray s -> ST s Integer
         self.env.insert("stArrayLength".into(), Scheme {
             vars: vec![s.clone()],
+            mult_vars: vec![],
             ty: Ty::arrow(sta_s.clone(), st_s(int.clone())),
         });
         // newSTArrayFromList :: [Integer] -> ST s (STArray s)
         self.env.insert("newSTArrayFromList".into(), Scheme {
             vars: vec![s.clone()],
+            mult_vars: vec![],
             ty: Ty::arrow(Ty::list(int.clone()), st_s(sta_s.clone())),
         });
         // stArrayToList :: STArray s -> ST s [Integer]
         self.env.insert("stArrayToList".into(), Scheme {
             vars: vec![s.clone()],
+            mult_vars: vec![],
             ty: Ty::arrow(sta_s.clone(), st_s(Ty::list(int.clone()))),
         });
 
@@ -1238,10 +1322,12 @@ impl Checker {
         });
         self.env.insert("fmap".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), f.clone()],
+            mult_vars: vec![],
             ty: fmap_ty.clone(),
         });
         self.env.insert("<$>".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), f.clone()],
+            mult_vars: vec![],
             ty: fmap_ty,
         });
 
@@ -1319,18 +1405,22 @@ impl Checker {
         });
         self.env.insert("pure".to_string(), Scheme {
             vars: vec![a.clone(), f.clone()],
+            mult_vars: vec![],
             ty: pure_ty.clone(),
         });
         self.env.insert("return".to_string(), Scheme {
             vars: vec![a.clone(), f.clone()],
+            mult_vars: vec![],
             ty: pure_ty,
         });
         self.env.insert("<*>".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), f.clone()],
+            mult_vars: vec![],
             ty: ap_ty,
         });
         self.env.insert("liftA2".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), c.clone(), f.clone()],
+            mult_vars: vec![],
             ty: lifta2_ty,
         });
 
@@ -1403,10 +1493,12 @@ impl Checker {
         // >>= and >> env entries
         self.env.insert(">>=".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), m.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[ma.clone(), Ty::arrow(ta.clone(), mb.clone())], mb.clone()),
         });
         self.env.insert(">>".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), m.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[ma.clone(), mb.clone()], mb.clone()),
         });
 
@@ -1481,10 +1573,12 @@ impl Checker {
         });
         self.env.insert("foldr".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), t.clone()],
+            mult_vars: vec![],
             ty: foldr_ty,
         });
         self.env.insert("foldl".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), t.clone()],
+            mult_vars: vec![],
             ty: foldl_ty,
         });
         // Emit wanted constraints at use sites so a fold over a type without
@@ -1523,6 +1617,7 @@ impl Checker {
         });
         self.env.insert("traverse".to_string(), Scheme {
             vars: vec![a.clone(), b.clone(), f.clone(), t.clone()],
+            mult_vars: vec![],
             ty: traverse_ty,
         });
         self.method_constraints.insert("traverse".to_string(), vec![
@@ -1573,6 +1668,7 @@ impl Checker {
         ] {
             self.env.insert(name.to_string(), Scheme {
                 vars: vec![a.clone()],
+                mult_vars: vec![],
                 ty: ty.clone(),
             });
         }
@@ -1615,6 +1711,7 @@ impl Checker {
         ] {
             self.env.insert(name.to_string(), Scheme {
                 vars: vec![a.clone()],
+                mult_vars: vec![],
                 ty: ty.clone(),
             });
         }
@@ -1630,6 +1727,7 @@ impl Checker {
         });
         self.env.insert("show".to_string(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: show_ty,
         });
 
@@ -1644,6 +1742,7 @@ impl Checker {
         });
         self.env.insert("read".to_string(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: read_ty,
         });
         // Read instances for base types
@@ -1669,11 +1768,13 @@ impl Checker {
         });
         self.env.insert("==".to_string(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: eq_ty,
         });
         // /= is derived from ==
         self.env.insert("/=".to_string(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into())),
         });
 
@@ -1711,11 +1812,13 @@ impl Checker {
         for op in &["<", ">", "<=", ">="] {
             self.env.insert(op.to_string(), Scheme {
                 vars: vec![a.clone()],
+                mult_vars: vec![],
                 ty: cmp_ty.clone(),
             });
         }
         self.env.insert("compare".to_string(), Scheme {
             vars: vec![a.clone()],
+            mult_vars: vec![],
             ty: compare_ty.clone(),
         });
 
@@ -1774,6 +1877,7 @@ impl Checker {
         // primitive is exposed for lists.)
         self.env.insert("semigroup_String".to_string(), Scheme {
             vars: vec![],
+            mult_vars: vec![],
             ty: Ty::fun(&[Ty::Con("String".into()), Ty::Con("String".into())], Ty::Con("String".into())),
         });
 
@@ -2276,7 +2380,7 @@ impl Checker {
                 existential_vars: ex_tvars,
                 existential_constraints: ex_constraints,
             });
-            self.env.insert(con_key, Scheme { vars: all_scheme_vars, ty: con_type });
+            self.env.insert(con_key, Scheme { vars: all_scheme_vars, mult_vars: vec![], ty: con_type });
 
             // Register record field accessors
             if let ConstructorFields::Named(fields) = &con.fields {
@@ -2303,6 +2407,7 @@ impl Checker {
                     let accessor_ty = Ty::arrow(result_type.clone(), field_ty);
                     self.env.insert(field.name.clone(), Scheme {
                         vars: tvars.clone(),
+                        mult_vars: vec![],
                         ty: accessor_ty,
                     });
                     // Store field index for codegen
@@ -2343,6 +2448,7 @@ impl Checker {
         });
         self.env.insert(con_key, Scheme {
             vars: tvars,
+            mult_vars: vec![],
             ty: Ty::arrow(inner_ty, result_type),
         });
     }

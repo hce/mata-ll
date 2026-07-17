@@ -71,12 +71,12 @@ impl fmt::Display for Kind {
     }
 }
 
-/// Multiplicity of a function arrow (linear/affine types): how often the
-/// function may USE the argument this arrow binds. `a -> b` is `a %Many -> b`
-/// (no restriction, every plain arrow); `a %1 -> b` promises the argument is
-/// used AT MOST once (affine — mata-ll enforces the at-most-once half of
-/// GHC's linear arrows; see typechecker/usage.rs for the enforcement and its
-/// boundary). Multiplicity is a type-CHECKING discipline only: it is never
+/// Multiplicity of a function arrow (linear types): how often the function
+/// may USE the argument this arrow binds. `a -> b` is `a %Many -> b` (no
+/// restriction, every plain arrow); `a %1 -> b` promises the argument is
+/// consumed EXACTLY once (linear — GHC's LinearTypes semantics: a second
+/// use is an error and so is dropping it; see typechecker/usage.rs for the
+/// enforcement and its boundary). Multiplicity is a type-CHECKING discipline only: it is never
 /// consulted after type checking, so monomorphization, codegen and the
 /// emitted Lua are identical with or without `%1` annotations.
 ///
@@ -84,23 +84,38 @@ impl fmt::Display for Kind {
 /// invents (the expected arrow at an application, a lambda's own arrows) get
 /// a fresh one so they adopt whichever multiplicity the program unifies them
 /// with — that is how a lambda checked against a `%1` parameter learns its
-/// binder is affine. A variable left unconstrained means no `%1` annotation
+/// binder is linear. A variable left unconstrained means no `%1` annotation
 /// ever reached the arrow, and every consumer treats it as `Many`.
+///
+/// `Rigid` is a NAMED multiplicity variable from a signature (`a %m -> b`):
+/// the multiplicity-polymorphism counterpart of a signature type variable.
+/// Inside the definition that declared it, it is rigid — it unifies only
+/// with itself, so the body cannot silently specialize `%m` to `One` or
+/// `Many` behind the callers' backs, and the usage checker treats a binder
+/// bound at a `%m` arrow pessimistically (a caller may instantiate `m` to
+/// `1`). At every USE of the definition, `Scheme` instantiation replaces it
+/// with a fresh flexible `Var`, which then adopts whatever the call site
+/// provides — that is how `apply :: (a %m -> b) -> a %m -> b` keeps a `%1`
+/// argument linear while staying usable with unrestricted functions.
 ///
 /// Equality and hashing are deliberately multiplicity-BLIND (see the manual
 /// impls below): multiplicity must never change a type's identity, so every
 /// existing `Ty` comparison, map key and cache behaves exactly as it did
 /// before multiplicities existed. Only `unify` (which handles the slot
-/// explicitly) and the affine-usage checker ever look at it.
+/// explicitly) and the linear-usage checker ever look at it.
 #[derive(Debug, Clone, Copy)]
 pub enum Mult {
-    /// `a %1 -> b`: the argument may be used at most once (affine).
+    /// `a %1 -> b`: the argument must be consumed exactly once (linear).
     One,
     /// `a -> b` / `a %Many -> b`: unrestricted (GHC's ω).
     Many,
     /// A multiplicity unification variable (ids from `Checker::fresh_mult`,
     /// a namespace separate from type-variable ids).
     Var(u32),
+    /// A named signature multiplicity variable (`a %m -> b`), rigid inside
+    /// its own definition and freshened to a flexible `Var` at each use (ids
+    /// share the `fresh_mult` counter, so an id is only ever one flavor).
+    Rigid(u32),
 }
 
 // Multiplicity-blind identity: any Mult equals any Mult, and hashing adds
@@ -254,6 +269,33 @@ impl Ty {
         }
     }
 
+    /// Collect the ids of every rigid multiplicity variable (`Mult::Rigid`)
+    /// on this type's arrows. These are what `Checker::generalize` quantifies
+    /// (`Scheme::mult_vars`) and instantiation freshens; flexible `Mult::Var`s
+    /// are never quantified — a definition is only checked against the
+    /// polymorphic reading of a multiplicity when the variable was rigid
+    /// while its body was checked (see `Mult`).
+    pub fn collect_rigid_mults(&self, out: &mut Vec<u32>) {
+        match self {
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) | Ty::Var(_) => {}
+            Ty::Arrow(a, b, m) => {
+                if let Mult::Rigid(id) = m
+                    && !out.contains(id) {
+                        out.push(*id);
+                    }
+                a.collect_rigid_mults(out);
+                b.collect_rigid_mults(out);
+            }
+            Ty::App(a, b) => {
+                a.collect_rigid_mults(out);
+                b.collect_rigid_mults(out);
+            }
+            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) =>
+                a.collect_rigid_mults(out),
+            Ty::Tuple(elems) => for e in elems { e.collect_rigid_mults(out); },
+        }
+    }
+
     /// Apply a substitution to this type
     pub fn apply_subst(&self, subst: &Subst) -> Ty {
         match self {
@@ -355,8 +397,13 @@ impl fmt::Display for Ty {
             Ty::Arrow(a, b, m) => {
                 // A `%1` arrow renders its annotation; `Many` and an
                 // unconstrained multiplicity variable render as the plain
-                // arrow they behave as.
-                let arrow = match m { Mult::One => "%1 ->", _ => "->" };
+                // arrow they behave as. A rigid multiplicity variable renders
+                // as the conventional `%m` (its source name is not carried).
+                let arrow = match m {
+                    Mult::One => "%1 ->",
+                    Mult::Rigid(_) => "%m ->",
+                    _ => "->",
+                };
                 match a.as_ref() {
                     Ty::Arrow(..) => write!(f, "({}) {} {}", a, arrow, b),
                     _ => write!(f, "{} {} {}", a, arrow, b),
@@ -457,12 +504,22 @@ impl fmt::Display for TyVar {
 #[derive(Debug, Clone)]
 pub struct Scheme {
     pub vars: Vec<TyVar>,
+    /// Quantified multiplicity variables: the `Mult::Rigid` ids of `ty` that
+    /// belong to this scheme (multiplicity polymorphism, `a %m -> b`).
+    /// Instantiation replaces each with a fresh flexible `Mult::Var`, so
+    /// every use of the scheme picks its own multiplicity — exactly parallel
+    /// to `vars`. Only RIGID multiplicities are ever quantified: a flexible
+    /// `Mult::Var` left on a type was not checked polymorphically (its
+    /// definition's usage accounting read it as `Many`), so freshening it
+    /// per use would let a call site claim `%1` behavior the definition was
+    /// never held to.
+    pub mult_vars: Vec<u32>,
     pub ty: Ty,
 }
 
 impl Scheme {
     pub fn mono(ty: Ty) -> Scheme {
-        Scheme { vars: vec![], ty }
+        Scheme { vars: vec![], mult_vars: vec![], ty }
     }
 
     pub fn apply_subst(&self, subst: &Subst) -> Scheme {
@@ -471,8 +528,12 @@ impl Scheme {
         for v in &self.vars {
             restricted.remove(v);
         }
+        for id in &self.mult_vars {
+            restricted.remove_mult(*id);
+        }
         Scheme {
             vars: self.vars.clone(),
+            mult_vars: self.mult_vars.clone(),
             ty: self.ty.apply_subst(&restricted),
         }
     }
@@ -515,6 +576,12 @@ impl Subst {
         Subst { map, mults: HashMap::new() }
     }
 
+    /// A substitution over type variables AND multiplicity variables at once
+    /// (scheme instantiation renames both namespaces in one application).
+    pub fn from_parts(map: HashMap<TyVar, Ty>, mults: HashMap<u32, Mult>) -> Subst {
+        Subst { map, mults }
+    }
+
     pub fn singleton(v: TyVar, ty: Ty) -> Subst {
         let mut map = HashMap::new();
         map.insert(v, ty);
@@ -530,14 +597,18 @@ impl Subst {
 
     /// Resolve a multiplicity through this substitution, following variable
     /// chains (with the same defensive depth cap as type-variable chains).
+    /// `Rigid` ids are looked up too: unification never binds a rigid
+    /// variable (see `unify_mult`), so the only bindings keyed by one are the
+    /// fresh-variable renamings scheme instantiation builds — everywhere else
+    /// a rigid variable resolves to itself.
     pub fn resolve_mult(&self, m: Mult) -> Mult {
         let mut cur = m;
         let mut depth = 0;
-        while let Mult::Var(id) = cur {
+        while let Mult::Var(id) | Mult::Rigid(id) = cur {
             match self.mults.get(&id) {
                 Some(next) => {
                     // A self-mapping or an over-long chain ends the walk.
-                    if matches!(next, Mult::Var(nid) if *nid == id) { break; }
+                    if matches!(next, Mult::Var(nid) | Mult::Rigid(nid) if *nid == id) { break; }
                     depth += 1;
                     if depth > 100 { break; }
                     cur = *next;
@@ -554,6 +625,13 @@ impl Subst {
 
     pub fn remove(&mut self, v: &TyVar) {
         self.map.remove(v);
+    }
+
+    /// Drop any binding for one multiplicity-variable id (the multiplicity
+    /// counterpart of `remove`, used by `Scheme::apply_subst` to keep a
+    /// substitution away from the scheme's bound multiplicity variables).
+    pub fn remove_mult(&mut self, id: u32) {
+        self.mults.remove(&id);
     }
 
     pub fn size(&self) -> usize {
@@ -950,14 +1028,21 @@ pub fn unify_tf(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, Diagnostic
     unify_inner(&n1, &n2, fams)
 }
 
-/// Unify two arrow multiplicities. Equal constants unify; a multiplicity
-/// variable binds to the other side (or trivially to itself); `One` vs
-/// `Many` is a genuine mismatch (`None` — the caller builds the diagnostic,
-/// which needs the full arrow types for a readable message).
+/// Unify two arrow multiplicities. Equal constants unify; a flexible
+/// multiplicity variable binds to the other side (or trivially to itself);
+/// `One` vs `Many` is a genuine mismatch (`None` — the caller builds the
+/// diagnostic, which needs the full arrow types for a readable message).
+/// A RIGID variable (a signature's `%m`) unifies only with itself: inside
+/// the definition that declared it, `m` stands for whichever multiplicity a
+/// caller will pick, so the body may not pin it to `One`, `Many`, or a
+/// different rigid variable — the same reason a rigid type variable rejects
+/// concrete types. (A flexible variable binding TO a rigid one is fine; that
+/// is how an inference-invented arrow adopts the signature's `%m`.)
 fn unify_mult(m1: Mult, m2: Mult) -> Option<Subst> {
     match (m1, m2) {
         (Mult::One, Mult::One) | (Mult::Many, Mult::Many) => Some(Subst::empty()),
         (Mult::Var(v), Mult::Var(w)) if v == w => Some(Subst::empty()),
+        (Mult::Rigid(v), Mult::Rigid(w)) if v == w => Some(Subst::empty()),
         (Mult::Var(v), m) | (m, Mult::Var(v)) => Some(Subst::mult_singleton(v, m)),
         _ => None,
     }
@@ -1005,10 +1090,10 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
             // Multiplicities unify invariantly, exactly like GHC's linear
             // arrows: `%1` and a plain `->` are different arrows, and a
             // variable adopts whichever side is concrete. Rejecting
-            // Many-into-One is what keeps the affine promise sound — an
+            // Many-into-One is what keeps the linear promise sound — an
             // unrestricted function flowing into a `%1`-typed position could
-            // duplicate the argument the `%1` type claims is used at most
-            // once.
+            // duplicate (or drop) the argument the `%1` type claims is
+            // consumed exactly once.
             let s0 = unify_mult(*m1, *m2)
                 .ok_or_else(|| DiagnosticKind::MultiplicityMismatch(t1.clone(), t2.clone()))?;
             let s1 = unify_tf(&a1.apply_subst(&s0), &a2.apply_subst(&s0), fams)?;
@@ -1135,11 +1220,11 @@ pub enum DiagnosticKind {
     Mismatch(Ty, Ty),
     RigidMismatch(Ty, Ty),
     /// Two function types whose shapes line up but whose arrows disagree
-    /// about multiplicity: one side is `a %1 -> b` (argument used at most
-    /// once) and the other a plain `a -> b` (no restriction). They are not
-    /// interchangeable — letting an unrestricted function stand where a `%1`
-    /// one is required would let it use an argument twice that the `%1` type
-    /// promises is consumed at most once.
+    /// about multiplicity: one side is `a %1 -> b` (argument consumed
+    /// exactly once) and the other a plain `a -> b` (no restriction). They
+    /// are not interchangeable — letting an unrestricted function stand
+    /// where a `%1` one is required would let it use an argument twice (or
+    /// drop it) that the `%1` type promises is consumed exactly once.
     MultiplicityMismatch(Ty, Ty),
     OccursCheck(TyVar, Ty),
     UnboundVariable(String),
@@ -1351,8 +1436,14 @@ impl fmt::Display for Diagnostic {
             }
             DiagnosticKind::MultiplicityMismatch(a, b) => {
                 let s = pretty_var_subst(&[a, b]);
-                write!(f, "Cannot match '{}' with '{}': the arrows disagree about how often the function may use its argument — '%1 ->' promises the argument is used at most once, while a plain '->' makes no such promise, so the two function types are not interchangeable",
-                    a.apply_subst(&s), b.apply_subst(&s))?
+                let mut rigids = Vec::new();
+                a.collect_rigid_mults(&mut rigids);
+                b.collect_rigid_mults(&mut rigids);
+                write!(f, "Cannot match '{}' with '{}': the arrows disagree about how often the function may use its argument — '%1 ->' promises the argument is consumed exactly once, while a plain '->' makes no such promise, so the two function types are not interchangeable",
+                    a.apply_subst(&s), b.apply_subst(&s))?;
+                if !rigids.is_empty() {
+                    write!(f, "\nnote: '%m ->' is a multiplicity VARIABLE from a signature — the caller chooses whether it is '%1' or unrestricted, so inside this definition it cannot be assumed to be either one")?
+                }
             }
             DiagnosticKind::OccursCheck(v, ty) => {
                 let vt = Ty::Var(v.clone());

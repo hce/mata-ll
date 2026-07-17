@@ -320,8 +320,14 @@ impl Checker {
             if !qvars.iter().any(|v| v.name == tv.name) {
                 qvars.push(tv.clone());
             }
+            // Quantify the method's rigid multiplicity variables (`consume ::
+            // a %m -> b` in a class) exactly like its type variables, so each
+            // use — and each instance — instantiates them independently.
+            let mut qmults = Vec::new();
+            ty.collect_rigid_mults(&mut qmults);
             self.env.insert(method.name.clone(), Scheme {
                 vars: qvars,
+                mult_vars: qmults,
                 ty: ty.clone(),
             });
 
