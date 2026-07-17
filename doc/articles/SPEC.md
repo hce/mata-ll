@@ -836,8 +836,18 @@ through FFI function calls.
 
 Lua modules compiled from MATA-LL must not clutter the global
 namespace. All definitions must be local; FFI exports must be passed
-via the module's return value. FFI exports are restricted to
-functions.
+via the module's return value. An export may be a function, an IO/LuaIO
+action, or a plain value. A function export becomes a callable wrapper;
+an IO/LuaIO-action export becomes a wrapper that PERFORMS the action
+when the host calls it; and a value export is marshalled to Lua
+directly, by the SAME result contract a function's return value uses —
+the same type-directed conversion, so a scalar becomes a Lua number, a
+record/LuaDict a keyed table, a tuple a positional table, a `Maybe`/ADT
+its tagged form, a finite list a Lua array. As on the function-result
+edge, a lazy or infinite structure cannot cross the strict Lua boundary
+(Lua cannot hold an unevaluated tail); this is inherent and one-way —
+the import side turns a Lua iterator INTO a lazy list, but the export
+side cannot hand an infinite list back out.
 
 When MATA-LL is intended to run standalone, the compiler appends an
 entry-point stub to the emitted `.lua` file itself (a single

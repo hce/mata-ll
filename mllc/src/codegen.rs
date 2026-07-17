@@ -1053,6 +1053,63 @@ impl CodeGen {
                 };
 
                 let n_args = arg_tys.len();
+
+                // The export's TYPE decides its emitted form:
+                //   * arrow type            → a calling wrapper (below).
+                //   * IO / LuaIO action     → a calling wrapper that PERFORMS
+                //                             the action when the host calls it.
+                //   * anything else (a pure value: scalar, tuple, record/
+                //     LuaDict, ADT, Maybe, finite list, …) → the FORCED VALUE
+                //     marshalled directly, with NO call — `exports.foo = 123`,
+                //     a record as a keyed table, a tuple as a positional table.
+                //
+                // A value must not be routed through the calling wrapper: the
+                // wrapper emits `__force(fn_ref)(args)`, and for a value
+                // `__force(fn_ref)` is the value itself (e.g. the number 123),
+                // so calling it raises "attempt to call a number/table value".
+                // We branch on the actual type after recognising IO/LuaIO — a
+                // nullary pure value and a nullary IO action are both "0 args"
+                // but marshal differently. A value reuses the EXACT same
+                // result-marshalling contract a function's *return value* uses
+                // (`__mll_arg_marshal` + type descriptor, or the deep-force
+                // `__mll_to_lua` fallback for descriptor-less types), so a value
+                // export supports precisely the types a function result does.
+                // As with a function result, a lazy/infinite structure cannot
+                // cross the strict Lua boundary — that is the inherent one-way
+                // boundary property, not a case to detect or reject.
+                let is_action = matches!(
+                    res_ty.as_ref(),
+                    Some(Ty::IO(_)) | Some(Ty::LuaIO(_, _))
+                );
+                if n_args == 0 && res_ty.is_some() && !is_action {
+                    let fn_ref = self.lua_ref(&sname);
+                    let res_marshal = res_ty.as_ref()
+                        .and_then(|t| self.ffi_arg_marshal_desc(t, &mut Vec::new()));
+                    self.emit_indent();
+                    self.emit(&format!("{} = (function()\n", sanitize_name(name)));
+                    self.indent += 1;
+                    self.emit_indent();
+                    self.emit(&format!("local __result = __force({})\n", fn_ref));
+                    match res_marshal {
+                        Some(desc) => {
+                            // Same contract as a function result: an empty MLL
+                            // list / Nothing is nil at the Lua boundary.
+                            self.emit_indent();
+                            self.emit("if __result == nil then return nil end\n");
+                            self.emit_indent();
+                            self.emit(&format!("return __mll_arg_marshal(__result, {})\n", desc));
+                        }
+                        None => {
+                            self.emit_indent();
+                            self.emit("return __mll_to_lua(__result)\n");
+                        }
+                    }
+                    self.indent -= 1;
+                    self.emit_indent();
+                    self.emit("end)(),\n");
+                    continue;
+                }
+
                 let params: Vec<String> = (0..n_args).map(|i| format!("a{}", i + 1)).collect();
                 let params_str = if n_args > 0 { params.join(", ") } else { "...".to_string() };
 

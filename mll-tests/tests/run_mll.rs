@@ -4488,6 +4488,74 @@ main = pure ()
     assert_eq!(result, vec![7, 7, 7, 7], "replicate 4 7");
 }
 
+#[test]
+fn ffi_export_values() {
+    // A VALUE export (a nullary, non-IO-action binding) must be marshalled to
+    // Lua directly, by the SAME result contract a function's RETURN value uses —
+    // NOT wrapped in a calling wrapper (which would emit `__force(value)(...)`
+    // and crash with "attempt to call a number/table value"). It supports
+    // exactly the types a function result does: a scalar, a LuaDict record
+    // (keyed table), a tuple (positional table), etc. A function export and an
+    // IO-action export in the same module must keep their performing wrappers.
+    let source = r#"
+data Config = Config { width :: Integer, height :: Integer }
+  deriving (LuaDict)
+
+export answer :: Integer
+answer = 42
+
+export config :: Config
+config = Config { width = 640, height = 480 }
+
+export pairV :: (Integer, String)
+pairV = (7, "seven")
+
+export incr :: Integer -> Integer
+incr n = n + 1
+
+export runIt :: IO Integer
+runIt = pure 99
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    // Scalar value: read directly as the number, NOT as a function.
+    let answer: mlua::Value = module.get("answer").unwrap();
+    assert!(
+        matches!(&answer, mlua::Value::Integer(42)) || matches!(&answer, mlua::Value::Number(n) if *n == 42.0),
+        "answer must be the marshalled value 42, got {answer:?}"
+    );
+    assert!(
+        !matches!(answer, mlua::Value::Function(_)),
+        "a value export must not be a function"
+    );
+
+    // LuaDict record value → a keyed Lua table.
+    let config: mlua::Table = module.get("config").unwrap();
+    let w: i64 = config.get("width").unwrap();
+    let h: i64 = config.get("height").unwrap();
+    assert_eq!((w, h), (640, 480), "record value marshals to a keyed table");
+
+    // Tuple value → a positional Lua table.
+    let pair: mlua::Table = module.get("pairV").unwrap();
+    let fst: i64 = pair.get(1).unwrap();
+    let snd: String = pair.get(2).unwrap();
+    assert_eq!((fst, snd.as_str()), (7, "seven"), "tuple value marshals to a positional table");
+
+    // Function export UNCHANGED: a callable wrapper taking its argument.
+    let incr: mlua::Function = module.get("incr").unwrap();
+    let r: i64 = incr.call(41).unwrap();
+    assert_eq!(r, 42, "function export still works: incr 41 == 42");
+
+    // IO-action export UNCHANGED: a wrapper that PERFORMS the action when
+    // called (returning its result), not the action value itself.
+    let run_it: mlua::Function = module.get("runIt").unwrap();
+    let r: i64 = run_it.call(()).unwrap();
+    assert_eq!(r, 99, "IO-action export performs on call: runIt () == 99");
+}
+
 // --- Outgoing FFI callbacks (mata-ll -> Lua): the fold / threaded-state pattern.
 
 #[test]
