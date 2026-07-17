@@ -861,7 +861,14 @@ impl CodeGen {
             self.top_level_names.insert(sanitize_name(name));
         }
 
-        for def in &module.data_defs {
+        // Register EVERY data definition — including the ones constructor-DCE
+        // dropped from emission. A dropped type's values can still flow
+        // through live code (an FFI result read only via accessors, a raw
+        // `try`-built Either), so its metadata (tags, LuaDict string tags and
+        // field keys, FFI-decoder field types) must stay available; only its
+        // constructor functions are omitted (no `__mll_fn` slots, no
+        // emission — see the two `module.data_defs`-only loops below).
+        for def in module.data_defs.iter().chain(module.dropped_data_defs.iter()) {
             self.register_data_type(def);
         }
         self.newtypes = module.newtypes.clone();

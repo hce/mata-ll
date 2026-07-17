@@ -158,6 +158,7 @@ mod tests {
     fn module_with(body: TExpr) -> TModule {
         TModule {
             data_defs: vec![],
+            dropped_data_defs: vec![],
             functions: vec![TFunction {
                 name: "f".into(),
                 ty: Ty::Con("String".into()),

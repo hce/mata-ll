@@ -99,6 +99,86 @@ main = do
     }
 }
 
+/// Constructor-level DCE: a `data` definition none of whose constructors is
+/// constructed (`Con`) or matched (pattern) by live code contributes NOTHING
+/// to the emitted Lua. Checked two ways: (1) adding a dead user `data`
+/// declaration (with derived instances) to a program leaves the output
+/// byte-identical; (2) a minimal program carries no constructor slots for the
+/// four Prelude datatypes (ExitValue, Any, Either, Ordering — 12 slots before
+/// this pass), pinned as a bound on `__mll_fn` slot assignments.
+#[test]
+fn constructor_dce_unused_data_adds_nothing() {
+    let base = "double :: Integer -> Integer\n\
+                double x = x * 2\n\
+                main :: IO ()\n\
+                main = print (double 21)\n";
+    let with_dead = format!(
+        "data Unused = UnusedA | UnusedB Integer deriving (Show, Eq)\n{}",
+        base
+    );
+    let dir = Path::new("tests/cases");
+    let a = mllc::compile(base, dir, &[]).expect("base must compile").lua_code;
+    let b = mllc::compile(&with_dead, dir, &[])
+        .expect("dead-data program must compile")
+        .lua_code;
+    assert!(
+        a == b,
+        "an unused data declaration must add nothing to the emitted Lua"
+    );
+
+    // No Prelude constructor slots in a minimal program: every `__mll_fn[N] =`
+    // assignment left is a live function. Before constructor-DCE this program
+    // carried 12 extra constructor slots; a loose bound keeps the test stable
+    // against unrelated emission drift while still catching that regression.
+    let slot_assigns = a.matches("__mll_fn[").count();
+    assert!(
+        slot_assigns < 10,
+        "expected no Prelude constructor slots in a minimal program, \
+         found {} __mll_fn references:\n{}",
+        slot_assigns,
+        a
+    );
+}
+
+/// Constructor-level DCE must drop only the constructor FUNCTIONS, never the
+/// type's metadata: a value of a dropped type can still flow through live
+/// code without being constructed or matched there. The canonical case is a
+/// LuaDict record built by the Lua host and read only through accessors — its
+/// keyed table layout comes from the registered definition, so the accessor
+/// must still emit `.port` (not a positional index) and the FFI decoder must
+/// keep the declared field types, while the constructor itself is not
+/// emitted.
+#[test]
+fn constructor_dce_keeps_metadata_for_flow_through_types() {
+    let source = "data Config = Config\n\
+                  \x20 { port :: Integer\n\
+                  \x20 , host :: String\n\
+                  \x20 } deriving (LuaDict)\n\
+                  export readPort :: Config -> Integer\n\
+                  readPort c = port c\n";
+    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+        .expect("flow-through program must compile")
+        .lua_code;
+    // The accessor keeps the LuaDict keyed layout (metadata survived)...
+    assert!(
+        lua.contains(").port"),
+        "accessor must read the LuaDict field by key, not position:\n{}",
+        lua
+    );
+    // ...the FFI decoder still knows the declared record shape...
+    assert!(
+        lua.contains("t=\"Config\""),
+        "FFI decode descriptor must keep the record's field metadata:\n{}",
+        lua
+    );
+    // ...but the never-constructed constructor function is not emitted.
+    assert!(
+        !lua.contains("port = _p0"),
+        "the unconstructed Config constructor must not be emitted:\n{}",
+        lua
+    );
+}
+
 /// Cheap-eagerness must stay sound but not over-tighten: a let binding whose
 /// RHS only reads provably-WHNF variables (a literal-bound sibling, a
 /// demand-analysis-strict parameter) is still assigned strictly — no thunk —

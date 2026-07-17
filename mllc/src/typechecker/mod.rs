@@ -3087,7 +3087,7 @@ impl Checker {
             } else { None }
         }).collect();
 
-        TModule { data_defs, functions, instance_fns, has_main, exports, record_accessors, newtypes }
+        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, record_accessors, newtypes }
     }
 }
 

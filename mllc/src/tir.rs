@@ -8,6 +8,15 @@ use crate::types::{Ty, Subst};
 #[derive(Debug, Clone)]
 pub struct TModule {
     pub data_defs: Vec<TDataDef>,
+    /// Data definitions dropped by constructor-level DCE (`dce.rs`): no kept
+    /// function constructs (`Con`) or pattern-matches any of their
+    /// constructors, so no constructor function is emitted for them. Codegen
+    /// still REGISTERS them (constructor tags, LuaDict keys, FFI field types)
+    /// because a value of such a type can flow through kept code without ever
+    /// being constructed or matched there — e.g. a LuaDict record built by
+    /// the Lua host and consumed only through field accessors, whose keyed
+    /// layout comes from this metadata. Empty until DCE runs.
+    pub dropped_data_defs: Vec<TDataDef>,
     pub functions: Vec<TFunction>,
     /// Instance method implementations, keyed as "ClassName_Type_method"
     pub instance_fns: Vec<TFunction>,

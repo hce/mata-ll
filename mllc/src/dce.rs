@@ -11,9 +11,25 @@
 //! points — `main` and the exported functions — and drops the rest before
 //! codegen. Reachability is the closure over the call graph: a function's
 //! out-edges are the names it references in its clauses (Var/Con/OpFunc/
-//! SpecCall/DictCall/DictAccess/operators). By construction no *kept* function
-//! can reference a *dropped* one, so the emitted code stays well-formed; the
-//! integration suite (which runs every output) is the backstop.
+//! SpecCall/DictCall/DictAccess/operators) plus every constructor name its
+//! patterns match. By construction no *kept* function can reference a
+//! *dropped* one, so the emitted code stays well-formed; the integration
+//! suite (which runs every output) is the backstop.
+//!
+//! Constructor-level DCE piggybacks on the same edge sets: a constructor is
+//! live iff some kept function constructs it (a `Con`/`Var` reference) or
+//! matches it in a pattern. A `data` definition none of whose constructors is
+//! live moves from `data_defs` to `dropped_data_defs` — whole-definition
+//! granularity, so tag numbering inside a kept definition never shifts.
+//! Dropped definitions are NOT discarded: codegen still registers their
+//! metadata (constructor tags, LuaDict string tags and field keys, FFI field
+//! types) but emits no constructor functions for them. The metadata must
+//! survive because a value of a dropped type can still flow through kept
+//! code without being constructed or matched there — a LuaDict record built
+//! by the Lua host and read only through field accessors needs its keyed
+//! layout; only the constructor *functions* (`__mll_fn` slots) are dead
+//! weight. This is what stops the four Prelude datatypes (`ExitValue`,
+//! `Any`, `Either`, `Ordering` — 12 slots) from shipping in every file.
 
 use std::collections::{HashMap, HashSet};
 use crate::tir::*;
@@ -58,17 +74,69 @@ pub fn eliminate(mut module: TModule) -> TModule {
 
     module.functions.retain(|f| reachable.contains(&f.name));
     module.instance_fns.retain(|f| reachable.contains(&f.name));
+
+    // Constructor liveness: the union of every kept function's references.
+    // `collect_clause` gathered both expression names (Var/Con) and pattern
+    // constructor names into the same set, so this is exactly "constructed or
+    // matched by live code". Set-union order does not matter — membership is
+    // deterministic — and `data_defs` keeps its source order, so emission
+    // stays deterministic.
+    let mut used: HashSet<&str> = HashSet::new();
+    for name in &reachable {
+        if let Some(refs) = edges.get(name) {
+            used.extend(refs.iter().map(String::as_str));
+        }
+    }
+    // Whole-definition granularity: a `data` stays emitted if ANY of its
+    // constructors is live (tags are positional indices within the
+    // definition, so partial emission would buy little and cost clarity).
+    // Dead definitions are kept aside for metadata-only registration.
+    let (kept, dropped): (Vec<_>, Vec<_>) = module
+        .data_defs
+        .drain(..)
+        .partition(|d| d.constructors.iter().any(|c| used.contains(c.name.as_str())));
+    module.data_defs = kept;
+    module.dropped_data_defs.extend(dropped);
     module
 }
 
 fn collect_clause(clause: &TClause, refs: &mut HashSet<String>) {
+    for p in &clause.patterns {
+        collect_pattern(p, refs);
+    }
     for g in &clause.guards {
         collect_expr(&g.condition, refs);
         collect_expr(&g.body, refs);
     }
     collect_expr(&clause.body, refs);
     for wb in &clause.where_binds {
+        for p in &wb.patterns {
+            collect_pattern(p, refs);
+        }
         collect_expr(&wb.body, refs);
+    }
+}
+
+/// Collect every constructor name a pattern matches. Function-level DCE never
+/// needed patterns (matching a constructor calls no function), but
+/// constructor-level DCE must count a match as a use: the matched type's
+/// definition has to stay registered, and its constructors may be referenced
+/// as values elsewhere in the same program.
+fn collect_pattern(p: &TPattern, refs: &mut HashSet<String>) {
+    match p {
+        TPattern::Constructor { name, args } => {
+            refs.insert(name.clone());
+            for a in args {
+                collect_pattern(a, refs);
+            }
+        }
+        TPattern::Paren(inner) => collect_pattern(inner, refs),
+        TPattern::Tuple(elems) => {
+            for e in elems {
+                collect_pattern(e, refs);
+            }
+        }
+        TPattern::Var(_, _) | TPattern::Wildcard | TPattern::LitPat(_) => {}
     }
 }
 
@@ -103,12 +171,16 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
         TExprKind::Case { scrutinee, branches } => {
             collect_expr(scrutinee, refs);
             for b in branches {
+                collect_pattern(&b.pattern, refs);
                 for g in &b.guards { collect_expr(&g.condition, refs); collect_expr(&g.body, refs); }
                 collect_expr(&b.body, refs);
             }
         }
         TExprKind::Let { binds, body } => {
-            for b in binds { collect_expr(&b.body, refs); }
+            for b in binds {
+                for p in &b.patterns { collect_pattern(p, refs); }
+                collect_expr(&b.body, refs);
+            }
             collect_expr(body, refs);
         }
         TExprKind::SpecCall { original, specialized, args } => {

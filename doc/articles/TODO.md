@@ -244,25 +244,30 @@ MATA-LL TODO
 - [x] Where-clause type unification: pre-registered fresh type variables now unified with inferred types
 - [x] Higher-rank polymorphism (generalize beyond ST/LuaFunction scope sealing)
 - [x] Reject bare type signatures with no definition (was silently compiling to nil at runtime; now a compile error, FFI sigs still allowed body-less)
-- [ ] Strict ST monad variant (LuaStrictArray or similar) for performance-critical code — to be discussed; current closure-based ST is only ~4% slower than direct mutations
-- [ ] **Constructor-level dead-code elimination (low priority).** DCE
-      (`dce.rs`) prunes only the function call-graph (`functions` +
-      `instance_fns`); data constructors are explicitly out of scope
-      (`dce.rs:32-33`) and codegen emits *every* `module.data_defs`
-      unconditionally (`codegen.rs:930-931`). So the four Prelude datatypes with
-      constructor slots — `ExitValue`, `Any`, `Either`, `Ordering` — ship in
-      every compiled file whether or not any live code references them (12
-      `__mll_fn` slots; `Maybe`/`Bool`/lists are builtins and add nothing). A
-      module that exports only code using `Either` still carries all 12. Bounded,
-      fixed cost — left in when function-DCE was added because the big win was
-      dropping the function-level Prelude. Fix: mark a constructor reachable iff a
-      kept function constructs it (a `Con` name, already collected in
-      `collect_expr`, `dce.rs:79`) or matches it in a pattern, then filter
-      `module.data_defs` (drop a whole `data` only when none of its constructors
-      are reached). The one gap to close: `collect_clause` (`dce.rs:64-73`) does
-      not walk case-branch *patterns* today (function-DCE never needed pattern
-      names), so constructor-DCE must also traverse patterns. ~15 emitted lines
-      saved per file; new surface area, so not worth it until it matters.
+- [x] **Constructor-level dead-code elimination — done.** DCE now also prunes
+      data constructors: a constructor is live iff a kept function constructs
+      it (a `Con`/`Var` reference) or matches it in a pattern
+      (`collect_clause`/`collect_expr` now walk clause patterns, case-branch
+      patterns, and let/where binding patterns via `collect_pattern`), and a
+      `data` definition none of whose constructors is live is dropped from
+      emission — whole-definition granularity, so tags never shift. The four
+      Prelude datatypes (`ExitValue`, `Any`, `Either`, `Ordering` — 12
+      `__mll_fn` slots) no longer ship in programs that don't touch them.
+      One deliberate refinement over the original plan: dropped definitions
+      are NOT discarded — they move to `TModule::dropped_data_defs`, which
+      codegen still REGISTERS (constructor tags, LuaDict string tags and
+      field keys, FFI-decoder field types) but never emits. The metadata must
+      survive because a value of a dropped type can flow through live code
+      without being constructed or matched there — canonically a LuaDict
+      record built by the Lua host and read only through field accessors,
+      whose keyed `.field` layout (vs. positional `[i]`) comes from exactly
+      this metadata; filtering `data_defs` outright would have miscompiled
+      that case. Tests: `constructor_dce_unused_data_adds_nothing` (a dead
+      `data` + derived instances adds nothing — byte-identical output — and a
+      minimal program carries no Prelude constructor slots) and
+      `constructor_dce_keeps_metadata_for_flow_through_types` (accessor stays
+      keyed, FFI descriptor keeps the record shape, constructor not emitted).
+      `codegen_is_deterministic` still green; full suite passes.
 - [x] Well-defined runtime errors when decoding a LuaUserData/LuaDict value that
       crosses the Lua FFI boundary. The type-directed FFI-result decoder
       (`__mll_ffi_decode`) now raises a descriptive

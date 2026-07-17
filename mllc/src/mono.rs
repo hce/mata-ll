@@ -334,6 +334,7 @@ impl Monomorphizer {
 
         TModule {
             data_defs: module.data_defs,
+            dropped_data_defs: module.dropped_data_defs,
             functions: result_fns,
             instance_fns,
             has_main: module.has_main,
