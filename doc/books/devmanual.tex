@@ -414,7 +414,13 @@ continuation 1, \texttt{let}/\texttt{where} right-hand side scaled by
 the binder's use count.  That last rule is the laziness answer: a
 thunk's FORCE is memoized (once), but the value it yields is consumed
 once per use of the binder, so the binder's use count is the sound
-bound; a memoized binding of builtin-scalar type relaxes back to 1.
+bound.  Scalars get no exemption: a scalar
+(\texttt{Integer}/\texttt{Number}/\texttt{Bool}/\texttt{String}) derived
+from a linear value is tracked exactly-once like any other alias --- strict
+GHC parity, dropping the earlier \texttt{Movable}-style memoization
+relaxation (which had opened an accept-direction hole by untracking a
+scalar once it flowed into unrestricted position); only \texttt{()}-typed
+derived results stay exempt.
 The discipline is \emph{exactly-once} (GHC's linear semantics), so the
 pass enforces a lower bound as well: the usage count is kept separate
 from the per-binder policy, a tracked binder ABSENT from its scope's

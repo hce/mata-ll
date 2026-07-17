@@ -274,3 +274,49 @@ A NON-GADT type parameter used only as a phantom defaults to kind
 GHC rejects this too without a `data Tagged (a :: Color)` kind
 signature; mata-ll has no such signature, so make `Tagged` a GADT that
 pins the tag in its constructor's result type instead.
+
+## Linear (`%1`) checking rejects conservatively, and trusts the FFI side
+
+The linear-types usage checker (see SPEC.md) is sound in the sense that
+matters — it never accepts a double-use or a leak of a `%1` value that
+GHC would reject, and scalars get no special treatment (`Integer`,
+`Number`, `Bool` and `String` derived from a `%1` value are tracked
+exactly-once, in strict parity with GHC). But its approximations mean
+some programs that are *actually* linear are still rejected, always
+erring toward rejection. The ones you are most likely to hit:
+
+- **Branching on a linear scalar with a wildcard.** A `case` over a
+  tainted scalar whose default is `_` is rejected, even though forcing
+  the scrutinee to compare the literals would consume it:
+
+      case useOnce t of        -- rejected: the '_' looks like a drop
+          0 -> "zero"
+          _ -> "other"
+
+  Bind the alternative to a variable and use it, which the checker can
+  see is a consumption:
+
+      case useOnce t of
+          0 -> "zero"
+          n -> show n          -- accepted: 'n' is used
+
+- **Discarding a non-`()` result built from a linear value.** A `>>` or
+  `_ <-` that drops a result whose type is not `()` is rejected, because
+  the pending consumption may live inside that never-forced result. Make
+  the action return `()`, or bind and use the result.
+- **Record update over a record built from a linear value** is rejected
+  outright — it discards the previous field values, which the checker
+  cannot prove resource-free.
+
+Conversely, the **Lua side of a `%1` FFI signature is trusted**. When you
+declare a foreign binding as `%1`, mata-ll charges the argument once per
+call and assumes the host consumes it exactly once; it cannot see across
+the FFI boundary to check that. The `%1` is your assertion about the host
+function, not a checked fact — this is deliberate, and the one place
+linear checking is not enforced end-to-end.
+
+One place mata-ll is *more* permissive than GHC, but still safe: an
+unannotated `let`/`where` binding that is never forced consumes nothing
+(the thunk never runs under lazy evaluation), so `let u = t in useOnce t`
+compiles where GHC's stricter typing rule rejects it. This cannot leak or
+double-use at run time — it just reflects mata-ll's laziness.

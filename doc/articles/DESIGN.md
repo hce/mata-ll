@@ -151,6 +151,57 @@ intrinsic ones (`LuaPure`, `LuaIO`) reduce during type checking:
 
 User-defined type families use closed, equation-based matching.
 
+### Linear types (multiplicity)
+
+`Ty::Arrow` carries a `Mult` (`One`, `Many`, a flexible inference `Var`,
+or a rigid signature variable `Rigid`) as a third field. `Mult`'s
+`PartialEq`/`Hash` are deliberately identity-blind — any `Mult` equals
+any other — so a `%1` arrow and a plain arrow are the *same* type for
+every existing map key, cache and comparison; only the unifier (which
+handles the slot explicitly) and the usage checker ever read it.
+Multiplicity variables have their own id namespace and their own slot in
+`Subst`, so minting them never perturbs type-variable numbering.
+Unification of multiplicity is invariant (`One` ≠ `Many`, as in GHC's
+`LinearTypes`); arrows the inference engine invents — the expected arrow
+at an application, a lambda's own arrows — get fresh multiplicity
+variables, which is how a lambda checked against a `%1` parameter learns
+its binder's restriction.
+
+Enforcement is *not* threaded through unification. It is a separate usage
+pass (`typechecker/usage.rs`) that runs at the end of `check_function`
+over the fully-substituted typed IR, counting 0/1/ω uses per variable
+(sequential add, branch-join max) and scaling by context. The discipline
+is *exactly-once* (GHC's linear semantics), so the pass keeps the usage
+count separate from the per-binder policy and enforces a lower bound too:
+a tracked binder absent from its scope's usage at a check point is a
+leak, and a binder consumed in only some branches of an alternative group
+leaks on the skipped path. Aliases (pattern binders of a match on a `%1`
+value, `<-` binders, `let`/`where` bindings) inherit the obligation. The
+module comment in `usage.rs` states the enforced fragment and every
+boundary precisely.
+
+**Design decision: no scalar exemption (strict GHC parity).** An earlier
+phase relaxed scalar aliases to *at-least-once* — usable repeatedly, on
+the reasoning that the runtime memoizes the thunk so duplicating a scalar
+is operationally harmless. That relaxation was dropped: a scalar derived
+from a `%1` value is now tracked exactly-once like every other alias. The
+relaxation had stopped tracking a scalar once it flowed into unrestricted
+position, which opened an accept-direction hole (a pending consumption
+parked in a never-forced scalar thunk could be counted as consumed). The
+project's north star is strict GHC parity wherever feasible — an
+almost-but-not-quite-Haskell semantics is a worse trap than a plainly
+missing feature — and GHC has no `Movable`-style scalar rule in its type
+system, so parity plus soundness won over the operationally-sound-but-
+non-GHC relaxation. The cost, accepted deliberately, is that the harmless
+scalar-duplication idiom (`go + go where go = useOnce t`) now rejects.
+Only `()`-typed derived results stay exempt (the run-for-effect idiom).
+
+Everything erases after type checking — the backend ignores the `Mult`
+field entirely and the emitted Lua is byte-identical with or without
+annotations (regression-tested). Dictionaries are never linear:
+dictionary-passing is introduced by the monomorphizer after this pass,
+and class-method arrows default to `Many`.
+
 ### Error handling
 
 Type errors are accumulated (not fatal on first error) and reported

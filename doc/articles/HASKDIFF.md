@@ -261,3 +261,63 @@ polymorphic where-helper applied to values unpacked from two
 first box's hidden type. GHC generalizes where-bindings and accepts
 it. Inline the helper or make it a top-level function with a
 signature.
+
+## Linear types match GHC's `LinearTypes`
+
+mata-ll implements GHC's linear arrows. A function arrow may carry a
+*multiplicity*: `a %1 -> b` promises the function consumes its argument
+*exactly once*, while a plain `a -> b` (spelled `a %Many -> b` or
+`a %'Many -> b`) is unrestricted. A signature may quantify over a
+multiplicity variable — `apply :: (a %m -> b) -> a %m -> b` — which each
+caller instantiates. The semantics are GHC's: a second use of a `%1`
+value is the double-close/double-free class of bug, *zero* uses leak the
+resource, and both are compile errors. Unification is invariant, as in
+GHC — a plain-arrow function is not interchangeable with a `%1` one
+(`map close conns` is a type error either way).
+
+**Scalars have no exemption — this is strict GHC parity.** A scalar
+(`Integer`, `Number`, `Bool`, `String`) derived from a `%1`/`%m` value —
+destructured from a match, `<-`-bound, or held in a `let`/`where`
+binding — is tracked exactly-once like every other alias, exactly as GHC
+does. GHC has no `Movable`-style relaxation in its type system, and
+neither does mata-ll: `go + go where go = useOnce t` (a scalar read
+twice) is rejected, even though duplicating a scalar is operationally
+harmless under the memoizing runtime. Enforcement is a dedicated usage
+pass over the fully-substituted typed IR (0/1/ω use counting), not a
+re-threading of inference; it erases completely (the emitted Lua is
+byte-identical with or without the annotations).
+
+The deviations that remain are all in the **reject** direction — mata-ll
+rejects some programs GHC accepts, never the reverse — except one
+accept-direction relaxation that is sound under the lazy runtime, and
+the FFI trust boundary:
+
+- **FFI boundary trust (deliberate — the standing exception to parity).**
+  The Lua side of a `%1` FFI declaration is trusted: mata-ll charges the
+  argument once per call and cannot see whether the host actually
+  consumes it. FFI is one of mata-ll's few deliberate departures from
+  parity in general, and this is its linear-types instance.
+- **Unannotated `let`/`where` that is never forced charges zero uses
+  (accept direction, operationally sound).** GHC's typing rule for an
+  unannotated `let`/`where` charges its right-hand side unconditionally,
+  so GHC rejects `let u = t in useOnce t` (with `t` linear) even though
+  `u` is never forced. mata-ll's use-count scaling *accepts* it: under
+  the lazy runtime the thunk genuinely never runs, so nothing is consumed
+  twice and nothing leaks. This is more permissive than GHC, but it does
+  not admit a double-use or a leak at run time — it reflects mata-ll's
+  laziness where GHC's rule is syntactic.
+- **Conservative over-rejections (reject direction).** A wildcard over a
+  *tainted scalar scrutinee* (`case useOnce t of 0 -> …; _ -> …`) is
+  rejected by the blanket wildcard rule, although forcing the scrutinee
+  to compare literals would in fact consume it — replace the `_` with a
+  variable pattern and use that binder. Discarding a non-`()` result
+  built from a linear value (a `>>` or `_ <-` whose result type is not
+  `()`) is rejected, since the pending consumption may live in that
+  never-forced result. A record update over a tainted record is rejected
+  outright. An operator whose declared type uses `%1`/`%m` arrows is
+  charged `%1` only when *both* operand arrows are literally `%1`; a rigid
+  `%m` operand arrow charges ω.
+
+Because the only accept-direction difference is the operationally-sound
+lazy-`let` case, there is **no remaining accept-direction gap** where a
+double-use or a leak slips past the checker.

@@ -39,16 +39,45 @@ API of the `mllc` library crate.)
   by a wildcard, discarded as a non-`()` action result, or consumed inside a
   Maybe bind's continuation (skipped on `Nothing`) — is a compile error, as is
   using it more than once. This catches the double-free / leak class of
-  resource bug: e.g. a file handle closed exactly once across the FFI. Scalar
-  aliases destructured from a `%1` value may be used repeatedly (they are
-  memoized) but must be forced at least once. Diagnostics name the variable and
-  explain both failure directions (leak vs. double-free) in plain language.
+  resource bug: e.g. a file handle closed exactly once across the FFI. A scalar
+  (`Integer`/`Number`/`Bool`/`String`) derived from a `%1` value — destructured
+  from a match, `<-`-bound, or held in a `let`/`where` binding — is tracked
+  **exactly once like every other alias**, in strict parity with GHC (which has
+  no Movable-style scalar exemption); only a `()`-typed derived result is exempt
+  (the run-for-effect idiom). Diagnostics name the variable and explain both
+  failure directions (leak vs. double-free) in plain language.
 - **Multiplicity polymorphism.** A function may be generic over a multiplicity:
   `apply :: (a %m -> b) -> a %m -> b` lets each caller choose `m`, so a linear
   value threads through helpers, local `where`/`let` functions, and IO/ST/Maybe
   binds without losing its exactly-once guarantee.
+- **Dead-code elimination now prunes unused data constructors, not just
+  unreachable functions.** A constructor is live only if a kept function
+  constructs it (a `Con`/`Var` reference) or matches it in a pattern — DCE now
+  walks clause, `case`-branch and `let`/`where` binding patterns to find those
+  matches. A data definition none of whose constructors is live is dropped from
+  emission at whole-definition granularity, so constructor tags never shift.
+  Dropped definitions keep their *metadata* (constructor tags, `LuaDict` string
+  tags and field keys, FFI-decoder field types), because a value of a dropped
+  type can still flow through live code without being constructed or matched
+  there — canonically a `LuaDict` record built by the Lua host and read only
+  through field accessors — so only the constructor *function* is elided, never
+  the layout information. Effect: the four Prelude datatypes with constructor
+  slots (`ExitValue`, `Any`, `Either`, `Ordering` — 12 runtime slots) no longer
+  ship in programs that never touch them. Output-shrinking only; behavior
+  unchanged. Tests: constructor_dce_unused_data_adds_nothing,
+  constructor_dce_keeps_metadata_for_flow_through_types.
 - Multiplicities are checked only — they **erase** entirely after type checking,
   so the emitted Lua is byte-identical with or without annotations.
+- Boundary (documented in HASKDIFF/SPEC/CAVEATS): the usage checker's
+  approximations are all in the *reject* direction — the Lua side of a `%1` FFI
+  signature is trusted, and a wildcard over a tainted scalar scrutinee, a
+  non-`()` result discard, and a record update on a tainted record over-reject
+  conservatively — with a single *accept*-direction relaxation that is sound
+  under the lazy runtime: an unannotated `let`/`where` binding that is never
+  forced charges zero uses (its thunk truly never runs), where GHC's rule
+  charges the right-hand side unconditionally. There is no scalar-memoization
+  accept-gap. Tests: linear_affine_basic.mll, linear_mult_poly.mll, and the
+  linear_rejects_* / erasure suites in run_mll.rs.
 
 ## [0.1.4] - 2026-07-17
 

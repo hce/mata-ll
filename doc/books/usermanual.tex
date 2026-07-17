@@ -1638,14 +1638,15 @@ consumed one, or a \texttt{let} binding whose right-hand side did.
 Because evaluation is lazy, a \texttt{\%1} value parked in a binding
 that is never forced is \emph{not} consumed and is rejected, as is
 matching part of one with a wildcard (\texttt{\_}), or discarding a
-non-\texttt{()} result built from one. A binder of builtin scalar type
-(\texttt{Integer}, \texttt{Number}, \texttt{Bool}, \texttt{String})
-destructured out of a \texttt{\%1} value may be used \emph{repeatedly}
-(the runtime memoizes, so plain data duplicates harmlessly) but must be
-used at least once --- until it is forced, the consumption that
-produces it has not happened. \texttt{()}-typed results are exempt: the
-run-for-effect idiom (\texttt{close c >> \dots}) discards them by
-design.
+non-\texttt{()} result built from one. A scalar (\texttt{Integer},
+\texttt{Number}, \texttt{Bool}, \texttt{String}) derived from a
+\texttt{\%1} value is tracked \emph{exactly once} like any other alias
+--- there is no memoization exemption, in strict parity with GHC, so
+reading such a scalar twice (\texttt{go + go} where
+\texttt{go = useOnce t}) is a leak-or-double-use error just as reading
+the linear value itself twice would be. \texttt{()}-typed results are
+exempt: the run-for-effect idiom (\texttt{close c >> \dots}) discards
+them by design.
 
 A signature may also be \emph{multiplicity-polymorphic}:
 \texttt{apply :: (a \%m -> b) -> a \%m -> b} lets each caller choose
@@ -1675,13 +1676,20 @@ checking, and the compiled Lua is byte-identical with or without the
 annotations.
 
 \emph{Boundary.} The checker's approximations err toward rejection,
-never toward accepting a double use or a leak, with one documented
-exception inherited from the scalar rule: a scalar laundered through an
-unrestricted function (e.g.\ \texttt{constUnit (useOnce t)} where
-\texttt{constUnit} ignores nothing visible to the tracker) is counted
-as a consumption even though laziness may never force it. GHC, which
-has no scalar exemption, rejects such programs; mata-ll accepts the
-memoized-scalar idioms GHC refuses in exchange.
+never toward accepting a double use or a leak, and scalars now get no
+exemption, so there is no remaining accept-direction gap. Two
+deviations from GHC's verdict remain. The Lua side of a \texttt{\%1}
+FFI signature is \emph{trusted}: mata-ll charges the argument once per
+call and cannot check what the host does with it --- the \texttt{\%1}
+is your assertion about the foreign function. And an unannotated
+\texttt{let}/\texttt{where} binding that is never forced consumes
+nothing (its thunk never runs under lazy evaluation), so mata-ll
+accepts \texttt{let u = t in useOnce t} where GHC's stricter typing
+rule rejects it --- more permissive than GHC, but it cannot leak or
+double-use at run time. Conservative rejections you may hit: a wildcard
+over a tainted scalar scrutinee (use a variable pattern instead), a
+discarded non-\texttt{()} result, and a record update over a record
+built from a linear value.
 
 %======================================================================
 \section{HashMap}

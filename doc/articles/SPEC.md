@@ -304,6 +304,102 @@ To define a typeclass:
 Since we don't want to support full haskell, for now we only support
 typeclasses with a single type argument for now.
 
+# Linear types (multiplicity arrows)
+
+A function arrow carries a *multiplicity* describing how the function
+consumes its argument. This is GHC's `LinearTypes`:
+
+    close :: Conn %1 -> IO ()      -- consumes its argument EXACTLY once
+    dup   :: Conn %Many -> …       -- unrestricted (also written %'Many)
+    id'   :: a -> a                -- a plain arrow is %Many
+
+`%1` is the *linear* arrow: the function must consume its argument
+exactly once — using it a second time is the double-close/double-free
+class of bug, and using it *zero* times leaks the resource. Both are
+compile errors. `%Many` (equivalently a plain `->`) places no
+restriction. A signature may also quantify over a multiplicity
+*variable*:
+
+    apply :: (a %m -> b) -> a %m -> b
+
+`%m` is chosen by each caller: applied to a `%1` function the argument
+stays linear through `apply`; applied to an unrestricted one it is
+unrestricted. Inside `apply`'s own body `m` is rigid and the binder is
+held to exactly-once, because a caller may instantiate `m = 1`.
+
+Multiplicity is invariant under unification (`%1` ≠ `%Many`, as in GHC):
+a plain-arrow function is not interchangeable with a `%1` one, so
+`map close conns` is a type error. The multiplicity lives only on the
+arrow type; two arrows that differ *only* in multiplicity are otherwise
+the same type for every map key, cache and comparison — only the
+unifier and the usage checker read the slot.
+
+## Enforcement: the usage checker
+
+Linearity is enforced by a dedicated *usage pass* over the final,
+fully-substituted typed IR of each function — it is **not** threaded
+through unification. The pass counts uses per variable on a 0/1/ω
+lattice: sequential composition adds, the alternatives of a
+`case`/`if`/guard take the per-variable maximum (one use in every branch
+is still one use, because only one branch runs), and each use is scaled
+by what its context may do with it — an unrestricted call or a closure
+capture charges ω, a constructor field or an IO/ST/Maybe-bind
+continuation charges one, and a `let`/`where` right-hand side is scaled
+by how often its bound name is used.
+
+Because a `%1` value must be consumed *exactly* once, the pass enforces a
+lower bound as well as an upper one: a tracked binder that is absent from
+its scope's usage at a check point (lambda exit, case-branch exit,
+bind-frame unwind, clause end) was consumed zero times and leaks; and a
+binder consumed in only some alternatives of a branch group leaks on the
+path through a non-consuming alternative. Aliases inherit the obligation:
+a pattern binder from a match on a `%1` value, a `<-` binder from an
+action that consumed one, and a `let`/`where` binding whose right-hand
+side did are each tracked exactly-once themselves.
+
+Under laziness, the `let`/`where` scaling is the key rule: a thunk's
+*force* is memoized (it runs at most once), but the value it yields is
+consumed once per use of the binder, so the binder's use count — not the
+force count — is the sound bound. A binding that is never forced
+contributes zero, which then trips the leak check.
+
+## Scalars: strict parity, no exemption
+
+A scalar (`Integer`, `Number`, `Bool`, `String`) derived from a `%1`/`%m`
+value is tracked exactly-once like every other alias — there is no
+`Movable`-style relaxation. Duplicating a scalar is operationally
+harmless under the memoizing runtime, but GHC's type system has no scalar
+exemption and neither does mata-ll: `go + go where go = useOnce t` is
+rejected. The single exempt case is a `()`-typed derived result, which
+the run-for-effect idiom (`close c >> …`) discards by design.
+
+## Erasure
+
+Multiplicities are a type-checking discipline only. After checking, the
+backend ignores the multiplicity entirely and the emitted Lua is
+byte-identical to the same program written with plain arrows. Nothing
+about linearity survives into the generated code.
+
+## Boundary
+
+Every deviation from GHC's verdict is in the *reject* direction — mata-ll
+may reject a program GHC accepts, but does not accept a double-use or a
+leak GHC rejects — with two exceptions:
+
+- The Lua side of a `%1` FFI declaration is **trusted**: the argument is
+  charged once per call, and what the host does with it is not visible
+  (FFI is a deliberate parity exception in general).
+- An unannotated `let`/`where` binding that is never forced charges zero
+  uses, which is *more permissive* than GHC's rule (GHC charges its
+  right-hand side unconditionally). This is sound under the lazy runtime
+  — the thunk genuinely never runs — so it admits no run-time double-use
+  or leak; it simply reflects mata-ll's laziness where GHC is syntactic.
+
+Conservative (reject-direction) over-approximations: a wildcard over a
+tainted scalar scrutinee, a discarded non-`()` result built from a linear
+value, a record update over a tainted record, and an operator whose
+declared arrows are not both literally `%1`.
+
 # Kinds
 
 MATA-LL has a full kind system. Kinds classify types the way types
