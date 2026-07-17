@@ -189,9 +189,8 @@ impl Checker {
             }
         }
 
-        // Apply the combined substitution to the function type and all clauses,
-        // resolving type variables that were unified during clause checking.
-        let final_ty = fresh_ty.apply_subst(&overall_subst);
+        // (The function type and clauses are finalised below, after numeric
+        // defaulting has had a chance to extend `overall_subst`.)
 
         // Record this function's declared constraints over the FINAL type's
         // variable names. Clause checking may unify a freshened signature
@@ -214,6 +213,21 @@ impl Checker {
             }).collect();
             self.fn_dict_constraints.insert(name.to_string(), renamed);
         }
+        // ---- Numeric defaulting (Haskell 2010 / GHC `default (Integer, Double)`) ----
+        // Resolve type variables that appear ONLY in the wanted constraints of
+        // this binding (never in its signature type) and are constrained solely
+        // by standard classes including at least one numeric class. Without this,
+        // an in-expression literal like `show 5` would be reported ambiguous.
+        // The chosen default (Integer first, then Number for Double) is folded
+        // into `overall_subst` BEFORE it is applied to the TIR clauses, so the
+        // literal nodes carry the concrete type codegen ultimately emits.
+        {
+            let default_subst = self.compute_numeric_defaults(&fresh_ty, &overall_subst);
+            if !default_subst.is_type_empty() {
+                overall_subst = overall_subst.merge(&default_subst);
+            }
+        }
+        let final_ty = fresh_ty.apply_subst(&overall_subst);
         let tclauses: Vec<TClause> = tclauses.into_iter()
             .map(|c| c.apply_subst(&overall_subst))
             .collect();
@@ -343,6 +357,92 @@ impl Checker {
         self.check_function_usage(&tfun);
 
         Some(tfun)
+    }
+
+    /// Haskell 2010 / GHC numeric defaulting for this binding.
+    ///
+    /// Considers each type variable that occurs in a leftover wanted constraint
+    /// (after `subst`). A variable is a defaulting candidate when, GHC-style,
+    /// every constraint on it has the bare variable as its head (`C v`, not
+    /// `C (f v)`), every such class is a *standard* class, at least one is a
+    /// numeric class, and the variable does NOT appear in this binding's own
+    /// (signature) type — i.e. it is ambiguous, resolvable only by defaulting.
+    /// For each candidate the default types are tried in order — `Integer`,
+    /// then `Number` (GHC's `Double`) — and the first that satisfies every
+    /// constraint on the variable is chosen. Returns the substitution to fold
+    /// into `overall_subst`.
+    fn compute_numeric_defaults(&self, fresh_ty: &Ty, subst: &Subst) -> Subst {
+        // GHC reduces each wanted constraint to head-normal form — per-variable
+        // pieces `C v` — before defaulting: `Eq [(a, b)]` becomes `Eq a` and
+        // `Eq b`, so `a` and `b` each default independently. `collect_required_
+        // var_constraints` performs exactly that structural reduction (the same
+        // one `has_instance` uses). A free variable a constraint cannot push all
+        // the way down to (a non-structural head with no matching context) is
+        // "blocked": it is entangled in a constraint we cannot simplify, so —
+        // matching GHC — it is not defaulted.
+        struct VarInfo {
+            // Residual per-variable classes (GHC's HNF), for the standard/numeric
+            // eligibility test.
+            classes: Vec<String>,
+            // Every original constraint in which the variable is free, used to
+            // verify a candidate default actually satisfies the WHOLE constraint
+            // (e.g. `Show (a -> a -> a)` — reducible to no residual, yet never
+            // satisfiable — must veto defaulting `a`).
+            full: Vec<(String, Ty)>,
+        }
+        let mut groups: HashMap<TyVar, VarInfo> = HashMap::new();
+        for (class, cty) in &self.wanted {
+            let rty = cty.apply_subst(subst);
+            let fvs = rty.free_vars();
+            if fvs.is_empty() { continue; }
+            for v in &fvs {
+                let e = groups.entry(v.clone()).or_insert(VarInfo { classes: Vec::new(), full: Vec::new() });
+                e.full.push((class.clone(), rty.clone()));
+            }
+            // Reduce to the residual per-variable class constraints (GHC's HNF).
+            // A structural constraint with no residual on a variable (e.g.
+            // `Monoid [a]`, whose instance needs nothing of `a`) contributes no
+            // class — it neither constrains nor blocks that variable's default.
+            let mut reduced: Vec<(String, TyVar)> = Vec::new();
+            self.collect_required_var_constraints(class, &rty, &mut reduced);
+            for (rc, rv) in reduced {
+                let e = groups.entry(rv).or_insert(VarInfo { classes: Vec::new(), full: Vec::new() });
+                if !e.classes.iter().any(|c| *c == rc) { e.classes.push(rc); }
+            }
+        }
+
+        let sig_vars = fresh_ty.apply_subst(subst).free_vars();
+        let mut out = Subst::empty();
+        for (v, info) in &groups {
+            // A variable that survives in the binding's own type is genuinely
+            // polymorphic — the caller (or its declared context) discharges it.
+            if sig_vars.contains(v) { continue; }
+            // All residual classes standard, at least one numeric (GHC's rule).
+            // A user (non-standard) class on the variable blocks defaulting
+            // exactly as in GHC — such a use is genuinely ambiguous.
+            if !info.classes.iter().all(|c| Self::is_standard_class(c)) { continue; }
+            if !info.classes.iter().any(|c| Self::is_numeric_class(c)) { continue; }
+            // Try the default types in order; pick the first for which EVERY
+            // original constraint on the variable has an instance.
+            for cand in &["Integer", "Number"] {
+                let ct = Ty::Con((*cand).to_string());
+                let sub = Subst::singleton(v.clone(), ct);
+                if info.full.iter().all(|(class, fty)| self.has_instance(class, &fty.apply_subst(&sub))) {
+                    out = out.merge(&sub);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn is_numeric_class(c: &str) -> bool {
+        matches!(c, "Num" | "Real" | "Integral" | "Fractional" | "RealFrac" | "Floating" | "RealFloat")
+    }
+
+    fn is_standard_class(c: &str) -> bool {
+        Self::is_numeric_class(c)
+            || matches!(c, "Eq" | "Ord" | "Show" | "Read" | "Enum" | "Bounded")
     }
 
     pub(super) fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, ctx: &str) -> Result<(TClause, Subst), DiagnosticKind> {
@@ -636,10 +736,26 @@ impl Checker {
 
         // Generalize each binding over the outer environment (excluding the
         // group's own monomorphic vars), then extend the environment.
+        //
+        // Monomorphism restriction: a type variable still carrying an unresolved
+        // class constraint is NOT generalized — it stays a shared monomorphic
+        // variable so its constraints remain connected to how the binding is
+        // used. This matters for numeric literals: `let t = Leaf 1` has type
+        // `Tree a` with a pending `Num a`; generalizing `a` would sever that
+        // `Num a` from the `Eq (Tree a)` a later `t == …` emits, and neither
+        // fragment could then be defaulted. Keeping `a` monomorphic lets the two
+        // constraints meet at the enclosing binding's defaulting step. This also
+        // brings `let` into line with mata-ll's already-monomorphic `where`
+        // bindings, and matches GHC's monomorphism restriction.
         let outer_env = env.apply_subst(&subst);
+        let constrained_vars: Vec<TyVar> = self.wanted.iter()
+            .flat_map(|(_, cty)| cty.apply_subst(&subst).free_vars())
+            .collect();
         let mut out_env = outer_env.clone();
         for (i, bind) in binds.iter().enumerate() {
-            let scheme = self.generalize(&outer_env, &fresh_tys[i].apply_subst(&subst));
+            let bind_ty = fresh_tys[i].apply_subst(&subst);
+            let mut scheme = self.generalize(&outer_env, &bind_ty);
+            scheme.vars.retain(|v| !constrained_vars.contains(v));
             out_env.insert(bind.name.clone(), scheme);
         }
 
@@ -854,8 +970,36 @@ impl Checker {
                 }
             }
             Expr::Lit(lit) => {
-                let ty = self.literal_type(lit);
-                Ok((TExpr::new(TExprKind::Lit(Self::convert_literal(lit)), ty.clone()), ty, Subst::empty()))
+                // Numeric literals are polymorphic (GHC): an integer literal is
+                // `Num a => a` (via `fromInteger`), a fractional literal is
+                // `Fractional a => a` (via `fromRational`). We give the literal a
+                // fresh type variable and emit the corresponding wanted; the
+                // variable is later unified with the surrounding concrete type,
+                // or resolved by defaulting (Integer, then Number) if it stays
+                // free. The TIR keeps the raw literal — at a concrete Integer or
+                // Number type `fromInteger`/`fromRational` is the identity and is
+                // erased in codegen; only a user Num type materialises the call
+                // (see the monomorphizer's Lit handling).
+                match lit {
+                    Literal::Integer(_) => {
+                        let ty = self.fresh_var("_lit");
+                        if let Ty::Var(v) = &ty {
+                            self.wanted.push(("Num".to_string(), Ty::Var(v.clone())));
+                        }
+                        Ok((TExpr::new(TExprKind::Lit(Self::convert_literal(lit)), ty.clone()), ty, Subst::empty()))
+                    }
+                    Literal::Number(_) => {
+                        let ty = self.fresh_var("_lit");
+                        if let Ty::Var(v) = &ty {
+                            self.wanted.push(("Fractional".to_string(), Ty::Var(v.clone())));
+                        }
+                        Ok((TExpr::new(TExprKind::Lit(Self::convert_literal(lit)), ty.clone()), ty, Subst::empty()))
+                    }
+                    _ => {
+                        let ty = self.literal_type(lit);
+                        Ok((TExpr::new(TExprKind::Lit(Self::convert_literal(lit)), ty.clone()), ty, Subst::empty()))
+                    }
+                }
             }
             Expr::App(func, arg) => {
                 let (tf, func_ty, s1) = self.infer_expr(func, env)?;

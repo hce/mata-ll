@@ -10,10 +10,13 @@ instance Similar Integer where
 
 main :: IO ()
 main = do
-    putStrLn (show (1 ~= 1))
-    putStrLn (show (1 ~= 2))
-    putStrLn (show (1 !~ 1))
-    putStrLn (show (1 !~ 2))
+    -- `Similar` is a user (non-standard) class; an integer literal used with
+    -- its operators is `(Similar a, Num a) => a`, which GHC's defaulting cannot
+    -- resolve. Pin the left operand's type (the right unifies to it).
+    putStrLn (show ((1 :: Integer) ~= 1))
+    putStrLn (show ((1 :: Integer) ~= 2))
+    putStrLn (show ((1 :: Integer) !~ 1))
+    putStrLn (show ((1 :: Integer) !~ 2))
 -- expect: True
 -- expect: False
 -- expect: False

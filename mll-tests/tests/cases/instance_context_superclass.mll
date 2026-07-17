@@ -27,6 +27,9 @@ instance MyOrd Integer where
 
 main :: IO ()
 main = do
-    assert (mylt (Box 1) (Box 2)) "context method via superclass"
-    assert (not (mylt (Box 2) (Box 2))) "superclass method in MyOrd body"
-    assert (myeq (Box 3) (Box 3)) "context-constrained superclass instance"
+    -- `MyOrd`/`MyEq` are user classes, so a `Box` of an integer literal is
+    -- `(MyOrd a, Num a) => Box a` etc. — ambiguous under GHC defaulting. Pin the
+    -- element type on one operand (the other unifies to it).
+    assert (mylt (Box (1 :: Integer)) (Box 2)) "context method via superclass"
+    assert (not (mylt (Box (2 :: Integer)) (Box 2))) "superclass method in MyOrd body"
+    assert (myeq (Box (3 :: Integer)) (Box 3)) "context-constrained superclass instance"

@@ -1154,6 +1154,11 @@ impl Checker {
         for name in &["max", "min"] {
             self.env.insert(name.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
         }
+        // Arithmetic operators are the methods of the numeric classes
+        // registered further below (Num for + - *, Fractional for /). Their
+        // env schemes are `forall a. a -> a -> a`; the Num/Fractional class
+        // constraint on `a` is attached via `method_constraints` in the
+        // numeric-class registration block, exactly like `==`/`show`.
         for op in &["+", "-", "*", "/"] {
             self.env.insert(op.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
         }
@@ -1161,8 +1166,10 @@ impl Checker {
         for op in &["&&", "||"] {
             self.env.insert(op.to_string(), Scheme { vars: vec![], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Bool".into()), Ty::Con("Bool".into())], Ty::Con("Bool".into())) });
         }
-        for name in &["mod", "div"] {
-            self.env.insert(name.to_string(), Scheme { vars: vec![], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::Con("Integer".into())], Ty::Con("Integer".into())) });
+        // div/mod/quot/rem are the Integral class methods (`forall a. a->a->a`,
+        // constrained to Integral below). Previously monomorphic Integer->Integer.
+        for name in &["mod", "div", "quot", "rem"] {
+            self.env.insert(name.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
         }
         // List functions that need lazy cons (implemented in Lua runtime)
         self.env.insert("head".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(Ty::list(ta.clone()), ta.clone()) });
@@ -1852,6 +1859,170 @@ impl Checker {
                 class_name: "Ord".to_string(),
                 target_type: target,
                 method_fns,
+                context: None,
+            });
+        }
+
+        // ===================================================================
+        // Numeric class hierarchy: Num, Fractional, Real, Integral.
+        // Registered built-in (like Eq/Ord) rather than as source classes,
+        // because the operator methods (+ - * / div mod quot rem) must map to
+        // THEMSELVES in the Integer/Number instances so the monomorphizer keeps
+        // them as inline InfixApp (byte-identical concrete arithmetic) — a
+        // self-reference no source `instance` body can express. The named
+        // methods (negate/abs/signum/fromInteger/recip/fromRational/toInteger/
+        // quotRem/divMod) dispatch to small runtime helpers emitted on demand.
+        // ===================================================================
+        {
+            let bin = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
+            let un = Ty::arrow(ta.clone(), ta.clone());
+            let from_integer_ty = Ty::arrow(Ty::Con("Integer".into()), ta.clone());
+            // No Rational type in mata-ll: a fractional literal is a Number
+            // (f64) at the source level, so `fromRational` takes that same
+            // representation. Documented as the single numeric-tower deviation.
+            let from_rational_ty = Ty::arrow(Ty::Con("Number".into()), ta.clone());
+            let pair = Ty::Tuple(vec![ta.clone(), ta.clone()]);
+            let to_pair = Ty::fun(&[ta.clone(), ta.clone()], pair);
+            let to_integer_ty = Ty::arrow(ta.clone(), Ty::Con("Integer".into()));
+
+            // ---- class Num a ----
+            self.classes.insert("Num".to_string(), ClassInfo {
+                name: "Num".to_string(),
+                type_var: "a".to_string(),
+                superclasses: vec![],
+                methods: vec![
+                    ("+".to_string(), bin.clone()),
+                    ("-".to_string(), bin.clone()),
+                    ("*".to_string(), bin.clone()),
+                    ("negate".to_string(), un.clone()),
+                    ("abs".to_string(), un.clone()),
+                    ("signum".to_string(), un.clone()),
+                    ("fromInteger".to_string(), from_integer_ty.clone()),
+                ],
+                default_methods: HashMap::new(),
+            });
+            // ---- class Num a => Fractional a ----
+            self.classes.insert("Fractional".to_string(), ClassInfo {
+                name: "Fractional".to_string(),
+                type_var: "a".to_string(),
+                superclasses: vec!["Num".to_string()],
+                methods: vec![
+                    ("/".to_string(), bin.clone()),
+                    ("recip".to_string(), un.clone()),
+                    ("fromRational".to_string(), from_rational_ty.clone()),
+                ],
+                default_methods: HashMap::new(),
+            });
+            // ---- class (Num a, Ord a) => Real a ----
+            // GHC's `Real` has `toRational :: a -> Rational`; mata-ll has no
+            // Rational, so the class is a superclass marker with no methods.
+            self.classes.insert("Real".to_string(), ClassInfo {
+                name: "Real".to_string(),
+                type_var: "a".to_string(),
+                superclasses: vec!["Num".to_string(), "Ord".to_string()],
+                methods: vec![],
+                default_methods: HashMap::new(),
+            });
+            // ---- class (Real a, Enum a) => Integral a ----
+            self.classes.insert("Integral".to_string(), ClassInfo {
+                name: "Integral".to_string(),
+                type_var: "a".to_string(),
+                superclasses: vec!["Real".to_string(), "Enum".to_string()],
+                methods: vec![
+                    ("quot".to_string(), bin.clone()),
+                    ("rem".to_string(), bin.clone()),
+                    ("div".to_string(), bin.clone()),
+                    ("mod".to_string(), bin.clone()),
+                    ("quotRem".to_string(), to_pair.clone()),
+                    ("divMod".to_string(), to_pair.clone()),
+                    ("toInteger".to_string(), to_integer_ty.clone()),
+                ],
+                default_methods: HashMap::new(),
+            });
+
+            // Env schemes for the NAMED methods (the operators are already in
+            // env from the arithmetic block above).
+            let named: &[(&str, &Ty)] = &[
+                ("negate", &un), ("abs", &un), ("signum", &un),
+                ("fromInteger", &from_integer_ty),
+                ("recip", &un), ("fromRational", &from_rational_ty),
+                ("quotRem", &to_pair), ("divMod", &to_pair),
+                ("toInteger", &to_integer_ty),
+            ];
+            for (name, ty) in named {
+                self.env.insert(name.to_string(), Scheme {
+                    vars: vec![a.clone()], mult_vars: vec![], ty: (*ty).clone(),
+                });
+            }
+
+            // Per-method class constraints (drives wanted emission on use).
+            let ncm: &[(&str, &str)] = &[
+                ("+", "Num"), ("-", "Num"), ("*", "Num"),
+                ("negate", "Num"), ("abs", "Num"), ("signum", "Num"),
+                ("fromInteger", "Num"),
+                ("/", "Fractional"), ("recip", "Fractional"), ("fromRational", "Fractional"),
+                ("quot", "Integral"), ("rem", "Integral"), ("div", "Integral"), ("mod", "Integral"),
+                ("quotRem", "Integral"), ("divMod", "Integral"), ("toInteger", "Integral"),
+            ];
+            for (method, class) in ncm {
+                self.method_constraints.insert(method.to_string(), vec![TyConstraint {
+                    class_name: class.to_string(),
+                    type_var: "a".to_string(),
+                }]);
+            }
+
+            // ---- instances ----
+            // Operators self-map (mono keeps them inline); named methods point
+            // at runtime helpers. See codegen PRELUDE for the helper bodies.
+            let mk = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+                pairs.iter().map(|(m, f)| (m.to_string(), f.to_string())).collect()
+            };
+            // Num Integer
+            self.register_instance(InstanceInfo {
+                class_name: "Num".to_string(),
+                target_type: Ty::Con("Integer".to_string()),
+                method_fns: mk(&[("+", "+"), ("-", "-"), ("*", "*"),
+                    ("negate", "negate_Integer"), ("abs", "abs_Integer"),
+                    ("signum", "signum_Integer"), ("fromInteger", "fromInteger_Integer")]),
+                context: None,
+            });
+            // Num Number
+            self.register_instance(InstanceInfo {
+                class_name: "Num".to_string(),
+                target_type: Ty::Con("Number".to_string()),
+                method_fns: mk(&[("+", "+"), ("-", "-"), ("*", "*"),
+                    ("negate", "negate_Number"), ("abs", "abs_Number"),
+                    ("signum", "signum_Number"), ("fromInteger", "fromInteger_Number")]),
+                context: None,
+            });
+            // Fractional Number (Integer is deliberately NOT Fractional, as GHC)
+            self.register_instance(InstanceInfo {
+                class_name: "Fractional".to_string(),
+                target_type: Ty::Con("Number".to_string()),
+                method_fns: mk(&[("/", "/"), ("recip", "recip_Number"),
+                    ("fromRational", "fromRational_Number")]),
+                context: None,
+            });
+            // Real Integer / Real Number (no methods; just evidence Ord+Num).
+            self.register_instance(InstanceInfo {
+                class_name: "Real".to_string(),
+                target_type: Ty::Con("Integer".to_string()),
+                method_fns: HashMap::new(),
+                context: None,
+            });
+            self.register_instance(InstanceInfo {
+                class_name: "Real".to_string(),
+                target_type: Ty::Con("Number".to_string()),
+                method_fns: HashMap::new(),
+                context: None,
+            });
+            // Integral Integer (Number is NOT Integral, as GHC)
+            self.register_instance(InstanceInfo {
+                class_name: "Integral".to_string(),
+                target_type: Ty::Con("Integer".to_string()),
+                method_fns: mk(&[("div", "div"), ("mod", "mod"), ("quot", "quot"), ("rem", "rem"),
+                    ("quotRem", "quotRem_Integer"), ("divMod", "divMod_Integer"),
+                    ("toInteger", "toInteger_Integer")]),
                 context: None,
             });
         }

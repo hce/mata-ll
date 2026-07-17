@@ -47,12 +47,16 @@ check name got want =
 
 main :: IO ()
 main = do
-    check "poly-depth0" (poly 0 7) 1
-    check "poly-depth3" (poly 3 7) 1
-    check "grow-depth0" (grow 0 5) 1
-    check "grow-depth1" (grow 1 5) 2
-    check "grow-depth4" (grow 4 5) 16
-    check "wrap-depth3" (wrap 3 9) 1
+    -- The element argument carries the user constraint `CSize a`; with
+    -- polymorphic numeric literals its type is `(CSize a, Num a) => a`, which
+    -- GHC (and mata-ll) cannot default — `CSize` is not a standard class — so
+    -- the literal is annotated to pin `a = Integer`.
+    check "poly-depth0" (poly 0 (7 :: Integer)) 1
+    check "poly-depth3" (poly 3 (7 :: Integer)) 1
+    check "grow-depth0" (grow 0 (5 :: Integer)) 1
+    check "grow-depth1" (grow 1 (5 :: Integer)) 2
+    check "grow-depth4" (grow 4 (5 :: Integer)) 16
+    check "wrap-depth3" (wrap 3 (9 :: Integer)) 1
     -- Built-in Show polymorphic recursion keeps working alongside.
     -- show [[1]] == "[[1]]", 5 characters
     check "show-still-works" (lengthS (showdeep 2 (1 :: Integer))) 5

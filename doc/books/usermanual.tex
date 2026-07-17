@@ -540,6 +540,10 @@ interop --- see Section~\ref{sec:luadict}.
 \texttt{Enum}        & \texttt{succ, pred, toEnum, fromEnum, enumFrom, \ldots} \\
 \texttt{Bounded}     & \texttt{minBound, maxBound} \\
 \texttt{Read}        & \texttt{read :: String -> a} \\
+\texttt{Num}         & \texttt{(+), (-), (*), negate, abs, signum, fromInteger} \\
+\texttt{Fractional}  & \texttt{(/), recip, fromRational} \\
+\texttt{Real}        & (superclass marker: \texttt{(Num a, Ord a)}) \\
+\texttt{Integral}    & \texttt{quot, rem, div, mod, quotRem, divMod, toInteger} \\
 \texttt{Functor}     & \texttt{fmap :: (a -> b) -> f a -> f b} \\
 \texttt{Applicative} & \texttt{pure, (<*>)} \\
 \texttt{Monad}       & \texttt{(>>=), return} \\
@@ -1735,9 +1739,13 @@ If you are coming from Haskell, keep these differences in mind:
 \begin{enumerate}[nosep]
   \item \textbf{String is not \texttt{[Char]}}.  It is a native Lua string.
         Use \texttt{<>} for concatenation; \texttt{++} is list-append only.
-  \item \textbf{No \texttt{Num} class}.  Arithmetic operators work directly
-        on \texttt{Integer} and \texttt{Number}.  Numeric literals are not
-        polymorphic.
+  \item \textbf{Numeric classes present}.  \texttt{Num}, \texttt{Fractional},
+        \texttt{Real}, and \texttt{Integral} are built in with GHC's signatures,
+        and numeric literals are polymorphic (\texttt{Num a => a} /
+        \texttt{Fractional a => a}) with GHC defaulting.  The deviations are
+        that \texttt{fromRational} takes a \texttt{Number} (mata-ll has no
+        \texttt{Rational}), \texttt{Real} has no \texttt{toRational}, and
+        \texttt{Floating}/\texttt{RealFrac} are not yet classes.
   \item \textbf{No \texttt{Char} type}.  Character operations use string
         functions from \texttt{LString}.
   \item \textbf{No multi-parameter typeclasses}.
@@ -1834,10 +1842,11 @@ flip  :: (a -> b -> c) -> b -> a -> c
 (.)   :: (b -> c) -> (a -> b) -> a -> c
 ($)   :: (a -> b) -> a -> b
 
--- Arithmetic (work on Integer and Number)
-(+), (-), (*) :: ...
-div, mod      :: Integer -> Integer -> Integer
-(/)           :: Number -> Number -> Number
+-- Arithmetic (numeric-class methods)
+(+), (-), (*)      :: Num a => a -> a -> a
+negate, abs, signum :: Num a => a -> a
+(/), recip         :: Fractional a => a -> a  -- Number, not Integer
+div, mod, quot, rem :: Integral a => a -> a -> a  -- Integer
 
 -- Comparison (require Eq/Ord instances)
 (==), (/=) :: Eq a  => a -> a -> Bool

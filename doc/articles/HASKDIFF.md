@@ -41,12 +41,24 @@ yourself.
 
 `Number` maps to Lua's float type (double-precision IEEE 754).
 
-## No Num, Integral, or Fractional typeclasses
+## Numeric typeclasses: Num / Fractional / Real / Integral
 
-Arithmetic operators (`+`, `-`, `*`) are builtin, not dispatched through
-typeclasses. You cannot define `(+)` for your own types. Numeric
-literals are always `Integer` or `Number` — there is no polymorphic
-`fromInteger`.
+The numeric hierarchy is present with GHC's signatures — `Num`
+(`+ - *`, `negate`, `abs`, `signum`, `fromInteger`), `Fractional`
+(`/`, `recip`, `fromRational`), `Real`, and `Integral` (`quot`, `rem`,
+`div`, `mod`, `quotRem`, `divMod`, `toInteger`). `Integer` is `Num`/
+`Real`/`Integral`; `Number` is `Num`/`Real`/`Fractional`. You can
+define `(+)` and the rest for your own types, and numeric literals are
+polymorphic (`Num a => a` / `Fractional a => a`) with GHC defaulting
+(`Integer`, then `Number`). Arithmetic at a concrete `Integer`/`Number`
+type still inlines to bare Lua operators — the classes are erased, not
+dictionary-dispatched.
+
+Two deliberate deviations remain, both because mata-ll has no
+`Rational` type: `fromRational` takes a `Number` argument rather than
+`Rational`, and `Real` has no `toRational` method. `Floating` and
+`RealFrac` are not yet classes (their operations exist as
+`Number`-typed functions). See CAVEATS.
 
 ## All top-level bindings require type signatures
 
@@ -202,9 +214,9 @@ generic over them, as in GHC. The differences:
   `length (x, y) == 1`) does not exist: mata-ll has no
   partially-applied tuple constructor. Fold over tuple components
   explicitly.
-- **`sum`/`product` are `t Integer -> Integer`.** There is no `Num`
-  class (see above), so they are fixed at `Integer` instead of GHC's
-  `Num a => t a -> a`.
+- **`sum`/`product` are `(Foldable t, Num a) => t a -> a`,** as in GHC
+  (they used to be fixed at `Integer` before the numeric classes
+  landed).
 - **`mapM`/`mapM_`/`sequence`/`forM` stay list-only** (`Monad m =>
   (a -> m b) -> [a] -> m [b]` etc.); GHC generalizes them to any
   Traversable/Foldable. Use `traverse` for non-list structures.

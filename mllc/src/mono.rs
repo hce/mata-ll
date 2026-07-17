@@ -140,7 +140,7 @@ impl Monomorphizer {
             // foldr/foldl are Foldable class methods and length carries a
             // Foldable constraint (all dispatched/specialized), so none of
             // them belong here.
-            "&&", "||", "mod", "div", "map", "filter",
+            "&&", "||", "mod", "div", "quot", "rem", "map", "filter",
             "True", "False", "Just", "Nothing",
             ":", "[]", "head", "tail", "take", "drop", "zipWith", "reverse",
             "engage", "liftIO",
@@ -900,7 +900,16 @@ impl Monomorphizer {
                     && !self.is_polymorphic(&ty)
                     && let MethodDispatch::Resolved(mangled) = self.resolve_op_use(&op, &ty)
                 {
-                    return TExpr { kind: TExprKind::Var(mangled), ty };
+                    // A self-mapping instance (mangled == op) is a builtin Lua
+                    // operator (`+`/`-`/`*`/`/` at Integer/Number, the numeric
+                    // classes' operators): keep it as an OpFunc so codegen emits
+                    // the native operator lambda — byte-identical to before the
+                    // operator became a class method, and never a reference to a
+                    // nonexistent `_plus_`-style global. Only a real instance fn
+                    // (a user Num type, `<>`, …) rewrites to a Var call.
+                    if mangled != op {
+                        return TExpr { kind: TExprKind::Var(mangled), ty };
+                    }
                 }
                 expr.kind
             }
@@ -1059,9 +1068,67 @@ impl Monomorphizer {
                 },
             TExprKind::FfiMaybeArg { value } =>
                 TExprKind::FfiMaybeArg { value: Box::new(self.mono_expr(*value)) },
+            // Numeric-literal overloading. A polymorphic integer literal has type
+            // `Num a => a` (fractional: `Fractional a => a`). At a concrete
+            // Integer/Number type the class `fromInteger`/`fromRational` is the
+            // identity, so the raw literal is emitted directly (byte-identical to
+            // the pre-overloading compiler). Only a USER numeric type needs the
+            // conversion materialised: wrap the literal in the instance's
+            // `fromInteger`/`fromRational` implementation, exactly as GHC's
+            // literal desugaring does.
+            TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_))) => {
+                let is_frac = matches!(lit, TLiteral::Number(_));
+                let class = if is_frac { "Fractional" } else { "Num" };
+                let method = if is_frac { "fromRational" } else { "fromInteger" };
+                let lit_src_ty = if is_frac { "Number" } else { "Integer" };
+                match self.numeric_literal_conversion(class, method, &ty) {
+                    Some(conv_fn) => {
+                        // App(Var(conv_fn), Lit) — the literal keeps its source
+                        // (Integer/Number) type as the conversion's argument.
+                        let arg = TExpr::new(
+                            TExprKind::Lit(lit),
+                            Ty::Con(lit_src_ty.to_string()),
+                        );
+                        return TExpr {
+                            kind: TExprKind::App(
+                                Box::new(TExpr::new(TExprKind::Var(conv_fn), Ty::Unit)),
+                                Box::new(arg),
+                            ),
+                            ty,
+                        };
+                    }
+                    None => TExprKind::Lit(lit),
+                }
+            }
             other => other,
         };
         TExpr { kind, ty }
+    }
+
+    /// If `ty` is a concrete numeric type whose `class` instance's `method`
+    /// (`fromInteger`/`fromRational`) is a real conversion function — i.e. NOT
+    /// the built-in Integer/Number identity — return that function's name so a
+    /// literal at `ty` can be wrapped in it. Integer/Number (and anything not a
+    /// concrete instance) return `None`: the raw literal is emitted as-is.
+    fn numeric_literal_conversion(&self, class: &str, method: &str, ty: &Ty) -> Option<String> {
+        // Only concrete, fully-resolved types dispatch; a still-free variable is
+        // left to defaulting (it should already be Integer/Number by now).
+        if !ty.free_vars().is_empty() || Self::contains_skolem(ty) {
+            return None;
+        }
+        let head = InstHead::of(ty)?;
+        let mangled = self.instance_methods.get(&(method.to_string(), head))?;
+        // The built-in Integer/Number instances name their fromInteger/
+        // fromRational the identity passthroughs; those are erasable, so a
+        // literal at Integer/Number is emitted bare. A user instance names its
+        // own conversion — materialise it.
+        match mangled.as_str() {
+            "fromInteger_Integer" | "fromInteger_Number" | "fromRational_Number" => None,
+            other => {
+                let _ = class;
+                Some(other.to_string())
+            }
+        }
     }
 
     /// Resolve the eq function for an element type, generating specialized eq

@@ -830,6 +830,11 @@ impl CodeGen {
             "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
             "__mll_shl", "__mll_shr", "__mll_math_type",
             "__mll_div", "__mll_mod", "__mll_div_fn", "__mll_mod_fn",
+            "__mll_quot", "__mll_rem", "__mll_quot_fn", "__mll_rem_fn",
+            "negate_Integer", "negate_Number", "abs_Integer", "abs_Number",
+            "signum_Integer", "signum_Number", "fromInteger_Integer", "fromInteger_Number",
+            "recip_Number", "fromRational_Number", "toInteger_Integer",
+            "quotRem_Integer", "divMod_Integer",
             "__mll_array_from_list", "__mll_array_index", "__mll_array_length",
             "__mll_bs_empty", "__mll_bs",
             "__mll_ma_new", "__mll_ma_read", "__mll_ma_write",
@@ -2173,7 +2178,7 @@ impl CodeGen {
     fn contains_trapping_op(expr: &TExpr) -> bool {
         match &expr.kind {
             TExprKind::InfixApp { op, lhs, rhs } => {
-                matches!(op.as_str(), "div" | "mod" | "%")
+                matches!(op.as_str(), "div" | "mod" | "quot" | "rem" | "%")
                     || Self::contains_trapping_op(lhs)
                     || Self::contains_trapping_op(rhs)
             }
@@ -2535,14 +2540,18 @@ impl CodeGen {
                 }
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                if op == "div" || op == "mod" {
+                if op == "div" || op == "mod" || op == "quot" || op == "rem" {
                     // Runtime helpers, not inline float math / bare `%`:
                     // math.floor(a/0) yields inf (a float escaping into
                     // Integer) instead of raising, and float division is
                     // inexact past 2^53. __mll_div/__mll_mod raise a clear
                     // error on a zero divisor and use native integer floor
-                    // division (Lua 5.3+ `//`) when the host has it.
-                    self.emit(if op == "div" { "__mll_div(" } else { "__mll_mod(" });
+                    // division (Lua 5.3+ `//`) when the host has it. quot/rem
+                    // truncate toward zero (remainder takes the dividend's sign).
+                    self.emit(match op.as_str() {
+                        "div" => "__mll_div(", "mod" => "__mll_mod(",
+                        "quot" => "__mll_quot(", _ => "__mll_rem(",
+                    });
                     self.gen_forced_subst(lhs, subst);
                     self.emit(", ");
                     self.gen_forced_subst(rhs, subst);
@@ -3375,6 +3384,8 @@ impl CodeGen {
                 // the inline backtick form stays on the strict core.
                 "div" => self.emit("__mll_div_fn"),
                 "mod" => self.emit("__mll_mod_fn"),
+                "quot" => self.emit("__mll_quot_fn"),
+                "rem" => self.emit("__mll_rem_fn"),
                 _ => {
                     let sname = sanitize_name(name);
                     let lref = self.lua_ref(&sname);
@@ -3599,7 +3610,7 @@ impl CodeGen {
     /// gen_forced already forced, so the result is a scalar/boolean/string.
     fn infix_yields_whnf(op: &str) -> bool {
         match op {
-            "div" | "mod" => true,
+            "div" | "mod" | "quot" | "rem" => true,
             "$" | "." | "++" | "!!" | ":" | "seq" | ">>=" | ">>" => false,
             o => is_builtin_op(o),
         }
@@ -3715,6 +3726,8 @@ impl CodeGen {
             // wrappers (see the gen_expr Var arm), e.g. `foldr div z xs`.
             TExprKind::Var(name) if name == "div" => self.emit("__mll_div_fn"),
             TExprKind::Var(name) if name == "mod" => self.emit("__mll_mod_fn"),
+            TExprKind::Var(name) if name == "quot" => self.emit("__mll_quot_fn"),
+            TExprKind::Var(name) if name == "rem" => self.emit("__mll_rem_fn"),
             TExprKind::Var(name) => {
                 let lref = self.lua_ref(&sanitize_name(name));
                 self.emit(&lref);
@@ -3914,6 +3927,8 @@ impl CodeGen {
                     // of redundant forces.
                     "div" => self.emit("__mll_div_fn"),
                     "mod" => self.emit("__mll_mod_fn"),
+                    "quot" => self.emit("__mll_quot_fn"),
+                    "rem" => self.emit("__mll_rem_fn"),
                     _ => {
                         let sname = sanitize_name(name);
                         let lref = self.lua_ref(&sname);
@@ -4176,14 +4191,18 @@ impl CodeGen {
                 }
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                if op == "div" || op == "mod" {
+                if op == "div" || op == "mod" || op == "quot" || op == "rem" {
                     // Runtime helpers, not inline float math / bare `%`:
                     // math.floor(a/0) yields inf (a float escaping into
                     // Integer) instead of raising, and float division is
                     // inexact past 2^53. __mll_div/__mll_mod raise a clear
                     // error on a zero divisor and use native integer floor
-                    // division (Lua 5.3+ `//`) when the host has it.
-                    self.emit(if op == "div" { "__mll_div(" } else { "__mll_mod(" });
+                    // division (Lua 5.3+ `//`) when the host has it. quot/rem
+                    // truncate toward zero (remainder takes the dividend's sign).
+                    self.emit(match op.as_str() {
+                        "div" => "__mll_div(", "mod" => "__mll_mod(",
+                        "quot" => "__mll_quot(", _ => "__mll_rem(",
+                    });
                     self.gen_forced(lhs);
                     self.emit(", ");
                     self.gen_forced(rhs);
@@ -6420,6 +6439,24 @@ local function ord_compare__Number(a, b) a = __force(a); b = __force(b); if a < 
 local function ord_compare__String(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function ord_compare__ByteString(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .. b end
+-- Numeric-class method helpers (Num / Fractional / Integral). The arithmetic
+-- OPERATORS (+ - * / div mod quot rem) never reach these — they inline to Lua
+-- operators / the strict div/mod/quot/rem cores. Only the NAMED methods land
+-- here, and only when a program references them (tree-shaken like every other
+-- helper). fromInteger/fromRational/toInteger are the identity at Integer/Number
+-- (the representations coincide); a user Num type supplies its own via its
+-- instance, so these built-in ones are pure passthroughs.
+local function negate_Integer(x) return -__force(x) end
+local function negate_Number(x) return -__force(x) end
+local function abs_Integer(x) x = __force(x); if x < 0 then return -x else return x end end
+local function abs_Number(x) x = __force(x); if x < 0 then return -x else return x end end
+local function signum_Integer(x) x = __force(x); if x < 0 then return -1 elseif x > 0 then return 1 else return 0 end end
+local function signum_Number(x) x = __force(x); if x < 0 then return -1.0 elseif x > 0 then return 1.0 else return 0.0 end end
+local function fromInteger_Integer(x) return __force(x) end
+local function fromInteger_Number(x) return __force(x) end
+local function recip_Number(x) return 1.0 / __force(x) end
+local function fromRational_Number(x) return __force(x) end
+local function toInteger_Integer(x) return __force(x) end
 -- head forces the element (a value-consumer under the head-consumption
 -- contract): it RETURNS the head as its result, and the WHNF-return invariant
 -- says a function may never return a raw thunk — the caller's one-level
@@ -6746,6 +6783,33 @@ end
 -- is idempotent, so an already-forced argument costs only the metatable probe.
 local function __mll_div_fn(a, b) return __mll_div(__force(a), __force(b)) end
 local function __mll_mod_fn(a, b) return __mll_mod(__force(a), __force(b)) end
+
+-- Integral `quot`/`rem`: truncate toward zero (remainder takes the DIVIDEND's
+-- sign), unlike `div`/`mod` which floor (remainder takes the divisor's sign).
+-- Computed exactly from the floor division `__mll_div` and native `%`: floor and
+-- truncation agree except when the operands' signs differ and the division is
+-- inexact, where truncation is one greater. `rem a b = a - b*(quot a b)`.
+local __mll_quot, __mll_rem
+do
+    __mll_quot = function(a, b)
+        if b == 0 then error("divide by zero: `quot` has no result when the divisor is 0") end
+        local q = __mll_div(a, b)
+        if a % b ~= 0 and (a < 0) ~= (b < 0) then q = q + 1 end
+        return q
+    end
+    __mll_rem = function(a, b)
+        if b == 0 then error("divide by zero: `rem` has no result when the divisor is 0") end
+        return a - b * __mll_quot(a, b)
+    end
+end
+local function __mll_quot_fn(a, b) return __mll_quot(__force(a), __force(b)) end
+local function __mll_rem_fn(a, b) return __mll_rem(__force(a), __force(b)) end
+
+-- Integral quotRem/divMod: both quotient and remainder as a pair (a 2-tuple is
+-- a Lua `{q, r}` table). Defined here, after __mll_quot/__mll_rem/__mll_div/
+-- __mll_mod, since they call those strict cores.
+local function quotRem_Integer(a, b) a = __force(a); b = __force(b); return { __mll_quot(a, b), __mll_rem(a, b) } end
+local function divMod_Integer(a, b) a = __force(a); b = __force(b); return { __mll_div(a, b), __mll_mod(a, b) } end
 
 -- Number subtype probe (Lua 5.3+ native math.type, else a portable fallback).
 -- LuaJIT and Lua 5.1/5.2 have no integer subtype: every number is an IEEE-754

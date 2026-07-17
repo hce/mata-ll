@@ -16,10 +16,13 @@ instance MyEq String where
 
 main :: IO ()
 main = do
-    putStrLn (show (myEq 1 1))
-    putStrLn (show (myEq 1 2))
-    putStrLn (show (myNeq 1 1))
-    putStrLn (show (myNeq 1 2))
+    -- `MyEq` is a user (non-standard) class, so an integer literal used as its
+    -- argument is `(MyEq a, Num a) => a` — ambiguous under GHC's defaulting
+    -- rule (which only defaults standard classes). Annotate to pin `a`.
+    putStrLn (show (myEq (1 :: Integer) 1))
+    putStrLn (show (myEq (1 :: Integer) 2))
+    putStrLn (show (myNeq (1 :: Integer) 1))
+    putStrLn (show (myNeq (1 :: Integer) 2))
     putStrLn (show (myEq "a" "a"))
     putStrLn (show (myNeq "a" "b"))
 -- expect: True

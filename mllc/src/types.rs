@@ -582,6 +582,13 @@ impl Subst {
         Subst { map, mults }
     }
 
+    /// True when this substitution binds no type variables (multiplicity-only
+    /// substitutions still count as empty here; callers use it to skip a no-op
+    /// merge of type bindings).
+    pub fn is_type_empty(&self) -> bool {
+        self.map.is_empty()
+    }
+
     pub fn singleton(v: TyVar, ty: Ty) -> Subst {
         let mut map = HashMap::new();
         map.insert(v, ty);

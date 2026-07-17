@@ -331,7 +331,8 @@ Errors are dedicated \texttt{DiagnosticKind} variants
 
 Single-parameter typeclasses with superclass constraints.  Built-in classes:
 \texttt{Monad}, \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
-\texttt{Bounded}, \texttt{Read}, \texttt{Functor}, \texttt{Applicative}.
+\texttt{Bounded}, \texttt{Read}, \texttt{Num}, \texttt{Fractional},
+\texttt{Real}, \texttt{Integral}, \texttt{Functor}, \texttt{Applicative}.
 
 Instance resolution key: \texttt{(class\_name, type\_name)} mapping to method
 function names.  Orphan instances are rejected.
@@ -496,8 +497,13 @@ Key intentional differences:
 \begin{itemize}[nosep]
   \item \texttt{String} is a native Lua string, not \texttt{[Char]}.
         No \texttt{Char} type exists.
-  \item No \texttt{Num} typeclass --- arithmetic uses built-in operators on
-        \texttt{Integer} and \texttt{Number} directly.
+  \item The numeric classes (\texttt{Num}/\texttt{Fractional}/\texttt{Real}/
+        \texttt{Integral}) are present, but at concrete \texttt{Integer}/
+        \texttt{Number} the operator methods are erased to built-in Lua
+        operators (no dictionary); \texttt{fromRational} takes a \texttt{Number}
+        and \texttt{Real} has no \texttt{toRational} (mata-ll has no
+        \texttt{Rational}); \texttt{Floating}/\texttt{RealFrac} are not yet
+        classes.
   \item No multi-parameter typeclasses.
   \item No lazy I/O --- file operations read eagerly.
   \item No \texttt{IORef}, \texttt{MVar}, \texttt{STRef} ---

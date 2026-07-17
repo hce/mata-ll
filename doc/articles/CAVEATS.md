@@ -69,6 +69,56 @@ representation, not something the division operator can recover; if you
 need exact 62-bit quotients, run on a Lua 5.3+ host (the embedded runner
 is Lua 5.4).
 
+`quot`/`rem` (Integral) truncate toward zero, so their remainder takes the
+dividend's sign, while `div`/`mod` floor and their remainder takes the
+divisor's sign — matching GHC exactly (e.g. `(-17) \`quot\` 5 == -3` but
+`(-17) \`div\` 5 == -4`). They share the same zero-divisor error and the same
+host precision limits as `div`/`mod`.
+
+## `fromRational` takes a `Number`, and `Real` has no `toRational`
+
+mata-ll has no `Rational` type. A decimal literal is a `Number` (an IEEE-754
+double) at the source level, so the `Fractional` method `fromRational` takes a
+`Number` argument rather than GHC's `Rational` — this is the numeric tower's
+one signature deviation, made because introducing an exact `Rational` (with its
+own `Integer`-pair arithmetic and `Show`/`Eq`) would be disproportionate to its
+value in a Lua-hosted language whose fractional type is already a double. For
+the same reason the `Real` class carries no `toRational` method; it exists only
+as the `(Num a, Ord a) =>` superclass marker that `Integral` sits above.
+`toInteger` (Integral) is present and behaves as in GHC.
+
+## `Floating` and `RealFrac` are functions, not classes
+
+The higher rungs of the numeric tower are not yet typeclasses. `pi`, `exp`,
+`log`, `sqrt`, `sin`, `cos`, … exist as `Number`-typed functions (in `LMath`),
+and rounding/truncation (`floor`, `ceiling`, `truncate`, `round`) likewise
+operate on `Number`. So you can compute with them at `Number`, but you cannot
+yet write code generic over `Floating a`/`RealFrac a`, nor give those classes a
+user instance. Generalising them is deferred; the underlying operations are all
+present, so this is a missing abstraction, not missing functionality.
+
+## Numeric-literal patterns are monomorphic; some literal errors defer
+
+A numeric *literal pattern* (`f 0 = …`) matches at the concrete literal type
+(`Integer` or `Number`), not at a polymorphic `Num a`. This differs from GHC,
+where a literal pattern is `(== fromInteger n)` and works at any `Num`/`Eq`
+type; in practice the scrutinee is almost always concrete, so this rarely
+shows. Separately, because integer literals are now `Num a => a`, a mismatch
+like `let x = 5 in putStrLn x` is reported as a deferred `No instance for
+(Num String)` at the enclosing binding rather than a use-site "cannot unify
+Integer with String" — the program is still rejected, but the message is the
+instance error GHC also gives.
+
+## Numeric defaulting only applies to standard classes
+
+An unconstrained numeric literal defaults `Integer` then `Number` (GHC's
+`default (Integer, Double)`). As in GHC, defaulting applies only when every
+class constraining the variable is *standard* (a numeric class, `Eq`, `Ord`,
+`Show`, `Read`, `Enum`, `Bounded`). A literal also constrained by a user class
+— e.g. `myClassMethod 5` where `5 :: (MyClass a, Num a) => a` — is genuinely
+ambiguous and must be annotated (`myClassMethod (5 :: Integer)`), exactly as
+GHC requires.
+
 ## Existential record fields have no selector and no record update
 
 Unpacking an existential constructor skolemizes the hidden type variable

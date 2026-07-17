@@ -151,12 +151,12 @@ all :: (a -> Bool) -> [a] -> Bool
 all _ []       = True
 all p (x : xs) = if p x then all p xs else False
 
--- Sum and product of any Foldable of integers. (mata-ll has no Num
--- typeclass, so these are fixed at Integer rather than GHC's `Num a`.)
-sum :: Foldable t => t Integer -> Integer
+-- Sum and product of any Foldable of numbers, generic over Num exactly as
+-- GHC. The `0`/`1` seeds are polymorphic numeric literals (`fromInteger`).
+sum :: (Foldable t, Num a) => t a -> a
 sum t = foldl (\acc x -> acc + x) 0 t
 
-product :: Foldable t => t Integer -> Integer
+product :: (Foldable t, Num a) => t a -> a
 product t = foldl (\acc x -> acc * x) 1 t
 
 -- Largest / smallest element. Both error on an empty structure.

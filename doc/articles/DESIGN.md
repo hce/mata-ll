@@ -110,13 +110,32 @@ data definitions, type families, and type applications.
 
 ### Typeclasses
 
-The built-in classes are `Monad`, `Show`, `Eq`, and `Ord`. Each class
-is registered with its methods and a set of built-in instances for
+The built-in classes are `Monad`, `Show`, `Eq`, `Ord`, and the numeric
+hierarchy `Num`, `Fractional`, `Real`, and `Integral`. Each class is
+registered with its methods and a set of built-in instances for
 primitive types. User-defined classes and instances are also supported.
 
 Instance resolution maps `(class_name, type_name)` to an `InstanceInfo`
 containing the mangled method names (e.g., `eq_Integer`, `show_String`,
 `ord_lt__Number`). Superclass constraints are tracked.
+
+The numeric classes plug into this same machinery without a new code
+path. Their operator methods (`+`, `-`, `*`, `/`, `div`, `mod`, `quot`,
+`rem`) are registered in the `Integer`/`Number` instances as mapping to
+*themselves* — the instance method for `+` at `Integer` is literally
+`+`. The monomorphizer already leaves a class method whose resolved
+implementation equals the operator as an ordinary `InfixApp` (the trick
+that keeps IO's `>>=` inline), so at a concrete numeric type `+`/`-`/`*`
+stay bare Lua operators and `div`/`mod`/`quot`/`rem` stay on their
+strict runtime cores — byte-identical to before the classes existed,
+with no dictionary. A *user* numeric type instead names real instance
+functions, which the monomorphizer dispatches to as a call. A numeric
+literal is `fromInteger`/`fromRational` applied to the raw literal; at
+`Integer`/`Number` that conversion is the identity and is erased in
+codegen, while a user `Num` type materialises the instance's
+`fromInteger` call around the literal. Unconstrained numeric variables
+are resolved by GHC-style defaulting (`Integer`, then `Number`) during
+constraint discharge.
 
 Orphan instances (where neither the class nor the type is defined in
 the current module) are rejected.

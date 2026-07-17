@@ -1029,17 +1029,70 @@ Comprehensions desugar to `concatMap` and `filter`.
 
 # Literals
 
-Integer literals are `Integer`. Decimal literals are `Number`. There
-is no polymorphic `Num`-based literal overloading.
+Numeric literals are polymorphic, exactly as in Haskell. An integer
+literal has type `Num a => a` (it is `fromInteger` applied to the
+literal), and a decimal literal has type `Fractional a => a` (it is
+`fromRational` applied to the literal):
 
-    42    :: Integer
-    3.14  :: Number
+    42    :: Num a => a
+    3.14  :: Fractional a => a
+
+At a concrete `Integer` or `Number` type `fromInteger`/`fromRational`
+is the identity and is erased, so `(42 :: Integer)` and
+`(3.14 :: Number)` still compile to the bare Lua values `42` and
+`3.14`.
+
+An unconstrained numeric literal is resolved by GHC's defaulting rule
+`default (Integer, Number)` (`Number` standing in for GHC's `Double`):
+the first of `Integer` then `Number` whose instances satisfy the
+variable's (standard) class constraints is chosen. So `show 5` is
+`show (5 :: Integer)`, while `show (5 / 2)` resolves to `Number`
+(because `Integer` is not `Fractional`). A variable also constrained
+by a non-standard (user) class is not defaulted — such a use is
+genuinely ambiguous and needs an annotation, matching GHC.
 
 String literals use double quotes with C-style escape sequences:
 
     "hello\n"
     "tab\there"
     "quote: \""
+
+# Numeric classes
+
+The numeric typeclass hierarchy is built in, with GHC's signatures:
+
+    class Num a where
+        (+), (-), (*) :: a -> a -> a
+        negate, abs, signum :: a -> a
+        fromInteger :: Integer -> a
+
+    class Num a => Fractional a where
+        (/) :: a -> a -> a
+        recip :: a -> a
+        fromRational :: Rational -> a
+
+    class (Num a, Ord a) => Real a          -- superclass marker
+
+    class (Real a, Enum a) => Integral a where
+        quot, rem, div, mod :: a -> a -> a
+        quotRem, divMod :: a -> a -> (a, a)
+        toInteger :: a -> Integer
+
+`Integer` is `Num`, `Real`, and `Integral`. `Number` is `Num`,
+`Real`, and `Fractional` (`Integer` is deliberately not `Fractional`
+and `Number` is deliberately not `Integral`, exactly as GHC). You can
+write ordinary polymorphic numeric code (`sum :: Num a => [a] -> a`,
+`average :: Fractional a => [a] -> a`) and give a hand-written `Num`
+instance to a user type (e.g. a modular-arithmetic newtype).
+
+`quot`/`rem` truncate toward zero (the remainder takes the dividend's
+sign); `div`/`mod` floor (the remainder takes the divisor's sign) —
+matching GHC's negative-number semantics exactly.
+
+Two deliberate deviations (see CAVEATS): mata-ll has no `Rational`
+type, so `fromRational` takes a `Number` (the representation a decimal
+literal already uses); and `Real` carries no `toRational` method for
+the same reason.
 
 # Typeclass instances
 
@@ -1243,6 +1296,7 @@ Comparison and equality operators are methods of Eq and Ord:
     data Ordering = LT | EQ | GT
 
 Typeclasses: Show, Eq, Ord, Enum, Bounded, Read, Semigroup, Monoid,
+             Num, Fractional, Real, Integral,
              Functor, Applicative, Monad, Foldable, Traversable
 
 Types: Maybe (Just, Nothing), Either (Left, Right), IO, Ordering,
@@ -1541,22 +1595,13 @@ build a thunk chain, exactly as in Haskell.
 
 ## Low priority / deferred
 
-### Num typeclass and numeric tower
+### Floating and RealFrac
 
-A pure MATA-LL library providing:
-
-    class Num a where
-        (+) :: a -> a -> a
-        (-) :: a -> a -> a
-        (*) :: a -> a -> a
-        abs :: a -> a
-        signum :: a -> a
-        fromInteger :: Integer -> a
-
-This includes types like Float, Double, Word, Rational as pure
-MATA-LL wrappers. Performance will be poor compared to intrinsic
-arithmetic, but correctness and compatibility are the goals. Similarly
-for Integral and Fractional.
+The higher rungs of the numeric tower — `Floating` (`pi`, `exp`,
+`log`, `sqrt`, `sin`, …) and `RealFrac` (`truncate`, `round`, `ceiling`,
+`floor`, `properFraction`) — are not yet classes. The operations exist
+as `Number`-typed functions in `Data`/`LMath`; only their generalisation
+into classes is deferred (see CAVEATS).
 
 ### where blocks in class/instance declarations
 

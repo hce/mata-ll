@@ -5,6 +5,32 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **Numeric typeclass hierarchy (`Num`/`Fractional`/`Real`/`Integral`) with
+      polymorphic numeric literals — GHC parity.** Arithmetic operators are now
+      class methods with GHC's exact signatures: `Num` (`+`/`-`/`*`/`negate`/
+      `abs`/`signum`/`fromInteger`), `Num => Fractional` (`/`/`recip`/
+      `fromRational`), `(Num, Ord) => Real`, `(Real, Enum) => Integral`
+      (`quot`/`rem`/`div`/`mod`/`quotRem`/`divMod`/`toInteger`). Built-in
+      instances: `Integer` is `Num`/`Real`/`Integral`, `Number` is `Num`/`Real`/
+      `Fractional` (not vice-versa, as GHC). Integer literals are `Num a => a`
+      and decimals `Fractional a => a`, resolved by GHC's `default (Integer,
+      Number)` when unconstrained (standard-class-only, so a literal under a user
+      class stays ambiguous exactly as GHC). User types take hand-written `Num`
+      instances; `sum`/`product` generalised to `(Foldable t, Num a) => t a -> a`.
+      The classes PLUG INTO the existing operator-inlining/monomorphization: at
+      concrete `Integer`/`Number` the operator methods map to themselves (so they
+      stay inline `InfixApp`s / the `div`/`mod`/`quot`/`rem` strict cores) and
+      `fromInteger`/`fromRational` are erased — generated Lua is byte-identical
+      for existing programs (the example corpus and the tracker benchmark diff
+      clean; `codegen_is_deterministic` and a new `numeric_classes_erased_at_
+      concrete_types` test guard it). A user `Num` type instead materialises its
+      instance methods + `fromInteger` around literals. `let` bindings now apply
+      the monomorphism restriction so a literal's `Num` constraint stays attached
+      to its use. Deviations (both from the absent `Rational` type): `fromRational
+      :: Number -> a`, and `Real` has no `toRational`. `Floating`/`RealFrac`
+      assessed and deferred (their ops exist as `Number` functions; only the
+      class abstraction is missing).
+
 - [x] **Linear types phase 3: scalar-laundering accept-gap closed — strict GHC
       parity on scalars.** The scalar-memoization exemption is GONE: a scalar
       (`Integer`/`Number`/`Bool`/`String`) derived from a `%1`/`%m` value —

@@ -31,6 +31,29 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **Numeric typeclass hierarchy — `Num`, `Fractional`, `Real`, `Integral` — with
+  polymorphic numeric literals, to GHC parity.** The arithmetic operators are
+  now class methods with GHC's exact signatures: `Num` (`+`, `-`, `*`, `negate`,
+  `abs`, `signum`, `fromInteger`), `Num a => Fractional` (`/`, `recip`,
+  `fromRational`), `(Num a, Ord a) => Real`, and `(Real a, Enum a) => Integral`
+  (`quot`, `rem`, `div`, `mod`, `quotRem`, `divMod`, `toInteger`). `Integer` is
+  `Num`/`Real`/`Integral`, `Number` is `Num`/`Real`/`Fractional` (as GHC,
+  `Integer` is not `Fractional` and `Number` is not `Integral`). You can now
+  write ordinary polymorphic numeric code (`sum :: Num a => [a] -> a`,
+  `average :: Fractional a => [a] -> a`) and give a user type a hand-written
+  `Num` instance (e.g. modular arithmetic on a `newtype`). Integer literals are
+  `Num a => a` and decimal literals `Fractional a => a` (via `fromInteger`/
+  `fromRational`), resolved by GHC's `default (Integer, Number)` rule when
+  otherwise unconstrained. `quot`/`rem` truncate toward zero and `div`/`mod`
+  floor, with GHC's exact negative-number remainder signs. `sum`/`product` are
+  generalised from `Integer` to `(Foldable t, Num a) => t a -> a`. **Concrete
+  `Integer`/`Number` arithmetic is unchanged in the generated Lua** — the
+  classes are erased at concrete types (bare Lua operators and the existing
+  `div`/`mod` strict cores, no dictionary), verified byte-identical on the
+  example corpus and the tracker benchmark. Two deliberate deviations, both
+  because mata-ll has no `Rational` type: `fromRational` takes a `Number`, and
+  `Real` has no `toRational`. `Floating`/`RealFrac` remain functions, not yet
+  classes.
 - **Linear types (`%1`), matching GHC's `LinearTypes`.** A function arrow may
   carry a multiplicity: `a %1 -> b` promises its argument is consumed *exactly
   once*, while `a -> b` (= `a %Many -> b`) stays unrestricted. A `%1` value used

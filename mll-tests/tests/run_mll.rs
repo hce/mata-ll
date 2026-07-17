@@ -99,6 +99,53 @@ main = do
     }
 }
 
+/// The numeric classes (Num/Fractional/Integral) must be fully ERASED at
+/// concrete Integer/Number types: `+ - * /` emit bare Lua operators, `div`/`mod`
+/// emit the existing strict cores, and NO dictionary is passed and NO named
+/// instance helper (fromInteger_Integer, plus_*, a dict table) is materialised.
+/// This is the byte-identity guarantee for concrete arithmetic — the hot path
+/// (e.g. the tracker mixer) must not gain an allocation or an indirection.
+#[test]
+fn numeric_classes_erased_at_concrete_types() {
+    let source = r#"
+hot :: Integer -> Integer -> Integer
+hot a b = a * b + a - b
+
+frac :: Number -> Number -> Number
+frac x y = x / y + x * y
+
+flr :: Integer -> Integer -> Integer
+flr a b = (a `div` b) + (a `mod` b)
+
+main :: IO ()
+main = do
+  putStrLn (show (hot 3 4))
+  putStrLn (show (frac 3.0 4.0))
+  putStrLn (show (flr 17 5))
+"#;
+    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+
+    // Concrete Integer/Number arithmetic inlines to bare Lua operators…
+    assert!(lua.contains("(a * b)"), "Integer * must inline to bare Lua *: {lua}");
+    assert!(lua.contains("(x / y)"), "Number / must inline to bare Lua /: {lua}");
+    // …div/mod stay on the existing strict cores…
+    assert!(lua.contains("__mll_div("), "div must stay on __mll_div: {lua}");
+    assert!(lua.contains("__mll_mod("), "mod must stay on __mll_mod: {lua}");
+    // …and NOTHING dispatches through a Num/Fractional/Integral dictionary or a
+    // per-type instance helper at these concrete types.
+    for forbidden in [
+        "fromInteger_Integer", "fromInteger_Number", "fromRational_Number",
+        "plus_Integer", "times_Integer", "__mll_dict", "__dict_Num",
+    ] {
+        assert!(
+            !lua.contains(forbidden),
+            "concrete arithmetic must not emit `{forbidden}` (no dictionary/instance dispatch): {lua}"
+        );
+    }
+}
+
 /// Constructor-level DCE: a `data` definition none of whose constructors is
 /// constructed (`Con`) or matched (pattern) by live code contributes NOTHING
 /// to the emitted Lua. Checked two ways: (1) adding a dead user `data`
@@ -476,6 +523,9 @@ mll_test!(where_clauses, "where_clauses.mll");
 mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
+mll_test!(num_polymorphic, "num_polymorphic.mll");
+mll_test!(num_user_instance, "num_user_instance.mll");
+mll_test!(integral_semantics, "integral_semantics.mll");
 mll_test!(datakinds, "datakinds.mll");
 mll_test!(kinds_hkt, "kinds_hkt.mll");
 mll_test!(type_level_nats, "type_level_nats.mll");
@@ -2176,10 +2226,14 @@ fn type_error_in_where_value_binding_rejected() {
     // diagnostic naming the binding. Regression: check_clause used to swallow
     // the inference error and substitute a placeholder term, so the program
     // "compiled" and misbehaved at runtime instead of being rejected.
+    // (`&&` on a String, a non-numeric clash, so the failure surfaces inside
+    // the binding's body. A numeric mismatch like `1 + "hello"` would now be a
+    // deferred `No instance for (Num String)` reported at the enclosing
+    // function, because integer literals are polymorphic `Num a => a`.)
     let source = r#"
 main :: IO ()
 main = putStrLn x
-  where x = 1 + "hello"
+  where x = True && "hello"
 "#;
     match mllc::compile(source, Path::new("."), &[]) {
         Err(e) => {
@@ -2195,13 +2249,18 @@ main = putStrLn x
 
 #[test]
 fn where_binding_definition_use_mismatch_rejected() {
-    // The binding's own body is fine (`x = 5`), but the clause body uses it as
-    // a String. Regression: the definition-vs-use unification failure was
-    // silently discarded, so this compiled and printed "5".
+    // The binding's own body is fine (`x = True`), but the clause body uses it
+    // as a String. Regression: the definition-vs-use unification failure was
+    // silently discarded, so this compiled and misbehaved at runtime.
+    // (`x = True` rather than the original `x = 5`: an integer literal is now
+    // polymorphic `Num a => a`, so `x = 5` used as a String would report a
+    // deferred `No instance for (Num String)` instead of a use-site unify
+    // failure — this uses a monomorphic Bool binding to keep exercising the
+    // definition-vs-use mismatch path.)
     let source = r#"
 main :: IO ()
 main = putStrLn x
-  where x = 5
+  where x = True
 "#;
     match mllc::compile(source, Path::new("."), &[]) {
         Err(e) => {
@@ -2218,10 +2277,13 @@ fn type_error_in_where_function_rejected() {
     // Same for a where-bound local function: the conflict between its body
     // and how the clause uses it must be reported, not swallowed into a
     // runtime crash ("attempt to add a 'number' with a 'string'").
+    // (`n && "oops"` — a non-numeric clash inside the function body — rather
+    // than `n + "oops"`: with polymorphic integer literals the latter defers a
+    // `No instance for (Num String)` reported at `main`, not at the binding.)
     let source = r#"
 main :: IO ()
-main = putStrLn (go 3)
-  where go n = n + "oops"
+main = putStrLn (go True)
+  where go n = n && "oops"
 "#;
     match mllc::compile(source, Path::new("."), &[]) {
         Err(e) => {
@@ -2257,10 +2319,14 @@ main = putStrLn (f True)
 fn multiple_where_binding_errors_all_reported() {
     // Error recovery must keep going: two independently broken where bindings
     // should both be diagnosed in a single compile.
+    // (`x = True && "a"` — a non-numeric clash inside the binding body — rather
+    // than `x = 1 + "a"`: with polymorphic integer literals the latter is a
+    // deferred `No instance for (Num String)` reported at `main`, not a
+    // binding-attributed error.)
     let source = r#"
 main :: IO ()
 main = putStrLn (x <> y)
-  where x = 1 + "a"
+  where x = True && "a"
         y = notInScope 3
 "#;
     match mllc::compile(source, Path::new("."), &[]) {
@@ -6204,10 +6270,15 @@ main = print ([1, 2] <> [3, 4] :: [Integer])
 
     // Ordering whole tuples is rejected at type-check with the missing-instance
     // explanation (the checker discharges the Ord constraint before codegen).
+    // The tuple is annotated `(Integer, Integer)` so the rejection is the
+    // missing tuple-Ord instance, not literal-defaulting ambiguity: with
+    // polymorphic literals `(1, 2)` alone is `(Num a, Num b) => (a, b)`, and
+    // since mata-ll has no `Ord (a, b)` instance the elements cannot default,
+    // so an un-annotated tuple would report an (also-correct) ambiguity error.
     let e = compile_err(
         r#"
 main :: IO ()
-main = print ((1, 2) > (1, 3) :: Bool)
+main = print (((1, 2) :: (Integer, Integer)) > (1, 3))
 "#,
     );
     assert!(e.contains("No instance for 'Ord (Integer, Integer)'"), "got: {e}");
@@ -6355,12 +6426,16 @@ data Showable = forall a. Show a => Showable a
 
 bad :: Showable -> Integer
 bad s = case s of
-  Showable x -> x + 1
+  Showable x -> x + (1 :: Integer)
 
 main :: IO ()
 main = putStrLn "no"
 "#,
     );
+    // The literal is annotated `Integer` so `+` forces the hidden type to be
+    // Integer, surfacing the rigid-match rejection. (An un-annotated `x + 1`
+    // now leaves the sum at the existential type `a`, which is reported instead
+    // as `a` escaping the match — also a rejection, but a different message.)
     assert!(
         e.contains("Cannot match 'a' with 'Integer'"),
         "undeclared class use must be rejected, got: {e}"
