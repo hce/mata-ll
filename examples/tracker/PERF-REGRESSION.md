@@ -242,3 +242,147 @@ gate are untouched.
 The same commit's WHNF-assumption on `<-`-bound user-action results was a
 separate *correctness* bug (miscompiled strict uses; fixed in codegen, see
 CHANGELOG and test `action_result_whnf`).
+
+# 3.8× regression (July 2026): thunks in the mixer blacklist the LuaJIT trace
+
+Current HEAD decodes `HongKong_Music.it` in **338 s wall (2.50× real-time)**
+against the fused baseline's **88.7 s (0.65×)** documented above — a 3.81×
+slowdown. Output is byte-identical (same 23,896,320 bytes, same md5
+`cdd386f6985dca3561fe1a2689231c78`) and peak RSS is a healthy 78 MB, so this
+is purely speed, not a leak and not a miscompile.
+
+## Not the ST-closure regression again
+
+First suspicion was a fusion break. It isn't: the generated tracker has **33
+fused `__mll_st_*` call sites and 0 first-class `__mll_ma_*` sites in the hot
+path** — every ST operation in the mixer still compiles to the closure-free
+fused form. The ST work above is intact.
+
+## Mechanism: `NYI: bytecode FNEW` aborts, then blacklisting
+
+`luajit -jv` shows the mixing loop's traces aborting with `NYI: bytecode
+FNEW` — closure allocation inside the loop — **766 times**, at the `mixFrame`
+hot lines, after which LuaJIT **blacklists** the loop. The entire mixer then
+runs in the interpreter. The arithmetic confirms we lost exactly the JIT and
+nothing else:
+
+- current LuaJIT wall 338 s ≈ the 352.9 s documented above for **plain
+  Lua 5.5** on the same workload;
+- the 3.81× regression ≈ the 3.98× JIT multiplier (352.9 / 88.7).
+
+The closures are `__thunk(function() … end)` allocations for the mixer's
+`let` bindings — per binding, per channel (×22), per audio frame (×44100/s).
+
+## The thunk cascade
+
+`mixFrame`'s arithmetic bindings (tracker.mll ~305–370):
+
+```
+let smp = if smpPos < sl then readSmp … else 0     -- call ⇒ not cheap ⇒ thunk
+let sv  = if is16 == 1 then (smp*vol*gvl*128) `div` … else …
+let nl  = la + (sv * (64 - pan)) `div` 64
+let nr  = ra + (sv * pan) `div` 64
+mixFrame mi arr (ch+1) nl nr                       -- la/ra ARE last frame's nl/nr
+```
+
+`sv`/`nl`/`nr` are `is_cheap` (small to evaluate) but not `is_cheap_to_force`
+(safe to evaluate *now*): they transitively read the `smp` thunk, and their
+`div` can trap. Nor can the demand analysis prove them demanded: they flow
+into the recursive call's `la`/`ra`, and `mixFrame`'s base case returns those
+in a **lazy tuple field** through a **non-strict `return`** — under
+whole-value demand analysis that is "not demanded", so the sound weighing
+thunks them. Since `la`/`ra` are the previous iteration's `nl`/`nr`, the
+entire per-frame state chain turns lazy. The same pattern thunks `fPos` in
+`advPos` (its value feeds `writeSTArray`, whose demand mask says the stored
+value is lazy — even though the fused runtime `__mll_st_write` forces on
+store) and `smpPos` (`div` is conservatively trapping even with the literal
+divisor 256).
+
+## Attribution (bisected)
+
+The primary regression commit is `93060aa` "codegen+demand.rs: weigh eager vs
+lazy so bottom is never forced". Its parent `341b878` emits `smpPos`, `smp`,
+`sv`, `nl`, `nr`, and `fPos` **eagerly**; `93060aa` flips them all to
+thunks. Measured on this machine, this input:
+
+| Build | Wall | Real-time | Peak RSS | Output md5 |
+|---|---|---|---|---|
+| `341b878` (pre-weighing) | **101 s** | 0.75× | 14.7 MB | `cdd386f…` |
+| current HEAD | **338 s** | 2.50× | 78 MB | `cdd386f…` (identical) |
+
+This is *not* the tuple-field laziness of `218b660` (that came later and does
+not change these bindings), and it is not a new soundness bug — `93060aa`'s
+weighing is correct, merely too coarse: the old build evaluated these
+bindings eagerly *without* a proof, which is exactly the hole the commit
+closed. A secondary, much smaller cost is `d3ef741` turning inline
+`math.floor(x/y)` into `__mll_div(x, y)` calls; it is not the JIT-killer.
+
+## The sound fix: per-field (product) demand analysis
+
+This is the pervasive form of the "Future work: per-field (product) demand
+analysis" item above — no longer one per-note thunk but the whole hot loop.
+A binding like `nl` **is** forced on every run: the caller (`mixFrames`)
+scrutinizes the result tuple and forces both fields into every emitted PCM
+frame, and the concat that `seq` forces at the end of every tick forces every
+frame. Proving that requires tracking demand **per tuple/constructor field
+and per list element** (plus applying the fused `__mll_st_write` runtime's
+actual on-store forcing to the stored-value position), so that a value every
+use forces is emitted eagerly at its binding — recovering `341b878`'s
+emission for the mixer *with* a proof, without weakening the ⊥-preservation
+contract anywhere it actually protects something.
+
+## Result (implemented)
+
+Per-field / per-element demand analysis is implemented in `demand.rs` as a
+structured demand domain (`Head` / `Fields` / `Elems`) with per-function
+demand ROWS — the demand each parameter receives when the function runs, and
+a second row under a "result deeply forced" assumption — plus a
+whole-program `deep_result` set: functions for which EVERY reference is a
+fully-applied call whose result provably receives the deep demand. Codegen
+seeds its demanded-binding decisions from these rows, threading the current
+function's proven result demand into chain terminals. The proof chain for
+the mixer lands exactly as sketched: `bsConcatList` is element-strict (its
+runtime forces every element) → `reverse` transmits element demand through
+its `go` accumulator (local where-functions get their own row fixpoint) →
+`mixFrames` is element-strict in `acc` → `pcm`, `ml`, `mr` are demanded →
+both fields of `mixFrame`'s result tuple are forced at its only external
+call site → `mixFrame` is deep-result → `nl`/`nr`/`sv`/`smp`/`smpPos` are
+demanded and emitted eagerly. `fPos` follows from aligning the fused
+`__mll_st_write` mask with the runtime's on-store force, and the loop
+counter `ch` from seeding the resolved primitive `eq_*`/`ord_*` instance
+methods (which codegen inlines as Lua comparison operators) as strict —
+they were invisible to the analysis, hiding every guard's operands.
+
+Nothing is emitted eagerly without a per-path proof: a call site that
+forces only one field, a spine-only consumer (`length`), a suspended
+first-class action, or a partial application all degrade the claim
+conservatively (verified by targeted ⊥ probes and the suite's pinned
+contract tests — `return_non_strict`, `div_mod_by_zero_raises`,
+`div_exact_and_zero`, exceptions — all green; 550 passed / 0 failed).
+
+A/B on this machine (LuaJIT, `HongKong_Music.it`, 2-arg disk mode):
+
+| Build | Wall | Real-time | Peak RSS | Output md5 |
+|---|---|---|---|---|
+| regressed HEAD (before) | 338 s | 2.50× | 78 MB | `cdd386f…` |
+| **per-field demand (after)** | **120 s** | **0.89×** | **15.0 MB** | `cdd386f…` (identical) |
+| `341b878` eager reference | 101 s | 0.75× | 14.7 MB | `cdd386f…` |
+
+2.8× faster, byte-identical, and the 5× thunk memory bloat is fully
+recovered (15.0 vs 14.7 MB). `luajit -jv` confirms the mixer's arithmetic
+lines no longer abort traces; the aborts that remain are closure sites the
+eager reference build shares (the per-call action closures, `advPos`'s
+first-class `when` argument, `mixFrames`' per-frame `pcm` thunk). The
+remaining ~19% gap to the eager build is `d3ef741`'s `__mll_div`/`__mll_mod`
+calls in place of inline `math.floor` (a deliberate correctness trade —
+div-by-zero must raise) plus those shared closures; candidates if it ever
+matters: a `when`/`unless` statement-position inline (same run-once
+justification as the ST fusion), and a checked inline div/mod.
+
+One latent bug surfaced and fixed along the way: the demand analysis'
+fixed-point env is name-keyed, and a user function SHADOWING a prelude name
+(the FFI test suite's `replicate`) made two bodies fight over one entry —
+harmlessly converging while both computed identical rows, oscillating
+forever once the new seeds made them differ. Same-named functions now share
+the MEET of their rows (a call site cannot be attributed to one of them),
+which is also the sound semantics.
