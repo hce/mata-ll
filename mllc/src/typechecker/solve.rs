@@ -39,7 +39,7 @@ impl Checker {
                 None => true,
             },
             // No instance for functions or effectful actions, ever.
-            Ty::Arrow(_, _) | Ty::Forall(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => false,
+            Ty::Arrow(..) | Ty::Forall(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => false,
             Ty::Promoted(_) => false,
             Ty::Unit => true,
             // Lists/tuples are structural for Show and Eq (mono generates the
@@ -146,7 +146,7 @@ impl Checker {
         // A compound type in constraint position reads wrong without parens
         // ("Show Tree a" vs "Show (Tree a)").
         let paren = |t: &Ty| match t {
-            Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
+            Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
                 format!("({})", t),
             _ => format!("{}", t),
         };
@@ -419,7 +419,7 @@ impl Checker {
                 other => {
                     if report {
                         let shown = match self.ast_type_to_ty(other) {
-                            t @ (Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
+                            t @ (Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
                                 format!("({})", t),
                             t => format!("{}", t),
                         };

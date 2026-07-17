@@ -1031,7 +1031,7 @@ impl CodeGen {
                 let (arg_tys, res_ty) = if let Some(ty) = export_types.get(name) {
                     let mut args = Vec::new();
                     let mut t = ty;
-                    while let Ty::Arrow(a, b) = t {
+                    while let Ty::Arrow(a, b, _) = t {
                         args.push(a.as_ref().clone());
                         t = b.as_ref();
                     }
@@ -1058,7 +1058,7 @@ impl CodeGen {
                 // corrupting silently.
                 for (i, ty) in arg_tys.iter().enumerate() {
                     let arg = params[i].clone();
-                    if matches!(ty, Ty::Arrow(_, _)) {
+                    if matches!(ty, Ty::Arrow(..)) {
                         // A host callback: mata-ll code will call it, so its
                         // arguments cross mata-ll→Lua (marshalled by their
                         // declared types) and its result crosses Lua→mata-ll
@@ -1066,7 +1066,7 @@ impl CodeGen {
                         let (cb_args, cb_ret) = ty.peel_arrows();
                         let out_descs: Vec<String> = cb_args.iter()
                             .map(|t| {
-                                if matches!(t, Ty::Arrow(_, _)) {
+                                if matches!(t, Ty::Arrow(..)) {
                                     // A nested mata-ll function handed to the
                                     // host callback: wrap it for positional
                                     // Lua calls (deep-force convention).
@@ -2960,7 +2960,7 @@ impl CodeGen {
     /// heads return false (they might be actions).
     fn is_definitely_not_action(ty: &Ty) -> bool {
         matches!(ty,
-            Ty::Con(_) | Ty::Arrow(_, _) | Ty::List(_) | Ty::Unit
+            Ty::Con(_) | Ty::Arrow(..) | Ty::List(_) | Ty::Unit
             | Ty::Forall(_, _) | Ty::Skolem(..))
     }
 
@@ -3010,7 +3010,7 @@ impl CodeGen {
     /// Check if a function type's return type is an IO/ST action.
     fn returns_action(ty: &Ty) -> bool {
         match ty {
-            Ty::Arrow(_, ret) => Self::returns_action(ret),
+            Ty::Arrow(_, ret, _) => Self::returns_action(ret),
             _ => Self::is_nullary_action_type(ty),
         }
     }
@@ -3018,7 +3018,7 @@ impl CodeGen {
     /// Check if a function type's return type is specifically an ST action.
     fn returns_st(ty: &Ty) -> bool {
         match ty {
-            Ty::Arrow(_, ret) => Self::returns_st(ret),
+            Ty::Arrow(_, ret, _) => Self::returns_st(ret),
             _ => Self::is_st_type(ty),
         }
     }
@@ -4226,7 +4226,7 @@ impl CodeGen {
                         // generic's function-parameter position (see
                         // runtime_generic_adapter).
                         let adapter = match &rhs.ty {
-                            Ty::Arrow(_, res) => self.runtime_generic_adapter(lhs, 0, res),
+                            Ty::Arrow(_, res, _) => self.runtime_generic_adapter(lhs, 0, res),
                             _ => None,
                         };
                         // `(f . g) x` is `f (g x)`. A non-strict `f` must not
@@ -4905,8 +4905,8 @@ impl CodeGen {
                 let mut cur: &Ty = &callee.ty;
                 let mut arg_descs: Vec<String> = Vec::new();
                 for _ in 0..*arity {
-                    if let Ty::Arrow(a, b) = cur {
-                        let d = if matches!(a.as_ref(), Ty::Arrow(_, _)) {
+                    if let Ty::Arrow(a, b, _) = cur {
+                        let d = if matches!(a.as_ref(), Ty::Arrow(..)) {
                             // A host-passed Lua function nested in a callback
                             // argument: wrap it so mata-ll can call it.
                             "{k=\"func\"}".to_string()
@@ -5345,7 +5345,7 @@ fn strict_binding_safe(binds: &[TLocalDef], i: usize) -> bool {
 /// Arrow(a, Arrow(b, c)) = 2, Arrow(a, b) = 1, Con(_) = 0
 fn count_arrows(ty: &Ty) -> usize {
     match ty {
-        Ty::Arrow(_, rest) => 1 + count_arrows(rest),
+        Ty::Arrow(_, rest, _) => 1 + count_arrows(rest),
         _ => 0,
     }
 }

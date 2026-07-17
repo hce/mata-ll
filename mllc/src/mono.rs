@@ -484,7 +484,7 @@ impl Monomorphizer {
         match ty {
             Ty::Skolem(..) => true,
             Ty::Con(_) | Ty::Var(_) | Ty::Unit | Ty::Promoted(_) => false,
-            Ty::Arrow(a, b) | Ty::App(a, b) => Self::contains_skolem(a) || Self::contains_skolem(b),
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => Self::contains_skolem(a) || Self::contains_skolem(b),
             Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => Self::contains_skolem(a),
             Ty::Tuple(elems) => elems.iter().any(Self::contains_skolem),
         }
@@ -590,7 +590,7 @@ impl Monomorphizer {
         match ty {
             Ty::Con(name) => name.clone(),
             Ty::Var(v) => format!("v{}", v.name),
-            Ty::Arrow(a, b) => format!("{}T{}", self.ty_to_suffix(a), self.ty_to_suffix(b)),
+            Ty::Arrow(a, b, _) => format!("{}T{}", self.ty_to_suffix(a), self.ty_to_suffix(b)),
             Ty::App(a, b) => format!("{}A{}", self.ty_to_suffix(a), self.ty_to_suffix(b)),
             Ty::List(a) => format!("L{}", self.ty_to_suffix(a)),
             Ty::IO(a) => format!("IO{}", self.ty_to_suffix(a)),
@@ -1499,7 +1499,7 @@ impl Monomorphizer {
     fn collect_subst_by_name(pattern: &Ty, concrete: &Ty, map: &mut HashMap<String, Ty>) {
         match (pattern, concrete) {
             (Ty::Var(v), _) => { map.insert(v.name.clone(), concrete.clone()); }
-            (Ty::Arrow(pa, pb), Ty::Arrow(ca, cb)) |
+            (Ty::Arrow(pa, pb, _), Ty::Arrow(ca, cb, _)) |
             (Ty::App(pa, pb), Ty::App(ca, cb)) => {
                 Self::collect_subst_by_name(pa, ca, map);
                 Self::collect_subst_by_name(pb, cb, map);
@@ -1538,7 +1538,7 @@ impl Monomorphizer {
     fn collect_subst_exact(pattern: &Ty, concrete: &Ty, map: &mut HashMap<TyVar, Ty>) {
         match (pattern, concrete) {
             (Ty::Var(v), _) => { map.insert(v.clone(), concrete.clone()); }
-            (Ty::Arrow(pa, pb), Ty::Arrow(ca, cb)) |
+            (Ty::Arrow(pa, pb, _), Ty::Arrow(ca, cb, _)) |
             (Ty::App(pa, pb), Ty::App(ca, cb)) => {
                 Self::collect_subst_exact(pa, ca, map);
                 Self::collect_subst_exact(pb, cb, map);
@@ -1921,7 +1921,7 @@ impl Monomorphizer {
     fn match_fn_args(fn_ty: &Ty, args: &[TExpr], subst: &mut HashMap<String, Ty>) {
         let mut param_ty = fn_ty;
         for arg in args {
-            if let Ty::Arrow(from, to) = param_ty {
+            if let Ty::Arrow(from, to, _) = param_ty {
                 Self::collect_subst_by_name(from, &arg.ty, subst);
                 param_ty = to;
             }
@@ -1988,9 +1988,10 @@ impl Monomorphizer {
         match ty {
             Ty::Var(v) if v.name == var => to.clone(),
             Ty::Var(_) | Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => ty.clone(),
-            Ty::Arrow(a, b) => Ty::Arrow(
+            Ty::Arrow(a, b, m) => Ty::Arrow(
                 Box::new(Self::subst_ty_by_name(a, var, to)),
                 Box::new(Self::subst_ty_by_name(b, var, to)),
+                *m,
             ),
             Ty::App(a, b) => Ty::App(
                 Box::new(Self::subst_ty_by_name(a, var, to)),

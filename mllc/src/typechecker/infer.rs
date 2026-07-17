@@ -308,7 +308,7 @@ impl Checker {
                 .map(|c| &c.patterns[0])
                 .collect();
             // Extract the first argument type for GADT-aware exhaustiveness
-            let first_arg_ty = if let Ty::Arrow(a, _) = &final_ty { Some(a.as_ref()) } else { None };
+            let first_arg_ty = if let Ty::Arrow(a, _, _) = &final_ty { Some(a.as_ref()) } else { None };
             let missing = self.check_exhaustiveness(&first_patterns, first_arg_ty);
             if !missing.is_empty() {
                 self.push_error_span(
@@ -327,13 +327,22 @@ impl Checker {
             return None;
         }
 
-        Some(TFunction {
+        let tfun = TFunction {
             name: name.to_string(),
             ty: final_ty,
             clauses: tclauses,
             specialized: false,
             dict_params: vec![],
-        })
+        };
+
+        // Affine-usage check (linear types): with every multiplicity now
+        // resolved on the final types, enforce that anything bound at a `%1`
+        // arrow is used at most once (typechecker/usage.rs). A function that
+        // never touches a `%1` type has nothing tracked, so this is a cheap
+        // no-op walk for ordinary code.
+        self.check_function_usage(&tfun);
+
+        Some(tfun)
     }
 
     pub(super) fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, ctx: &str) -> Result<(TClause, Subst), DiagnosticKind> {
@@ -348,7 +357,7 @@ impl Checker {
 
         for pattern in &clause.patterns {
             match &remaining_ty {
-                Ty::Arrow(arg_ty, ret_ty) => {
+                Ty::Arrow(arg_ty, ret_ty, _) => {
                     let arg_ty = arg_ty.apply_subst(&subst);
                     let (tp, pat_subst) = self.check_pattern(pattern, &arg_ty, &mut local_env)?;
                     subst = subst.compose(&pat_subst);
@@ -854,10 +863,16 @@ impl Checker {
                 let (ta, arg_ty, s2) = self.infer_expr(arg, &env2)?;
                 let ret_ty = self.fresh_var("_r");
                 let func_ty = func_ty.apply_subst(&s2);
+                // The expected arrow at an application carries a FLEXIBLE
+                // multiplicity: it adopts the applied function's own (so a
+                // `%1` function can be applied like any other), and the
+                // affine-usage pass later reads the resolved multiplicity to
+                // decide how the application charges the argument (usage.rs).
+                let app_mult = self.fresh_mult();
 
                 // Rank-2: if the function expects a forall-quantified argument,
                 // skolemize the quantified variable and check the argument against it
-                let s3 = if let Ty::Arrow(ref param_ty, ref func_ret) = func_ty {
+                let s3 = if let Ty::Arrow(ref param_ty, ref func_ret, _) = func_ty {
                     if let Ty::Forall(..) = **param_ty {
                         // Collect all forall-bound variables (handles forall a b. T)
                         let mut skolems = vec![];
@@ -894,10 +909,10 @@ impl Checker {
                         }
                         combined
                     } else {
-                        self.unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
+                        self.unify(&func_ty, &Ty::arrow_m(arg_ty, ret_ty.clone(), app_mult))?
                     }
                 } else {
-                    self.unify(&func_ty, &Ty::arrow(arg_ty, ret_ty.clone()))?
+                    self.unify(&func_ty, &Ty::arrow_m(arg_ty, ret_ty.clone(), app_mult))?
                 };
 
                 let final_ty = ret_ty.apply_subst(&s3);
@@ -948,17 +963,23 @@ impl Checker {
                 let mut param_info = Vec::new();
                 for param in params {
                     let param_ty = self.fresh_var("_l");
+                    // Each lambda arrow gets a fresh multiplicity variable so
+                    // the lambda can be used at a `%1` type: checking it
+                    // against `a %1 -> b` binds the variable to One, and the
+                    // affine-usage pass then reads the resolved arrow to know
+                    // the binder is limited to one use (usage.rs).
+                    let mult = self.fresh_mult();
                     if param != "_" {
                         local_env.insert(param.clone(), Scheme::mono(param_ty.clone()));
                     }
-                    param_info.push((param.clone(), param_ty));
+                    param_info.push((param.clone(), param_ty, mult));
                 }
                 let (tbody, body_ty, subst) = self.infer_expr(body, &local_env)?;
-                let func_ty = param_info.iter().rev().fold(body_ty, |acc, (_, pt)| {
-                    Ty::arrow(pt.apply_subst(&subst), acc)
+                let func_ty = param_info.iter().rev().fold(body_ty, |acc, (_, pt, m)| {
+                    Ty::arrow_m(pt.apply_subst(&subst), acc, *m)
                 });
                 let typed_params: Vec<(String, Ty)> = param_info.iter()
-                    .map(|(n, t)| (n.clone(), t.apply_subst(&subst)))
+                    .map(|(n, t, _)| (n.clone(), t.apply_subst(&subst)))
                     .collect();
                 Ok((
                     TExpr::new(TExprKind::Lambda { params: typed_params, body: Box::new(tbody) }, func_ty.clone()),
@@ -1440,7 +1461,7 @@ impl Checker {
         let mut current = ty.clone();
         loop {
             match current {
-                Ty::Arrow(a, b) => {
+                Ty::Arrow(a, b, _) => {
                     arg_types.push(*a);
                     current = *b;
                 }
@@ -1502,7 +1523,7 @@ impl Checker {
         let call_args: Vec<TExpr> = params.iter().enumerate()
             .map(|(i, (n, t))| {
                 let var = TExpr::new(TExprKind::Var(n.clone()), t.clone());
-                if matches!(t, Ty::Arrow(_, _)) {
+                if matches!(t, Ty::Arrow(..)) {
                     let (arity, run_io) = outgoing_cb_flags(t);
                     TExpr::new(
                         TExprKind::OutgoingCallback {
@@ -1582,7 +1603,7 @@ impl Checker {
             current = inner;
         }
         // Walk arrow parameters
-        while let Type::Arrow(param, ret) = current {
+        while let Type::Arrow(param, ret, _) = current {
             self.check_callback_param(name, param);
             current = ret;
         }
@@ -1596,10 +1617,10 @@ impl Checker {
             _ => param,
         };
         // Check if this parameter is a function type
-        if let Type::Arrow(_, _) = p {
+        if let Type::Arrow(..) = p {
             // Find the ultimate return type of this callback
             let mut ret = p;
-            while let Type::Arrow(_, r) = ret {
+            while let Type::Arrow(_, r, _) = ret {
                 ret = r;
             }
             // Unwrap parens on return type
@@ -1653,7 +1674,7 @@ impl Checker {
             other => other,
         };
 
-        for cb in arg_tys.iter().filter(|t| matches!(t, Ty::Arrow(_, _))) {
+        for cb in arg_tys.iter().filter(|t| matches!(t, Ty::Arrow(..))) {
             if callback_value_vars(cb).is_empty() {
                 continue; // concrete callback: no opaque state to keep sound
             }

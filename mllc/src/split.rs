@@ -360,7 +360,7 @@ fn is_value_type(ty: &Ty) -> bool {
     match ty {
         Ty::Con(_) | Ty::List(_) | Ty::Tuple(_) | Ty::Unit | Ty::Promoted(_) => true,
         Ty::App(_, _) => !is_st_type(ty),
-        Ty::Arrow(_, _)
+        Ty::Arrow(..)
         | Ty::IO(_)
         | Ty::LuaIO(_, _)
         | Ty::Forall(_, _)

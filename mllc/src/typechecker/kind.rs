@@ -194,7 +194,7 @@ pub(super) fn show_ast_type(ty: &Type) -> String {
         Type::Con(name) => name.clone(),
         Type::Var(name) => name.clone(),
         Type::App(f, a) => format!("{} {}", show_ast_type(f), atom(a)),
-        Type::Arrow(a, b) => match a.as_ref() {
+        Type::Arrow(a, b, _) => match a.as_ref() {
             Type::Arrow(..) => format!("({}) -> {}", show_ast_type(a), show_ast_type(b)),
             _ => format!("{} -> {}", show_ast_type(a), show_ast_type(b)),
         },
@@ -325,7 +325,7 @@ impl Checker {
                     }
                 }
             }
-            Type::Arrow(a, b) => {
+            Type::Arrow(a, b, _) => {
                 self.expect_type_kind(a, &Kind::Type, kctx, ctx);
                 self.expect_type_kind(b, &Kind::Type, kctx, ctx);
                 Kind::Type
@@ -459,7 +459,7 @@ impl Checker {
                     }
                 }
             }
-            Type::Arrow(a, b) => {
+            Type::Arrow(a, b, _) => {
                 self.check_family_saturation(a, ctx);
                 self.check_family_saturation(b, ctx);
             }

@@ -1222,13 +1222,67 @@ impl Parser {
     fn parse_type_arrow_inner(&mut self) -> PResult<Type> {
         let lhs = self.parse_type_app()?;
         self.skip_newlines_and_indent();
+        // A multiplicity annotation before the arrow: `a %1 -> b` (the
+        // argument is used at most once) or the explicit unrestricted
+        // spellings `a %Many -> b` / `a %'Many -> b`. `%` only ever means
+        // this in a type — types have no operators.
+        if self.at(&Token::Operator("%".to_string())) {
+            let mult = self.parse_multiplicity()?;
+            self.skip_newlines_and_indent();
+            if !self.at(&Token::Arrow) {
+                return Err(self.err_here(
+                    "a multiplicity annotation belongs to a function arrow: \
+                     expected '->' after the '%' annotation".to_string()));
+            }
+            self.advance();
+            self.skip_newlines_and_indent();
+            let rhs = self.parse_type_arrow()?;
+            return Ok(Type::Arrow(Box::new(lhs), Box::new(rhs), mult));
+        }
         if self.at(&Token::Arrow) {
             self.advance();
             self.skip_newlines_and_indent();
             let rhs = self.parse_type_arrow()?;
-            Ok(Type::Arrow(Box::new(lhs), Box::new(rhs)))
+            Ok(Type::Arrow(Box::new(lhs), Box::new(rhs), crate::types::Mult::Many))
         } else {
             Ok(lhs)
+        }
+    }
+
+    /// Parse the multiplicity spelling after a `%` in a type: `1` (linear /
+    /// affine — the argument may be used at most once), or `Many` / `'Many`
+    /// (explicitly unrestricted, the same as a plain arrow).
+    fn parse_multiplicity(&mut self) -> PResult<crate::types::Mult> {
+        self.advance(); // consume '%'
+        match self.peek().clone() {
+            Token::IntLit(1) => {
+                self.advance();
+                Ok(crate::types::Mult::One)
+            }
+            Token::UpperIdent(ref name) if name == "Many" => {
+                self.advance();
+                Ok(crate::types::Mult::Many)
+            }
+            // The DataKinds-style promoted spelling `%'Many`.
+            Token::Tick => {
+                self.advance();
+                match self.peek().clone() {
+                    Token::UpperIdent(ref name) if name == "Many" => {
+                        self.advance();
+                        Ok(crate::types::Mult::Many)
+                    }
+                    other => Err(self.err_here(format!(
+                        "unknown multiplicity '%'{}': the only multiplicities are \
+                         '%1' (the function uses the argument at most once) and \
+                         '%Many' (no restriction — the same as a plain '->')",
+                        other))),
+                }
+            }
+            other => Err(self.err_here(format!(
+                "unknown multiplicity '%{}': the only multiplicities are \
+                 '%1' (the function uses the argument at most once) and \
+                 '%Many' (no restriction — the same as a plain '->')",
+                other))),
         }
     }
 

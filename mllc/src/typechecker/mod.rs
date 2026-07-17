@@ -7,6 +7,7 @@ mod solve;
 mod derive;
 mod infer;
 mod kind;
+mod usage;
 
 /// Fuel for type-alias expansion while resolving one top-level type (reset at
 /// each depth-0 `ast_type_to_ty`). Charged by the size of every expanded alias
@@ -172,6 +173,11 @@ pub struct Checker {
     alias_reported: bool,
     env: TypeEnv,
     next_var: u32,
+    /// Counter for multiplicity unification variables (`Mult::Var`), a
+    /// namespace separate from type-variable ids so minting one never
+    /// perturbs type-variable numbering (and therefore diagnostics) in
+    /// programs that never mention `%1`.
+    next_mult: u32,
     constructors: HashMap<String, ConInfo>,
     pub errors: Vec<Diagnostic>,
     current_fn: Option<String>,
@@ -358,6 +364,7 @@ impl Checker {
             alias_reported: false,
             env: TypeEnv::new(),
             next_var: 0,
+            next_mult: 0,
             constructors: HashMap::new(),
             errors: Vec::new(),
             current_fn: None,
@@ -412,6 +419,16 @@ impl Checker {
         let id = self.next_var;
         self.next_var += 1;
         TyVar { name: format!("{}{}", prefix, id), id }
+    }
+
+    /// A fresh multiplicity variable, for arrows the inference engine invents
+    /// (the expected arrow at an application, a lambda's own arrows). It
+    /// unifies with whichever multiplicity the program provides; left
+    /// unconstrained it behaves as `Many` everywhere.
+    fn fresh_mult(&mut self) -> Mult {
+        let id = self.next_mult;
+        self.next_mult += 1;
+        Mult::Var(id)
     }
 
     fn instantiate(&mut self, scheme: &Scheme) -> Ty {
@@ -543,7 +560,7 @@ impl Checker {
                 Ty::Con(name.clone())
             }
             Type::Var(name) => Ty::Var(TyVar { name: name.clone(), id: u32::MAX }),
-            Type::Arrow(a, b) => Ty::arrow(self.ast_type_to_ty(a), self.ast_type_to_ty(b)),
+            Type::Arrow(a, b, m) => Ty::arrow_m(self.ast_type_to_ty(a), self.ast_type_to_ty(b), *m),
             Type::App(f, a) => {
                 // Check for type family reduction: FamilyName arg1 arg2 ...
                 if let Some(result) = self.try_reduce_type_family(ast_ty) {
@@ -755,9 +772,10 @@ impl Checker {
                 Box::new(self.substitute_type(f, bindings)),
                 Box::new(self.substitute_type(a, bindings)),
             ),
-            Type::Arrow(a, b) => Type::Arrow(
+            Type::Arrow(a, b, m) => Type::Arrow(
                 Box::new(self.substitute_type(a, bindings)),
                 Box::new(self.substitute_type(b, bindings)),
+                *m,
             ),
             Type::List(a) => Type::List(Box::new(self.substitute_type(a, bindings))),
             Type::IO(a) => Type::IO(Box::new(self.substitute_type(a, bindings))),
@@ -2137,7 +2155,7 @@ impl Checker {
         let full_ty = self.ast_type_to_ty(core);
         let mut args = Vec::new();
         let mut cur = full_ty;
-        while let Ty::Arrow(a, b) = cur {
+        while let Ty::Arrow(a, b, _) = cur {
             args.push(*a);
             cur = *b;
         }
@@ -3012,7 +3030,7 @@ enum FfiKind {
 
 fn extract_ffi_info(ty: &Type) -> Option<(String, FfiKind)> {
     match ty {
-        Type::Arrow(_, b) => extract_ffi_info(b),
+        Type::Arrow(_, b, _) => extract_ffi_info(b),
         Type::LuaPure { lua_name, .. } => Some((lua_name.clone(), FfiKind::Pure)),
         Type::LuaIO { lua_name, .. } => Some((lua_name.clone(), FfiKind::IO)),
         Type::LuaIterator { lua_name, .. } => Some((lua_name.clone(), FfiKind::Iterator)),
@@ -3075,7 +3093,7 @@ fn ast_type_size_up_to(ty: &Type, cap: u32) -> u32 {
         if *acc >= cap { return; }
         *acc += 1;
         match ty {
-            Type::App(a, b) | Type::Arrow(a, b) => { go(a, cap, acc); go(b, cap, acc); }
+            Type::App(a, b) | Type::Arrow(a, b, _) => { go(a, cap, acc); go(b, cap, acc); }
             Type::List(a) | Type::IO(a) => go(a, cap, acc),
             Type::Paren(inner) => go(inner, cap, acc),
             Type::ScopedLuaIO { inner, .. } => go(inner, cap, acc),

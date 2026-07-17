@@ -1726,7 +1726,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
             let mut rty = &members[0].ty;
             while let Ty::Forall(_, t) = rty { rty = t; }
             for _ in 0..arity {
-                if let Ty::Arrow(_, rest) = rty {
+                if let Ty::Arrow(_, rest, _) = rty {
                     rty = rest;
                     while let Ty::Forall(_, t) = rty { rty = t; }
                 }

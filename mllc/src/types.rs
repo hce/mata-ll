@@ -71,6 +71,52 @@ impl fmt::Display for Kind {
     }
 }
 
+/// Multiplicity of a function arrow (linear/affine types): how often the
+/// function may USE the argument this arrow binds. `a -> b` is `a %Many -> b`
+/// (no restriction, every plain arrow); `a %1 -> b` promises the argument is
+/// used AT MOST once (affine — mata-ll enforces the at-most-once half of
+/// GHC's linear arrows; see typechecker/usage.rs for the enforcement and its
+/// boundary). Multiplicity is a type-CHECKING discipline only: it is never
+/// consulted after type checking, so monomorphization, codegen and the
+/// emitted Lua are identical with or without `%1` annotations.
+///
+/// `Var` is a multiplicity unification variable. Arrows the inference engine
+/// invents (the expected arrow at an application, a lambda's own arrows) get
+/// a fresh one so they adopt whichever multiplicity the program unifies them
+/// with — that is how a lambda checked against a `%1` parameter learns its
+/// binder is affine. A variable left unconstrained means no `%1` annotation
+/// ever reached the arrow, and every consumer treats it as `Many`.
+///
+/// Equality and hashing are deliberately multiplicity-BLIND (see the manual
+/// impls below): multiplicity must never change a type's identity, so every
+/// existing `Ty` comparison, map key and cache behaves exactly as it did
+/// before multiplicities existed. Only `unify` (which handles the slot
+/// explicitly) and the affine-usage checker ever look at it.
+#[derive(Debug, Clone, Copy)]
+pub enum Mult {
+    /// `a %1 -> b`: the argument may be used at most once (affine).
+    One,
+    /// `a -> b` / `a %Many -> b`: unrestricted (GHC's ω).
+    Many,
+    /// A multiplicity unification variable (ids from `Checker::fresh_mult`,
+    /// a namespace separate from type-variable ids).
+    Var(u32),
+}
+
+// Multiplicity-blind identity: any Mult equals any Mult, and hashing adds
+// nothing. This keeps `Ty`'s derived Eq/Hash exactly as they were before the
+// multiplicity slot existed — a `%1` arrow and a plain arrow are the SAME
+// type for lookup/caching purposes, and only unification distinguishes them.
+impl PartialEq for Mult {
+    fn eq(&self, _other: &Mult) -> bool {
+        true
+    }
+}
+impl Eq for Mult {}
+impl std::hash::Hash for Mult {
+    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {}
+}
+
 /// Internal type representation used by the type checker.
 /// Separate from the AST's Type to allow for unification variables.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -79,8 +125,9 @@ pub enum Ty {
     Con(String),
     /// Type variable (rigid or unification)
     Var(TyVar),
-    /// Function type: a -> b
-    Arrow(Box<Ty>, Box<Ty>),
+    /// Function type: a -> b (the `Mult` is the arrow's multiplicity;
+    /// plain `->` is `Mult::Many`)
+    Arrow(Box<Ty>, Box<Ty>, Mult),
     /// Type application: Maybe a, Tree Int
     App(Box<Ty>, Box<Ty>),
     /// List type: [a]
@@ -104,7 +151,13 @@ pub enum Ty {
 
 impl Ty {
     pub fn arrow(from: Ty, to: Ty) -> Ty {
-        Ty::Arrow(Box::new(from), Box::new(to))
+        Ty::Arrow(Box::new(from), Box::new(to), Mult::Many)
+    }
+
+    /// Build an arrow with an explicit multiplicity (`%1`, or a fresh
+    /// multiplicity variable for inference-invented arrows).
+    pub fn arrow_m(from: Ty, to: Ty, mult: Mult) -> Ty {
+        Ty::Arrow(Box::new(from), Box::new(to), mult)
     }
 
     pub fn app(f: Ty, a: Ty) -> Ty {
@@ -139,7 +192,7 @@ impl Ty {
     /// Number of top-level arrows: `a -> b -> c` is 2, `Con` is 0.
     pub fn arrow_arity(&self) -> usize {
         match self {
-            Ty::Arrow(_, rest) => 1 + rest.arrow_arity(),
+            Ty::Arrow(_, rest, _) => 1 + rest.arrow_arity(),
             _ => 0,
         }
     }
@@ -147,7 +200,7 @@ impl Ty {
     /// The final result type after peeling all top-level arrows.
     pub fn return_type(&self) -> &Ty {
         match self {
-            Ty::Arrow(_, rest) => rest.return_type(),
+            Ty::Arrow(_, rest, _) => rest.return_type(),
             other => other,
         }
     }
@@ -157,7 +210,7 @@ impl Ty {
     pub fn peel_arrows(&self) -> (Vec<&Ty>, &Ty) {
         let mut args = Vec::new();
         let mut cur = self;
-        while let Ty::Arrow(a, b) = cur {
+        while let Ty::Arrow(a, b, _) = cur {
             args.push(a.as_ref());
             cur = b.as_ref();
         }
@@ -169,7 +222,7 @@ impl Ty {
         match self {
             Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => vec![],
             Ty::Var(v) => vec![v.clone()],
-            Ty::Arrow(a, b) | Ty::App(a, b) => {
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => {
                 let mut vars = a.free_vars();
                 for v in b.free_vars() {
                     if !vars.contains(&v) {
@@ -224,7 +277,8 @@ impl Ty {
                     }
                 }
             }
-            Ty::Arrow(a, b) => Ty::arrow(a.apply_subst(subst), b.apply_subst(subst)),
+            Ty::Arrow(a, b, m) => Ty::arrow_m(
+                a.apply_subst(subst), b.apply_subst(subst), subst.resolve_mult(*m)),
             Ty::App(a, b) => Ty::app(a.apply_subst(subst), b.apply_subst(subst)),
             Ty::List(a) => Ty::list(a.apply_subst(subst)),
             Ty::IO(a) => Ty::io(a.apply_subst(subst)),
@@ -250,7 +304,7 @@ impl Ty {
         match self {
             Ty::Skolem(n, i) => n == name && *i == id,
             Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Var(_) => false,
-            Ty::Arrow(a, b) | Ty::App(a, b) => a.contains_skolem(name, id) || b.contains_skolem(name, id),
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => a.contains_skolem(name, id) || b.contains_skolem(name, id),
             Ty::List(a) | Ty::IO(a) => a.contains_skolem(name, id),
             Ty::LuaIO(_, a) => a.contains_skolem(name, id),
             Ty::Forall(_, inner) => inner.contains_skolem(name, id),
@@ -269,7 +323,7 @@ impl Ty {
                 }
             }
             Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Var(_) => {}
-            Ty::Arrow(a, b) | Ty::App(a, b) => {
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => {
                 a.collect_skolems(out);
                 b.collect_skolems(out);
             }
@@ -283,7 +337,7 @@ impl Ty {
         match self {
             Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => false,
             Ty::Var(w) => v == w,
-            Ty::Arrow(a, b) | Ty::App(a, b) => a.occurs(v) || b.occurs(v),
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => a.occurs(v) || b.occurs(v),
             Ty::List(a) | Ty::IO(a) => a.occurs(v),
             Ty::LuaIO(s, a) => v == s || a.occurs(v),
             Ty::Forall(_, inner) => inner.occurs(v),
@@ -298,15 +352,19 @@ impl fmt::Display for Ty {
             Ty::Con(name) => write!(f, "{}", name),
             Ty::Promoted(name) => write!(f, "'{}", name),
             Ty::Var(v) => write!(f, "{}", v),
-            Ty::Arrow(a, b) => {
+            Ty::Arrow(a, b, m) => {
+                // A `%1` arrow renders its annotation; `Many` and an
+                // unconstrained multiplicity variable render as the plain
+                // arrow they behave as.
+                let arrow = match m { Mult::One => "%1 ->", _ => "->" };
                 match a.as_ref() {
-                    Ty::Arrow(_, _) => write!(f, "({}) -> {}", a, b),
-                    _ => write!(f, "{} -> {}", a, b),
+                    Ty::Arrow(..) => write!(f, "({}) {} {}", a, arrow, b),
+                    _ => write!(f, "{} {} {}", a, arrow, b),
                 }
             }
             Ty::App(a, b) => {
                 match b.as_ref() {
-                    Ty::App(_, _) | Ty::Arrow(_, _) => write!(f, "{} ({})", a, b),
+                    Ty::App(_, _) | Ty::Arrow(..) => write!(f, "{} ({})", a, b),
                     _ => write!(f, "{} {}", a, b),
                 }
             }
@@ -438,25 +496,56 @@ impl fmt::Display for Scheme {
     }
 }
 
-/// Substitution: mapping from type variables to types
+/// Substitution: mapping from type variables to types. Multiplicity
+/// variables (see `Mult`) live in their own map: they are a separate
+/// namespace from type variables and are only ever read back through
+/// `resolve_mult` when a substitution is applied to an arrow type.
 #[derive(Debug, Clone)]
 pub struct Subst {
     map: HashMap<TyVar, Ty>,
+    mults: HashMap<u32, Mult>,
 }
 
 impl Subst {
     pub fn empty() -> Subst {
-        Subst { map: HashMap::new() }
+        Subst { map: HashMap::new(), mults: HashMap::new() }
     }
 
     pub fn from_map(map: HashMap<TyVar, Ty>) -> Subst {
-        Subst { map }
+        Subst { map, mults: HashMap::new() }
     }
 
     pub fn singleton(v: TyVar, ty: Ty) -> Subst {
         let mut map = HashMap::new();
         map.insert(v, ty);
-        Subst { map }
+        Subst { map, mults: HashMap::new() }
+    }
+
+    /// A substitution binding one multiplicity variable.
+    pub fn mult_singleton(id: u32, m: Mult) -> Subst {
+        let mut mults = HashMap::new();
+        mults.insert(id, m);
+        Subst { map: HashMap::new(), mults }
+    }
+
+    /// Resolve a multiplicity through this substitution, following variable
+    /// chains (with the same defensive depth cap as type-variable chains).
+    pub fn resolve_mult(&self, m: Mult) -> Mult {
+        let mut cur = m;
+        let mut depth = 0;
+        while let Mult::Var(id) = cur {
+            match self.mults.get(&id) {
+                Some(next) => {
+                    // A self-mapping or an over-long chain ends the walk.
+                    if matches!(next, Mult::Var(nid) if *nid == id) { break; }
+                    depth += 1;
+                    if depth > 100 { break; }
+                    cur = *next;
+                }
+                None => break,
+            }
+        }
+        cur
     }
 
     pub fn lookup(&self, v: &TyVar) -> Option<&Ty> {
@@ -481,7 +570,17 @@ impl Subst {
         for (k, v) in &other.map {
             result.entry(k.clone()).or_insert_with(|| v.clone());
         }
-        Subst { map: result }
+        // Multiplicity bindings compose the same way: resolve self's images
+        // through other, then take other's bindings for anything self left
+        // unbound.
+        let mut mults: HashMap<u32, Mult> = self.mults
+            .iter()
+            .map(|(k, v)| (*k, other.resolve_mult(*v)))
+            .collect();
+        for (k, v) in &other.mults {
+            mults.entry(*k).or_insert(*v);
+        }
+        Subst { map: result, mults }
     }
 
     /// Merge two INDEPENDENT substitutions (e.g. from two clauses of the same
@@ -617,7 +716,7 @@ fn tf_subst(ty: &Ty, binds: &HashMap<String, Ty>) -> Ty {
     match ty {
         Ty::Var(v) => binds.get(&v.name).cloned().unwrap_or_else(|| ty.clone()),
         Ty::App(f, a) => Ty::app(tf_subst(f, binds), tf_subst(a, binds)),
-        Ty::Arrow(a, b) => Ty::arrow(tf_subst(a, binds), tf_subst(b, binds)),
+        Ty::Arrow(a, b, m) => Ty::arrow_m(tf_subst(a, binds), tf_subst(b, binds), *m),
         Ty::List(e) => Ty::list(tf_subst(e, binds)),
         Ty::IO(e) => Ty::io(tf_subst(e, binds)),
         Ty::LuaIO(s, e) => Ty::lua_io(s.clone(), tf_subst(e, binds)),
@@ -676,7 +775,7 @@ fn tf_maybe_unifiable(pat: &Ty, actual: &Ty, binds: &mut HashMap<String, Ty>, fa
         (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => {
             xs.iter().zip(ys).all(|(x, y)| tf_maybe_unifiable(x, y, binds, fams))
         }
-        (Ty::Arrow(f1, a1), Ty::Arrow(f2, a2)) => {
+        (Ty::Arrow(f1, a1, _), Ty::Arrow(f2, a2, _)) => {
             tf_maybe_unifiable(f1, f2, binds, fams) && tf_maybe_unifiable(a1, a2, binds, fams)
         }
         // Different shapes (constructor vs list, promoted vs con, …): apart.
@@ -690,7 +789,7 @@ fn tf_rename_pat_vars(ty: &Ty) -> Ty {
     match ty {
         Ty::Var(v) => Ty::Var(TyVar { name: format!("__tfpat_{}", v.name), id: v.id }),
         Ty::App(f, a) => Ty::app(tf_rename_pat_vars(f), tf_rename_pat_vars(a)),
-        Ty::Arrow(a, b) => Ty::arrow(tf_rename_pat_vars(a), tf_rename_pat_vars(b)),
+        Ty::Arrow(a, b, m) => Ty::arrow_m(tf_rename_pat_vars(a), tf_rename_pat_vars(b), *m),
         Ty::List(e) => Ty::list(tf_rename_pat_vars(e)),
         Ty::IO(e) => Ty::io(tf_rename_pat_vars(e)),
         Ty::LuaIO(s, e) => Ty::lua_io(s.clone(), tf_rename_pat_vars(e)),
@@ -751,8 +850,8 @@ fn tf_normalize_children(ty: &Ty, fams: &TyFamilies, fuel: &mut u32) -> Result<T
     Ok(match ty {
         Ty::App(f, a) =>
             Ty::app(tf_normalize(f, fams, fuel)?, tf_normalize(a, fams, fuel)?),
-        Ty::Arrow(a, b) =>
-            Ty::arrow(tf_normalize(a, fams, fuel)?, tf_normalize(b, fams, fuel)?),
+        Ty::Arrow(a, b, m) =>
+            Ty::arrow_m(tf_normalize(a, fams, fuel)?, tf_normalize(b, fams, fuel)?, *m),
         Ty::List(e) => Ty::list(tf_normalize(e, fams, fuel)?),
         Ty::IO(e) => Ty::io(tf_normalize(e, fams, fuel)?),
         Ty::LuaIO(s, e) => Ty::lua_io(s.clone(), tf_normalize(e, fams, fuel)?),
@@ -807,7 +906,7 @@ fn ty_size_up_to(ty: &Ty, cap: u32) -> u32 {
         if *acc >= cap { return; }
         *acc += 1;
         match ty {
-            Ty::Arrow(a, b) | Ty::App(a, b) => { go(a, cap, acc); go(b, cap, acc); }
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => { go(a, cap, acc); go(b, cap, acc); }
             Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => go(a, cap, acc),
             Ty::Tuple(es) => for e in es { go(e, cap, acc); if *acc >= cap { break; } },
             _ => {}
@@ -851,6 +950,19 @@ pub fn unify_tf(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, Diagnostic
     unify_inner(&n1, &n2, fams)
 }
 
+/// Unify two arrow multiplicities. Equal constants unify; a multiplicity
+/// variable binds to the other side (or trivially to itself); `One` vs
+/// `Many` is a genuine mismatch (`None` — the caller builds the diagnostic,
+/// which needs the full arrow types for a readable message).
+fn unify_mult(m1: Mult, m2: Mult) -> Option<Subst> {
+    match (m1, m2) {
+        (Mult::One, Mult::One) | (Mult::Many, Mult::Many) => Some(Subst::empty()),
+        (Mult::Var(v), Mult::Var(w)) if v == w => Some(Subst::empty()),
+        (Mult::Var(v), m) | (m, Mult::Var(v)) => Some(Subst::mult_singleton(v, m)),
+        _ => None,
+    }
+}
+
 /// The structural core of unification. `t1`/`t2` are already in
 /// family-normal-form when `fams` is non-empty; recursive calls go back
 /// through `unify_tf` so a substitution that exposes a new reduction is
@@ -889,10 +1001,20 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
             }
         }
 
-        (Ty::Arrow(a1, b1), Ty::Arrow(a2, b2)) => {
-            let s1 = unify_tf(a1, a2, fams)?;
-            let s2 = unify_tf(&b1.apply_subst(&s1), &b2.apply_subst(&s1), fams)?;
-            Ok(s1.compose(&s2))
+        (Ty::Arrow(a1, b1, m1), Ty::Arrow(a2, b2, m2)) => {
+            // Multiplicities unify invariantly, exactly like GHC's linear
+            // arrows: `%1` and a plain `->` are different arrows, and a
+            // variable adopts whichever side is concrete. Rejecting
+            // Many-into-One is what keeps the affine promise sound — an
+            // unrestricted function flowing into a `%1`-typed position could
+            // duplicate the argument the `%1` type claims is used at most
+            // once.
+            let s0 = unify_mult(*m1, *m2)
+                .ok_or_else(|| DiagnosticKind::MultiplicityMismatch(t1.clone(), t2.clone()))?;
+            let s1 = unify_tf(&a1.apply_subst(&s0), &a2.apply_subst(&s0), fams)?;
+            let s01 = s0.compose(&s1);
+            let s2 = unify_tf(&b1.apply_subst(&s01), &b2.apply_subst(&s01), fams)?;
+            Ok(s01.compose(&s2))
         }
 
         (Ty::App(a1, b1), Ty::App(a2, b2)) => {
@@ -1012,6 +1134,13 @@ impl Diagnostic {
 pub enum DiagnosticKind {
     Mismatch(Ty, Ty),
     RigidMismatch(Ty, Ty),
+    /// Two function types whose shapes line up but whose arrows disagree
+    /// about multiplicity: one side is `a %1 -> b` (argument used at most
+    /// once) and the other a plain `a -> b` (no restriction). They are not
+    /// interchangeable — letting an unrestricted function stand where a `%1`
+    /// one is required would let it use an argument twice that the `%1` type
+    /// promises is consumed at most once.
+    MultiplicityMismatch(Ty, Ty),
     OccursCheck(TyVar, Ty),
     UnboundVariable(String),
     UnboundConstructor(String),
@@ -1151,9 +1280,16 @@ impl Diagnostic {
                 Some("mata-ll has no Ord instance for tuples, lists, or Maybe; compare their \
                       components individually."),
             DiagnosticKind::NoInstance { ty, .. }
-                if matches!(ty, Ty::Arrow(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
+                if matches!(ty, Ty::Arrow(..) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
                 Some("functions and IO actions have no Show/Eq/Ord instance — there is no \
                       way to render or compare them."),
+            DiagnosticKind::MultiplicityMismatch(..) =>
+                Some("to pass a '%1' function where an ordinary one is expected, \
+                      wrap it in a lambda: '\\x -> f x' makes no single-use promise. \
+                      The other direction (an ordinary function where '%1' is \
+                      required) is rejected outright, because the function might \
+                      use its argument more than once. GHC's LinearTypes behave \
+                      the same way."),
             DiagnosticKind::AmbiguousType { .. } =>
                 Some("add a type annotation to pin the type down, e.g. \
                       `show (Nothing :: Maybe Integer)`. GHC rejects this the same way."),
@@ -1213,6 +1349,11 @@ impl fmt::Display for Diagnostic {
                 write!(f, "Cannot match '{}' with '{}': a rigid type variable stands for one specific type that is not visible here, so it cannot be assumed to be any particular type",
                     a.apply_subst(&s), b.apply_subst(&s))?
             }
+            DiagnosticKind::MultiplicityMismatch(a, b) => {
+                let s = pretty_var_subst(&[a, b]);
+                write!(f, "Cannot match '{}' with '{}': the arrows disagree about how often the function may use its argument — '%1 ->' promises the argument is used at most once, while a plain '->' makes no such promise, so the two function types are not interchangeable",
+                    a.apply_subst(&s), b.apply_subst(&s))?
+            }
             DiagnosticKind::OccursCheck(v, ty) => {
                 let vt = Ty::Var(v.clone());
                 let s = pretty_var_subst(&[&vt, ty]);
@@ -1236,7 +1377,7 @@ impl fmt::Display for Diagnostic {
                 let s = pretty_var_subst(&[ty]);
                 let rendered = ty.apply_subst(&s);
                 let shown = match &rendered {
-                    Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
+                    Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
                         format!("({})", rendered),
                     _ => format!("{}", rendered),
                 };
@@ -1246,7 +1387,7 @@ impl fmt::Display for Diagnostic {
                 let s = pretty_var_subst(&[ty]);
                 let rendered = ty.apply_subst(&s);
                 let shown = match &rendered {
-                    Ty::Arrow(_, _) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
+                    Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
                         format!("({})", rendered),
                     _ => format!("{}", rendered),
                 };

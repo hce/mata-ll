@@ -312,8 +312,11 @@ pub enum Type {
     Var(String),
     /// Type application: `Maybe String`, `Tree a`
     App(Box<Type>, Box<Type>),
-    /// Function type: `a -> b`
-    Arrow(Box<Type>, Box<Type>),
+    /// Function type: `a -> b`. The multiplicity is `Many` for a plain `->`
+    /// and `One` for a `%1`-annotated arrow (`a %1 -> b`: the function uses
+    /// the argument at most once — see `types::Mult`). The parser never
+    /// produces `Mult::Var`; that form exists only inside inference.
+    Arrow(Box<Type>, Box<Type>, crate::types::Mult),
     /// List/Array type: `[a]`
     List(Box<Type>),
     /// IO type: `IO a` (Pure provenance)

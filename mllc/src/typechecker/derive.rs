@@ -1098,7 +1098,7 @@ impl Checker {
         match ty {
             Ty::Var(tv) => tv.name == var_name,
             Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => false,
-            Ty::Arrow(a, b) | Ty::App(a, b) => {
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => {
                 Self::ty_mentions_var(a, var_name) || Self::ty_mentions_var(b, var_name)
             }
             Ty::List(a) | Ty::IO(a) => Self::ty_mentions_var(a, var_name),
@@ -1165,7 +1165,7 @@ impl Checker {
                 }
                 Ok(TExpr::new(TExprKind::Tuple(mapped), field_ty.clone()))
             }
-            Ty::Arrow(arg, res) => {
+            Ty::Arrow(arg, res, _) => {
                 if Self::ty_mentions_var(arg, last_var) {
                     // Contravariant occurrence: fmap would have to transform
                     // the function's ARGUMENT backwards, which no Functor can.
@@ -1507,7 +1507,7 @@ impl Checker {
         let mut e = Self::jx_var(fname, fty);
         for a in args {
             let next_ty = match &e.ty {
-                Ty::Arrow(_, b) => (**b).clone(),
+                Ty::Arrow(_, b, _) => (**b).clone(),
                 _ => ret_ty.clone(),
             };
             e = Self::jx_app(e, a, next_ty);
