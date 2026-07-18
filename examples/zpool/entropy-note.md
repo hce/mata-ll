@@ -27,7 +27,7 @@ Let a model that can see repetition weigh in and the verdict inverts hard.
 | `zpr.mll`  | 2174    | 941    | 0.433 | 3.463                |
 | `zpr.lua`  | 132811  | 22451  | 0.169 | 1.352                |
 
-So the `.lua` actually carries **~2.6× less** information per byte. The original
+So the `.lua` carries **~2.6× less** information per byte. The original
 intuition ("generated boilerplate is repetitive → low entropy") was right; H1 was
 just measuring the wrong order.
 
@@ -37,7 +37,7 @@ just measuring the wrong order.
    2 KB *leaf* that only names its imports. The `.lua` is the whole linked,
    dead-code-eliminated program: `ZPool`, `Lz4`, `Nvlist`, `ZBytes`, `LIOLinear`,
    the reachable slices of `LIO`/`LOS`/`Prelude`, plus the runtime. So "2 KB →
-   132 KB" is mostly *inclusion*, not *expansion*. Against the real app-local
+   132 KB" is mostly *inclusion*, not *expansion*. Against the app-local
    source closure it is ~41 KB → 132 KB ≈ **3.2×** — an unremarkable lowering
    ratio for a lazy-functional subset compiled to strict Lua (and lower still if
    you fold in the stdlib+runtime source).
@@ -53,8 +53,8 @@ just measuring the wrong order.
 
 2. **A big slice of `zpr.lua` is a fixed runtime tax.** The runtime + stdlib
    scaffolding is byte-identical across every mata-ll output — a hello-world
-   carries most of the same `__force`/`__thunk`/prelude machinery. That is exactly
-   why the `.lua` gzips so hard: shared scaffolding is pure redundancy to a
+   carries most of the same `__force`/`__thunk`/prelude machinery. That is why
+   the `.lua` gzips so hard: shared scaffolding is pure redundancy to a
    compressor, and its Kolmogorov cost is charged once to the compiler, not to the
    program.
 
@@ -65,5 +65,5 @@ runtime*. They land within 0.06 bits/byte on H1 only because both are code-shape
 text — not because anything deep is preserved. Everything interesting (the
 repetition, the generated-ness, the fixed runtime cost) lives in the orders that
 first-order entropy cannot see. The honest ranking of "how much information is
-really here": first-order entropy says one thing, `gzip` says a truer thing, and
+here": first-order entropy says one thing, `gzip` says a truer thing, and
 "it's deterministic compiler output" says the truest thing.
