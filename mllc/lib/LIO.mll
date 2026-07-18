@@ -33,6 +33,13 @@ fClose :: FileHandle -> LuaIO ":close" ()
 
 -- File methods (handle as first arg, colon-call in Lua)
 fRead :: FileHandle -> String -> LuaIO ":read" String
+
+-- Read exactly n raw bytes from the current position (Lua's file:read(n)
+-- numeric form). fRead covers the string formats ("l", "a", ...); this is
+-- the binary-safe counterpart for reading a byte count, e.g. fixed-size
+-- on-disk structures. At end of file Lua returns nil, which is an error
+-- here — seek within bounds before reading.
+fReadN :: FileHandle -> Integer -> LuaIO ":read" String
 fReadLine :: FileHandle -> LuaIO ":read" (Maybe String)
 fWrite :: FileHandle -> String -> LuaIO ":write" ()
 fFlush :: FileHandle -> LuaIO ":flush" ()
