@@ -1466,7 +1466,7 @@ impl Parser {
                         if !is_either_string_type(&result) {
                             return Err(self.err_here(format!(
                                 "{} requires the result to be written as `(Either String a)`, \
-                                 so a raised Lua error can be returned as `Left`",
+                                 so a raised Lua `error(...)` can be returned as `Left`",
                                 name
                             )));
                         }
