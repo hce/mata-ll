@@ -1,7 +1,7 @@
 # mata-ll ZFS pool reader
 
 A read-only ZFS pool reader, written in mata-ll. It reads files out of a ZFS
-pool image by genuine on-disk traversal — vdev label → highest-txg uberblock →
+pool image by on-disk traversal — vdev label → highest-txg uberblock →
 MOS objset → DSL dataset hierarchy → ZAP directories → dnode → block-pointer
 and indirect-block reassembly — with per-structure endianness detection and
 LZ4 decompression. It doubles as a worked example of a byte-level binary parser
@@ -57,7 +57,7 @@ only single-vdev (disk or mirror) pools are supported
 ```
 
 That is the 64-bit corruption surfacing as a plausible-looking wrong index (and
-tripping the single-vdev guard), not a real multi-vdev pool. Supporting LuaJIT
+tripping the single-vdev guard), not a multi-vdev pool. Supporting LuaJIT
 would require decoding the 64-bit words as split 32-bit halves, or via LuaJIT's
 FFI `int64_t` — a deliberate non-goal here.
 
