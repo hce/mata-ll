@@ -26,6 +26,7 @@ pub(crate) const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("JSON", include_str!("../lib/JSON.mll")),
     ("LBit", include_str!("../lib/LBit.mll")),
     ("LIO", include_str!("../lib/LIO.mll")),
+    ("LIOLinear", include_str!("../lib/LIOLinear.mll")),
     ("LMath", include_str!("../lib/LMath.mll")),
     ("LOS", include_str!("../lib/LOS.mll")),
     ("LString", include_str!("../lib/LString.mll")),
