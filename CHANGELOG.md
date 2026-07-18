@@ -39,8 +39,21 @@ API of the `mllc` library crate.)
   predicate) — where a raw `io.read` binding would have let a Lua `nil` escape
   into a `String` and crash later with "attempt to concatenate a nil value".
   Internally built on a `LuaTry "io.read"` binding (`ffi_getLine`), whose
-  bare-nil EOF becomes `Left`. `LIO.readLine` is unchanged (and still has the
-  raw nil-at-EOF behavior).
+  bare-nil EOF becomes `Left`.
+- **`LIO.readLine` no longer crashes at end of input.** `readLine` (still in
+  `LIO`, still requires `import LIO`) now presents as `IO String` and receives
+  the same hardening as `getLine`: at end of input it raises the clean,
+  catchable error `LIO.readLine: end of input` instead of letting `io.read()`'s
+  nil escape into a `String` and crash downstream with "attempt to concatenate
+  a nil value". A normal line is still returned without the trailing newline
+  (`io.read`'s default "l" format — unchanged). Internally built on
+  `ffi_readLine :: LuaTry "io.read" String`, exactly like the Prelude's
+  `getLine`. (Its former declared type was `LuaIO "io.read" String`, which
+  reduces to `IO String`, so no caller-visible type change — only the EOF
+  behavior changes, from a raw Lua crash to a catchable error.)
+  `LIO.readStdin` (the format-argument variant) is unchanged: `io.read(fmt)`'s
+  nil is format-dependent ("n" also returns nil for an unparseable number), so
+  it needs its own decision.
 - **FFI value/constant exports.** An `export` may now be a plain value, not only
   a function or an IO/LuaIO action: `export answer :: Integer` (with `answer =
   42`) is marshalled to Lua directly as `exports.answer = 42`, and a record

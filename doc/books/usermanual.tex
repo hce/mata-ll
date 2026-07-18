@@ -641,7 +641,8 @@ newline; at end of input it raises a catchable error
 \texttt{catch} capture --- mata-ll's analog of GHC's \texttt{getLine}
 throwing an \texttt{isEOFError} exception.  The \texttt{LIO} library
 module offers further input functions: \texttt{readLine :: IO String}
-(the raw \texttt{io.read} binding), and
+(reads a line the same way and raises the same kind of catchable
+end-of-input error, named \texttt{LIO.readLine: end of input}), and
 \texttt{fileLines :: String -> IO [String]} reads a whole file as a
 list of lines.
 

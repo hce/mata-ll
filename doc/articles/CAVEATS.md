@@ -169,7 +169,7 @@ To catch an error in a *pure* value, force it to WHNF inside the tried action â€
 IO effects inside `try` are still caught normally; only a lazily-returned pure
 value needs the explicit force.
 
-## `getLine` at end of input raises a string error, not a typed `isEOFError`
+## `getLine`/`readLine` at end of input raise a string error, not a typed `isEOFError`
 
 `getLine :: IO String` matches GHC (Prelude, no import, strips the trailing
 newline), and at end of input it raises an error rather than returning a nil
@@ -180,8 +180,12 @@ other error; there is no `isEOFError` predicate, so a handler that must
 distinguish EOF from other failures has to inspect the message. As with all
 caught errors, the string carries a Lua source-position prefix
 (`file:line: Prelude.getLine: end of input`), so match on the suffix, not
-the whole string. `LIO`'s lower-level `readLine` is the raw `io.read`
-binding without this EOF guard.
+the whole string. `LIO`'s `readLine :: IO String` has the identical EOF
+guard with its own message, `LIO.readLine: end of input` â€” same caveats
+(string error, no typed predicate, source-position prefix). `LIO.readStdin`,
+the format-argument reader, is still the raw `io.read` binding: at end of
+input (or, for the "n" format, an unparseable number) its Lua `nil` escapes
+into the result.
 
 ## An IO action's result must not itself be a function
 

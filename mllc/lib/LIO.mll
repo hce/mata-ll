@@ -7,7 +7,22 @@ newtype FileHandle = FileHandle LuaUserData
 data IOResult a = IOSuccess a | IOFailure String
 
 -- Default stream operations (stdin/stdout)
-readLine :: LuaIO "io.read" String
+-- readLine reads one line from stdin WITHOUT the trailing newline (io.read's
+-- default "l" format already strips it). ffi_readLine is the raw internal
+-- binding: at end of input io.read() returns nil, which LuaTry surfaces as
+-- Left rather than letting a nil String escape (and crash later with
+-- "attempt to concatenate a nil value"). readLine turns that Left into the
+-- clean, catchable error "LIO.readLine: end of input" — the same hardening
+-- as the Prelude's getLine (catch it with try/catch).
+ffi_readLine :: LuaTry "io.read" String
+
+readLine :: IO String
+readLine = do
+    r <- ffi_readLine
+    case r of
+        Left _  -> error "LIO.readLine: end of input"
+        Right s -> pure s
+
 readStdin :: String -> LuaIO "io.read" String
 writeStdout :: String -> LuaIO "io.write" ()
 flushStdout :: LuaIO "io.flush" ()

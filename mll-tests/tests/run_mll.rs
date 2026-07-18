@@ -746,6 +746,7 @@ mll_test!(div_mod_negative_literal_folding, "div_mod_negative_literal_folding.ml
 mll_test!(linear_affine_basic, "linear_affine_basic.mll");
 mll_test!(linear_mult_poly, "linear_mult_poly.mll");
 mll_test!(getline, "getline.mll");
+mll_test!(readline, "readline.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

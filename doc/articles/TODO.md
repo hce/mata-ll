@@ -5,6 +5,24 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **`LIO.readLine` hardened at end of input (same as `getLine`).**
+      `readLine` is now `IO String` in `LIO.mll`, a wrapper over
+      `ffi_readLine :: LuaTry "io.read" String`: `io.read()`'s bare-nil EOF
+      decodes to `Left` and is re-raised as the clean, catchable error
+      `LIO.readLine: end of input` — instead of letting the nil escape into a
+      `String` and crash later with "attempt to concatenate a nil value". It
+      stays in `LIO` (still needs `import LIO`; not a Prelude alias — the
+      error names readLine), and a normal line is still returned without the
+      trailing newline. Covered by `mll-tests/tests/cases/readline.mll` (real
+      EOF via an `io.input`-redirected fixture file, `try` and `catch` both
+      capture the error). NOTE: `readStdin :: String -> LuaIO "io.read"
+      String` (unused anywhere) still passes `io.read(fmt)`'s nil through; it
+      was left alone deliberately because nil there is format-dependent ("n"
+      returns nil for an unparseable number, not only EOF; "a" never returns
+      nil), so a blanket end-of-input error would mislabel "n" failures — its
+      hardening (likely a `Maybe String` result like `fReadLine`) is a
+      separate API decision. `fRead` has the same format-dependent nil.
+
 - [x] **`getLine` in the Prelude (GHC parity).** `getLine :: IO String`, no
       import needed, strips the trailing newline (`io.read`'s default "l"
       format). EOF handling is the point: instead of letting `io.read()`'s
@@ -14,8 +32,8 @@ MATA-LL TODO
       EOF becomes `Left` and is re-raised as the catchable error
       `Prelude.getLine: end of input` — the string-error analog of GHC's
       `isEOFError`. Covered by `mll-tests/tests/cases/getline.mll` (real EOF
-      via an `io.input`-redirected fixture file). NOTE: `LIO.readLine` still
-      has the raw nil-at-EOF crash; hardening it is a separate decision.
+      via an `io.input`-redirected fixture file). `LIO.readLine` has since
+      received the same hardening (see the entry above).
 
 - [x] **FFI export marshallability check (whitelist, strict).** An `export`
       whose signature uses a type that cannot cross the Lua boundary is rejected
