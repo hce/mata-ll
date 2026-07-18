@@ -9,11 +9,11 @@ difftime :: Integer -> Integer -> LuaPure "os.difftime" Number
 date :: String -> LuaPure "os.date" String
 
 -- Environment
-getenv :: String -> LuaTry "os.getenv" String
+getenv :: String -> LuaTry "os.getenv" (Either String String)
 
 -- File operations
-remove :: String -> LuaTry "os.remove" ()
-rename :: String -> String -> LuaTry "os.rename" ()
+remove :: String -> LuaTry "os.remove" (Either String ())
+rename :: String -> String -> LuaTry "os.rename" (Either String ())
 
 -- Process
 execute :: String -> LuaIO "os.execute" Bool

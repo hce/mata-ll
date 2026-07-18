@@ -29,6 +29,20 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: `LuaTry`'s result must now be written as `(Either String a)`,
+  matching `LuaCatch`/`LuaIOCatch`.** `LuaTry "io.open" (Either String
+  FileHandle)` reduces to `IO (Either String FileHandle)` — the same reduction
+  as before, but the `Either String` the binding produces is now explicit in
+  the signature instead of implicitly wrapped around a bare payload. The old
+  form (`LuaTry "io.open" FileHandle`) is rejected at parse time with an error
+  explaining the required shape. Only the surface syntax changes: the generated
+  Lua, the `(val, err)` decode (a nil value still becomes `Left`), and the
+  reduced type are all identical. The bundled libraries are migrated
+  (`Prelude.ffi_getLine`, `LIO.ffi_readLine`/`fOpen`,
+  `LOS.getenv`/`remove`/`rename`).
+
 ### Added
 
 - **`getLine :: IO String` in the Prelude — GHC parity.** Available with no
@@ -47,7 +61,7 @@ API of the `mllc` library crate.)
   nil escape into a `String` and crash downstream with "attempt to concatenate
   a nil value". A normal line is still returned without the trailing newline
   (`io.read`'s default "l" format — unchanged). Internally built on
-  `ffi_readLine :: LuaTry "io.read" String`, exactly like the Prelude's
+  `ffi_readLine :: LuaTry "io.read" (Either String String)`, exactly like the Prelude's
   `getLine`. (Its former declared type was `LuaIO "io.read" String`, which
   reduces to `IO String`, so no caller-visible type change — only the EOF
   behavior changes, from a raw Lua crash to a catchable error.)

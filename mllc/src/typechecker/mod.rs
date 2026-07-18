@@ -766,11 +766,9 @@ impl Checker {
                 }
             }
             Type::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| self.ast_type_to_ty(t)).collect()),
-            // LuaTry "name" T  reduces to  IO (Either String T)
-            Type::LuaTry { result, .. } => {
-                let inner = self.ast_type_to_ty(result);
-                Ty::io(Ty::app(Ty::app(Ty::Con("Either".into()), Ty::Con("String".into())), inner))
-            }
+            // LuaTry "name" (Either String T)  reduces to  IO (Either String T)
+            // (the parser has already checked the `Either String a` shape).
+            Type::LuaTry { result, .. } => Ty::io(self.ast_type_to_ty(result)),
             // LuaCatch "name" (Either String T)  reduces to  Either String T
             // (the parser has already checked the `Either String a` shape).
             Type::LuaCatch { result, .. } => self.ast_type_to_ty(result),

@@ -525,8 +525,10 @@ generation and then erases:
   a thunk-wrapped Lua call forced in monadic context.
 - `LuaIterator "name" a` — wraps a Lua iterator factory into a lazy
   mata-ll list via `__mll_iter`.
-- `LuaTry "name" a` — wraps a Lua function that returns `(val, err)`
-  into `IO (Either String a)` via `__mll_try`.
+- `LuaTry "name" (Either String a)` — wraps a Lua function that returns
+  `(val, err)` into `IO (Either String a)` via `__mll_try` (a nil value
+  counts as a failure). Like the pcall forms below, the result *must* be
+  written as `Either String a`; the parser rejects other shapes.
 - `LuaCatch "name" (Either String a)` — pure call run under `pcall`,
   reduces to `Either String a`. A raised Lua `error(...)` is captured
   as `Left msg` (via `tostring`), a normal return as `Right a`, with

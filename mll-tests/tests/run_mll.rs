@@ -4936,8 +4936,8 @@ fn luatry_success_payload_decodes_and_error_is_stringified() {
     // And finding 17 (the LuaTry half): a non-string `err` in the Lua
     // (val, err) convention landed raw in Left :: String.
     let source = r#"
-tryList   :: Integer -> LuaTry "try_list" [Integer]
-tryNested :: Integer -> LuaTry "try_nested" [[Integer]]
+tryList   :: Integer -> LuaTry "try_list" (Either String [Integer])
+tryNested :: Integer -> LuaTry "try_nested" (Either String [[Integer]])
 
 export sumTry :: Integer -> IO Integer
 sumTry n = do

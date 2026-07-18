@@ -282,8 +282,8 @@ runtime crash. To capture it instead:
   String a)`** — run the call under `pcall`, returning `Left msg` on a raised
   error and `Right a` on success. This is the right tool when the Lua function
   signals failure by *raising*.
-- **`LuaTry "name" a`** — for the `(nil, err)` return convention (`io.open`
-  style), not raised errors.
+- **`LuaTry "name" (Either String a)`** — for the `(nil, err)` return
+  convention (`io.open` style), not raised errors.
 - Wrapping a `LuaIO` call in **`try`** also catches errors as
   `IO (Either String a)`.
 

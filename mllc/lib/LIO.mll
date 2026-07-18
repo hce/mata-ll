@@ -14,7 +14,7 @@ data IOResult a = IOSuccess a | IOFailure String
 -- "attempt to concatenate a nil value"). readLine turns that Left into the
 -- clean, catchable error "LIO.readLine: end of input" — the same hardening
 -- as the Prelude's getLine (catch it with try/catch).
-ffi_readLine :: LuaTry "io.read" String
+ffi_readLine :: LuaTry "io.read" (Either String String)
 
 readLine :: IO String
 readLine = do
@@ -28,7 +28,7 @@ writeStdout :: String -> LuaIO "io.write" ()
 flushStdout :: LuaIO "io.flush" ()
 
 -- File open (returns Either String FileHandle: Left err | Right handle)
-fOpen :: String -> String -> LuaTry "io.open" FileHandle
+fOpen :: String -> String -> LuaTry "io.open" (Either String FileHandle)
 fClose :: FileHandle -> LuaIO ":close" ()
 
 -- File methods (handle as first arg, colon-call in Lua)

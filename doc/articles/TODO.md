@@ -7,7 +7,8 @@ MATA-LL TODO
 
 - [x] **`LIO.readLine` hardened at end of input (same as `getLine`).**
       `readLine` is now `IO String` in `LIO.mll`, a wrapper over
-      `ffi_readLine :: LuaTry "io.read" String`: `io.read()`'s bare-nil EOF
+      `ffi_readLine :: LuaTry "io.read" (Either String String)`:
+      `io.read()`'s bare-nil EOF
       decodes to `Left` and is re-raised as the clean, catchable error
       `LIO.readLine: end of input` — instead of letting the nil escape into a
       `String` and crash later with "attempt to concatenate a nil value". It
@@ -28,8 +29,8 @@ MATA-LL TODO
       format). EOF handling is the point: instead of letting `io.read()`'s
       nil escape into a `String` (the `LIO.readLine` failure mode — a later
       "attempt to concatenate a nil value" crash), `getLine` is a Prelude
-      wrapper over `ffi_getLine :: LuaTry "io.read" String`, so the bare-nil
-      EOF becomes `Left` and is re-raised as the catchable error
+      wrapper over `ffi_getLine :: LuaTry "io.read" (Either String String)`,
+      so the bare-nil EOF becomes `Left` and is re-raised as the catchable error
       `Prelude.getLine: end of input` — the string-error analog of GHC's
       `isEOFError`. Covered by `mll-tests/tests/cases/getline.mll` (real EOF
       via an `io.input`-redirected fixture file). `LIO.readLine` has since

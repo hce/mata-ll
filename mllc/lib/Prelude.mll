@@ -13,7 +13,7 @@ sqrt :: Number -> LuaPure "math.sqrt" Number
 -- a nil String escape. getLine turns that Left into a clean, catchable
 -- error — mata-ll's analog of GHC's getLine throwing an isEOFError
 -- exception (catch it with try/catch).
-ffi_getLine :: LuaTry "io.read" String
+ffi_getLine :: LuaTry "io.read" (Either String String)
 
 getLine :: IO String
 getLine = do

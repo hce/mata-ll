@@ -1443,9 +1443,18 @@ impl Parser {
                         Ok(Type::LuaIterator { lua_name, result: Box::new(result) })
                     }
                     "LuaTry" => {
-                        // LuaTry "lua.func.name" ResultType
+                        // LuaTry "lua.func.name" (Either String T)  ->  IO (Either String T)
+                        // A Lua `(val, err)` failure return (including a bare nil
+                        // value) is captured as `Left err`.
                         let lua_name = self.parse_ffi_lua_name("LuaTry")?;
                         let result = self.parse_type_atom()?;
+                        if !is_either_string_type(&result) {
+                            return Err(self.err_here(
+                                "LuaTry requires the result to be written as `(Either String a)`, \
+                                 so a Lua `(val, err)` failure can be returned as `Left`"
+                                    .to_string(),
+                            ));
+                        }
                         Ok(Type::LuaTry { lua_name, result: Box::new(result) })
                     }
                     "LuaCatch" | "LuaIOCatch" => {
@@ -2963,8 +2972,8 @@ fn token_len(tok: &Token) -> usize {
 }
 
 /// True when `ty` is (syntactically) `Either String a` for some `a`, ignoring
-/// enclosing parentheses. Used to enforce the LuaCatch/LuaIOCatch result shape,
-/// so a captured Lua error has a `Left String` slot to land in.
+/// enclosing parentheses. Used to enforce the LuaTry/LuaCatch/LuaIOCatch result
+/// shape, so a captured Lua error has a `Left String` slot to land in.
 fn is_either_string_type(ty: &Type) -> bool {
     // Peel parentheses.
     let mut head = ty;

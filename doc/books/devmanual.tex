@@ -371,12 +371,13 @@ Intrinsic type families for FFI:
   \item \texttt{LuaPure "name" a} --- pure foreign function
   \item \texttt{LuaIO "name" a} --- effectful foreign function
   \item \texttt{LuaIterator "name" a} --- Lua iterator protocol
-  \item \texttt{LuaTry "name" a} --- Lua \texttt{(val, err)}-convention call,
-        result \texttt{IO (Either String a)}
-  \item \texttt{LuaCatch "name" a} --- pure call under \texttt{pcall},
-        result \texttt{Either String a}
-  \item \texttt{LuaIOCatch "name" a} --- IO action under \texttt{pcall},
-        result \texttt{IO (Either String a)}
+  \item \texttt{LuaTry "name" (Either String a)} --- Lua
+        \texttt{(val, err)}-convention call, result
+        \texttt{IO (Either String a)}
+  \item \texttt{LuaCatch "name" (Either String a)} --- pure call under
+        \texttt{pcall}, result \texttt{Either String a}
+  \item \texttt{LuaIOCatch "name" (Either String a)} --- IO action under
+        \texttt{pcall}, result \texttt{IO (Either String a)}
 \end{itemize}
 
 User-defined closed type families (equation-based reduction) are also supported.

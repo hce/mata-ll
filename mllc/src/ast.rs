@@ -353,7 +353,11 @@ pub enum Type {
     LuaIterator { lua_name: String, result: Box<Type> },
     /// Tuple type: `(Integer, String, Bool)`
     Tuple(Vec<Type>),
-    /// FFI with Lua error convention: `LuaTry "io.open" FileHandle` reduces to `IO (Either String FileHandle)`
+    /// FFI with Lua error convention: `LuaTry "io.open" (Either String FileHandle)`
+    /// reduces to `IO (Either String FileHandle)`. The wrapped call uses Lua's
+    /// `(val, err)` two-return convention (a nil value is a failure): failure
+    /// becomes `Left err`, success becomes `Right val`. The result MUST be
+    /// written as `Either String a`.
     LuaTry { lua_name: String, result: Box<Type> },
     /// FFI pure call guarded by `pcall`: `LuaCatch "foo.bar" (Either String T)`
     /// reduces to `Either String T`. A raised Lua `error(...)` becomes `Left msg`,

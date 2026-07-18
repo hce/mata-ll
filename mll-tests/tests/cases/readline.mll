@@ -15,7 +15,7 @@ import LIO (readLine)
 newtype WriteHandle = WriteHandle LuaUserData
 
 tmpName :: LuaIO "os.tmpname" String
-fopen :: String -> String -> LuaTry "io.open" WriteHandle
+fopen :: String -> String -> LuaTry "io.open" (Either String WriteHandle)
 hWrite :: WriteHandle -> String -> LuaIO ":write" ()
 hClose :: WriteHandle -> LuaIO ":close" ()
 setInput :: String -> LuaIO "io.input" ()
@@ -24,7 +24,7 @@ removeFile :: String -> LuaIO "os.remove" ()
 -- Plain-text substring search (string.find with plain=True): Right when
 -- found, Left when not. Used to assert on the caught error message, which
 -- carries a Lua source-position prefix before our text.
-sfind :: String -> String -> Integer -> Bool -> LuaTry "string.find" Integer
+sfind :: String -> String -> Integer -> Bool -> LuaTry "string.find" (Either String Integer)
 
 containsStr :: String -> String -> IO Bool
 containsStr s sub = do
