@@ -213,8 +213,10 @@ re-exports the Prelude ones, so existing imports keep working:
 
 Other bundled modules, also explicitly imported: `Data.Map`, `Data.Maybe`,
 `Data.Foldable`, `Data.Traversable`, `Control.Monad`, `ByteString`, plus
-`LString`, `LMath`, `LIO`, `LOS`, `LBit`, `JSON`, `Regex`. There is no
-`Data.Char` (there is no `Char` type — see above).
+`LString`, `LMath`, `LIO`, `LIOLinear` (linear `%1` file handles, in
+the style of linear-base's `System.IO.Resource`), `LOS`, `LBit`,
+`JSON`, `Regex`. There is no `Data.Char` (there is no `Char` type —
+see above).
 
 The lazy list functions stream properly over infinite lists, so e.g.
 `takeWhile (< 100) [1 ..]` and `take 10 (filter even [1 ..])` terminate.

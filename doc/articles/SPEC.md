@@ -1496,6 +1496,7 @@ are imported explicitly:
 
     import ByteString    -- byte sequence operations
     import LIO           -- file I/O (fOpen, fRead, fWrite, ...)
+    import LIOLinear     -- linear (%1) file handles (openOut, hPut, hClose)
     import LMath         -- math.* bindings (sin, cos, random, ...)
     import LOS           -- OS functions
     import LString       -- string utilities

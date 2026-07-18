@@ -579,8 +579,8 @@ The prelude is auto-imported by the compiler (prepended to the AST
 before desugaring). Additional standard library modules live in `lib/`:
 
     ByteString, Control.Monad, Data.Foldable, Data.List, Data.Map,
-    Data.Maybe, Data.Traversable, JSON, LBit, LIO, LMath, LOS,
-    LString, Regex
+    Data.Maybe, Data.Traversable, JSON, LBit, LIO, LIOLinear, LMath,
+    LOS, LString, Regex
 
 
 ## ST monad and STArray

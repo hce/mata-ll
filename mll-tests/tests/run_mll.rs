@@ -893,6 +893,10 @@ mll_lib_test!(lib_data_foldable, "lib_data_foldable.mll");
 // JSON decoding, computed Just/Nothing) — literals are already native Lua
 // values and hide marshalling bugs.
 mll_lib_test!(ffi_constructed_values, "ffi_constructed_values.mll");
+// LIOLinear: the linear (%1) file-handle API — open, thread writes, close.
+// The rejection side (leak / use-after-close) is in the
+// linear_rejects_liolinear_* tests below.
+mll_lib_test!(lib_liolinear, "lib_liolinear.mll");
 
 // Compile-error tests: these SHOULD fail to compile
 #[test]
@@ -8898,6 +8902,86 @@ fn linear_exactly_once_erases_to_identical_lua() {
         .expect("the plain-arrow program must compile")
         .lua_code;
     assert!(a == b, "%1 must erase: emitted Lua differs");
+}
+
+// ---------------------------------------------------------------------------
+// LIOLinear: the linear file-handle library's guarantee is the usage checker's
+// — a WHandle crossing a `%1` arrow must be written/closed exactly once. These
+// compile against the real library (lib/LIOLinear.mll), so they pin down the
+// two misuses the API exists to prevent: forgetting hClose (a leaked file
+// handle) and touching a handle after it has been consumed (write/close after
+// close). The well-formed side runs in lib_liolinear.mll.
+// ---------------------------------------------------------------------------
+
+/// Like expect_linear_reject, but with the lib/ search path so the program
+/// can import LIOLinear.
+fn expect_linear_reject_with_lib(src: &str) -> String {
+    let lib_path = Path::new("../lib");
+    match mllc::compile(src, Path::new("tests/cases"), &[lib_path]) {
+        Ok(_) => panic!(
+            "this program violates the %1 (exactly-once) discipline and \
+             must NOT compile:\n{}",
+            src
+        ),
+        Err(e) => format!("{}", e),
+    }
+}
+
+/// Forgetting hClose: the handle threaded out of hPut is never consumed, so
+/// the underlying file would leak — rejected.
+#[test]
+fn linear_rejects_liolinear_forgotten_close() {
+    let msg = expect_linear_reject_with_lib(
+        "import LIOLinear (WHandle, hPut, hClose, withOutFile)\n\
+         main :: IO ()\n\
+         main = do\n\
+         \x20 r <- withOutFile \"/tmp/mll-liolinear-leak\" (\\h -> do\n\
+         \x20\x20 h2 <- hPut h \"hello\"\n\
+         \x20\x20 putStrLn \"forgot to close\")\n\
+         \x20 case r of\n\
+         \x20\x20 Left err -> error err\n\
+         \x20\x20 Right _ -> pure ()\n",
+    );
+    assert!(msg.contains("'h2' must be consumed exactly once"), "{}", msg);
+    assert!(msg.contains("consumed zero times"), "{}", msg);
+}
+
+/// Using a handle after it has been consumed: the first hPut consumed `h`,
+/// the second write is the double-close/double-free class of bug — rejected.
+#[test]
+fn linear_rejects_liolinear_use_after_consume() {
+    let msg = expect_linear_reject_with_lib(
+        "import LIOLinear (WHandle, hPut, hClose, withOutFile)\n\
+         main :: IO ()\n\
+         main = do\n\
+         \x20 r <- withOutFile \"/tmp/mll-liolinear-twice\" (\\h -> do\n\
+         \x20\x20 h2 <- hPut h \"first\"\n\
+         \x20\x20 hClose h2\n\
+         \x20\x20 h3 <- hPut h \"again\"\n\
+         \x20\x20 hClose h3)\n\
+         \x20 case r of\n\
+         \x20\x20 Left err -> error err\n\
+         \x20\x20 Right _ -> pure ()\n",
+    );
+    assert!(msg.contains("'h' must be consumed exactly once"), "{}", msg);
+    assert!(msg.contains("more than once"), "{}", msg);
+}
+
+/// Double close through a %1-typed writer function (the openOut entry path):
+/// the handle is linear for the whole body, so closing twice is two uses.
+#[test]
+fn linear_rejects_liolinear_double_close() {
+    let msg = expect_linear_reject_with_lib(
+        "import LIOLinear (WHandle, hPut, hClose)\n\
+         closeTwice :: WHandle %1 -> IO ()\n\
+         closeTwice h = do\n\
+         \x20 hClose h\n\
+         \x20 hClose h\n\
+         main :: IO ()\n\
+         main = putStrLn \"no\"\n",
+    );
+    assert!(msg.contains("'h' must be consumed exactly once"), "{}", msg);
+    assert!(msg.contains("more than once"), "{}", msg);
 }
 
 // Regression: the entry-point trailer used to run main() only when the chunk's
