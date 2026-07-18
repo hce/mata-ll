@@ -97,6 +97,17 @@ There is no `hGetContents`, `readFile` returning a lazy String, or
 similar. All I/O is strict. Use `fileLines` to read a file as a strict
 list of lines, or `fReadLine` to read line-by-line in a loop.
 
+## `getLine` matches GHC, except EOF is a string error
+
+`getLine :: IO String` is available from the Prelude with no import,
+as in GHC: it reads one line from stdin without the trailing newline.
+(It was previously absent; `LIO`'s `readLine` was the only console
+input.) The one deviation is at end of input: GHC throws an
+`IOException` satisfying `isEOFError`, but mata-ll has no exception
+type hierarchy (see below), so `getLine` raises the string error
+`Prelude.getLine: end of input` — catchable with `try`/`catch` like
+any other error.
+
 ## Error handling is string-based
 
 There is no exception type hierarchy. `error` throws a string,

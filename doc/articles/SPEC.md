@@ -1270,7 +1270,7 @@ shell silently.
 
 # Minimal prelude
 
-Functions: show, putStrLn, putStr, print, (++), (<>), ($), max, min,
+Functions: show, putStrLn, putStr, getLine, print, (++), (<>), ($), max, min,
            const, id, (.), flip, map, filter, foldl, foldr, sqrt,
            not, (&&), (||), and, or, any, all, error, undefined,
            otherwise, head, tail, last, init, null, take, drop,
@@ -1288,11 +1288,18 @@ Functions: show, putStrLn, putStr, print, (++), (<>), ($), max, min,
     id    :: a -> a
     flip  :: (a -> b -> c) -> b -> a -> c
     error :: String -> a
+    getLine :: IO String  -- one line from stdin, without the newline
     otherwise :: Bool  -- defined as True
     seq   :: a -> b -> b  -- explicit forcing
     assert :: Bool -> String -> IO ()
     sum     :: (Foldable t, Num a) => t a -> a
     product :: (Foldable t, Num a) => t a -> a
+
+`getLine` reads one line from stdin without the trailing newline, as
+in GHC, and needs no import. At end of input it raises the error
+`Prelude.getLine: end of input`, catchable with `try`/`catch` — the
+mata-ll analog of GHC's `isEOFError` exception (mata-ll errors are
+strings, not typed exceptions).
 
 Note: `String` is *not* a list, so `(++)` does not concatenate
 strings — use `(<>)` for that. Conversely `(<>)` today applies only to

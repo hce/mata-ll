@@ -5,6 +5,18 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **`getLine` in the Prelude (GHC parity).** `getLine :: IO String`, no
+      import needed, strips the trailing newline (`io.read`'s default "l"
+      format). EOF handling is the point: instead of letting `io.read()`'s
+      nil escape into a `String` (the `LIO.readLine` failure mode — a later
+      "attempt to concatenate a nil value" crash), `getLine` is a Prelude
+      wrapper over `ffi_getLine :: LuaTry "io.read" String`, so the bare-nil
+      EOF becomes `Left` and is re-raised as the catchable error
+      `Prelude.getLine: end of input` — the string-error analog of GHC's
+      `isEOFError`. Covered by `mll-tests/tests/cases/getline.mll` (real EOF
+      via an `io.input`-redirected fixture file). NOTE: `LIO.readLine` still
+      has the raw nil-at-EOF crash; hardening it is a separate decision.
+
 - [x] **FFI export marshallability check (whitelist, strict).** An `export`
       whose signature uses a type that cannot cross the Lua boundary is rejected
       at compile time — a polymorphic type variable, a class-constrained type (a

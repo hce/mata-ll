@@ -598,12 +598,10 @@ constructor where a complete type is required
 Programs with a \texttt{main :: IO ()} are standalone executables:
 
 \begin{lstlisting}
-import LIO  -- readLine (stdin) lives here, not in the Prelude
-
 main :: IO ()
 main = do
     putStrLn "What is your name?"
-    name <- readLine
+    name <- getLine
     putStrLn ("Hello, " <> name <> "!")
 \end{lstlisting}
 
@@ -630,15 +628,22 @@ example2 = return "hello" >>= \x ->
 \begin{lstlisting}
 putStrLn :: String -> IO ()     -- print with newline
 putStr   :: String -> IO ()     -- print without newline
+getLine  :: IO String           -- read a line from stdin
 getArgs  :: IO [String]         -- command-line arguments
 exit     :: ExitValue -> IO ()  -- exit process
 error    :: String -> a         -- abort with message
 \end{lstlisting}
 
-There is no built-in \texttt{getLine}.  Input comes from the
-\texttt{LIO} library module: \texttt{readLine :: IO String} reads a
-line from stdin, and \texttt{fileLines :: String -> IO [String]} reads
-a whole file as a list of lines.
+\texttt{getLine} is available in the Prelude with no import,
+GHC-style.  It reads one line from stdin without the trailing
+newline; at end of input it raises a catchable error
+(\texttt{Prelude.getLine: end of input}) that \texttt{try} and
+\texttt{catch} capture --- mata-ll's analog of GHC's \texttt{getLine}
+throwing an \texttt{isEOFError} exception.  The \texttt{LIO} library
+module offers further input functions: \texttt{readLine :: IO String}
+(the raw \texttt{io.read} binding), and
+\texttt{fileLines :: String -> IO [String]} reads a whole file as a
+list of lines.
 
 \subsection{Exception Handling}
 

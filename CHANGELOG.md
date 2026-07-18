@@ -31,6 +31,16 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **`getLine :: IO String` in the Prelude — GHC parity.** Available with no
+  import, exactly as in GHC: reads one line from stdin without the trailing
+  newline. At end of input it raises the clean, catchable error
+  `Prelude.getLine: end of input` (mata-ll's analog of GHC throwing an
+  `isEOFError` exception; mata-ll errors are strings, so there is no typed
+  predicate) — where a raw `io.read` binding would have let a Lua `nil` escape
+  into a `String` and crash later with "attempt to concatenate a nil value".
+  Internally built on a `LuaTry "io.read"` binding (`ffi_getLine`), whose
+  bare-nil EOF becomes `Left`. `LIO.readLine` is unchanged (and still has the
+  raw nil-at-EOF behavior).
 - **FFI value/constant exports.** An `export` may now be a plain value, not only
   a function or an IO/LuaIO action: `export answer :: Integer` (with `answer =
   42`) is marshalled to Lua directly as `exports.answer = 42`, and a record

@@ -6,6 +6,22 @@ putStrLn :: String -> LuaIO "print" ()
 putStr :: String -> LuaIO "io.write" ()
 sqrt :: Number -> LuaPure "math.sqrt" Number
 
+-- Console input, GHC-style. Reads one line from stdin WITHOUT the trailing
+-- newline (io.read's default "l" format already strips it, matching GHC's
+-- getLine). ffi_getLine is the raw internal binding: at end of input
+-- io.read() returns nil, which LuaTry surfaces as Left rather than letting
+-- a nil String escape. getLine turns that Left into a clean, catchable
+-- error — mata-ll's analog of GHC's getLine throwing an isEOFError
+-- exception (catch it with try/catch).
+ffi_getLine :: LuaTry "io.read" String
+
+getLine :: IO String
+getLine = do
+    r <- ffi_getLine
+    case r of
+        Left _  -> error "Prelude.getLine: end of input"
+        Right s -> pure s
+
 -- Process control
 data ExitValue = Normal | Err Integer
 
