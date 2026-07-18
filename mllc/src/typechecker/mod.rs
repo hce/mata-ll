@@ -96,6 +96,94 @@ impl TypeEnv {
     }
 }
 
+/// The direction a value crosses the FFI boundary. Used by the export-type
+/// whitelist (`ffi_marshallable` / `validate_top_level_callback`): an export
+/// argument and a callback's result are `Import`; an export result and a
+/// callback's argument are `Export`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FfiDir {
+    /// Lua → mata-ll: an export ARGUMENT, or (after unwrapping its effect) a
+    /// callback's own result. Decoded by the argument-decode path.
+    Import,
+    /// mata-ll → Lua: an export RESULT, or a callback's own argument. Marshalled
+    /// by the result path.
+    Export,
+}
+
+/// The scalar type names the FFI marshaller round-trips as bare Lua values
+/// (derived from `codegen::Codegen::scalar_lua_type`: numbers, strings,
+/// booleans). Keep in sync with that function.
+fn ffi_scalar_name(n: &str) -> bool {
+    matches!(n,
+        "Integer" | "Int" | "Number" | "Double" | "Float"
+        | "String" | "Char" | "ByteString" | "Bool")
+}
+
+/// Peel `App(App(Con(H), a), b)` into `(Some("H"), [a, b])`; the argument-source
+/// order dual of `codegen::decompose_app`, so `HashMap k v` → `("HashMap",
+/// [k, v])` and `Tree a` → `("Tree", [a])`. A non-`Con` head yields `None`.
+fn decompose_ty_app(ty: &Ty) -> (Option<&str>, Vec<&Ty>) {
+    let mut args: Vec<&Ty> = Vec::new();
+    let mut head = ty;
+    while let Ty::App(f, a) = head {
+        args.push(a.as_ref());
+        head = f.as_ref();
+    }
+    args.reverse();
+    match head {
+        Ty::Con(n) => (Some(n.as_str()), args),
+        _ => (None, args),
+    }
+}
+
+/// Rename EVERY free type variable in the given types to friendly single
+/// letters (`a`, `b`, …), sharing one map so the same variable reads the same
+/// on every side of the message. Unlike the diagnostic renderer's
+/// `pretty_var_subst` — which preserves user-written names — this renames a
+/// freshened user var (`a890`) too, because an export error's variables have no
+/// meaningful source name to keep (the export is being rejected *for* being
+/// polymorphic) and a leaked internal spelling is noise.
+fn friendly_export_tys(tys: &[&Ty]) -> Vec<Ty> {
+    let mut vars: Vec<TyVar> = Vec::new();
+    for t in tys {
+        for v in t.free_vars() {
+            if !vars.contains(&v) { vars.push(v); }
+        }
+    }
+    let mut map: HashMap<TyVar, Ty> = HashMap::new();
+    for (i, v) in vars.iter().enumerate() {
+        let letter = (b'a' + (i % 26) as u8) as char;
+        let name = if i < 26 { letter.to_string() } else { format!("{}{}", letter, i / 26) };
+        map.insert(v.clone(), Ty::Var(TyVar { name, id: v.id }));
+    }
+    let sub = Subst::from_map(map);
+    tys.iter().map(|t| t.apply_subst(&sub)).collect()
+}
+
+/// The `note:` line explaining why `culprit` cannot cross in direction `dir`.
+fn export_ffi_note(culprit: &Ty, dir: FfiDir) -> String {
+    let (head, _) = decompose_ty_app(culprit);
+    match culprit {
+        Ty::Var(_) | Ty::Skolem(..) =>
+            "Lua has no representation for a polymorphic value; give the export a \
+             concrete type.".to_string(),
+        Ty::IO(_) | Ty::LuaIO(_, _) if dir == FfiDir::Import =>
+            "a Lua caller cannot supply an IO/LuaIO action; only a callback (a \
+             function returning LuaIO) may cross inward.".to_string(),
+        Ty::Arrow(..) =>
+            "a callback is only marshalled as a DIRECT top-level argument of the \
+             export (returning LuaIO); a function nested in a container/result, or \
+             a callback that itself takes a callback, is not.".to_string(),
+        _ if matches!(head, Some("ST") | Some("STArray") | Some("STRef")) =>
+            "an ST handle is region-scoped (it must not outlive its runST) and has \
+             no Lua representation.".to_string(),
+        _ =>
+            "only scalars, (), lists, tuples, Maybe/Either, HashMap, records/ADTs of \
+             marshallable fields, and a top-level callback may cross the FFI \
+             boundary.".to_string(),
+    }
+}
+
 /// Constructor info
 #[derive(Debug, Clone)]
 pub struct ConInfo {
@@ -975,6 +1063,226 @@ impl Checker {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
         self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file: None, notes, baseline });
+    }
+
+    /// Reject exports whose declared type uses something the FFI marshaller
+    /// cannot correctly move across the boundary. Runs on each export's FINAL
+    /// resolved type — the same `export_types` the code generator marshals from
+    /// — so the whitelist is derived from what `ffi_arg_marshal_desc` /
+    /// `ffi_decode_desc_inner` / the deep-force fallback actually handle, and a
+    /// silently-wrong `"false"`/`__mll_to_lua` conversion never reaches codegen.
+    fn validate_export_types(&mut self, exports: &[String], functions: &[TFunction], constrained: &[String]) {
+        let tys: HashMap<&str, &Ty> = functions.iter()
+            .filter(|f| exports.contains(&f.name))
+            .map(|f| (f.name.as_str(), &f.ty))
+            .collect();
+        // Deterministic diagnostics: follow the source export order.
+        for name in exports {
+            // Already rejected for a class constraint — its type variable would
+            // be reported a second time here.
+            if constrained.contains(name) { continue; }
+            let Some(&ty) = tys.get(name.as_str()) else { continue };
+            // Peel a leading rank-2 forall (the LuaIO scope variable etc.).
+            let mut t = ty;
+            while let Ty::Forall(_, inner) = t { t = inner; }
+            // An export `A1 -> … -> An -> R` decodes each Ai (Lua→mata-ll, the
+            // IMPORT direction) and marshals R (mata-ll→Lua, the EXPORT
+            // direction). A top-level argument that is itself a function is a
+            // CALLBACK — the one arrow position codegen fully marshals — so it
+            // is validated by `validate_top_level_callback`; every other arrow
+            // (nested in a container, in the result, or a callback's own
+            // argument) is rejected by `ffi_marshallable`.
+            let (arg_tys, res) = t.peel_arrows();
+            for (i, a) in arg_tys.iter().enumerate() {
+                let pos = format!("argument {}", i + 1);
+                if matches!(a, Ty::Arrow(..)) {
+                    self.validate_top_level_callback(name, &pos, a);
+                } else if let Err((culprit, cdir)) =
+                    self.ffi_marshallable(a, FfiDir::Import, &mut Vec::new())
+                {
+                    self.push_export_ffi_error(name, &pos, a, &culprit, cdir);
+                }
+            }
+            if let Err((culprit, cdir)) =
+                self.ffi_marshallable(res, FfiDir::Export, &mut Vec::new())
+            {
+                self.push_export_ffi_error(name, "the result", res, &culprit, cdir);
+            }
+        }
+    }
+
+    /// Whether `ty` can cross the FFI boundary in direction `dir`. Returns the
+    /// first offending sub-type (and the direction it was reached in) so the
+    /// diagnostic can name the exact culprit.
+    ///
+    /// The allowed set is exactly what the marshaller round-trips CORRECTLY:
+    ///   - scalars (Integer/Int/Number/Double/Float/String/Char/ByteString/Bool),
+    ///     `()`, and the opaque `LuaUserData` interop handle;
+    ///   - `[a]`, tuples, and any data type — `Maybe`/`Either`/`Ordering`/`Any`/
+    ///     a user ADT/newtype/LuaDict record — each iff every constructor field
+    ///     is allowed in the SAME direction (deep-force round-trips these; a
+    ///     recursive type is cycle-guarded and passes as opaque, exactly as the
+    ///     marshaller treats its re-entry);
+    ///   - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;
+    ///   - `IO a` / `LuaIO _ a` in EXPORT (result) position iff `a` is allowed.
+    /// Everything else is rejected: a bare type variable (no runtime rep for a
+    /// polymorphic value), a region-scoped `ST`/`STArray`/`STRef` handle, `IO`/
+    /// `LuaIO` in IMPORT (argument) position, and any unknown constructor.
+    ///
+    /// A FUNCTION type is rejected here in EVERY position. Codegen only fully
+    /// marshals a callback when it is a DIRECT top-level export argument (the
+    /// branch emitting `__mll_wrap_callback_in`); a function nested inside a
+    /// container/result — or a callback's own function-typed argument — is
+    /// passed opaque (`"false"` descriptor) and would leak. So the only accepted
+    /// arrow position is handled separately by `validate_top_level_callback`,
+    /// and this recursive check treats any arrow it reaches as unmarshallable.
+    fn ffi_marshallable(&self, ty: &Ty, dir: FfiDir, visited: &mut Vec<String>)
+        -> Result<(), (Ty, FfiDir)>
+    {
+        match ty {
+            Ty::Forall(_, inner) => self.ffi_marshallable(inner, dir, visited),
+            Ty::Unit => Ok(()),
+            Ty::Con(n) if ffi_scalar_name(n) || n == "LuaUserData" => Ok(()),
+            Ty::Var(_) | Ty::Skolem(..) | Ty::Promoted(_) => Err((ty.clone(), dir)),
+            Ty::List(a) => self.ffi_marshallable(a, dir, visited),
+            Ty::Tuple(es) => {
+                for e in es { self.ffi_marshallable(e, dir, visited)?; }
+                Ok(())
+            }
+            // An action can be a RESULT (the export performs it and marshals the
+            // yielded value) but never an ARGUMENT — Lua has nothing to hand in.
+            Ty::IO(a) | Ty::LuaIO(_, a) => match dir {
+                FfiDir::Export => self.ffi_marshallable(a, FfiDir::Export, visited),
+                FfiDir::Import => Err((ty.clone(), dir)),
+            },
+            // A function reached in any recursive position (nested in a
+            // container, in result position, or as a callback's own argument)
+            // is NOT marshalled by codegen — reject it. The one accepted arrow,
+            // a top-level export-argument callback, never reaches here.
+            Ty::Arrow(..) => Err((ty.clone(), dir)),
+            Ty::App(..) | Ty::Con(_) => {
+                let (head, args) = decompose_ty_app(ty);
+                match head {
+                    Some("HashMap") if args.len() == 2 => {
+                        // Keys are Lua table keys — must be a scalar; values
+                        // marshal by the value type in the same direction.
+                        if !matches!(args[0], Ty::Con(n) if ffi_scalar_name(n)) {
+                            return Err((ty.clone(), dir));
+                        }
+                        self.ffi_marshallable(args[1], dir, visited)
+                    }
+                    Some(name) => {
+                        // A recursive type re-entered: the marshaller treats the
+                        // re-entry as opaque and it round-trips, so accept and stop.
+                        if visited.iter().any(|v| v == name) {
+                            return Ok(());
+                        }
+                        // A data type: check every constructor's field types with
+                        // the type arguments substituted for the type parameters.
+                        // No constructors ⇒ an abstract/handle constructor (ST,
+                        // STArray, STRef, …) with no marshalling ⇒ reject.
+                        let cons: Vec<ConInfo> = self.constructors.values()
+                            .filter(|c| c.type_name == name)
+                            .cloned()
+                            .collect();
+                        if cons.is_empty() {
+                            return Err((ty.clone(), dir));
+                        }
+                        visited.push(name.to_string());
+                        for con in &cons {
+                            let mut smap: HashMap<TyVar, Ty> = HashMap::new();
+                            for (tv, a) in con.type_vars.iter().zip(args.iter()) {
+                                smap.insert(tv.clone(), (*a).clone());
+                            }
+                            let sub = Subst::from_map(smap);
+                            for fty in &con.field_types {
+                                let fty = fty.apply_subst(&sub);
+                                if let Err(e) = self.ffi_marshallable(&fty, dir, visited) {
+                                    visited.pop();
+                                    return Err(e);
+                                }
+                            }
+                        }
+                        visited.pop();
+                        Ok(())
+                    }
+                    None => Err((ty.clone(), dir)),
+                }
+            }
+        }
+    }
+
+    /// Validate the ONE arrow position codegen fully marshals: a direct
+    /// top-level export argument that is a callback. The codegen (the export
+    /// loop's `if matches!(ty, Ty::Arrow(..))` branch, which emits
+    /// `__mll_wrap_callback_in`) marshals each callback argument OUT
+    /// (mata-ll→Lua, the EXPORT direction) with `ffi_arg_marshal_desc` and
+    /// decodes the callback's result IN (Lua→mata-ll, the IMPORT direction)
+    /// after unwrapping its `LuaIO`/`IO` — but it hard-codes the opaque
+    /// `"false"` descriptor for a callback argument that is ITSELF a function.
+    /// So we accept this callback iff none of its arguments is a function and
+    /// every argument (Export) and its unwrapped result (Import) marshal. (The
+    /// separate pre-existing rule that the result be an action lives in
+    /// `check_export_callbacks`.)
+    fn validate_top_level_callback(&mut self, name: &str, position: &str, cb_ty: &Ty) {
+        let (cb_args, cb_ret) = cb_ty.peel_arrows();
+        for a in &cb_args {
+            let cb_pos = format!("{} (a callback argument)", position);
+            if matches!(a, Ty::Arrow(..)) {
+                // A callback taking a callback: codegen passes the inner
+                // function opaque, so reject it (name it via the shared helper).
+                self.push_export_ffi_error(name, &cb_pos, cb_ty, a, FfiDir::Export);
+            } else if let Err((culprit, cdir)) =
+                self.ffi_marshallable(a, FfiDir::Export, &mut Vec::new())
+            {
+                self.push_export_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
+            }
+        }
+        // The callback's result crosses back IN; codegen unwraps its LuaIO/IO
+        // and decodes the payload, so validate the payload in Import direction.
+        let payload = match cb_ret {
+            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+            other => other,
+        };
+        if let Err((culprit, cdir)) =
+            self.ffi_marshallable(payload, FfiDir::Import, &mut Vec::new())
+        {
+            let cb_pos = format!("{} (the callback result)", position);
+            self.push_export_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
+        }
+    }
+
+    /// Build the export-boundary diagnostic: name the binder, the position
+    /// (argument N / the result), the whole position type and the offending
+    /// sub-type, and the crossing direction — with a `note:` explaining WHY the
+    /// culprit cannot cross.
+    fn push_export_ffi_error(&mut self, name: &str, position: &str, whole: &Ty, culprit: &Ty, dir: FfiDir) {
+        let dir_phrase = match dir {
+            FfiDir::Import => "cross into mata-ll from Lua (argument direction)",
+            FfiDir::Export => "cross out to Lua from mata-ll (result direction)",
+        };
+        // Rename internal/freshened type variables (e.g. `a890`, `_r7`) to
+        // friendly letters, sharing one map so `whole` and `culprit` agree.
+        let (whole, culprit) = {
+            let pair = friendly_export_tys(&[whole, culprit]);
+            (pair[0].clone(), pair[1].clone())
+        };
+        let nested = if whole == culprit {
+            String::new()
+        } else {
+            format!(" (inside '{}')", whole)
+        };
+        self.push_error_ctx(
+            DiagnosticKind::Other(format!(
+                "Export '{}': {} has type '{}', which cannot {} — the type '{}'{} has no FFI marshalling.",
+                name, position, whole, dir_phrase, culprit, nested
+            )),
+            format!("export declaration of '{}'", name),
+        );
+        let note = export_ffi_note(&culprit, dir);
+        if let Some(diag) = self.errors.last_mut() {
+            diag.notes.push(note);
+        }
     }
 
     /// Provenance notes for every existential skolem a diagnostic's types
@@ -3198,6 +3506,10 @@ impl Checker {
 
         // Pass 6: collect exports and check function definitions
         let mut exports = Vec::new();
+        // Exports already rejected for carrying a class constraint — the
+        // structural boundary check is skipped for them (their type variable
+        // would otherwise be reported a second time).
+        let mut constrained_exports: Vec<String> = Vec::new();
         for (decl_idx, decl) in module.decls.iter().enumerate() {
             // Enable hidden name enforcement only for local (user) declarations
             self.enforce_hidden = !self.hidden_names.is_empty()
@@ -3229,6 +3541,36 @@ impl Checker {
                     exports.push(name.clone());
                     // Validate: callback parameters in exports must return LuaIO s
                     self.check_export_callbacks(name, ty);
+                    // A class constraint on the export (`export f :: Num a => …`)
+                    // would require passing a dictionary across the boundary,
+                    // which has no Lua representation. Reject it here where the
+                    // declared context is visible (the resolved type has the
+                    // context stripped). Peel a leading forall/parens first.
+                    let mut ctx_ty = ty;
+                    loop {
+                        match ctx_ty {
+                            Type::Forall { inner, .. } | Type::Paren(inner) => ctx_ty = inner,
+                            _ => break,
+                        }
+                    }
+                    if let Type::Constrained { constraints, .. } = ctx_ty
+                        && !constraints.is_empty()
+                    {
+                        constrained_exports.push(name.clone());
+                        self.push_error_ctx(
+                            DiagnosticKind::Other(format!(
+                                "Export '{}' has a class constraint in its type, but a \
+                                 typeclass dictionary cannot cross the FFI boundary.",
+                                name
+                            )),
+                            format!("export declaration of '{}'", name),
+                        );
+                        if let Some(diag) = self.errors.last_mut() {
+                            diag.notes.push(
+                                "give the export a concrete, unconstrained type — Lua \
+                                 has no representation for a class dictionary.".to_string());
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -3243,6 +3585,14 @@ impl Checker {
 
         self.checking_local = false;
         self.checking_prelude = false;
+
+        // Reject exports whose signature uses a type that cannot cross the FFI
+        // boundary (a polymorphic value, a constrained/dictionary type, a
+        // region-scoped ST handle, an inbound IO action, …). Runs on the FINAL
+        // resolved function types — exactly the `export_types` codegen marshals
+        // from — so the error is raised before codegen ever emits a broken
+        // (undefined-at-the-boundary) conversion.
+        self.validate_export_types(&exports, &functions, &constrained_exports);
 
         // The newtype list carries the *registered* constructor keys: a local
         // newtype whose constructor shadows a non-local constructor is known

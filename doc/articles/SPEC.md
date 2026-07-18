@@ -849,6 +849,45 @@ edge, a lazy or infinite structure cannot cross the strict Lua boundary
 the import side turns a Lua iterator INTO a lazy list, but the export
 side cannot hand an infinite list back out.
 
+An export's signature is checked at compile time: every type that
+crosses the boundary must be one the marshaller can move correctly, or
+the export is rejected. An export's ARGUMENTS cross Lua→MATA-LL (they
+must be *importable*) and its RESULT crosses MATA-LL→Lua (it must be
+*exportable*). The allowed *value* set, in both directions and
+recursively, is:
+
+  - scalars — `Integer`, `Number`, `Bool`, `String`, `ByteString` (and
+    the FFI aliases `Int`/`Double`/`Float`/`Char`) — and `()`;
+  - the opaque `LuaUserData` interop handle;
+  - `[a]`, tuples, and any data type — `Maybe`, `Either`, `Ordering`,
+    `Any`, a user ADT/newtype, or a `LuaDict` record — each iff every
+    constructor field is allowed in the same direction (a value ADT
+    crosses as its tagged deep-forced representation; a recursive type
+    is permitted and crosses opaquely);
+  - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;
+  - `IO a` / `LuaIO s a` as an export RESULT (an action export) iff `a`
+    is exportable.
+
+A function (a callback) is marshallable in exactly ONE position: as a
+DIRECT top-level argument of the export. There the callback's own
+arguments cross MATA-LL→Lua (each must be *exportable*) and its result
+crosses back Lua→MATA-LL — its `LuaIO s a` effect is unwrapped, so the
+payload `a` must be *importable*, and the result must be a `LuaIO`
+action (untrusted Lua functions are assumed effectful). A function
+ANYWHERE ELSE is rejected: nested inside a tuple/list/`Maybe`/record, in
+result position, or as a callback's OWN argument (a
+callback-taking-a-callback). This is not an arbitrary restriction — it
+is exactly the shape the code generator fully marshals; every other
+arrow position would be passed to Lua opaque and leak.
+
+Rejected — a compile-time error naming the binder, the position and the
+direction — is anything else: a bare polymorphic type variable (Lua has
+no representation for a polymorphic value), a class-constrained type (a
+dictionary cannot cross), a region-scoped `ST`/`STArray`/`STRef` handle,
+an `IO`/`LuaIO` action in ARGUMENT position (a Lua caller cannot supply
+an action; only a top-level callback returning `LuaIO` may carry an
+effect inward), and a function in any non-top-level-argument position.
+
 When MATA-LL is intended to run standalone, the compiler appends an
 entry-point stub to the emitted `.lua` file itself (a single
 self-contained file — no separate `main.lua` is produced) that calls

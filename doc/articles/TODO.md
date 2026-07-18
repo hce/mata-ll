@@ -5,6 +5,39 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **FFI export marshallability check (whitelist, strict).** An `export`
+      whose signature uses a type that cannot cross the Lua boundary is rejected
+      at compile time — a polymorphic type variable, a class-constrained type (a
+      dictionary cannot cross), a region-scoped `ST`/`STArray`/`STRef` handle, an
+      `IO`/`LuaIO` action in argument position, or a callback (function) anywhere
+      but as a DIRECT top-level export argument (nested in a container, in result
+      position, or a callback-taking-a-callback — all of which codegen can only
+      pass opaque). The allowed VALUE set is derived from what the marshaller
+      (`ffi_arg_marshal_desc` / `ffi_decode_desc_inner` / the deep-force
+      fallback) actually round-trips — scalars/`()`/`LuaUserData`/`[a]`/tuples/
+      `Maybe`/`Either`/`Ordering`/`Any`/user ADTs+newtypes/`LuaDict` records/
+      `HashMap` (scalar key) — with `IO`/`LuaIO` allowed only in result position.
+      A function is marshallable in exactly one position (`validate_top_level_
+      callback`): a direct top-level export argument, whose own arguments cross
+      out (exportable) and whose `LuaIO` result is decoded back in (importable),
+      and whose arguments are not themselves functions — mirroring exactly the
+      one callback shape the code generator's `__mll_wrap_callback_in` branch
+      emits a real descriptor for. The error names the binder, the offending
+      type, the position (argument N / result / callback argument / callback
+      result) and the direction. Runs after typechecking on the resolved export
+      types, before codegen. No previously valid export regresses (the whole
+      `ffi_export_*` family still compiles and passes).
+
+- [x] **FFI value/constant exports.** `export foo :: Integer` (with `foo = 123`)
+      now marshals the FORCED value directly to Lua (`exports.foo = 123`), by the
+      same result contract a function's return value uses (records → keyed
+      tables, tuples → positional, ADTs/`Maybe`/lists structurally) — no calling
+      wrapper. Previously every export was wrapped in `__force(fn)(args)`, so a
+      value export emitted `__force(123)(…)` and crashed. The branch is chosen by
+      the export's TYPE (arrow → function wrapper; IO/LuaIO → performing wrapper;
+      anything else → direct value), so function and action exports stay
+      byte-identical.
+
 - [x] **Numeric typeclass hierarchy (`Num`/`Fractional`/`Real`/`Integral`) with
       polymorphic numeric literals — GHC parity.** Arithmetic operators are now
       class methods with GHC's exact signatures: `Num` (`+`/`-`/`*`/`negate`/

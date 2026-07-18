@@ -309,6 +309,17 @@ the FFI trust boundary:
   argument once per call and cannot see whether the host actually
   consumes it. FFI is one of mata-ll's few deliberate departures from
   parity in general, and this is its linear-types instance.
+- **FFI exports must use marshallable types — like GHC.** mata-ll rejects
+  an `export` whose signature crosses the Lua boundary with a type that
+  has no marshalling: a polymorphic type variable, a class-constrained
+  type, a region-scoped `ST` handle, or an `IO`/`LuaIO` action in
+  argument position (see CAVEATS). This mirrors GHC, whose `foreign
+  export` likewise admits only marshallable (FFI/`Storable`) types and
+  rejects polymorphic or class-constrained foreign signatures; the
+  concrete allowed set differs (mata-ll marshals lists, tuples, `Maybe`,
+  records and ADTs structurally, where GHC would require `Storable`
+  wrappers), but the principle — no polymorphism, no dictionaries, no
+  unrepresentable handles across the boundary — is the same.
 - **Unannotated `let`/`where` that is never forced charges zero uses
   (accept direction, operationally sound).** GHC's typing rule for an
   unannotated `let`/`where` charges its right-hand side unconditionally,

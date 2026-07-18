@@ -283,6 +283,45 @@ when this happens rather than writing the empty shell silently. Such
 library modules are meant to be *imported* by another `.mll` module
 (the compilation root), not compiled on their own.
 
+## An export's types must be marshallable, or it is rejected
+
+`export` signatures may only use types the FFI marshaller can move
+across the Lua boundary — see the SPEC's "Boundaries" section for the
+full allowed set. The compiler rejects, at compile time, an export whose
+argument or result (recursing through tuples/lists/`Maybe`/records)
+uses a type with no marshalling:
+
+  - a bare polymorphic type variable (`export id :: a -> a`) — Lua has
+    no representation for a polymorphic value, so give the export a
+    concrete type (GHC's FFI rejects polymorphic foreign exports too);
+  - a class-constrained type (`export f :: Num a => a -> a`) — a
+    typeclass dictionary cannot cross the boundary;
+  - a region-scoped `ST`/`STArray`/`STRef` handle — it must not outlive
+    its `runST` and has no Lua representation;
+  - an `IO`/`LuaIO` action in ARGUMENT position — a Lua caller has no
+    action to hand in; only a *top-level callback* (a function returning
+    `LuaIO`) may carry an effect inward;
+  - a function (callback) anywhere but as a DIRECT top-level argument of
+    the export — nested inside a tuple/list/`Maybe`/record, in result
+    position, or as a callback's own argument (a
+    callback-taking-a-callback). Only a top-level callback argument is
+    fully marshalled by the code generator (arguments crossing out, its
+    `LuaIO` result decoded back in); every other arrow position would be
+    handed to Lua opaque and leak, so it is refused rather than
+    silently miscompiled.
+
+The error names the export binder, the offending sub-type, the position
+(argument N or the result), and the crossing direction. This is a pure
+tightening: it turns what used to compile into a silently-wrong
+`__mll_to_lua`/opaque conversion at the boundary into a clear rejection.
+
+One inherent, pre-existing marshalling limit remains for a value that IS
+accepted: an opaque ADT (one with no marshal descriptor, e.g. `Either`)
+is deep-forced correctly when it is the WHOLE result, but when it is
+nested inside a list its payload is only shallow-forced, so a thunked
+payload can leak. Prefer a descriptor-carrying container (`Maybe`, a
+`LuaDict` record) when a structured value must survive nesting.
+
 ## Type families reduce, but non-injectively and with a termination bound
 
 Closed type families reduce during type checking, including over type

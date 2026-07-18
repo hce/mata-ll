@@ -31,6 +31,29 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **FFI value/constant exports.** An `export` may now be a plain value, not only
+  a function or an IO/LuaIO action: `export answer :: Integer` (with `answer =
+  42`) is marshalled to Lua directly as `exports.answer = 42`, and a record
+  crosses as a keyed table, a tuple as a positional table, an ADT/`Maybe`/list
+  by the same result contract a function's return value uses. Previously every
+  export was wrapped in a calling wrapper, so a value export emitted
+  `__force(42)(…)` and crashed at the boundary. Function and IO/LuaIO-action
+  exports are byte-identical to before.
+- **Export signatures are checked for FFI marshallability.** An `export` whose
+  argument or result uses a type that cannot cross the Lua boundary is now
+  rejected at compile time, with an error naming the binder, the offending type,
+  the position (argument N / result), and the crossing direction. Rejected: a
+  bare polymorphic type variable, a class-constrained type (a dictionary cannot
+  cross), a region-scoped `ST`/`STArray`/`STRef` handle, an `IO`/`LuaIO` action
+  in argument position, and a callback (function) anywhere but as a DIRECT
+  top-level argument — nested in a container, in result position, or as a
+  callback's own argument, all of which the code generator can only pass opaque.
+  A top-level callback argument stays fully supported (its arguments cross out,
+  its `LuaIO` result decoded back in). The whitelist is derived from exactly
+  what the marshaller round-trips, replacing a silent, undefined-at-the-boundary
+  conversion with a clear rejection; every previously valid export (the
+  `ffi_export_*` suite) still compiles unchanged.
+
 - **Numeric typeclass hierarchy — `Num`, `Fractional`, `Real`, `Integral` — with
   polymorphic numeric literals, to GHC parity.** The arithmetic operators are
   now class methods with GHC's exact signatures: `Num` (`+`, `-`, `*`, `negate`,

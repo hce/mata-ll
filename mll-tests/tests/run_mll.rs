@@ -4556,6 +4556,146 @@ main = pure ()
     assert_eq!(r, 99, "IO-action export performs on call: runIt () == 99");
 }
 
+#[test]
+fn ffi_export_rejects_unmarshallable_types() {
+    // An export signature must only use types the FFI marshaller round-trips.
+    // Each rejection names the binder, the position (argument N / the result),
+    // the offending type, and the crossing direction.
+
+    // A bare type variable has no runtime representation — rejected in both an
+    // argument (import) and a result (export) position.
+    let e = compile_err("export idf :: a -> a\nidf x = x\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'idf'"), "names the binder: {e}");
+    assert!(e.contains("argument 1") && e.contains("argument direction"), "arg position+dir: {e}");
+    assert!(e.contains("the result") && e.contains("result direction"), "result position+dir: {e}");
+    assert!(e.contains("polymorphic value"), "type-var note: {e}");
+    // The internal/freshened variable name must not leak (prettified to `a`).
+    assert!(!e.contains("a890") && !e.contains("_r") && !e.contains("_lit"),
+        "type variables must prettify, not leak internal names: {e}");
+
+    // A class constraint would require a dictionary to cross.
+    let e = compile_err("export addN :: Num a => a -> a\naddN x = x + x\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'addN'") && e.contains("class constraint"), "constraint rejected: {e}");
+    assert!(e.contains("dictionary"), "dictionary note: {e}");
+
+    // A region-scoped ST handle, in both directions.
+    let e = compile_err("export g :: [Integer] -> ST s (STArray s)\ng xs = newSTArrayFromList xs\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'g'") && e.contains("the result"), "ST result rejected: {e}");
+    assert!(e.contains("STArray") && e.contains("region-scoped"), "ST note: {e}");
+
+    let e = compile_err("export f :: forall s. STArray s -> Integer\nf _ = 5\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'f'") && e.contains("argument 1") && e.contains("STArray"),
+        "ST argument rejected: {e}");
+
+    // An IO action cannot be supplied by a Lua caller (import position).
+    let e = compile_err("export bad :: IO () -> Integer\nbad _ = 5\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'bad'") && e.contains("argument 1") && e.contains("IO ()"),
+        "IO-in-argument rejected: {e}");
+    assert!(e.contains("cannot supply an IO/LuaIO action"), "IO-arg note: {e}");
+
+    // Recursion + direction-flip: a rejected type nested inside a tuple, a list,
+    // and a Maybe is still caught and located.
+    let e = compile_err("export t :: (Integer, a) -> Integer\nt (n, _) = n\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("(inside '(Integer, a)')"), "nested-in-tuple culprit located: {e}");
+    let e = compile_err("export h :: [a] -> Integer\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("(inside '[a]')"), "nested-in-list culprit located: {e}");
+    let e = compile_err("export j :: Maybe a -> Integer\nj _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("(inside 'Maybe a')"), "nested-in-Maybe culprit located: {e}");
+
+    // A callback whose own signature contains a rejected type. The callback's
+    // RESULT is in the import direction (unwrapping its LuaIO), so an ST handle
+    // there is rejected.
+    let e = compile_err(
+        "export ap :: forall s. (Integer -> LuaIO s (ST s (STArray s))) -> LuaIO s Integer\nap f = pure 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'ap'") && e.contains("STArray"), "callback-result ST rejected: {e}");
+
+    // The callback's ARGUMENT flips to the export (result) direction — a type
+    // variable there is reported as a result-direction failure.
+    let e = compile_err(
+        "export cb :: forall s. (a -> LuaIO s Integer) -> LuaIO s Integer\ncb f = pure 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'cb'") && e.contains("result direction"),
+        "callback-argument direction flip: {e}");
+
+    // A callback is marshalled ONLY as a direct top-level export argument.
+    // Nested inside a container it is passed opaque by codegen, so it is
+    // rejected — here a callback nested in a Maybe inside a tuple argument.
+    let e = compile_err(
+        "export ap :: (Maybe (Bool -> [Integer]), Integer) -> Integer\nap _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'ap'") && e.contains("argument 1"), "nested callback rejected: {e}");
+    assert!(e.contains("Bool -> [Integer]") && e.contains("(inside '(Maybe (Bool -> [Integer]), Integer)')"),
+        "names the nested callback and its position: {e}");
+    assert!(e.contains("DIRECT top-level argument"), "callback-position note: {e}");
+
+    // A function nested in the RESULT is rejected (a list of functions — a bare
+    // `Integer -> (Bool -> Integer)` would just be a two-argument export).
+    let e = compile_err(
+        "export rf :: Integer -> [Bool -> Integer]\nrf n = [\\b -> n]\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'rf'") && e.contains("the result") && e.contains("Bool -> Integer"),
+        "function nested in result rejected: {e}");
+
+    // A callback whose OWN argument is a callback (callback-taking-a-callback):
+    // codegen passes the inner function opaque, so reject it.
+    let e = compile_err(
+        "export cc :: forall s. ((Integer -> Integer) -> LuaIO s Integer) -> LuaIO s Integer\ncc _ = pure 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'cc'") && e.contains("callback argument") && e.contains("Integer -> Integer"),
+        "callback-taking-a-callback rejected: {e}");
+}
+
+#[test]
+fn ffi_export_deep_nesting_allowed() {
+    // Deep, fully-marshallable nesting (tuple / list / Maybe / Either) is
+    // accepted AND round-trips — WITHOUT a nested callback (a function is only
+    // marshallable as a direct top-level export argument; see the reject test).
+    // A second export exercises the SUPPORTED callback shape.
+    let source = r#"
+export deep :: (Maybe [Integer], Bool) -> [Either String Integer]
+deep (m, b) = case m of
+    Just xs -> map (\x -> if b then Right x else Left "neg") xs
+    Nothing -> []
+
+export cbSum :: forall s. (Integer -> LuaIO s [Integer]) -> LuaIO s Integer
+cbSum f = do
+    xs <- f 3
+    pure (sum xs)
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+
+    // A tuple of (Maybe of a list) and a Bool, returning a list of Eithers,
+    // round-trips: `Right x` / `Left "neg"` cross with their tags. (Payloads are
+    // the already-forced list elements — a computed `Right (x*2)` would leave
+    // the payload a thunk, the pre-existing opaque-ADT-in-a-list limit noted in
+    // CAVEATS, unrelated to this check.)
+    let deep: mlua::Function = module.get("deep").unwrap();
+    let arg = lua.create_table().unwrap();
+    arg.push(lua.create_sequence_from([5, 6]).unwrap()).unwrap(); // Just [5,6]
+    arg.push(true).unwrap();
+    let out: mlua::Table = deep.call(arg).expect("deep tuple/list/Maybe/Either marshals");
+    let e1: mlua::Table = out.get(1).unwrap();
+    assert_eq!(e1.get::<i64>(1).unwrap(), 2, "first is Right (tag 2)");
+    assert_eq!(e1.get::<i64>(2).unwrap(), 5, "Right payload = 5");
+    let arg2 = lua.create_table().unwrap();
+    arg2.push(lua.create_sequence_from([9]).unwrap()).unwrap();
+    arg2.push(false).unwrap();
+    let out2: mlua::Table = deep.call(arg2).unwrap();
+    let e2: mlua::Table = out2.get(1).unwrap();
+    assert_eq!(e2.get::<i64>(1).unwrap(), 1, "is Left (tag 1)");
+    assert_eq!(e2.get::<String>(2).unwrap(), "neg", "Left payload");
+
+    // The SUPPORTED callback shape — a top-level `(A -> LuaIO s R)` argument —
+    // stays accepted (the module loaded) and runs: the host callback yields a
+    // Lua array, decoded to `[Integer]`, and `sum` folds it.
+    let cb_sum: mlua::Function = module.get("cbSum")
+        .expect("a top-level (A -> LuaIO s R) callback export is accepted");
+    let cb = lua.create_function(|lua, n: i64| {
+        lua.create_sequence_from((1..=n).collect::<Vec<_>>())
+    }).unwrap();
+    let r: i64 = cb_sum.call(cb).expect("top-level callback still works");
+    assert_eq!(r, 6, "cbSum: sum (f 3) = 1+2+3");
+}
+
 // --- Outgoing FFI callbacks (mata-ll -> Lua): the fold / threaded-state pattern.
 
 #[test]
