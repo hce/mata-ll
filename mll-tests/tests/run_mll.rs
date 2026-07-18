@@ -8899,3 +8899,69 @@ fn linear_exactly_once_erases_to_identical_lua() {
         .lua_code;
     assert!(a == b, "%1 must erase: emitted Lua differs");
 }
+
+// Regression: the entry-point trailer used to run main() only when the chunk's
+// first vararg was nil. A standalone interpreter (`lua prog.lua x`) passes CLI
+// args as varargs, so ANY argument made the program look like it had been
+// `require`d and main was silently skipped. main must run whenever the file is
+// executed as a program (first vararg matches arg[1], including the no-arg case
+// where both are absent) and stay dormant only when a host require()s it (first
+// vararg is the module name, which won't match arg[1]). On ambiguity we err
+// toward running main: a genuine library module carries no main to begin with.
+#[test]
+fn main_runs_standalone_with_cli_args_not_when_required() {
+    let source = r#"
+import LIO (putStrLn)
+
+main :: IO ()
+main = do
+    args <- getArgs
+    putStrLn "MAIN"
+    putStrLn (show args)
+"#;
+    let lua_code = mllc::compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+
+    // Exec the chunk the way a standalone interpreter would: `arg` set as a
+    // global (arg[0]=script, arg[1..]=CLI args) and the same args handed to the
+    // chunk as varargs. `arg1` is arg[1]; `first_vararg` is the chunk's `...`.
+    let run = |arg1: Option<&str>, first_vararg: &str| -> Vec<String> {
+        let lua = mlua::Lua::new();
+        let captured = lua.create_table().unwrap();
+        lua.globals().set("__captured", captured.clone()).unwrap();
+        let print_fn = lua
+            .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+                let t: mlua::Table = lua.globals().get("__captured")?;
+                let n = t.raw_len();
+                t.raw_set(n + 1, s.to_str()?.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        lua.globals().set("print", print_fn).unwrap();
+        let arg_tbl = lua.create_table().unwrap();
+        arg_tbl.raw_set(0, "prog.lua").unwrap();
+        if let Some(a) = arg1 {
+            arg_tbl.raw_set(1, a).unwrap();
+        }
+        lua.globals().set("arg", arg_tbl).unwrap();
+        lua.load(&lua_code)
+            .set_name("entrypoint")
+            .call::<()>(first_vararg.to_string())
+            .expect("chunk runs");
+        captured
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()
+            .unwrap()
+    };
+
+    // Standalone with a CLI argument: first vararg == arg[1] == "alpha" → run.
+    assert_eq!(run(Some("alpha"), "alpha"), vec!["MAIN", "[alpha]"]);
+
+    // Required for its exports: first vararg is the module name "prog" while the
+    // host passed no args (arg[1] unset), so they differ → main stays dormant.
+    assert!(
+        run(None, "prog").is_empty(),
+        "main must not run when the module is require()d"
+    );
+}

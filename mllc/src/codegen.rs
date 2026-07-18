@@ -1006,10 +1006,24 @@ impl CodeGen {
 
         if module.has_main {
             self.emit_line("");
-            self.emit_line("-- Entry point (skip when loaded via require)");
-            self.emit_line("local __mll_modname = ...");
+            // Entry point: run main() only when this file is the program being
+            // executed, not when a Lua host `require`s it for its exports.
+            //
+            // A standalone interpreter (`lua prog.lua a b c`) passes the command
+            // -line arguments as the chunk's varargs AND in the global `arg`
+            // table, so the first vararg equals arg[1]. With no arguments the
+            // first vararg is nil. `require "prog"` instead calls the chunk with
+            // the MODULE NAME as its first vararg, which won't match arg[1]. So
+            // testing only `... == nil` (as we used to) misfired the moment the
+            // program was run standalone WITH arguments: the CLI arg looked like
+            // a require modname and main was wrongly skipped.
+            self.emit_line("-- Entry point (run main unless this file was loaded via require)");
+            self.emit_line("local __mll_arg1 = ...");
             let run_ref = self.lua_ref("__run");
-            self.emit_line(&format!("if __mll_modname == nil then __mll_run({}()) end", run_ref));
+            self.emit_line(&format!(
+                "if __mll_arg1 == nil or (arg ~= nil and __mll_arg1 == arg[1]) then __mll_run({}()) end",
+                run_ref
+            ));
         }
 
         // Generate module return table for exports
