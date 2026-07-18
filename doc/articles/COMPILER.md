@@ -24,8 +24,11 @@ Everything is orchestrated by `mllc/src/lib.rs:compile`. The stages, in order:
 | 5 | Desugar do-notation | `desugar::desugar_module` | AST → AST |
 | 6 | Type check | `typechecker::Checker::check_module_with_local_start` | AST → **TIR** (`tir::TModule`) |
 | 7 | Monomorphize | `mono::Monomorphizer::run` | TIR → TIR (specialized) |
-| 8 | Constant fold | `fold::fold_module` | TIR → TIR |
-| 9 | Codegen (+ demand analysis) | `codegen::generate` | TIR → Lua source `String` |
+| 8 | Verify | `mono::Monomorphizer::verify` (→ `verify::check`) | TIR → TIR (unchanged; errors if an invariant is violated) |
+| 9 | Constant fold | `fold::fold_module` | TIR → TIR |
+| 10 | Split deep expressions | `split::split_module` | TIR → TIR (deep nesting hoisted into `let`s so the emitted Lua stays within Lua's own parser limits) |
+| 11 | Dead-code elimination | `dce::eliminate` | TIR → TIR (unreachable functions dropped) |
+| 12 | Codegen (+ demand analysis) | `codegen::generate` | TIR → Lua source `String` |
 
 Two ordering facts that are easy to get wrong and matter:
 
@@ -76,10 +79,17 @@ analysis, and codegen all consume and (except codegen) rewrite it.
 
 ---
 
-## 3. Type system core (`typechecker.rs`, `types.rs`)
+## 3. Type system core (`typechecker/`, `types.rs`)
 
 This is a Hindley–Milner inferencer in the Algorithm-W tradition, extended
 with typeclasses, type families, GADTs, and kinds.
+
+The checker is a directory, `mllc/src/typechecker/`, split by concern:
+`mod.rs` (the `Checker` itself: instantiate/generalize/unify, the module
+passes), `infer.rs` (expression/pattern inference + exhaustiveness),
+`solve.rs` (typeclass constraint solving), `derive.rs` (`deriving`
+implementations), `kind.rs` (kind inference/checking), and `usage.rs`
+(linear-usage checking for `%1` arrows).
 
 ### Representation (`types.rs`)
 - `Ty` (`types.rs:35`) — types: variables, constructors, applications, etc.
@@ -93,19 +103,19 @@ with typeclasses, type families, GADTs, and kinds.
   families and type-level symbols need this).
 
 ### The three HM primitives
-- `instantiate` (`typechecker.rs:157`) — replaces a scheme's quantified vars
+- `instantiate` (`typechecker/mod.rs:547`) — replaces a scheme's quantified vars
   with fresh unification vars when a polymorphic value is *used*.
-- `generalize` (`typechecker.rs:167`) — quantifies over free vars not bound in
+- `generalize` (`typechecker/mod.rs:573`) — quantifies over free vars not bound in
   the environment when a binding is *defined* (let-generalization).
 - **Unification** — solves `Ty ~ Ty` into the `Subst`, with the **occurs
-  check** to reject infinite types. (Search `unify` in `typechecker.rs`.)
+  check** to reject infinite types. (Search `unify` in `typechecker/mod.rs`.)
 
 The mental model: inference walks expressions producing types and accumulating
 a `Subst`; `instantiate` opens schemes at use sites, `generalize` closes them
 at definition sites, `unify` reconciles. At the end the final substitution is
 applied so every `TExpr.ty` is fully resolved.
 
-### Module checking is multi-pass (`check_module`, `typechecker.rs:1430`)
+### Module checking is multi-pass (`check_module`, `typechecker/mod.rs:3008`)
 Order matters because later passes depend on earlier registrations:
 1. **Pass 1** — type aliases, data types, newtypes.
 2. **Pass 2** — typeclass declarations + type families.
@@ -118,11 +128,12 @@ Order matters because later passes depend on earlier registrations:
    inference over bodies).
 
 ### Other checker responsibilities
-- **Exhaustiveness checking** (`typechecker.rs:2844`) — warns/errors on
-  non-exhaustive pattern matches (see §6 for the algorithm family).
-- **Typeclass handling** (`typechecker.rs:1612`) — resolves which instance
+- **Exhaustiveness checking** (`check_exhaustiveness`, `typechecker/infer.rs`)
+  — warns/errors on non-exhaustive pattern matches (see §6 for the algorithm
+  family).
+- **Typeclass handling** (`typechecker/solve.rs`) — resolves which instance
   satisfies each constraint; this feeds monomorphization.
-- **Deriving** (`typechecker.rs:1807`) — auto-generates `Show`/`Eq`/etc.
+- **Deriving** (`typechecker/derive.rs`) — auto-generates `Show`/`Eq`/etc.
 
 ---
 
@@ -174,8 +185,9 @@ direction to be careful about when editing.
 
 ## 6. Exhaustiveness & pattern matching
 
-Pattern checking returns typed patterns (`typechecker.rs:3122`); exhaustiveness
-lives at `typechecker.rs:2844`. Nested/overlapping constructor patterns (e.g.
+Pattern checking returns typed patterns (`check_pattern`,
+`typechecker/infer.rs:791`); exhaustiveness lives in `check_exhaustiveness`
+in the same file. Nested/overlapping constructor patterns (e.g.
 red-black-tree-style `Branch R (Branch R a x b) y c`) are the stress case.
 The algorithm family is matrix-based usefulness checking — see references.
 
@@ -237,8 +249,9 @@ list for fixing them solo:
 ---
 
 ## 11. Debugging entry points (cheat sheet)
-- Wrong/odd **type error** → `typechecker.rs`, find the relevant `infer_*` and
-  check what `unify` is being asked to reconcile.
+- Wrong/odd **type error** → `typechecker/infer.rs`, find the relevant
+  `infer_*` and check what `unify` (`typechecker/mod.rs`) is being asked to
+  reconcile.
 - **`nil` at runtime where a value/method expected** → `mono.rs` (missing
   specialization or unreached call-site rewrite).
 - **Wrong strictness / unexpected eager-or-lazy behavior** → `demand.rs`, then
@@ -247,4 +260,4 @@ list for fixing them solo:
   reading the emitted Lua.
 - **Import not found / wrong merge** → `modules.rs`.
 - Reproduce any of these against the test suite in `mll-tests/tests/run_mll.rs`
-  (261 tests; each compiles and runs an `.mll`).
+  (612 tests; each compiles and runs an `.mll`).

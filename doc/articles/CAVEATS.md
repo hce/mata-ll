@@ -40,16 +40,21 @@ operation. Note that suspending the accumulator with a lazy `$`
 chain that overflows when finally forced — pass the accumulator directly
 (`loop (n-1) (acc+n)`) so demand analysis can keep it strict.
 
-## Non-exhaustive patterns produce a runtime error
+## Non-exhaustive patterns are rejected at compile time (mostly)
 
 When a case expression or function definition doesn't cover all constructors,
-the compiler emits a fallthrough that calls:
+the compiler rejects it with a hard error naming the gap:
+
+    Type error: Non-exhaustive patterns in 'name': missing patterns for Blue
+
+Only gaps the exhaustiveness checker cannot see — a guard chain with no
+always-true fallback, or certain nested patterns — compile to a runtime
+fallthrough that calls:
 
     error("Non-exhaustive patterns")
 
-The error message does not include the function name or source location, so it
-can be hard to track down. The exhaustiveness checker warns at compile time for
-most cases, but guards and nested patterns can still slip through.
+That runtime message does not include the function name or source location, so
+it can be hard to track down.
 
 ## Integer overflow wraps silently
 

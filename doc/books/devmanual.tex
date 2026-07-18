@@ -78,7 +78,7 @@
 \section{Introduction}
 
 MATA-LL is a Haskell-inspired language that compiles to standalone Lua files with
-no runtime dependencies.  The compiler is written in Rust (\textasciitilde15\,000
+no runtime dependencies.  The compiler is written in Rust (\textasciitilde30\,000
 lines) and targets both Lua~5.4 and LuaJIT.
 
 \begin{itemize}[nosep]
@@ -99,7 +99,7 @@ lines) and targets both Lua~5.4 and LuaJIT.
 \texttt{mllc/}       & Compiler library (core) \\
 \texttt{mll/}        & CLI binary \\
 \texttt{mll-repl/}   & Interactive REPL \\
-\texttt{mll-tests/}  & Test harness (246 tests) \\
+\texttt{mll-tests/}  & Test harness (600+ tests) \\
 \texttt{mllc-wasm/}  & WASM binding for browser playground \\
 \texttt{lib/}        & Standard library (\texttt{.mll} files) \\
 \texttt{examples/}   & Example programs \\
@@ -112,7 +112,7 @@ lines) and targets both Lua~5.4 and LuaJIT.
 
 \begin{lstlisting}[language=bash]
 cargo build --release        # all crates
-cargo test                   # run 246 tests (needs 32 MB stack)
+cargo test                   # run 600+ tests (needs 32 MB stack)
 cargo run -- file.mll --run  # compile and execute
 \end{lstlisting}
 
@@ -122,7 +122,8 @@ The CLI binary (\texttt{mll}) embeds \texttt{mlua} with vendored Lua~5.4 for
 %----------------------------------------------------------------------
 \section{Compilation Pipeline}
 
-The compiler transforms source through seven distinct phases:
+The compiler transforms source through the following phases (in order; see
+\texttt{mllc/src/lib.rs}):
 
 \begin{enumerate}[nosep]
   \item \textbf{Lexing} --- layout-sensitive tokenization
@@ -130,9 +131,17 @@ The compiler transforms source through seven distinct phases:
   \item \textbf{Import resolution} --- module loading and cycle detection
   \item \textbf{Desugaring} --- do-notation to monadic bind chains
   \item \textbf{Type checking} --- HM unification + bidirectional checking
+        (including kind inference)
   \item \textbf{Monomorphization} --- specialization + typeclass dispatch
-  \item \textbf{Demand analysis} --- strictness inference
-  \item \textbf{Code generation} --- Lua source emission
+  \item \textbf{Verification} --- post-monomorphization invariant checks
+        (\texttt{verify.rs}); a violation is a compiler bug, not a user error
+  \item \textbf{Constant folding} --- compile-time reduction (\texttt{fold.rs})
+  \item \textbf{Splitting} --- bound the nesting depth of emitted Lua so its
+        parser accepts it (\texttt{split.rs})
+  \item \textbf{Dead-code elimination} --- drop unused prelude functions and
+        specializations (\texttt{dce.rs})
+  \item \textbf{Code generation} --- Lua source emission, with integrated
+        demand/strictness analysis (\texttt{demand.rs})
 \end{enumerate}
 
 The public API is a single function:
@@ -210,12 +219,14 @@ Key capabilities:
         inference (kind variables default to \texttt{Type})
   \item Typeclasses with superclass constraints and default methods
   \item GADTs with local type equalities introduced by pattern matching
-  \item Rank-2 types (\texttt{forall s.}) for scoped resources
+  \item Rank-2 types (higher-rank function arguments; \texttt{forall s.}
+        scope sealing)
   \item Existential types in data constructors
   \item Type families (intrinsic and user-defined, closed)
   \item DataKinds (promoted constructors as type-level tags)
   \item Deriving: \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
-        \texttt{Bounded}, \texttt{Functor}
+        \texttt{Bounded}, \texttt{Functor}, \texttt{ToJSON}, \texttt{FromJSON},
+        \texttt{LuaDict}
 \end{itemize}
 
 %----------------------------------------------------------------------
@@ -345,7 +356,9 @@ refinement.
 
 \subsection{Rank-2 Types}
 
-\texttt{forall s.} quantification specifically for:
+Rank-2 function arguments work in general: a parameter of type
+\texttt{(forall a. a -> a)} may be instantiated at several types within
+the body.  The scope-sealing pattern is the primary motivating use:
 \begin{itemize}[nosep]
   \item \texttt{LuaFunction s} --- scope safety for Lua callbacks
   \item \texttt{runST :: (forall s. ST s a) -> a} --- scoped mutation
@@ -358,7 +371,12 @@ Intrinsic type families for FFI:
   \item \texttt{LuaPure "name" a} --- pure foreign function
   \item \texttt{LuaIO "name" a} --- effectful foreign function
   \item \texttt{LuaIterator "name" a} --- Lua iterator protocol
-  \item \texttt{LuaTry "name" a} --- pcall-wrapped call
+  \item \texttt{LuaTry "name" a} --- Lua \texttt{(val, err)}-convention call,
+        result \texttt{IO (Either String a)}
+  \item \texttt{LuaCatch "name" a} --- pure call under \texttt{pcall},
+        result \texttt{Either String a}
+  \item \texttt{LuaIOCatch "name" a} --- IO action under \texttt{pcall},
+        result \texttt{IO (Either String a)}
 \end{itemize}
 
 User-defined closed type families (equation-based reduction) are also supported.
@@ -445,15 +463,20 @@ with or without annotations (regression-tested in \texttt{run\_mll.rs},
 %----------------------------------------------------------------------
 \section{FFI}
 
-Foreign functions are declared via type families:
+Foreign functions are declared via type families in the \emph{result}
+position of the signature; the arguments are ordinary arrow parameters
+in front of it.  A zero-argument \texttt{LuaPure} reads a constant:
 \begin{lstlisting}[language=MLL]
-sin :: LuaPure "math.sin" (Number -> Number)
-randomInt :: LuaIO "math.random" (Integer -> Integer -> Integer)
+sin :: Number -> LuaPure "math.sin" Number
+pi :: LuaPure "math.pi" Number
+randomInt :: Integer -> Integer -> LuaIO "math.random" Integer
 \end{lstlisting}
 
-Method-call syntax uses a colon prefix:
+Method-call syntax uses a colon prefix.  Note the result is written
+\texttt{()}, not \texttt{IO ()} --- the \texttt{LuaIO} family itself
+supplies the \texttt{IO} wrapper:
 \begin{lstlisting}[language=MLL]
-fileWrite :: LuaIO ":write" (Handle -> String -> IO ())
+fileWrite :: Handle -> String -> LuaIO ":write" ()
 \end{lstlisting}
 
 A top-level \texttt{Maybe} parameter becomes an optional Lua argument.  Outgoing
@@ -483,9 +506,11 @@ Prelude (auto-imported) & \texttt{lib/Prelude.mll} \\
 \texttt{LBit}           & \texttt{lib/LBit.mll} \\
 \texttt{Regex}          & \texttt{lib/Regex.mll} \\
 \texttt{JSON}           & \texttt{lib/JSON.mll} \\
+\texttt{Data.Foldable}  & \texttt{lib/Data/Foldable.mll} \\
 \texttt{Data.List}      & \texttt{lib/Data/List.mll} \\
 \texttt{Data.Maybe}     & \texttt{lib/Data/Maybe.mll} \\
 \texttt{Data.Map}       & \texttt{lib/Data/Map.mll} \\
+\texttt{Data.Traversable} & \texttt{lib/Data/Traversable.mll} \\
 \texttt{Control.Monad}  & \texttt{lib/Control/Monad.mll} \\
 \bottomrule
 \end{tabular}
@@ -515,7 +540,7 @@ Key intentional differences:
 %----------------------------------------------------------------------
 \section{Testing}
 
-Tests live in \texttt{mll-tests/tests/cases/} (171 case files) and
+Tests live in \texttt{mll-tests/tests/cases/} (\textasciitilde190 case files) and
 \texttt{mll-tests/tests/ghc/} (GHC compatibility tests).
 
 \begin{lstlisting}[language=Rust]
@@ -541,7 +566,7 @@ Tests run on 32\,MB stack threads (deeply nested ASTs from large list literals).
   \item \textbf{AST}: add node variants (\texttt{ast.rs})
   \item \textbf{Parser}: handle new syntax (\texttt{parser.rs})
   \item \textbf{Desugarer}: add rewrite if the feature is syntactic sugar
-  \item \textbf{Type checker}: extend inference/checking (\texttt{typechecker.rs})
+  \item \textbf{Type checker}: extend inference/checking (\texttt{typechecker/})
   \item \textbf{TIR}: add typed IR node if needed (\texttt{tir.rs})
   \item \textbf{Monomorphizer}: handle new TIR node (\texttt{mono.rs})
   \item \textbf{Demand analysis}: propagate strictness if relevant
@@ -552,22 +577,34 @@ Tests run on 32\,MB stack threads (deeply nested ASTs from large list literals).
 %----------------------------------------------------------------------
 \section{Source Map}
 
-\begin{tabular}{@{}lrl@{}}
+\begin{tabular}{@{}ll@{}}
 \toprule
-\textbf{File} & \textbf{Lines} & \textbf{Purpose} \\
+\textbf{File} & \textbf{Purpose} \\
 \midrule
-\texttt{mllc/src/lib.rs}          & 126  & Public API, pipeline orchestration \\
-\texttt{mllc/src/lexer.rs}        & 443  & Layout-sensitive tokenizer \\
-\texttt{mllc/src/ast.rs}          & 352  & AST type definitions \\
-\texttt{mllc/src/parser.rs}       & 2481 & Recursive-descent parser \\
-\texttt{mllc/src/modules.rs}      & 237  & Import resolution \\
-\texttt{mllc/src/desugar.rs}      & 195  & Do-notation desugaring \\
-\texttt{mllc/src/typechecker.rs}  & 3944 & Type inference and checking \\
-\texttt{mllc/src/types.rs}        & 496  & Internal type representation \\
-\texttt{mllc/src/tir.rs}          & 356  & Typed intermediate representation \\
-\texttt{mllc/src/mono.rs}         & 1534 & Monomorphization \\
-\texttt{mllc/src/demand.rs}       & 394  & Demand/strictness analysis \\
-\texttt{mllc/src/codegen.rs}      & 3120 & Lua code generation \\
+\texttt{mllc/src/lib.rs}          & Public API, pipeline orchestration \\
+\texttt{mllc/src/lexer.rs}        & Layout-sensitive tokenizer \\
+\texttt{mllc/src/ast.rs}          & AST type definitions \\
+\texttt{mllc/src/parser.rs}       & Recursive-descent parser \\
+\texttt{mllc/src/modules.rs}      & Import resolution \\
+\texttt{mllc/src/desugar.rs}      & Do-notation desugaring \\
+\texttt{mllc/src/typechecker/}    & Type inference and checking (directory) \\
+\quad \texttt{mod.rs}             & Checker core: environments, unification \\
+\quad \texttt{infer.rs}           & Clause/pattern/expression inference \\
+\quad \texttt{solve.rs}           & Typeclass constraint solving \\
+\quad \texttt{derive.rs}          & \texttt{deriving (...)} implementations \\
+\quad \texttt{kind.rs}            & Kind inference and checking \\
+\quad \texttt{usage.rs}           & Linear-usage pass (\texttt{\%1} arrows) \\
+\texttt{mllc/src/types.rs}        & Internal type representation \\
+\texttt{mllc/src/tir.rs}          & Typed intermediate representation \\
+\texttt{mllc/src/mono.rs}         & Monomorphization \\
+\texttt{mllc/src/verify.rs}       & Post-monomorphization invariant checks \\
+\texttt{mllc/src/fold.rs}         & Constant folding \\
+\texttt{mllc/src/split.rs}        & Expression splitting (Lua nesting limits) \\
+\texttt{mllc/src/dce.rs}          & Dead-code elimination \\
+\texttt{mllc/src/demand.rs}       & Demand/strictness analysis \\
+\texttt{mllc/src/embed.rs}        & Source embedding for \texttt{-{}-recompile} \\
+\texttt{mllc/src/stdlib.rs}       & Embedded standard-library modules \\
+\texttt{mllc/src/codegen.rs}      & Lua code generation \\
 \bottomrule
 \end{tabular}
 
@@ -575,7 +612,7 @@ Tests run on 32\,MB stack threads (deeply nested ASTs from large list literals).
 \section{CLI Reference}
 
 \begin{lstlisting}[language=bash]
-mll file.mll              # compile, print Lua to stdout
+mll file.mll              # compile, write file.lua
 mll file.mll --run        # compile and execute
 mll file.mll --emit-lua   # write file.lua
 mll file.mll -L ./lib     # add library search path

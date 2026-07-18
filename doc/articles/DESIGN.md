@@ -104,16 +104,22 @@ A small, fixed kind system:
 - `Type` — the kind of ordinary types
 - `Symbol` — the kind of type-level strings (used in FFI)
 - `Arrow(k1, k2)` — the kind of type constructors
+- `Promoted(name)` — the kind a data type promotes to under DataKinds
 
-No kind polymorphism or promotion. The checker validates kinds for
-data definitions, type families, and type applications.
+No kind polymorphism; promoted data types have real kinds (DataKinds —
+see SPEC). Only parameterless, non-GADT, non-existential data types
+promote, which keeps promotion monomorphic. The checker validates
+kinds for data definitions, type families, and type applications.
 
 ### Typeclasses
 
-The built-in classes are `Monad`, `Show`, `Eq`, `Ord`, and the numeric
-hierarchy `Num`, `Fractional`, `Real`, and `Integral`. Each class is
-registered with its methods and a set of built-in instances for
-primitive types. User-defined classes and instances are also supported.
+The built-in classes are `Functor`, `Applicative`, `Monad`,
+`Foldable`, `Traversable`, `Enum`, `Bounded`, `Show`, `Read`, `Eq`,
+`Ord`, and the numeric hierarchy `Num`, `Fractional`, `Real`, and
+`Integral`. Each class is registered with its methods and a set of
+built-in instances for primitive types. (`Semigroup` and `Monoid` are
+ordinary source classes in the bundled Prelude, not compiler
+built-ins.) User-defined classes and instances are also supported.
 
 Instance resolution maps `(class_name, type_name)` to an `InstanceInfo`
 containing the mangled method names (e.g., `eq_Integer`, `show_String`,
@@ -140,7 +146,8 @@ constraint discharge.
 Orphan instances (where neither the class nor the type is defined in
 the current module) are rejected.
 
-Deriving is supported for `Show`, `Eq`, `Ord`, `Enum`, `Bounded`, and `Functor`.
+Deriving is supported for `Show`, `Eq`, `Ord`, `Enum`, `Bounded`,
+`Functor`, `ToJSON`, `FromJSON`, and `LuaDict`.
 
 ### GADTs
 
@@ -151,14 +158,17 @@ identical to standard ADTs.
 
 ### Rank-2 types
 
-`forall s.` quantification is supported in two specific patterns:
+`forall s.` quantification is supported, with two motivating patterns:
 
 1. Exported functions receiving `LuaFunction s` (scope safety for
    Lua callbacks, same mechanism as Haskell's ST monad).
 2. `runST :: (forall s. ST s a) -> a` (scope safety for mutable
    state).
 
-General rank-2 polymorphism is not supported.
+Rank-2 function arguments also work in general — a parameter of type
+`(forall a. a -> a)` may be instantiated at several types within the
+body — though the scope-sealing patterns above are the cases the
+language is designed around.
 
 ### Type families
 
@@ -381,10 +391,17 @@ between mata-ll and plain Lua is clean.
 ### Standalone mode
 
 When the module has a `main :: IO ()` declaration, the compiler
-appends `__run()` at the end of the generated Lua file. `main` is
-renamed to `__run` internally because it is not an exported function.
-The CLI can also execute the result directly via the embedded `mlua`
-runtime (`--run` flag).
+appends an entry-point stub at the end of the generated Lua file:
+
+    local __mll_modname = ...
+    if __mll_modname == nil then __mll_run(__mll_fn[N]()) end
+
+so the file runs `main` when executed directly but stays inert when
+loaded via `require` (a required module receives its module name as
+`...`). `main` is renamed to `__run` internally because it is not an
+exported function; the stub reaches it through its function-table
+slot. The CLI can also execute the result directly via the embedded
+`mlua` runtime (`--run` flag).
 
 
 ## Evaluation strategy
@@ -559,7 +576,9 @@ modules are cached.
 The prelude is auto-imported by the compiler (prepended to the AST
 before desugaring). Additional standard library modules live in `lib/`:
 
-    ByteString, LIO, LMath, LOS, LString, LBit, Regex, JSON
+    ByteString, Control.Monad, Data.Foldable, Data.List, Data.Map,
+    Data.Maybe, Data.Traversable, JSON, LBit, LIO, LMath, LOS,
+    LString, Regex
 
 
 ## ST monad and STArray

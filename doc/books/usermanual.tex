@@ -545,7 +545,7 @@ interop --- see Section~\ref{sec:luadict}.
 \texttt{Real}        & (superclass marker: \texttt{(Num a, Ord a)}) \\
 \texttt{Integral}    & \texttt{quot, rem, div, mod, quotRem, divMod, toInteger} \\
 \texttt{Functor}     & \texttt{fmap :: (a -> b) -> f a -> f b} \\
-\texttt{Applicative} & \texttt{pure, (<*>)} \\
+\texttt{Applicative} & \texttt{pure, (<*>), liftA2} \\
 \texttt{Monad}       & \texttt{(>>=), return} \\
 \bottomrule
 \end{tabular}
@@ -598,10 +598,12 @@ constructor where a complete type is required
 Programs with a \texttt{main :: IO ()} are standalone executables:
 
 \begin{lstlisting}
+import LIO  -- readLine (stdin) lives here, not in the Prelude
+
 main :: IO ()
 main = do
     putStrLn "What is your name?"
-    name <- getLine
+    name <- readLine
     putStrLn ("Hello, " <> name <> "!")
 \end{lstlisting}
 
@@ -613,12 +615,12 @@ Do-notation desugars to monadic bind:
 -- These are equivalent:
 example1 :: IO ()
 example1 = do
-    x <- getLine
+    x <- return "hello"
     let y = x <> "!"
     putStrLn y
 
 example2 :: IO ()
-example2 = getLine >>= \x ->
+example2 = return "hello" >>= \x ->
            let y = x <> "!" in
            putStrLn y
 \end{lstlisting}
@@ -628,26 +630,32 @@ example2 = getLine >>= \x ->
 \begin{lstlisting}
 putStrLn :: String -> IO ()     -- print with newline
 putStr   :: String -> IO ()     -- print without newline
-getLine  :: IO String           -- read a line
 getArgs  :: IO [String]         -- command-line arguments
 exit     :: ExitValue -> IO ()  -- exit process
 error    :: String -> a         -- abort with message
 \end{lstlisting}
 
+There is no built-in \texttt{getLine}.  Input comes from the
+\texttt{LIO} library module: \texttt{readLine :: IO String} reads a
+line from stdin, and \texttt{fileLines :: String -> IO [String]} reads
+a whole file as a list of lines.
+
 \subsection{Exception Handling}
 
 \begin{lstlisting}
+import LIO  -- fileLines :: String -> IO [String]
+
 main :: IO ()
 main = do
-    result <- try (readFile "data.txt")
+    result <- try (fileLines "data.txt")
     case result of
-        Right contents -> putStrLn contents
-        Left err       -> putStrLn ("Error: " <> err)
+        Right ls -> mapM_ putStrLn ls
+        Left err -> putStrLn ("Error: " <> err)
 
 -- Or with catch:
-safeRead :: String -> IO String
-safeRead path = catch (readFile path)
-                      (\err -> return "")
+safeRead :: String -> IO [String]
+safeRead path = catch (fileLines path)
+                      (\err -> return [])
 \end{lstlisting}
 
 %======================================================================
@@ -1060,6 +1068,45 @@ Declare an FFI \emph{argument} as \texttt{[a]} and an empty list
 reaches the host as an empty table instead; only exported
 \emph{results} collapse it to \texttt{nil}.
 \end{note}
+
+An export need not be a function.  A plain value --- a scalar, tuple,
+record, ADT, \texttt{Maybe}, or finite list --- appears in the
+module's return table as its forced, marshalled value, following the
+same conversions as a function result: a scalar crosses as a Lua
+number or string, a tuple or plain record as a positional table, a
+\texttt{LuaDict} record as a name-keyed table.  An exported
+\texttt{IO} or \texttt{LuaIO} action appears as a Lua function that
+runs the action when called and returns its marshalled result.
+
+\begin{lstlisting}
+export answer :: Integer
+answer = 42
+
+export tick :: IO Integer
+tick = return 99
+\end{lstlisting}
+
+From Lua, \texttt{mll.answer} \emph{is} the number \texttt{42}, and
+\texttt{mll.tick()} runs the action and returns \texttt{99}.
+
+Not every signature can cross the boundary.  An export whose type
+uses something the marshaller cannot represent in Lua is rejected at
+compile time, with the offending sub-type named in the error:
+
+\begin{itemize}
+\item a polymorphic type variable (\texttt{export ident :: a -> a})
+  --- Lua has no representation for a polymorphic value;
+\item a class constraint (\texttt{Num a => \ldots}) --- a typeclass
+  dictionary cannot cross the boundary;
+\item a region-scoped \texttt{ST}/\texttt{STArray} handle --- it must
+  not outlive its \texttt{runST};
+\item an \texttt{IO} or \texttt{LuaIO} action in \emph{argument}
+  position --- a Lua caller has no action to hand in;
+\item a function type anywhere except as a direct top-level argument
+  of the export itself.  That one position is a \emph{callback}, and
+  it must return \texttt{LuaIO s r} --- Lua functions are untrusted
+  and assumed effectful.
+\end{itemize}
 
 \subsection{LuaDict}
 \label{sec:luadict}
@@ -1698,23 +1745,43 @@ built from a linear value.
 %======================================================================
 \section{HashMap}
 
-A built-in dictionary type backed by Lua tables:
+A built-in dictionary type backed by Lua tables.  The \texttt{hm*}
+builtins need no import:
 
 \begin{lstlisting}
-import Data.Map
+main :: IO ()
+main = do
+    let m = hmFromList [("a", 1), ("b", 2), ("c", 3)]
+    putStrLn (show (hmLookup "b" m))  -- Just 2
+    let m2 = hmInsert "d" 4 m
+    putStrLn (show (hmKeys m2))       -- [a, b, c, d]
+    putStrLn (show (hmMember "x" m))  -- False
+\end{lstlisting}
+
+Operations: \texttt{hmEmpty}, \texttt{hmInsert}, \texttt{hmLookup},
+\texttt{hmDelete}, \texttt{hmSize}, \texttt{hmKeys}, \texttt{hmValues},
+\texttt{hmMember}, \texttt{hmFromList}, \texttt{hmToList}.  Keys must
+be primitive (a \texttt{String} or a numeric type).
+
+The \texttt{Data.Map} library module wraps the same type under the
+Haskell-compatible names (\texttt{empty}, \texttt{insert},
+\texttt{lookup}, \texttt{fromList}, \ldots, plus \texttt{union},
+\texttt{filter}, \texttt{foldrWithKey} and friends).  Import it
+\emph{qualified}, as in Haskell: several of its names
+(\texttt{lookup}, \texttt{null}, \texttt{map}, \texttt{filter})
+deliberately shadow the Prelude, and because mata-ll merges every
+import into a single namespace, an unqualified
+\texttt{import Data.Map} is rejected with a name-conflict error.
+
+\begin{lstlisting}
+import qualified Data.Map as M
 
 main :: IO ()
 main = do
-    let m = hashmap_fromList [("a", 1), ("b", 2), ("c", 3)]
-    putStrLn (show (hashmap_lookup "b" m))  -- Just 2
-    let m2 = hashmap_insert "d" 4 m
-    putStrLn (show (hashmap_keys m2))
-    putStrLn (show (hashmap_member "x" m))  -- False
+    let m = M.fromList [("a", 1), ("b", 2), ("c", 3)]
+    putStrLn (show (M.lookup "b" m))  -- Just 2
+    putStrLn (show (M.keys (M.insert "d" 4 m)))
 \end{lstlisting}
-
-Operations: \texttt{hashmap\_lookup}, \texttt{hashmap\_insert},
-\texttt{hashmap\_delete}, \texttt{hashmap\_keys}, \texttt{hashmap\_values},
-\texttt{hashmap\_member}, \texttt{hashmap\_fromList}.
 
 %======================================================================
 \section{Ranges and Enumerations}

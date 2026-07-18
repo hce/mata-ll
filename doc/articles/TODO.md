@@ -423,7 +423,7 @@ MATA-LL TODO
 - [x] Comprehensive test suites for each library module (Regex, JSON, LOS, LString, LBit, LMath)
 - [x] Stress tests for compiler limits (large ADTs, deep recursion, nested exprs, many functions/instances, long do-blocks, large patterns, deep types, many args, list ops, BST program)
 - [x] Do-notation regression tests (eval order, let scoping, bind return unwrapping)
-- [x] 246 tests passing (Lua 5.4 via mlua)
+- [x] 612 tests passing (Lua 5.4 via mlua)
 
 ## Can defer
 

@@ -82,8 +82,14 @@ import go directly into scope.
 ## HashMap instead of Data.Map
 
 There is no ordered `Map` type. Use `HashMap k v`, which is backed by
-Lua tables. The API uses standalone functions (`hashmap_lookup`,
-`hashmap_insert`, etc.) rather than a typeclass-based interface.
+Lua tables. The API uses standalone builtin functions (`hmLookup`,
+`hmInsert`, `hmFromList`, `hmMember`, etc.) rather than a
+typeclass-based interface. (The `hashmap_*` names visible in emitted
+Lua are runtime internals, not source names.) For the familiar
+`Data.Map` spelling, `import qualified Data.Map as M` provides
+`M.lookup`, `M.insert`, and friends as a thin wrapper over `HashMap`
+— the import must be qualified; a plain `import Data.Map` is rejected
+because its names clash with the Prelude.
 
 ## No lazy I/O
 

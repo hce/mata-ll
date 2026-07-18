@@ -716,7 +716,7 @@ The `Symbol` argument is consumed by the compiler during code
 generation to resolve the target Lua function and is then erased from
 the type.
 
-A `Maybe` argument translates to an optional Lua parameter: `None`
+A `Maybe` argument translates to an optional Lua parameter: `Nothing`
 causes the argument to be omitted, relying on Lua's treatment of
 missing arguments as nil.
 
@@ -1272,11 +1272,13 @@ shell silently.
 
 Functions: show, putStrLn, putStr, print, (++), (<>), ($), max, min,
            const, id, (.), flip, map, filter, foldl, foldr, sqrt,
-           not, (&&), (||), error, undefined, otherwise, head, tail,
-           take, zipWith, elem, length, reverse, fst, snd, concatMap,
-           mapM_, when, assert, seq, getArgs, exit, try, catch,
-           foldMap, maximum, minimum, mempty, mappend,
-           traverse, sequenceA, liftA2
+           not, (&&), (||), and, or, any, all, error, undefined,
+           otherwise, head, tail, last, init, null, take, drop,
+           takeWhile, dropWhile, span, zip, unzip, zipWith, elem,
+           length, reverse, concat, replicate, iterate, sum, product,
+           fst, snd, concatMap, mapM_, when, assert, seq, getArgs,
+           exit, try, catch, foldMap, maximum, minimum, mempty,
+           mappend, traverse, sequenceA, liftA2
 
     (++)  :: [a] -> [a] -> [a]              -- list append only
     (<>)  :: Semigroup a => a -> a -> a     -- string concatenation
@@ -1289,6 +1291,8 @@ Functions: show, putStrLn, putStr, print, (++), (<>), ($), max, min,
     otherwise :: Bool  -- defined as True
     seq   :: a -> b -> b  -- explicit forcing
     assert :: Bool -> String -> IO ()
+    sum     :: (Foldable t, Num a) => t a -> a
+    product :: (Foldable t, Num a) => t a -> a
 
 Note: `String` is *not* a list, so `(++)` does not concatenate
 strings — use `(<>)` for that. Conversely `(<>)` today applies only to
@@ -1366,7 +1370,7 @@ is given.
 # Deriving
 
 Automatic instance generation is supported for Show, Eq, Ord, Enum,
-Bounded, Functor, ToJSON, and FromJSON:
+Bounded, Functor, ToJSON, FromJSON, and LuaDict:
 
     data Color = Red | Green | Blue
         deriving (Show, Eq, Ord, Enum, Bounded)
@@ -1379,7 +1383,10 @@ Bounded, Functor, ToJSON, and FromJSON:
 
 The compiler generates the obvious structural instances. Enum and
 Bounded are supported for simple enum types (constructors with no
-fields).
+fields). `LuaDict` generates no instance functions; it instead marks
+the type's Lua-boundary layout — a record crosses as a keyed table,
+and a nullary constructor of a `LuaDict` type crosses as its tag
+string (see "Boundaries between standard Lua and MATA-LL").
 
 `ToJSON`/`FromJSON` are provided by the `JSON` module (`import JSON`),
 which offers a hand-written codec alongside the derived instances:
@@ -1419,13 +1426,23 @@ constructor of an untagged type
 
 # Export
 
-Functions can be exported to plain Lua via the `export` keyword:
+Definitions are exported to plain Lua via the `export` keyword:
 
     export fibonacci :: Integer -> [Integer]
     fibonacci = flip take fib
 
-Exported functions appear in the module's return table and are
-callable from Lua. Only functions can be exported.
+Exports appear in the module's return table. An export may be a
+function, an IO/LuaIO action, or a plain value: a function export
+becomes a wrapper callable from Lua, an action export becomes a
+wrapper that performs the action when the host calls it, and a value
+export is marshalled to Lua as its forced value, by the same
+type-directed conversion a function result uses. An export whose
+signature uses a type the marshaller cannot move — a polymorphic or
+class-constrained type, an ST/STArray/STRef handle, an IO/LuaIO
+action in argument position, or a function anywhere but a direct
+top-level `(A -> LuaIO s R)` argument — is rejected at compile time
+(see "Boundaries between standard Lua and MATA-LL" for the full
+contract).
 
 # STArray (mutable arrays)
 
@@ -1481,6 +1498,8 @@ are imported explicitly:
     import Data.List     -- sortBy, nubBy, groupBy, intercalate, etc.
     import Data.Maybe    -- fromMaybe, catMaybes, mapMaybe, etc.
     import Data.Map      -- HashMap-backed Map (import qualified as M)
+    import Data.Foldable    -- toList, foldl', find, etc. (re-exports)
+    import Data.Traversable -- traverse, sequenceA, etc. (re-exports)
     import Control.Monad -- mapM, forM, sequence, etc.
 
 Several of these deliberately reuse Prelude names (`Data.Map`'s
