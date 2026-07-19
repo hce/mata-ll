@@ -70,3 +70,10 @@ FFI `int64_t` — a deliberate non-goal here.
 | `Nvlist.mll` | XDR nvlist parser for the vdev-label pool config.                    |
 | `ZBytes.mll` | Endian-parameterized integer and NUL-string readers.                 |
 | `zpr.mll`    | Demonstration harness: list datasets/files and extract them to disk. |
+
+## See also
+
+[`README-native-lua.md`](README-native-lua.md) — `zpr-native-lua.lua` is a
+hand-written pure-Lua twin of this reader (same format, byte-identical output),
+used to isolate and analyze the cost of mata-ll's runtime model: ~10 s vs. ~13 min
+on the same image, and where that ~78× goes.
