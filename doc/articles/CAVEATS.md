@@ -30,12 +30,12 @@ grows the stack:
     length (_:xs) = 1 + length xs      -- `1 + …` consumes the call: not a tail call
 
 Such non-tail recursion (and a deeply nested recursive data traversal) will hit
-Lua's stack limit on very deep input:
+Lua's stack limit on deep input:
 
     stack overflow
 
 Refactor to an accumulator in tail position, or use an iterative list
-operation. Note that suspending the accumulator with a lazy `$`
+operation. Suspending the accumulator with a lazy `$`
 (`loop (n-1) $ acc+n`) keeps the call in tail position but builds a thunk
 chain that overflows when finally forced — pass the accumulator directly
 (`loop (n-1) (acc+n)`) so demand analysis can keep it strict.
@@ -120,7 +120,7 @@ An unconstrained numeric literal defaults `Integer` then `Number` (GHC's
 `default (Integer, Double)`). As in GHC, defaulting applies only when every
 class constraining the variable is *standard* (a numeric class, `Eq`, `Ord`,
 `Show`, `Read`, `Enum`, `Bounded`). A literal also constrained by a user class
-— e.g. `myClassMethod 5` where `5 :: (MyClass a, Num a) => a` — is genuinely
+— e.g. `myClassMethod 5` where `5 :: (MyClass a, Num a) => a` — is
 ambiguous and must be annotated (`myClassMethod (5 :: Integer)`), exactly as
 GHC requires.
 
@@ -359,7 +359,7 @@ SPEC.md). Two consequences to be aware of:
 - **A non-terminating family is rejected, not run forever.** Reduction
   is bounded; a family whose equation reduces to itself
   (`Loop x = Loop x`) is reported as "type family '…' did not
-  terminate" instead of hanging or overflowing the stack. A genuinely
+  terminate" instead of hanging or overflowing the stack. A
   huge (but terminating) type-level computation could in principle hit
   the same bound — keep type-level arithmetic small.
 

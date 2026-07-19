@@ -64,6 +64,6 @@ The measurement compared a 2 KB *reference* to a self-contained *program +
 runtime*. They land within 0.06 bits/byte on H1 only because both are code-shaped
 text — not because anything deep is preserved. Everything interesting (the
 repetition, the generated-ness, the fixed runtime cost) lives in the orders that
-first-order entropy cannot see. The honest ranking of "how much information is
+first-order entropy cannot see. The ranking of "how much information is
 here": first-order entropy says one thing, `gzip` says a truer thing, and
 "it's deterministic compiler output" says the truest thing.

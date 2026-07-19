@@ -595,7 +595,7 @@ operations (`newSTArray`, `readSTArray`, `writeSTArray`,
 `stArrayToList`) carry the scope tag `s` and run in `ST s`. Indices
 are 0-based externally, converted to 1-based internally for Lua.
 
-At runtime, `runST` is just `__mll_run` (force and call), and the
+At runtime, `runST` is `__mll_run` (force and call), and the
 array operations are plain Lua table manipulations. The scope safety
 is enforced entirely by the type checker.
 

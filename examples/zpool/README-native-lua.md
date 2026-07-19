@@ -74,7 +74,7 @@ ranked by confidence, not measurements.
 4. **Typeclass dictionary indirection — near-zero here (<5%).**
    The hot byte-readers are monomorphic `Integer`/`ByteString`; no dictionaries
    flow through them. Dictionaries appear only in cold spots (`Ord` for `sortBy`,
-   `Show` for error strings). A genuine cost in general, but not where this
+   `Show` for error strings). A cost in general, but not where this
    reader's time goes.
 
 ## Inherent vs. unrealized optimization
@@ -94,7 +94,7 @@ compiling a lazy typed language to Lua**:
   monomorphic, inline to native `&` / `<<` / `+` instead of the wrapper.
   Monomorphism is already established (`mono.rs`); this is codegen using it.
 - **Shared-backing ByteString slices and a mutable byte-buffer builder —
-  genuinely intrinsic improvements with real semantic surface.** A slice-view
+  intrinsic improvements with real semantic surface.** A slice-view
   (offset+len instead of a copied string) breaks the invariant "a ByteString *is*
   a Lua string" — every FFI/`bsToString` consumer must then materialize. And the
   builder's upside is bounded here since the LZ4 path already buffers. Do these

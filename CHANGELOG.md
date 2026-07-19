@@ -552,7 +552,7 @@ API of the `mllc` library crate.)
   `HashMap`, `Maybe` — so encode-then-decode is identity at every depth
   (regression test `ffi_arg_marshal_roundtrips_all_containers` echoes each
   container and nesting through a host and asserts identity). Two further
-  correctness fixes landed in the same pass: (1) the marshaller is now
+  correctness fixes were made in the same pass: (1) the marshaller is now
   **non-destructive** — a converted container is rebuilt into a fresh Lua value
   instead of mutating the mata-ll value in place, so a value passed to a host
   and then reused in mata-ll code is no longer corrupted (previously the reused

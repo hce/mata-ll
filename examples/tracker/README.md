@@ -1,6 +1,6 @@
 A proof of concept decoder for IT (Impulse Tracker) music files. It
 can feed the decoded raw audio stream to sox for real time playback
-(well, not so much real time yet because it is as of yet still very
+(well, not so much real time yet because it is as of yet still
 slow) or alternatively write them to a raw audio stream on disk which
 you can later play back with sox.
 
@@ -12,7 +12,7 @@ superset of instruments.
 The ImpulseTracker format was used in the Deus Ex (1) and Unreal (1)
 games, amongst others.
 
-Do note that while Deus Ex music is partly ImpulseTracker, they are
+While Deus Ex music is partly ImpulseTracker, they are
 wrapped in Unreal's proprietary, complex object file format with the
 .umx extension. You will need to extract them from there first using
 UnrealEd. Or, you use other tracker files. If you like this kind of

@@ -21,7 +21,7 @@ operator (++); instead, use the Semigroup's (<>) operator, like so:
 mata-ll also has a ByteString type. Only strict ByteStrings are
 supported; haskell is slowly deprecating lazy ByteStrings anyway.
 ByteString and String shares the same type in Lua, string. string in
-Lua is really a ByteString with no encoding awareness.
+Lua is a ByteString with no encoding awareness.
 
 A proper Text type in mata-ll is planned for later.
 
@@ -235,7 +235,7 @@ generic over them, as in GHC. The differences:
   explicitly.
 - **`sum`/`product` are `(Foldable t, Num a) => t a -> a`,** as in GHC
   (they used to be fixed at `Integer` before the numeric classes
-  landed).
+  were added).
 - **`mapM`/`mapM_`/`sequence`/`forM` stay list-only** (`Monad m =>
   (a -> m b) -> [a] -> m [b]` etc.); GHC generalizes them to any
   Traversable/Foldable. Use `traverse` for non-list structures.
@@ -344,7 +344,7 @@ the FFI trust boundary:
   unannotated `let`/`where` charges its right-hand side unconditionally,
   so GHC rejects `let u = t in useOnce t` (with `t` linear) even though
   `u` is never forced. mata-ll's use-count scaling *accepts* it: under
-  the lazy runtime the thunk genuinely never runs, so nothing is consumed
+  the lazy runtime the thunk never runs, so nothing is consumed
   twice and nothing leaks. This is more permissive than GHC, but it does
   not admit a double-use or a leak at run time — it reflects mata-ll's
   laziness where GHC's rule is syntactic.

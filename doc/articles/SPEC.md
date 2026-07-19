@@ -67,7 +67,7 @@ This datatype is internally represented as:
     foo = A "Hello"  -- { 1 = 1, 2 = "Hello" }
     bar = B 17 23    -- { 1 = 2, 2 = 17, 3 = 23 }
 
-As you can see, we simply use integer indices here, where index 1
+We use integer indices here, where index 1
 indicates the variant that is instantiated, while the subsequent
 numbers reference the items.
 
@@ -273,7 +273,7 @@ When called as
 
     add 1 2
 
-That call could simply translate to
+That call could translate to
 
     add(1, 2)
 
@@ -392,8 +392,8 @@ leak GHC rejects — with two exceptions:
 - An unannotated `let`/`where` binding that is never forced charges zero
   uses, which is *more permissive* than GHC's rule (GHC charges its
   right-hand side unconditionally). This is sound under the lazy runtime
-  — the thunk genuinely never runs — so it admits no run-time double-use
-  or leak; it simply reflects mata-ll's laziness where GHC is syntactic.
+  — the thunk never runs — so it admits no run-time double-use
+  or leak; it reflects mata-ll's laziness where GHC is syntactic.
 
 Conservative (reject-direction) over-approximations: a wildcard over a
 tainted scalar scrutinee, a discarded non-`()` result built from a linear
@@ -654,7 +654,7 @@ The `intrinsic` keyword marks definitions whose equations are part of
 the language spec and visible for type checking, but whose
 implementation is provided by the compiler. Users are not intended to
 define their own intrinsic type families. (Note: the current parser
-does not reject a user-written `intrinsic type family`; it is simply
+does not reject a user-written `intrinsic type family`; it is
 accepted. Rejecting it is a candidate enforcement fix.)
 
 ## Intrinsic type families
@@ -1098,7 +1098,7 @@ variable's (standard) class constraints is chosen. So `show 5` is
 `show (5 :: Integer)`, while `show (5 / 2)` resolves to `Number`
 (because `Integer` is not `Fractional`). A variable also constrained
 by a non-standard (user) class is not defaulted — such a use is
-genuinely ambiguous and needs an annotation, matching GHC.
+ambiguous and needs an annotation, matching GHC.
 
 String literals use double quotes with C-style escape sequences:
 

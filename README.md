@@ -44,7 +44,7 @@ fmt2 :: String -> String -> String -> LuaPure "string.format" String
 
 For dynamic formatting with a variable number of values or mixed types,
 prefer mata-ll native constructs (`<>` and `show`) over `string.format`.
-Note that list functions like `intercalate` do not apply to `String`,
+List functions like `intercalate` do not apply to `String`,
 which is opaque rather than `[Char]`; to join a list of strings, fold
 them with `<>`.
 

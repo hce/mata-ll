@@ -84,7 +84,7 @@ it** shows a flat retained footprint across many bursts:
 A leak (accumulating references) would climb monotonically; this is flat at
 ~4.6 MB. The OS agrees: real RSS holds steady at ~15–16 MB for the whole run
 (the gap above the 4.6 MB live set is just LuaJIT's allocator arenas). So the
-decoder genuinely streams — constant working set — it just manufactures and
+decoder streams — constant working set — it just manufactures and
 immediately discards a large volume of short-lived thunks per pattern. The cost
 is the CPU work of *creating and forcing* them, not holding them: not a leak,
 and (per the GC-off test above) not GC pauses either.
