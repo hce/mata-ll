@@ -1,3 +1,8 @@
+-- lua-compat-skip: luajit
+--   (this case asserts 64-bit values with the top bit set; LuaJIT's doubles
+--   cannot represent integers > 2^53, so the sign-bit magics and shifts are
+--   rounded before any op runs — a documented limitation, see
+--   doc/articles/CAVEATS.md. The contract holds on 64-bit-integer hosts.)
 -- LBit at the 64-bit / sign-bit boundary.
 --
 -- CONTRACT (established from source, not assumed):

@@ -1,3 +1,8 @@
+-- lua-compat-skip: luajit
+--   (a getU64 whose bytes set the top bit is a value > 2^53; LuaJIT's doubles
+--   cannot represent it, so the read and the masking below round before they
+--   run — a documented limitation, see doc/articles/CAVEATS.md. The contract
+--   holds on 64-bit-integer hosts.)
 -- 64-bit ByteString reads whose bytes set the top bit (a getU64 producing a
 -- Lua-negative), plus the downstream masking the zpool reader does on them.
 --
