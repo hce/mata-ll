@@ -767,28 +767,172 @@ only what \texttt{main} or an \texttt{export} can reach); the
 compiler warns when that happens.  Such library modules are meant to
 be imported by the module you actually compile.
 
-\subsection{Available Library Modules}
+The library modules that ship with the compiler are catalogued in the
+next section.
+
+%======================================================================
+\section{Standard Library}
+\label{sec:stdlib}
+
+The standard library ships inside the compiler: each module's
+\texttt{.mll} source is compiled into the \texttt{mllc} binary with
+Rust's \texttt{include\_str!}, so an installed \texttt{mllc} is
+self-contained and needs no library directory on disk. A \texttt{-L}
+search path still takes precedence over the embedded copy, which lets
+you iterate on a module without rebuilding the compiler. The Prelude is
+imported into every module automatically; the rest are brought in with
+\texttt{import}.
 
 \begin{tabular}{@{}ll@{}}
 \toprule
 \textbf{Import} & \textbf{Provides} \\
 \midrule
-\texttt{ByteString}      & Byte sequence operations \\
-\texttt{LIO}             & File I/O (\texttt{fOpen}, \texttt{fRead}, \texttt{fWrite}, \ldots) \\
-\texttt{LMath}           & \texttt{math.*} bindings (sin, cos, random, \ldots) \\
-\texttt{LOS}             & OS functions \\
-\texttt{LString}         & String utilities \\
-\texttt{LBit}            & Bitwise operations \\
-\texttt{Regex}           & CPS-based regex matching \\
-\texttt{JSON}            & JSON codec: parser, serializer, \texttt{ToJSON}/\texttt{FromJSON} \\
-\texttt{Data.List}       & sortBy, nubBy, groupBy, intercalate, \ldots \\
-\texttt{Data.Maybe}      & fromMaybe, catMaybes, mapMaybe, \ldots \\
-\texttt{Data.Map}        & HashMap operations \\
-\texttt{Control.Monad}   & mapM, forM, sequence, \ldots \\
+\texttt{Prelude}          & Core types, classes, and functions (auto-imported) \\
+\texttt{ByteString}       & Byte sequences backed by Lua strings \\
+\texttt{LBit}             & Bitwise operations (Lua semantics) \\
+\texttt{LMath}            & \texttt{math.*} bindings \\
+\texttt{LOS}              & \texttt{os.*} bindings \\
+\texttt{LString}          & \texttt{string.*} bindings \\
+\texttt{LIO}              & File and stream I/O \\
+\texttt{LIOLinear}        & Linear exactly-once write handles \\
+\texttt{Regex}            & Backtracking regular-expression matcher \\
+\texttt{JSON}             & JSON codec and \texttt{ToJSON}/\texttt{FromJSON} \\
+\texttt{Data.List}        & List functions beyond the Prelude \\
+\texttt{Data.Maybe}       & \texttt{Maybe} helpers \\
+\texttt{Data.Map}         & Key/value maps over the HashMap type \\
+\texttt{Data.Foldable}    & Foldable operations \\
+\texttt{Data.Traversable} & Traversable operations \\
+\texttt{Control.Monad}    & Monadic control helpers \\
 \bottomrule
 \end{tabular}
 
-The Prelude is imported automatically into every module.
+The \texttt{L}-prefixed modules are FFI bindings to the Lua standard
+library; each function reduces to a Lua call (see \emph{Foreign
+Function Interface}).
+
+\subsection{Prelude}
+
+Imported into every module. It defines the core types \texttt{Either},
+\texttt{Ordering}, \texttt{ExitValue}, and \texttt{Any}; the
+\texttt{Semigroup} and \texttt{Monoid} classes; and the standard list,
+folding, and IO functions --- \texttt{map}, \texttt{filter},
+\texttt{foldr}, \texttt{zip}, \texttt{takeWhile}, \texttt{putStrLn},
+\texttt{print}, \texttt{getLine}, \texttt{mapM}, \texttt{sequence},
+\texttt{when}, \texttt{assert}, and more. The full catalogue is in the
+\emph{Prelude Reference}.
+
+\subsection{ByteString}
+
+Byte sequences backed by an immutable Lua string, indexed from~0. The
+functions are compiler builtins, so they work without the import;
+import the module for its documentation. Construction:
+\texttt{bsEmpty}, \texttt{bsPack}, \texttt{bsConcat},
+\texttt{bsConcatList}, \texttt{bsReplicate}. Access: \texttt{bsLength},
+\texttt{bsIndex}, \texttt{bsSub}, \texttt{bsNull}. Transformation:
+\texttt{bsMap}, \texttt{bsFoldl}, \texttt{bsXor}, \texttt{bsZipWith}.
+Conversion: \texttt{bsToString}, \texttt{bsFromString},
+\texttt{bsUnpack}.
+
+\subsection{The L-family: Lua bindings}
+
+These modules bind the Lua standard library through the FFI.
+
+\texttt{LBit} --- \texttt{band}, \texttt{bor}, \texttt{xor},
+\texttt{bnot}, \texttt{shiftL}, \texttt{shiftR}. The shifts follow Lua
+semantics: \texttt{shiftR} is logical (it fills the vacated high bits
+with zero) rather than sign-extending, and a shift count at or beyond
+64 gives~0.
+
+\texttt{LMath} --- the constants \texttt{pi}, \texttt{huge},
+\texttt{maxinteger}, and \texttt{mininteger}; trigonometric,
+exponential, and rounding functions such as \texttt{sin}, \texttt{cos},
+\texttt{sqrt}, \texttt{exp}, \texttt{log}, \texttt{floor}, and
+\texttt{ceil}; and the effectful \texttt{random}, \texttt{randomInt},
+and \texttt{randomseed}.
+
+\texttt{LOS} --- \texttt{clock}, \texttt{time}, \texttt{difftime},
+\texttt{date}, \texttt{getenv}, \texttt{remove}, \texttt{rename},
+\texttt{execute}, \texttt{exit}, and \texttt{tmpname}.
+
+\texttt{LString} --- \texttt{strByte}, \texttt{strLen},
+\texttt{strSub}, \texttt{strChar}, and \texttt{strToInts}, which turns a
+\texttt{String} into the list of its character codes so it can be
+processed with ordinary list functions.
+
+\subsection{LIO and LIOLinear}
+
+\texttt{LIO} provides file and stream I/O over an opaque
+\texttt{FileHandle}: \texttt{fOpen} and \texttt{fClose}; \texttt{fRead},
+\texttt{fReadN} (a fixed byte count), \texttt{fReadLine}, and
+\texttt{fWrite}; and the stream operations \texttt{readLine},
+\texttt{readStdin}, \texttt{writeStdout}, and \texttt{flushStdout}.
+\texttt{fOpen} returns \texttt{Either String FileHandle}, so an open
+failure is a value rather than a raised error.
+
+\texttt{LIOLinear} provides a write handle, \texttt{WHandle}, under the
+linear exactly-once discipline. Every operation consumes the handle:
+\texttt{hPut} hands back a fresh handle to thread onward, and
+\texttt{hClose} ends the chain. The type checker proves the handle is
+used and closed once --- dropping it (a leak) or mentioning it twice (a
+write or close after close) is a compile error. The entry point is
+\texttt{withOutFile}, whose callback receives the handle at
+\texttt{\%1} (see \emph{Linear Types}); \texttt{openOut} opens one
+directly.
+
+\subsection{Regex}
+
+A backtracking regular-expression matcher written in MATA-LL, with a
+compiled pattern type \texttt{RE} and a \texttt{Match} result.
+\texttt{compile} turns a pattern string into \texttt{Either String RE};
+\texttt{test} reports whether a pattern occurs, \texttt{find} and
+\texttt{findStr} return the first match, and \texttt{matchFull} requires
+the whole string to match. The syntax covers \texttt{.\ * + ?\ |},
+groups \texttt{()}, character classes, the anchors
+\texttt{\textasciicircum{}} and \texttt{\$}, and the escapes
+\texttt{\textbackslash d}, \texttt{\textbackslash w}, and
+\texttt{\textbackslash s} (with their negations).
+
+\subsection{JSON}
+
+\texttt{import JSON} provides a JSON codec written in MATA-LL:
+\texttt{parseJSON} and \texttt{encodeJSON} over the \texttt{Json} data
+type, plus \texttt{decodeJSON} and \texttt{encodeToJSON} driven by the
+\texttt{FromJSON} and \texttt{ToJSON} classes. It is covered in
+Section~\ref{sec:json}.
+
+\subsection{Data and Control modules}
+
+\texttt{Data.List} adds list functions the Prelude omits:
+\texttt{sortBy}, \texttt{foldl'}, \texttt{nubBy}, \texttt{groupBy},
+\texttt{partition}, \texttt{intersperse}, \texttt{intercalate},
+\texttt{unfoldr}, \texttt{scanl}, \texttt{scanr}, \texttt{find}, and
+\texttt{drop}.
+
+\texttt{Data.Maybe} --- \texttt{maybe}, \texttt{fromMaybe},
+\texttt{isJust}, \texttt{isNothing}, \texttt{fromJust},
+\texttt{listToMaybe}, \texttt{maybeToList}, \texttt{catMaybes}, and
+\texttt{mapMaybe}.
+
+\texttt{Data.Map} --- key/value maps aliased to the HashMap type
+(\texttt{type Map k v = HashMap k v}). Import it \texttt{qualified},
+since names such as \texttt{lookup}, \texttt{insert}, and \texttt{map}
+shadow the Prelude. It provides \texttt{empty}, \texttt{singleton},
+\texttt{insert}, \texttt{delete}, \texttt{lookup}, \texttt{member},
+\texttt{size}, \texttt{keys}, \texttt{values}, \texttt{toList},
+\texttt{fromList}, \texttt{map}, \texttt{filter}, the
+\texttt{foldlWithKey} and \texttt{foldrWithKey} folds, and
+\texttt{union}, \texttt{intersection}, and \texttt{difference}. Keys
+must be primitive (see \emph{HashMap}).
+
+\texttt{Data.Foldable} and \texttt{Data.Traversable} re-export the
+Foldable and Traversable operations --- \texttt{foldr},
+\texttt{foldMap}, \texttt{toList}, \texttt{sum}, \texttt{traverse},
+\texttt{sequenceA}, \texttt{mapM}, and \texttt{sequence} --- so
+GHC-style selective imports resolve.
+
+\texttt{Control.Monad} --- \texttt{forM}, \texttt{forM\_},
+\texttt{sequence\_}, \texttt{void}, \texttt{join}, \texttt{guard}, and
+\texttt{unless}.
 
 %======================================================================
 \section{Foreign Function Interface}
