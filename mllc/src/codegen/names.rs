@@ -29,7 +29,7 @@ pub(super) fn lua_bare_key_ok(name: &str) -> bool {
 
 /// The ONE canonical Lua double-quoted string literal for `s`. Every place
 /// that emits a source string into the generated Lua — expression literals
-/// (`gen_literal`), pattern-match literals (`collect_pattern_conditions`),
+/// (`literal_ast`), pattern-match literals (`collect_pattern_conditions`),
 /// LuaDict `as`-renamed table keys (`lua_key_string`) — must go through this
 /// function: string escaping used to live in three hand-rolled copies, and
 /// the two incomplete ones let a quote or a control character through raw,
@@ -185,7 +185,7 @@ pub(super) fn sanitize_name(name: &str) -> String {
 
 /// The native Lua operator a fully-applied (two-argument) resolved primitive
 /// typeclass method inlines to, or None. Single point of truth shared by the
-/// gen_expr App-arm inline and gen_expr_yields_whnf, so the two can never
+/// expr_ast App-arm inline and expr_yields_whnf, so the two can never
 /// disagree about which calls become forced native operations.
 pub(super) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
     match name {

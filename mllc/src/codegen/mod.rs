@@ -1,38 +1,45 @@
 //! Lua code generation: turns a typed, monomorphized TIR module into a single
 //! self-contained Lua source file.
 //!
-//! `generate` is the crate-facing entry point and the only public item. Its
-//! pipeline:
+//! `generate` is the crate-facing entry point and the only public item.
+//! Emission is AST-based: the generators build a `lua::Stmt`/`lua::Expr`
+//! tree (lua.rs) and the tree is printed once at the end — no generator
+//! writes output text directly, so statement well-formedness and grouping
+//! are carried by structure, not re-proven per emission site. The pipeline:
 //!
 //! 1. `crate::demand::analyze` computes per-function parameter strictness and
 //!    result demand; the result seeds `CodeGen::demand_info`.
-//! 2. `generate_module` (module.rs) registers data types, runs the
-//!    whole-program call-site and inlining analyses (analysis.rs), and emits
-//!    the program body: constructors, functions, exports.
-//! 3. `ondemand_prelude` (runtime.rs) scans the emitted body and prepends only
+//! 2. `module_stmts` (module.rs) registers data types, runs the
+//!    whole-program call-site and inlining analyses (analysis.rs), and builds
+//!    the program body as one statement list: constructors, functions,
+//!    exports. `generate` prints it via `lua::Block::render`.
+//! 3. `ondemand_prelude` (runtime.rs) scans the printed body and prepends only
 //!    the runtime-prelude definitions it transitively references.
 //! 4. When source embedding is requested, `embed::embed_block` places the
 //!    embedded source block above everything else.
 //!
 //! The only error this pass can produce is the expression-depth diagnostic
-//! (see `gen_expr` in expr.rs); everything else was rejected by earlier
+//! (see `expr_ast` in expr.rs); everything else was rejected by earlier
 //! passes.
 //!
 //! This file holds the `CodeGen` state struct and its basic plumbing: name
 //! resolution (`lua_ref`), local declaration and the `_v` spill table for
-//! Lua's 200-local limit, sub-generator management (`new_sub` /
-//! `absorb_sub_error`), and the emit helpers.
+//! Lua's 200-local limit (`declare_local_parts` / `LocalDecl`), and
+//! sub-generator management (`new_sub` / `absorb_sub_error`).
 //!
 //! Child modules:
+//! - lua.rs — the Lua AST the generators build, and its printer
 //! - module.rs — module body layout: data-type registration, constructors,
-//!   forward declarations, exports
+//!   forward declarations, exports (`module_stmts`)
 //! - function.rs — top-level functions, clauses, where-binding groups
-//! - pattern.rs — pattern-match compilation (conditions, bindings, guards)
-//! - expr.rs — the main expression walk (`gen_expr` / `gen_expr_inner`)
+//!   (`function_stmts`, `where_binds_stmts`)
+//! - pattern.rs — pattern-match compilation (`pattern_match_block`)
+//! - expr.rs — the main expression walk (`expr_ast` / `expr_ast_inner`)
 //! - thunks.rs — eager-vs-thunk decisions for arguments, callees, forcing
 //! - strictness.rs — cheapness and demand predicates behind those decisions
-//! - action.rs — IO/ST actions: bind chains, pure boxes, the two runners
-//! - inline.rs — substitution-based inlining twins of the emission paths
+//! - action.rs — IO/ST actions: bind chains (`bind_chain_block`), pure
+//!   boxes, the two runners (`action_run_ast`)
+//! - inline.rs — substitution-based inlining twins of the builder paths
 //! - analysis.rs — whole-program call-site and inline-candidate analyses
 //! - ffi.rs — FFI marshalling and type-directed boundary decoding
 //! - names.rs — Lua identifier, keyword and string-literal helpers
@@ -50,6 +57,7 @@ mod expr;
 mod ffi;
 mod function;
 mod inline;
+mod lua;
 mod module;
 mod names;
 mod pattern;
@@ -61,9 +69,28 @@ mod util;
 pub(crate) use names::is_lua_keyword;
 use runtime::ondemand_prelude;
 
+/// A freshly declared local's assignment target: a real `local name`
+/// declaration under Lua's per-function local limit, or a `_v[N]` slot in
+/// the spill table over it (the slot exists implicitly; assignment is plain).
+/// See `CodeGen::declare_local_parts`.
+enum LocalDecl {
+    Fresh(String),
+    Slot(String),
+}
+
+impl LocalDecl {
+    /// The statement that binds `rhs` to this declaration.
+    fn stmt(self, rhs: lua::Expr) -> lua::Stmt {
+        match self {
+            LocalDecl::Fresh(n) => lua::Stmt::Local(vec![n], Some(rhs)),
+            LocalDecl::Slot(lv) => lua::Stmt::Assign(lv, rhs),
+        }
+    }
+}
+
 /// Tracks constructor info for code generation.
 struct CodeGen {
-    /// Current `gen_expr` recursion depth, bounded by
+    /// Current `expr_ast` recursion depth, bounded by
     /// `crate::MAX_NESTING_DEPTH`. Upstream passes (the parser's and the
     /// typechecker's own depth guards) already bound the structural depth of
     /// what reaches codegen, so this is the last-line backstop: if it ever
@@ -136,8 +163,8 @@ struct CodeGen {
     /// (see demand::local_fn_strict_params), keyed by source name and
     /// consulted BEFORE `demand_info.strict_params` at call sites — a local
     /// `go` shadows a same-named top-level function. Entries are installed
-    /// by gen_where_binds when a clause's where scope opens and restored at
-    /// clause-scope exit (gen_function / gen_pattern_match*), so a row
+    /// by where_binds_stmts when a clause's where scope opens and restored at
+    /// clause-scope exit (function_stmts / pattern_match_block*), so a row
     /// never outlives its lexical scope or leaks into a sibling clause.
     local_strict_params: std::collections::HashMap<String, Vec<bool>>,
     /// Structured twin of `local_strict_params`: the demand rows of the
@@ -145,7 +172,7 @@ struct CodeGen {
     /// demand::local_fn_rows), threaded into demanded_map /
     /// demanded_map_guards so a binding whose value is demanded THROUGH a
     /// call to a where-local counts as demanded. Installed by
-    /// gen_where_binds (via clause_local_rows, which shadows every
+    /// where_binds_stmts (via clause_local_rows, which shadows every
     /// where-bound name first) and restored at the same scope exits as
     /// `local_strict_params`, so a row never leaks across clauses.
     local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
@@ -161,8 +188,6 @@ struct CodeGen {
     /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
     /// return table must export it — even when there are no other exports.
     embed_var_export: bool,
-    output: String,
-    indent: usize,
 }
 
 impl CodeGen {
@@ -195,7 +220,6 @@ impl CodeGen {
             local_demand_rows: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
             embed_var_export: false,
-            output: String::new(), indent: 0,
         }
     }
 
@@ -230,56 +254,60 @@ impl CodeGen {
         }
     }
 
-    /// Returns "local name = " or "name = " depending on forward declaration.
-    fn var_decl(&self, lua_name: &str) -> String {
+    /// Bind `rhs` to a top-level name — its
+    /// `__mll_fn[N]` slot when forward-declared, a fresh `local` otherwise.
+    fn var_decl_stmt(&self, lua_name: &str, rhs: lua::Expr) -> lua::Stmt {
         if let Some(&slot) = self.fn_table.get(lua_name) {
-            format!("__mll_fn[{}] = ", slot)
+            lua::Stmt::Assign(format!("__mll_fn[{}]", slot), rhs)
         } else {
-            format!("local {} = ", lua_name)
+            lua::Stmt::Local(vec![lua_name.to_string()], Some(rhs))
         }
     }
 
     /// Lua's per-function local variable limit.
     const LOCAL_LIMIT: usize = 180;
 
-    /// Declare a local variable, returning the Lua lvalue to assign to.
-    /// When the local count is under the limit, returns `"local name"`.
-    /// When over the limit, allocates a `_v[N]` slot and returns `"_v[N]"`.
+    /// Declare a local variable for a block-building emission path. Returns
+    /// an optional statement that must precede the declaration (the one-time
+    /// `local _v = {}` spill-table setup) and the declaration itself: a fresh
+    /// `local name` under the limit, a `_v[N]` slot assignment over it.
     /// Also registers the name in `local_vars` (and `var_slots` if tabled).
-    fn declare_local(&mut self, name: &str) -> String {
+    fn declare_local_parts(&mut self, name: &str) -> (Option<lua::Stmt>, LocalDecl) {
         self.local_vars.insert(name.to_string());
         self.local_count += 1;
         if self.local_count > Self::LOCAL_LIMIT {
-            if !self.var_table_emitted {
-                // Emit the _v table declaration (this itself is one local)
-                self.emit_line("local _v = {}");
+            let pre = if !self.var_table_emitted {
+                // The _v table declaration (this itself is one local)
                 self.var_table_emitted = true;
-            }
+                Some(lua::Stmt::Local(vec!["_v".into()], Some(lua::Expr::Table(vec![]))))
+            } else {
+                None
+            };
             self.var_slots_next += 1;
             self.var_slots.insert(name.to_string(), self.var_slots_next);
-            format!("_v[{}]", self.var_slots_next)
+            (pre, LocalDecl::Slot(format!("_v[{}]", self.var_slots_next)))
         } else {
-            format!("local {}", name)
+            (None, LocalDecl::Fresh(name.to_string()))
         }
     }
 
-    /// Declare a local without a name (forward declaration for later assignment).
+    /// Declare a local without a value (forward declaration for later
+    /// assignment) in a block-building path. Returns the statements to place
+    /// at the declaration point: the optional spill-table setup plus the
+    /// `local name` line — or nothing beyond the setup for a `_v[N]` slot,
+    /// which exists implicitly (nil).
     /// Only used when the variable needs to exist before its value is known
     /// (e.g., `local x; if ... then x = a else x = b end`).
-    fn declare_local_fwd(&mut self, name: &str) {
-        self.local_vars.insert(name.to_string());
-        self.local_count += 1;
-        if self.local_count > Self::LOCAL_LIMIT {
-            if !self.var_table_emitted {
-                self.emit_line("local _v = {}");
-                self.var_table_emitted = true;
-            }
-            self.var_slots_next += 1;
-            self.var_slots.insert(name.to_string(), self.var_slots_next);
-            // _v[N] slot exists implicitly (nil), no declaration needed
-        } else {
-            self.emit_line(&format!("local {}", name));
+    fn declare_local_fwd_stmts(&mut self, name: &str) -> Vec<lua::Stmt> {
+        let (pre, decl) = self.declare_local_parts(name);
+        let mut out = Vec::new();
+        if let Some(s) = pre {
+            out.push(s);
         }
+        if let LocalDecl::Fresh(n) = decl {
+            out.push(lua::Stmt::Local(vec![n], None));
+        }
+        out
     }
 
     /// Get the Lua lvalue for an already-declared local (for assignment after fwd decl).
@@ -291,7 +319,6 @@ impl CodeGen {
         }
     }
 
-    /// Create a sub-CodeGen that shares lookup tables but has its own output buffer.
     /// Carry a sub-generator's depth-guard error (if any) into this
     /// generator, so `generate` sees it no matter where it fired.
     fn absorb_sub_error(&mut self, sub: &mut CodeGen) {
@@ -299,6 +326,10 @@ impl CodeGen {
             self.depth_error = sub.depth_error.take();
         }
     }
+
+    /// Create a sub-CodeGen that shares this generator's lookup tables but
+    /// whose state changes are discarded (used for guard conditions — see
+    /// `guard_cond_raw` in pattern.rs).
 
     fn new_sub(&self) -> CodeGen {
         let mut sub = CodeGen::new();
@@ -321,11 +352,6 @@ impl CodeGen {
         sub
     }
 
-    fn emit(&mut self, s: &str) { self.output.push_str(s); }
-
-    fn emit_indent(&mut self) { for _ in 0..self.indent { self.output.push_str("    "); } }
-
-    fn emit_line(&mut self, s: &str) { self.emit_indent(); self.output.push_str(s); self.output.push('\n'); }
 
     fn constructor_info(&self, name: &str) -> Option<(usize, usize, bool)> {
         for (cn, _, idx, total, is_enum) in &self.constructors {
@@ -336,19 +362,21 @@ impl CodeGen {
 }
 
 /// Generate the Lua module. `Err` carries the codegen depth-guard
-/// diagnostic (see `CodeGen::gen_expr`) — the only error this pass can
+/// diagnostic (see `CodeGen::expr_ast`) — the only error this pass can
 /// produce; everything else was rejected by earlier passes.
 pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> Result<String, String> {
     let mut cg = CodeGen::new();
     cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
     cg.demand_info = crate::demand::analyze(module);
-    // Generate the program body first so we can see which runtime-prelude
-    // functions it actually references, then prepend only those (transitively).
-    cg.generate_module(module);
+    // Build the program body first (as one Lua statement list, then printed)
+    // so we can see which runtime-prelude functions it actually references,
+    // then prepend only those (transitively).
+    let stmts = cg.module_stmts(module);
     if let Some(msg) = cg.depth_error {
         return Err(msg);
     }
-    let body = cg.output;
+    let mut body = String::new();
+    lua::Block(stmts).render(0, &mut body);
     let prelude = ondemand_prelude(&body);
     // The embedded-source block goes at the very top of the file: extraction
     // takes the earliest marker, so the genuine block must precede anything

@@ -70,7 +70,7 @@ impl CodeGen {
     /// Cheap-eagerness (Faxén-style) is only valid for expressions that
     /// cannot fail or diverge. A bare `Var` does not qualify by itself: a
     /// variable can be bound to a thunk of `error`/an infinite loop, and
-    /// gen_expr emits `__force(v)` for non-concrete variables — so eagerly
+    /// expr_ast emits `__force(v)` for non-concrete variables — so eagerly
     /// evaluating `y + 1` forces `y` even though the binding was never
     /// demanded (GHC would never touch it). A variable only qualifies when
     /// its referent is provably WHNF, which is exactly the `concrete_vars`
@@ -91,7 +91,7 @@ impl CodeGen {
     /// divisor and raise "divide by zero" explicitly). Such an expression can be
     /// ⊥ even though every operand is a plain value, so it is never safe to
     /// evaluate eagerly in a non-strict position: bottom always weighs
-    /// maximally on the laziness side (see the weighing in gen_arg). Float `/`
+    /// maximally on the laziness side (see the weighing in arg_ast). Float `/`
     /// is deliberately excluded — `1/0` is `inf`, matching Haskell's `Double`,
     /// not an error.
     pub(super) fn contains_trapping_op(expr: &TExpr) -> bool {
@@ -170,7 +170,7 @@ impl CodeGen {
     /// The structured local-function rows in scope for `clause`: the
     /// current scope's rows with every where-bound NAME shadowed first (a
     /// sibling value binding must not inherit an enclosing scope's row —
-    /// same discipline gen_where_binds applies to local_strict_params),
+    /// same discipline where_binds_stmts applies to local_strict_params),
     /// extended with the rows of the clause's own where-bound function
     /// groups (see demand::local_fn_rows).
     pub(super) fn clause_local_rows(
@@ -197,7 +197,7 @@ impl CodeGen {
     ///
     /// Computes the clause's local rows itself (rather than reading
     /// local_demand_rows) because every caller evaluates this seed BEFORE
-    /// gen_where_binds opens the clause's where scope.
+    /// where_binds_stmts opens the clause's where scope.
     pub(super) fn clause_demanded(&self, clause: &TClause) -> crate::demand::DemandMap {
         let inlined = |n: &str| self.inline_fns.contains_key(n);
         let locals = self.clause_local_rows(clause);
@@ -259,10 +259,10 @@ pub(super) fn strict_binding_safe(binds: &[TLocalDef], i: usize) -> bool {
 }
 
 /// If the lazy binding `binds[i]` is a pure alias — its RHS is exactly a bare
-/// variable (after stripping parens, as gen_arg does) — return that variable
+/// variable (after stripping parens, as arg_ast does) — return that variable
 /// expression so the emitter assigns the raw reference instead of wrapping a
 /// fresh thunk around a force of it. The variable already denotes a
-/// thunk-or-value (the same rule gen_arg applies to bare-variable arguments):
+/// thunk-or-value (the same rule arg_ast applies to bare-variable arguments):
 /// `x = y` then shares y's thunk, so laziness is preserved (nothing is forced
 /// at binding time), a single force memoizes for both names, and the extra
 /// thunk allocation plus force indirection disappear. This is GHC semantics —

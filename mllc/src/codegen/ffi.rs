@@ -4,14 +4,17 @@
 //! Results are decoded by descriptor: the `ffi_decode_desc*` family builds a
 //! Lua descriptor expression consumed at runtime by `__mll_ffi_decode`, and
 //! returns `None` when the raw host value already matches the mata-ll
-//! representation, so no wrapper is emitted. Arguments are forced at the
+//! representation, so no wrapper is emitted. Descriptor text is carried as
+//! `lua::Expr::Raw` leaves (the descriptor mini-language stays textual);
+//! the call shapes around it are built as AST. Arguments are forced at the
 //! boundary; `Maybe`-declared arguments become optional Lua parameters
 //! (`__mll_opt` / `__mll_opt_tail`). LuaCatch / LuaIOCatch calls go through
-//! `pcall` wrappers (`gen_pcall_call`) that build the `Either` tags.
+//! `pcall` wrappers (`pcall_call_ast`) that build the `Either` tags.
 
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
+use super::lua::{Expr, FuncBody, Stmt};
 use super::names::{lua_quoted_string};
 use super::util::{con_name, decompose_app, subst_tyvars};
 
@@ -54,11 +57,11 @@ impl CodeGen {
         }
     }
 
-    /// Emit an FFI call's argument list (the text between the parens, after
-    /// any already-emitted receiver — `need_comma` says whether something was
-    /// emitted before this list). Plain arguments are `__force(a)`, exactly as
-    /// before. Arguments declared `Maybe` in the FFI signature (FfiMaybeArg)
-    /// are optional Lua parameters (SPEC "Optional parameters"):
+    /// Build an FFI call's argument list (the expressions between the parens,
+    /// after any receiver the caller placed first). Plain arguments are
+    /// `__force(a)`, exactly as before. Arguments declared `Maybe` in the FFI
+    /// signature (FfiMaybeArg) are optional Lua parameters (SPEC "Optional
+    /// parameters"):
     ///   - the maximal *trailing* run of optionals is bundled into one
     ///     `__mll_opt_tail(...)` call in final argument position — its
     ///     multiple-return expands there, unwrapping each `Just` and dropping
@@ -69,49 +72,47 @@ impl CodeGen {
     ///     omitted in Lua, so it goes through `__mll_opt`: `Just x` unwraps to
     ///     `x` and `Nothing` becomes an explicit nil — Lua's own idiom for a
     ///     skipped middle optional (luaL_opt* treats nil as "use default").
-    pub(super) fn gen_ffi_args(&mut self, args: &[TExpr], mut need_comma: bool) {
+    pub(super) fn ffi_args_ast(&mut self, args: &[TExpr]) -> Vec<Expr> {
+        let mut out = Vec::new();
         // Start of the maximal trailing run of declared-optional arguments.
         let mut tail_start = args.len();
         while tail_start > 0 && matches!(args[tail_start - 1].kind, TExprKind::FfiMaybeArg { .. }) {
             tail_start -= 1;
         }
         for a in &args[..tail_start] {
-            if need_comma { self.emit(", "); }
-            need_comma = true;
             if let TExprKind::FfiMaybeArg { value } = &a.kind {
-                self.emit("__mll_opt(");
-                self.gen_ffi_boundary_value(value);
-                self.emit(")");
+                let v = self.ffi_boundary_value_ast(value);
+                out.push(Expr::call_named("__mll_opt", vec![v]));
             } else if let Some(desc) = self.ffi_arg_marshal_desc(&a.ty, &mut Vec::new()) {
                 // The argument carries structure a Lua host reads: a list must
                 // be rebuilt into a plain array, and a tuple's/record's lazy
                 // fields must be forced (and nested lists converted) before the
                 // host sees them. An FFI call is strict in its arguments, so
                 // this forces nothing the call does not already demand.
-                self.emit("__mll_arg_marshal(");
-                self.gen_expr(a);
-                self.emit(&format!(", {})", desc));
+                let v = self.expr_ast(a);
+                out.push(Expr::call_named("__mll_arg_marshal", vec![v, Expr::raw(desc)]));
             } else {
                 // The host must see a value, never a thunk — but skip the
-                // wrapper when gen_expr's own emission already yields WHNF.
-                self.gen_forced(a);
+                // wrapper when expr_ast's own emission already yields WHNF.
+                out.push(self.forced_ast(a));
             }
         }
         if tail_start < args.len() {
-            if need_comma { self.emit(", "); }
-            self.emit("__mll_opt_tail(");
-            for (i, a) in args[tail_start..].iter().enumerate() {
-                if i > 0 { self.emit(", "); }
+            let mut tail_args = Vec::new();
+            for a in &args[tail_start..] {
                 match &a.kind {
-                    TExprKind::FfiMaybeArg { value } => self.gen_ffi_boundary_value(value),
+                    TExprKind::FfiMaybeArg { value } => {
+                        tail_args.push(self.ffi_boundary_value_ast(value));
+                    }
                     _ => unreachable!("non-optional argument in trailing optional run"),
                 }
             }
-            self.emit(")");
+            out.push(Expr::call_named("__mll_opt_tail", tail_args));
         }
+        out
     }
 
-    /// Emit an optional FFI argument's underlying `Maybe` value. `__mll_opt` /
+    /// Build an optional FFI argument's underlying `Maybe` value. `__mll_opt` /
     /// `__mll_opt_tail` unwrap the `Just`/`Nothing` wrapper AFTER this to decide
     /// whether the argument is present, so here the wrapper is KEPT and only the
     /// payload's structure is marshalled (a list inside a `Just` must still
@@ -120,17 +121,19 @@ impl CodeGen {
     /// (used for a `Maybe` nested in a record/list/tuple — see
     /// `ffi_arg_marshal_desc`). When the payload has no structure to marshal
     /// (a scalar or opaque payload), emit it directly — `__mll_opt` forces it.
-    pub(super) fn gen_ffi_boundary_value(&mut self, value: &TExpr) {
+    pub(super) fn ffi_boundary_value_ast(&mut self, value: &TExpr) -> Expr {
         let (head, args) = decompose_app(&value.ty);
         if head == Some("Maybe")
             && args.len() == 1
             && let Some(pdesc) = self.ffi_arg_marshal_desc(args[0], &mut Vec::new())
         {
-            self.emit("__mll_arg_marshal(");
-            self.gen_expr(value);
-            self.emit(&format!(", {{k=\"just\",e={}}})", pdesc));
+            let v = self.expr_ast(value);
+            Expr::call_named(
+                "__mll_arg_marshal",
+                vec![v, Expr::raw(format!("{{k=\"just\",e={}}}", pdesc))],
+            )
         } else {
-            self.gen_expr(value);
+            self.expr_ast(value)
         }
     }
 
@@ -200,7 +203,7 @@ impl CodeGen {
                     // The TOP-LEVEL optional positional-argument path is separate:
                     // it keeps the wrapper for __mll_opt/__mll_opt_tail (which
                     // detect present/absent) and marshals only the payload — see
-                    // gen_ffi_boundary_value, which emits the `just` descriptor
+                    // ffi_boundary_value_ast, which emits the `just` descriptor
                     // and never routes a Maybe through here.
                     let e = self.ffi_arg_marshal_desc(args[0], stack)
                         .unwrap_or_else(|| "false".into());
@@ -245,7 +248,7 @@ impl CodeGen {
         }
     }
 
-    /// Emit `__mll_pcall(desc, root, fn, forced-args...)` for LuaCatch/
+    /// Build `__mll_pcall(desc, root, fn, forced-args...)` for LuaCatch/
     /// LuaIOCatch — `root` is the human-readable name of the host function,
     /// threaded through so a decode error on the *successful* result can say
     /// whose result it was. The forced arguments are evaluated *outside* the
@@ -253,22 +256,36 @@ impl CodeGen {
     /// `Left` — not errors from forcing our own thunks. A leading `:` in
     /// `lua_func` is a method call on arg0; the receiver is bound once to
     /// avoid re-evaluating it.
-    pub(super) fn gen_pcall_call(&mut self, lua_func: &str, desc: &Option<String>, args: &[TExpr]) {
+    pub(super) fn pcall_call_ast(&mut self, lua_func: &str, desc: &Option<String>, args: &[TExpr]) -> Expr {
         let desc_str = desc.as_deref().unwrap_or("false");
         let root = Self::ffi_root_name(lua_func);
         if let Some(method) = lua_func.strip_prefix(':') {
-            self.emit("(function() local __recv = ");
-            self.gen_forced(&args[0]);
-            self.emit(&format!(
-                "; return __mll_pcall({}, {:?}, __recv.{}, __recv",
-                desc_str, root, method
-            ));
-            self.gen_ffi_args(&args[1..], true);
-            self.emit(") end)()");
+            let recv = self.forced_ast(&args[0]);
+            let mut pargs = vec![
+                Expr::raw(desc_str),
+                Expr::raw(format!("{:?}", root)),
+                Expr::name(format!("__recv.{}", method)),
+                Expr::name("__recv"),
+            ];
+            pargs.extend(self.ffi_args_ast(&args[1..]));
+            Expr::call(
+                Expr::paren(Expr::Func(
+                    vec![],
+                    FuncBody::Inline(vec![
+                        Stmt::Local(vec!["__recv".into()], Some(recv)),
+                        Stmt::Return(Expr::call_named("__mll_pcall", pargs)),
+                    ]),
+                )),
+                vec![],
+            )
         } else {
-            self.emit(&format!("__mll_pcall({}, {:?}, {}", desc_str, root, lua_func));
-            self.gen_ffi_args(args, true);
-            self.emit(")");
+            let mut pargs = vec![
+                Expr::raw(desc_str),
+                Expr::raw(format!("{:?}", root)),
+                Expr::name(lua_func),
+            ];
+            pargs.extend(self.ffi_args_ast(args));
+            Expr::call_named("__mll_pcall", pargs)
         }
     }
 

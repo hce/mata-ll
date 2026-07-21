@@ -1,27 +1,33 @@
-//! The main expression walk: `gen_expr` / `gen_expr_inner`.
+//! The main expression walk: `expr_ast` / `expr_ast_inner`.
 //!
-//! `gen_expr` is the depth-guard wrapper: past `crate::MAX_NESTING_DEPTH`
-//! it records a clean diagnostic (surfaced by `generate`) instead of
-//! overflowing the native stack. `gen_expr_inner` is the single large match
-//! over every expression form and stays one function on purpose — the arms
+//! The expression layer BUILDS `lua::Expr` trees rather than streaming text:
+//! each arm constructs the node shape the printer renders back byte-for-byte
+//! (explicit `Paren` placement, per-site inline vs. block function layout —
+//! see lua.rs).
+//!
+//! `expr_ast` is the depth-guard wrapper: past `crate::MAX_NESTING_DEPTH` it
+//! records a clean diagnostic (surfaced by `generate`) instead of overflowing
+//! the native stack. `expr_ast_inner` is the single large match over every
+//! expression form and stays one function on purpose — the arms
 //! cross-reference each other and the WHNF predicates mirror them arm for
-//! arm. `gen_expr_lazy` emits self-referencing definitions with lazy cons
-//! tails (`__mll_lazy_cons`); `gen_literal` emits literals through the
+//! arm. `expr_lazy_ast` builds self-referencing definitions with lazy cons
+//! tails (`__mll_lazy_cons`); `literal_ast` renders literals through the
 //! canonical string quoting in names.rs.
 
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
+use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{is_builtin_op, lua_field_index, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
 impl CodeGen {
-    /// Depth-guard wrapper around `gen_expr_inner` (the whole expression
+    /// Depth-guard wrapper around `expr_ast_inner` (the whole expression
     /// walk): checked BEFORE recursing deeper, so past the limit it records a
-    /// clean diagnostic (surfaced by `generate`) and emits a placeholder
+    /// clean diagnostic (surfaced by `generate`) and builds a placeholder
     /// instead of overflowing the native stack.
-    pub(super) fn gen_expr(&mut self, expr: &TExpr) {
+    pub(super) fn expr_ast(&mut self, expr: &TExpr) -> Expr {
         if self.expr_depth >= crate::MAX_NESTING_DEPTH {
             if self.depth_error.is_none() {
                 self.depth_error = Some(format!(
@@ -32,26 +38,26 @@ impl CodeGen {
                     crate::MAX_NESTING_DEPTH
                 ));
             }
-            self.emit("nil");
-            return;
+            return Expr::lit("nil");
         }
         self.expr_depth += 1;
-        self.gen_expr_inner(expr);
+        let e = self.expr_ast_inner(expr);
         self.expr_depth -= 1;
+        e
     }
 
-    pub(super) fn gen_expr_inner(&mut self, expr: &TExpr) {
+    fn expr_ast_inner(&mut self, expr: &TExpr) -> Expr {
         match &expr.kind {
             TExprKind::Var(name) => {
                 match name.as_str() {
-                    "otherwise" => self.emit("true"),
+                    "otherwise" => Expr::lit("true"),
                     // A first-class / partially-applied `seq` (e.g. `foldr seq
                     // z`, `map (seq x) ys`, `let g = seq x`) resolves to the
                     // runtime primitive, which forces its first argument and
                     // returns the second (over-application applies the returned
                     // function to the rest). The fully-applied prefix and
                     // backtick forms are lowered inline before reaching here.
-                    "seq" => self.emit("__mll_seq"),
+                    "seq" => Expr::name("__mll_seq"),
                     // A first-class / partially-applied / prefix `div` or `mod`
                     // (`div 7 2`, `map (div 10) xs`, `foldr div z`) resolves to
                     // its forcing wrapper, which forces both arguments to WHNF
@@ -59,53 +65,45 @@ impl CodeGen {
                     // `a `div` b` (InfixApp) stays on the bare strict core with
                     // pre-forced operands, keeping the arithmetic hot path free
                     // of redundant forces.
-                    "div" => self.emit("__mll_div_fn"),
-                    "mod" => self.emit("__mll_mod_fn"),
-                    "quot" => self.emit("__mll_quot_fn"),
-                    "rem" => self.emit("__mll_rem_fn"),
+                    "div" => Expr::name("__mll_div_fn"),
+                    "mod" => Expr::name("__mll_mod_fn"),
+                    "quot" => Expr::name("__mll_quot_fn"),
+                    "rem" => Expr::name("__mll_rem_fn"),
                     _ => {
                         let sname = sanitize_name(name);
                         let lref = self.lua_ref(&sname);
                         if self.concrete_vars.contains(&sname) {
-                            self.emit(&lref);
+                            Expr::name(lref)
                         } else {
-                            self.emit("__force(");
-                            self.emit(&lref);
-                            self.emit(")");
+                            Expr::force(Expr::name(lref))
                         }
                     }
                 }
             }
             TExprKind::Con(name) => {
                 match name.as_str() {
-                    "[]" => self.emit("nil"),
-                    _ => {
-                        let lref = self.lua_ref(&sanitize_name(name));
-                        self.emit(&lref);
-                    }
+                    "[]" => Expr::lit("nil"),
+                    _ => Expr::name(self.lua_ref(&sanitize_name(name))),
                 }
             }
-            TExprKind::Lit(lit) => self.gen_literal(lit),
+            TExprKind::Lit(lit) => Self::literal_ast(lit),
             TExprKind::App(func, arg) => {
                 // Record field accessor: inline as direct table indexing.
                 // The field may hold a thunk (lazy construction), so force the
-                // projected value. The container is forced by gen_expr(arg) when
+                // projected value. The container is forced by expr_ast(arg) when
                 // it is a non-concrete variable; __force is idempotent on values.
                 // Laziness is preserved because non-strict argument positions
-                // thunk-wrap the whole projection (see gen_arg).
+                // thunk-wrap the whole projection (see arg_ast).
                 if let TExprKind::Var(name) = &func.kind
                     && let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
                         // A LuaDict field is keyed by name; a plain record field
-                        // by position. Compute the index expression before
-                        // gen_expr borrows self mutably.
+                        // by position.
                         let index = match self.luadict_field_key.get(&sanitize_name(name)) {
                             Some(key) => lua_field_index(key),
                             None => format!("[{}]", idx),
                         };
-                        self.emit("__force(");
-                        self.gen_expr(arg);
-                        self.emit(&format!("{})", index));
-                        return;
+                        let container = self.expr_ast(arg);
+                        return Expr::force(Expr::index(container, index));
                     }
 
                 // Check for cons application: (:) x xs => __mll_cons(x, xs)
@@ -114,25 +112,33 @@ impl CodeGen {
                         && name == ":" {
                             // Try to collect a literal list and emit compactly
                             if let Some(elems) = Self::collect_list_literal(expr) {
-                                self.emit("(function() local _l = nil; ");
+                                let mut stmts = vec![Stmt::Local(
+                                    vec!["_l".into()],
+                                    Some(Expr::lit("nil")),
+                                )];
                                 for elem in elems.iter().rev() {
-                                    self.emit("_l = __mll_cons(");
                                     // A cons head is a lazy position: `:` forces
                                     // neither side. Weigh it like any argument so
                                     // a possibly-⊥ element is suspended rather
                                     // than run when the cell is built.
                                     // Value-consumers force the head on read; see
                                     // the head-consumption contract on __mll_head.
-                                    self.gen_arg(elem, false);
-                                    self.emit(", _l); ");
+                                    let head = self.arg_ast(elem, false);
+                                    stmts.push(Stmt::Assign(
+                                        "_l".into(),
+                                        Expr::call_named("__mll_cons", vec![head, Expr::name("_l")]),
+                                    ));
                                 }
-                                self.emit("return _l end)()");
-                                return;
+                                stmts.push(Stmt::Return(Expr::name("_l")));
+                                return Expr::call(
+                                    Expr::paren(Expr::Func(vec![], FuncBody::Inline(stmts))),
+                                    vec![],
+                                );
                             }
                             // Keep the cons tail lazy. A bare reference — a
                             // variable or a nullary constructor like [] —
                             // already denotes a thunk-or-value, so emit it raw:
-                            // forcing it here (gen_expr forces non-concrete
+                            // forcing it here (expr_ast forces non-concrete
                             // vars) would evaluate the rest of the spine eagerly
                             // and diverge on infinite or self-referential lists
                             // (e.g. `cons x rest = x : rest`). Any tail that
@@ -147,21 +153,19 @@ impl CodeGen {
                             let tail_is_ref = matches!(&tail.kind,
                                 TExprKind::Var(_) | TExprKind::Con(_));
                             if tail_is_ref {
-                                self.emit("__mll_cons(");
-                                self.gen_arg(inner_arg, false); // lazy head — see below
-                                self.emit(", ");
-                                self.gen_lazy_ref(tail);
-                                self.emit(")");
+                                let head = self.arg_ast(inner_arg, false); // lazy head — see below
+                                let tail_e = self.lazy_ref_ast(tail);
+                                return Expr::call_named("__mll_cons", vec![head, tail_e]);
                             } else {
-                                self.emit("__mll_lazy_cons(");
                                 // Lazy head: suspend a possibly-⊥ element instead
                                 // of running it when the cell is built.
-                                self.gen_arg(inner_arg, false);
-                                self.emit(", function() return ");
-                                self.gen_expr(arg);
-                                self.emit(" end)");
+                                let head = self.arg_ast(inner_arg, false);
+                                let tail_e = self.expr_ast(arg);
+                                return Expr::call_named(
+                                    "__mll_lazy_cons",
+                                    vec![head, Expr::inline_fn0(tail_e)],
+                                );
                             }
-                            return;
                         }
 
                 // seq a b (prefix, EXACTLY two args) => force a, return b,
@@ -174,27 +178,24 @@ impl CodeGen {
                 if let TExprKind::App(seq_f, seq_a) = &func.kind
                     && let TExprKind::Var(name) = &seq_f.kind
                         && name == "seq" {
-                            self.gen_seq_inline(seq_a, arg);
-                            return;
+                            return self.seq_inline_ast(seq_a, arg);
                         }
 
                 // return/pure wrap their argument in an IO action closure whose
                 // performed value is the argument, left UNFORCED per the
                 // eagerness contract: running `return ⊥` must not raise until
-                // something demands the value. gen_arg(strict=false) suspends a
+                // something demands the value. arg_ast(strict=false) suspends a
                 // possibly-⊥ argument in a thunk and keeps a provably-total one
                 // eager, so `return 0` still yields a bare `0` while
                 // `return (error "x")` yields an inert thunk. This is the
                 // first-class / higher-order path (e.g. `fmap f (return e)`,
                 // `mapM (\x -> return (g x)) xs`); the do-block bind chain
-                // flattens its own returns through gen_action, which suspends
+                // flattens its own returns through action_run_ast, which suspends
                 // the same way.
                 if let TExprKind::Var(name) = &func.kind
                     && (name == "return" || name == "pure") {
-                        self.emit("(function() return ");
-                        self.gen_arg(arg, false);
-                        self.emit(" end)");
-                        return;
+                        let payload = self.arg_ast(arg, false);
+                        return Expr::paren(Expr::inline_fn0(payload));
                     }
 
                 // Collect all applied arguments
@@ -210,33 +211,28 @@ impl CodeGen {
                 // errors are deferred into pcall rather than crashing eagerly.
                 if let TExprKind::Var(name) = &f.kind {
                     if name == "try" && args.len() == 1 {
-                        self.emit("try_(function() return ");
-                        self.gen_action(args[0]);
-                        self.emit(" end)");
-                        return;
+                        let action = self.action_run_ast(args[0], false);
+                        return Expr::call_named("try_", vec![Expr::inline_fn0(action)]);
                     }
                     if name == "catch" && args.len() == 2 {
-                        self.emit("catch_(function() return ");
-                        self.gen_action(args[0]);
-                        self.emit(" end, ");
-                        self.gen_expr(args[1]);
-                        self.emit(")");
-                        return;
+                        let action = self.action_run_ast(args[0], false);
+                        let handler = self.expr_ast(args[1]);
+                        return Expr::call_named(
+                            "catch_",
+                            vec![Expr::inline_fn0(action), handler],
+                        );
                     }
                 }
 
                 // Typeclass methods on primitive types → inline as Lua operators
-                // (primitive_method_lua_op is also what gen_expr_yields_whnf
+                // (primitive_method_lua_op is also what expr_yields_whnf
                 // keys on to know this emission is a forced native operation).
                 if args.len() == 2
                     && let TExprKind::Var(name) = &f.kind {
                         if let Some(op) = primitive_method_lua_op(name) {
-                            self.emit("(");
-                            self.gen_forced(args[0]);
-                            self.emit(&format!(" {} ", op));
-                            self.gen_forced(args[1]);
-                            self.emit(")");
-                            return;
+                            let l = self.forced_ast(args[0]);
+                            let r = self.forced_ast(args[1]);
+                            return Expr::paren(Expr::binop(op, l, r));
                         }
                     }
 
@@ -249,10 +245,8 @@ impl CodeGen {
                             for (param, arg) in params.iter().zip(args.iter()) {
                                 subst.insert(param.clone(), *arg);
                             }
-                            self.emit("(");
-                            self.gen_expr_subst(&body, &subst);
-                            self.emit(")");
-                            return;
+                            let inlined = self.expr_subst_ast(&body, &subst);
+                            return Expr::paren(inlined);
                         }
 
                 // Look up callee's demand info for call-site strictness
@@ -280,52 +274,41 @@ impl CodeGen {
                     let extra_params: Vec<String> = (0..remaining)
                         .map(|i| format!("_pa{}", i))
                         .collect();
-                    self.emit(&format!("(function({})\n", extra_params.join(", ")));
-                    self.indent += 1;
-                    self.emit_indent();
-                    self.emit("return ");
-                    self.gen_callee(f);
-                    self.emit("(");
+                    let callee = self.callee_ast(f);
+                    let mut cargs = Vec::new();
                     for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.emit(", "); }
                         let is_strict = callee_strict.as_ref()
                             .is_some_and(|v| v.get(i).copied().unwrap_or(false));
+                        let arg_e = self.arg_ast(a, is_strict);
                         if i == 0 && let Some(adapter) = arg0_adapter {
-                            self.emit(adapter);
-                            self.emit("(");
-                            self.gen_arg(a, is_strict);
-                            self.emit(")");
+                            cargs.push(Expr::call_named(adapter, vec![arg_e]));
                         } else {
-                            self.gen_arg(a, is_strict);
+                            cargs.push(arg_e);
                         }
                     }
                     for p in &extra_params {
-                        self.emit(", ");
-                        self.emit(p);
+                        cargs.push(Expr::name(p.clone()));
                     }
-                    self.emit(")\n");
-                    self.indent -= 1;
-                    self.emit_indent();
-                    self.emit("end)");
+                    Expr::paren(Expr::Func(
+                        extra_params,
+                        FuncBody::Block(Block(vec![Stmt::Return(Expr::call(callee, cargs))])),
+                    ))
                 } else {
                     // Full application
                     // Wrap function literals in parens so Lua allows calling them
-                    self.gen_callee(f);
-                    self.emit("(");
+                    let callee = self.callee_ast(f);
+                    let mut cargs = Vec::new();
                     for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.emit(", "); }
                         let is_strict = callee_strict.as_ref()
                             .is_some_and(|v| v.get(i).copied().unwrap_or(false));
+                        let arg_e = self.arg_ast(a, is_strict);
                         if i == 0 && let Some(adapter) = arg0_adapter {
-                            self.emit(adapter);
-                            self.emit("(");
-                            self.gen_arg(a, is_strict);
-                            self.emit(")");
+                            cargs.push(Expr::call_named(adapter, vec![arg_e]));
                         } else {
-                            self.gen_arg(a, is_strict);
+                            cargs.push(arg_e);
                         }
                     }
-                    self.emit(")");
+                    Expr::call(callee, cargs)
                 }
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
@@ -337,39 +320,33 @@ impl CodeGen {
                     // error on a zero divisor and use native integer floor
                     // division (Lua 5.3+ `//`) when the host has it. quot/rem
                     // truncate toward zero (remainder takes the dividend's sign).
-                    self.emit(match op.as_str() {
-                        "div" => "__mll_div(", "mod" => "__mll_mod(",
-                        "quot" => "__mll_quot(", _ => "__mll_rem(",
-                    });
-                    self.gen_forced(lhs);
-                    self.emit(", ");
-                    self.gen_forced(rhs);
-                    self.emit(")");
-                    return;
+                    let helper = match op.as_str() {
+                        "div" => "__mll_div", "mod" => "__mll_mod",
+                        "quot" => "__mll_quot", _ => "__mll_rem",
+                    };
+                    let l = self.forced_ast(lhs);
+                    let r = self.forced_ast(rhs);
+                    return Expr::call_named(helper, vec![l, r]);
                 }
                 if op == "++" {
-                    self.emit("__mll_list_append(");
-                    self.gen_expr(lhs);
-                    self.emit(", function() return ");
-                    self.gen_expr(rhs);
-                    self.emit(" end)");
-                    return;
+                    let l = self.expr_ast(lhs);
+                    let r = self.expr_ast(rhs);
+                    return Expr::call_named(
+                        "__mll_list_append",
+                        vec![l, Expr::inline_fn0(r)],
+                    );
                 }
                 if op == "!!" {
-                    self.emit("__mll_list_index(");
-                    self.gen_expr(lhs);
-                    self.emit(", ");
-                    self.gen_forced(rhs);
-                    self.emit(")");
-                    return;
+                    let l = self.expr_ast(lhs);
+                    let r = self.forced_ast(rhs);
+                    return Expr::call_named("__mll_list_index", vec![l, r]);
                 }
                 if op == "seq" {
                     // Backtick `a `seq` b`: same inline lowering as prefix
                     // `seq a b` (force a, return b in tail position). Without
                     // this the operator fell to the user-operator branch below
                     // and emitted `seq(a, b)` — a call to a nonexistent global.
-                    self.gen_seq_inline(lhs, rhs);
-                    return;
+                    return self.seq_inline_ast(lhs, rhs);
                 }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
@@ -382,7 +359,7 @@ impl CodeGen {
                         // eagerly and diverge on infinite/self-referential
                         // lists (e.g. `cons x rest = x : rest`). Any tail that
                         // requires computation is wrapped in a thunk; the
-                        // runtime forces the cell when read. See gen_lazy_ref.
+                        // runtime forces the cell when read. See lazy_ref_ast.
                         let tail = {
                             let mut t = rhs.as_ref();
                             while let TExprKind::Paren(inner) = &t.kind { t = inner.as_ref(); }
@@ -393,21 +370,21 @@ impl CodeGen {
                         // The head is a lazy position too; weigh it so a
                         // possibly-⊥ head is suspended, not run at construction.
                         if tail_is_ref {
-                            self.emit("__mll_cons(");
-                            self.gen_arg(lhs, false); self.emit(", "); self.gen_lazy_ref(tail);
-                            self.emit(")");
+                            let head = self.arg_ast(lhs, false);
+                            let tail_e = self.lazy_ref_ast(tail);
+                            return Expr::call_named("__mll_cons", vec![head, tail_e]);
                         } else {
-                            self.emit("__mll_lazy_cons(");
-                            self.gen_arg(lhs, false);
-                            self.emit(", function() return ");
-                            self.gen_expr(rhs);
-                            self.emit(" end)");
+                            let head = self.arg_ast(lhs, false);
+                            let tail_e = self.expr_ast(rhs);
+                            return Expr::call_named(
+                                "__mll_lazy_cons",
+                                vec![head, Expr::inline_fn0(tail_e)],
+                            );
                         }
-                        return;
                     }
                     "$" => {
                         // f $ x is exactly f x, so x is weighed like a normal
-                        // application argument (gen_arg): eager when f's next
+                        // application argument (arg_ast): eager when f's next
                         // parameter position is strict or x is cheap/total,
                         // suspended otherwise. When the result type still has
                         // arrows, f's real Lua arity is 1 + remaining under
@@ -449,26 +426,26 @@ impl CodeGen {
                                     .and_then(|v| v.get(applied).copied())
                                     .unwrap_or(false))
                         };
+                        let callee = self.callee_ast(lhs);
+                        let arg = self.arg_ast(rhs, rhs_strict);
+                        let arg = match adapter {
+                            Some(a) => Expr::call_named(a, vec![arg]),
+                            None => arg,
+                        };
                         if remaining > 0 {
                             let extra: Vec<String> =
                                 (0..remaining).map(|i| format!("_pa{}", i)).collect();
-                            self.emit(&format!("(function({}) return ", extra.join(", ")));
-                            self.gen_callee(lhs);
-                            self.emit("(");
-                            if let Some(a) = adapter { self.emit(a); self.emit("("); }
-                            self.gen_arg(rhs, rhs_strict);
-                            if adapter.is_some() { self.emit(")"); }
-                            for p in &extra { self.emit(", "); self.emit(p); }
-                            self.emit(") end)");
+                            let mut cargs = vec![arg];
+                            for p in &extra {
+                                cargs.push(Expr::name(p.clone()));
+                            }
+                            return Expr::paren(Expr::Func(
+                                extra,
+                                FuncBody::Inline(vec![Stmt::Return(Expr::call(callee, cargs))]),
+                            ));
                         } else {
-                            self.gen_callee(lhs);
-                            self.emit("(");
-                            if let Some(a) = adapter { self.emit(a); self.emit("("); }
-                            self.gen_arg(rhs, rhs_strict);
-                            if adapter.is_some() { self.emit(")"); }
-                            self.emit(")");
+                            return Expr::call(callee, vec![arg]);
                         }
-                        return;
                     }
                     ">>=" => {
                         // IO actions: do-blocks produce function() closures.
@@ -479,31 +456,27 @@ impl CodeGen {
                         // multi-clause emission path wraps the ST body here) —
                         // where the ambient result demand is exactly the demand
                         // on the action's yielded value — or for a first-class
-                        // action, whose enclosing context (gen_arg, statement
+                        // action, whose enclosing context (arg_ast, statement
                         // actions, value-binding RHSes, lambdas) has already
                         // reset the ambient demand to Head. So it is used as-is.
                         if let TExprKind::Lambda { .. } = &rhs.kind {
-                            self.emit("function()\n");
-                            self.indent += 1;
-                            self.gen_bind_chain_io(expr);
-                            self.indent -= 1;
-                            self.emit_indent(); self.emit("end");
+                            let b = self.bind_chain_block(expr, true);
+                            return Expr::Func(vec![], FuncBody::Block(b));
                         } else {
                             // m >>= f (non-lambda): wrap as action
-                            self.emit("function() return ("); self.gen_expr(rhs); self.emit(")(");
-                            self.gen_action(lhs); self.emit(")() end");
+                            let f_e = self.expr_ast(rhs);
+                            let m_e = self.action_run_ast(lhs, false);
+                            return Expr::inline_fn0(Expr::call(
+                                Expr::call(Expr::paren(f_e), vec![m_e]),
+                                vec![],
+                            ));
                         }
-                        return;
                     }
                     ">>" => {
                         // IO-then: produce action closure (see the ">>=" arm
                         // for the cur_result_demand rationale).
-                        self.emit("function()\n");
-                        self.indent += 1;
-                        self.gen_bind_chain_io(expr);
-                        self.indent -= 1;
-                        self.emit_indent(); self.emit("end");
-                        return;
+                        let b = self.bind_chain_block(expr, true);
+                        return Expr::Func(vec![], FuncBody::Block(b));
                     }
                     "." => {
                         // f . g as a value. Under the N-ary convention the
@@ -539,33 +512,38 @@ impl CodeGen {
                                 .or_else(|| self.demand_info.strict_params.get(n))
                                 .and_then(|v| v.first().copied()).unwrap_or(false));
                         let suspend = !f_strict && g_extras == 0 && adapter.is_none();
-                        self.emit("(function(_x");
-                        for i in 0..extras { self.emit(&format!(", _pa{}", i)); }
-                        self.emit(") return ");
-                        self.gen_callee(lhs);
-                        self.emit("(");
-                        if suspend { self.emit("__thunk(function() return "); }
-                        if let Some(a) = adapter { self.emit(a); self.emit("("); }
-                        if g_extras == 0 {
-                            self.gen_callee(rhs);
-                            self.emit("(_x)");
+                        let f_callee = self.callee_ast(lhs);
+                        let inner = if g_extras == 0 {
+                            let g_callee = self.callee_ast(rhs);
+                            Expr::call(g_callee, vec![Expr::name("_x")])
                         } else {
-                            self.emit("(function(");
-                            for i in 0..g_extras {
-                                if i > 0 { self.emit(", "); }
-                                self.emit(&format!("_pb{}", i));
+                            let pb_params: Vec<String> =
+                                (0..g_extras).map(|i| format!("_pb{}", i)).collect();
+                            let g_callee = self.callee_ast(rhs);
+                            let mut gargs = vec![Expr::name("_x")];
+                            for p in &pb_params {
+                                gargs.push(Expr::name(p.clone()));
                             }
-                            self.emit(") return ");
-                            self.gen_callee(rhs);
-                            self.emit("(_x");
-                            for i in 0..g_extras { self.emit(&format!(", _pb{}", i)); }
-                            self.emit(") end)");
+                            Expr::paren(Expr::Func(
+                                pb_params,
+                                FuncBody::Inline(vec![Stmt::Return(Expr::call(g_callee, gargs))]),
+                            ))
+                        };
+                        let inner = match adapter {
+                            Some(a) => Expr::call_named(a, vec![inner]),
+                            None => inner,
+                        };
+                        let inner = if suspend { Expr::thunk(inner) } else { inner };
+                        let mut outer_params = vec!["_x".to_string()];
+                        let mut fargs = vec![inner];
+                        for i in 0..extras {
+                            outer_params.push(format!("_pa{}", i));
+                            fargs.push(Expr::name(format!("_pa{}", i)));
                         }
-                        if suspend { self.emit(" end)"); }
-                        if adapter.is_some() { self.emit(")"); }
-                        for i in 0..extras { self.emit(&format!(", _pa{}", i)); }
-                        self.emit(") end)");
-                        return;
+                        return Expr::paren(Expr::Func(
+                            outer_params,
+                            FuncBody::Inline(vec![Stmt::Return(Expr::call(f_callee, fargs))]),
+                        ));
                     }
                     other => other,
                 };
@@ -573,25 +551,35 @@ impl CodeGen {
                     // Lua-native operator: emit as infix. Operands are forced —
                     // a thunk is a table, which would corrupt arithmetic and
                     // comparison, and is truthy under `and`/`or`.
-                    self.emit("("); self.gen_forced(lhs);
-                    self.emit(&format!(" {} ", lua_op));
-                    self.gen_forced(rhs); self.emit(")");
+                    let l = self.forced_ast(lhs);
+                    let r = self.forced_ast(rhs);
+                    Expr::paren(Expr::binop(lua_op, l, r))
                 } else {
                     // User-defined or non-Lua operator: emit as function call
                     let sop = sanitize_name(op);
-                    self.emit(&self.lua_ref(&sop)); self.emit("(");
-                    self.gen_expr(lhs); self.emit(", "); self.gen_expr(rhs); self.emit(")");
+                    let fref = self.lua_ref(&sop);
+                    let l = self.expr_ast(lhs);
+                    let r = self.expr_ast(rhs);
+                    Expr::call_named(&fref, vec![l, r])
                 }
             }
-            TExprKind::Negate(inner) => { self.emit("(-"); self.gen_expr(inner); self.emit(")"); }
+            TExprKind::Negate(inner) => Expr::paren(Expr::neg(self.expr_ast(inner))),
             TExprKind::If { cond, then_branch, else_branch } => {
-                self.emit("(function()\n"); self.indent += 1;
-                self.emit_indent(); self.emit("if "); self.gen_expr(cond); self.emit(" then\n");
-                self.indent += 1; self.emit_indent(); self.emit("return "); self.gen_tail(then_branch, false); self.emit("\n"); self.indent -= 1;
-                self.emit_indent(); self.emit("else\n");
-                self.indent += 1; self.emit_indent(); self.emit("return "); self.gen_tail(else_branch, false); self.emit("\n"); self.indent -= 1;
-                self.emit_indent(); self.emit("end\n"); self.indent -= 1;
-                self.emit_indent(); self.emit("end)()");
+                let cond_e = self.expr_ast(cond);
+                let then_s = Stmt::Return(self.tail_ast(then_branch, false));
+                let else_s = Stmt::Return(self.tail_ast(else_branch, false));
+                Expr::call(
+                    Expr::paren(Expr::Func(
+                        vec![],
+                        FuncBody::Block(Block(vec![Stmt::If {
+                            cond: cond_e,
+                            then_b: Block(vec![then_s]),
+                            elseifs: vec![],
+                            else_b: Some(Block(vec![else_s])),
+                        }])),
+                    )),
+                    vec![],
+                )
             }
             TExprKind::Case { scrutinee, branches } if branches.iter().any(|b| !b.guards.is_empty()) => {
                 // Guarded branches: lower to clause-based matching (via the
@@ -600,11 +588,11 @@ impl CodeGen {
                 // branch, exactly like function-clause guards.
                 let saved_locals = self.local_vars.clone();
                 let saved_concrete = self.concrete_vars.clone();
-                self.emit("(function(_cg)\n"); self.indent += 1;
+                let mut stmts = Vec::new();
                 // Entry force, skipped when the argument emission below
-                // (gen_expr at the call parens) already yields WHNF.
-                if !self.gen_expr_yields_whnf(scrutinee) {
-                    self.emit_line("_cg = __force(_cg)");
+                // (expr_ast at the call parens) already yields WHNF.
+                if !self.expr_yields_whnf(scrutinee) {
+                    stmts.push(Stmt::Assign("_cg".into(), Expr::force(Expr::name("_cg"))));
                 }
                 self.local_vars.insert("_cg".to_string());
                 self.concrete_vars.insert("_cg".to_string());
@@ -615,15 +603,30 @@ impl CodeGen {
                     body: b.body.clone(),
                     where_binds: vec![],
                 }).collect();
-                self.gen_pattern_match(&["_cg".to_string()], &clauses);
+                let b = self.pattern_match_block(&["_cg".to_string()], &clauses);
+                stmts.extend(b.0);
                 self.local_vars = saved_locals;
                 self.concrete_vars = saved_concrete;
-                self.indent -= 1; self.emit_indent(); self.emit("end)(");
-                self.gen_expr(scrutinee); self.emit(")");
+                let scrut = self.expr_ast(scrutinee);
+                Expr::call(
+                    Expr::paren(Expr::Func(
+                        vec!["_cg".into()],
+                        FuncBody::Block(Block(stmts)),
+                    )),
+                    vec![scrut],
+                )
             }
             TExprKind::Case { scrutinee, branches } => {
-                self.emit("(function()\n"); self.indent += 1;
-                self.emit_indent(); self.emit("local _s = "); self.gen_forced(scrutinee); self.emit("\n");
+                let scrut_stmt = Stmt::Local(vec!["_s".into()], Some(self.forced_ast(scrutinee)));
+                // Assemble the branch loop's if/elseif chain structurally:
+                // the first conditioned branch opens the `if`, later ones are
+                // `elseif`s, an unconditioned branch past the first becomes the
+                // `else` and ends the chain (later branches are unreachable),
+                // and an unconditioned FIRST branch needs no `if` at all.
+                let mut chain: Option<(Expr, Block)> = None;
+                let mut elseifs: Vec<(Expr, Block)> = Vec::new();
+                let mut else_b: Option<Block> = None;
+                let mut direct: Vec<Stmt> = Vec::new();
                 for (i, branch) in branches.iter().enumerate() {
                     let mut conditions = Vec::new();
                     let mut bindings = Vec::new();
@@ -633,33 +636,59 @@ impl CodeGen {
                     // same-named top-level/prelude function.
                     let saved_locals = self.local_vars.clone();
                     if conditions.is_empty() {
-                        if i > 0 { self.emit_indent(); self.emit("else\n"); self.indent += 1; }
-                        for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); self.local_vars.insert(var.clone()); }
-                        self.emit_indent(); self.emit("return "); self.gen_tail(&branch.body, false); self.emit("\n");
-                        if i > 0 { self.indent -= 1; self.emit_line("end"); }
+                        if i > 0 {
+                            let mut bs = Vec::new();
+                            for (var, val) in &bindings {
+                                bs.push(Stmt::Local(vec![var.clone()], Some(Expr::raw(val.clone()))));
+                                self.local_vars.insert(var.clone());
+                            }
+                            bs.push(Stmt::Return(self.tail_ast(&branch.body, false)));
+                            else_b = Some(Block(bs));
+                        } else {
+                            for (var, val) in &bindings {
+                                direct.push(Stmt::Local(vec![var.clone()], Some(Expr::raw(val.clone()))));
+                                self.local_vars.insert(var.clone());
+                            }
+                            direct.push(Stmt::Return(self.tail_ast(&branch.body, false)));
+                        }
                         self.local_vars = saved_locals;
                         break;
                     }
-                    let kw = if i == 0 { "if" } else { "elseif" };
-                    self.emit_indent(); self.emit(&format!("{} {} then\n", kw, conditions.join(" and ")));
-                    self.indent += 1;
-                    for (var, val) in &bindings { self.emit_line(&format!("local {} = {}", var, val)); self.local_vars.insert(var.clone()); }
-                    self.emit_indent(); self.emit("return "); self.gen_tail(&branch.body, false); self.emit("\n");
-                    self.indent -= 1;
-                    if i == branches.len() - 1 { self.emit_line("end"); }
+                    let cond = Expr::raw(conditions.join(" and "));
+                    let mut bs = Vec::new();
+                    for (var, val) in &bindings {
+                        bs.push(Stmt::Local(vec![var.clone()], Some(Expr::raw(val.clone()))));
+                        self.local_vars.insert(var.clone());
+                    }
+                    bs.push(Stmt::Return(self.tail_ast(&branch.body, false)));
+                    if chain.is_none() {
+                        chain = Some((cond, Block(bs)));
+                    } else {
+                        elseifs.push((cond, Block(bs)));
+                    }
                     self.local_vars = saved_locals;
                 }
-                self.indent -= 1; self.emit_indent(); self.emit("end)()");
+                let mut stmts = vec![scrut_stmt];
+                match chain {
+                    Some((cond, then_b)) => {
+                        stmts.push(Stmt::If { cond, then_b, elseifs, else_b });
+                    }
+                    None => stmts.extend(direct),
+                }
+                Expr::call(
+                    Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(stmts)))),
+                    vec![],
+                )
             }
             TExprKind::Let { binds, body } => {
-                self.emit("(function()\n"); self.indent += 1;
                 let saved_locals = self.local_vars.clone();
                 let saved_concrete = self.concrete_vars.clone();
+                let mut stmts = Vec::new();
                 // Forward-declare all names before assigning, so let bindings
                 // can be self- and mutually recursive. Lua locals are not in
                 // scope within their own initializer, so `local x = ...x...`
                 // would bind the inner `x` to an outer/global. See
-                // gen_where_binds for the same rationale.
+                // where_binds_stmts for the same rationale.
                 {
                     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                     let names: Vec<String> = binds.iter()
@@ -667,8 +696,7 @@ impl CodeGen {
                         .filter(|n| seen.insert(n.clone()))
                         .collect();
                     if !names.is_empty() {
-                        self.emit_indent();
-                        self.emit(&format!("local {}\n", names.join(", ")));
+                        stmts.push(Stmt::Local(names.clone(), None));
                     }
                     // Register the names as locals so references in the bodies
                     // resolve to these bindings, not a same-named top-level or
@@ -690,11 +718,10 @@ impl CodeGen {
                     ),
                 );
                 for (i, bind) in binds.iter().enumerate() {
-                    self.emit_indent();
                     let sname = sanitize_name(&bind.name);
                     if self.strict_binding_ok(bind, &demanded) && strict_binding_safe(binds, i) {
-                        self.emit(&format!("{} = ", sname));
-                        self.gen_expr(&bind.body); self.emit("\n");
+                        let rhs = self.expr_ast(&bind.body);
+                        stmts.push(Stmt::Assign(sname.clone(), rhs));
                         self.concrete_vars.insert(sname);
                     } else {
                         // Thunked: must not stay marked concrete (a same-named
@@ -703,19 +730,22 @@ impl CodeGen {
                         if let Some(v) = bare_var_alias(binds, i) {
                             // Bare-variable RHS: share the existing
                             // thunk-or-value (see bare_var_alias).
-                            self.emit(&format!("{} = ", sname));
-                            self.gen_lazy_ref(v);
-                            self.emit("\n");
+                            let rhs = self.lazy_ref_ast(v);
+                            stmts.push(Stmt::Assign(sname, rhs));
                         } else {
-                            self.emit(&format!("{} = __thunk(function() return ", sname));
-                            self.gen_expr(&bind.body); self.emit(" end)\n");
+                            let rhs = self.expr_ast(&bind.body);
+                            stmts.push(Stmt::Assign(sname, Expr::thunk(rhs)));
                         }
                     }
                 }
-                self.emit_indent(); self.emit("return "); self.gen_tail(body, false); self.emit("\n");
-                self.indent -= 1; self.emit_indent(); self.emit("end)()");
+                stmts.push(Stmt::Return(self.tail_ast(body, false)));
+                let out = Expr::call(
+                    Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(stmts)))),
+                    vec![],
+                );
                 self.local_vars = saved_locals;
                 self.concrete_vars = saved_concrete;
+                out
             }
             TExprKind::Lambda { params, body } => {
                 // Flatten directly nested lambdas into one Lua function and
@@ -744,368 +774,78 @@ impl CodeGen {
                 }
                 let mut all_params = ps.clone();
                 all_params.extend(eta_params.iter().cloned());
-                self.emit(&format!("function({})\n", all_params.join(", ")));
-                self.indent += 1; self.emit_indent(); self.emit("return ");
-                if eta_count > 0 {
+                let ret = if eta_count > 0 {
                     // The body still has function type (e.g. `\x -> f x` at
                     // type a -> b -> c): apply the eta params to its value,
-                    // mirroring the top-level eta-expansion in gen_function.
+                    // mirroring the top-level eta-expansion in function_stmts.
                     // The callee must be WHNF; when the emission already
-                    // yields that, gen_callee only adds the parens a bare fn
+                    // yields that, callee_ast only adds the parens a bare fn
                     // literal needs to be called.
-                    if self.gen_expr_yields_whnf(inner_body) {
-                        self.gen_callee(inner_body);
+                    let callee = if self.expr_yields_whnf(inner_body) {
+                        self.callee_ast(inner_body)
                     } else {
-                        self.emit("__force(");
-                        self.gen_expr(inner_body);
-                        self.emit(")");
-                    }
-                    self.emit(&format!("({})", eta_params.join(", ")));
+                        Expr::force(self.expr_ast(inner_body))
+                    };
+                    Expr::call(
+                        callee,
+                        eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
+                    )
                 } else {
                     // Lambda body is in tail position — strip parens for PTC.
-                    self.gen_tail(inner_body, false);
-                }
-                self.emit("\n"); self.indent -= 1;
-                self.emit_indent(); self.emit("end");
+                    self.tail_ast(inner_body, false)
+                };
+                let out = Expr::Func(all_params, FuncBody::Block(Block(vec![Stmt::Return(ret)])));
                 self.local_vars = saved_locals;
                 self.concrete_vars = saved_concrete;
                 self.cur_result_demand = saved_result_demand;
+                out
             }
-            TExprKind::Paren(inner) => {
-                self.emit("("); self.gen_expr(inner); self.emit(")");
-            }
+            TExprKind::Paren(inner) => Expr::paren(self.expr_ast(inner)),
             TExprKind::OpFunc(op) => {
                 if op == "++" {
-                    self.emit("function(_a, _b) return __mll_list_append(_a, function() return _b end) end");
-                    return;
+                    return Expr::Func(
+                        vec!["_a".into(), "_b".into()],
+                        FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
+                            "__mll_list_append",
+                            vec![Expr::name("_a"), Expr::inline_fn0(Expr::name("_b"))],
+                        ))]),
+                    );
                 }
                 if op == "!!" {
-                    self.emit("function(_a, _b) return __mll_list_index(_a, __force(_b)) end");
-                    return;
+                    return Expr::Func(
+                        vec!["_a".into(), "_b".into()],
+                        FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
+                            "__mll_list_index",
+                            vec![Expr::name("_a"), Expr::force(Expr::name("_b"))],
+                        ))]),
+                    );
                 }
                 if op == ":" {
-                    self.emit("function(_a, _b) return __mll_cons(_a, _b) end");
-                    return;
+                    return Expr::Func(
+                        vec!["_a".into(), "_b".into()],
+                        FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
+                            "__mll_cons",
+                            vec![Expr::name("_a"), Expr::name("_b")],
+                        ))]),
+                    );
                 }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     other => other,
                 };
-                self.emit(&format!("function(_a, _b) return __force(_a) {} __force(_b) end", lua_op));
+                Expr::Func(
+                    vec!["_a".into(), "_b".into()],
+                    FuncBody::Inline(vec![Stmt::Return(Expr::binop(
+                        lua_op,
+                        Expr::force(Expr::name("_a")),
+                        Expr::force(Expr::name("_b")),
+                    ))]),
+                )
             }
-            TExprKind::SpecCall { specialized, args, .. } => {
-                if let Some(rest) = specialized.strip_prefix("__mll_dict:") {
-                    // Dictionary table literal: { method1 = impl1, method2 = impl2 }
-                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                    let methods = if parts.len() > 1 { parts[1] } else { "" };
-                    self.emit("{ ");
-                    let mut first = true;
-                    for entry in methods.split(',') {
-                        if entry.is_empty() { continue; }
-                        let kv: Vec<&str> = entry.splitn(2, '=').collect();
-                        if kv.len() == 2 {
-                            if !first { self.emit(", "); }
-                            first = false;
-                            let sv = sanitize_name(kv[1]);
-                            self.emit(&format!("{} = {}", sanitize_name(kv[0]), self.lua_ref(&sv)));
-                        }
-                    }
-                    self.emit(" }");
-                } else if let Some(rest) = specialized.strip_prefix("__mll_dictc:") {
-                    // A CONSTRUCTED dictionary for a parameterized instance
-                    // (`instance C a => C [a]`): each method is the instance's
-                    // dictionary-form implementation partially applied to the
-                    // context's dictionaries, which arrive as `args` (one per
-                    // context constraint, in declaration order). Emits
-                    //   (function(__cd1, …) return { m = function(...)
-                    //       return impl(__cd1, …, ...) end, … } end)(<dicts>)
-                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                    let methods = if parts.len() > 1 { parts[1] } else { "" };
-                    let n_dicts = args.len();
-                    let dict_params: Vec<String> =
-                        (0..n_dicts).map(|i| format!("__cd{}", i + 1)).collect();
-                    self.emit("(function(");
-                    self.emit(&dict_params.join(", "));
-                    self.emit(") return { ");
-                    let mut first = true;
-                    for entry in methods.split(',') {
-                        if entry.is_empty() { continue; }
-                        let kv: Vec<&str> = entry.splitn(2, '=').collect();
-                        if kv.len() == 2 {
-                            if !first { self.emit(", "); }
-                            first = false;
-                            let sv = sanitize_name(kv[1]);
-                            let impl_ref = self.lua_ref(&sv);
-                            self.emit(&format!(
-                                "{} = function(...) return {}({}{}...) end",
-                                sanitize_name(kv[0]),
-                                impl_ref,
-                                dict_params.join(", "),
-                                if n_dicts > 0 { ", " } else { "" },
-                            ));
-                        }
-                    }
-                    self.emit(" } end)(");
-                    for (i, a) in args.iter().enumerate() {
-                        if i > 0 { self.emit(", "); }
-                        self.gen_expr(a);
-                    }
-                    self.emit(")");
-                } else if let Some(elem_eq) = specialized.strip_prefix("__mll_list_eq:") {
-                    // List eq: recursive element-wise comparison
-                    self.emit(&format!("__mll_list_eq({}, ", self.lua_ref(elem_eq)));
-                    self.gen_expr(&args[0]);
-                    self.emit(", ");
-                    self.gen_expr(&args[1]);
-                    self.emit(")");
-                } else if let Some(elem_eq) = specialized.strip_prefix("__mll_maybe_eq:") {
-                    // Maybe eq: Nothing==Nothing, Just a == Just b iff a==b
-                    self.emit(&format!("__mll_maybe_eq({}, ", self.lua_ref(elem_eq)));
-                    self.gen_expr(&args[0]);
-                    self.emit(", ");
-                    self.gen_expr(&args[1]);
-                    self.emit(")");
-                } else if let Some(rest) = specialized.strip_prefix("__mll_tuple_eq:") {
-                    // Tuple eq: compare element-wise
-                    // Format: __mll_tuple_eq:N:eq_E1,eq_E2,...
-                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                    let n: usize = parts[0].parse().unwrap();
-                    let eq_fns: Vec<&str> = parts[1].split(',').collect();
-                    self.emit("(");
-                    for i in 0..n {
-                        if i > 0 { self.emit(" and "); }
-                        self.emit(&self.lua_ref(eq_fns[i]));
-                        self.emit("(");
-                        // Indexing base: the tuple cell must be WHNF, but a
-                        // concrete variable / already-forcing emission needs
-                        // no extra wrapper (see gen_forced_prefix).
-                        self.gen_forced_prefix(&args[0]);
-                        self.emit(&format!("[{}], ", i + 1));
-                        self.gen_forced_prefix(&args[1]);
-                        self.emit(&format!("[{}])", i + 1));
-                    }
-                    self.emit(")");
-                } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_list:") {
-                    // Specialized list show: iterate with element show function
-                    self.emit(&format!("__mll_show_list({}, ", self.lua_ref(elem_show)));
-                    self.gen_expr(&args[0]);
-                    self.emit(")");
-                } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_maybe:") {
-                    // Specialized Maybe show: type-directed, so Just/Nothing are
-                    // recovered from the element type (nil == Nothing).
-                    self.emit(&format!("__mll_show_maybe({}, ", self.lua_ref(elem_show)));
-                    self.gen_expr(&args[0]);
-                    self.emit(")");
-                } else if let Some(lua_name) = specialized.strip_prefix("__mll_const:") {
-                    // Constant access: math.pi (no function call)
-                    self.emit(lua_name);
-                } else if let Some(idx) = specialized.strip_prefix("__mll_tup_get:") {
-                    // Tuple field access for the derived tuple `show`: force
-                    // BOTH the tuple cell (outer `__force`) AND the projected
-                    // field (inner `__force`). This is a value-consumer — the
-                    // field is handed to `show_E`, which itself forces only one
-                    // layer, so a now-lazily-built tuple field (a thunk) must be
-                    // forced to WHNF here or `show` renders the raw thunk table.
-                    // (Tuple `==` does the same via its `__force(a)[i]` inline;
-                    // this projection is otherwise the sole `__mll_tup_get`
-                    // consumer, generated only by generate_tuple_show.)
-                    self.emit("__force(");
-                    self.gen_forced_prefix(&args[0]);
-                    self.emit(&format!("[{}])", idx));
-                } else if let Some(rest) = specialized.strip_prefix("__mll_tup_ret:") {
-                    // Multi-return FFI: pack Lua multiple returns into a tuple table
-                    // Format: __mll_tup_ret:N:lua_func
-                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                    let n: usize = parts[0].parse().unwrap();
-                    let lua_func = parts[1];
-                    let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
-                    self.emit("(function() local ");
-                    self.emit(&vars.join(", "));
-                    self.emit(" = ");
-                    self.emit(lua_func);
-                    self.emit("(");
-                    self.gen_ffi_args(args, false);
-                    self.emit("); return ");
-                    // Decode the packed tuple like every other FFI result: a
-                    // missing or wrong-typed return value fails with a clear
-                    // localized error, and structured elements (lists, Maybe,
-                    // records) are converted to the mata-ll representation.
-                    let decode = self.ffi_decode_desc(&expr.ty);
-                    if let Some(desc) = &decode {
-                        self.emit(&format!("__mll_ffi_decode({}, ", desc));
-                    }
-                    self.emit("{");
-                    self.emit(&vars.join(", "));
-                    self.emit("}");
-                    if decode.is_some() {
-                        self.emit(&format!(", {:?})", Self::ffi_root_name(lua_func)));
-                    }
-                    self.emit(" end)()");
-                } else if let Some(lua_func) = specialized.strip_prefix("__mll_iter:") {
-                    // Iterator FFI: the result type is a list `[element]` (see the
-                    // LuaIterator reduction). Each iterator step yields one
-                    // `element`, which must be decoded the same way an ordinary
-                    // FFI result is — a list element becomes a cons list, a Maybe
-                    // is wrapped, a structured element is validated. Without this,
-                    // a structured element (a list, chiefly) was stored as a raw
-                    // Lua value, so `show`/any consumer failed later with a
-                    // baffling "raw value" error. A scalar/opaque element needs
-                    // no descriptor (`nil`), keeping the common iterator's exact
-                    // old codegen.
-                    let elem_desc = match &expr.ty {
-                        Ty::List(elem) =>
-                            self.ffi_decode_desc_inner(elem, &mut Vec::new(), None).map(|d| d.0),
-                        _ => None,
-                    };
-                    // __mll_iter(factory, decode_desc, root, arg0, arg1, ...)
-                    if let Some(method) = lua_func.strip_prefix(':') {
-                        // Method-form iterator (`LuaIterator ":gmatch" [...]`):
-                        // the factory is a method on the first argument. A
-                        // method name is not a Lua expression, so bind the
-                        // receiver once and pass the method function with the
-                        // receiver as the factory's first argument
-                        // (`__recv.m(__recv, ...)` ≡ `__recv:m(...)`).
-                        self.emit("(function() local __recv = ");
-                        self.gen_forced(&args[0]);
-                        self.emit(&format!("; return __mll_iter(__recv.{}", method));
-                        match &elem_desc {
-                            Some(desc) =>
-                                self.emit(&format!(", {}, {:?}", desc, Self::ffi_root_name(lua_func))),
-                            None => self.emit(", nil, nil"),
-                        }
-                        self.emit(", __recv");
-                        self.gen_ffi_args(&args[1..], true);
-                        self.emit(") end)()");
-                    } else {
-                        self.emit("__mll_iter(");
-                        self.emit(lua_func);
-                        match &elem_desc {
-                            Some(desc) =>
-                                self.emit(&format!(", {}, {:?}", desc, Self::ffi_root_name(lua_func))),
-                            None => self.emit(", nil, nil"),
-                        }
-                        self.gen_ffi_args(args, true);
-                        self.emit(")");
-                    }
-                } else if let Some(lua_func) = specialized.strip_prefix("__mll_try:") {
-                    // Try FFI: wrap the (val, err) convention in Either via
-                    // __mll_try. The SUCCESS payload crosses the FFI boundary
-                    // like any other result, so it carries the same
-                    // type-directed decode descriptor (a raw Lua array where
-                    // [Integer] was declared must become a cons list, not be
-                    // walked as a cons cell later).
-                    let desc = self.ffi_catch_decode_desc(&expr.ty);
-                    let desc_str = desc.as_deref().unwrap_or("false");
-                    let root = Self::ffi_root_name(lua_func);
-                    self.emit(&format!("__mll_try({}, {:?}, ", desc_str, root));
-                    if let Some(method) = lua_func.strip_prefix(':') {
-                        // Method call try: handle:method(args)
-                        self.gen_forced_prefix(&args[0]);
-                        self.emit(&format!(":{}", method));
-                        self.emit("(");
-                        self.gen_ffi_args(&args[1..], false);
-                        self.emit(")");
-                    } else {
-                        // Global function try
-                        self.emit(lua_func);
-                        self.emit("(");
-                        self.gen_ffi_args(args, false);
-                        self.emit(")");
-                    }
-                    self.emit(")");
-                } else if let Some(lua_func) = specialized.strip_prefix("__mll_pcall:") {
-                    // LuaCatch: pure call under pcall, result Either String a.
-                    let desc = self.ffi_catch_decode_desc(&expr.ty);
-                    self.gen_pcall_call(lua_func, &desc, args);
-                } else if let Some(lua_func) = specialized.strip_prefix("__mll_iopcall:") {
-                    // LuaIOCatch: same pcall capture, deferred as an IO action thunk.
-                    // Zero-arg still needs a wrapper: the value IS the action.
-                    self.emit("function() return ");
-                    let desc = self.ffi_catch_decode_desc(&expr.ty);
-                    self.gen_pcall_call(lua_func, &desc, args);
-                    self.emit(" end");
-                } else if let Some(method) = specialized.strip_prefix(':') {
-                    // Method call FFI: arg0:method(arg1, arg2, ...)
-                    self.gen_forced_prefix(&args[0]);
-                    self.emit(&format!(":{}", method));
-                    self.emit("(");
-                    self.gen_ffi_args(&args[1..], false);
-                    self.emit(")");
-                } else if let Some(lua_func) = specialized.strip_prefix("__mll_io:") {
-                    // IO FFI: wrap in action thunk — only performed by >>= / >>
-                    // Zero-arg IO (e.g., os.clock): emit raw call without closure wrapper,
-                    // since the function definition already wraps in function()...end.
-                    let needs_wrapper = !args.is_empty();
-                    if needs_wrapper { self.emit("function() return "); }
-                    // Type-directed decode of the FFI result (see gen_action).
-                    let decode = self.ffi_decode_desc(&expr.ty);
-                    if let Some(desc) = &decode {
-                        self.emit(&format!("__mll_ffi_decode({}, ", desc));
-                    }
-                    if let Some(method) = lua_func.strip_prefix(':') {
-                        // Method call IO: handle:method(args)
-                        self.gen_forced_prefix(&args[0]);
-                        self.emit(&format!(":{}", method));
-                        self.emit("(");
-                        self.gen_ffi_args(&args[1..], false);
-                        self.emit(")");
-                    } else {
-                        self.emit(lua_func);
-                        self.emit("(");
-                        self.gen_ffi_args(args, false);
-                        self.emit(")");
-                    }
-                    if decode.is_some() {
-                        self.emit(&format!(", {:?})", Self::ffi_root_name(lua_func)));
-                    }
-                    if needs_wrapper { self.emit(" end"); }
-                } else if let Some(rest) = specialized.strip_prefix("__mll_io_tup:") {
-                    // IO FFI with multi-return: wrap in action thunk
-                    let parts: Vec<&str> = rest.splitn(2, ':').collect();
-                    let n: usize = parts[0].parse().unwrap();
-                    let lua_func = parts[1];
-                    let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
-                    self.emit("function() local ");
-                    self.emit(&vars.join(", "));
-                    self.emit(" = ");
-                    self.emit(lua_func);
-                    self.emit("(");
-                    self.gen_ffi_args(args, false);
-                    self.emit("); return ");
-                    // Decode the packed tuple (see the __mll_tup_ret arm).
-                    let decode = self.ffi_decode_desc(&expr.ty);
-                    if let Some(desc) = &decode {
-                        self.emit(&format!("__mll_ffi_decode({}, ", desc));
-                    }
-                    self.emit("{");
-                    self.emit(&vars.join(", "));
-                    self.emit("}");
-                    if decode.is_some() {
-                        self.emit(&format!(", {:?})", Self::ffi_root_name(lua_func)));
-                    }
-                    self.emit(" end");
-                } else {
-                    // Regular (pure) FFI: lua_func(arg0, arg1, ...)
-                    // Type-directed decode of the result, symmetric with the IO
-                    // arms above: e.g. a `Maybe a` result from the host must be
-                    // wrapped into the tagged `Just`/`Nothing` representation.
-                    let decode = self.ffi_decode_desc(&expr.ty);
-                    if let Some(desc) = &decode {
-                        self.emit(&format!("__mll_ffi_decode({}, ", desc));
-                    }
-                    self.emit(specialized);
-                    self.emit("(");
-                    self.gen_ffi_args(args, false);
-                    self.emit(")");
-                    if decode.is_some() {
-                        self.emit(&format!(", {:?})", Self::ffi_root_name(specialized)));
-                    }
-                }
-            }
+            TExprKind::SpecCall { specialized, args, .. } => self.spec_call_ast(specialized, args, expr),
             TExprKind::Tuple(elems) => {
-                self.emit("{");
-                for (i, e) in elems.iter().enumerate() {
-                    if i > 0 { self.emit(", "); }
+                let mut items = Vec::new();
+                for e in elems {
                     // A tuple field is a lazy position: `(,)` forces neither
                     // side, exactly like a cons head. Weigh it like any
                     // argument so a possibly-⊥ field is suspended rather than
@@ -1115,38 +855,32 @@ impl CodeGen {
                     // __mll_tup_get specializations hand the raw field to an
                     // eq/show function that forces, and the FFI boundary
                     // deep-forces through __mll_arg_marshal.
-                    self.gen_arg(e, false);
+                    items.push(Item::Pos(self.arg_ast(e, false)));
                 }
-                self.emit("}");
+                Expr::Table(items)
             }
             TExprKind::DictAccess { dict_param, method_name } => {
-                self.emit(&format!("{}.{}", sanitize_name(dict_param), sanitize_name(method_name)));
+                Expr::name(format!("{}.{}", sanitize_name(dict_param), sanitize_name(method_name)))
             }
             TExprKind::DictMethod { dict, method_name } => {
                 // A method of a CONSTRUCTED dictionary (e.g. the `[a]`
                 // dictionary built from the element dictionary). Parenthesized
                 // because the dictionary may be a table literal, which Lua
                 // cannot index directly.
-                self.emit("(");
-                self.gen_expr(dict);
-                self.emit(&format!(").{}", sanitize_name(method_name)));
+                let d = self.expr_ast(dict);
+                Expr::index(Expr::paren(d), format!(".{}", sanitize_name(method_name)))
             }
             TExprKind::DictCall { func_name, dict_args, value_args } => {
                 let sfn = sanitize_name(func_name);
-                self.emit(&self.lua_ref(&sfn));
-                self.emit("(");
-                let mut first = true;
+                let fref = self.lua_ref(&sfn);
+                let mut cargs = Vec::new();
                 for d in dict_args {
-                    if !first { self.emit(", "); }
-                    first = false;
-                    self.gen_expr(d);
+                    cargs.push(self.expr_ast(d));
                 }
                 for v in value_args {
-                    if !first { self.emit(", "); }
-                    first = false;
-                    self.gen_expr(v);
+                    cargs.push(self.expr_ast(v));
                 }
-                self.emit(")");
+                Expr::call_named(&fref, cargs)
             }
             TExprKind::RecordUpdate { record, updates, num_fields } => {
                 // A LuaDict record is keyed by name, so we can't copy it
@@ -1156,9 +890,11 @@ impl CodeGen {
                     .map(|(fname, _, _)| self.luadict_field_key.contains_key(&sanitize_name(fname)))
                     .unwrap_or(false);
                 if is_luadict {
-                    self.emit("(function() local _r = ");
-                    self.gen_forced(record);
-                    self.emit("; local _u = {}; for _k, _v in pairs(_r) do _u[_k] = _v end");
+                    let mut stmts = vec![
+                        Stmt::Local(vec!["_r".into()], Some(self.forced_ast(record))),
+                        Stmt::Local(vec!["_u".into()], Some(Expr::Table(vec![]))),
+                        Stmt::Raw("for _k, _v in pairs(_r) do _u[_k] = _v end".into()),
+                    ];
                     for (fname, _, val) in updates {
                         // Resolve the Haskell field name to its effective Lua
                         // key (`as "key"` rename) — the copied table is keyed
@@ -1168,27 +904,34 @@ impl CodeGen {
                             .get(&sanitize_name(fname))
                             .cloned()
                             .unwrap_or_else(|| fname.clone());
-                        self.emit(&format!("; _u{} = ", lua_field_index(&key)));
-                        self.gen_expr(val);
+                        let rhs = self.expr_ast(val);
+                        stmts.push(Stmt::Assign(format!("_u{}", lua_field_index(&key)), rhs));
                     }
-                    self.emit("; return _u end)()");
-                    return;
+                    stmts.push(Stmt::Return(Expr::name("_u")));
+                    return Expr::call(
+                        Expr::paren(Expr::Func(vec![], FuncBody::Inline(stmts))),
+                        vec![],
+                    );
                 }
                 // Generate: (function() local _r = __force(record)
                 //   local _u = {_r[1], _r[2], ...}; _u[i] = val; ...; return _u end)()
-                self.emit("(function() local _r = ");
-                self.gen_forced(record);
-                self.emit("; local _u = {");
+                let mut copy_items = Vec::new();
                 for i in 1..=*num_fields {
-                    if i > 1 { self.emit(", "); }
-                    self.emit(&format!("_r[{}]", i));
+                    copy_items.push(Item::Pos(Expr::name(format!("_r[{}]", i))));
                 }
-                self.emit("}");
+                let mut stmts = vec![
+                    Stmt::Local(vec!["_r".into()], Some(self.forced_ast(record))),
+                    Stmt::Local(vec!["_u".into()], Some(Expr::Table(copy_items))),
+                ];
                 for (_, idx, val) in updates {
-                    self.emit(&format!("; _u[{}] = ", idx));
-                    self.gen_expr(val);
+                    let rhs = self.expr_ast(val);
+                    stmts.push(Stmt::Assign(format!("_u[{}]", idx), rhs));
                 }
-                self.emit("; return _u end)()");
+                stmts.push(Stmt::Return(Expr::name("_u")));
+                Expr::call(
+                    Expr::paren(Expr::Func(vec![], FuncBody::Inline(stmts))),
+                    vec![],
+                )
             }
             TExprKind::OutgoingCallback { callee, arity, run_io } => {
                 // Type-directed callback boundary, derived from the callback's
@@ -1243,18 +986,358 @@ impl CodeGen {
                     // FFI edge passes for the same type.
                     "false".to_string()
                 };
-                self.emit("__mll_wrap_callback_out(");
-                self.gen_expr(callee);
-                self.emit(&format!(", {}, {{{}}}, {}, {})",
-                    arity, arg_descs.join(", "), run_io, ret_desc));
+                let callee_e = self.expr_ast(callee);
+                Expr::call_named(
+                    "__mll_wrap_callback_out",
+                    vec![
+                        callee_e,
+                        Expr::lit(arity.to_string()),
+                        Expr::raw(format!("{{{}}}", arg_descs.join(", "))),
+                        Expr::lit(run_io.to_string()),
+                        Expr::raw(ret_desc),
+                    ],
+                )
             }
             TExprKind::FfiMaybeArg { value } => {
-                // Normally consumed by gen_ffi_args inside a SpecCall argument
+                // Normally consumed by ffi_args_ast inside a SpecCall argument
                 // list. If one is ever emitted standalone, degrade to its
                 // nullable value: Just x -> x, Nothing -> nil.
-                self.emit("__mll_opt(");
-                self.gen_expr(value);
-                self.emit(")");
+                let v = self.expr_ast(value);
+                Expr::call_named("__mll_opt", vec![v])
+            }
+        }
+    }
+
+    /// The SpecCall arms of the expression walk, split out only to keep
+    /// `expr_ast_inner` readable. Same arm-for-arm structure as before.
+    fn spec_call_ast(&mut self, specialized: &str, args: &[TExpr], expr: &TExpr) -> Expr {
+        if let Some(rest) = specialized.strip_prefix("__mll_dict:") {
+            // Dictionary table literal: { method1 = impl1, method2 = impl2 }
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            let methods = if parts.len() > 1 { parts[1] } else { "" };
+            let mut items = Vec::new();
+            for entry in methods.split(',') {
+                if entry.is_empty() { continue; }
+                let kv: Vec<&str> = entry.splitn(2, '=').collect();
+                if kv.len() == 2 {
+                    let sv = sanitize_name(kv[1]);
+                    items.push(Item::KV(
+                        format!("{} = ", sanitize_name(kv[0])),
+                        Expr::name(self.lua_ref(&sv)),
+                    ));
+                }
+            }
+            Expr::TableSpaced(items)
+        } else if let Some(rest) = specialized.strip_prefix("__mll_dictc:") {
+            // A CONSTRUCTED dictionary for a parameterized instance
+            // (`instance C a => C [a]`): each method is the instance's
+            // dictionary-form implementation partially applied to the
+            // context's dictionaries, which arrive as `args` (one per
+            // context constraint, in declaration order). Emits
+            //   (function(__cd1, …) return { m = function(...)
+            //       return impl(__cd1, …, ...) end, … } end)(<dicts>)
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            let methods = if parts.len() > 1 { parts[1] } else { "" };
+            let n_dicts = args.len();
+            let dict_params: Vec<String> =
+                (0..n_dicts).map(|i| format!("__cd{}", i + 1)).collect();
+            let mut items = Vec::new();
+            for entry in methods.split(',') {
+                if entry.is_empty() { continue; }
+                let kv: Vec<&str> = entry.splitn(2, '=').collect();
+                if kv.len() == 2 {
+                    let sv = sanitize_name(kv[1]);
+                    let impl_ref = self.lua_ref(&sv);
+                    let mut impl_args: Vec<Expr> =
+                        dict_params.iter().map(|p| Expr::name(p.clone())).collect();
+                    impl_args.push(Expr::name("..."));
+                    items.push(Item::KV(
+                        format!("{} = ", sanitize_name(kv[0])),
+                        Expr::Func(
+                            vec!["...".into()],
+                            FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
+                                &impl_ref, impl_args,
+                            ))]),
+                        ),
+                    ));
+                }
+            }
+            let mut cargs = Vec::new();
+            for a in args {
+                cargs.push(self.expr_ast(a));
+            }
+            Expr::call(
+                Expr::paren(Expr::Func(
+                    dict_params,
+                    FuncBody::Inline(vec![Stmt::Return(Expr::TableSpaced(items))]),
+                )),
+                cargs,
+            )
+        } else if let Some(elem_eq) = specialized.strip_prefix("__mll_list_eq:") {
+            // List eq: recursive element-wise comparison
+            let eq_ref = self.lua_ref(elem_eq);
+            let a0 = self.expr_ast(&args[0]);
+            let a1 = self.expr_ast(&args[1]);
+            Expr::call_named("__mll_list_eq", vec![Expr::name(eq_ref), a0, a1])
+        } else if let Some(elem_eq) = specialized.strip_prefix("__mll_maybe_eq:") {
+            // Maybe eq: Nothing==Nothing, Just a == Just b iff a==b
+            let eq_ref = self.lua_ref(elem_eq);
+            let a0 = self.expr_ast(&args[0]);
+            let a1 = self.expr_ast(&args[1]);
+            Expr::call_named("__mll_maybe_eq", vec![Expr::name(eq_ref), a0, a1])
+        } else if let Some(rest) = specialized.strip_prefix("__mll_tuple_eq:") {
+            // Tuple eq: compare element-wise
+            // Format: __mll_tuple_eq:N:eq_E1,eq_E2,...
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            let n: usize = parts[0].parse().unwrap();
+            let eq_fns: Vec<&str> = parts[1].split(',').collect();
+            let mut acc: Option<Expr> = None;
+            for i in 0..n {
+                let eq_ref = self.lua_ref(eq_fns[i]);
+                // Indexing base: the tuple cell must be WHNF, but a
+                // concrete variable / already-forcing emission needs
+                // no extra wrapper (see forced_prefix_ast).
+                let l = self.forced_prefix_ast(&args[0]);
+                let r = self.forced_prefix_ast(&args[1]);
+                let cmp = Expr::call_named(
+                    &eq_ref,
+                    vec![
+                        Expr::index(l, format!("[{}]", i + 1)),
+                        Expr::index(r, format!("[{}]", i + 1)),
+                    ],
+                );
+                acc = Some(match acc {
+                    None => cmp,
+                    Some(prev) => Expr::binop("and", prev, cmp),
+                });
+            }
+            Expr::paren(acc.unwrap_or_else(|| Expr::raw("")))
+        } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_list:") {
+            // Specialized list show: iterate with element show function
+            let show_ref = self.lua_ref(elem_show);
+            let a0 = self.expr_ast(&args[0]);
+            Expr::call_named("__mll_show_list", vec![Expr::name(show_ref), a0])
+        } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_maybe:") {
+            // Specialized Maybe show: type-directed, so Just/Nothing are
+            // recovered from the element type (nil == Nothing).
+            let show_ref = self.lua_ref(elem_show);
+            let a0 = self.expr_ast(&args[0]);
+            Expr::call_named("__mll_show_maybe", vec![Expr::name(show_ref), a0])
+        } else if let Some(lua_name) = specialized.strip_prefix("__mll_const:") {
+            // Constant access: math.pi (no function call)
+            Expr::name(lua_name)
+        } else if let Some(idx) = specialized.strip_prefix("__mll_tup_get:") {
+            // Tuple field access for the derived tuple `show`: force
+            // BOTH the tuple cell (outer `__force`) AND the projected
+            // field (inner `__force`). This is a value-consumer — the
+            // field is handed to `show_E`, which itself forces only one
+            // layer, so a now-lazily-built tuple field (a thunk) must be
+            // forced to WHNF here or `show` renders the raw thunk table.
+            // (Tuple `==` does the same via its `__force(a)[i]` inline;
+            // this projection is otherwise the sole `__mll_tup_get`
+            // consumer, generated only by generate_tuple_show.)
+            let base = self.forced_prefix_ast(&args[0]);
+            Expr::force(Expr::index(base, format!("[{}]", idx)))
+        } else if let Some(rest) = specialized.strip_prefix("__mll_tup_ret:") {
+            // Multi-return FFI: pack Lua multiple returns into a tuple table
+            // Format: __mll_tup_ret:N:lua_func
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            let n: usize = parts[0].parse().unwrap();
+            let lua_func = parts[1];
+            let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
+            let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
+            // Decode the packed tuple like every other FFI result: a
+            // missing or wrong-typed return value fails with a clear
+            // localized error, and structured elements (lists, Maybe,
+            // records) are converted to the mata-ll representation.
+            let decode = self.ffi_decode_desc(&expr.ty);
+            let tuple = Expr::Table(
+                vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
+            );
+            let ret = match &decode {
+                Some(desc) => Expr::call_named(
+                    "__mll_ffi_decode",
+                    vec![
+                        Expr::raw(desc.clone()),
+                        tuple,
+                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                    ],
+                ),
+                None => tuple,
+            };
+            Expr::call(
+                Expr::paren(Expr::Func(
+                    vec![],
+                    FuncBody::Inline(vec![
+                        Stmt::Local(vars, Some(call)),
+                        Stmt::Return(ret),
+                    ]),
+                )),
+                vec![],
+            )
+        } else if let Some(lua_func) = specialized.strip_prefix("__mll_iter:") {
+            // Iterator FFI: the result type is a list `[element]` (see the
+            // LuaIterator reduction). Each iterator step yields one
+            // `element`, which must be decoded the same way an ordinary
+            // FFI result is — a list element becomes a cons list, a Maybe
+            // is wrapped, a structured element is validated. Without this,
+            // a structured element (a list, chiefly) was stored as a raw
+            // Lua value, so `show`/any consumer failed later with a
+            // baffling "raw value" error. A scalar/opaque element needs
+            // no descriptor (`nil`), keeping the common iterator's exact
+            // old codegen.
+            let elem_desc = match &expr.ty {
+                Ty::List(elem) =>
+                    self.ffi_decode_desc_inner(elem, &mut Vec::new(), None).map(|d| d.0),
+                _ => None,
+            };
+            let desc_args = |elem_desc: &Option<String>| -> Vec<Expr> {
+                match elem_desc {
+                    Some(desc) => vec![
+                        Expr::raw(desc.clone()),
+                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                    ],
+                    None => vec![Expr::lit("nil"), Expr::lit("nil")],
+                }
+            };
+            // __mll_iter(factory, decode_desc, root, arg0, arg1, ...)
+            if let Some(method) = lua_func.strip_prefix(':') {
+                // Method-form iterator (`LuaIterator ":gmatch" [...]`):
+                // the factory is a method on the first argument. A
+                // method name is not a Lua expression, so bind the
+                // receiver once and pass the method function with the
+                // receiver as the factory's first argument
+                // (`__recv.m(__recv, ...)` ≡ `__recv:m(...)`).
+                let recv = self.forced_ast(&args[0]);
+                let mut iter_args = vec![Expr::name(format!("__recv.{}", method))];
+                iter_args.extend(desc_args(&elem_desc));
+                iter_args.push(Expr::name("__recv"));
+                iter_args.extend(self.ffi_args_ast(&args[1..]));
+                Expr::call(
+                    Expr::paren(Expr::Func(
+                        vec![],
+                        FuncBody::Inline(vec![
+                            Stmt::Local(vec!["__recv".into()], Some(recv)),
+                            Stmt::Return(Expr::call_named("__mll_iter", iter_args)),
+                        ]),
+                    )),
+                    vec![],
+                )
+            } else {
+                let mut iter_args = vec![Expr::name(lua_func)];
+                iter_args.extend(desc_args(&elem_desc));
+                iter_args.extend(self.ffi_args_ast(args));
+                Expr::call_named("__mll_iter", iter_args)
+            }
+        } else if let Some(lua_func) = specialized.strip_prefix("__mll_try:") {
+            // Try FFI: wrap the (val, err) convention in Either via
+            // __mll_try. The SUCCESS payload crosses the FFI boundary
+            // like any other result, so it carries the same
+            // type-directed decode descriptor (a raw Lua array where
+            // [Integer] was declared must become a cons list, not be
+            // walked as a cons cell later).
+            let desc = self.ffi_catch_decode_desc(&expr.ty);
+            let desc_str = desc.as_deref().unwrap_or("false").to_string();
+            let root = Self::ffi_root_name(lua_func);
+            let call = if let Some(method) = lua_func.strip_prefix(':') {
+                // Method call try: handle:method(args)
+                let recv = self.forced_prefix_ast(&args[0]);
+                let margs = self.ffi_args_ast(&args[1..]);
+                Expr::method(recv, method, margs)
+            } else {
+                // Global function try
+                Expr::call_named(lua_func, self.ffi_args_ast(args))
+            };
+            Expr::call_named(
+                "__mll_try",
+                vec![Expr::raw(desc_str), Expr::raw(format!("{:?}", root)), call],
+            )
+        } else if let Some(lua_func) = specialized.strip_prefix("__mll_pcall:") {
+            // LuaCatch: pure call under pcall, result Either String a.
+            let desc = self.ffi_catch_decode_desc(&expr.ty);
+            self.pcall_call_ast(lua_func, &desc, args)
+        } else if let Some(lua_func) = specialized.strip_prefix("__mll_iopcall:") {
+            // LuaIOCatch: same pcall capture, deferred as an IO action thunk.
+            // Zero-arg still needs a wrapper: the value IS the action.
+            let desc = self.ffi_catch_decode_desc(&expr.ty);
+            let call = self.pcall_call_ast(lua_func, &desc, args);
+            Expr::inline_fn0(call)
+        } else if let Some(method) = specialized.strip_prefix(':') {
+            // Method call FFI: arg0:method(arg1, arg2, ...)
+            let recv = self.forced_prefix_ast(&args[0]);
+            let margs = self.ffi_args_ast(&args[1..]);
+            Expr::method(recv, method, margs)
+        } else if let Some(lua_func) = specialized.strip_prefix("__mll_io:") {
+            // IO FFI: wrap in action thunk — only performed by >>= / >>
+            // Zero-arg IO (e.g., os.clock): emit raw call without closure wrapper,
+            // since the function definition already wraps in function()...end.
+            let needs_wrapper = !args.is_empty();
+            // Type-directed decode of the FFI result (see action_run_ast).
+            let decode = self.ffi_decode_desc(&expr.ty);
+            let call = if let Some(method) = lua_func.strip_prefix(':') {
+                // Method call IO: handle:method(args)
+                let recv = self.forced_prefix_ast(&args[0]);
+                let margs = self.ffi_args_ast(&args[1..]);
+                Expr::method(recv, method, margs)
+            } else {
+                Expr::call_named(lua_func, self.ffi_args_ast(args))
+            };
+            let inner = match &decode {
+                Some(desc) => Expr::call_named(
+                    "__mll_ffi_decode",
+                    vec![
+                        Expr::raw(desc.clone()),
+                        call,
+                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                    ],
+                ),
+                None => call,
+            };
+            if needs_wrapper { Expr::inline_fn0(inner) } else { inner }
+        } else if let Some(rest) = specialized.strip_prefix("__mll_io_tup:") {
+            // IO FFI with multi-return: wrap in action thunk
+            let parts: Vec<&str> = rest.splitn(2, ':').collect();
+            let n: usize = parts[0].parse().unwrap();
+            let lua_func = parts[1];
+            let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
+            let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
+            // Decode the packed tuple (see the __mll_tup_ret arm).
+            let decode = self.ffi_decode_desc(&expr.ty);
+            let tuple = Expr::Table(
+                vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
+            );
+            let ret = match &decode {
+                Some(desc) => Expr::call_named(
+                    "__mll_ffi_decode",
+                    vec![
+                        Expr::raw(desc.clone()),
+                        tuple,
+                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                    ],
+                ),
+                None => tuple,
+            };
+            Expr::Func(
+                vec![],
+                FuncBody::Inline(vec![Stmt::Local(vars, Some(call)), Stmt::Return(ret)]),
+            )
+        } else {
+            // Regular (pure) FFI: lua_func(arg0, arg1, ...)
+            // Type-directed decode of the result, symmetric with the IO
+            // arms above: e.g. a `Maybe a` result from the host must be
+            // wrapped into the tagged `Just`/`Nothing` representation.
+            let decode = self.ffi_decode_desc(&expr.ty);
+            let call = Expr::call_named(specialized, self.ffi_args_ast(args));
+            match &decode {
+                Some(desc) => Expr::call_named(
+                    "__mll_ffi_decode",
+                    vec![
+                        Expr::raw(desc.clone()),
+                        call,
+                        Expr::raw(format!("{:?}", Self::ffi_root_name(specialized))),
+                    ],
+                ),
+                None => call,
             }
         }
     }
@@ -1263,7 +1346,7 @@ impl CodeGen {
     /// Cons operations wrap the tail in a thunk via __mll_lazy_cons.
     /// Is `expr` a cons application at its head (`x : xs`, either the infix
     /// form or `App(App(Con ":"), _)`)? A cons-headed self-referential CAF is
-    /// built eagerly with a deferred tail (`gen_expr_lazy`); any other head is
+    /// built eagerly with a deferred tail (`expr_lazy_ast`); any other head is
     /// thunked so the by-name self-reference resolves after assignment.
     pub(super) fn is_cons_headed(expr: &TExpr) -> bool {
         match &expr.kind {
@@ -1275,51 +1358,48 @@ impl CodeGen {
         }
     }
 
-    pub(super) fn gen_expr_lazy(&mut self, expr: &TExpr, self_name: &str) {
+    pub(super) fn expr_lazy_ast(&mut self, expr: &TExpr, self_name: &str) -> Expr {
         // Check for infix cons: x : rest
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
             && op == ":" {
-                self.emit("__mll_lazy_cons(");
                 // A cons head is a lazy position here too — weigh it like any
                 // argument so a possibly-⊥ element in a self-referential list
                 // (`xs = error "boom" : xs`) is suspended, not run at
                 // construction. Same rule as the other three `:` sites.
-                self.gen_arg(lhs, false);
-                self.emit(", function() return ");
-                self.gen_expr_lazy(rhs, self_name);
-                self.emit(" end)");
-                return;
+                let head = self.arg_ast(lhs, false);
+                let tail = self.expr_lazy_ast(rhs, self_name);
+                return Expr::call_named("__mll_lazy_cons", vec![head, Expr::inline_fn0(tail)]);
             }
         // Check for App(App(Con(":"), head), tail)
         if let TExprKind::App(func, tail) = &expr.kind
             && let TExprKind::App(con, head) = &func.kind
                 && let TExprKind::Con(name) = &con.kind
                     && name == ":" {
-                        self.emit("__mll_lazy_cons(");
-                        self.gen_arg(head, false);
-                        self.emit(", function() return ");
-                        self.gen_expr_lazy(tail, self_name);
-                        self.emit(" end)");
-                        return;
+                        let head_e = self.arg_ast(head, false);
+                        let tail_e = self.expr_lazy_ast(tail, self_name);
+                        return Expr::call_named(
+                            "__mll_lazy_cons",
+                            vec![head_e, Expr::inline_fn0(tail_e)],
+                        );
                     }
         // Not a cons — fall through to normal gen
-        self.gen_expr(expr);
+        self.expr_ast(expr)
     }
 
-    pub(super) fn gen_literal(&mut self, lit: &TLiteral) {
+    pub(super) fn literal_ast(lit: &TLiteral) -> Expr {
         match lit {
             // i64::MIN cannot be written in decimal: Lua parses the positive
             // magnitude first (overflowing to float) and negates the float.
             // The hex spelling is defined to wrap to the integer subtype.
-            TLiteral::Integer(i64::MIN) => self.emit("0x8000000000000000"),
-            TLiteral::Integer(n) => self.emit(&format!("{}", n)),
-            TLiteral::Number(n) => self.emit(&format!("{}", n)),
+            TLiteral::Integer(i64::MIN) => Expr::lit("0x8000000000000000"),
+            TLiteral::Integer(n) => Expr::lit(n.to_string()),
+            TLiteral::Number(n) => Expr::lit(n.to_string()),
             // Routed through the canonical escaper shared with pattern
             // literals and table keys (see `lua_quoted_string`).
-            TLiteral::Str(s) => self.emit(&lua_quoted_string(s)),
-            TLiteral::Bool(true) => self.emit("true"),
-            TLiteral::Bool(false) => self.emit("false"),
-            TLiteral::Unit => self.emit("nil"),
+            TLiteral::Str(s) => Expr::lit(lua_quoted_string(s)),
+            TLiteral::Bool(true) => Expr::lit("true"),
+            TLiteral::Bool(false) => Expr::lit("false"),
+            TLiteral::Unit => Expr::lit("nil"),
         }
     }
 }

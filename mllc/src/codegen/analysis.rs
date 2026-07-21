@@ -100,17 +100,17 @@ impl CodeGen {
                                 // A parameter is judged "always cheap" (the
                                 // callee then skips forcing it and treats it as
                                 // a value) only when EVERY call site passes an
-                                // argument that gen_arg is guaranteed to
+                                // argument that arg_ast is guaranteed to
                                 // evaluate eagerly regardless of context. That
                                 // guarantee is the *context-free floor* of
                                 // is_cheap_to_force: cheap structure built
                                 // without leaning on any variable's WHNF-ness
                                 // (var_ok = false) and free of trapping ops.
-                                // gen_arg's eager set (strict OR
+                                // arg_ast's eager set (strict OR
                                 // is_cheap_to_force) is a superset of this, so
                                 // whenever the callee assumes a value one was
                                 // passed. Any other argument may be thunked by
-                                // gen_arg, so mark the position thunked here.
+                                // arg_ast, so mark the position thunked here.
                                 if !(Self::is_cheap_with(arg, &|_| false)
                                     && !Self::contains_trapping_op(arg))
                                 {
@@ -127,7 +127,7 @@ impl CodeGen {
                 }
             }
             TExprKind::InfixApp { op, lhs, rhs } if op == "$" || op == "." => {
-                // These operators emit hidden call sites (see their gen_expr
+                // These operators emit hidden call sites (see their expr_ast
                 // arms) that the generic recursion below cannot see:
                 //   f $ x  calls f with a thunked x appended to f's spine args;
                 //   f . g  builds a closure that calls g with the closure's raw
@@ -226,7 +226,7 @@ impl CodeGen {
             if !Self::is_cheap(&clause.body) { continue; }
             if expr_references_name(&clause.body, &func.name) { continue; } // recursive
             // Only inline bodies that are arithmetic/comparison expressions,
-            // not constructor applications (which need special gen_expr handling)
+            // not constructor applications (which need special expr_ast handling)
             if Self::body_has_constructors(&clause.body) { continue; }
             let params: Vec<String> = clause.patterns.iter().map(|p| {
                 if let TPattern::Var(name, _) = p { name.clone() } else { unreachable!() }
@@ -236,8 +236,8 @@ impl CodeGen {
     }
 
     /// Check if an expression contains constructor applications (Con nodes).
-    /// These need special handling in gen_expr (e.g. : → __mll_cons) that
-    /// gen_expr_subst doesn't replicate, so we skip inlining for them.
+    /// These need special handling in expr_ast (e.g. : → __mll_cons) that
+    /// expr_subst_ast doesn't replicate, so we skip inlining for them.
     pub(super) fn body_has_constructors(expr: &TExpr) -> bool {
         match &expr.kind {
             TExprKind::Con(_) => true,

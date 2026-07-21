@@ -1,10 +1,19 @@
 //! Pattern-match compilation: clause conditions, field bindings, guards.
 //!
-//! `gen_pattern_match` compiles clauses into an if/elseif chain.
-//! `gen_pattern_match_guarded` emits each guarded clause as an independent
-//! block so a clause whose pattern matches but whose guards all fail simply
-//! falls through to the next clause — Haskell semantics an if/elseif chain
-//! cannot express. Forcing discipline: a sub-pattern is forced only when it
+//! `pattern_match_block` compiles guard-free clauses into one `Stmt::If`
+//! chain (with the non-exhaustive error after it); any guard-bearing match
+//! is dispatched to `pattern_match_guarded_block`, which emits each clause
+//! as an independent block (`Stmt::If` for a refutable pattern, `Stmt::Do`
+//! for an irrefutable one) so a clause whose pattern matches but whose
+//! guards all fail simply falls through to the next clause — Haskell
+//! semantics an if/elseif chain cannot express. Because the dispatch is
+//! total, the chain builder handles ONLY guard-free clauses (the old string
+//! emitter carried unreachable guard branches here).
+//!
+//! Conditions, scrutinee paths and binding values are built as rendered
+//! strings (`collect_pattern_conditions`, `field_path*`, `match_scrutinee`)
+//! and enter the tree as `Raw` leaves; the statement structure around them
+//! is AST. Forcing discipline: a sub-pattern is forced only when it
 //! inspects its value (tag match, literal, deeper destructuring);
 //! Var/Wildcard bindings stay lazy, and a refutable top-level pattern forces
 //! its scrutinee inside its own clause condition so a matching earlier
@@ -12,21 +21,66 @@
 
 use crate::tir::*;
 use super::CodeGen;
+use super::lua::{Block, Expr, Stmt};
 use super::names::{lua_field_index, lua_quoted_string, sanitize_name};
 
 impl CodeGen {
-    pub(super) fn gen_pattern_match(&mut self, params: &[String], clauses: &[TClause]) {
+    /// The `error("Non-exhaustive patterns")` fall-off statement.
+    fn non_exhaustive_stmt() -> Stmt {
+        Stmt::Expr(Expr::call_named(
+            "error",
+            vec![Expr::lit(lua_quoted_string("Non-exhaustive patterns"))],
+        ))
+    }
+
+    /// A clause's bindings (`local x = <path>`) plus its where bindings.
+    fn clause_intro_stmts(&mut self, clause: &TClause, bindings: &[(String, String)]) -> Vec<Stmt> {
+        let mut stmts = Vec::new();
+        for (var, val) in bindings {
+            let (pre, decl) = self.declare_local_parts(var);
+            if let Some(s) = pre {
+                stmts.push(s);
+            }
+            stmts.push(decl.stmt(Expr::raw(val.clone())));
+            // Propagate concreteness: if binding source is concrete, so is the target
+            if self.concrete_vars.contains(val) {
+                self.concrete_vars.insert(var.clone());
+            }
+        }
+        let demanded = self.clause_demanded(clause);
+        stmts.extend(self.where_binds_stmts(clause, demanded));
+        stmts
+    }
+
+    /// A guard condition, rendered through a fresh sub-generator exactly as
+    /// the streaming emitter did: the sub starts at indent 0, so a multiline
+    /// construct inside a guard renders relative to column 0 regardless of
+    /// the chain's depth. (A formatting oddity, but a byte-for-byte one.)
+    fn guard_cond_raw(&mut self, cond: &TExpr) -> Expr {
+        let mut sub = self.new_sub();
+        let e = sub.expr_ast(cond);
+        self.absorb_sub_error(&mut sub);
+        let mut s = String::new();
+        e.render(0, &mut s);
+        Expr::raw(s)
+    }
+
+    pub(super) fn pattern_match_block(&mut self, params: &[String], clauses: &[TClause]) -> Block {
         // Clauses with guards need fallthrough semantics (a clause whose pattern
         // matches but whose guards all fail must drop to the next clause). The
         // if/elseif chain below cannot express that across a pattern boundary, so
-        // route any guard-bearing match through the independent-block emitter.
+        // route any guard-bearing match through the independent-block builder.
+        // The dispatch is total, so the chain below handles only guard-free
+        // clauses.
         if clauses.iter().any(|c| !c.guards.is_empty()) {
-            self.gen_pattern_match_guarded(params, clauses);
-            return;
+            return self.pattern_match_guarded_block(params, clauses);
         }
+        let mut chain: Option<(Expr, Block)> = None;
+        let mut elseifs: Vec<(Expr, Block)> = Vec::new();
+        let mut else_b: Option<Block> = None;
+        let mut direct: Option<Vec<Stmt>> = None;
+        let mut fell_through = true;
         for (i, clause) in clauses.iter().enumerate() {
-            let keyword = if i == 0 { "if" } else { "elseif" };
-
             // Each clause is an independent Lua branch (if/elseif … then … end),
             // so its locals must not leak into sibling clauses. Without this,
             // a name bound in one clause stays in `local_vars` and a later
@@ -42,99 +96,36 @@ impl CodeGen {
             let scope_lsp = self.local_strict_params.clone();
             let scope_ldr = self.local_demand_rows.clone();
 
-            if !clause.guards.is_empty() {
-                let mut bindings = Vec::new();
-                let mut conditions = Vec::new();
-                for (pi, pat) in clause.patterns.iter().enumerate() {
-                    self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
-                }
-                if !conditions.is_empty() {
-                    // Wrap in a pattern-matching if block, then test guards inside
-                    self.emit_indent();
-                    self.emit(&format!("{} {} then\n", keyword, conditions.join(" and ")));
-                    self.indent += 1;
-                    for (var, val) in &bindings {
-                        let decl = self.declare_local(var);
-                        self.emit_line(&format!("{} = {}", decl, val));
-                        if self.concrete_vars.contains(val) {
-                            self.concrete_vars.insert(var.clone());
-                        }
-                    }
-                    self.gen_where_binds(clause, self.clause_demanded(clause));
-                    for (gi, guard) in clause.guards.iter().enumerate() {
-                        let gkw = if gi == 0 { "if" } else { "elseif" };
-                        self.emit_indent(); self.emit(&format!("{} ", gkw));
-                        let mut sub = self.new_sub();
-                        sub.gen_expr(&guard.condition);
-                        self.absorb_sub_error(&mut sub);
-                        self.emit(&sub.output);
-                        self.emit(" then\n");
-                        self.indent += 1;
-                        self.emit_indent(); self.emit("return "); self.gen_tail(&guard.body, false); self.emit("\n");
-                        self.indent -= 1;
-                    }
-                    self.emit_line("end");
-                    self.indent -= 1;
+            let mut conditions = Vec::new();
+            let mut bindings = Vec::new();
+            for (pi, pat) in clause.patterns.iter().enumerate() {
+                self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
+            }
+
+            if conditions.is_empty() {
+                // Irrefutable clause: for the first clause its body IS the
+                // whole match; after refutable clauses it becomes the chain's
+                // `else` and later clauses are unreachable. Mirroring the
+                // string emitter, the clause scope is NOT restored on this
+                // early exit (the enclosing function restores its own scope).
+                let mut bs = self.clause_intro_stmts(clause, &bindings);
+                bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
+                if i > 0 {
+                    else_b = Some(Block(bs));
                 } else {
-                    // No pattern conditions, just guards
-                    for (var, val) in &bindings {
-                        let decl = self.declare_local(var);
-                        self.emit_line(&format!("{} = {}", decl, val));
-                        if self.concrete_vars.contains(val) {
-                            self.concrete_vars.insert(var.clone());
-                        }
-                    }
-                    self.gen_where_binds(clause, self.clause_demanded(clause));
-                    for (gi, guard) in clause.guards.iter().enumerate() {
-                        let gkw = if i == 0 && gi == 0 { "if" } else { "elseif" };
-                        self.emit_indent(); self.emit(&format!("{} ", gkw));
-                        let mut sub = self.new_sub();
-                        sub.gen_expr(&guard.condition);
-                        self.absorb_sub_error(&mut sub);
-                        self.emit(&sub.output);
-                        self.emit(" then\n");
-                        self.indent += 1;
-                        self.emit_indent(); self.emit("return "); self.gen_tail(&guard.body, false); self.emit("\n");
-                        self.indent -= 1;
-                    }
+                    direct = Some(bs);
                 }
+                fell_through = false;
+                break;
+            }
+
+            let cond = Expr::raw(conditions.join(" and "));
+            let mut bs = self.clause_intro_stmts(clause, &bindings);
+            bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
+            if chain.is_none() {
+                chain = Some((cond, Block(bs)));
             } else {
-                let mut conditions = Vec::new();
-                let mut bindings = Vec::new();
-                for (pi, pat) in clause.patterns.iter().enumerate() {
-                    self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
-                }
-
-                if conditions.is_empty() {
-                    if i > 0 { self.emit_indent(); self.emit("else\n"); self.indent += 1; }
-                    for (var, val) in &bindings {
-                        let decl = self.declare_local(var);
-                        self.emit_line(&format!("{} = {}", decl, val));
-                        // Propagate concreteness: if binding source is concrete, so is the target
-                        if self.concrete_vars.contains(val) {
-                            self.concrete_vars.insert(var.clone());
-                        }
-                    }
-                    self.gen_where_binds(clause, self.clause_demanded(clause));
-                    self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
-                    if i > 0 { self.indent -= 1; self.emit_line("end"); }
-                    return;
-                }
-
-                self.emit_indent();
-                self.emit(&format!("{} {} then\n", keyword, conditions.join(" and ")));
-                self.indent += 1;
-                for (var, val) in &bindings {
-                    let decl = self.declare_local(var);
-                    self.emit_line(&format!("{} = {}", decl, val));
-                    // Propagate concreteness: if binding source is concrete, so is the target
-                    if self.concrete_vars.contains(val) {
-                        self.concrete_vars.insert(var.clone());
-                    }
-                }
-                self.gen_where_binds(clause, self.clause_demanded(clause));
-                self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
-                self.indent -= 1;
+                elseifs.push((cond, Block(bs)));
             }
 
             // Restore the scope captured at the start of this clause so its
@@ -148,8 +139,20 @@ impl CodeGen {
             self.local_strict_params = scope_lsp;
             self.local_demand_rows = scope_ldr;
         }
-        self.emit_line("end");
-        self.emit_line("error(\"Non-exhaustive patterns\")");
+        let mut stmts = Vec::new();
+        match chain {
+            Some((cond, then_b)) => {
+                stmts.push(Stmt::If { cond, then_b, elseifs, else_b });
+                if fell_through {
+                    stmts.push(Self::non_exhaustive_stmt());
+                }
+            }
+            None => {
+                // First clause irrefutable: its body is the whole match.
+                stmts.extend(direct.unwrap_or_default());
+            }
+        }
+        Block(stmts)
     }
 
     /// Pattern match where at least one clause carries guards. Each clause is
@@ -160,9 +163,10 @@ impl CodeGen {
     /// is exactly Haskell's semantics. (The flat if/elseif chain cannot do this:
     /// once a pattern's `then` arm is entered there is no way back to the next
     /// `elseif`.)
-    pub(super) fn gen_pattern_match_guarded(&mut self, params: &[String], clauses: &[TClause]) {
+    pub(super) fn pattern_match_guarded_block(&mut self, params: &[String], clauses: &[TClause]) -> Block {
+        let mut stmts = Vec::new();
         for clause in clauses {
-            // A clause's where-scope rows (installed by gen_where_binds)
+            // A clause's where-scope rows (installed by where_binds_stmts)
             // must not leak into the next clause's independent block.
             let scope_lsp = self.local_strict_params.clone();
             let scope_ldr = self.local_demand_rows.clone();
@@ -171,44 +175,44 @@ impl CodeGen {
             for (pi, pat) in clause.patterns.iter().enumerate() {
                 self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
             }
-            self.emit_indent();
-            if conditions.is_empty() {
-                self.emit("do\n");
-            } else {
-                self.emit(&format!("if {} then\n", conditions.join(" and ")));
-            }
-            self.indent += 1;
-            for (var, val) in &bindings {
-                let decl = self.declare_local(var);
-                self.emit_line(&format!("{} = {}", decl, val));
-                if self.concrete_vars.contains(val) {
-                    self.concrete_vars.insert(var.clone());
-                }
-            }
-            self.gen_where_binds(clause, self.clause_demanded(clause));
+            let mut bs = self.clause_intro_stmts(clause, &bindings);
             if clause.guards.is_empty() {
-                self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
+                bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
             } else {
-                for (gi, guard) in clause.guards.iter().enumerate() {
-                    let gkw = if gi == 0 { "if" } else { "elseif" };
-                    self.emit_indent(); self.emit(&format!("{} ", gkw));
-                    let mut sub = self.new_sub();
-                    sub.gen_expr(&guard.condition);
-                    self.absorb_sub_error(&mut sub);
-                    self.emit(&sub.output);
-                    self.emit(" then\n");
-                    self.indent += 1;
-                    self.emit_indent(); self.emit("return "); self.gen_tail(&guard.body, false); self.emit("\n");
-                    self.indent -= 1;
+                let mut gchain: Option<(Expr, Block)> = None;
+                let mut gelseifs: Vec<(Expr, Block)> = Vec::new();
+                for guard in &clause.guards {
+                    let cond = self.guard_cond_raw(&guard.condition);
+                    let body = Block(vec![Stmt::Return(self.tail_ast(&guard.body, false))]);
+                    if gchain.is_none() {
+                        gchain = Some((cond, body));
+                    } else {
+                        gelseifs.push((cond, body));
+                    }
                 }
-                self.emit_line("end");
+                let (gcond, gthen) = gchain.expect("non-empty guard list");
+                bs.push(Stmt::If {
+                    cond: gcond,
+                    then_b: gthen,
+                    elseifs: gelseifs,
+                    else_b: None,
+                });
             }
-            self.indent -= 1;
-            self.emit_line("end");
+            if conditions.is_empty() {
+                stmts.push(Stmt::Do(Block(bs)));
+            } else {
+                stmts.push(Stmt::If {
+                    cond: Expr::raw(conditions.join(" and ")),
+                    then_b: Block(bs),
+                    elseifs: vec![],
+                    else_b: None,
+                });
+            }
             self.local_strict_params = scope_lsp;
             self.local_demand_rows = scope_ldr;
         }
-        self.emit_line("error(\"Non-exhaustive patterns\")");
+        stmts.push(Self::non_exhaustive_stmt());
+        Block(stmts)
     }
 
     /// A sub-pattern that inspects its value (matches a tag, compares a
@@ -267,7 +271,7 @@ impl CodeGen {
             TPattern::Wildcard => {}
             TPattern::LitPat(lit) => {
                 let s = match lit {
-                    // See gen_literal: i64::MIN has no decimal Lua spelling.
+                    // See literal_ast: i64::MIN has no decimal Lua spelling.
                     TLiteral::Integer(i64::MIN) => "0x8000000000000000".to_string(),
                     TLiteral::Integer(n) => format!("{}", n),
                     TLiteral::Number(n) => format!("{}", n),
@@ -366,7 +370,7 @@ impl CodeGen {
                                 // `[x]`) needs the next cell in WHNF, so it
                                 // uses the forcing reader; a Var/Wildcard
                                 // sub-pattern binds the raw tail and pulls no
-                                // further spine cell (gen_expr forces the
+                                // further spine cell (expr_ast forces the
                                 // bound variable at each value-use). Same rule
                                 // as the head above.
                                 let tail_pat = &args[1];

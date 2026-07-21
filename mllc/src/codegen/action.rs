@@ -1,7 +1,9 @@
 //! IO/ST action emission: bind chains, the pure-box convention, and the
-//! two-runner protocol.
+//! two-runner protocol. `bind_chain_block` flattens do-notation into a
+//! statement `Block`; the `*_ast` builders produce the run-position
+//! expressions.
 //!
-//! Performing an action goes through a runner. `gen_action_run(tail=false)`
+//! Performing an action goes through a runner. `action_run_ast(tail=false)`
 //! emits the CONSUMING `__mll_run` (bind RHSes and value positions — the
 //! result is inspected, so any pending pure box is stripped);
 //! `tail=true` emits the FORWARDING `__mll_run_tail`, whose Lua tail call
@@ -17,6 +19,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
+use super::lua::{Block, Expr, Stmt};
 use super::names::{sanitize_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
@@ -34,13 +37,13 @@ impl CodeGen {
     /// value) rather than a possibly-suspended thunk. A `<-`-bound variable is
     /// marked `concrete` (read force-free downstream) only when this holds.
     ///
-    /// This must mirror gen_action's emission arms exactly — it is a claim
+    /// This must mirror action_run_ast's emission arms exactly — it is a claim
     /// about what the emitted code produces, so each `true` arm corresponds to
-    /// an arm of gen_action whose result is provably forced:
+    /// an arm of action_run_ast whose result is provably forced:
     ///
     ///   * `return e` / `pure e` (prefix or `$`): the result is `e` left
     ///     UNFORCED per the non-strict contract — WHNF only when `e` is itself
-    ///     provably total (`is_cheap_to_force`); otherwise gen_action suspends
+    ///     provably total (`is_cheap_to_force`); otherwise action_run_ast suspends
     ///     it in a thunk.
     ///   * literal / constructor / tuple actions: emitted as the value itself,
     ///     which is WHNF by construction.
@@ -93,15 +96,15 @@ impl CodeGen {
         Self::ty_never_lua_function(&arg.ty) && self.pure_payload_force_is_total(arg)
     }
 
-    /// Whether `__force` applied to what `gen_arg(arg, false)` emits cannot
-    /// bottom — i.e. the emitted form is already WHNF. `gen_arg` suspends a
+    /// Whether `__force` applied to what `arg_ast(arg, false)` emits cannot
+    /// bottom — i.e. the emitted form is already WHNF. `arg_ast` suspends a
     /// possibly-⊥ payload in a thunk (so forcing it could raise) EXCEPT for two
     /// forms it emits directly, both provably total to WHNF: a `is_cheap_to_force`
     /// expression, and a TUPLE literal (building the table forces nothing — each
     /// field is independently suspended, so a ⊥ field stays inert until demanded).
     /// For those two, `__mll_run`'s force is a harmless no-op and the value is
     /// safe to leave bare; everything else must be boxed. This mirrors the
-    /// gen_arg emission arms exactly.
+    /// arg_ast emission arms exactly.
     pub(super) fn pure_payload_force_is_total(&self, arg: &TExpr) -> bool {
         let mut a = arg;
         while let TExprKind::Paren(inner) = &a.kind {
@@ -129,32 +132,31 @@ impl CodeGen {
         }
     }
 
-    /// Emit the action produced by `pure arg` / `return arg` in a position
+    /// Build the action produced by `pure arg` / `return arg` in a position
     /// where it may ESCAPE to a caller's `__mll_run` (a function's terminal
     /// action, a discarded statement). The value is left bare when that is
     /// provably safe (see `pure_value_bare_is_safe`) and otherwise wrapped in
     /// `__mll_pure`, which `__mll_run` unwraps without forcing or calling it.
-    /// `arg` is still emitted through the eagerness weighing (`gen_arg`,
+    /// `arg` is still built through the eagerness weighing (`arg_ast`,
     /// non-strict), so a possibly-⊥ payload stays suspended inside the box.
-    pub(super) fn gen_pure_action(&mut self, arg: &TExpr) {
+    pub(super) fn pure_action_ast(&mut self, arg: &TExpr) -> Expr {
         if self.pure_value_bare_is_safe(arg) {
-            self.gen_arg(arg, false);
+            self.arg_ast(arg, false)
         } else {
-            self.emit("__mll_pure(");
-            self.gen_arg(arg, false);
-            self.emit(")");
+            let payload = self.arg_ast(arg, false);
+            Expr::call_named("__mll_pure", vec![payload])
         }
     }
 
-    /// Emit the RHS of an `x <- action` bind whose result is assigned DIRECTLY
+    /// Build the RHS of an `x <- action` bind whose result is assigned DIRECTLY
     /// to `x` (no enclosing runner). A syntactic `pure e` / `return e`
     /// short-circuits to its payload — bound as a value/thunk and forced only
     /// on use — and must stay UNBOXED here, since nothing will unwrap a
     /// `__mll_pure` box on this path. Every other action goes through
-    /// `gen_action`, which emits its own `__mll_run` (unwrapping any box
+    /// `action_run_ast`, which emits its own `__mll_run` (unwrapping any box
     /// produced deeper). This mirrors `action_result_is_whnf`'s pure arms, so
     /// the concreteness decision that follows the bind stays exact.
-    pub(super) fn gen_bound_action(&mut self, action: &TExpr) {
+    pub(super) fn bound_action_ast(&mut self, action: &TExpr) -> Expr {
         let mut a = action;
         while let TExprKind::Paren(inner) = &a.kind {
             a = inner.as_ref();
@@ -170,16 +172,12 @@ impl CodeGen {
             _ => None,
         };
         match payload {
-            Some(p) => self.gen_arg(p, false),
-            None => self.gen_action(a),
+            Some(p) => self.arg_ast(p, false),
+            None => self.action_run_ast(a, false),
         }
     }
 
-    pub(super) fn gen_action(&mut self, expr: &TExpr) {
-        self.gen_action_run(expr, false);
-    }
-
-    /// Emit an action in run-position. `tail` selects the runner: `false`
+    /// Build an action in run-position. `tail` selects the runner: `false`
     /// emits the CONSUMING `__mll_run` (bind RHSes, value positions — the
     /// result is inspected, so any pending pure box must be stripped);
     /// `true` emits the FORWARDING `__mll_run_tail` (a `return`-position
@@ -189,13 +187,13 @@ impl CodeGen {
     /// xs`) into a constant-stack Lua tail-call chain; the ≤1 pending box
     /// its result may carry is stripped by the consuming site at the
     /// chain's root (see the __mll_run contract comment in the runtime).
-    pub(super) fn gen_action_run(&mut self, expr: &TExpr, tail: bool) {
+    pub(super) fn action_run_ast(&mut self, expr: &TExpr, tail: bool) -> Expr {
         let runner = if tail { "__mll_run_tail" } else { "__mll_run" };
         // Structural checks FIRST — the monad type variable may be
         // unresolved in bind chains, so we can't rely on the type alone.
         // pure(x) / return(x): performing it just yields x — and yields it
         // UNFORCED, per the eagerness contract (`return ⊥` must not raise until
-        // the value is demanded). gen_arg with strict=false suspends a possibly-⊥
+        // the value is demanded). arg_ast with strict=false suspends a possibly-⊥
         // x in a thunk and leaves a provably-total x (literal, concrete var,
         // constructor of such) eager, so the common `return 0` stays a bare
         // value while `return (error "x")` / `return (n `div` 0)` become inert.
@@ -203,14 +201,12 @@ impl CodeGen {
         // yields WHNF (see action_result_is_whnf).
         if let TExprKind::App(func, arg) = &expr.kind
             && matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                self.gen_pure_action(arg);
-                return;
+                return self.pure_action_ast(arg);
             }
         // return $ x / pure $ x: same as return(x)
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
             && op == "$" && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                self.gen_pure_action(rhs);
-                return;
+                return self.pure_action_ast(rhs);
             }
         // ST primitive calls now return closures — go through __mll_run like everything else
         if !Self::is_nullary_action_type(&expr.ty) {
@@ -220,18 +216,15 @@ impl CodeGen {
             // defensively wrap with __mll_run since we may be in a bind chain
             // where the expression must be an action.
             if Self::is_definitely_not_action(&expr.ty) {
-                self.gen_expr(expr);
+                return self.expr_ast(expr);
             } else {
-                self.emit(runner);
-                self.emit("(");
-                self.gen_expr(expr);
-                self.emit(")");
+                let e = self.expr_ast(expr);
+                return Expr::call_named(runner, vec![e]);
             }
-            return;
         }
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => {
-                self.gen_expr(expr);
+                self.expr_ast(expr)
             }
             // IO SpecCall: inline the Lua call directly (skip closure)
             TExprKind::SpecCall { specialized, args, .. } if specialized.starts_with("__mll_io:") => {
@@ -240,28 +233,29 @@ impl CodeGen {
                 // value (arrays, dicts, nested records) is converted into the
                 // mata-ll representation before it reaches mata-ll code.
                 let decode = self.ffi_decode_desc(&expr.ty);
-                if let Some(desc) = &decode {
-                    self.emit(&format!("__mll_ffi_decode({}, ", desc));
-                }
-                if let Some(method) = lua_func.strip_prefix(':') {
-                    self.gen_forced_prefix(&args[0]);
-                    self.emit(&format!(":{}", method));
-                    self.emit("(");
-                    self.gen_ffi_args(&args[1..], false);
-                    self.emit(")");
+                let call = if let Some(method) = lua_func.strip_prefix(':') {
+                    let recv = self.forced_prefix_ast(&args[0]);
+                    let margs = self.ffi_args_ast(&args[1..]);
+                    Expr::method(recv, method, margs)
                 } else {
-                    self.emit(lua_func);
-                    self.emit("(");
-                    self.gen_ffi_args(args, false);
-                    self.emit(")");
-                }
-                if decode.is_some() {
-                    self.emit(&format!(", {:?})", Self::ffi_root_name(lua_func)));
+                    let cargs = self.ffi_args_ast(args);
+                    Expr::call_named(lua_func, cargs)
+                };
+                match &decode {
+                    Some(desc) => Expr::call_named(
+                        "__mll_ffi_decode",
+                        vec![
+                            Expr::raw(desc.clone()),
+                            call,
+                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                        ],
+                    ),
+                    None => call,
                 }
             }
             // Fully-applied ST intrinsic in run-once position: emit the
             // effect directly, skipping the action-closure allocation and
-            // the __mll_run dispatch. gen_action is only reached where an
+            // the __mll_run dispatch. This path is only reached where an
             // action runs exactly once, in order, so this is safe by
             // construction. See st_intrinsic_fused.
             _ if Self::st_intrinsic_fused(expr).is_some() => {
@@ -294,22 +288,18 @@ impl CodeGen {
                     "__mll_st_to_list" => &[true],
                     _ => &[],
                 };
-                self.emit(fused);
-                self.emit("(");
+                let mut cargs = Vec::new();
                 for (i, a) in fargs.iter().enumerate() {
-                    if i > 0 { self.emit(", "); }
                     let strict = strict_mask.get(i).copied().unwrap_or(false);
-                    self.gen_arg(a, strict);
+                    cargs.push(self.arg_ast(a, strict));
                 }
-                self.emit(")");
+                Expr::call_named(fused, cargs)
             }
             _ => {
                 // General IO/ST action: the runner handles both direct
                 // values and action closures (function or value).
-                self.emit(runner);
-                self.emit("(");
-                self.gen_expr(expr);
-                self.emit(")");
+                let e = self.expr_ast(expr);
+                Expr::call_named(runner, vec![e])
             }
         }
     }
@@ -418,9 +408,9 @@ impl CodeGen {
     /// runner: `return __mll_run_tail(a)` tail-calls the forwarding runner,
     /// which tail-calls the action closure — so IO/ST recursion that crosses
     /// a function boundary per step (`mapM_`, a recursive `loop n`) is also
-    /// constant-stack. See gen_action_run and the runtime's __mll_run
+    /// constant-stack. See action_run_ast and the runtime's __mll_run
     /// contract comment.
-    pub(super) fn gen_tail(&mut self, expr: &TExpr, inside_action: bool) {
+    pub(super) fn tail_ast(&mut self, expr: &TExpr, inside_action: bool) -> Expr {
         let mut e = expr;
         while let TExprKind::Paren(inner) = &e.kind {
             e = inner.as_ref();
@@ -431,10 +421,10 @@ impl CodeGen {
             // `return __mll_run_tail(a)` emission is a two-step tail chain
             // and recursive action sequencing runs in constant stack. Any
             // pending pure box rides through to the consuming site at the
-            // chain's root (see gen_action_run).
-            self.gen_action_run(e, true);
+            // chain's root (see action_run_ast).
+            self.action_run_ast(e, true)
         } else {
-            self.gen_expr(e);
+            self.expr_ast(e)
         }
     }
 
@@ -443,18 +433,11 @@ impl CodeGen {
     /// When `inside_action` is true, terminal IO expressions are performed
     /// (called with `()`) because we're inside a do-block action closure.
     /// When false (regular function body), IO actions are returned as-is.
-    pub(super) fn gen_bind_chain(&mut self, expr: &TExpr) {
-        self.gen_bind_chain_inner(expr, false);
-    }
-
-    pub(super) fn gen_bind_chain_io(&mut self, expr: &TExpr) {
-        self.gen_bind_chain_inner(expr, true);
-    }
-
-    pub(super) fn gen_bind_chain_inner(&mut self, expr: &TExpr, inside_action: bool) {
+    pub(super) fn bind_chain_block(&mut self, expr: &TExpr, inside_action: bool) -> Block {
         // Iterative loop for right-spine bind chains to avoid stack overflow
         // on deeply nested do-blocks. Only recurses for non-spine children
         // (individual expressions, if-branches) which have bounded depth.
+        let mut stmts: Vec<Stmt> = Vec::new();
         let mut expr = expr;
         let mut inside_action = inside_action;
         loop {
@@ -480,28 +463,28 @@ impl CodeGen {
                                 TExprKind::App(func, _) if matches!(&func.kind,
                                     TExprKind::Var(n) if n == "pure" || n == "return"));
                             if !is_pure_discard {
-                                self.emit_indent();
                                 let saved_rd = std::mem::replace(
                                     &mut self.cur_result_demand, crate::demand::Demand::Head);
-                                self.gen_action_run(lhs_unwrapped, true);
+                                let action = self.action_run_ast(lhs_unwrapped, true);
                                 self.cur_result_demand = saved_rd;
-                                self.emit("\n");
+                                stmts.push(Stmt::Expr(action));
                             }
                             expr = body;
                             inside_action = true;
                             continue;
                         }
                         let param_name = sanitize_name(&params[0].0);
-                        let decl = self.declare_local(&param_name);
-                        self.emit_indent();
-                        self.emit(&format!("{} = ", decl));
+                        let (pre, decl) = self.declare_local_parts(&param_name);
+                        if let Some(s) = pre {
+                            stmts.push(s);
+                        }
                         // A statement action's result is not the function's
                         // result — no deep result demand inside it.
                         let saved_rd = std::mem::replace(
                             &mut self.cur_result_demand, crate::demand::Demand::Head);
-                        self.gen_bound_action(lhs);
+                        let rhs_e = self.bound_action_ast(lhs);
                         self.cur_result_demand = saved_rd;
-                        self.emit("\n");
+                        stmts.push(decl.stmt(rhs_e));
                         // The bound value is force-free downstream only if the
                         // action yields WHNF. A `return ⊥` binds a thunk (kept
                         // lazy per the eagerness contract), so its uses must
@@ -524,7 +507,6 @@ impl CodeGen {
                         TExprKind::App(func, _) if matches!(&func.kind,
                             TExprKind::Var(n) if n == "pure" || n == "return"));
                     if !is_pure_discard {
-                        self.emit_indent();
                         // Statement position — see the ">>=" arm above. The
                         // result is DISCARDED, so the forwarding runner is
                         // used: identical forcing/effect behaviour, and it
@@ -532,9 +514,9 @@ impl CodeGen {
                         // nobody looks at.
                         let saved_rd = std::mem::replace(
                             &mut self.cur_result_demand, crate::demand::Demand::Head);
-                        self.gen_action_run(lhs_unwrapped, true);
+                        let action = self.action_run_ast(lhs_unwrapped, true);
                         self.cur_result_demand = saved_rd;
-                        self.emit("\n");
+                        stmts.push(Stmt::Expr(action));
                     }
                     expr = rhs;
                     inside_action = true;
@@ -544,13 +526,13 @@ impl CodeGen {
                     // Forward-declare all names before assigning so do-block let
                     // bindings can be self- and mutually recursive. Lua locals
                     // are not in scope within their own initializer (see
-                    // gen_where_binds for the rationale).
+                    // where_binds_stmts for the rationale).
                     {
                         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                         for bind in binds {
                             let bname = sanitize_name(&bind.name);
                             if !self.local_vars.contains(&bname) && seen.insert(bname.clone()) {
-                                self.declare_local_fwd(&bname);
+                                stmts.extend(self.declare_local_fwd_stmts(&bname));
                             }
                         }
                     }
@@ -586,34 +568,24 @@ impl CodeGen {
                             && strict_ok
                             && (self.is_cheap_to_force(&bind.body) || demanded.contains(&bind.name)) {
                             self.concrete_vars.insert(bname.clone());
-                            self.emit_indent();
-                            self.emit("if ");
-                            self.gen_expr(cond);
-                            self.emit(" then ");
-                            self.emit(&format!("{} = ", lval));
-                            self.gen_expr(then_branch);
-                            self.emit(" else ");
-                            self.emit(&format!("{} = ", lval));
-                            self.gen_expr(else_branch);
-                            self.emit(" end\n");
+                            let cond_e = self.expr_ast(cond);
+                            let then_e = self.expr_ast(then_branch);
+                            let else_e = self.expr_ast(else_branch);
+                            stmts.push(Stmt::AssignIf { lhs: lval, cond: cond_e, then_e, else_e });
                         } else if Self::is_nullary_action_type(&bind.body.ty) {
                             // First-class action binding — its result is not
                             // the function's result (see cur_result_demand).
                             let saved_rd = std::mem::replace(
                                 &mut self.cur_result_demand, crate::demand::Demand::Head);
-                            self.emit_indent();
-                            self.emit(&format!("{} = function() return ", lval));
-                            self.gen_action(&bind.body);
-                            self.emit(" end\n");
+                            let action = self.action_run_ast(&bind.body, false);
+                            stmts.push(Stmt::Assign(lval, Expr::inline_fn0(action)));
                             self.cur_result_demand = saved_rd;
                         } else {
                             let saved_rd = std::mem::replace(
                                 &mut self.cur_result_demand, crate::demand::Demand::Head);
-                            self.emit_indent();
                             if self.strict_binding_ok(bind, &demanded) && strict_ok {
-                                self.emit(&format!("{} = ", lval));
-                                self.gen_expr(&bind.body);
-                                self.emit("\n");
+                                let rhs_e = self.expr_ast(&bind.body);
+                                stmts.push(Stmt::Assign(lval, rhs_e));
                                 self.concrete_vars.insert(bname);
                             } else {
                                 // Thunked: must not stay marked concrete (a
@@ -622,13 +594,11 @@ impl CodeGen {
                                 if let Some(v) = bare_var_alias(binds, i) {
                                     // Bare-variable RHS: share the existing
                                     // thunk-or-value (see bare_var_alias).
-                                    self.emit(&format!("{} = ", lval));
-                                    self.gen_lazy_ref(v);
-                                    self.emit("\n");
+                                    let rhs_e = self.lazy_ref_ast(v);
+                                    stmts.push(Stmt::Assign(lval, rhs_e));
                                 } else {
-                                    self.emit(&format!("{} = __thunk(function() return ", lval));
-                                    self.gen_expr(&bind.body);
-                                    self.emit(" end)\n");
+                                    let rhs_e = self.expr_ast(&bind.body);
+                                    stmts.push(Stmt::Assign(lval, Expr::thunk(rhs_e)));
                                 }
                             }
                             self.cur_result_demand = saved_rd;
@@ -642,32 +612,26 @@ impl CodeGen {
             // Terminal expression
             match &expr.kind {
                 TExprKind::If { cond, then_branch, else_branch } => {
-                    self.emit_indent();
-                    self.emit("if ");
-                    self.gen_expr(cond);
-                    self.emit(" then\n");
-                    self.indent += 1;
-                    self.gen_bind_chain_inner(then_branch, inside_action);
-                    self.indent -= 1;
-                    self.emit_indent();
-                    self.emit("else\n");
-                    self.indent += 1;
-                    self.gen_bind_chain_inner(else_branch, inside_action);
-                    self.indent -= 1;
-                    self.emit_indent();
-                    self.emit("end\n");
+                    let cond_e = self.expr_ast(cond);
+                    let then_b = self.bind_chain_block(then_branch, inside_action);
+                    let else_b = self.bind_chain_block(else_branch, inside_action);
+                    stmts.push(Stmt::If {
+                        cond: cond_e,
+                        then_b,
+                        elseifs: vec![],
+                        else_b: Some(else_b),
+                    });
                 }
                 _ => {
-                    self.emit_indent();
-                    self.emit("return ");
                     // Tail position: strip transparent parens so a wrapped call
-                    // (`return (f x)`) becomes a proper Lua tail call. See gen_tail.
-                    self.gen_tail(expr, inside_action);
-                    self.emit("\n");
+                    // (`return (f x)`) becomes a proper Lua tail call. See tail_ast.
+                    let tail = self.tail_ast(expr, inside_action);
+                    stmts.push(Stmt::Return(tail));
                 }
             }
             break;
         }
+        Block(stmts)
     }
 
     pub(super) fn is_st_type(ty: &Ty) -> bool {

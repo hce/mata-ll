@@ -1,23 +1,26 @@
 //! Top-level function emission: clause dispatch and where-binding groups.
 //!
-//! `gen_function` emits each function as one N-ary Lua function (clause
-//! parameters plus `_eta` padding) and hands multi-clause or refutable
-//! definitions to the pattern-match paths. The `gen_where_*` family emits a
-//! clause's where bindings: function groups are forward-declared and then
-//! assigned so mutual recursion resolves, value bindings are assigned
-//! strictly only when `strict_binding_ok` proves it sound, and the clause's
-//! local strictness and demand rows are installed for the scope and restored
-//! at exit so they never leak into a sibling clause.
+//! `function_stmts` builds each function as one N-ary Lua function
+//! (`Stmt::Function` with clause parameters plus `_eta` padding) and hands
+//! multi-clause or refutable definitions to the pattern-match builders. The
+//! `where_*` family builds a clause's where bindings: function groups are
+//! forward-declared and then assigned so mutual recursion resolves, value
+//! bindings are assigned strictly only when `strict_binding_ok` proves it
+//! sound, and the clause's local strictness and demand rows are installed
+//! for the scope and restored at exit so they never leak into a sibling
+//! clause. `function_stmts` is the streaming boundary kept for the module
+//! layer.
 
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
+use super::lua::{Block, Expr, FuncBody, Stmt};
 use super::names::{sanitize_name};
 use super::util::{count_arrows, expr_evaluates_global_ref, expr_references_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
 impl CodeGen {
-    pub(super) fn gen_function(&mut self, func: &TFunction) {
+    pub(super) fn function_stmts(&mut self, func: &TFunction) -> Vec<Stmt> {
         let lua_name = sanitize_name(&func.name);
         let clauses = &func.clauses;
         let saved_concrete = self.concrete_vars.clone();
@@ -37,7 +40,7 @@ impl CodeGen {
         // demanded-binding analysis of result-position expressions.
         self.cur_result_demand = self.demand_info.rows.result_demand(&func.name);
 
-        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; self.local_count = saved_local_count; self.var_slots = saved_var_slots; self.var_slots_next = saved_var_slots_next; self.var_table_emitted = saved_var_table_emitted; self.local_strict_params = saved_local_strict; self.local_demand_rows = saved_local_rows; return; }
+        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; self.local_count = saved_local_count; self.var_slots = saved_var_slots; self.var_slots_next = saved_var_slots_next; self.var_table_emitted = saved_var_table_emitted; self.local_strict_params = saved_local_strict; self.local_demand_rows = saved_local_rows; return Vec::new(); }
 
         // Eta-expand: if the function has fewer patterns than type arrows,
         // add extra params so the Lua function matches the expected arity.
@@ -60,19 +63,18 @@ impl CodeGen {
             // zero-arg function (IO action / thunk)
             let is_io_action = matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _) | Ty::Forall(_, _));
 
+            let mut stmts = Vec::new();
             let is_concrete;
             if is_io_action {
                 // Wrap in a function (IO action, needs to be called)
-                // Use gen_bind_chain_io to flatten do-block let/bind chains
-                // into sequential local statements instead of nested IIFEs.
-                self.emit_indent();
-                self.emit(&self.fn_decl(&lua_name, ""));
-                self.emit("\n");
-                self.indent += 1;
-                self.gen_where_binds(&clauses[0], self.clause_demanded(&clauses[0]));
-                self.gen_bind_chain_io(&clauses[0].body);
-                self.indent -= 1;
-                self.emit_line("end");
+                // Use the IO bind-chain builder to flatten do-block let/bind
+                // chains into sequential local statements instead of nested
+                // IIFEs.
+                let header = self.fn_decl(&lua_name, "");
+                let demanded = self.clause_demanded(&clauses[0]);
+                let mut body = self.where_binds_stmts(&clauses[0], demanded);
+                body.extend(self.bind_chain_block(&clauses[0].body, true).0);
+                stmts.push(Stmt::Function { header, body: Block(body) });
                 is_concrete = true;
             } else if expr_references_name(&clauses[0].body, &func.name) {
                 // Self-referencing value binding (e.g., infinite list).
@@ -80,17 +82,15 @@ impl CodeGen {
                 // resolve to this local binding, not a potentially missing slot.
                 self.local_vars.insert(lua_name.clone());
                 if !self.forward_declared.contains(&lua_name) {
-                    self.emit_line(&format!("local {}", lua_name));
+                    stmts.push(Stmt::Local(vec![lua_name.clone()], None));
                 }
                 if Self::is_cons_headed(&clauses[0].body) {
                     // Cons-headed (`xs = 0 : xs`): the value is an eagerly built
-                    // cons cell whose TAIL self-reference `gen_expr_lazy` defers
+                    // cons cell whose TAIL self-reference `expr_lazy_ast` defers
                     // into a thunk. The cell itself is a concrete value, so the
                     // deferred self-reference reads it after assignment.
-                    self.emit_indent();
-                    self.emit(&format!("{} = ", lua_name));
-                    self.gen_expr_lazy(&clauses[0].body, &func.name);
-                    self.emit("\n");
+                    let rhs = self.expr_lazy_ast(&clauses[0].body, &func.name);
+                    stmts.push(Stmt::Assign(lua_name.clone(), rhs));
                     is_concrete = true;
                 } else {
                     // General self-reference (`xs = myCons 0 xs`, `s = S 1 s`,
@@ -105,13 +105,11 @@ impl CodeGen {
                     // would force the in-progress thunk and loop — so mark it
                     // concrete only while emitting the body; external uses of
                     // the (thunked) binding still force it.
-                    self.emit_indent();
-                    self.emit(&format!("{} = __thunk(function() return ", lua_name));
                     let was_concrete = self.concrete_vars.contains(&lua_name);
                     self.concrete_vars.insert(lua_name.clone());
-                    self.gen_expr(&clauses[0].body);
+                    let rhs = self.expr_ast(&clauses[0].body);
                     if !was_concrete { self.concrete_vars.remove(&lua_name); }
-                    self.emit(" end)\n");
+                    stmts.push(Stmt::Assign(lua_name.clone(), Expr::thunk(rhs)));
                     is_concrete = false;
                 }
             } else if clauses[0].where_binds.is_empty() && Self::is_cheap(&clauses[0].body)
@@ -122,37 +120,27 @@ impl CodeGen {
                 // (possibly defined later in the file) falls through to the
                 // thunk branch below, deferring the read past module load when
                 // the slot is still nil.
-                self.emit_indent();
-                self.emit(&self.var_decl(&lua_name));
-                self.gen_expr(&clauses[0].body);
-                self.emit("\n");
+                let rhs = self.expr_ast(&clauses[0].body);
+                stmts.push(self.var_decl_stmt(&lua_name, rhs));
                 is_concrete = true;
             } else if clauses[0].where_binds.is_empty() {
                 // Expensive value binding with no where clause — thunk
-                self.emit_indent();
-                self.emit(&self.var_decl(&lua_name));
-                self.emit("__thunk(function() return ");
-                self.gen_expr(&clauses[0].body);
-                self.emit(" end)");
-                self.emit("\n");
+                let rhs = self.expr_ast(&clauses[0].body);
+                stmts.push(self.var_decl_stmt(&lua_name, Expr::thunk(rhs)));
                 is_concrete = false;
             } else {
                 // Value binding with where clause — wrap in thunked IIFE to scope the locals
-                self.emit_indent();
-                self.emit(&self.var_decl(&lua_name));
-                self.emit("__thunk(function()\n");
-                self.indent += 1;
-                self.gen_where_binds(&clauses[0], self.clause_demanded(&clauses[0]));
-                self.emit_indent();
-                self.emit("return ");
-                self.gen_expr(&clauses[0].body);
-                self.emit("\n");
-                self.indent -= 1;
-                self.emit_indent();
-                self.emit("end)\n");
+                let demanded = self.clause_demanded(&clauses[0]);
+                let mut body = self.where_binds_stmts(&clauses[0], demanded);
+                body.push(Stmt::Return(self.expr_ast(&clauses[0].body)));
+                let thunk = Expr::call_named(
+                    "__thunk",
+                    vec![Expr::Func(vec![], FuncBody::Block(Block(body)))],
+                );
+                stmts.push(self.var_decl_stmt(&lua_name, thunk));
                 is_concrete = false;
             }
-            self.emit_line("");
+            stmts.push(Stmt::Raw(String::new()));
             self.concrete_vars = saved_concrete;
             self.local_strict_params = saved_local_strict;
             self.local_demand_rows = saved_local_rows;
@@ -162,7 +150,7 @@ impl CodeGen {
                 // Thunked value — must NOT be concrete (needs __force)
                 self.concrete_vars.remove(&lua_name);
             }
-            return;
+            return stmts;
         }
 
         if clauses.len() == 1 && clauses[0].guards.is_empty() {
@@ -174,10 +162,8 @@ impl CodeGen {
             let mut all_params = dict_param_names.clone();
             all_params.extend(params.iter().cloned());
             let params_str = all_params.join(", ");
-            self.emit_indent();
-            self.emit(&self.fn_decl(&lua_name, &params_str));
-            self.emit("\n");
-            self.indent += 1;
+            let header = self.fn_decl(&lua_name, &params_str);
+            let mut body = Vec::new();
             // The function name is concrete (it's a function value) — allow
             // self-recursive calls to skip __force
             self.concrete_vars.insert(lua_name.clone());
@@ -196,49 +182,46 @@ impl CodeGen {
                         let sname = sanitize_name(v);
                         let always_cheap = call_site_cheap.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
                         let is_strict = demand_strict.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                        let decl = self.declare_local(&sname);
+                        let (pre, decl) = self.declare_local_parts(&sname);
+                        if let Some(s) = pre { body.push(s); }
                         if always_cheap {
                             // All callers pass concrete values — no __force needed
-                            self.emit_line(&format!("{} = _arg{}", decl, i));
+                            body.push(decl.stmt(Expr::name(format!("_arg{}", i))));
                             self.concrete_vars.insert(sname);
                         } else if is_strict {
                             // Demand analysis: body forces this param — force at entry
-                            self.emit_line(&format!("{} = __force(_arg{})", decl, i));
+                            body.push(decl.stmt(Expr::force(Expr::name(format!("_arg{}", i)))));
                             self.concrete_vars.insert(sname);
                         } else {
                             // Not demanded — stay lazy
-                            self.emit_line(&format!("{} = _arg{}", decl, i));
+                            body.push(decl.stmt(Expr::name(format!("_arg{}", i))));
                         }
                     }
                 }
-                self.gen_where_binds(clause, self.clause_demanded(clause));
+                let demanded = self.clause_demanded(clause);
+                body.extend(self.where_binds_stmts(clause, demanded));
                 if eta_count > 0 {
                     // Eta-expand: apply extra params to the body
-                    self.emit_indent(); self.emit("return __force(");
-                    self.gen_expr(&clause.body);
-                    self.emit(")(");
-                    self.emit(&eta_params.join(", "));
-                    self.emit(")\n");
+                    let callee = Expr::force(self.expr_ast(&clause.body));
+                    body.push(Stmt::Return(Expr::call(
+                        callee,
+                        eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
+                    )));
                 } else if Self::returns_st(&func.ty) {
                     // ST-returning function: wrap body in a closure so the
                     // function returns an ST action (deferred computation).
                     // The closure is called by __mll_run in bind chains.
-                    self.emit_indent();
-                    self.emit("return function()\n");
-                    self.indent += 1;
-                    self.gen_bind_chain_io(&clause.body);
-                    self.indent -= 1;
-                    self.emit_indent();
-                    self.emit("end\n");
+                    let chain = self.bind_chain_block(&clause.body, true);
+                    body.push(Stmt::Return(Expr::Func(vec![], FuncBody::Block(chain))));
                 } else if Self::returns_action(&func.ty) {
                     // IO-returning function: flatten bind chains, performing
                     // sub-actions directly. The function itself acts as the action
-                    // closure — callers use gen_action to invoke it.
-                    self.gen_bind_chain_io(&clause.body);
+                    // closure — callers use the action runners to invoke it.
+                    body.extend(self.bind_chain_block(&clause.body, true).0);
                 } else {
-                    // Pure function: use gen_bind_chain for the body so
-                    // If/>>=/>> flatten into statements instead of IIFEs
-                    self.gen_bind_chain(&clause.body);
+                    // Pure function: use the plain bind-chain builder for the
+                    // body so If/>>=/>> flatten into statements instead of IIFEs
+                    body.extend(self.bind_chain_block(&clause.body, false).0);
                 }
             } else {
                 // Force only args that are destructured
@@ -246,16 +229,18 @@ impl CodeGen {
                     if i < clause.patterns.len()
                         && !matches!(&clause.patterns[i], TPattern::Var(_, _) | TPattern::Wildcard)
                     {
-                        self.emit_line(&format!("{} = __force({})", p, p));
+                        body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
                         self.concrete_vars.insert(p.clone());
                     }
                 }
-                self.gen_where_binds(clause, self.clause_demanded(clause));
-                self.gen_pattern_match(&params, clauses);
+                let demanded = self.clause_demanded(clause);
+                body.extend(self.where_binds_stmts(clause, demanded));
+                body.extend(self.pattern_match_block(&params, clauses).0);
             }
-            self.indent -= 1;
-            self.emit_line("end");
-            self.emit_line("");
+            let stmts = vec![
+                Stmt::Function { header, body: Block(body) },
+                Stmt::Raw(String::new()),
+            ];
             self.concrete_vars = saved_concrete;
             self.local_vars = saved_locals;
             self.local_count = saved_local_count;
@@ -265,7 +250,7 @@ impl CodeGen {
             self.local_strict_params = saved_local_strict;
             self.local_demand_rows = saved_local_rows;
             self.concrete_vars.insert(lua_name);
-            return;
+            return stmts;
         }
 
         // Multiple clauses or guards
@@ -277,10 +262,8 @@ impl CodeGen {
         let mut all_params = dict_param_names.clone();
         all_params.extend(params.iter().cloned());
         let params_str = all_params.join(", ");
-        self.emit_indent();
-        self.emit(&self.fn_decl(&lua_name, &params_str));
-        self.emit("\n");
-        self.indent += 1;
+        let header = self.fn_decl(&lua_name, &params_str);
+        let mut body = Vec::new();
         self.concrete_vars.insert(lua_name.clone());
         for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
         // Force params that are destructured OR where call-site analysis
@@ -303,17 +286,18 @@ impl CodeGen {
             });
             if needs_force {
                 // Destructured param — must force for pattern matching
-                self.emit_line(&format!("{} = __force({})", p, p));
+                body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
                 self.concrete_vars.insert(p.clone());
             } else if always_cheap {
                 // All callers pass concrete values — mark concrete, no force needed
                 self.concrete_vars.insert(p.clone());
             }
         }
-        self.gen_pattern_match(&params, clauses);
-        self.indent -= 1;
-        self.emit_line("end");
-        self.emit_line("");
+        body.extend(self.pattern_match_block(&params, clauses).0);
+        let stmts = vec![
+            Stmt::Function { header, body: Block(body) },
+            Stmt::Raw(String::new()),
+        ];
         self.concrete_vars = saved_concrete;
         self.local_vars = saved_locals;
         self.local_count = saved_local_count;
@@ -323,6 +307,7 @@ impl CodeGen {
         self.local_strict_params = saved_local_strict;
         self.local_demand_rows = saved_local_rows;
         self.concrete_vars.insert(lua_name);
+        stmts
     }
 
     /// `demanded` seeds which where-bound names are provably forced by the
@@ -332,8 +317,9 @@ impl CodeGen {
     /// Takes the whole clause (not just its where_binds) because the local
     /// strictness rows installed here are scoped by scanning the clause for
     /// rebindings of the local function names (see local_fn_strict_params).
-    pub(super) fn gen_where_binds(&mut self, clause: &TClause, demanded: crate::demand::DemandMap) {
+    pub(super) fn where_binds_stmts(&mut self, clause: &TClause, demanded: crate::demand::DemandMap) -> Vec<Stmt> {
         let binds: &[TLocalDef] = &clause.where_binds;
+        let mut stmts = Vec::new();
         // Forward-declare ALL where-bound names — values as well as functions —
         // before emitting any definition. A where/let group is mutually
         // recursive in Haskell, and a value may reference itself (e.g. a
@@ -349,7 +335,7 @@ impl CodeGen {
                 let is_func = !binds[i].patterns.is_empty();
                 let sname = sanitize_name(&binds[i].name);
                 if !self.local_vars.contains(&sname) && seen.insert(sname.clone()) {
-                    self.declare_local_fwd(&sname);
+                    stmts.extend(self.declare_local_fwd_stmts(&sname));
                 }
                 if is_func {
                     let name = &binds[i].name;
@@ -385,33 +371,34 @@ impl CodeGen {
         // z's RHS demands y, y is demanded too (see demanded_bindings).
         let demanded = self.demanded_bindings(binds, demanded);
 
-        // Now emit all bindings in source order — functions and values
+        // Now build all bindings in source order — functions and values
         // interleaved as written. The forward declarations above ensure
         // references resolve regardless of order.
         let mut i = 0;
         while i < binds.len() {
             if binds[i].patterns.is_empty() {
-                self.gen_where_value(binds, i, &demanded);
+                stmts.push(self.where_value_stmt(binds, i, &demanded));
                 i += 1;
             } else {
-                self.gen_where_func_group_assign(binds, i);
+                stmts.extend(self.where_func_group_assign_stmts(binds, i));
                 let name = &binds[i].name;
                 while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
                     i += 1;
                 }
             }
         }
+        stmts
     }
 
-    pub(super) fn gen_where_value(
+    pub(super) fn where_value_stmt(
         &mut self,
         binds: &[TLocalDef],
         i: usize,
         demanded: &std::collections::HashSet<String>,
-    ) {
+    ) -> Stmt {
         let bind = &binds[i];
         let sname = sanitize_name(&bind.name);
-        // The name was forward-declared in gen_where_binds; assign to it
+        // The name was forward-declared in where_binds_stmts; assign to it
         // (rather than re-declaring) so the binding's own body can refer to
         // itself and to its mutually-recursive siblings. A cheap value may only
         // be assigned strictly when it does not read a still-nil sibling (a
@@ -422,11 +409,10 @@ impl CodeGen {
         // action closure inside it must not inherit the deep result demand.
         let saved_rd =
             std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
-        self.emit_indent();
-        if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
-            self.emit(&format!("{} = ", lref));
-            self.gen_expr(&bind.body);
+        let stmt = if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
+            let rhs = self.expr_ast(&bind.body);
             self.concrete_vars.insert(sname);
+            Stmt::Assign(lref, rhs)
         } else {
             // Thunked: the name must not be considered concrete, even if a
             // same-named outer binding was (this assignment shadows it).
@@ -434,33 +420,33 @@ impl CodeGen {
             if let Some(v) = bare_var_alias(binds, i) {
                 // Bare-variable RHS: share the existing thunk-or-value
                 // (see bare_var_alias).
-                self.emit(&format!("{} = ", lref));
-                self.gen_lazy_ref(v);
+                let rhs = self.lazy_ref_ast(v);
+                Stmt::Assign(lref, rhs)
             } else {
-                self.emit(&format!("{} = __thunk(function() return ", lref));
-                self.gen_expr(&bind.body);
-                self.emit(" end)");
+                let rhs = self.expr_ast(&bind.body);
+                Stmt::Assign(lref, Expr::thunk(rhs))
             }
-        }
-        self.emit("\n");
+        };
         self.cur_result_demand = saved_rd;
+        stmt
     }
 
-    pub(super) fn gen_where_func_group_assign(&mut self, binds: &[TLocalDef], start: usize) {
-        // Emit as assignment (name already forward-declared)
-        self.gen_where_func_group_impl(binds, start, true);
+    pub(super) fn where_func_group_assign_stmts(&mut self, binds: &[TLocalDef], start: usize) -> Vec<Stmt> {
+        // Build as assignment (name already forward-declared)
+        self.where_func_group_impl_stmts(binds, start, true)
     }
 
-    pub(super) fn gen_where_func_group_impl(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) {
+    pub(super) fn where_func_group_impl_stmts(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) -> Vec<Stmt> {
         // A local function's result is not the enclosing function's result:
         // its body must not inherit the outer deep result demand.
         let saved_result_demand =
             std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
-        self.gen_where_func_group_body(binds, start, pre_declared);
+        let stmts = self.where_func_group_body_stmts(binds, start, pre_declared);
         self.cur_result_demand = saved_result_demand;
+        stmts
     }
 
-    pub(super) fn gen_where_func_group_body(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) {
+    pub(super) fn where_func_group_body_stmts(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) -> Vec<Stmt> {
         let name = &binds[start].name;
         let mut clauses = Vec::new();
         let num_params = binds[start].patterns.len();
@@ -485,23 +471,23 @@ impl CodeGen {
             self.local_vars.insert(sname.clone());
             self.local_count += 1;
         }
-        self.emit_indent();
-        if pre_declared {
+        let mut stmts = Vec::new();
+        let header = if pre_declared {
             // Name was forward-declared; use assignment form
             let lref = self.lua_ref(&sname);
-            self.emit(&format!("{} = function({})\n", lref, params_str));
+            format!("{} = function({})", lref, params_str)
         } else if self.local_count > Self::LOCAL_LIMIT {
             if !self.var_table_emitted {
-                self.emit_line("local _v = {}");
                 self.var_table_emitted = true;
+                stmts.push(Stmt::Local(vec!["_v".into()], Some(Expr::Table(vec![]))));
             }
             self.var_slots_next += 1;
             self.var_slots.insert(sname.clone(), self.var_slots_next);
-            self.emit(&format!("_v[{}] = function({})\n", self.var_slots_next, params_str));
+            format!("_v[{}] = function({})", self.var_slots_next, params_str)
         } else {
-            self.emit(&format!("local function {}({})\n", sname, params_str));
-        }
-        self.indent += 1;
+            format!("local function {}({})", sname, params_str)
+        };
+        let mut body = Vec::new();
 
         if clauses.len() == 1 {
             let clause = &clauses[0];
@@ -511,20 +497,23 @@ impl CodeGen {
             if all_simple {
                 for (j, pat) in clause.patterns.iter().enumerate() {
                     if let TPattern::Var(v, _) = pat {
-                        self.emit_line(&format!("local {} = _warg{}", sanitize_name(v), j));
+                        body.push(Stmt::Local(
+                            vec![sanitize_name(v)],
+                            Some(Expr::name(format!("_warg{}", j))),
+                        ));
                     }
                 }
-                self.emit_indent();
-                self.emit("return ");
-                self.gen_expr(&clause.body);
-                self.emit("\n");
+                body.push(Stmt::Return(self.expr_ast(&clause.body)));
             } else {
                 for (j, pat) in clause.patterns.iter().enumerate() {
                     if !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard) {
-                        self.emit_line(&format!("_warg{} = __force(_warg{})", j, j));
+                        body.push(Stmt::Assign(
+                            format!("_warg{}", j),
+                            Expr::force(Expr::name(format!("_warg{}", j))),
+                        ));
                     }
                 }
-                self.gen_pattern_match(&params, &clauses);
+                body.extend(self.pattern_match_block(&params, &clauses).0);
             }
         } else {
             for j in 0..num_params {
@@ -534,13 +523,16 @@ impl CodeGen {
                     })
                 });
                 if needs_force {
-                    self.emit_line(&format!("_warg{} = __force(_warg{})", j, j));
+                    body.push(Stmt::Assign(
+                        format!("_warg{}", j),
+                        Expr::force(Expr::name(format!("_warg{}", j))),
+                    ));
                 }
             }
-            self.gen_pattern_match(&params, &clauses);
+            body.extend(self.pattern_match_block(&params, &clauses).0);
         }
 
-        self.indent -= 1;
-        self.emit_line("end");
+        stmts.push(Stmt::Function { header, body: Block(body) });
+        stmts
     }
 }
