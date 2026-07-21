@@ -749,22 +749,12 @@ impl Checker {
             Type::LuaPure { result, .. } => self.ast_type_to_ty(result),
             // LuaIO "name" T  reduces to  IO T
             Type::LuaIO { result, .. } => Ty::io(self.ast_type_to_ty(result)),
-            // LuaIterator "name" R  reduces to a LIST: the type argument names
-            // the RESULT of collecting the iterator. When `R` is already a list
-            // `[E]`, the result IS `[E]` and the iterator yields one `E` per
-            // step (`LuaIterator "f" [Integer]` -> `[Integer]`, yielding ints).
-            // When `R` is a bare element type `T`, the result is `[T]` — the
-            // backward-compatible shorthand where the argument names the ELEMENT
-            // (`LuaIterator "string.gmatch" String` -> `[String]`). Either way
-            // the result is `[element]` and each yielded value is decoded as
-            // that element type at the call site (see codegen `__mll_iter:`).
-            Type::LuaIterator { result, .. } => {
-                let r = self.ast_type_to_ty(result);
-                match r {
-                    Ty::List(_) => r,
-                    other => Ty::list(other),
-                }
-            }
+            // LuaIterator "name" [E]  reduces to  [E]: the type argument names
+            // the RESULT of collecting the iterator, always an explicit list,
+            // and each step yields one `E` (decoded at the call site, see
+            // codegen `__mll_iter:`). The parser has already checked the list
+            // shape, so reduce it as-is.
+            Type::LuaIterator { result, .. } => self.ast_type_to_ty(result),
             Type::Tuple(elems) => Ty::Tuple(elems.iter().map(|t| self.ast_type_to_ty(t)).collect()),
             // LuaTry "name" (Either String T)  reduces to  IO (Either String T)
             // (the parser has already checked the `Either String a` shape).

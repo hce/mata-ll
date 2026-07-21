@@ -2,7 +2,7 @@ floor' :: Number -> LuaPure "math.floor" Number
 ceil :: Number -> LuaPure "math.ceil" Number
 
 -- LuaIterator: wraps a Lua iterator factory into a lazy MLL list
-gmatch :: String -> String -> LuaIterator "string.gmatch" String
+gmatch :: String -> String -> LuaIterator "string.gmatch" [String]
 
 main :: IO ()
 main = do

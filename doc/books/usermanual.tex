@@ -1139,11 +1139,11 @@ counter :: LuaIterator "count" [Integer]
 rows :: LuaIterator "rows" [[Integer]]
 \end{lstlisting}
 
-A bare element type is accepted as a shorthand for the
-one-element-deep case: \texttt{LuaIterator "string.gmatch" String} also
-reduces to \texttt{[String]} (the iterator yields \texttt{String}s).
-Prefer writing the result list (\texttt{[String]}); the bare form is
-kept for compatibility.
+The result is always written as an explicit list. A bare element type
+(\texttt{LuaIterator "string.gmatch" String}) is rejected: because a
+list argument such as \texttt{[[Integer]]} already means ``an iterator
+yielding \texttt{[Integer]}'', a bare element would make the argument
+ambiguous, so it must always name the result list directly.
 
 \subsection{Error-Capturing FFI}
 

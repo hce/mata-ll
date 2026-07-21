@@ -3996,6 +3996,29 @@ fn compile_ffi_module(source: &str) -> (mlua::Lua, mlua::Table) {
 }
 
 #[test]
+fn lua_iterator_result_must_be_an_explicit_list() {
+    // The LuaIterator type argument always names the result list, so a bare
+    // (non-list) element type is rejected: it would make the argument
+    // ambiguous with a genuine list-yielding iterator (`[[Integer]]`).
+    let source = r#"
+gm :: String -> String -> LuaIterator "string.gmatch" String
+
+main :: IO ()
+main = mapM_ putStrLn (gm "a b" "%w+")
+"#;
+    match mllc::compile(source, Path::new("."), &[Path::new("../lib")]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(msg.contains("LuaIterator requires the result to be written as an explicit"),
+                "Expected the explicit-list requirement error, got: {}", msg);
+            assert!(msg.contains("[String]"),
+                "The error must show the corrected form, got: {}", msg);
+        }
+        Ok(_) => panic!("a bare-element LuaIterator result must be rejected"),
+    }
+}
+
+#[test]
 fn lua_iterator_type_argument_is_the_result_list_and_elements_decode() {
     // experiments/iterator/ regression, two properties in one:
     //

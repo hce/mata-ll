@@ -2,13 +2,14 @@
 --
 -- mata-ll runs as a guest inside a Lua host, so calling host functions is a
 -- first-class feature, not an escape hatch. A signature whose result is
--- `LuaIterator "f" T` binds directly to the Lua stateful iterator `f`, each
--- step yielding a `T`; here `f` is Lua's `string.gmatch`. A tuple result type
--- decodes the pattern's capture groups positionally — no glue code, the
--- marshalling is generated from the type.
+-- `LuaIterator "f" [E]` binds directly to the Lua stateful iterator `f`, each
+-- step yielding an `E`; here `f` is Lua's `string.gmatch`. The result is always
+-- written as an explicit list. A tuple element type decodes the pattern's
+-- capture groups positionally — no glue code, the marshalling is generated
+-- from the type.
 
-gmatch :: String -> String -> LuaIterator "string.gmatch" String
-gmatchPairs :: String -> String -> LuaIterator "string.gmatch" (String, String)
+gmatch :: String -> String -> LuaIterator "string.gmatch" [String]
+gmatchPairs :: String -> String -> LuaIterator "string.gmatch" [(String, String)]
 
 main :: IO ()
 main = do

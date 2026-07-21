@@ -345,11 +345,10 @@ pub enum Type {
     LuaPure { lua_name: String, result: Box<Type> },
     /// FFI effectful call: `LuaIO "math.random" Number` reduces to `IO Number`
     LuaIO { lua_name: String, result: Box<Type> },
-    /// FFI iterator collected into a lazy list. The type argument names the
-    /// RESULT list: a list argument `[E]` reduces to `[E]` (the iterator yields
-    /// one `E` per step), and a bare element type `T` reduces to `[T]` (the
-    /// backward-compatible shorthand, `LuaIterator "string.gmatch" String` ->
-    /// `[String]`). Each yielded value is decoded as the element type.
+    /// FFI iterator collected into a lazy list. The type argument is always an
+    /// explicit list `[E]` naming the RESULT: `LuaIterator "f" [E]` reduces to
+    /// `[E]` and the iterator yields one `E` per step, each decoded as the
+    /// element type. The parser rejects a bare (non-list) element type.
     LuaIterator { lua_name: String, result: Box<Type> },
     /// Tuple type: `(Integer, String, Bool)`
     Tuple(Vec<Type>),

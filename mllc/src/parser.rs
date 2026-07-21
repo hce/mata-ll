@@ -1436,10 +1436,21 @@ impl Parser {
                         Ok(Type::LuaIO { lua_name, result: Box::new(result) })
                     }
                     "LuaIterator" => {
-                        // LuaIterator "lua.func.name" ResultListType
-                        // (a bare element type is the [T] shorthand — see ast.rs)
+                        // LuaIterator "lua.func.name" [E]  ->  [E], yielding one
+                        // E per step. The result must be written as an explicit
+                        // list: the iterator is collected into a list, so the
+                        // type argument always names that list.
                         let lua_name = self.parse_ffi_lua_name("LuaIterator")?;
                         let result = self.parse_type_atom()?;
+                        if !matches!(result, Type::List(_)) {
+                            return Err(self.err_here(
+                                "LuaIterator requires the result to be written as an explicit \
+                                 list `[E]`: the iterator is collected into a list that yields \
+                                 one `E` per step (e.g. `LuaIterator \"string.gmatch\" [String]`, \
+                                 not `... String`)"
+                                    .to_string(),
+                            ));
+                        }
                         Ok(Type::LuaIterator { lua_name, result: Box::new(result) })
                     }
                     "LuaTry" => {
