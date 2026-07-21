@@ -8,6 +8,10 @@
 -- statements should interleave. If the list is strictly
 -- evaluated, the statements would not interleave.
 
+-- myIter and myIter' are separate bindings on purpose: each LuaIterator
+-- binding is its own memoized lazy list (its own coroutine run). A single
+-- shared binding would be memoized after the first demo, and the second
+-- demo would print no "Yielding" lines.
 myIter              :: LuaIterator "my_iter" [Integer]
 myIter'             :: LuaIterator "my_iter" [Integer]
 runawayLoopIterator :: LuaIterator "runaway_loop_iterator" [Integer]
@@ -25,4 +29,4 @@ export runPartly :: Integer -> IO ()
 runPartly c = print $ take c runawayLoopIterator
 
 main :: IO ()
-main = putStrLn "You need to compile this example to Lua, than run iterdemo.lua"
+main = putStrLn "You need to compile this example to Lua, then run iterdemo.lua"
