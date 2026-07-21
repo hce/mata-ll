@@ -17,10 +17,23 @@
 
 import Data.Foldable (toList)
 
--- The Peano naturals (`data Nat = Zero | Succ Nat`, kind Type) live in their
--- own module; we use them here purely as the element type of a higher-kinded
--- container.
-import Nat (Nat(..), addNat, toInt, fromInt)
+-- The Peano naturals: an ordinary recursive type of kind Type. We use them
+-- here purely as the element type of a higher-kinded container, so keep the
+-- definition inline.
+data Nat = Zero | Succ Nat
+
+addNat :: Nat -> Nat -> Nat
+addNat Zero     m = m
+addNat (Succ n) m = Succ (addNat n m)
+
+toInt :: Nat -> Integer
+toInt Zero     = 0
+toInt (Succ n) = 1 + toInt n
+
+fromInt :: Integer -> Nat
+fromInt n
+  | n <= 0    = Zero
+  | otherwise = Succ (fromInt (n - 1))
 
 -- A binary tree: kind Type -> Type. THIS is the higher-kinded constructor the
 -- two instances below abstract over.

@@ -3,11 +3,43 @@
 Canonical programs demonstrating mata-ll language features. For the broader
 corpus of compiler try-outs and stress tests, see [`../experiments/`](../experiments/).
 
+Build the compiler first (`cargo build --release -p mata-ll`); the commands
+below use the in-tree binary `target/release/mll`, which auto-loads the
+standard library from `lib/`.
+
 ## Showcases
 
-- `atdg.mll` — LZ4 decompression through the `contrib` library (`Lz4`, `Hex`);
-  decodes an embedded blob and prints an ASCII comic.
+- `primes_check.mll` — **lazy evaluation.** A self-referential prime sieve over
+  an infinite list: `primes` is consumed (via `takeWhile`) while it is still
+  being produced. Real non-strict semantics, in eight lines.
 
   ```bash
-  mll examples/atdg.mll -r
+  target/release/mll examples/primes_check.mll -r
+  ```
+
+- `string.mll` — **Lua FFI.** Binds Lua's `string.gmatch` directly through a
+  `LuaIterator` type; capture groups decode positionally into tuples. mata-ll
+  is a typed guest in a Lua host, so calling host functions is first-class.
+
+  ```bash
+  target/release/mll examples/string.mll -r
+  ```
+
+- `nat_hkt.mll` — **typeclasses & higher-kinded types.** A `Tree` of kind
+  `Type -> Type` with `Functor` and `Foldable` instances; one `fmap`/`foldr`
+  works for any element type. ADTs, pattern matching, and type inference,
+  self-checking against fixed oracles.
+
+  ```bash
+  target/release/mll examples/nat_hkt.mll -r
+  ```
+
+- `atdg.mll` — **whole-program FFI + a `contrib` library.** LZ4 decompression
+  (`Lz4`, `Hex`) that decodes an embedded blob and prints an ASCII comic. These
+  modules live in [`../contrib/`](../contrib/), which is *not* baked into the
+  compiler, so pass `-L contrib` explicitly (the in-tree binary also finds it
+  automatically, but the flag makes the command work with any `mll`):
+
+  ```bash
+  target/release/mll -L contrib examples/atdg.mll -r
   ```

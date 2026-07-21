@@ -3031,17 +3031,31 @@ fn examples_compile() {
     }
 }
 
-// The curated showcase in examples/ imports from the contrib library
-// (atdg.mll pulls in Lz4 and Hex), so it needs both ../lib and ../contrib
-// on the lib path.
+// The curated showcases in examples/ must all compile. Some pull in the
+// contrib library (atdg.mll uses Lz4/Hex), so the lib path carries both
+// ../lib and ../contrib; the others ignore the extra path harmlessly.
 #[test]
-fn example_atdg_compiles() {
-    let source = std::fs::read_to_string("../examples/atdg.mll")
-        .expect("Cannot read examples/atdg.mll");
-    let source_dir = Path::new("../examples");
-    match mllc::compile(&source, source_dir, &[Path::new("../lib"), Path::new("../contrib")]) {
-        Ok(_) => {}
-        Err(e) => panic!("atdg.mll failed to compile:\n{}", e),
+fn examples_curated_compile() {
+    let lib = Path::new("../lib");
+    let contrib = Path::new("../contrib");
+    let examples_dir = Path::new("../examples");
+
+    let mut failures = Vec::new();
+    for entry in std::fs::read_dir(examples_dir).expect("Cannot read examples/") {
+        let path = entry.unwrap().path();
+        if path.extension().map_or(true, |e| e != "mll") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_str().unwrap();
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
+        let source_dir = path.parent().unwrap_or(Path::new("."));
+        if let Err(e) = mllc::compile(&source, source_dir, &[lib, contrib]) {
+            failures.push(format!("{}: {}", stem, e));
+        }
+    }
+    if !failures.is_empty() {
+        panic!("Curated examples failed to compile:\n{}", failures.join("\n"));
     }
 }
 
