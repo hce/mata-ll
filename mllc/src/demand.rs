@@ -311,6 +311,18 @@ pub fn analyze(module: &TModule) -> DemandInfo {
                 rows.run.get(n.as_str()), rows.deep.get(n.as_str()),
                 rows.deep_result.contains(n.as_str()));
         }
+        // Where-bound local function rows, recomputed under the converged
+        // environment (exactly what codegen's scoped call-site map holds).
+        for func in &functions {
+            for clause in &func.clauses {
+                let locals = local_fn_strict_params(clause, &strict_params);
+                let mut lnames: Vec<&String> = locals.keys().collect();
+                lnames.sort();
+                for n in lnames {
+                    eprintln!("DEMAND {}.{} {:?} (where-local)", func.name, n, locals[n]);
+                }
+            }
+        }
     }
 
     DemandInfo { strict_params, rows }
@@ -344,6 +356,23 @@ fn analyze_function(func: &TFunction, env: &HashMap<String, Vec<bool>>) -> Vec<b
 
 /// Analyze a single clause's parameter strictness.
 fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool>>) -> Vec<bool> {
+    // Where-bound local FUNCTIONS get real strictness rows, visible only
+    // inside this clause (the extended map is dropped when this returns, so
+    // a local row can never leak into another scope). Without them every
+    // call to a local helper contributes no demand, which blinds the
+    // ENCLOSING function's row too: `reverse xs = go [] xs` was judged lazy
+    // in xs even though go forces its list argument on every path.
+    let local_rows = local_fn_strict_params(clause, env);
+    let env_ext: HashMap<String, Vec<bool>>;
+    let env = if local_rows.is_empty() {
+        env
+    } else {
+        let mut e = env.clone();
+        e.extend(local_rows);
+        env_ext = e;
+        &env_ext
+    };
+
     let mut strict = vec![false; arity];
 
     // Collect parameter names from patterns.
@@ -403,12 +432,20 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
             }
         }
     };
-    let demanded = if clause.guards.is_empty() {
+    let mut demanded = if clause.guards.is_empty() {
         close(demanded_vars(&clause.body, env))
     } else {
         demanded_guards_with(&clause.guards, env, &close)
     };
     // (Both are Semantic-mode: parameter strictness must not over-claim.)
+
+    // A where-bound name shadows a same-named parameter (`f go = go []
+    // where go … = …` calls the LOCAL go), so demand on it — including the
+    // bare "callee is demanded" entry every call contributes — must not
+    // mark the parameter strict.
+    for b in &clause.where_binds {
+        demanded.remove(&b.name);
+    }
 
     // Mark parameters whose names appear in the demanded set.
     for (i, name) in param_names.iter().enumerate() {
@@ -461,6 +498,228 @@ fn demanded_guards_with(
         };
     }
     acc
+}
+
+/// Boolean strict rows for a clause's where-bound local FUNCTIONS (the
+/// consecutive same-named equation groups codegen emits via
+/// `gen_where_func_group_body`), iterated to their own greatest fixed point
+/// under the fixed outer environment `env`.
+///
+/// Rules are identical to top-level functions:
+///   * seed every parameter strict (⊤) and shrink downward — a self- or
+///     mutually-recursive accumulator (`go acc i = … go (acc + i) …`) is
+///     only provable strict under the assumption the recursive call already
+///     is (see the greatest-fixed-point note in `analyze`);
+///   * a parameter is kept strict only if EVERY equation forces it on every
+///     path (per-position AND across the group);
+///   * strictness is about the local function's PARAMETERS only — demand it
+///     places on captured outer variables is deliberately not propagated
+///     (that would need per-function captured-demand sets; leaving it out
+///     under-approximates, which is the safe direction).
+///
+/// SCOPING: a row is keyed by bare name, so it may only be consulted where
+/// the name can ONLY mean this local function. Any group whose name is also
+/// bound by an inner construct somewhere in the clause — a lambda
+/// parameter, a case-pattern variable, a let binding, or another local
+/// definition's parameter — is dropped entirely: at such a call site the
+/// name may refer to an unknown function, and applying the row there could
+/// eagerly force an argument the actual function never demands. The same
+/// goes for a name defined by two separate groups or shared with a where
+/// VALUE binding (call sites cannot be attributed). Dropping a row merely
+/// keeps the argument thunked — under-approximation stays safe.
+///
+/// Both consumers must agree on these rows: `analyze_clause` extends its
+/// environment with them (so the enclosing function's row sees through
+/// local calls), and codegen installs them in its scoped call-site map
+/// (`local_strict_params`). Both call this with a deterministic `env`
+/// (codegen with the converged `strict_params`), so the rows coincide.
+pub fn local_fn_strict_params(
+    clause: &TClause,
+    env: &HashMap<String, Vec<bool>>,
+) -> HashMap<String, Vec<bool>> {
+    // Group consecutive same-named function equations, mirroring codegen's
+    // gen_where_func_group_body and the structured local_fn_rows.
+    let mut groups: Vec<(String, Vec<&TLocalDef>)> = Vec::new();
+    for b in &clause.where_binds {
+        if b.patterns.is_empty() {
+            continue;
+        }
+        match groups.last_mut() {
+            Some((n, defs)) if *n == b.name => defs.push(b),
+            _ => groups.push((b.name.clone(), vec![b])),
+        }
+    }
+    if groups.is_empty() {
+        return HashMap::new();
+    }
+
+    // Names rebound anywhere in the clause (see the scoping note above).
+    let mut rebound: HashSet<String> = HashSet::new();
+    collect_rebound_names(&clause.body, &mut rebound);
+    for g in &clause.guards {
+        collect_rebound_names(&g.condition, &mut rebound);
+        collect_rebound_names(&g.body, &mut rebound);
+    }
+    for b in &clause.where_binds {
+        collect_rebound_names(&b.body, &mut rebound);
+        for p in &b.patterns {
+            collect_pattern_vars(p, &mut rebound);
+        }
+    }
+    // Ambiguous names: two separate groups, or a group sharing its name
+    // with a where VALUE binding.
+    let mut ambiguous: HashSet<String> = HashSet::new();
+    {
+        let mut seen: HashSet<&str> = HashSet::new();
+        for (n, _) in &groups {
+            if !seen.insert(n.as_str()) {
+                ambiguous.insert(n.clone());
+            }
+        }
+        for b in &clause.where_binds {
+            if b.patterns.is_empty() && seen.contains(b.name.as_str()) {
+                ambiguous.insert(b.name.clone());
+            }
+        }
+    }
+    groups.retain(|(n, _)| !rebound.contains(n) && !ambiguous.contains(n));
+    if groups.is_empty() {
+        return HashMap::new();
+    }
+
+    // Fixed clause views of each group's equations. Guards on where-binds
+    // were desugared to if/else by the parser, and a TLocalDef carries no
+    // nested where, so these clauses are guard- and where-free (which also
+    // bounds the analyze_clause -> local_fn_strict_params recursion at one
+    // level). Arity follows the FIRST equation, matching codegen's
+    // num_params in gen_where_func_group_body.
+    let group_clauses: Vec<(String, usize, Vec<TClause>)> = groups
+        .iter()
+        .map(|(name, defs)| {
+            let arity = defs[0].patterns.len();
+            let clauses = defs
+                .iter()
+                .map(|d| TClause {
+                    patterns: d.patterns.clone(),
+                    guards: vec![],
+                    body: d.body.clone(),
+                    where_binds: vec![],
+                    span: None,
+                })
+                .collect();
+            (name.clone(), arity, clauses)
+        })
+        .collect();
+
+    // Optimistic seed, then iterate downward to the greatest fixed point.
+    // The outer env is fixed and analyze_clause is monotone in it, so from
+    // the ⊤ seed the local rows only shrink; termination is finite descent.
+    let mut ext = env.clone();
+    for (name, arity, _) in &group_clauses {
+        ext.insert(name.clone(), vec![true; *arity]);
+    }
+    loop {
+        let mut changed = false;
+        for (name, arity, clauses) in &group_clauses {
+            let mut row = vec![true; *arity];
+            for c in clauses {
+                let cs = analyze_clause(c, *arity, &ext);
+                for i in 0..*arity {
+                    row[i] = row[i] && cs[i];
+                }
+            }
+            if ext.get(name.as_str()) != Some(&row) {
+                ext.insert(name.clone(), row);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    group_clauses
+        .into_iter()
+        .map(|(name, _, _)| {
+            let row = ext.remove(&name).unwrap_or_default();
+            (name, row)
+        })
+        .collect()
+}
+
+/// Names bound by an inner construct anywhere inside `expr`: lambda
+/// parameters, case-pattern variables, and let-bound names. Used by
+/// `local_fn_strict_params` to drop rows whose bare-name keying would be
+/// ambiguous at some call site.
+fn collect_rebound_names(expr: &TExpr, out: &mut HashSet<String>) {
+    match &expr.kind {
+        TExprKind::Var(_) | TExprKind::Lit(_) | TExprKind::Con(_)
+        | TExprKind::OpFunc(_) | TExprKind::DictAccess { .. } => {}
+        TExprKind::Lambda { params, body } => {
+            for (p, _) in params {
+                out.insert(p.clone());
+            }
+            collect_rebound_names(body, out);
+        }
+        TExprKind::App(f, a) => {
+            collect_rebound_names(f, out);
+            collect_rebound_names(a, out);
+        }
+        TExprKind::InfixApp { lhs, rhs, .. } => {
+            collect_rebound_names(lhs, out);
+            collect_rebound_names(rhs, out);
+        }
+        TExprKind::Negate(e) | TExprKind::Paren(e) => collect_rebound_names(e, out),
+        TExprKind::If { cond, then_branch, else_branch } => {
+            collect_rebound_names(cond, out);
+            collect_rebound_names(then_branch, out);
+            collect_rebound_names(else_branch, out);
+        }
+        TExprKind::Case { scrutinee, branches } => {
+            collect_rebound_names(scrutinee, out);
+            for b in branches {
+                collect_pattern_vars(&b.pattern, out);
+                for g in &b.guards {
+                    collect_rebound_names(&g.condition, out);
+                    collect_rebound_names(&g.body, out);
+                }
+                collect_rebound_names(&b.body, out);
+            }
+        }
+        TExprKind::Let { binds, body } => {
+            for b in binds {
+                out.insert(b.name.clone());
+                for p in &b.patterns {
+                    collect_pattern_vars(p, out);
+                }
+                collect_rebound_names(&b.body, out);
+            }
+            collect_rebound_names(body, out);
+        }
+        TExprKind::Tuple(elems) => {
+            for e in elems {
+                collect_rebound_names(e, out);
+            }
+        }
+        TExprKind::SpecCall { args, .. } => {
+            for a in args {
+                collect_rebound_names(a, out);
+            }
+        }
+        TExprKind::DictCall { dict_args, value_args, .. } => {
+            for a in dict_args.iter().chain(value_args.iter()) {
+                collect_rebound_names(a, out);
+            }
+        }
+        TExprKind::DictMethod { dict, .. } => collect_rebound_names(dict, out),
+        TExprKind::RecordUpdate { record, updates, .. } => {
+            collect_rebound_names(record, out);
+            for (_, _, e) in updates {
+                collect_rebound_names(e, out);
+            }
+        }
+        TExprKind::OutgoingCallback { callee, .. } => collect_rebound_names(callee, out),
+        TExprKind::FfiMaybeArg { value } => collect_rebound_names(value, out),
+    }
 }
 
 /// Arguments that codegen's `gen_arg` evaluates eagerly at *every* call site,
@@ -621,6 +880,17 @@ pub fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<
         TExprKind::Paren(e) => rec(e),
 
         TExprKind::If { cond, then_branch, else_branch } => {
+            // `if otherwise then b else …` is what the parser desugars the
+            // final guard of a where-bound function into: the condition is
+            // constant true (codegen emits it as the literal `true`), so
+            // the then-branch runs unconditionally and the dead else-branch
+            // (`error "non-exhaustive guards"`) must not water down its
+            // demands. Same rule demanded_guards applies to real guard
+            // chains — without it a guarded local accumulator loop loses
+            // its recursive-branch demand and stays lazy.
+            if matches!(&cond.kind, TExprKind::Var(n) if n == "otherwise") {
+                return rec(then_branch);
+            }
             let mut s = rec(cond);
             // Only demanded if demanded in BOTH branches.
             let t = rec(then_branch);

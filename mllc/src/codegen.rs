@@ -74,6 +74,14 @@ struct CodeGen {
     var_table_emitted: bool,
     /// Demand analysis: per-function parameter strictness.
     demand_info: DemandInfo,
+    /// Strictness rows for where-bound local functions currently in scope
+    /// (see demand::local_fn_strict_params), keyed by source name and
+    /// consulted BEFORE `demand_info.strict_params` at call sites — a local
+    /// `go` shadows a same-named top-level function. Entries are installed
+    /// by gen_where_binds when a clause's where scope opens and restored at
+    /// clause-scope exit (gen_function / gen_pattern_match*), so a row
+    /// never outlives its lexical scope or leaks into a sibling clause.
+    local_strict_params: std::collections::HashMap<String, Vec<bool>>,
     /// The demand the program provably places on the CURRENT function's
     /// result (see `Rows::result_demand`): deep for functions in the
     /// whole-program deep-result set, plain WHNF otherwise. Seeds the
@@ -116,6 +124,7 @@ impl CodeGen {
                 strict_params: std::collections::HashMap::new(),
                 rows: crate::demand::Rows::default(),
             },
+            local_strict_params: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
             embed_var_export: false,
             output: String::new(), indent: 0,
@@ -236,6 +245,10 @@ impl CodeGen {
         sub.luadict_enum_tag = self.luadict_enum_tag.clone();
         sub.top_level_names = self.top_level_names.clone();
         sub.local_vars = self.local_vars.clone();
+        // Scoped local-function rows apply to everything emitted within the
+        // same clause, including guard conditions and bodies routed through
+        // a sub-generator.
+        sub.local_strict_params = self.local_strict_params.clone();
         sub
     }
 
@@ -1305,6 +1318,7 @@ impl CodeGen {
         let saved_var_slots = self.var_slots.clone();
         let saved_var_slots_next = self.var_slots_next;
         let saved_var_table_emitted = self.var_table_emitted;
+        let saved_local_strict = self.local_strict_params.clone();
         self.local_count = 0;
         self.var_slots.clear();
         self.var_slots_next = 0;
@@ -1314,7 +1328,7 @@ impl CodeGen {
         // demanded-binding analysis of result-position expressions.
         self.cur_result_demand = self.demand_info.rows.result_demand(&func.name);
 
-        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; self.local_count = saved_local_count; self.var_slots = saved_var_slots; self.var_slots_next = saved_var_slots_next; self.var_table_emitted = saved_var_table_emitted; return; }
+        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; self.local_count = saved_local_count; self.var_slots = saved_var_slots; self.var_slots_next = saved_var_slots_next; self.var_table_emitted = saved_var_table_emitted; self.local_strict_params = saved_local_strict; return; }
 
         // Eta-expand: if the function has fewer patterns than type arrows,
         // add extra params so the Lua function matches the expected arity.
@@ -1346,7 +1360,7 @@ impl CodeGen {
                 self.emit(&self.fn_decl(&lua_name, ""));
                 self.emit("\n");
                 self.indent += 1;
-                self.gen_where_binds(&clauses[0].where_binds, self.clause_demanded(&clauses[0]));
+                self.gen_where_binds(&clauses[0], self.clause_demanded(&clauses[0]));
                 self.gen_bind_chain_io(&clauses[0].body);
                 self.indent -= 1;
                 self.emit_line("end");
@@ -1419,7 +1433,7 @@ impl CodeGen {
                 self.emit(&self.var_decl(&lua_name));
                 self.emit("__thunk(function()\n");
                 self.indent += 1;
-                self.gen_where_binds(&clauses[0].where_binds, self.clause_demanded(&clauses[0]));
+                self.gen_where_binds(&clauses[0], self.clause_demanded(&clauses[0]));
                 self.emit_indent();
                 self.emit("return ");
                 self.gen_expr(&clauses[0].body);
@@ -1431,6 +1445,7 @@ impl CodeGen {
             }
             self.emit_line("");
             self.concrete_vars = saved_concrete;
+            self.local_strict_params = saved_local_strict;
             if is_concrete {
                 self.concrete_vars.insert(lua_name);
             } else {
@@ -1486,7 +1501,7 @@ impl CodeGen {
                         }
                     }
                 }
-                self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
+                self.gen_where_binds(clause, self.clause_demanded(clause));
                 if eta_count > 0 {
                     // Eta-expand: apply extra params to the body
                     self.emit_indent(); self.emit("return __force(");
@@ -1525,7 +1540,7 @@ impl CodeGen {
                         self.concrete_vars.insert(p.clone());
                     }
                 }
-                self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
+                self.gen_where_binds(clause, self.clause_demanded(clause));
                 self.gen_pattern_match(&params, clauses);
             }
             self.indent -= 1;
@@ -1537,6 +1552,7 @@ impl CodeGen {
             self.var_slots = saved_var_slots;
             self.var_slots_next = saved_var_slots_next;
             self.var_table_emitted = saved_var_table_emitted;
+            self.local_strict_params = saved_local_strict;
             self.concrete_vars.insert(lua_name);
             return;
         }
@@ -1593,13 +1609,19 @@ impl CodeGen {
         self.var_slots = saved_var_slots;
         self.var_slots_next = saved_var_slots_next;
         self.var_table_emitted = saved_var_table_emitted;
+        self.local_strict_params = saved_local_strict;
         self.concrete_vars.insert(lua_name);
     }
 
     /// `demanded` seeds which where-bound names are provably forced by the
     /// clause body/guards (see clause_demanded); such bindings may be
     /// assigned strictly even when they read suspended values.
-    fn gen_where_binds(&mut self, binds: &[TLocalDef], demanded: crate::demand::DemandMap) {
+    ///
+    /// Takes the whole clause (not just its where_binds) because the local
+    /// strictness rows installed here are scoped by scanning the clause for
+    /// rebindings of the local function names (see local_fn_strict_params).
+    fn gen_where_binds(&mut self, clause: &TClause, demanded: crate::demand::DemandMap) {
+        let binds: &[TLocalDef] = &clause.where_binds;
         // Forward-declare ALL where-bound names — values as well as functions —
         // before emitting any definition. A where/let group is mutually
         // recursive in Haskell, and a value may reference itself (e.g. a
@@ -1627,6 +1649,21 @@ impl CodeGen {
                 }
             }
         }
+
+        // Local functions in this where group get real strictness rows so
+        // every call site emitted within the clause — inside the group's own
+        // (mutually) recursive bodies, in sibling value bindings, and in the
+        // clause body/guards generated after this returns — passes strict
+        // arguments eagerly instead of allocating a thunk per call. Any
+        // where-bound NAME first shadows an outer row of the same name (a
+        // sibling value binding must not inherit an enclosing scope's row);
+        // the enclosing clause emitter restores the map at scope exit.
+        for b in binds {
+            self.local_strict_params.remove(&b.name);
+        }
+        let local_rows =
+            crate::demand::local_fn_strict_params(clause, &self.demand_info.strict_params);
+        self.local_strict_params.extend(local_rows);
 
         // Close the demand seed over sibling RHSes: if the body demands z and
         // z's RHS demands y, y is demanded too (see demanded_bindings).
@@ -1808,6 +1845,7 @@ impl CodeGen {
             let scope_lc = self.local_count;
             let scope_vte = self.var_table_emitted;
             let scope_cv = self.concrete_vars.clone();
+            let scope_lsp = self.local_strict_params.clone();
 
             if !clause.guards.is_empty() {
                 let mut bindings = Vec::new();
@@ -1827,7 +1865,7 @@ impl CodeGen {
                             self.concrete_vars.insert(var.clone());
                         }
                     }
-                    self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
+                    self.gen_where_binds(clause, self.clause_demanded(clause));
                     for (gi, guard) in clause.guards.iter().enumerate() {
                         let gkw = if gi == 0 { "if" } else { "elseif" };
                         self.emit_indent(); self.emit(&format!("{} ", gkw));
@@ -1851,7 +1889,7 @@ impl CodeGen {
                             self.concrete_vars.insert(var.clone());
                         }
                     }
-                    self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
+                    self.gen_where_binds(clause, self.clause_demanded(clause));
                     for (gi, guard) in clause.guards.iter().enumerate() {
                         let gkw = if i == 0 && gi == 0 { "if" } else { "elseif" };
                         self.emit_indent(); self.emit(&format!("{} ", gkw));
@@ -1882,7 +1920,7 @@ impl CodeGen {
                             self.concrete_vars.insert(var.clone());
                         }
                     }
-                    self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
+                    self.gen_where_binds(clause, self.clause_demanded(clause));
                     self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
                     if i > 0 { self.indent -= 1; self.emit_line("end"); }
                     return;
@@ -1899,7 +1937,7 @@ impl CodeGen {
                         self.concrete_vars.insert(var.clone());
                     }
                 }
-                self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
+                self.gen_where_binds(clause, self.clause_demanded(clause));
                 self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
                 self.indent -= 1;
             }
@@ -1912,6 +1950,7 @@ impl CodeGen {
             self.local_count = scope_lc;
             self.var_table_emitted = scope_vte;
             self.concrete_vars = scope_cv;
+            self.local_strict_params = scope_lsp;
         }
         self.emit_line("end");
         self.emit_line("error(\"Non-exhaustive patterns\")");
@@ -1927,6 +1966,9 @@ impl CodeGen {
     /// `elseif`.)
     fn gen_pattern_match_guarded(&mut self, params: &[String], clauses: &[TClause]) {
         for clause in clauses {
+            // A clause's where-scope rows (installed by gen_where_binds)
+            // must not leak into the next clause's independent block.
+            let scope_lsp = self.local_strict_params.clone();
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
             for (pi, pat) in clause.patterns.iter().enumerate() {
@@ -1946,7 +1988,7 @@ impl CodeGen {
                     self.concrete_vars.insert(var.clone());
                 }
             }
-            self.gen_where_binds(&clause.where_binds, self.clause_demanded(clause));
+            self.gen_where_binds(clause, self.clause_demanded(clause));
             if clause.guards.is_empty() {
                 self.emit_indent(); self.emit("return "); self.gen_tail(&clause.body, false); self.emit("\n");
             } else {
@@ -1966,6 +2008,7 @@ impl CodeGen {
             }
             self.indent -= 1;
             self.emit_line("end");
+            self.local_strict_params = scope_lsp;
         }
         self.emit_line("error(\"Non-exhaustive patterns\")");
     }
@@ -4192,9 +4235,13 @@ impl CodeGen {
                             return;
                         }
 
-                // Look up callee's demand info for call-site strictness decisions
+                // Look up callee's demand info for call-site strictness
+                // decisions. A where-bound local function shadows a
+                // same-named top-level one, so its scoped row wins.
                 let callee_strict = if let TExprKind::Var(name) = &f.kind {
-                    self.demand_info.strict_params.get(name).cloned()
+                    self.local_strict_params.get(name)
+                        .or_else(|| self.demand_info.strict_params.get(name))
+                        .cloned()
                 } else {
                     None
                 };
@@ -4441,7 +4488,8 @@ impl CodeGen {
                         // forces its function argument itself, so both are safe
                         // to pass eagerly.
                         let f_strict = matches!(&lhs.kind, TExprKind::Var(n)
-                            if self.demand_info.strict_params.get(n)
+                            if self.local_strict_params.get(n)
+                                .or_else(|| self.demand_info.strict_params.get(n))
                                 .and_then(|v| v.first().copied()).unwrap_or(false));
                         let suspend = !f_strict && g_extras == 0 && adapter.is_none();
                         self.emit("(function(_x");
