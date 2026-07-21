@@ -824,7 +824,7 @@ impl CodeGen {
         // Seed concrete_vars so references skip __force throughout user code.
         for name in &[
             "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
-            "__mll_tail", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_st", "__mll_perform",
+            "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_st", "__mll_perform",
             "__mll_ffi_decode",
             "not_", "engage", "liftIO", "show", "error_", "max", "min", "undefined",
             "pure", "return_", "Just",
@@ -2191,9 +2191,23 @@ impl CodeGen {
                                 self.collect_pattern_conditions(&head, head_pat, conditions, bindings);
                             }
                             if args.len() >= 2 {
-                                self.collect_pattern_conditions(
-                                    &format!("__mll_tail({})", scrutinee),
-                                    &args[1], conditions, bindings);
+                                // The tail is a lazy position too: GHC's
+                                // `(x:xs)` match forces only this cell, and
+                                // `xs` is the tail field UNFORCED. A nested
+                                // pattern that inspects the tail (`x:y:ys`,
+                                // `[x]`) needs the next cell in WHNF, so it
+                                // uses the forcing reader; a Var/Wildcard
+                                // sub-pattern binds the raw tail and pulls no
+                                // further spine cell (gen_expr forces the
+                                // bound variable at each value-use). Same rule
+                                // as the head above.
+                                let tail_pat = &args[1];
+                                let tail = if Self::pattern_inspects_value(tail_pat) {
+                                    format!("__mll_tail({})", scrutinee)
+                                } else {
+                                    format!("__mll_tail_lazy({})", scrutinee)
+                                };
+                                self.collect_pattern_conditions(&tail, tail_pat, conditions, bindings);
                             }
                         }
                         _ => conditions.push(format!("{} == {}", scrutinee, name)),
@@ -6104,6 +6118,30 @@ end
 local function __mll_cons(h, t) return setmetatable({h, t}, __cons_mt) end
 local function __mll_lazy_cons(h, thunk) return setmetatable({h, thunk, __lazy = true}, __cons_mt) end
 local function __mll_head(l) l = __force(l); return l[1] end
+-- TAIL-CONSUMPTION CONTRACT. In GHC, `tail (x:xs) = xs` extracts the tail
+-- field WITHOUT forcing it: matching a cons forces only that one cell, and the
+-- extracted tail is a plain (possibly unevaluated) reference. The two tail
+-- readers below split along the same line as the head readers above:
+--   * __mll_tail — for a SPINE INSPECTOR: a consumer that immediately checks
+--     the tail for nil / walks on (show, eq, drop, (!!), foldl, the fromList
+--     converters). It forces the extracted tail to WHNF and memoizes it into
+--     the cell, so the walker's `cur ~= nil` test and `cur[1]` read are sound.
+--     This forces nothing GHC would not: the inspection itself is the demand.
+--     It is also what a function that RETURNS a tail as its own result uses
+--     (`tail`, `drop`) — the WHNF-return invariant (see the head contract)
+--     forbids returning a raw thunk, and a returned tail is demanded to WHNF
+--     by the very context that ran the call, exactly when Haskell forces it.
+--   * __mll_tail_lazy — for a tail EXTRACTED BUT NOT INSPECTED: binding `xs`
+--     in an `(x:xs)` pattern, or take's `n-1` recursion (where n-1 may be 0
+--     and GHC's `take 0 xs = []` demands nothing). It forces the cell (that
+--     match already happened) but yields the tail UNFORCED — pulling no
+--     further spine cell, matching GHC. A lazy-cons generator is wrapped in a
+--     __thunk (memoized in place, so sharing is kept) instead of being run.
+--     The result may therefore be a raw thunk; that is safe everywhere a
+--     pattern-bound variable can flow: gen_expr forces non-concrete variables
+--     at every value-use, both runtime tail readers and __mll_head force
+--     their argument at entry, and thunk bodies return WHNF so __force's
+--     single unwrap suffices.
 local function __mll_tail(l)
     l = __force(l)
     if l.__lazy then
@@ -6112,15 +6150,27 @@ local function __mll_tail(l)
     end
     -- The tail may be an unforced thunk: a recursive cons whose tail is a
     -- variable (e.g. `x : rest`) stores it raw so the spine is not forced
-    -- eagerly at construction (which would diverge on infinite lists). Force
-    -- it to WHNF here — one spine step, on demand — and memoize, so the cell
-    -- meets the "tail is WHNF" invariant that show/eq/append rely on.
+    -- eagerly at construction (which would diverge on infinite lists), and a
+    -- pattern-bound tail is extracted raw by __mll_tail_lazy below. Force it
+    -- to WHNF here — one spine step, on demand — and memoize into the cell,
+    -- so repeated walks read a plain cell, not a thunk.
     local t = l[2]
     if getmetatable(t) == __thunk_mt then
         t = __force(t)
         l[2] = t
     end
     return t
+end
+local function __mll_tail_lazy(l)
+    l = __force(l)
+    if l.__lazy then
+        -- Suspend the generator instead of running it: __thunk memoizes on
+        -- first force and is stored back into the cell, so every later read
+        -- (lazy or forcing) shares the one evaluation.
+        l[2] = __thunk(l[2])
+        l.__lazy = nil
+    end
+    return l[2]
 end
 
 -- List append (second arg is a thunk for laziness)
@@ -6792,10 +6842,15 @@ local function take(n, xs)
     if n <= 0 then return nil end
     xs = __force(xs)
     if xs == nil then return nil end
+    -- The recursion extracts the tail LAZILY: when n - 1 is 0 the `n <= 0`
+    -- clause above returns [] without touching the list, so `take 2 (1:2:⊥)`
+    -- is [1, 2] exactly as in GHC — the strict __mll_tail here would pull one
+    -- cell past the n requested. For n - 1 > 0 the recursive call forces the
+    -- extracted tail at entry, so nothing is delayed that GHC demands.
     if xs.__lazy then
-        return __mll_lazy_cons(__mll_head(xs), function() return take(n - 1, __mll_tail(xs)) end)
+        return __mll_lazy_cons(__mll_head(xs), function() return take(n - 1, __mll_tail_lazy(xs)) end)
     else
-        return __mll_cons(__mll_head(xs), take(n - 1, __mll_tail(xs)))
+        return __mll_cons(__mll_head(xs), take(n - 1, __mll_tail_lazy(xs)))
     end
 end
 local function drop(n, xs)
