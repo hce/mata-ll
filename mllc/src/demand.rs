@@ -315,11 +315,17 @@ pub fn analyze(module: &TModule) -> DemandInfo {
         // environment (exactly what codegen's scoped call-site map holds).
         for func in &functions {
             for clause in &func.clauses {
-                let locals = local_fn_strict_params(clause, &strict_params);
+                let (locals, caps) = local_fn_demand(clause, &strict_params);
                 let mut lnames: Vec<&String> = locals.keys().collect();
                 lnames.sort();
                 for n in lnames {
-                    eprintln!("DEMAND {}.{} {:?} (where-local)", func.name, n, locals[n]);
+                    let mut cap_list: Vec<&String> = caps
+                        .get(n.as_str())
+                        .map(|(_, s)| s.iter().collect())
+                        .unwrap_or_default();
+                    cap_list.sort();
+                    eprintln!("DEMAND {}.{} {:?} captures={:?} (where-local)",
+                        func.name, n, locals[n], cap_list);
                 }
             }
         }
@@ -372,13 +378,17 @@ fn analyze_function(func: &TFunction, env: &HashMap<String, Vec<bool>>) -> Vec<b
 
 /// Analyze a single clause's parameter strictness.
 fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool>>) -> Vec<bool> {
-    // Where-bound local FUNCTIONS get real strictness rows, visible only
-    // inside this clause (the extended map is dropped when this returns, so
-    // a local row can never leak into another scope). Without them every
-    // call to a local helper contributes no demand, which blinds the
-    // ENCLOSING function's row too: `reverse xs = go [] xs` was judged lazy
-    // in xs even though go forces its list argument on every path.
-    let local_rows = local_fn_strict_params(clause, env);
+    // Where-bound local FUNCTIONS get real strictness rows and
+    // captured-demand sets, visible only inside this clause (the extended
+    // map is dropped when this returns, so a local row can never leak into
+    // another scope). Without the rows every call to a local helper
+    // contributes no demand, which blinds the ENCLOSING function's row
+    // too: `reverse xs = go [] xs` was judged lazy in xs even though go
+    // forces its list argument on every path. The captured sets are the
+    // outward half of the same story: `sumStrict n = go 0 0 where go's
+    // guard is i > n` forces the CAPTURED n on every path, so sumStrict is
+    // strict in n even though n is never an argument of the call.
+    let (local_rows, local_caps) = local_fn_demand(clause, env);
     let env_ext: HashMap<String, Vec<bool>>;
     let env = if local_rows.is_empty() {
         env
@@ -436,7 +446,7 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
             let mut changed = false;
             for b in &clause.where_binds {
                 if b.patterns.is_empty() && s.contains(&b.name) {
-                    for v in demanded_vars(&b.body, env) {
+                    for v in demanded_vars_in(&b.body, env, &local_caps) {
                         if s.insert(v) {
                             changed = true;
                         }
@@ -449,9 +459,9 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
         }
     };
     let mut demanded = if clause.guards.is_empty() {
-        close(demanded_vars(&clause.body, env))
+        close(demanded_vars_in(&clause.body, env, &local_caps))
     } else {
-        demanded_guards_with(&clause.guards, env, &close)
+        demanded_guards_with(&clause.guards, env, &local_caps, &close)
     };
     // (Both are Semantic-mode: parameter strictness must not over-claim.)
 
@@ -488,27 +498,29 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
 /// forced at entry even when an earlier guard matched and GHC would never
 /// have touched it.
 pub fn demanded_guards(guards: &[TGuard], env: &HashMap<String, Vec<bool>>) -> HashSet<String> {
-    demanded_guards_with(guards, env, &|s| s)
+    demanded_guards_with(guards, env, &CapturedEnv::new(), &|s| s)
 }
 
-/// `demanded_guards` with a closure applied to every per-guard demand set
-/// BEFORE the chain combines them — used to expand where-bound values so
-/// the guard intersection sees through them (see analyze_clause).
+/// `demanded_guards` with the in-scope captured-demand sets and a closure
+/// applied to every per-guard demand set BEFORE the chain combines them —
+/// the closure expands where-bound values so the guard intersection sees
+/// through them (see analyze_clause).
 fn demanded_guards_with(
     guards: &[TGuard],
     env: &HashMap<String, Vec<bool>>,
+    captured: &CapturedEnv,
     close: &dyn Fn(HashSet<String>) -> HashSet<String>,
 ) -> HashSet<String> {
     // Demand past the end of the chain: fallthrough demands nothing.
     let mut acc: HashSet<String> = HashSet::new();
     for g in guards.iter().rev() {
-        let body_d = close(demanded_vars(&g.body, env));
+        let body_d = close(demanded_vars_in(&g.body, env, captured));
         let is_otherwise = matches!(&g.condition.kind, TExprKind::Var(n) if n == "otherwise");
         acc = if is_otherwise {
             // Condition is `true`: the body runs unconditionally here.
             body_d
         } else {
-            let mut s = close(demanded_vars(&g.condition, env));
+            let mut s = close(demanded_vars_in(&g.condition, env, captured));
             s.extend(&body_d & &acc);
             s
         };
@@ -527,11 +539,11 @@ fn demanded_guards_with(
 ///     only provable strict under the assumption the recursive call already
 ///     is (see the greatest-fixed-point note in `analyze`);
 ///   * a parameter is kept strict only if EVERY equation forces it on every
-///     path (per-position AND across the group);
-///   * strictness is about the local function's PARAMETERS only — demand it
-///     places on captured outer variables is deliberately not propagated
-///     (that would need per-function captured-demand sets; leaving it out
-///     under-approximates, which is the safe direction).
+///     path (per-position AND across the group).
+///
+/// Demand a local places on captured OUTER variables is propagated
+/// separately, through the captured-demand sets `local_fn_demand` computes
+/// alongside these rows (see there).
 ///
 /// SCOPING: a row is keyed by bare name, so it may only be consulted where
 /// the name can ONLY mean this local function. Any group whose name is also
@@ -553,6 +565,45 @@ pub fn local_fn_strict_params(
     clause: &TClause,
     env: &HashMap<String, Vec<bool>>,
 ) -> HashMap<String, Vec<bool>> {
+    local_fn_demand(clause, env).0
+}
+
+/// Strict rows AND captured-demand sets for a clause's where-bound local
+/// functions.
+///
+/// The second component maps each local to (arity, the set of OUTER
+/// variables its body forces on every path): the every-path demanded set
+/// of its body — same branch-intersection and `otherwise` rule as
+/// everywhere else — restricted to free variables (each equation's own
+/// pattern variables are excluded, and inner-bound names never enter a
+/// demanded set in the first place). `demanded_vars_in` unions such a set
+/// into the caller's demanded set at every demanded, saturated call to the
+/// local, which is what makes `sumStrict n = go 0 0 where go's guard is
+/// i > n` strict in the captured n.
+///
+/// Fixed point: unlike the rows (greatest, seeded all-strict), the
+/// captured sets are the LEAST fixed point, seeded EMPTY and grown — a
+/// capture may only be claimed when a finite derivation forces it, so a
+/// capture reachable only through a not-yet-proven recursive call stays
+/// out (conservative; safe direction). Growth is monotone (the sets only
+/// feed `demanded_vars_in` additively), so the iteration terminates.
+/// Transitive captures among (mutually) recursive siblings resolve through
+/// the same union: go's demanded set includes captured(aux) at go's call
+/// to aux, so aux's captures surface in captured(go) as the sets grow.
+///
+/// SCOPING of the captured names: a set is injected into demand sets at
+/// arbitrary nesting depth inside the clause, so a name is kept only if it
+/// can mean just ONE thing everywhere in the clause — any name rebound
+/// somewhere in the clause (lambda/case/let binders, local-function
+/// parameters; the same `rebound` set that gates the rows) is dropped, as
+/// are function-bind and ambiguous names. What remains are enclosing
+/// parameters, where-bound VALUES (which `close` then expands), and
+/// further-out/top-level names — each with a single clause-wide meaning.
+/// Dropping a name merely under-approximates, which stays safe.
+fn local_fn_demand(
+    clause: &TClause,
+    env: &HashMap<String, Vec<bool>>,
+) -> (HashMap<String, Vec<bool>>, CapturedEnv) {
     // Group consecutive same-named function equations, mirroring codegen's
     // gen_where_func_group_body and the structured local_fn_rows.
     let mut groups: Vec<(String, Vec<&TLocalDef>)> = Vec::new();
@@ -566,7 +617,7 @@ pub fn local_fn_strict_params(
         }
     }
     if groups.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), CapturedEnv::new());
     }
 
     // Names rebound anywhere in the clause (see the scoping note above).
@@ -600,7 +651,7 @@ pub fn local_fn_strict_params(
     }
     groups.retain(|(n, _)| !rebound.contains(n) && !ambiguous.contains(n));
     if groups.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), CapturedEnv::new());
     }
 
     // Fixed clause views of each group's equations. Guards on where-binds
@@ -653,13 +704,63 @@ pub fn local_fn_strict_params(
             break;
         }
     }
-    group_clauses
+    // Captured-demand sets: least fixed point, seeded empty and grown (see
+    // the function comment). Computed under the CONVERGED rows in `ext`, so
+    // argument demand through sibling calls is already exact. Per equation:
+    // the every-path demanded set of the body minus that equation's own
+    // pattern variables; equations of one local are pattern-dispatch
+    // alternatives, so the group's set is their INTERSECTION (a capture
+    // forced by only some equations is not every-path). The scope filter
+    // then drops rebound, function-bind, and ambiguous names.
+    let fn_bind_names: HashSet<String> = clause
+        .where_binds
+        .iter()
+        .filter(|b| !b.patterns.is_empty())
+        .map(|b| b.name.clone())
+        .collect();
+    let mut captured: CapturedEnv = group_clauses
+        .iter()
+        .map(|(name, arity, _)| (name.clone(), (*arity, HashSet::new())))
+        .collect();
+    loop {
+        let mut changed = false;
+        for (name, _, clauses) in &group_clauses {
+            let mut set: Option<HashSet<String>> = None;
+            for c in clauses {
+                let mut d = demanded_vars_in(&c.body, &ext, &captured);
+                let mut bound = HashSet::new();
+                for p in &c.patterns {
+                    collect_pattern_vars(p, &mut bound);
+                }
+                d.retain(|v| !bound.contains(v));
+                set = Some(match set {
+                    None => d,
+                    Some(prev) => &prev & &d,
+                });
+            }
+            let mut set = set.unwrap_or_default();
+            set.retain(|v| {
+                !rebound.contains(v) && !fn_bind_names.contains(v) && !ambiguous.contains(v)
+            });
+            let entry = captured.get_mut(name.as_str()).unwrap();
+            if entry.1 != set {
+                entry.1 = set;
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let rows = group_clauses
         .into_iter()
         .map(|(name, _, _)| {
             let row = ext.remove(&name).unwrap_or_default();
             (name, row)
         })
-        .collect()
+        .collect();
+    (rows, captured)
 }
 
 /// Names bound by an inner construct anywhere inside `expr`: lambda
@@ -783,6 +884,12 @@ fn arg_emitted_eagerly(expr: &TExpr) -> bool {
     }
 }
 
+/// Captured-demand info for the where-bound local functions in scope:
+/// name → (arity, the outer variables the local's body forces on every
+/// path). See `local_fn_demand` for how the sets are computed and the
+/// scoping rules that keep the name-keyed injection sound.
+pub type CapturedEnv = HashMap<String, (usize, HashSet<String>)>;
+
 /// Core analysis: returns the set of free variables that are guaranteed
 /// to be forced when `expr` is evaluated to WHNF.
 ///
@@ -793,7 +900,19 @@ fn arg_emitted_eagerly(expr: &TExpr) -> bool {
 /// evaluated eagerly: a binding demanded by the let body will be forced
 /// anyway, so evaluating it at binding time is sound (GHC's let-to-case).
 pub fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<String> {
-    let rec = |e: &TExpr| demanded_vars(e, env);
+    demanded_vars_in(expr, env, &CapturedEnv::new())
+}
+
+/// `demanded_vars` with the captured-demand sets of the where-bound local
+/// functions in scope. A demanded, SATURATED call to such a local runs its
+/// body, so the outer variables the body forces on every path are demanded
+/// at the call site too — that is the only place `captured` is consulted.
+fn demanded_vars_in(
+    expr: &TExpr,
+    env: &HashMap<String, Vec<bool>>,
+    captured: &CapturedEnv,
+) -> HashSet<String> {
+    let rec = |e: &TExpr| demanded_vars_in(e, env, captured);
     match &expr.kind {
         TExprKind::Var(x) => {
             let mut s = HashSet::new();
@@ -842,6 +961,20 @@ pub fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<
                         }
                     }
                 }
+
+            // Captured-demand propagation: a call to a where-bound local
+            // function runs its body whenever the call's result is demanded
+            // — and this arm is only reached in demanded position, the same
+            // condition under which the argument demand above fires — so
+            // the outer variables the body forces on every path (`go`'s
+            // guard `i > n` forcing the captured `n`) are demanded here
+            // too. Gated on SATURATION: a partial application only builds
+            // a closure and forces none of the body's captures.
+            if let TExprKind::Var(name) = &f.kind
+                && let Some((arity, caps)) = captured.get(name)
+                    && args_rev.len() >= *arity {
+                        s.extend(caps.iter().cloned());
+                    }
 
             s
         }
@@ -924,7 +1057,7 @@ pub fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<
                     let body_demanded = if b.guards.is_empty() {
                         rec(&b.body)
                     } else {
-                        demanded_guards(&b.guards, env)
+                        demanded_guards_with(&b.guards, env, captured, &|s| s)
                     };
                     let bound = pattern_bound_vars(&b.pattern);
                     // Remove locally bound names.
