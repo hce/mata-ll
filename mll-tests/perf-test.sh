@@ -26,14 +26,14 @@ if [ ! -f "$TEST_IT" ]; then
 fi
 
 # Compile tracker
-"$MLL" -e "$ROOT/examples/tracker/tracker.mll" 2>/dev/null
+"$MLL" -e "$ROOT/experiments/tracker/tracker.mll" 2>/dev/null
 
 # Decode and measure
 OUTFILE="$(mktemp)"
 trap "rm -f $OUTFILE" EXIT
 
 START=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
-cd "$ROOT/examples/tracker"
+cd "$ROOT/experiments/tracker"
 "$LUA" ctracker.lua "$TEST_IT" "$OUTFILE" >/dev/null 2>&1
 END=$(date +%s%N 2>/dev/null || python3 -c 'import time; print(int(time.time()*1e9))')
 

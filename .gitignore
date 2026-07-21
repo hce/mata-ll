@@ -1,6 +1,12 @@
 target/
 examples/*.lua
 examples/tracker/*.wav
+# experiments/ carries the same compiled-Lua and tracker-audio artifacts as
+# examples/ used to; ignore them in every subdirectory. Hand-written .lua
+# harnesses that are already tracked are unaffected by these rules.
+experiments/*.lua
+experiments/**/*.lua
+experiments/tracker/*.wav
 # Copyrighted tracker modules must never be committed. benchmark.it is our
 # own non-copyrighted test fixture, so it is explicitly re-allowed below.
 *.it

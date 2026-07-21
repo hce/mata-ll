@@ -3164,7 +3164,7 @@ impl CodeGen {
     /// fused `__mll_st_*` functions perform the effect directly and return
     /// the value, so the caller can emit a single direct call — no closure
     /// allocation, no `__mll_run` dispatch. See
-    /// examples/tracker/PERF-REGRESSION.md.
+    /// experiments/tracker/PERF-REGRESSION.md.
     ///
     /// Returns None for partial applications (an Arrow, never in action
     /// position), first-class action references (`__mll_run(<var>)`), and

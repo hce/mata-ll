@@ -2992,7 +2992,7 @@ main = do
 #[test]
 fn examples_compile() {
     let lib_path = Path::new("../lib");
-    let examples_dir = Path::new("../examples");
+    let examples_dir = Path::new("../experiments");
 
     // Examples expected to fail or skip
     let expected_fail: Vec<&str> = vec![
@@ -3008,7 +3008,7 @@ fn examples_compile() {
     ];
 
     let mut failures = Vec::new();
-    for entry in std::fs::read_dir(examples_dir).expect("Cannot read examples/") {
+    for entry in std::fs::read_dir(examples_dir).expect("Cannot read experiments/") {
         let entry = entry.unwrap();
         let path = entry.path();
         if path.extension().map_or(true, |e| e != "mll") {
@@ -3028,6 +3028,20 @@ fn examples_compile() {
     }
     if !failures.is_empty() {
         panic!("Examples failed to compile:\n{}", failures.join("\n"));
+    }
+}
+
+// The curated showcase in examples/ imports from the contrib library
+// (atdg.mll pulls in Lz4 and Hex), so it needs both ../lib and ../contrib
+// on the lib path.
+#[test]
+fn example_atdg_compiles() {
+    let source = std::fs::read_to_string("../examples/atdg.mll")
+        .expect("Cannot read examples/atdg.mll");
+    let source_dir = Path::new("../examples");
+    match mllc::compile(&source, source_dir, &[Path::new("../lib"), Path::new("../contrib")]) {
+        Ok(_) => {}
+        Err(e) => panic!("atdg.mll failed to compile:\n{}", e),
     }
 }
 
@@ -3916,37 +3930,37 @@ sumList (x:xs) = x + sumList xs
 // their own correctness at runtime (a failed roundtrip -> error -> test fail).
 #[test]
 fn example_huffman_roundtrip() {
-    run_mll_file_with_lib(Path::new("../examples/huffman.mll"));
+    run_mll_file_with_lib(Path::new("../experiments/huffman.mll"));
 }
 
 #[test]
 fn example_redblack_invariants() {
-    run_mll_file_with_lib(Path::new("../examples/redblack.mll"));
+    run_mll_file_with_lib(Path::new("../experiments/redblack.mll"));
 }
 
 #[test]
 fn example_scheme_eval() {
-    run_mll_file_with_lib(Path::new("../examples/scheme.mll"));
+    run_mll_file_with_lib(Path::new("../experiments/scheme.mll"));
 }
 
 #[test]
 fn example_raytracer_renders() {
-    run_mll_file_with_lib(Path::new("../examples/raytracer.mll"));
+    run_mll_file_with_lib(Path::new("../experiments/raytracer.mll"));
 }
 
 #[test]
 fn example_typeinfer_checks() {
-    run_mll_file_with_lib(Path::new("../examples/typeinfer.mll"));
+    run_mll_file_with_lib(Path::new("../experiments/typeinfer.mll"));
 }
 
 #[test]
 fn example_listcomp() {
-    run_mll_file_with_lib(Path::new("../examples/listcomp.mll"));
+    run_mll_file_with_lib(Path::new("../experiments/listcomp.mll"));
 }
 
 #[test]
 fn example_lambda_reduction() {
-    run_mll_file_with_lib(Path::new("../examples/lambda.mll"));
+    run_mll_file_with_lib(Path::new("../experiments/lambda.mll"));
 }
 
 // ============================================================
@@ -3969,7 +3983,7 @@ fn compile_ffi_module(source: &str) -> (mlua::Lua, mlua::Table) {
 
 #[test]
 fn lua_iterator_type_argument_is_the_result_list_and_elements_decode() {
-    // examples/iterator/ regression, two properties in one:
+    // experiments/iterator/ regression, two properties in one:
     //
     // 1. The `LuaIterator "f" T` type argument names the RESULT list. A list
     //    argument `[Integer]` reduces to `[Integer]` (the iterator yields the

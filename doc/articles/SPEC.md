@@ -638,7 +638,7 @@ callback's accumulator argument, the callback's result, the FFI's
 initial-state argument, and the FFI's return type. Effectful callbacks
 must use `LuaIO s acc` (not `IO acc`). A callback with no type variables
 (e.g. `String -> String` for `string.gsub`) threads no opaque state and
-is accepted without these constraints. See `examples/ffi_fold.mll`.
+is accepted without these constraints. See `experiments/ffi_fold.mll`.
 
 ## Runtime representation
 

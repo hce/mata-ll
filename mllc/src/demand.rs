@@ -95,7 +95,7 @@ const STRICT_BUILTINS: &[(&str, &[bool])] = &[
 /// condition written with `==`/`<`/`>=` on a primitive type hides its
 /// operands from the analysis (the comparison survives to TIR as
 /// `App(App(Var("ord_ge__Integer"), a), b)`), which is what kept hot-loop
-/// counters lazy (see examples/tracker/PERF-REGRESSION.md).
+/// counters lazy (see experiments/tracker/PERF-REGRESSION.md).
 const PRIMITIVE_BINOP_METHODS: &[&str] = &[
     "eq_Integer", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
     "ord_lt__Integer", "ord_lt__Number", "ord_lt__String", "ord_lt__ByteString",
@@ -705,7 +705,7 @@ fn collect_pattern_vars(pat: &TPattern, vars: &mut HashSet<String>) {
 // eventually flattens. Under whole-value demand those are "not demanded",
 // so codegen must thunk them — which is what turned the tracker's mixer
 // loop into a closure-allocating (and therefore LuaJIT-unJITtable) loop;
-// see examples/tracker/PERF-REGRESSION.md.
+// see experiments/tracker/PERF-REGRESSION.md.
 //
 // This section computes, for every function, structured demand ROWS:
 //

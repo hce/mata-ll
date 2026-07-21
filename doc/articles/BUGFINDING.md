@@ -98,7 +98,7 @@ once, in order, so it paid a per-frame allocation for a guarantee it does not
 need. The regression was found only by benchmarking against a remembered
 baseline, not by any assertion.
 
-The fix (see `examples/tracker/PERF-REGRESSION.md`) fuses the ST intrinsics at
+The fix (see `experiments/tracker/PERF-REGRESSION.md`) fuses the ST intrinsics at
 their run-once call sites in codegen: where an action is built and immediately
 run, the closure is skipped and the effect emitted directly. Output stays
 byte-identical and the hot loop recovers most of the lost time.
