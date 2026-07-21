@@ -105,6 +105,51 @@ const PRIMITIVE_BINOP_METHODS: &[&str] = &[
     "semigroup_String",
 ];
 
+/// Runtime-implemented prelude functions with known per-argument strictness.
+/// Like `STRICT_BUILTINS`, these have no mata-ll body for the fixed point to
+/// analyze — their behaviour is fixed by the Lua runtime text codegen emits —
+/// so their strict positions are stated here, keyed by the SOURCE name that
+/// appears at TIR call sites (`not`/`error` are renamed to `not_`/`error_`
+/// only later, by `sanitize_name`). Every mask below was read off the emitted
+/// runtime body: a position is `true` only if the body `__force`s it on EVERY
+/// path before returning, so evaluating the argument eagerly at the call site
+/// merely reorders a force the callee performs anyway.
+///
+/// The deliberate laziness holes, verified against the runtime bodies:
+///   * `take` is LAZY in the list — GHC's `take n _ | n <= 0 = []` returns
+///     without touching it, and the runtime checks `n <= 0` before
+///     `__force(xs)`, so `take 0 undefined` must stay `[]`.
+///   * `show_Unit` is omitted entirely: it returns "()" without forcing.
+///   * `foldr`/`foldl` are omitted: their seed argument is forced only on the
+///     empty-structure path, and the accumulator must stay lazy.
+/// `map`/`filter`/`zipWith` force their FUNCTION argument too (`f = __force(f)`
+/// runs before the nil check), so that position is strict as well.
+const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
+    // show forces its value to WHNF first thing (`x = __force(x)`); each
+    // type-directed shim is an unconditional `return show(x)` or forces
+    // its argument itself (show_ByteString, show_HashMap).
+    ("show", &[true]),
+    ("show_Integer", &[true]),
+    ("show_Number", &[true]),
+    ("show_String", &[true]),
+    ("show_Bool", &[true]),
+    ("show_List_", &[true]),
+    ("show_Maybe", &[true]),
+    ("show_ByteString", &[true]),
+    ("show_HashMap", &[true]),
+    ("not", &[true]),         // return not __force(x)
+    ("error", &[true]),       // error(__force(msg)) — forces before raising
+    ("max", &[true, true]),   // math.max(__force(a), __force(b))
+    ("min", &[true, true]),   // math.min(__force(a), __force(b))
+    ("head", &[true]),        // __mll_head forces the cell (l = __force(l))
+    ("tail", &[true]),        // __mll_tail forces the cell (l = __force(l))
+    ("map", &[true, true]),
+    ("filter", &[true, true]),
+    ("take", &[true, false]), // n always; the list NOT when n <= 0
+    ("drop", &[true, true]),
+    ("zipWith", &[true, true, true]),
+];
+
 /// Run demand analysis on a typed module with cross-function propagation.
 /// Iterates to a fixed point: each round may discover new strict params
 /// by looking through call sites to already-known-strict callees.
@@ -145,6 +190,21 @@ pub fn analyze(module: &TModule) -> DemandInfo {
     }
     for name in PRIMITIVE_BINOP_METHODS {
         strict_params.entry((*name).to_string()).or_insert_with(|| vec![true, true]);
+    }
+    // Runtime prelude rows apply only when the name still refers to the
+    // runtime function. A user definition under the same source name shadows
+    // the prelude one (codegen emits it after the runtime block), so every
+    // TIR call site resolves to the user's function — its row must come from
+    // analyzing its body, seeded optimistically like any other function, not
+    // from the runtime mask.
+    let defined_names: HashSet<&str> = functions.iter()
+        .filter(|f| !f.clauses.is_empty())
+        .map(|f| f.name.as_str())
+        .collect();
+    for (name, mask) in RUNTIME_PRELUDE_STRICTNESS {
+        if !defined_names.contains(name) {
+            strict_params.entry((*name).to_string()).or_insert_with(|| mask.to_vec());
+        }
     }
 
     // Seed every non-FFI function optimistically — every parameter strict —
