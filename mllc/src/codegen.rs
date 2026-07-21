@@ -2907,6 +2907,34 @@ impl CodeGen {
         }
     }
 
+    /// Check if an expression is a SATURATED constructor application: the head
+    /// is statically a data constructor and the applied argument count equals
+    /// the constructor's arity. The infix cons `x : xs` always qualifies (both
+    /// operands are present by construction). For a prefix spine, saturation
+    /// is proved against the Con head's own instantiated type — its arrow
+    /// count IS the constructor's arity (the typechecker stamps every Con node
+    /// with its constructor scheme) — plus no arrows remaining on the result.
+    /// A partial application (`Just` as a value, a `Cons x` awaiting its
+    /// tail) fails the arity test: it is a closure, not a construction, and
+    /// must not be treated as one. An unprovable head type fails conservatively.
+    fn is_saturated_con_app(expr: &TExpr) -> bool {
+        match &expr.kind {
+            TExprKind::InfixApp { op, .. } => op == ":",
+            TExprKind::App(..) => {
+                let mut argc = 0usize;
+                let mut f = expr;
+                while let TExprKind::App(inner, _) = &f.kind {
+                    argc += 1;
+                    f = inner.as_ref();
+                }
+                matches!(&f.kind, TExprKind::Con(_))
+                    && count_arrows(&expr.ty) == 0
+                    && count_arrows(&f.ty) == argc
+            }
+            _ => false,
+        }
+    }
+
     /// Emit an ST/IO action in a flattened bind chain.
     /// Bare Var references to zero-arg IO/ST bindings are deferred functions
     /// in Lua and need () to execute. Everything else self-evaluates.
@@ -3975,6 +4003,27 @@ impl CodeGen {
         // Sound for demand analysis: demanded_vars(Tuple) is empty, so no
         // let/where binding is ever judged demanded by appearing in a tuple.
         if matches!(&stripped.kind, TExprKind::Tuple(_)) {
+            self.gen_expr(stripped);
+            return;
+        }
+        // A SATURATED constructor application (`x : acc`, `T B a x b`) is the
+        // same kind of total construction as a tuple literal: building it to
+        // WHNF fills a tag and field slots and forces nothing, so the
+        // construction itself can never be ⊥ and an outer thunk buys nothing
+        // but an allocation. Emit it directly; the emission arms it reaches —
+        // the cons arms (`__mll_cons`/`__mll_lazy_cons`) and the App
+        // full-application branch (a Con head has no strictness row, so every
+        // position is weighed lazily) — pass each FIELD through
+        // gen_arg(field, false), so a possibly-⊥ field (a recursive tail, an
+        // infinite structure) is still suspended per-field. Only the
+        // redundant whole-node thunk is dropped: `ones = 1 : ones` still
+        // builds one WHNF cell with a lazy tail. A PARTIAL constructor
+        // application is a closure, not a construction — is_saturated_con_app
+        // rejects it and it stays thunked below. Sound for demand analysis:
+        // like Tuple, demanded_vars of a Con-headed application demands
+        // nothing (a Con head has no strictness row either), so no let/where
+        // binding is judged demanded by appearing under a constructor.
+        if Self::is_saturated_con_app(stripped) {
             self.gen_expr(stripped);
             return;
         }
