@@ -127,6 +127,15 @@ pub struct Monomorphizer {
     /// and correct under nested specialization (unlike picking an arbitrary
     /// entry from the `specializations` HashMap).
     gen_stack: Vec<(String, String)>,
+    /// The (class, dict param) pairs of the function currently being rewritten
+    /// for dictionary passing, in constraint DECLARATION order. `class_to_dict`
+    /// carries the same pairs as a lookup map; this Vec is the ordered view for
+    /// the one place that must enumerate them (the no-recorded-constraints
+    /// fallback in `rewrite_dict_expr`) — enumerating the HashMap there would
+    /// pass dictionaries in nondeterministic order. Saved/restored around each
+    /// rewrite scope because dictionary construction nests (`build_dict_expr`
+    /// can enter `build_concrete_dict`, which rewrites with its own context).
+    cur_dict_params: Vec<(String, String)>,
 }
 
 impl Monomorphizer {
@@ -221,6 +230,7 @@ impl Monomorphizer {
             dict_passing_fns: HashSet::new(),
             purged_specs: HashMap::new(),
             gen_stack: Vec::new(),
+            cur_dict_params: Vec::new(),
             fn_constraints: {
                 // Prefer the freshened-name spelling of each function's
                 // constraints (the names its checked type actually uses);
@@ -301,7 +311,14 @@ impl Monomorphizer {
 
         // Rewrite dict-passing functions and their call sites
         if !self.dict_passing_fns.is_empty() {
-            let dict_fns: Vec<String> = self.dict_passing_fns.iter().cloned().collect();
+            // Sorted: rewriting a dict-passing function can GENERATE new
+            // functions (dictionary-form instance methods, via build_dict_expr
+            // → build_concrete_dict), which are appended to the module in the
+            // order they are first demanded. Iterating the HashSet directly
+            // would make that order — and the emitted __mll_fn slot numbering —
+            // vary from run to run.
+            let mut dict_fns: Vec<String> = self.dict_passing_fns.iter().cloned().collect();
+            dict_fns.sort();
             for name in &dict_fns {
                 if let Some(pos) = result_fns.iter().position(|f| f.name == *name) {
                     let mut func = result_fns[pos].clone();
@@ -1728,6 +1745,7 @@ impl Monomorphizer {
             .collect();
 
         let func_name = func.name.clone();
+        let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params);
         for clause in &mut func.clauses {
             clause.body = self.rewrite_dict_expr(clause.body.clone(), &func_name, &class_to_dict, &env);
             clause.guards = clause.guards.iter().map(|g| TGuard {
@@ -1740,6 +1758,7 @@ impl Monomorphizer {
                 body: self.rewrite_dict_expr(wb.body.clone(), &func_name, &class_to_dict, &env),
             }).collect();
         }
+        self.cur_dict_params = saved_dict_params;
     }
 
     /// Rewrite an expression for dictionary-passing.
@@ -1786,9 +1805,13 @@ impl Monomorphizer {
                                 &c.class_name, &bound, class_to_dict, env));
                         }
                         if dict_args.is_empty() {
-                            // No recorded constraints (defensive): keep the
-                            // old behavior of passing the parameters through.
-                            dict_args = class_to_dict.values().map(|dp| {
+                            // No recorded constraints (defensive): pass the
+                            // enclosing function's dictionary parameters
+                            // through, in constraint declaration order —
+                            // `cur_dict_params` holds them ordered, whereas
+                            // enumerating `class_to_dict` (a HashMap) would
+                            // pass them in nondeterministic order.
+                            dict_args = self.cur_dict_params.iter().map(|(_, dp)| {
                                 TExpr::new(TExprKind::Var(dp.clone()), Ty::Unit)
                             }).collect();
                         }
@@ -2246,8 +2269,12 @@ impl Monomorphizer {
             .map(|(c, (_, p))| ((c.class_name.clone(), c.type_var.clone()), p.clone()))
             .collect();
 
+        let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params.clone());
         for (base, dictform) in work {
-            let mut f = self.poly_fns.get(&base).cloned()?;
+            let Some(mut f) = self.poly_fns.get(&base).cloned() else {
+                self.cur_dict_params = saved_dict_params;
+                return None;
+            };
             f.name = dictform.clone();
             // Ordinary monomorphization first: ground method uses and helper
             // calls resolve as usual; still-polymorphic method uses stay
@@ -2270,6 +2297,7 @@ impl Monomorphizer {
             }
             self.generated.push(f);
         }
+        self.cur_dict_params = saved_dict_params;
         Some(names)
     }
 }
