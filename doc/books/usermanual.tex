@@ -1145,6 +1145,78 @@ list argument such as \texttt{[[Integer]]} already means ``an iterator
 yielding \texttt{[Integer]}'', a bare element would make the argument
 ambiguous, so it must always name the result list directly.
 
+\subsubsection{Memory Behaviour of Iterator Lists}
+
+An iterator list follows the same rules as any other lazy list (see
+\emph{Evaluation Strategy}), and those rules decide when its realized
+cells can be reclaimed.  What matters is not whether the iterator
+takes an argument --- it is whether the realized list is rooted by a
+nullary top-level binding.
+
+A nullary top-level binding such as \texttt{counter} above compiles to
+a memoized module-lifetime thunk (a constant applicative form).  Once
+forced, the head cell is memoized into that slot and every realized
+tail into its predecessor cell, so the entire realized spine stays
+reachable from a permanent root.  It is retained until the host drops
+the module from \texttt{package.loaded}, which normal programs never
+do --- garbage collection cannot reclaim it.
+
+A binding with parameters compiles to a plain function and is never
+memoized.  Each application builds a fresh, independent list ---
+calling it twice runs the Lua factory twice, with no sharing between
+the calls.  When the result is consumed directly at the application
+site, the realized cells are reclaimed on the next collection cycle
+after consumption.
+
+Re-binding an applied result to a nullary top-level name
+(\texttt{events = mkEvents 0}) recreates the module-lifetime root and
+retains the full spine exactly as the nullary form does.  A
+\texttt{let}-bound local also roots the head, but only for the
+lifetime of its enclosing frame.
+
+The consumer decides peak memory:
+
+\begin{itemize}
+\item A strict tail-recursive walker compiles to a proper Lua tail
+  call and streams in constant space: consumed cells become garbage as
+  the cursor advances, provided nothing holds the head.  Measured at
+  about 75~KB, flat, over two million elements.
+\item \texttt{take n} realizes exactly \texttt{n} cells.
+\item \texttt{mapM\_} --- and IO sequencing generally --- is not
+  stack-iterative in the current code generator: it uses one Lua
+  stack frame per element, and those frames pin the realized prefix
+  during the walk.  It overflows the stack at roughly 14\,000
+  elements on LuaJIT and a few hundred thousand on Lua~5.5 (both
+  approximate and interpreter-dependent).
+\end{itemize}
+
+For an endless iterator these effects compound: with a tail-call
+consumer and no head root it streams forever in constant space; with
+\texttt{mapM\_} or any head root, growth is unbounded until stack
+overflow or memory exhaustion.
+
+\begin{lstlisting}
+-- Retains every realized cell for the life of the module:
+events :: LuaIterator "events" [Integer]
+
+-- Streams in constant space: parameterized binding, applied
+-- at the use site, consumed by a strict tail-call walker.
+mkEvents :: Integer -> LuaIterator "events" [Integer]
+
+walk :: Integer -> [Integer] -> Integer
+walk n []     = n
+walk n (_:ys) = seq n (walk (n + 1) ys)
+
+main :: IO ()
+main = print (walk 0 (mkEvents 0))
+\end{lstlisting}
+
+For large or endless iterators: give the binding a parameter and
+apply it at the use site; do not re-bind the result to a top-level
+name; bound the list with \texttt{take} or consume it with a strict
+tail-recursive walker.  \texttt{mapM\_} over a large list is
+stack-unsafe in the current implementation.
+
 \subsection{Error-Capturing FFI}
 
 Many Lua functions signal failure by \emph{raising} an error
