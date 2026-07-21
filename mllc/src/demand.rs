@@ -1313,7 +1313,10 @@ fn st_intrinsic_run_row(name: &str, argc: usize) -> Option<Vec<Option<Demand>>> 
 }
 
 /// Signatures of a clause's where-bound local functions (grouped defs).
-struct LocalRows {
+/// Opaque outside this module: codegen only carries the map from
+/// `local_fn_rows` into `demanded_map`/`demanded_map_guards`.
+#[derive(Clone)]
+pub struct LocalRows {
     run: Vec<Option<Demand>>,
     deep: Option<Vec<Option<Demand>>>,
     result_deep: Demand,
@@ -1516,6 +1519,15 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
         },
 
         TExprKind::If { cond, then_branch, else_branch } => {
+            // `if otherwise then b else …` is what the parser desugars the
+            // final guard of a where-bound function into: the condition is
+            // constant true (codegen emits it as the literal `true`), so
+            // the then-branch runs unconditionally and the dead else-branch
+            // (`error "non-exhaustive guards"`) must not water down its
+            // demands. Same rule demanded_vars and demand_guards_map apply.
+            if matches!(&cond.kind, TExprKind::Var(n) if n == "otherwise") {
+                return demand_expr(cx, then_branch, rd, run_pos);
+            }
             let mut m = head(cond);
             let t = demand_expr(cx, then_branch, rd, run_pos);
             let e = demand_expr(cx, else_branch, rd, run_pos);
@@ -1901,8 +1913,11 @@ fn equations_rows(
 
 /// Signatures for a clause's where-bound local FUNCTIONS, iterated to
 /// their own fixed point under the global environment. Needed so demand
-/// flows through helpers like `reverse`'s `go` accumulator loop.
-fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds: &[TLocalDef]) -> HashMap<String, LocalRows> {
+/// flows through helpers like `reverse`'s `go` accumulator loop. Public
+/// because codegen threads the same rows into `demanded_map` /
+/// `demanded_map_guards` (via its scoped `local_demand_rows` map), so the
+/// demanded-binding decision sees exactly what the rows analysis saw.
+pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds: &[TLocalDef]) -> HashMap<String, LocalRows> {
     // Group function equations by name, in order.
     let mut groups: Vec<(String, Vec<&TLocalDef>)> = Vec::new();
     for b in where_binds {
@@ -1965,15 +1980,18 @@ fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds: &[
 
 /// Public entry point for codegen: the demand map of `expr` evaluated with
 /// result demand `rd` in run position (a bind-chain statement or a clause
-/// body — the positions codegen flattens).
+/// body — the positions codegen flattens). `locals` carries the rows of
+/// the where-bound local functions in scope (see `local_fn_rows`); without
+/// them a demand that flows through a call to a where-local is invisible
+/// and the binding stays conservatively thunked.
 pub fn demanded_map(
     expr: &TExpr,
     rows: &Rows,
+    locals: &HashMap<String, LocalRows>,
     inlined: &dyn Fn(&str) -> bool,
     rd: &Demand,
 ) -> DemandMap {
-    let locals = HashMap::new();
-    let cx = RowCx { rows, locals: &locals, inlined, sites: None };
+    let cx = RowCx { rows, locals, inlined, sites: None };
     demand_expr(&cx, expr, rd, true)
 }
 
@@ -1981,11 +1999,11 @@ pub fn demanded_map(
 pub fn demanded_map_guards(
     guards: &[TGuard],
     rows: &Rows,
+    locals: &HashMap<String, LocalRows>,
     inlined: &dyn Fn(&str) -> bool,
     rd: &Demand,
 ) -> DemandMap {
-    let locals = HashMap::new();
-    let cx = RowCx { rows, locals: &locals, inlined, sites: None };
+    let cx = RowCx { rows, locals, inlined, sites: None };
     demand_guards_map(&cx, guards, rd, true)
 }
 
