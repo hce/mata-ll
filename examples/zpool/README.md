@@ -63,13 +63,17 @@ FFI `int64_t` — a deliberate non-goal here.
 
 ## Modules
 
-| Module       | Role                                                                 |
-|--------------|----------------------------------------------------------------------|
-| `ZPool.mll`  | The reader and its public API (label → uberblock → MOS → DSL → ZAP → dnode → file). |
-| `Lz4.mll`    | LZ4 block decompression plus ZFS's 4-byte big-endian length framing. |
-| `Nvlist.mll` | XDR nvlist parser for the vdev-label pool config.                    |
-| `ZBytes.mll` | Endian-parameterized integer and NUL-string readers.                 |
-| `zpr.mll`    | Demonstration harness: list datasets/files and extract them to disk. |
+| Module              | Role                                                                 |
+|---------------------|----------------------------------------------------------------------|
+| `ZPool.mll`         | The reader and its public API (label → uberblock → MOS → DSL → ZAP → dnode → file). |
+| `../../contrib/Lz4.mll`    | LZ4 block decompression plus ZFS's 4-byte big-endian length framing. |
+| `Nvlist.mll`        | XDR nvlist parser for the vdev-label pool config.                    |
+| `../../contrib/ZBytes.mll` | Endian-parameterized integer and NUL-string readers.                 |
+| `zpr.mll`           | Demonstration harness: list datasets/files and extract them to disk. |
+
+`Lz4.mll` and `ZBytes.mll` are general-purpose auxiliary libraries, so they
+live in the repo-root `contrib/` directory (auto-searched by `mll`), not in
+this example directory.
 
 ## See also
 

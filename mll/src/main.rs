@@ -143,11 +143,18 @@ fn run_compiler(cli: Cli) {
     let auto_lib = exe_dir.as_ref()
         .map(|d| d.join("../../lib"))
         .and_then(|p| p.canonicalize().ok());
+    // Auto-add contrib/ directory (auxiliary in-tree libraries, not embedded)
+    let auto_contrib = exe_dir.as_ref()
+        .map(|d| d.join("../../contrib"))
+        .and_then(|p| p.canonicalize().ok());
 
     let mut lib_paths: Vec<&Path> = cli.lib_paths.iter()
         .map(|p| Path::new(p.as_str()))
         .collect();
     if let Some(ref auto) = auto_lib {
+        lib_paths.push(auto.as_path());
+    }
+    if let Some(ref auto) = auto_contrib {
         lib_paths.push(auto.as_path());
     }
 
