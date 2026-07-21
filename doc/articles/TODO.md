@@ -3,7 +3,26 @@ MATA-LL TODO
 
 ## Planned — top priority
 
+2. [ ] **GHC as a differential oracle.** The parity suite asserts what the
+       author believed GHC does; belief-driven tests share the author's blind
+       spots (this is how three `Show` divergences — unquoted `show "a"`,
+       records printed positionally, list spacing — survived a suite built to
+       check GHC behaviour). Instead: run the parity corpus through real GHC
+       (`runghc`), pin the outputs as golden files, and diff mata-ll's runtime
+       output against them in CI. Start with the already-ported `ghc_*` cases.
+       Suggested by the independent 2026-07-21 review.
+
 ## Completed
+
+- [x] **Lua AST in codegen (was planned #1).** String-based emission replaced
+      with a small Lua AST and printer (`mllc/src/codegen/lua.rs`): every
+      generator builds `lua::Expr`/`lua::Stmt` trees, printed once. Malformed
+      statements are unrepresentable by construction; grouping is explicit
+      (`Paren` nodes reproduce the historical parens — no precedence logic;
+      redundant-paren cleanup remains a separate, deliberate output change).
+      Conversion contract held: byte-identical output across the whole corpus
+      and the acceptance program, verified same-HEAD. Suggested by the
+      independent 2026-07-21 review.
 
 - [x] **`LIO.readLine` hardened at end of input (same as `getLine`).**
       `readLine` is now `IO String` in `LIO.mll`, a wrapper over
