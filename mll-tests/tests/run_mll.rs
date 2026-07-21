@@ -604,6 +604,7 @@ mll_test!(operator_fixity, "operator_fixity.mll");
 mll_test!(export_module, "export_module.mll");
 mll_test!(import_hiding, "import_hiding.mll");
 mll_test!(record_update, "record_update.mll");
+mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
 mll_test!(monad_nonio, "monad_nonio.mll");
@@ -9356,6 +9357,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_promoted_nat_kind, "cases", "promoted_nat_kind.mll"),
         (ghc_oracle_rank2, "cases", "rank2.mll"),
         (ghc_oracle_read_typeclass, "cases", "read_typeclass.mll"),
+        (ghc_oracle_record_brace_next_line, "cases", "record_brace_next_line.mll"),
         (ghc_oracle_record_update, "cases", "record_update.mll"),
         (ghc_oracle_records, "cases", "records.mll"),
         (ghc_oracle_result_only_monad, "cases", "result_only_monad.mll"),

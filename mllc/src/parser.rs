@@ -1862,22 +1862,42 @@ impl Parser {
         }
 
         // Record update: expr { field = val, ... }
-        // Only parse if '{' is on the same line (to avoid conflict with do-blocks)
-        // Loop to allow chained updates: expr { x = 1 } { y = 2 }
-        while self.at(&Token::LeftBrace) && self.pos > 0 {
-            let prev_tok = &self.tokens[self.pos - 1];
-            let brace_tok = &self.tokens[self.pos];
-            if brace_tok.line != prev_tok.line {
-                break;
+        // Loop to allow chained updates: expr { x = 1 } { y = 2 }.
+        // The brace attaches on the same line, or from a following line
+        // indented strictly past the current layout block's column (the
+        // cross-line continuation rule from parse_expr_app) — a brace at or
+        // left of the block column belongs to a sibling item (a do-statement,
+        // the next binding), never to this expression.
+        loop {
+            let save_pos = self.pos;
+            let save_indent = self.current_indent;
+            if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
+                self.skip_newlines_and_indent();
+                if !(self.at(&Token::LeftBrace)
+                    && self.current_indent > self.block_indent)
+                {
+                    self.pos = save_pos;
+                    self.current_indent = save_indent;
+                    break;
+                }
+            } else {
+                if !(self.at(&Token::LeftBrace) && self.pos > 0) {
+                    break;
+                }
+                let prev_tok = &self.tokens[self.pos - 1];
+                let brace_tok = &self.tokens[self.pos];
+                if brace_tok.line != prev_tok.line {
+                    break;
+                }
             }
-            let save = self.pos;
             if let Ok(updates) = self.try_parse_record_update() {
                 expr = Expr::RecordUpdate {
                     expr: Box::new(expr),
                     updates,
                 };
             } else {
-                self.pos = save;
+                self.pos = save_pos;
+                self.current_indent = save_indent;
                 break;
             }
         }
@@ -2020,6 +2040,24 @@ impl Parser {
                     "False" => Ok(Expr::Lit(Literal::Bool(false))),
                     _ => {
                         // Check for record construction: Con { field = val, ... }
+                        // The brace may open on a following line indented
+                        // strictly past the current layout block's column —
+                        // the same cross-line continuation rule application
+                        // arguments use (parse_expr_app). At or left of the
+                        // block column the brace would belong to a sibling
+                        // item, so `Foo` stays a bare constructor and the
+                        // position is restored.
+                        if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
+                            let save_pos = self.pos;
+                            let save_indent = self.current_indent;
+                            self.skip_newlines_and_indent();
+                            if !(self.at(&Token::LeftBrace)
+                                && self.current_indent > self.block_indent)
+                            {
+                                self.pos = save_pos;
+                                self.current_indent = save_indent;
+                            }
+                        }
                         if self.at(&Token::LeftBrace) {
                             self.advance();
                             let mut fields = Vec::new();
