@@ -277,6 +277,7 @@ impl Checker {
             clauses,
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         }]
     }
 
@@ -405,6 +406,13 @@ impl Checker {
             clauses,
             specialized: false,
             dict_params: vec![],
+            // Strict in both operands by construction: every per-constructor
+            // clause matches a constructor pattern on BOTH positions, and the
+            // `_ _ = False` catch-all is reachable only after clause dispatch
+            // has forced both scrutinees (the first argument's constructor is
+            // inspected by clause 1, and whichever constructor it is, that
+            // constructor's own clause then inspects the second argument).
+            derived_strict: true,
         }]
     }
 
@@ -559,6 +567,11 @@ impl Checker {
             clauses: compare_clauses,
             specialized: false,
             dict_params: vec![],
+            // Strict in both operands by construction: the clauses cover every
+            // (constructor, constructor) pair, each matching a constructor
+            // pattern on BOTH positions, so no clause can be selected before
+            // both scrutinees are forced.
+            derived_strict: true,
         });
 
         for (op, op_name) in &[("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")] {
@@ -656,6 +669,12 @@ impl Checker {
                 clauses,
                 specialized: false,
                 dict_params: vec![],
+                // Strict in both operands by construction, in both shapes: the
+                // enum clauses match constructor patterns on both positions,
+                // and the non-enum body immediately scrutinizes
+                // `compare _a _b`, whose derived implementation (above) forces
+                // both.
+                derived_strict: true,
             });
         }
 
@@ -719,6 +738,7 @@ impl Checker {
                 clauses,
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -756,6 +776,7 @@ impl Checker {
                 clauses,
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -794,6 +815,7 @@ impl Checker {
                 clauses,
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -832,6 +854,7 @@ impl Checker {
                 clauses,
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -917,6 +940,7 @@ impl Checker {
                 }],
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -945,6 +969,7 @@ impl Checker {
                 }],
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -982,6 +1007,7 @@ impl Checker {
                 }],
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -1003,6 +1029,7 @@ impl Checker {
                 }],
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             });
         }
 
@@ -1061,6 +1088,7 @@ impl Checker {
             }],
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         });
 
         // maxBound_T :: T
@@ -1077,6 +1105,7 @@ impl Checker {
             }],
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         });
 
         // Register Bounded instance
@@ -1461,6 +1490,7 @@ impl Checker {
             clauses,
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         }]
     }
 
@@ -2138,6 +2168,7 @@ impl Checker {
             }],
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         }]
     }
 
@@ -2457,6 +2488,7 @@ impl Checker {
             clauses,
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         }]
     }
 }

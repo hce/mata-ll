@@ -167,6 +167,7 @@ mod tests {
                 }],
                 specialized: false,
                 dict_params: vec![],
+                derived_strict: false,
             }],
             instance_fns: vec![],
             has_main: false,

@@ -347,6 +347,7 @@ impl Checker {
             clauses: tclauses,
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         };
 
         // Affine-usage check (linear types): with every multiplicity now
@@ -1637,6 +1638,7 @@ impl Checker {
                 }],
                 specialized: false,
             dict_params: vec![],
+            derived_strict: false,
             };
         }
 
@@ -1733,6 +1735,7 @@ impl Checker {
             }],
             specialized: false,
             dict_params: vec![],
+            derived_strict: false,
         }
     }
 

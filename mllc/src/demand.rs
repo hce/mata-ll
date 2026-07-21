@@ -340,6 +340,22 @@ fn analyze_function(func: &TFunction, env: &HashMap<String, Vec<bool>>) -> Vec<b
         return vec![];
     }
 
+    // Compiler-DERIVED Eq/Ord instance methods are strict in every argument by
+    // construction (see `TFunction::derived_strict`): structural comparison
+    // must force both operands to WHNF to inspect their constructor tags
+    // before ANY clause can be selected. The clause-wise AND below cannot see
+    // that — the derived `_ == _ = False` catch-all matches wildcards and
+    // contributes `false` for both positions, dragging the row to all-false
+    // even though the catch-all is only reachable after both scrutinees were
+    // forced by the preceding constructor clauses. Pinning the row here (it
+    // also survives the fixed point) is the derived-instance analogue of the
+    // `PRIMITIVE_BINOP_METHODS` seed. Sound ONLY because the marker is set
+    // exclusively at derivation time — a user-written Eq/Ord method may be
+    // lazy in an argument and is analyzed normally.
+    if func.derived_strict {
+        return vec![true; arity];
+    }
+
     // For each parameter position, determine strictness across all clauses.
     let mut strict = vec![true; arity];
 

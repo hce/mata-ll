@@ -1199,6 +1199,7 @@ impl Monomorphizer {
             }],
             specialized: true,
             dict_params: vec![],
+            derived_strict: false,
         };
         self.generated.push(func);
         mangled
@@ -1243,6 +1244,7 @@ impl Monomorphizer {
             }],
             specialized: true,
             dict_params: vec![],
+            derived_strict: false,
         };
         self.generated.push(func);
         mangled
@@ -1299,6 +1301,7 @@ impl Monomorphizer {
             }],
             specialized: true,
             dict_params: vec![],
+            derived_strict: false,
         };
         self.generated.push(func);
         mangled
@@ -1352,6 +1355,7 @@ impl Monomorphizer {
             }],
             specialized: true,
             dict_params: vec![],
+            derived_strict: false,
         };
         self.generated.push(func);
         mangled
@@ -1444,6 +1448,7 @@ impl Monomorphizer {
             }],
             specialized: true,
             dict_params: vec![],
+            derived_strict: false,
         };
         self.generated.push(func);
         mangled

@@ -102,6 +102,19 @@ pub struct TFunction {
     /// Dictionary parameters for polymorphic-recursive functions
     /// Each entry is (class_name, param_name), e.g. ("Show", "__dict_Show")
     pub dict_params: Vec<(String, String)>,
+    /// True only for compiler-DERIVED Eq/Ord instance methods (`eq_T`,
+    /// `ord_compare__T`, `ord_lt__T`, …) from a `deriving` clause. Their
+    /// bodies force every argument to WHNF on every path by construction:
+    /// structural comparison must inspect both constructor tags before any
+    /// clause — including the `_ == _ = False` catch-all — can be selected.
+    /// The demand analysis pins their strictness row to all-true, which the
+    /// clause-wise AND over the wildcard catch-all otherwise under-approximates
+    /// to all-false (see `PRIMITIVE_BINOP_METHODS` in demand.rs for the
+    /// primitive-type analogue). Never set for USER-WRITTEN instances, whose
+    /// methods may legitimately be lazy in an argument. Monomorphization
+    /// clones the function, so specializations of a derived method keep the
+    /// marker.
+    pub derived_strict: bool,
 }
 
 #[derive(Debug, Clone)]
