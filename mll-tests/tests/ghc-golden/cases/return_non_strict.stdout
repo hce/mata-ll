@@ -1,0 +1,9 @@
+1: `_ <- return boom` did not force
+2: `v <- return boom` bound without forcing
+3: `pure $ boom` did not force
+4: `_ <- returnsBottom` (terminal return of bottom) did not force
+.
+.
+7: Maybe return does not force its argument
+8: demanding the returned bottom raises when forced
+return/pure are non-strict: bottom is not forced until demanded

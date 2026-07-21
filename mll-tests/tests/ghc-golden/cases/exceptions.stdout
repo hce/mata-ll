@@ -1,0 +1,9 @@
+.
+try error gives Left
+hello from try
+try putStrLn succeeded
+.
+.
+.
+caught head []
+ok

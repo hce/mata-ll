@@ -1,0 +1,5 @@
+1: interprocedural `v <- mk 1` bound a bottom without forcing
+.
+3: demanding it raises when forced
+.
+interprocedural return/pure: non-strict, value-preserving, still-raising-when-demanded

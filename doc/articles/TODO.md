@@ -3,16 +3,24 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-2. [ ] **GHC as a differential oracle.** The parity suite asserts what the
-       author believed GHC does; belief-driven tests share the author's blind
-       spots (this is how three `Show` divergences — unquoted `show "a"`,
-       records printed positionally, list spacing — survived a suite built to
-       check GHC behaviour). Instead: run the parity corpus through real GHC
-       (`runghc`), pin the outputs as golden files, and diff mata-ll's runtime
-       output against them in CI. Start with the already-ported `ghc_*` cases.
-       Suggested by the independent 2026-07-21 review.
+(empty)
 
 ## Completed
+
+- [x] **GHC as a differential oracle (was planned #2).** The parity suite
+      asserted what the author believed GHC does; belief-driven tests share
+      the author's blind spots. Now real GHC is the referee:
+      `mll-tests/regenerate-ghc-goldens.sh` runs a mechanical GHC twin of
+      every eligible case (shared shim
+      `mll-tests/tests/ghc-golden/MllShim.hs`) and pins GHC's stdout as
+      committed goldens; the `ghc_oracle_*` tests in
+      `mll-tests/tests/run_mll.rs` diff mata-ll's runtime output against
+      them byte-exactly (254 cases; CI needs no GHC). Known differences are
+      pinned and enumerated in `mll-tests/tests/ghc-golden/DIVERGENCES.md`
+      — all reduce to three `show` behaviours (unquoted strings, `", "`
+      list/tuple separators, Lua `%.14g` for `Number`); a fix or a drift on
+      any of them fails the suite. Suggested by the independent 2026-07-21
+      review.
 
 - [x] **Lua AST in codegen (was planned #1).** String-based emission replaced
       with a small Lua AST and printer (`mllc/src/codegen/lua.rs`): every

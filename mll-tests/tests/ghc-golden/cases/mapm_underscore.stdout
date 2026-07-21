@@ -1,0 +1,11 @@
+mapM_ a
+mapM_ b
+forM_ 1
+forM_ 2
+forM_ 3
+sequence_ 1
+sequence_ 2
+.
+.
+.
+.

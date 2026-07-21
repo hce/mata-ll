@@ -1,0 +1,5 @@
+ok defaulted-mappend
+ok foldMap
+ok first-class-op
+ok mconcat
+ok mconcat-string

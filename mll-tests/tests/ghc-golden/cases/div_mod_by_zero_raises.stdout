@@ -1,0 +1,10 @@
+div by zero raises (function form)
+0 div 0 raises
+negative div by zero raises
+mod by zero raises (function form)
+0 mod 0 raises
+div by zero raises (literal infix form)
+mod by zero raises (literal infix form)
+div by let-bound zero raises
+div by computed zero raises
+ok
