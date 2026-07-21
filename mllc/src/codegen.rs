@@ -1715,9 +1715,16 @@ impl CodeGen {
             // Thunked: the name must not be considered concrete, even if a
             // same-named outer binding was (this assignment shadows it).
             self.concrete_vars.remove(&sname);
-            self.emit(&format!("{} = __thunk(function() return ", lref));
-            self.gen_expr(&bind.body);
-            self.emit(" end)");
+            if let Some(v) = bare_var_alias(binds, i) {
+                // Bare-variable RHS: share the existing thunk-or-value
+                // (see bare_var_alias).
+                self.emit(&format!("{} = ", lref));
+                self.gen_lazy_ref(v);
+            } else {
+                self.emit(&format!("{} = __thunk(function() return ", lref));
+                self.gen_expr(&bind.body);
+                self.emit(" end)");
+            }
         }
         self.emit("\n");
         self.cur_result_demand = saved_rd;
@@ -3468,9 +3475,17 @@ impl CodeGen {
                                 // Thunked: must not stay marked concrete (a
                                 // same-named outer binding may have been).
                                 self.concrete_vars.remove(&bname);
-                                self.emit(&format!("{} = __thunk(function() return ", lval));
-                                self.gen_expr(&bind.body);
-                                self.emit(" end)\n");
+                                if let Some(v) = bare_var_alias(binds, i) {
+                                    // Bare-variable RHS: share the existing
+                                    // thunk-or-value (see bare_var_alias).
+                                    self.emit(&format!("{} = ", lval));
+                                    self.gen_lazy_ref(v);
+                                    self.emit("\n");
+                                } else {
+                                    self.emit(&format!("{} = __thunk(function() return ", lval));
+                                    self.gen_expr(&bind.body);
+                                    self.emit(" end)\n");
+                                }
                             }
                             self.cur_result_demand = saved_rd;
                         }
@@ -4728,8 +4743,16 @@ impl CodeGen {
                         // Thunked: must not stay marked concrete (a same-named
                         // outer binding may have been).
                         self.concrete_vars.remove(&sname);
-                        self.emit(&format!("{} = __thunk(function() return ", sname));
-                        self.gen_expr(&bind.body); self.emit(" end)\n");
+                        if let Some(v) = bare_var_alias(binds, i) {
+                            // Bare-variable RHS: share the existing
+                            // thunk-or-value (see bare_var_alias).
+                            self.emit(&format!("{} = ", sname));
+                            self.gen_lazy_ref(v);
+                            self.emit("\n");
+                        } else {
+                            self.emit(&format!("{} = __thunk(function() return ", sname));
+                            self.gen_expr(&bind.body); self.emit(" end)\n");
+                        }
                     }
                 }
                 self.emit_indent(); self.emit("return "); self.gen_tail(body, false); self.emit("\n");
@@ -5664,6 +5687,35 @@ fn strict_binding_safe(binds: &[TLocalDef], i: usize) -> bool {
     }
     // Not-yet-assigned siblings are those at position i (self) and beyond.
     !binds[i..].iter().any(|b| expr_references_name(&binds[i].body, &b.name))
+}
+
+/// If the lazy binding `binds[i]` is a pure alias — its RHS is exactly a bare
+/// variable (after stripping parens, as gen_arg does) — return that variable
+/// expression so the emitter assigns the raw reference instead of wrapping a
+/// fresh thunk around a force of it. The variable already denotes a
+/// thunk-or-value (the same rule gen_arg applies to bare-variable arguments):
+/// `x = y` then shares y's thunk, so laziness is preserved (nothing is forced
+/// at binding time), a single force memoizes for both names, and the extra
+/// thunk allocation plus force indirection disappear. This is GHC semantics —
+/// `let x = y` makes x and y the same lazy value.
+///
+/// Only fires when the raw read is sound: the reference is read at assignment
+/// time, so the RHS must not be a self or forward sibling reference (those
+/// slots are still nil — the same condition strict_binding_safe checks; for a
+/// bare variable it degenerates to exactly that name test). A self/forward
+/// alias stays thunked, which keeps `let x = x` a proper ⊥ instead of nil.
+/// Anything that is not a bare variable — calls, constructor applications,
+/// operators — is out of scope here and keeps its thunk.
+fn bare_var_alias(binds: &[TLocalDef], i: usize) -> Option<&TExpr> {
+    let mut e = &binds[i].body;
+    while let TExprKind::Paren(inner) = &e.kind {
+        e = inner.as_ref();
+    }
+    if matches!(e.kind, TExprKind::Var(_)) && strict_binding_safe(binds, i) {
+        Some(e)
+    } else {
+        None
+    }
 }
 
 /// Count how many arrows are at the top level of a type.
