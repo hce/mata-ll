@@ -824,7 +824,7 @@ impl CodeGen {
         // Seed concrete_vars so references skip __force throughout user code.
         for name in &[
             "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
-            "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_st", "__mll_perform",
+            "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_tail", "__mll_run_st", "__mll_perform",
             "__mll_ffi_decode",
             "not_", "engage", "liftIO", "show", "error_", "max", "min", "undefined",
             "pure", "return_", "Just",
@@ -3165,6 +3165,21 @@ impl CodeGen {
     }
 
     fn gen_action(&mut self, expr: &TExpr) {
+        self.gen_action_run(expr, false);
+    }
+
+    /// Emit an action in run-position. `tail` selects the runner: `false`
+    /// emits the CONSUMING `__mll_run` (bind RHSes, value positions — the
+    /// result is inspected, so any pending pure box must be stripped);
+    /// `true` emits the FORWARDING `__mll_run_tail` (a `return`-position
+    /// terminal, or an effect statement whose result is discarded). The
+    /// forwarding runner tail-calls the action closure, which is what turns
+    /// interprocedural action recursion (`mapM_ f (x:xs) = f x >> mapM_ f
+    /// xs`) into a constant-stack Lua tail-call chain; the ≤1 pending box
+    /// its result may carry is stripped by the consuming site at the
+    /// chain's root (see the __mll_run contract comment in the runtime).
+    fn gen_action_run(&mut self, expr: &TExpr, tail: bool) {
+        let runner = if tail { "__mll_run_tail" } else { "__mll_run" };
         // Structural checks FIRST — the monad type variable may be
         // unresolved in bind chains, so we can't rely on the type alone.
         // pure(x) / return(x): performing it just yields x — and yields it
@@ -3196,7 +3211,8 @@ impl CodeGen {
             if Self::is_definitely_not_action(&expr.ty) {
                 self.gen_expr(expr);
             } else {
-                self.emit("__mll_run(");
+                self.emit(runner);
+                self.emit("(");
                 self.gen_expr(expr);
                 self.emit(")");
             }
@@ -3277,9 +3293,10 @@ impl CodeGen {
                 self.emit(")");
             }
             _ => {
-                // General IO/ST action: use __mll_run which handles both
-                // direct values and action closures (function or value).
-                self.emit("__mll_run(");
+                // General IO/ST action: the runner handles both direct
+                // values and action closures (function or value).
+                self.emit(runner);
+                self.emit("(");
                 self.gen_expr(expr);
                 self.emit(")");
             }
@@ -3385,13 +3402,26 @@ impl CodeGen {
     /// to the closure, and the closure tail-calls `f`, so the whole chain runs
     /// in constant stack — which is why only the paren wrapper, not the IIFE,
     /// has to be stripped.
+    ///
+    /// Action terminals (`inside_action`) keep the property through the
+    /// runner: `return __mll_run_tail(a)` tail-calls the forwarding runner,
+    /// which tail-calls the action closure — so IO/ST recursion that crosses
+    /// a function boundary per step (`mapM_`, a recursive `loop n`) is also
+    /// constant-stack. See gen_action_run and the runtime's __mll_run
+    /// contract comment.
     fn gen_tail(&mut self, expr: &TExpr, inside_action: bool) {
         let mut e = expr;
         while let TExprKind::Paren(inner) = &e.kind {
             e = inner.as_ref();
         }
         if inside_action {
-            self.gen_action(e);
+            // Action terminal: run through the FORWARDING runner, whose
+            // function arm is a bare `return action()` — so the whole
+            // `return __mll_run_tail(a)` emission is a two-step tail chain
+            // and recursive action sequencing runs in constant stack. Any
+            // pending pure box rides through to the consuming site at the
+            // chain's root (see gen_action_run).
+            self.gen_action_run(e, true);
         } else {
             self.gen_expr(e);
         }
@@ -3420,6 +3450,36 @@ impl CodeGen {
             match &expr.kind {
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
                     if let TExprKind::Lambda { params, body } = &rhs.kind {
+                        // A do-STATEMENT desugars to `action >>= \_ -> rest`.
+                        // Emit it exactly like the `>>` arm below — a bare
+                        // statement through the forwarding runner — instead
+                        // of `local _ = __mll_run(...)`. This is not just
+                        // cosmetic: the consuming runner's frame stays live
+                        // for the whole call and holds the action closure,
+                        // whose captured tail reference retains every list
+                        // cell the walk realizes — a discarded
+                        // `mapM_ f xs` over a million-element lazy list
+                        // pinned the entire prefix until the walk finished.
+                        // The statement form hands the closure to
+                        // __mll_run_tail, whose tail call releases it, so
+                        // consumed cells are collectable as the walk moves.
+                        if params.len() == 1 && params[0].0 == "_" {
+                            let lhs_unwrapped = if let TExprKind::Paren(inner) = &lhs.kind { inner.as_ref() } else { lhs.as_ref() };
+                            let is_pure_discard = matches!(&lhs_unwrapped.kind,
+                                TExprKind::App(func, _) if matches!(&func.kind,
+                                    TExprKind::Var(n) if n == "pure" || n == "return"));
+                            if !is_pure_discard {
+                                self.emit_indent();
+                                let saved_rd = std::mem::replace(
+                                    &mut self.cur_result_demand, crate::demand::Demand::Head);
+                                self.gen_action_run(lhs_unwrapped, true);
+                                self.cur_result_demand = saved_rd;
+                                self.emit("\n");
+                            }
+                            expr = body;
+                            inside_action = true;
+                            continue;
+                        }
                         let param_name = sanitize_name(&params[0].0);
                         let decl = self.declare_local(&param_name);
                         self.emit_indent();
@@ -3454,10 +3514,14 @@ impl CodeGen {
                             TExprKind::Var(n) if n == "pure" || n == "return"));
                     if !is_pure_discard {
                         self.emit_indent();
-                        // Statement position — see the ">>=" arm above.
+                        // Statement position — see the ">>=" arm above. The
+                        // result is DISCARDED, so the forwarding runner is
+                        // used: identical forcing/effect behaviour, and it
+                        // skips the consuming runner's unbox of a result
+                        // nobody looks at.
                         let saved_rd = std::mem::replace(
                             &mut self.cur_result_demand, crate::demand::Demand::Head);
-                        self.gen_action(lhs_unwrapped);
+                        self.gen_action_run(lhs_unwrapped, true);
                         self.cur_result_demand = saved_rd;
                         self.emit("\n");
                     }
@@ -6650,6 +6714,20 @@ __mll_wrap_callback_in = function(f, n, out_descs, ret_desc, root)
 end
 
 -- Run an IO action: force thunks, then call the action closure
+--
+-- TWO RUNNERS, ONE BOX CONVENTION. Calling an action closure returns the
+-- action's result carrying AT MOST ONE pending `__mll_pure` box (produced by
+-- a terminal `pure e` whose payload isn't provably safe to leave bare — see
+-- gen_pure_action). `__mll_run` is the CONSUMING runner: it is used wherever
+-- the result is actually bound, marshalled, or inspected, and it strips that
+-- one pending box (`__mll_unbox(action())`). `__mll_run_tail` below is the
+-- FORWARDING runner for `return __mll_run_tail(a)` terminals: it leaves the
+-- box on and tail-calls the closure, so Lua's tail-call elimination reclaims
+-- the frame and a recursive action chain (`mapM_` over a million-element
+-- list) runs in constant stack. The box rides the tail chain untouched until
+-- it reaches the one consuming site at the chain's root — every such site
+-- (`__mll_run` itself, try_/catch_, __mll_run_st, the export and callback
+-- wrappers) applies exactly one unbox to a closure-call result.
 local function __mll_run(action)
     -- A pure action (`pure e`/`return e` that escaped its defining function)
     -- already carries its result — hand it back UNFORCED. This is the only way
@@ -6663,6 +6741,22 @@ local function __mll_run(action)
     -- A closure whose body is a pure action returns a box (e.g. a first-class
     -- `let a = pure e`); unwrap the result of running it too.
     if type(action) == "function" then return __mll_unbox(action()) else return action end
+end
+-- Tail-position runner: same action dispatch as __mll_run (box-check before
+-- AND after forcing, for the same thunk-vs-value-action reasons), but it
+-- FORWARDS rather than consumes. The function arm is a bare `return action()`
+-- — the exact syntactic form Lua eliminates the frame for — and the box arms
+-- return the box ITSELF so the payload stays unforced and uncalled, and so
+-- the consuming site at the chain's root strips exactly one box (unwrapping
+-- here would make an action-valued payload — `pure someBoxedAction` — lose
+-- its own box to the consumer's unbox). Emitted only for `return`-position
+-- action terminals (gen_bind_chain / gen_tail) and effect statements whose
+-- result is discarded; every value position keeps __mll_run.
+local function __mll_run_tail(action)
+    if getmetatable(action) == __mll_pure_mt then return action end
+    action = __force(action)
+    if getmetatable(action) == __mll_pure_mt then return action end
+    if type(action) == "function" then return action() else return action end
 end
 -- Perform an IO action (normally a function closure; a pure action carries its
 -- result and is returned unforced, exactly as in __mll_run)
@@ -6850,7 +6944,31 @@ local function take(n, xs)
     if xs.__lazy then
         return __mll_lazy_cons(__mll_head(xs), function() return take(n - 1, __mll_tail_lazy(xs)) end)
     else
-        return __mll_cons(__mll_head(xs), take(n - 1, __mll_tail_lazy(xs)))
+        -- Realized spine: build the taken prefix ITERATIVELY. The recursive
+        -- form (`__mll_cons(h, take(n - 1, tail))`) cost one Lua frame per
+        -- element, so `take 1000000` over a memoized, already-walked list
+        -- overflowed the stack even though the lazy arm above streams in
+        -- O(1). The loop builds the same eager cells by appending in place;
+        -- heads stay unforced, and n reaching 0 stops BEFORE the next tail
+        -- is forced (`take 2 (1:2:⊥)` is [1, 2], as in the recursion). A
+        -- still-lazy cell mid-spine hands the remainder back to the lazy
+        -- arm: one frame, then O(1) again.
+        local first = __mll_cons(__mll_head(xs), nil)
+        local last = first
+        n = n - 1
+        while n > 0 do
+            xs = __force(__mll_tail_lazy(xs))
+            if xs == nil then break end
+            if xs.__lazy then
+                last[2] = take(n, xs)
+                return first
+            end
+            local cell = __mll_cons(__mll_head(xs), nil)
+            last[2] = cell
+            last = cell
+            n = n - 1
+        end
+        return first
     end
 end
 local function drop(n, xs)

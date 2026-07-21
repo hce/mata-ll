@@ -1182,18 +1182,19 @@ The consumer decides peak memory:
   the cursor advances, provided nothing holds the head.  Measured at
   about 75~KB, flat, over two million elements.
 \item \texttt{take n} realizes exactly \texttt{n} cells.
-\item \texttt{mapM\_} --- and IO sequencing generally --- is not
-  stack-iterative in the current code generator: it uses one Lua
-  stack frame per element, and those frames pin the realized prefix
-  during the walk.  It overflows the stack at roughly 14\,000
-  elements on LuaJIT and a few hundred thousand on Lua~5.5 (both
-  approximate and interpreter-dependent).
+\item \texttt{mapM\_} --- and IO sequencing generally --- also
+  streams: each sequencing step is emitted as a proper Lua tail call
+  through the runtime's forwarding runner, so the walk runs in
+  constant stack and consumed cells become garbage as the cursor
+  advances.  Measured over one million elements: constant stack on
+  both LuaJIT and Lua~5.5, with the live set flat (about 73~KB
+  LuaJIT, 55~KB Lua~5.5) for the whole walk.
 \end{itemize}
 
 For an endless iterator these effects compound: with a tail-call
-consumer and no head root it streams forever in constant space; with
-\texttt{mapM\_} or any head root, growth is unbounded until stack
-overflow or memory exhaustion.
+consumer --- pure walker or \texttt{mapM\_} --- and no head root it
+streams forever in constant space; with a head root, growth is
+unbounded until memory exhaustion.
 
 \begin{lstlisting}
 -- Retains every realized cell for the life of the module:
@@ -1214,8 +1215,8 @@ main = print (walk 0 (mkEvents 0))
 For large or endless iterators: give the binding a parameter and
 apply it at the use site; do not re-bind the result to a top-level
 name; bound the list with \texttt{take} or consume it with a strict
-tail-recursive walker.  \texttt{mapM\_} over a large list is
-stack-unsafe in the current implementation.
+tail-recursive walker or \texttt{mapM\_} --- both stream in constant
+space.
 
 \subsection{Error-Capturing FFI}
 
