@@ -4386,18 +4386,49 @@ impl CodeGen {
                         return;
                     }
                     "$" => {
-                        // f $ x applies f to a lazily thunked x. When the
-                        // result type still has arrows, f's real Lua arity is
-                        // 1 + remaining under the N-ary convention, so close
-                        // over the missing arguments — exactly like the App
-                        // arm's partial-application closure. Calling f with
-                        // the thunk alone would leave its remaining
-                        // parameters nil.
+                        // f $ x is exactly f x, so x is weighed like a normal
+                        // application argument (gen_arg): eager when f's next
+                        // parameter position is strict or x is cheap/total,
+                        // suspended otherwise. When the result type still has
+                        // arrows, f's real Lua arity is 1 + remaining under
+                        // the N-ary convention, so close over the missing
+                        // arguments — exactly like the App arm's
+                        // partial-application closure. Calling f with the one
+                        // argument alone would leave its remaining parameters
+                        // nil.
                         let remaining = count_arrows(&expr.ty);
                         // `map $ f` puts f straight into a runtime generic's
                         // function-parameter position (see
                         // runtime_generic_adapter).
                         let adapter = self.runtime_generic_adapter(lhs, 0, &rhs.ty);
+                        // x occupies f's NEXT argument position: f is often a
+                        // partial application (`(const 5) $ undefined` is
+                        // `const 5 undefined`), so strip the applied spine off
+                        // lhs and consult the head's strictness row at the
+                        // index PAST the already-applied arguments — the same
+                        // row/index the App arm would use for `f x`. Anything
+                        // short of a known head with a strict row at that
+                        // exact position stays lazy: over-forcing here would
+                        // run a ⊥ that f never demands.
+                        let rhs_strict = {
+                            let mut head = lhs.as_ref();
+                            let mut applied = 0usize;
+                            loop {
+                                match &head.kind {
+                                    TExprKind::Paren(inner) => head = inner.as_ref(),
+                                    TExprKind::App(f, _) => {
+                                        applied += 1;
+                                        head = f.as_ref();
+                                    }
+                                    _ => break,
+                                }
+                            }
+                            matches!(&head.kind, TExprKind::Var(n)
+                                if self.local_strict_params.get(n)
+                                    .or_else(|| self.demand_info.strict_params.get(n))
+                                    .and_then(|v| v.get(applied).copied())
+                                    .unwrap_or(false))
+                        };
                         if remaining > 0 {
                             let extra: Vec<String> =
                                 (0..remaining).map(|i| format!("_pa{}", i)).collect();
@@ -4405,9 +4436,7 @@ impl CodeGen {
                             self.gen_callee(lhs);
                             self.emit("(");
                             if let Some(a) = adapter { self.emit(a); self.emit("("); }
-                            self.emit("__thunk(function() return ");
-                            self.gen_expr(rhs);
-                            self.emit(" end)");
+                            self.gen_arg(rhs, rhs_strict);
                             if adapter.is_some() { self.emit(")"); }
                             for p in &extra { self.emit(", "); self.emit(p); }
                             self.emit(") end)");
@@ -4415,9 +4444,7 @@ impl CodeGen {
                             self.gen_callee(lhs);
                             self.emit("(");
                             if let Some(a) = adapter { self.emit(a); self.emit("("); }
-                            self.emit("__thunk(function() return ");
-                            self.gen_expr(rhs);
-                            self.emit(" end)");
+                            self.gen_arg(rhs, rhs_strict);
                             if adapter.is_some() { self.emit(")"); }
                             self.emit(")");
                         }
