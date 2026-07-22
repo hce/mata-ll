@@ -146,6 +146,72 @@ main = do
     }
 }
 
+/// Paren normalization (codegen/opt.rs): the emitted corpus must be free of
+/// the redundant-paren shapes the pass eliminates. The one with semantic
+/// weight is the paren-wrapped call in return position — `return (f(x))` is
+/// not a proper tail call in Lua — asserted here for the provably
+/// single-return callees (`__mll_*`, `__force`, `show*`) and for thunk
+/// bodies (whose only consumer, `__force`, truncates to one value). The
+/// FFI-wrapper check is the flip side: a host call with a declared
+/// single-value result KEEPS its truncating paren.
+#[test]
+fn emitted_parens_are_normalized() {
+    let lib_path = Path::new("../lib").to_path_buf();
+    let dir = Path::new("tests/cases");
+    for entry in std::fs::read_dir(dir).expect("read tests/cases") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("mll") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read case");
+        let lua = match mllc::compile(&source, dir, &[&lib_path]) {
+            Ok(r) => r.lua_code,
+            // A case that needs CLI-only setup is not this test's business.
+            Err(_) => continue,
+        };
+        for forbidden in [
+            "return (__mll",
+            "return (__force",
+            "return (show",
+            "__thunk(function() return (__",
+        ] {
+            for line in lua.lines().filter(|l| l.contains(forbidden)) {
+                // `return (__force(a) * ...` is a grouped binop operand, not
+                // a paren-wrapped call: only flag lines where the paren
+                // closes the return expression (line ends right after the
+                // call's own closing parens).
+                let after = &line[line.find(forbidden).unwrap()..];
+                if after.trim_end().ends_with("))") && !after.contains(" and ")
+                    && !after.contains(" or ") && !after.contains(" + ")
+                    && !after.contains(" * ") && !after.contains(" - ")
+                    && !after.contains(" .. ") && !after.contains(" == ")
+                    && !after.contains(" ~= ") && !after.contains(" < ")
+                    && !after.contains(" > ") && !after.contains(" end")
+                {
+                    panic!(
+                        "{}: redundant paren survived normalization: {}",
+                        path.display(),
+                        line.trim()
+                    );
+                }
+            }
+        }
+    }
+
+    // FFI wrappers truncate a multi-returning host to the declared single
+    // result — the paren here is semantics and must survive the pass.
+    let ffi_source = "modf1 :: Number -> LuaPure \"math.modf\" Number\n\
+                      main :: IO ()\n\
+                      main = assert (modf1 3.75 == 3.0) \"t\"\n";
+    let lua = mllc::compile(ffi_source, dir, &[])
+        .expect("ffi probe must compile")
+        .lua_code;
+    assert!(
+        lua.contains("return (math.modf(_ffi0))"),
+        "FFI wrapper must keep the truncating paren around the raw host call: {lua}"
+    );
+}
+
 /// Constructor-level DCE: a `data` definition none of whose constructors is
 /// constructed (`Con`) or matched (pattern) by live code contributes NOTHING
 /// to the emitted Lua. Checked two ways: (1) adding a dead user `data`
@@ -544,6 +610,7 @@ mll_test!(operators, "operators.mll");
 mll_test!(let_exprs, "let_exprs.mll");
 mll_test!(ffi, "ffi.mll");
 mll_test!(ffi_maybe_args, "ffi_maybe_args.mll");
+mll_test!(ffi_multi_return, "ffi_multi_return.mll");
 mll_test!(luacatch, "luacatch.mll");
 mll_test!(lua_iterator_method, "lua_iterator_method.mll");
 mll_test!(tuple_ctor, "tuple_ctor.mll");

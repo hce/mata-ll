@@ -43,6 +43,7 @@
 //! - analysis.rs — whole-program call-site and inline-candidate analyses
 //! - ffi.rs — FFI marshalling and type-directed boundary decoding
 //! - names.rs — Lua identifier, keyword and string-literal helpers
+//! - opt.rs — AST optimization passes run on the finished statement list
 //! - util.rs — type- and TIR-shape helpers shared across the module
 //! - runtime.rs — the runtime prelude and its on-demand chunk selection
 
@@ -60,6 +61,7 @@ mod inline;
 mod lua;
 mod module;
 mod names;
+mod opt;
 mod pattern;
 mod runtime;
 mod strictness;
@@ -371,10 +373,11 @@ pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> Re
     // Build the program body first (as one Lua statement list, then printed)
     // so we can see which runtime-prelude functions it actually references,
     // then prepend only those (transitively).
-    let stmts = cg.module_stmts(module);
+    let mut stmts = cg.module_stmts(module);
     if let Some(msg) = cg.depth_error {
         return Err(msg);
     }
+    opt::run(&mut stmts);
     let mut body = String::new();
     lua::Block(stmts).render(0, &mut body);
     let prelude = ondemand_prelude(&body);

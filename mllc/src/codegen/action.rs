@@ -250,7 +250,9 @@ impl CodeGen {
                             Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
                         ],
                     ),
-                    None => call,
+                    // The declared result is ONE value: truncate the raw
+                    // host call so extra return values cannot spread.
+                    None => Expr::paren(call),
                 }
             }
             // Fully-applied ST intrinsic in run-once position: emit the

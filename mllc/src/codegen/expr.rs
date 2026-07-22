@@ -1264,9 +1264,12 @@ impl CodeGen {
             Expr::inline_fn0(call)
         } else if let Some(method) = specialized.strip_prefix(':') {
             // Method call FFI: arg0:method(arg1, arg2, ...)
+            // The declared result is ONE value; parenthesize so a
+            // multi-returning host method cannot spread extra values into
+            // whatever position this call lands in.
             let recv = self.forced_prefix_ast(&args[0]);
             let margs = self.ffi_args_ast(&args[1..]);
-            Expr::method(recv, method, margs)
+            Expr::paren(Expr::method(recv, method, margs))
         } else if let Some(lua_func) = specialized.strip_prefix("__mll_io:") {
             // IO FFI: wrap in action thunk — only performed by >>= / >>
             // Zero-arg IO (e.g., os.clock): emit raw call without closure wrapper,
@@ -1291,7 +1294,10 @@ impl CodeGen {
                         Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
                     ],
                 ),
-                None => call,
+                // The declared result is ONE value (multi-return IO uses the
+                // __mll_io_tup arm): truncate the raw host call so extra
+                // return values cannot spread.
+                None => Expr::paren(call),
             };
             if needs_wrapper { Expr::inline_fn0(inner) } else { inner }
         } else if let Some(rest) = specialized.strip_prefix("__mll_io_tup:") {
@@ -1337,7 +1343,12 @@ impl CodeGen {
                         Expr::raw(format!("{:?}", Self::ffi_root_name(specialized))),
                     ],
                 ),
-                None => call,
+                // The declared result is ONE value (multi-return uses the
+                // __mll_tup_ret arm): truncate the raw host call so extra
+                // return values cannot spread — this is also what makes
+                // compiled-function references provably single-return for
+                // the paren-normalization pass (opt.rs).
+                None => Expr::paren(call),
             }
         }
     }
