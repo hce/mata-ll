@@ -100,6 +100,19 @@ Record update syntax creates a copy with specific fields changed:
     olderMorpheus = morpheus { perAge = 5.0 }
     renamedMorpheus = morpheus { perName = "Neo", perFirstName = Just "The One" }
 
+In both record construction and record update, the opening brace may
+sit on a line of its own below the constructor or record expression,
+provided it is indented strictly past the enclosing layout block's
+column (the same continuation rule application arguments use):
+
+    morpheus = Person
+        { perName = "Morpheus", perFirstName = Nothing
+        , perAge = 4.2, perIsFriendly = True
+        , perType = LLM }
+
+Chained updates may also break the line between braces, matching
+GHC's postfix grammar.
+
 And also newtype:
 
     newtype A = A Integer
@@ -963,8 +976,17 @@ The generated .lua file ends with an entry-point stub that runs the
 program only when the file is executed directly, and stays quiet when
 it is loaded as a module via `require`:
 
-    local __mll_modname = ...
-    if __mll_modname == nil then __mll_run(__mll_fn[N]()) end
+    local __mll_arg1 = ...
+    if __mll_arg1 == nil or (arg ~= nil and __mll_arg1 == arg[1]) then
+        __mll_run(__mll_fn[N]())
+    end
+
+The test distinguishes the two invocation styles even when command-line
+arguments are present: a standalone interpreter (`lua my.lua x y`)
+fills both the chunk's varargs and the global `arg` table from the
+same command line, so the first vararg equals `arg[1]` (or is nil with
+no arguments), while `require` passes the module name as the first
+vararg, which does not match `arg[1]`.
 
 The stub invokes an internal runner over `main`'s compiled thunk
 (`__mll_fn[N]` above) rather than a bare `main`, because `main` is not
@@ -1559,7 +1581,8 @@ elements*: the head of a cons cell is a lazy position, so
 `length [error "boom"]` returns `1` and `map g [error "boom"]` does not
 force the element. A cons head is suspended at construction and forced
 only at the point of consumption (see the head-consumption contract in
-`codegen.rs`: a value-consumer forces the head, a laziness-preserving one
+the codegen module, `mllc/src/codegen/expr.rs` and `runtime.lua`: a
+value-consumer forces the head, a laziness-preserving one
 — storing it in a new cons, or passing it to a function that decides —
 does not). This holds at every construction site — list literals, both
 `:` emission arms, and self-referential lists (`xs = error "boom" : xs`).
@@ -1655,17 +1678,25 @@ build a thunk chain, exactly as in Haskell.
         ↓
     Constant folding — evaluate statically known expressions
         ↓
-    Dead-code elimination — drop functions unreachable from main
-                            and exports
+    Expression splitting — hoist deep nesting into lets so the
+                           emitted Lua stays within Lua's own
+                           parser limits
         ↓
-    Code generator — Lua source with optimizations
-                     (bind chain flattening, function inlining,
-                      cheapness analysis, concrete variable tracking,
-                      cross-function demand analysis); the runtime
-                      prelude is emitted on demand, tree-shaking
-                      helpers the program never uses
+    Dead-code elimination — drop functions unreachable from main
+                            and exports, and data constructors
+                            nothing constructs or matches
+        ↓
+    Code generator — builds a Lua AST and prints it once, with
+                     optimizations (bind chain flattening, function
+                     inlining, cheapness analysis, concrete variable
+                     tracking, cross-function demand analysis); the
+                     runtime prelude is emitted on demand,
+                     tree-shaking helpers the program never uses
         ↓
     .lua output (standalone, no runtime needed)
+
+Compilation is deterministic: the same source compiles to
+byte-identical Lua on every run.
 
 # Planned features
 

@@ -67,7 +67,7 @@
 \title{\textbf{MATA-LL Developer's Manual}\\[6pt]
   \large Modest Attempt at Typesystem Augmenting the Lua Language}
 \author{MATA-LL Project}
-\date{June 2026}
+\date{July 2026}
 
 \begin{document}
 \maketitle
@@ -99,7 +99,7 @@ lines) and targets both Lua~5.4 and LuaJIT.
 \texttt{mllc/}       & Compiler library (core) \\
 \texttt{mll/}        & CLI binary \\
 \texttt{mll-repl/}   & Interactive REPL \\
-\texttt{mll-tests/}  & Test harness (600+ tests) \\
+\texttt{mll-tests/}  & Test harness (880+ tests) \\
 \texttt{mllc-wasm/}  & WASM binding for browser playground \\
 \texttt{lib/}        & Standard library (\texttt{.mll} files) \\
 \texttt{examples/}   & Curated language showcases \\
@@ -113,7 +113,7 @@ lines) and targets both Lua~5.4 and LuaJIT.
 
 \begin{lstlisting}[language=bash]
 cargo build --release        # all crates
-cargo test                   # run 600+ tests (needs 32 MB stack)
+cargo test                   # run 880+ tests (needs 32 MB stack)
 cargo run -- file.mll --run  # compile and execute
 \end{lstlisting}
 
@@ -139,10 +139,12 @@ The compiler transforms source through the following phases (in order; see
   \item \textbf{Constant folding} --- compile-time reduction (\texttt{fold.rs})
   \item \textbf{Splitting} --- bound the nesting depth of emitted Lua so its
         parser accepts it (\texttt{split.rs})
-  \item \textbf{Dead-code elimination} --- drop unused prelude functions and
-        specializations (\texttt{dce.rs})
-  \item \textbf{Code generation} --- Lua source emission, with integrated
-        demand/strictness analysis (\texttt{demand.rs})
+  \item \textbf{Dead-code elimination} --- drop unused prelude functions,
+        specializations, and data constructors nothing constructs or
+        matches (\texttt{dce.rs})
+  \item \textbf{Code generation} --- build a Lua AST and print it once
+        (\texttt{codegen/}), with integrated demand/strictness analysis
+        (\texttt{demand.rs})
 \end{enumerate}
 
 The public API is a single function:
@@ -178,8 +180,11 @@ A hand-written recursive-descent parser with operator-precedence climbing for
 infix expressions.  Fixity is tracked in a \texttt{HashMap<String, (Assoc, u8)>}
 and respects user \texttt{infixl}/\texttt{infixr}/\texttt{infix} declarations.
 
-Layout handling: a wrapped line indented past the definition's start column
-is merged into the same declaration.
+Layout handling: a wrapped line indented past the enclosing layout block's
+column is merged into the same declaration.  Record construction and record
+update follow the same rule: the \texttt{\{ \ldots \}} brace may open on a
+following, deeper-indented line, and chained updates may break the line
+between braces.
 
 Declaration forms: \texttt{TypeSig}, \texttt{FunDef}, \texttt{DataDef},
 \texttt{NewtypeDef}, \texttt{ClassDecl}, \texttt{InstanceDecl},
@@ -210,8 +215,9 @@ do { let x = e; rest }     -- becomes: let x = e in rest
 \subsection{Type Checker (\texttt{mllc/src/typechecker.rs})}
 
 Robinson unification with bidirectional checking.  Top-level definitions require
-explicit type signatures; local bindings are inferred.  Errors accumulate rather
-than aborting on the first failure.
+explicit type signatures; local bindings are inferred.  Errors accumulate per
+definition: one run reports an error for each failing definition, while
+checking of a single definition stops at its first error.
 
 Key capabilities:
 \begin{itemize}[nosep]
@@ -250,9 +256,27 @@ allocation at call sites and \texttt{\_\_force} at use sites.  FFI functions are
 seeded as strict in all parameters.
 
 %----------------------------------------------------------------------
-\subsection{Code Generator (\texttt{mllc/src/codegen.rs})}
+\subsection{Code Generator (\texttt{mllc/src/codegen/})}
 
-Emits Lua source.  Key design decisions:
+The code generator is a module directory.  Emission is AST-based: the
+generators build a \texttt{lua::Stmt}/\texttt{lua::Expr} tree
+(\texttt{codegen/lua.rs}) that is printed once at the end --- no
+generator writes output text directly, so statement well-formedness
+and grouping are carried by structure.  The submodules by concern:
+\texttt{mod.rs} (the \texttt{CodeGen} state struct and plumbing),
+\texttt{module.rs} (module body layout), \texttt{function.rs}
+(functions, clauses, where-binding groups), \texttt{pattern.rs}
+(pattern-match compilation), \texttt{expr.rs} (the main expression
+walk), \texttt{thunks.rs} and \texttt{strictness.rs} (eager-vs-thunk
+decisions), \texttt{action.rs} (IO/ST bind chains), \texttt{inline.rs},
+\texttt{analysis.rs} (whole-program call-site and inlining analyses),
+\texttt{ffi.rs}, \texttt{names.rs}, \texttt{util.rs}, and
+\texttt{runtime.rs} + \texttt{runtime.lua} (the runtime prelude).
+Generated output is deterministic --- the same source compiles to
+byte-identical Lua, guarded by the \texttt{codegen\_is\_deterministic}
+test.
+
+Key design decisions:
 \begin{itemize}[nosep]
   \item Forward declarations packed into an \texttt{\_\_mll\_fn} table (avoids
         Lua's 200-local limit)
@@ -287,7 +311,10 @@ Thunk                                   & \texttt{\{fn, false\}} with \texttt{\_
 
 \medskip
 
-Thunk forcing is handled by a runtime preamble embedded in every generated file:
+Thunk forcing is handled by a runtime preamble at the top of every generated
+file.  Its source is \texttt{codegen/runtime.lua}, embedded into the compiler
+with \texttt{include\_str!} and emitted as an \emph{on-demand subset}: only
+the definitions the program transitively references are prepended.
 \begin{lstlisting}[language={}]
 local function __thunk(f)
   return setmetatable({f, false}, __thunk_mt)
@@ -542,7 +569,7 @@ Key intentional differences:
 %----------------------------------------------------------------------
 \section{Testing}
 
-Tests live in \texttt{mll-tests/tests/cases/} (\textasciitilde190 case files) and
+Tests live in \texttt{mll-tests/tests/cases/} (\textasciitilde200 case files) and
 \texttt{mll-tests/tests/ghc/} (GHC compatibility tests).
 
 \begin{lstlisting}[language=Rust]
@@ -560,6 +587,24 @@ cargo test -p mll-tests
 
 Tests run on 32\,MB stack threads (deeply nested ASTs from large list literals).
 
+\subsection{The GHC Differential Oracle}
+
+The parity corpus is additionally checked against real GHC.
+\texttt{mll-tests/regenerate-ghc-goldens.sh} runs a mechanical GHC twin
+of every eligible test case (through the shared shim
+\texttt{mll-tests/tests/ghc-golden/MllShim.hs}) and pins GHC's stdout as
+committed goldens in \texttt{mll-tests/tests/ghc-golden/}.  The
+\texttt{ghc\_oracle\_*} tests in \texttt{run\_mll.rs} then diff
+mata-ll's runtime output against those goldens byte-exactly on every
+test run --- CI needs no GHC installed.  Known divergences are pinned
+(mata-ll's current output committed alongside GHC's) and enumerated in
+\texttt{mll-tests/tests/ghc-golden/DIVERGENCES.md}; every one reduces
+to three \texttt{show} behaviours (unquoted \texttt{String} show,
+\texttt{", "} list/tuple separators, \texttt{Number} formatted via
+\texttt{\%.14g}).  Both a silent drift and a silent fix fail the suite,
+and \texttt{ghc\_oracle\_registry\_is\_complete} fails if a pinned
+divergence is missing from the record.
+
 %----------------------------------------------------------------------
 \section{Adding a New Feature: Checklist}
 
@@ -572,7 +617,7 @@ Tests run on 32\,MB stack threads (deeply nested ASTs from large list literals).
   \item \textbf{TIR}: add typed IR node if needed (\texttt{tir.rs})
   \item \textbf{Monomorphizer}: handle new TIR node (\texttt{mono.rs})
   \item \textbf{Demand analysis}: propagate strictness if relevant
-  \item \textbf{Codegen}: emit Lua (\texttt{codegen.rs})
+  \item \textbf{Codegen}: emit Lua (\texttt{codegen/})
   \item \textbf{Tests}: add case file + \texttt{mll\_test!} entry
 \end{enumerate}
 
@@ -606,7 +651,19 @@ Tests run on 32\,MB stack threads (deeply nested ASTs from large list literals).
 \texttt{mllc/src/demand.rs}       & Demand/strictness analysis \\
 \texttt{mllc/src/embed.rs}        & Source embedding for \texttt{-{}-recompile} \\
 \texttt{mllc/src/stdlib.rs}       & Embedded standard-library modules \\
-\texttt{mllc/src/codegen.rs}      & Lua code generation \\
+\texttt{mllc/src/codegen/}        & Lua code generation (directory) \\
+\quad \texttt{mod.rs}             & \texttt{CodeGen} state, name resolution, locals \\
+\quad \texttt{lua.rs}             & The Lua AST the generators build, and its printer \\
+\quad \texttt{module.rs}          & Module body layout: constructors, exports \\
+\quad \texttt{function.rs}        & Functions, clauses, where-binding groups \\
+\quad \texttt{pattern.rs}         & Pattern-match compilation \\
+\quad \texttt{expr.rs}            & The main expression walk \\
+\quad \texttt{thunks.rs}, \texttt{strictness.rs} & Eager-vs-thunk decisions \\
+\quad \texttt{action.rs}          & IO/ST actions and bind chains \\
+\quad \texttt{inline.rs}, \texttt{analysis.rs} & Inlining and call-site analyses \\
+\quad \texttt{ffi.rs}             & FFI marshalling and boundary decoding \\
+\quad \texttt{names.rs}, \texttt{util.rs} & Identifier/string and shape helpers \\
+\quad \texttt{runtime.rs}, \texttt{runtime.lua} & Runtime prelude, on-demand selection \\
 \bottomrule
 \end{tabular}
 

@@ -69,7 +69,7 @@
 \title{\textbf{MATA-LL User's Manual}\\[6pt]
   \large A Haskell-Inspired Language Targeting Lua}
 \author{MATA-LL Project}
-\date{June 2026}
+\date{July 2026}
 
 \begin{document}
 \maketitle
@@ -304,6 +304,22 @@ alice = Person { name = "Alice", age = 30 }
 -- Record update (creates a copy)
 olderAlice :: Person
 olderAlice = alice { age = 31 }
+\end{lstlisting}
+
+The braces follow the ordinary layout rule, so they may open on a
+following line when that line is indented past the enclosing block ---
+in construction and in update alike:
+
+\begin{lstlisting}
+bob :: Person
+bob = Person
+    { name = "Bob"
+    , age  = 44
+    }
+
+olderBob :: Person
+olderBob = bob
+    { age = 45 }
 \end{lstlisting}
 
 \subsection{Newtypes}

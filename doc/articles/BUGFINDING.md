@@ -106,3 +106,25 @@ byte-identical and the hot loop recovers most of the lost time.
 Why the suite missed it: tests assert *what* a program computes, not *how fast*.
 A 2× slowdown is invisible to a green suite. Catching it needs a tracked
 performance baseline, not more correctness tests.
+
+## Postscript (2026-07): a partial answer to the correlation problem
+
+The critique above — the suite asserts what its author believed, so it shares
+the author's blind spots — now has a partial structural answer. The parity
+corpus is diffed against real GHC: `mll-tests/regenerate-ghc-goldens.sh` runs a
+mechanical GHC twin of every eligible test case (through the shared shim
+`mll-tests/tests/ghc-golden/MllShim.hs`) and pins GHC's stdout as committed
+goldens; the `ghc_oracle_*` tests then compare mata-ll's runtime output against
+those goldens byte-exactly on every test run, with no GHC needed in CI. Every
+measured divergence is itself pinned and enumerated in
+`mll-tests/tests/ghc-golden/DIVERGENCES.md`; all of them reduce to three `show`
+behaviours (unquoted `String` show, `", "` list/tuple separators, `Number`
+formatted via `%.14g`), and both a silent drift and a silent fix fail the
+suite.
+
+This removes belief from the *expected outputs*: for the oracle-covered cases
+the referee is GHC itself, not the author's recollection of GHC. It is only a
+partial answer because the *inputs* are still the same corpus, written by the
+same author with the same idioms — the oracle validates what those programs
+print, not which programs exist. The short-program-from-a-different-angle
+lesson stands.

@@ -20,10 +20,17 @@ for the browser playground. The pipeline is:
         → Code generator  Lua source
         → .lua output
 
+Between the monomorphizer and the code generator sit four smaller
+TIR→TIR passes: verification (`verify.rs`, post-mono invariant checks),
+constant folding (`fold.rs`), expression splitting (`split.rs`, hoists
+deep nesting into `let`s so the emitted Lua stays within Lua's own
+parser limits), and dead-code elimination (`dce.rs`).
+
 Each stage is a separate module (`lexer.rs`, `parser.rs`, `modules.rs`,
-`desugar.rs`, `typechecker.rs`, `mono.rs`, `codegen.rs`). The prelude
-(`lib/Prelude.mll`) is embedded at compile time via `include_str!` and
-prepended to every module before desugaring.
+`desugar.rs`, the `typechecker/` directory, `mono.rs`, and the
+`codegen/` directory). The prelude (`lib/Prelude.mll`) is embedded at
+compile time via `include_str!` and prepended to every module before
+desugaring.
 
 
 ## Lexer
@@ -52,6 +59,12 @@ an infix operator.
 Layout-sensitivity is handled by an indentation stack. Continuation
 lines indented deeper than the start of an expression are merged into
 it. This gives Haskell-like layout without explicit braces.
+
+Record construction and record update use the same cross-line
+continuation rule as application arguments: the `{ … }` brace may open
+on a following line, provided that line is indented strictly past the
+enclosing layout block's column. Chained updates may also break the
+line between braces, matching GHC's postfix grammar.
 
 The parser produces an AST with these main node kinds:
 
@@ -233,10 +246,13 @@ and class-method arrows default to `Many`.
 
 ### Error handling
 
-Type errors are accumulated (not fatal on first error) and reported
-together. Error kinds include unification mismatches, occurs-check
-failures, unbound variables/constructors, arity mismatches,
-non-exhaustive patterns, and signature mismatches.
+Type errors are accumulated per definition and reported together: a
+file with errors in several definitions reports one error for each of
+them in a single run. Within a single definition, checking stops at
+the first error, so only that one is reported for the definition.
+Error kinds include unification mismatches, occurs-check failures,
+unbound variables/constructors, arity mismatches, non-exhaustive
+patterns, and signature mismatches.
 
 
 ## Monomorphization
@@ -268,15 +284,40 @@ bounded overhead for the rare deep-nesting case.
 
 ## Code generation
 
+The code generator is a module directory, `mllc/src/codegen/`, split
+by concern: `mod.rs` (the `CodeGen` state struct, name resolution,
+local declaration), `lua.rs` (a small Lua AST and its printer),
+`module.rs` (module body layout: data-type registration, constructors,
+forward declarations, exports), `function.rs` (top-level functions,
+clauses, where-binding groups), `pattern.rs` (pattern-match
+compilation), `expr.rs` (the main expression walk), `thunks.rs` and
+`strictness.rs` (eager-vs-thunk decisions), `action.rs` (IO/ST bind
+chains), `inline.rs`, `analysis.rs` (whole-program call-site and
+inlining analyses), `ffi.rs`, `names.rs`, `util.rs`, and `runtime.rs`
+plus `runtime.lua` (the runtime prelude).
+
+Emission is AST-based: the generators build a `lua::Stmt`/`lua::Expr`
+tree and the tree is printed once at the end. No generator writes
+output text directly, so statement well-formedness and grouping are
+carried by structure rather than re-proven at each emission site.
+
+Generated output is deterministic: compiling the same source twice
+produces byte-identical Lua. The last source of non-determinism
+(specialization resolution order in the monomorphizer's
+dictionary-passing fallback) was removed, and the property is guarded
+by the `codegen_is_deterministic` test.
+
 ### Lua runtime preamble
 
 Every generated `.lua` file begins with a preamble defining the
-runtime support functions. This is a Rust string constant (`PRELUDE`)
-appended by the code generator. It includes thunk infrastructure,
-list primitives, `show`/`eq`/`ord` instances for primitives, list
-operations (`map`, `filter`, `take`, `zipWith`), HashMap operations,
-ByteString operations, STArray operations, bitwise operations, and
-FFI helpers.
+runtime support functions. Its source is `codegen/runtime.lua`,
+embedded into the compiler via `include_str!` and emitted *on demand*:
+the generator scans the printed program body and prepends only the
+prelude definitions it transitively references. The full prelude
+includes thunk infrastructure, list primitives, `show`/`eq`/`ord`
+instances for primitives, list operations (`map`, `filter`, `take`,
+`zipWith`), HashMap operations, ByteString operations, STArray
+operations, bitwise operations, and FFI helpers.
 
 ### ADT representation
 
@@ -393,12 +434,18 @@ between mata-ll and plain Lua is clean.
 When the module has a `main :: IO ()` declaration, the compiler
 appends an entry-point stub at the end of the generated Lua file:
 
-    local __mll_modname = ...
-    if __mll_modname == nil then __mll_run(__mll_fn[N]()) end
+    local __mll_arg1 = ...
+    if __mll_arg1 == nil or (arg ~= nil and __mll_arg1 == arg[1]) then
+        __mll_run(__mll_fn[N]())
+    end
 
 so the file runs `main` when executed directly but stays inert when
-loaded via `require` (a required module receives its module name as
-`...`). `main` is renamed to `__run` internally because it is not an
+loaded via `require`. The discriminator: a standalone interpreter
+(`lua prog.lua x y`) fills both the chunk's varargs and the global
+`arg` table from the same command line, so the first vararg equals
+`arg[1]` (and is nil when there are no arguments); `require "prog"`
+instead passes the module name as the first vararg, which does not
+match `arg[1]`. `main` is renamed to `__run` internally because it is not an
 exported function; the stub reaches it through its function-table
 slot. The CLI can also execute the result directly via the embedded
 `mlua` runtime (`--run` flag).

@@ -17,12 +17,16 @@ standard library from `lib/`.
   target/release/mll examples/primes_check.mll -r
   ```
 
-- `string.mll` — **Lua FFI.** Binds Lua's `string.gmatch` directly through a
-  `LuaIterator` type; capture groups decode positionally into tuples. mata-ll
-  is a typed guest in a Lua host, so calling host functions is first-class.
+- `itermll.mll` + `iterdemo.lua` — **Lua FFI and lazy iterator lists.** A Lua
+  host hands coroutine-backed iterators to mata-ll through `LuaIterator`
+  bindings; mata-ll consumes them as lazy lists, so the host's `print` calls
+  and mata-ll's `putStrLn` calls interleave — including a `take n` over an
+  endless iterator. mata-ll is a typed guest in a Lua host, so calling host
+  functions is first-class.
 
   ```bash
-  target/release/mll examples/string.mll -r
+  target/release/mll examples/itermll.mll   # -> examples/itermll.lua
+  (cd examples && lua iterdemo.lua)
   ```
 
 - `nat_hkt.mll` — **typeclasses & higher-kinded types.** A `Tree` of kind

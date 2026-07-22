@@ -31,6 +31,47 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Breaking: `LuaIterator`'s result must now be written as an explicit
+  list.** `LuaIterator "string.gmatch" [String]` names the result list
+  directly; the old bare-element shorthand (`LuaIterator "string.gmatch"
+  String`, implicitly wrapped to `[String]`) is rejected at parse time with an
+  error showing the required shape. The shorthand made the argument ambiguous
+  once list elements were supported: `[[Integer]]` means "an iterator yielding
+  `[Integer]`", so a bare `[Integer]` argument could not also mean "yielding
+  `Integer`". Only the surface syntax changes; the reduction and the generated
+  code are unchanged for signatures already written as lists.
+- **Cons tails are extracted lazily — GHC one-cell strictness.** Extracting a
+  list tail no longer forces the next spine cell to WHNF, so spine walkers
+  stop exactly where GHC does: `mapM_ print (1 : error "boom")` prints `1`
+  before raising, and `take 2 (1 : 2 : error "boom")` is `[1, 2]` instead of
+  an error.
+- **IO sequencing is stack-safe at chain terminals; `mapM_` streams large
+  lists.** Consuming a large list with `mapM_` previously overflowed the Lua
+  stack at around 14k elements (LuaJIT) and pinned the realized spine for the
+  whole walk. Each sequencing step is now a proper Lua tail call through the
+  runtime's forwarding runner, so the walk runs in constant stack and consumed
+  cells become garbage as the cursor advances — measured flat at about 73 KB
+  (LuaJIT) / 55 KB (Lua 5.5) over a million elements.
+- **Generated output is fully deterministic.** The last source of run-to-run
+  variation — emission order of dictionary-form functions (and with it
+  `__mll_fn` slot numbering) in the monomorphizer's dictionary-passing
+  fallback, which followed `HashSet`/`HashMap` iteration order — is now
+  sorted. Compiling the same source twice yields byte-identical Lua, guarded
+  by the `codegen_is_deterministic` test.
+- **Internal: the code generator is a module directory and emission is
+  AST-based.** `mllc/src/codegen.rs` was restructured into
+  `mllc/src/codegen/` (fifteen Rust modules plus `runtime.lua`), and the
+  string-streaming emitter was replaced: generators build a
+  `lua::Expr`/`lua::Stmt` tree (`codegen/lua.rs`) that is printed once, so
+  malformed statements are unrepresentable by construction. Output was
+  verified byte-identical across the whole corpus during the conversion.
+- **Performance: demand analysis reaches further.** Strictness rows for
+  runtime-implemented Prelude functions and for `where`-bound local functions,
+  captured-variable demand propagation from local functions, strict derived
+  `Eq`/`Ord` instances, weighed `$` arguments, aliased bare-variable
+  `let`/`where` bindings, and unthunked saturated constructor arguments —
+  each removes thunk allocations the previous analysis kept.
+
 - **Breaking: `LuaTry`'s result must now be written as `(Either String a)`,
   matching `LuaCatch`/`LuaIOCatch`.** `LuaTry "io.open" (Either String
   FileHandle)` reduces to `IO (Either String FileHandle)` — the same reduction
@@ -45,6 +86,30 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **Record braces may open on a following line.** Record construction and
+  record update now use the same cross-line continuation rule as application
+  arguments: the `{ … }` may sit on the next line when indented strictly past
+  the enclosing layout block's column, and chained updates may break the line
+  between braces — matching GHC's postfix grammar. A brace at do-statement or
+  sibling-binding indent is never captured. The accepted forms are pinned
+  against real GHC in the differential oracle
+  (`record_brace_next_line.mll`).
+- **GHC as a differential oracle for the parity corpus.**
+  `mll-tests/regenerate-ghc-goldens.sh` runs a mechanical GHC twin of every
+  eligible test case (via the shared shim
+  `mll-tests/tests/ghc-golden/MllShim.hs`) and pins GHC's stdout as committed
+  goldens; the `ghc_oracle_*` tests diff mata-ll's runtime output against them
+  byte-exactly on every run (CI needs no GHC). Known divergences are pinned
+  and enumerated in `mll-tests/tests/ghc-golden/DIVERGENCES.md` — all reduce
+  to three `show` behaviours (unquoted `String` show, `", "` list/tuple
+  separators, `Number` via `%.14g`) — and both a silent drift and a silent
+  fix fail the suite.
+- **`LIOLinear`: linear (`%1`) file-handle IO.** A resource-safe file-writing
+  module in the style of linear-base's `System.IO.Resource`: a `WHandle`
+  wraps the FFI file handle at `%1`, so the usage checker proves each handle
+  is written and closed exactly once. Operations consume and return the
+  handle (`hPut` threads it; `hClose` ends the chain); `withOutFile` brackets
+  open/close with a `%1` callback, and `openOut` opens a handle directly.
 - **`getLine :: IO String` in the Prelude — GHC parity.** Available with no
   import, exactly as in GHC: reads one line from stdin without the trailing
   newline. At end of input it raises the clean, catchable error
@@ -161,6 +226,16 @@ API of the `mllc` library crate.)
   charges the right-hand side unconditionally. There is no scalar-memoization
   accept-gap. Tests: linear_affine_basic.mll, linear_mult_poly.mll, and the
   linear_rejects_* / erasure suites in run_mll.rs.
+
+### Fixed
+
+- **Standalone programs run `main` even when invoked with command-line
+  arguments.** The entry-point stub decided "loaded via `require`?" by testing
+  whether the chunk's first vararg was nil — but a standalone interpreter
+  (`lua prog.lua x`) passes the CLI arguments as varargs, so any argument
+  made the program look like a required module and `main` silently did not
+  run. The stub now compares the first vararg against `arg[1]`, which
+  distinguishes the two invocation styles reliably.
 
 ## [0.1.4] - 2026-07-17
 
@@ -504,7 +579,8 @@ API of the `mllc` library crate.)
   matches the pre-regression eager build (101 s) and the decoded output stays
   byte-identical (`cdd386f6985dca3561fe1a2689231c78`) throughout. The demand
   pass and the WHNF predicate are general codegen improvements, not
-  tracker-specific. See `examples/tracker/PERF-REGRESSION.md`.
+  tracker-specific. See `experiments/tracker/PERF-REGRESSION.md` (the
+  directory has since moved from `examples/` to `experiments/`).
 
 ## [0.1.3] - 2026-07-14
 

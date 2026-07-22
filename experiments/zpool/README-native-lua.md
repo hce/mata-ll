@@ -40,7 +40,7 @@ runtime model the compiler emits.
 ## Where the ~78× goes
 
 This is a **structural analysis from reading the compiled `zpr.lua` and the
-runtime it embeds** (`mllc/src/codegen.rs`), not a profiler decomposition. The
+runtime it embeds** (`mllc/src/codegen/runtime.lua`), not a profiler decomposition. The
 one experiment that would have measured the split empirically (a deliberately
 un-buffered variant) was confounded — it changed the *algorithm* rather than the
 runtime, so it was aborted. Treat the percentages below as reasoned estimates,
