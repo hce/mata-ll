@@ -637,6 +637,7 @@ mll_test!(promoted_nat_kind, "promoted_nat_kind.mll");
 mll_test!(operator_sections, "operator_sections.mll");
 mll_test!(section_composition, "section_composition.mll");
 mll_test!(guards, "guards.mll");
+mll_test!(guard_strict_entry, "guard_strict_entry.mll");
 mll_test!(lambdas, "lambdas.mll");
 mll_test!(maybe, "maybe.mll");
 mll_test!(monomorphization, "monomorphization.mll");

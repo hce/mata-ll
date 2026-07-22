@@ -269,6 +269,7 @@ impl CodeGen {
         // Force params that are destructured OR where call-site analysis
         // shows all callers pass cheap args (so the value is already concrete).
         let call_site_cheap = self.params_always_cheap.get(&func.name).cloned();
+        let demand_strict = self.demand_info.strict_params.get(&func.name).cloned();
         for (i, p) in params.iter().enumerate() {
             if i >= num_params { break; }
             let always_cheap = call_site_cheap.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
@@ -284,8 +285,15 @@ impl CodeGen {
                     !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
                 })
             });
-            if needs_force {
-                // Destructured param — must force for pattern matching
+            // Demand analysis proves EVERY path through every clause (guard
+            // chains included, sequenced right-to-left) forces this param,
+            // so a single entry force is exactly as strict as the per-use
+            // forces it replaces. The single-clause simple path has used
+            // this rule all along; without it here, a guard chain like
+            // `go n i | i >= 64 = n | …` re-forced n and i at every use.
+            let is_strict = demand_strict.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
+            if needs_force || is_strict {
+                // Forced on every path — force once at entry.
                 body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
                 self.concrete_vars.insert(p.clone());
             } else if always_cheap {
