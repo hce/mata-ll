@@ -648,6 +648,7 @@ mll_test!(where_clauses, "where_clauses.mll");
 mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(bind_first_class, "bind_first_class.mll");
 mll_test!(show_ghc_parity, "show_ghc_parity.mll");
+mll_test!(prefix_minus, "prefix_minus.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
@@ -6659,6 +6660,59 @@ fn non_associative_chains_are_rejected_impl() {
     }
 }
 
+/// Prefix minus follows GHC exactly: it has the fixity of binary '-'
+/// (infixl 6). It cannot be the right operand of any precedence >= 6
+/// operator (`a + -b`, `a * -2`, ``a `div` -2`` are parse errors), its
+/// operand is everything binding tighter than 6 (`-a * b` is
+/// `negate (a * b)`; `-a + b` is `negate a + b`), and it cannot stand left
+/// of a precedence-6 operator that is not left-associative (`-a <> b`).
+/// GHC accepts/rejects every one of these programs identically (verified
+/// against GHC 9.14.1; the runtime groupings are covered by the
+/// prefix_minus GHC-golden case).
+#[test]
+fn prefix_minus_matches_ghc() {
+    on_compiler_stack(prefix_minus_matches_ghc_impl)
+}
+
+fn prefix_minus_matches_ghc_impl() {
+    // Rejected: prefix minus as the RHS of a precedence >= 6 operator.
+    for (src, op) in [
+        ("main :: IO ()\nmain = print (1 + - 2)\n", "'+'"),
+        ("main :: IO ()\nmain = print (1 - - 2)\n", "'-'"),
+        ("main :: IO ()\nmain = print (1 * - 2)\n", "'*'"),
+        ("main :: IO ()\nmain = print (1 `div` - 2)\n", "`div`"),
+        // ...including inside a right section (GHC rejects `(+ -2)`).
+        ("main :: IO ()\nmain = print ((+ - 2) 3)\n", "'+'"),
+        ("main :: IO ()\nmain = print ((`div` - 2) 8)\n", "`div`"),
+    ] {
+        let e = compile_err(src);
+        assert!(e.contains("Prefix minus"), "{src}: got: {e}");
+        assert!(e.contains(op), "{src}: got: {e}");
+        assert!(e.contains("parenthesize"), "{src}: got: {e}");
+    }
+
+    // Rejected: prefix minus left of a non-left-associative precedence-6
+    // operator (GHC: "cannot mix prefix `-' and `<>'").
+    let e = compile_err("main :: IO ()\nmain = putStrLn (- 1 <> \"a\")\n");
+    assert!(e.contains("prefix minus"), "got: {e}");
+    assert!(e.contains("'<>'"), "got: {e}");
+
+    // Accepted: parenthesized negation anywhere, negation left of infixl 6,
+    // negation under a precedence < 6 operator, and `(- x)`/`(-)` forms.
+    for src in [
+        "main :: IO ()\nmain = print (1 + (- 2))\n",
+        "main :: IO ()\nmain = print (- 2 + 3)\n",
+        "main :: IO ()\nmain = print (- 2 - 3)\n",
+        "main :: IO ()\nmain = print (1 == - 1)\n",
+        "main :: IO ()\nmain = print ((* (- 2)) 3)\n",
+        "main :: IO ()\nmain = print ((+ 1) (- 2))\n",
+        "main :: IO ()\nmain = print (map (\\x -> - x * 2) [1, 2])\n",
+        "main :: IO ()\nmain = print ((-) 5 2)\n",
+    ] {
+        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+    }
+}
+
 /// The other half of the precedence-parsing rule: same precedence but
 /// opposite associativities defines no grouping either.
 #[test]
@@ -9597,6 +9651,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_pattern_matching, "cases", "pattern_matching.mll"),
         (ghc_oracle_pointfree_caf, "cases", "pointfree_caf.mll"),
         (ghc_oracle_poly_recursion, "cases", "poly_recursion.mll"),
+        (ghc_oracle_prefix_minus, "cases", "prefix_minus.mll"),
         (ghc_oracle_promoted_nat_kind, "cases", "promoted_nat_kind.mll"),
         (ghc_oracle_rank2, "cases", "rank2.mll"),
         (ghc_oracle_read_typeclass, "cases", "read_typeclass.mll"),

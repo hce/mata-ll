@@ -427,6 +427,13 @@ is a parse error --- parenthesize one side, or chain comparisons with
 same precedence without parentheses is rejected the same way, exactly as in
 GHC.
 
+Prefix minus has the fixity of binary subtraction (\texttt{infixl 6}),
+exactly as in GHC: \texttt{a + -b} is a parse error (write
+\texttt{a + (-b)}), \texttt{-a * b} parses as \texttt{negate (a * b)}
+because the operand takes everything binding tighter than precedence~6,
+and \texttt{-a + b} is \texttt{negate a + b}. \texttt{(-x)} is negation,
+never a right section; \texttt{(-)} is the subtraction function.
+
 \subsection{Guards}
 
 \begin{lstlisting}

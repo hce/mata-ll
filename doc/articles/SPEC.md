@@ -1415,6 +1415,24 @@ disagree on associativity (an `infixl` next to an `infixr` at the same
 level). So `a == b == c` is a parse error: `==` is `infix 4`, and the
 expression has no defined grouping without parentheses.
 
+Prefix minus has the fixity of binary subtraction (`infixl 6`), with
+GHC's exact consequences:
+
+- It cannot be the right operand of an operator at precedence 6 or
+  higher: `a + -b`, `a - -b`, `a * -b`, and ``a `div` -b`` are parse
+  errors (parenthesize the negation: `a + (-b)`). The same holds
+  inside a right section: `(+ -2)` is rejected, `(* (-2))` accepted.
+- Its operand is everything binding tighter than precedence 6:
+  `-a * b` is `negate (a * b)` and ``-a `div` b`` is
+  `negate (a `div` b)`, while `-a + b` is `negate a + b` (the
+  precedence-6 `+` stops the operand).
+- Left of a precedence-6 operator it participates only in an `infixl`
+  grouping: `-a + b` parses, `-a <> b` is rejected (`<>` is
+  `infixr 6`, and the mix has no defined grouping).
+
+`(-x)` is negation, never a right section of subtraction; `(-)` is the
+subtraction function, as in GHC.
+
 # Deriving
 
 Automatic instance generation is supported for Show, Eq, Ord, Enum,

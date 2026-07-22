@@ -296,7 +296,19 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
-- **`Number` literals emit as Lua floats.** A `Number` literal with a whole
+- **Prefix minus follows GHC's grammar.** Prefix minus now has the fixity
+  of binary subtraction (`infixl 6`), with GHC's exact consequences:
+  `a + -b`, `a - -b`, `a * -b`, and ``a `div` -b`` are parse errors (the
+  error explains the rule and suggests `a + (-b)`), the same rejection
+  applies inside right sections (`(+ -2)`), and `-a <> b` is rejected
+  because `infixr 6` defines no grouping against the negation. Groupings
+  changed to GHC's: `-a * b` is now `negate (a * b)` and ``-a `div` b`` is
+  ``negate (a `div` b)`` — observably different from the previous
+  `(-a) `div` b` for odd negatives — while `-a + b` stays `negate a + b`.
+  A parenthesized `(-a op b)` follows the same grammar instead of negating
+  the whole body: `(-a + b)` was previously `negate (a + b)`, which is
+  simply the wrong value. Previously all the rejected forms were silently
+  accepted with groupings GHC refuses. A `Number` literal with a whole
   value (`10.0`, `1.0`) was emitted as a bare integer spelling, which Lua
   5.3+ reads as a native integer — so Double-typed arithmetic silently ran
   on wrapping 64-bit integers (`10.0^20`-style products wrapped past 2^63)

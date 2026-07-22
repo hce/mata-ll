@@ -1708,7 +1708,9 @@ impl Parser {
     }
 
     fn parse_expr_infix_inner(&mut self, min_prec: u8, parent: Option<&ParentOp>) -> PResult<Expr> {
-        let lhs = self.parse_expr_prefix()?;
+        // `parent` reaches the prefix parser so prefix minus can be rejected
+        // in the right operand of a precedence >= 6 operator (GHC's rule).
+        let lhs = self.parse_expr_prefix(parent)?;
         self.continue_infix(lhs, min_prec, parent)
     }
 
@@ -1749,6 +1751,15 @@ impl Parser {
     /// the parenthesised body would otherwise be parsed twice at every nesting
     /// level, giving O(2^n) parse time on deeply nested parentheses.
     fn continue_infix(&mut self, mut lhs: Expr, min_prec: u8, parent: Option<&ParentOp>) -> PResult<Expr> {
+        // A bare Negate here is a prefix-minus expression fresh from
+        // `parse_negation` (a parenthesized one arrives wrapped in Paren).
+        // As Haskell's `lexp6` it may only continue with operators of
+        // precedence < 6 or LEFT-associative precedence-6 ones
+        // (`-a + b` groups `(negate a) + b`); a precedence-6 operator with
+        // any other associativity has no defined grouping against it —
+        // GHC rejects `-a <> b`. Cleared after the first consumed operator:
+        // the negation is nested inside an InfixApp from then on.
+        let mut lhs_is_negation = matches!(lhs, Expr::Negate(_));
         loop {
             // Try to consume indentation for continuation lines
             // Only if the next real token after indent is an operator
@@ -1774,6 +1785,9 @@ impl Parser {
                 }
                 Token::Operator(ref op) => {
                     let (assoc, prec) = self.operator_fixity(op);
+                    if lhs_is_negation && prec >= 6 && !(prec == 6 && assoc == Assoc::Left) {
+                        return Err(self.prefix_minus_lhs_err(op, assoc, prec));
+                    }
                     if !self.infix_should_consume(parent, min_prec, op, assoc, prec)? {
                         break;
                     }
@@ -1788,6 +1802,7 @@ impl Parser {
                         lhs: Box::new(lhs),
                         rhs: Box::new(rhs),
                     };
+                    lhs_is_negation = false;
                 }
                 Token::Backtick => {
                     let save = self.pos;
@@ -1795,6 +1810,9 @@ impl Parser {
                     let func = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
                     let (assoc, prec) = self.operator_fixity(&func);
+                    if lhs_is_negation && prec >= 6 && !(prec == 6 && assoc == Assoc::Left) {
+                        return Err(self.prefix_minus_lhs_err(&func, assoc, prec));
+                    }
                     if !self.infix_should_consume(parent, min_prec, &func, assoc, prec)? {
                         // The operator belongs to an enclosing call — rewind
                         // past the backticks so it can consume them itself.
@@ -1810,6 +1828,7 @@ impl Parser {
                         lhs: Box::new(lhs),
                         rhs: Box::new(rhs),
                     };
+                    lhs_is_negation = false;
                 }
                 _ => break,
             }
@@ -1818,15 +1837,77 @@ impl Parser {
         Ok(lhs)
     }
 
-    fn parse_expr_prefix(&mut self) -> PResult<Expr> {
-        // Negation
+    fn parse_expr_prefix(&mut self, parent: Option<&ParentOp>) -> PResult<Expr> {
+        // Prefix minus (negation). Haskell gives it the fixity of binary
+        // subtraction — infixl 6 — with two consequences the grammar
+        // (`lexp6 -> - exp7`) enforces and GHC implements exactly:
+        //   * it cannot be the right operand of any operator at precedence 6
+        //     or higher (`a + -b`, `a - -b`, `a * -b` are parse errors —
+        //     the expression has no defined grouping without parentheses);
+        //   * its operand is everything binding TIGHTER than 6, so
+        //     `-a * b` is `negate (a * b)`, while `-a + b` is
+        //     `negate a + b` (the `+` stops the operand).
         if let Token::Operator(ref op) = self.peek().clone()
             && op == "-" {
-                self.advance();
-                let expr = self.parse_expr_app()?;
-                return Ok(Expr::Negate(Box::new(expr)));
+                if let Some(par) = parent
+                    && par.prec >= 6
+                {
+                    return Err(self.prefix_minus_rhs_err(par));
+                }
+                return self.parse_negation();
             }
         self.parse_expr_app()
+    }
+
+    /// Parse `- <operand>` where `-` has already been checked to be legal
+    /// here. The operand is Haskell's `exp7`: an application followed by any
+    /// operators of precedence 7 and higher (`NEGATION_OPERAND_MIN_PREC`),
+    /// so `- a * b` reads the whole `a * b` and `- a + b` stops at `a`.
+    fn parse_negation(&mut self) -> PResult<Expr> {
+        self.advance(); // consume '-'
+        let operand = self.parse_expr_app()?;
+        let operand = self.continue_infix(operand, NEGATION_OPERAND_MIN_PREC, None)?;
+        Ok(Expr::Negate(Box::new(operand)))
+    }
+
+    /// The error for prefix minus in the right operand of a precedence >= 6
+    /// operator, matching GHC's rejection (GHC: "cannot mix ... and prefix
+    /// minus in the same infix expression").
+    fn prefix_minus_rhs_err(&self, parent: &ParentOp) -> Box<Diagnostic> {
+        let d = op_display(&parent.op);
+        let e = op_in_expr(&parent.op);
+        let msg = format!(
+            "Prefix minus cannot be the right operand of {d} ({} {}): \
+             prefix minus binds like binary '-' (precedence 6), so \
+             'a {e} -b' has no defined grouping",
+            assoc_keyword(parent.assoc),
+            parent.prec
+        );
+        let loc = self.peek_loc();
+        let mut diag = Diagnostic::parse_at(msg, Span::new(loc.line, loc.col));
+        diag.notes.push(format!("parenthesize the negation: 'a {e} (-b)'"));
+        Box::new(diag)
+    }
+
+    /// The error for an operator that can neither take a prefix-minus
+    /// expression as its LEFT operand nor be part of its operand: a
+    /// precedence-6 operator that is not left-associative (`-a <> b`), or —
+    /// defensively — anything tighter that escaped the operand parse.
+    fn prefix_minus_lhs_err(&self, op: &str, assoc: Assoc, prec: u8) -> Box<Diagnostic> {
+        let d = op_display(op);
+        let e = op_in_expr(op);
+        let msg = format!(
+            "Cannot mix prefix minus and {d} ({} {prec}): prefix minus \
+             binds like binary '-' (infixl 6), so '-a {e} b' has no \
+             defined grouping",
+            assoc_keyword(assoc)
+        );
+        let loc = self.peek_loc();
+        let mut diag = Diagnostic::parse_at(msg, Span::new(loc.line, loc.col));
+        diag.notes.push(format!(
+            "parenthesize one side: '(-a) {e} b' or '-(a {e} b)'"
+        ));
+        Box::new(diag)
     }
 
     fn parse_expr_app(&mut self) -> PResult<Expr> {
@@ -2255,31 +2336,47 @@ impl Parser {
                     return Ok(Expr::Lambda { params, body: Box::new(Expr::Tuple(elems)) });
                 }
 
-                // Check for operator-starting forms: (+), (+1), (-)
+                // Check for operator-starting forms: (+), (+1), (-).
+                // A leading '-' that is NOT the bare operator `(-)` is
+                // prefix minus, never a right section (the GHC rule): it
+                // falls through to the general parenthesised-expression
+                // path below, which parses it by the negation grammar —
+                // so `(-a + b)` is `(negate a) + b` and `(-a * b)` is
+                // `negate (a * b)`, not a blanket negation of the whole
+                // body.
                 if let Token::Operator(op) = self.peek().clone() {
-                    self.advance(); // consume operator
-                    if self.at(&Token::RightParen) {
-                        // (op) — operator as function
-                        self.advance();
-                        return Ok(Expr::OpFunc(op));
-                    }
-                    if op == "-" {
-                        // (-expr) is negation, not a section
-                        let inner = self.parse_expr()?;
+                    let bare_op = self.pos + 1 < self.tokens.len()
+                        && self.tokens[self.pos + 1].token == Token::RightParen;
+                    if op != "-" || bare_op {
+                        self.advance(); // consume operator
+                        if self.at(&Token::RightParen) {
+                            // (op) — operator as function
+                            self.advance();
+                            return Ok(Expr::OpFunc(op));
+                        }
+                        // (op expr) — right section: \x -> x op expr.
+                        // Prefix minus in the operand follows the infix
+                        // rule: legal only under a precedence < 6 operator
+                        // (GHC rejects `(* -2)` like `a * -2`).
+                        let (assoc, prec) = self.operator_fixity(&op);
+                        if prec >= 6
+                            && let Token::Operator(m) = self.peek()
+                            && m == "-"
+                        {
+                            let par = ParentOp { op: op.clone(), prec, assoc };
+                            return Err(self.prefix_minus_rhs_err(&par));
+                        }
+                        let rhs = self.parse_expr()?;
                         self.expect(&Token::RightParen)?;
-                        return Ok(Expr::Paren(Box::new(Expr::Negate(Box::new(inner)))));
+                        return Ok(Expr::Lambda {
+                            params: vec!["_sec".into()],
+                            body: Box::new(Expr::InfixApp {
+                                op,
+                                lhs: Box::new(Expr::Var("_sec".into())),
+                                rhs: Box::new(rhs),
+                            }),
+                        });
                     }
-                    // (op expr) — right section: \x -> x op expr
-                    let rhs = self.parse_expr()?;
-                    self.expect(&Token::RightParen)?;
-                    return Ok(Expr::Lambda {
-                        params: vec!["_sec".into()],
-                        body: Box::new(Expr::InfixApp {
-                            op,
-                            lhs: Box::new(Expr::Var("_sec".into())),
-                            rhs: Box::new(rhs),
-                        }),
-                    });
                 }
 
                 // (`name` expr) — backtick right section: \x -> x `name` expr
@@ -2291,6 +2388,16 @@ impl Parser {
                         // (`name`) — operator as function
                         self.advance();
                         return Ok(Expr::OpFunc(name));
+                    }
+                    // Prefix minus in the operand follows the infix rule
+                    // (see the symbolic right-section arm above).
+                    let (assoc, prec) = self.operator_fixity(&name);
+                    if prec >= 6
+                        && let Token::Operator(m) = self.peek()
+                        && m == "-"
+                    {
+                        let par = ParentOp { op: name.clone(), prec, assoc };
+                        return Err(self.prefix_minus_rhs_err(&par));
                     }
                     let rhs = self.parse_expr()?;
                     self.expect(&Token::RightParen)?;
@@ -2325,7 +2432,10 @@ impl Parser {
                 self.skip_newlines_and_indent();
                 let saved_expr_min_indent = self.expr_min_indent;
                 self.expr_min_indent = self.current_indent;
-                let lhs = self.parse_expr_app()?;
+                // Prefix (not just application) level: a leading '-' is
+                // negation here (`(-a + b)` fell through from the
+                // operator-section check above).
+                let lhs = self.parse_expr_prefix(None)?;
 
                 // (expr op) — left section: \x -> expr op x
                 if let Token::Operator(op) = self.peek().clone() {
@@ -3123,6 +3233,12 @@ impl Parser {
 /// Operator precedence (left binding power, right binding power).
 /// Based on Haskell defaults.
 /// Convert (Assoc, prec 0-9) to Pratt binding powers (lp, rp).
+/// Minimum Pratt binding power for the operand of prefix minus: Haskell's
+/// `lexp6 -> - exp7` takes everything binding tighter than precedence 6, so
+/// the operand continues through operators with precedence >= 7 (left
+/// binding power >= 7*2) and stops at precedence 6 and below.
+const NEGATION_OPERAND_MIN_PREC: u8 = 14;
+
 fn assoc_prec_to_binding(assoc: Assoc, prec: u8) -> (u8, u8) {
     let base = prec * 2;
     match assoc {
