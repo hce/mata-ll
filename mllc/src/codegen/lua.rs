@@ -27,6 +27,7 @@
 //! producer's obligation.
 
 /// A Lua expression as this code generator shapes it.
+#[derive(Clone)]
 pub(super) enum Expr {
     /// A reference printed verbatim: a bare name, `__mll_fn[3]`, `_v[2]`,
     /// a dotted path like `math.pi`. Produced by name resolution (`lua_ref`),
@@ -63,6 +64,7 @@ pub(super) enum Expr {
 }
 
 /// One table-constructor item.
+#[derive(Clone)]
 pub(super) enum Item {
     Pos(Expr),
     /// Keyed entry; the key text arrives rendered INCLUDING the ` = ` suffix
@@ -71,6 +73,7 @@ pub(super) enum Item {
 }
 
 /// Function-literal layout.
+#[derive(Clone)]
 pub(super) enum FuncBody {
     /// One line: `function(p) s1; s2; sn end`.
     Inline(Vec<Stmt>),
@@ -80,9 +83,11 @@ pub(super) enum FuncBody {
 }
 
 /// A statement sequence printed one statement per line at a given indent.
+#[derive(Clone)]
 pub(super) struct Block(pub Vec<Stmt>);
 
 /// A Lua statement as this code generator shapes it.
+#[derive(Clone)]
 pub(super) enum Stmt {
     /// Bridge: one preformatted line (no indent prefix, no newline).
     Raw(String),
@@ -189,6 +194,16 @@ impl Expr {
     /// Convenience: `name(args)`.
     pub(super) fn call_named(name: &str, args: Vec<Expr>) -> Expr {
         Expr::Call(Box::new(Expr::Name(name.into())), args)
+    }
+
+    /// Fold a non-empty condition list into one left-associated `and` chain:
+    /// `c1 and c2 and c3`. The conditions are comparisons and calls (never
+    /// bare `and`/`or` chains of lower precedence), so no grouping parens
+    /// are needed between them.
+    pub(super) fn and_chain(conds: Vec<Expr>) -> Expr {
+        let mut it = conds.into_iter();
+        let first = it.next().expect("and_chain: empty condition list");
+        it.fold(first, |acc, c| Expr::binop("and", acc, c))
     }
 
     /// Render at `ind` (the indent any internal line breaks are relative to)

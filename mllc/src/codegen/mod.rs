@@ -329,7 +329,7 @@ impl CodeGen {
 
     /// Create a sub-CodeGen that shares this generator's lookup tables but
     /// whose state changes are discarded (used for guard conditions — see
-    /// `guard_cond_raw` in pattern.rs).
+    /// `guard_cond_ast` in pattern.rs).
 
     fn new_sub(&self) -> CodeGen {
         let mut sub = CodeGen::new();

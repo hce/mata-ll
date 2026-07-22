@@ -630,7 +630,7 @@ impl CodeGen {
                 for (i, branch) in branches.iter().enumerate() {
                     let mut conditions = Vec::new();
                     let mut bindings = Vec::new();
-                    self.collect_pattern_conditions("_s", &branch.pattern, &mut conditions, &mut bindings);
+                    self.collect_pattern_conditions(&Expr::name("_s"), &branch.pattern, &mut conditions, &mut bindings);
                     // Register pattern-bound names as locals (scoped to this
                     // branch) so references resolve to them rather than a
                     // same-named top-level/prelude function.
@@ -639,14 +639,14 @@ impl CodeGen {
                         if i > 0 {
                             let mut bs = Vec::new();
                             for (var, val) in &bindings {
-                                bs.push(Stmt::Local(vec![var.clone()], Some(Expr::raw(val.clone()))));
+                                bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
                                 self.local_vars.insert(var.clone());
                             }
                             bs.push(Stmt::Return(self.tail_ast(&branch.body, false)));
                             else_b = Some(Block(bs));
                         } else {
                             for (var, val) in &bindings {
-                                direct.push(Stmt::Local(vec![var.clone()], Some(Expr::raw(val.clone()))));
+                                direct.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
                                 self.local_vars.insert(var.clone());
                             }
                             direct.push(Stmt::Return(self.tail_ast(&branch.body, false)));
@@ -654,10 +654,10 @@ impl CodeGen {
                         self.local_vars = saved_locals;
                         break;
                     }
-                    let cond = Expr::raw(conditions.join(" and "));
+                    let cond = Expr::and_chain(conditions);
                     let mut bs = Vec::new();
                     for (var, val) in &bindings {
-                        bs.push(Stmt::Local(vec![var.clone()], Some(Expr::raw(val.clone()))));
+                        bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
                         self.local_vars.insert(var.clone());
                     }
                     bs.push(Stmt::Return(self.tail_ast(&branch.body, false)));

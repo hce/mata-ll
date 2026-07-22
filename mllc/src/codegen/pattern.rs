@@ -10,10 +10,10 @@
 //! total, the chain builder handles ONLY guard-free clauses (the old string
 //! emitter carried unreachable guard branches here).
 //!
-//! Conditions, scrutinee paths and binding values are built as rendered
-//! strings (`collect_pattern_conditions`, `field_path*`, `match_scrutinee`)
-//! and enter the tree as `Raw` leaves; the statement structure around them
-//! is AST. Forcing discipline: a sub-pattern is forced only when it
+//! Conditions, scrutinee paths and binding values are built as `lua::Expr`
+//! trees (`collect_pattern_conditions`, `field_path*`, `match_scrutinee`);
+//! the clause condition is their `and_chain`. Forcing discipline: a
+//! sub-pattern is forced only when it
 //! inspects its value (tag match, literal, deeper destructuring);
 //! Var/Wildcard bindings stay lazy, and a refutable top-level pattern forces
 //! its scrutinee inside its own clause condition so a matching earlier
@@ -34,35 +34,34 @@ impl CodeGen {
     }
 
     /// A clause's bindings (`local x = <path>`) plus its where bindings.
-    fn clause_intro_stmts(&mut self, clause: &TClause, bindings: &[(String, String)]) -> Vec<Stmt> {
+    fn clause_intro_stmts(&mut self, clause: &TClause, bindings: &[(String, Expr)]) -> Vec<Stmt> {
         let mut stmts = Vec::new();
         for (var, val) in bindings {
             let (pre, decl) = self.declare_local_parts(var);
             if let Some(s) = pre {
                 stmts.push(s);
             }
-            stmts.push(decl.stmt(Expr::raw(val.clone())));
-            // Propagate concreteness: if binding source is concrete, so is the target
-            if self.concrete_vars.contains(val) {
-                self.concrete_vars.insert(var.clone());
-            }
+            stmts.push(decl.stmt(val.clone()));
+            // Propagate concreteness: if binding source is a concrete
+            // variable, so is the target.
+            if let Expr::Name(n) = val
+                && self.concrete_vars.contains(n) {
+                    self.concrete_vars.insert(var.clone());
+                }
         }
         let demanded = self.clause_demanded(clause);
         stmts.extend(self.where_binds_stmts(clause, demanded));
         stmts
     }
 
-    /// A guard condition, rendered through a fresh sub-generator exactly as
-    /// the streaming emitter did: the sub starts at indent 0, so a multiline
-    /// construct inside a guard renders relative to column 0 regardless of
-    /// the chain's depth. (A formatting oddity, but a byte-for-byte one.)
-    fn guard_cond_raw(&mut self, cond: &TExpr) -> Expr {
+    /// A guard condition, built through a fresh sub-generator so the
+    /// emission's scope bookkeeping (locals, concreteness) stays out of the
+    /// enclosing generator's state.
+    fn guard_cond_ast(&mut self, cond: &TExpr) -> Expr {
         let mut sub = self.new_sub();
         let e = sub.expr_ast(cond);
         self.absorb_sub_error(&mut sub);
-        let mut s = String::new();
-        e.render(0, &mut s);
-        Expr::raw(s)
+        e
     }
 
     pub(super) fn pattern_match_block(&mut self, params: &[String], clauses: &[TClause]) -> Block {
@@ -99,7 +98,8 @@ impl CodeGen {
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
             for (pi, pat) in clause.patterns.iter().enumerate() {
-                self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
+                let scrut = self.match_scrutinee(&params[pi], pat);
+                self.collect_pattern_conditions(&scrut, pat, &mut conditions, &mut bindings);
             }
 
             if conditions.is_empty() {
@@ -119,7 +119,7 @@ impl CodeGen {
                 break;
             }
 
-            let cond = Expr::raw(conditions.join(" and "));
+            let cond = Expr::and_chain(conditions);
             let mut bs = self.clause_intro_stmts(clause, &bindings);
             bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
             if chain.is_none() {
@@ -173,7 +173,8 @@ impl CodeGen {
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
             for (pi, pat) in clause.patterns.iter().enumerate() {
-                self.collect_pattern_conditions(&self.match_scrutinee(&params[pi], pat), pat, &mut conditions, &mut bindings);
+                let scrut = self.match_scrutinee(&params[pi], pat);
+                self.collect_pattern_conditions(&scrut, pat, &mut conditions, &mut bindings);
             }
             let mut bs = self.clause_intro_stmts(clause, &bindings);
             if clause.guards.is_empty() {
@@ -182,7 +183,7 @@ impl CodeGen {
                 let mut gchain: Option<(Expr, Block)> = None;
                 let mut gelseifs: Vec<(Expr, Block)> = Vec::new();
                 for guard in &clause.guards {
-                    let cond = self.guard_cond_raw(&guard.condition);
+                    let cond = self.guard_cond_ast(&guard.condition);
                     let body = Block(vec![Stmt::Return(self.tail_ast(&guard.body, false))]);
                     if gchain.is_none() {
                         gchain = Some((cond, body));
@@ -202,7 +203,7 @@ impl CodeGen {
                 stmts.push(Stmt::Do(Block(bs)));
             } else {
                 stmts.push(Stmt::If {
-                    cond: Expr::raw(conditions.join(" and ")),
+                    cond: Expr::and_chain(conditions),
                     then_b: Block(bs),
                     elseifs: vec![],
                     else_b: None,
@@ -229,20 +230,20 @@ impl CodeGen {
     /// Build an indexing path into a field, forcing it when the sub-pattern
     /// will inspect it. The field may hold a thunk (lazy construction), so
     /// indexing into it (`field[1]`, `field == tag`, ...) requires forcing.
-    pub(super) fn field_path(scrutinee: &str, idx: usize, child: &TPattern) -> String {
-        let path = format!("{}[{}]", scrutinee, idx);
+    pub(super) fn field_path(scrutinee: &Expr, idx: usize, child: &TPattern) -> Expr {
+        let path = Expr::index(scrutinee.clone(), format!("[{}]", idx));
         if Self::pattern_inspects_value(child) {
-            format!("__force({})", path)
+            Expr::force(path)
         } else {
             path
         }
     }
 
     /// Like `field_path`, but for a LuaDict field addressed by name (`.width`).
-    pub(super) fn field_path_key(scrutinee: &str, key: &str, child: &TPattern) -> String {
-        let path = format!("{}{}", scrutinee, lua_field_index(key));
+    pub(super) fn field_path_key(scrutinee: &Expr, key: &str, child: &TPattern) -> Expr {
+        let path = Expr::index(scrutinee.clone(), lua_field_index(key));
         if Self::pattern_inspects_value(child) {
-            format!("__force({})", path)
+            Expr::force(path)
         } else {
             path
         }
@@ -255,19 +256,19 @@ impl CodeGen {
     /// force it HERE, inside the clause's `elseif` condition, so a matching
     /// earlier clause never forces it. An irrefutable pattern (Var/Wildcard)
     /// binds lazily and must stay the raw (unforced) param.
-    pub(super) fn match_scrutinee(&self, param: &str, pat: &TPattern) -> String {
+    pub(super) fn match_scrutinee(&self, param: &str, pat: &TPattern) -> Expr {
         if matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
             || self.concrete_vars.contains(param)
         {
-            param.to_string()
+            Expr::name(param)
         } else {
-            format!("__force({})", param)
+            Expr::force(Expr::name(param))
         }
     }
 
-    pub(super) fn collect_pattern_conditions(&self, scrutinee: &str, pattern: &TPattern, conditions: &mut Vec<String>, bindings: &mut Vec<(String, String)>) {
+    pub(super) fn collect_pattern_conditions(&self, scrutinee: &Expr, pattern: &TPattern, conditions: &mut Vec<Expr>, bindings: &mut Vec<(String, Expr)>) {
         match pattern {
-            TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.to_string())); }
+            TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.clone())); }
             TPattern::Wildcard => {}
             TPattern::LitPat(lit) => {
                 let s = match lit {
@@ -282,7 +283,7 @@ impl CodeGen {
                     TLiteral::Bool(b) => if *b { "true".into() } else { "false".into() },
                     TLiteral::Unit => "nil".into(),
                 };
-                conditions.push(format!("{} == {}", scrutinee, s));
+                conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit(s)));
             }
             TPattern::Constructor { name, args } => {
                 if self.is_newtype(name) {
@@ -294,12 +295,20 @@ impl CodeGen {
                     // LuaDict enum: the value is the constructor's Lua string,
                     // so match by string equality (declaration-order semantics
                     // live in the derived Ord/Enum, not the wire value).
-                    conditions.push(format!("{} == {}", scrutinee, lua_quoted_string(str_tag)));
+                    conditions.push(Expr::binop(
+                        "==",
+                        scrutinee.clone(),
+                        Expr::lit(lua_quoted_string(str_tag)),
+                    ));
                 } else if let Some((tag, total, is_enum)) = self.constructor_info(name) {
                     if is_enum {
-                        conditions.push(format!("{} == {}", scrutinee, tag));
+                        conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit(format!("{}", tag))));
                     } else if total > 1 {
-                        conditions.push(format!("{}[1] == {}", scrutinee, tag));
+                        conditions.push(Expr::binop(
+                            "==",
+                            Expr::index(scrutinee.clone(), "[1]"),
+                            Expr::lit(format!("{}", tag)),
+                        ));
                         for (i, arg) in args.iter().enumerate() {
                             let path = Self::field_path(scrutinee, i + 2, arg);
                             self.collect_pattern_conditions(&path, arg, conditions, bindings);
@@ -319,15 +328,15 @@ impl CodeGen {
                     }
                 } else {
                     match name.as_str() {
-                        "True" => conditions.push(format!("{} == true", scrutinee)),
-                        "False" => conditions.push(format!("{} == false", scrutinee)),
-                        "Nothing" | "[]" => conditions.push(format!("{} == nil", scrutinee)),
+                        "True" => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit("true"))),
+                        "False" => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit("false"))),
+                        "Nothing" | "[]" => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit("nil"))),
                         "Just" => {
                             // A Maybe value is either nil (Nothing) or the Just
                             // wrapper, so `~= nil` identifies Just; the payload is
                             // unwrapped from field [1] (which is itself nil for
                             // `Just Nothing` / `Just []`).
-                            conditions.push(format!("{} ~= nil", scrutinee));
+                            conditions.push(Expr::binop("~=", scrutinee.clone(), Expr::lit("nil")));
                             if let Some(arg) = args.first() {
                                 // The payload may be a thunk (lazy construction),
                                 // so a nested pattern that indexes it (`Just (a,b)`,
@@ -336,17 +345,18 @@ impl CodeGen {
                                 // Var/Wildcard sub-pattern binds it lazily and needs
                                 // no force. (The general ADT/tuple paths already do
                                 // this via field_path; the Just special case did not.)
+                                let path = Expr::index(Expr::paren(scrutinee.clone()), "[1]");
                                 let payload = if Self::pattern_inspects_value(arg) {
-                                    format!("__force(({})[1])", scrutinee)
+                                    Expr::force(path)
                                 } else {
-                                    format!("({})[1]", scrutinee)
+                                    path
                                 };
                                 self.collect_pattern_conditions(&payload, arg, conditions, bindings);
                             }
                         }
                         ":" => {
                             // Cons pattern: x:xs
-                            conditions.push(format!("{} ~= nil", scrutinee));
+                            conditions.push(Expr::binop("~=", scrutinee.clone(), Expr::lit("nil")));
                             if let Some(head_pat) = args.first() {
                                 // The head is stored lazily (a cons head is a
                                 // lazy position — see the head-consumption
@@ -355,10 +365,11 @@ impl CodeGen {
                                 // literal) must force it to WHNF first. A
                                 // Var/Wildcard sub-pattern binds it lazily and
                                 // needs no force. Same rule as the `Just` payload.
+                                let head_call = Expr::call_named("__mll_head", vec![scrutinee.clone()]);
                                 let head = if Self::pattern_inspects_value(head_pat) {
-                                    format!("__force(__mll_head({}))", scrutinee)
+                                    Expr::force(head_call)
                                 } else {
-                                    format!("__mll_head({})", scrutinee)
+                                    head_call
                                 };
                                 self.collect_pattern_conditions(&head, head_pat, conditions, bindings);
                             }
@@ -375,14 +386,14 @@ impl CodeGen {
                                 // as the head above.
                                 let tail_pat = &args[1];
                                 let tail = if Self::pattern_inspects_value(tail_pat) {
-                                    format!("__mll_tail({})", scrutinee)
+                                    Expr::call_named("__mll_tail", vec![scrutinee.clone()])
                                 } else {
-                                    format!("__mll_tail_lazy({})", scrutinee)
+                                    Expr::call_named("__mll_tail_lazy", vec![scrutinee.clone()])
                                 };
                                 self.collect_pattern_conditions(&tail, tail_pat, conditions, bindings);
                             }
                         }
-                        _ => conditions.push(format!("{} == {}", scrutinee, name)),
+                        _ => conditions.push(Expr::binop("==", scrutinee.clone(), Expr::name(name.clone()))),
                     }
                 }
             }
