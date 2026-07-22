@@ -86,7 +86,7 @@ main = do
     assert ("" <> "" == "") "empty concat"
     assert ("" <> "a" == "a") "empty left concat"
     assert ("a" <> "" == "a") "empty right concat"
-    assert (show "" == "") "show empty string"
+    assert (show "" == "\"\"") "show empty string"
     assert (show 0 == "0") "show zero"
     assert (show (-42) == "-42") "show negative"
 

@@ -60,6 +60,26 @@ pub(super) fn lua_quoted_string(s: &str) -> String {
     out
 }
 
+/// The ONE canonical Lua literal for a `Number` (Double) value. Rust's
+/// `Display` for f64 drops a whole value's fraction (`10.0.to_string()` is
+/// `"10"`), and Lua 5.3+ reads a bare `10` as a native INTEGER — so a
+/// `Number` literal emitted that way put integer arithmetic behind a
+/// Double-typed expression: exact small results by luck, silent 64-bit
+/// wraparound past 2^63 (`10.0^20` became 7766279631452241920), and integer
+/// `show` output. `Debug` formatting always keeps the float marker (`10.0`,
+/// `1e20`), which Lua parses back as the identical float. Non-finite values
+/// cannot appear in source literals but constant folding could produce
+/// them; spell them as expressions.
+pub(super) fn lua_number_literal(n: f64) -> String {
+    if n.is_nan() {
+        "(0/0)".to_string()
+    } else if n.is_infinite() {
+        if n < 0.0 { "(-math.huge)".to_string() } else { "math.huge".to_string() }
+    } else {
+        format!("{:?}", n)
+    }
+}
+
 /// A bracketed Lua string-literal table key: `["na\"me"]`. Always valid —
 /// the key text is escaped by the canonical `lua_quoted_string`.
 pub(super) fn lua_key_string(name: &str) -> String {

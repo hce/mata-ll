@@ -40,8 +40,8 @@ main = do
   assert (show (Just ()) == "Just ()") "show (Just ()) should be Just ()"
   assert (show (Just (Just ())) == "Just (Just ())") "show nested Just ()"
   assert (show (Nothing :: Maybe ()) == "Nothing") "show Nothing at Maybe ()"
-  assert (show [(), ()] == "[(), ()]") "show list of units"
-  assert (show (1 :: Integer, ()) == "(1, ())") "show tuple with unit"
+  assert (show [(), ()] == "[(),()]") "show list of units"
+  assert (show (1 :: Integer, ()) == "(1,())") "show tuple with unit"
   assert (show (L ()) == "L ()") "derived Show with unit field"
   -- Eq/Ord ()
   assert (() == ()) "unit equals itself"

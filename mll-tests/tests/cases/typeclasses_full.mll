@@ -30,8 +30,8 @@ main :: IO ()
 main = do
     -- Show deriving
     assert (show Red == "Red") "show enum"
-    assert (show (Circle 3.0) == "Circle 3") "show con fields"
-    assert (show (Rect 2.0 3.0) == "Rect 2 3") "show two fields"
+    assert (show (Circle 3.0) == "Circle 3.0") "show con fields"
+    assert (show (Rect 2.0 3.0) == "Rect 2.0 3.0") "show two fields"
     assert (show (MkPair 1 2) == "MkPair 1 2") "show param type"
 
     -- Eq deriving - enums
@@ -86,7 +86,7 @@ main = do
     assert ([(1, 2)] /= [(1, 3)]) "list of tuple neq"
 
     -- Show for lists
-    assert (show [1, 2, 3] == "[1, 2, 3]") "show list"
+    assert (show [1, 2, 3] == "[1,2,3]") "show list"
     assert (show ([] :: [Integer]) == "[]") "show empty list"
 
     -- Show for basic types

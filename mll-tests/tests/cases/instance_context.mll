@@ -23,6 +23,6 @@ main = do
     assert (show (Branch (Leaf (Leaf 1)) (Leaf (Leaf 2)))
             == "Branch (Leaf Leaf 1) (Leaf Leaf 2)")
         "constrained instance at Tree (Tree Integer)"
-    assert (show (Leaf "s") == "Leaf s") "constrained instance at Tree String"
+    assert (show (Leaf "s") == "Leaf \"s\"") "constrained instance at Tree String"
     assert (describe (Branch (Leaf 3) (Leaf 4)) == "tree: Branch (Leaf 3) (Leaf 4)")
         "context through a constrained function"

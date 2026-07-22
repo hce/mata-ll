@@ -1409,8 +1409,9 @@ impl Monomorphizer {
         let elem_show_names: Vec<String> =
             elem_tys.iter().map(|et| self.resolve_show_for(et)).collect();
 
-        // Build body: "(" ++ show_E1(t[1]) ++ ", " ++ show_E2(t[2]) ++ ... ++ ")"
-        // We generate this as a chain of InfixApp(++, ...)
+        // Build body: "(" ++ show_E1(t[1]) ++ "," ++ show_E2(t[2]) ++ ... ++ ")"
+        // — GHC's tuple show has no space after the comma: show (1,2) is
+        // "(1,2)". We generate this as a chain of InfixApp(++, ...)
         let param_name = "_t".to_string();
         let str_ty = Ty::Con("String".to_string());
 
@@ -1419,7 +1420,7 @@ impl Monomorphizer {
         ];
         for (i, show_fn) in elem_show_names.iter().enumerate() {
             if i > 0 {
-                parts.push(TExpr::new(TExprKind::Lit(TLiteral::Str(", ".to_string())), str_ty.clone()));
+                parts.push(TExpr::new(TExprKind::Lit(TLiteral::Str(",".to_string())), str_ty.clone()));
             }
             // show_Elem(t[i+1]) — represented as App(Var(show_fn), SpecCall to access field)
             let field_access = TExpr::new(

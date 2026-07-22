@@ -547,6 +547,12 @@ data Tree a = Leaf a | Branch (Tree a) (Tree a)
 Supported: \texttt{Show}, \texttt{Eq}, \texttt{Ord}, \texttt{Enum},
 \texttt{Bounded}, \texttt{Functor}, \texttt{ToJSON}, \texttt{FromJSON},
 and \texttt{LuaDict}.
+Derived \texttt{show} output matches GHC exactly: strings are quoted
+and escaped by GHC's rules, lists and tuples separate with \texttt{,}
+and no space (\texttt{show [1,2]} is \texttt{"[1,2]"}), records show
+in record syntax (\texttt{P \{px = 1\}}), and \texttt{Number} uses
+GHC's shortest-identifying \texttt{Double} format (\texttt{show 3.0}
+is \texttt{"3.0"}, \texttt{show 0.01} is \texttt{"1.0e-2"}).
 \texttt{ToJSON} and \texttt{FromJSON} generate a JSON encoder and
 decoder for the type; they require \texttt{import JSON} --- see
 Section~\ref{sec:json}.

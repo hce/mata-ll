@@ -38,5 +38,5 @@ main = do
     assert (MkPair [1 :: Integer] Nothing /= MkPair [1] (Just Blue)) "neq Maybe field"
 
     -- Show goes through the same per-type specialization.
-    assert (show n1 == "MkPair (MkPair 1 x) Red") "show nested Pair"
+    assert (show n1 == "MkPair (MkPair 1 \"x\") Red") "show nested Pair"
     putStrLn "ok"

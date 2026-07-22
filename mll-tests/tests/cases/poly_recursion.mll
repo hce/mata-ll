@@ -25,7 +25,7 @@ main = do
     let n = NCons 1 (NCons [2,3] (NCons [[4,5],[6]] NNil))
     assert (depth n == 3) "depth 3-deep nested"
     assert (depth NNil == 0) "depth Nil"
-    assert (showNested n == "Cons 1 (Cons [2, 3] (Cons [[4, 5], [6]] (Nil)))") "showNested"
+    assert (showNested n == "Cons 1 (Cons [2,3] (Cons [[4,5],[6]] (Nil)))") "showNested"
     let d = DCons 1 (DCons (Box 1) (DCons (Box (Box 1)) DNil))
     assert (depthD d == 3) "depthD 3-deep Box chain"
     assert (depthD DNil == 0) "depthD Nil"

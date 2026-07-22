@@ -66,7 +66,7 @@ main = do
     -- derived Eq and Show work over the named layout
     assert (c == c) "derived Eq reflexive"
     assert (not (c == d)) "derived Eq distinguishes"
-    assert (show c == "Config 80 25 hi") "derived Show"
+    assert (show c == "Config {width = 80, height = 25, title = \"hi\"}") "derived Show"
     -- reserved-word field keys round-trip through bracketed access/update
     let s = Span { local = 7, end = 3 }
     assert (s.local == 7) "reserved-word key access"
@@ -96,7 +96,7 @@ main = do
     -- derived Eq and Show still work over the renamed layout
     assert (cr == cr) "renamed field: derived Eq reflexive"
     assert (not (cr == cr3)) "renamed field: derived Eq distinguishes"
-    assert (show cr == "Creds alice 22 n h") "renamed field: derived Show"
+    assert (show cr == "Creds {credsUser = \"alice\", credsPort = 22, credsNote = \"n\", credsHost = \"h\"}") "renamed field: derived Show"
     -- interop: Lua sees the renamed keys, not the Haskell field names
     assert (rawgetStr cr "user" == "alice") "Lua reads renamed key"
     assert (rawgetInt cr "port" == 22) "Lua reads renamed key 2"

@@ -13,12 +13,13 @@
 # diffed against these files by the ghc_oracle_* tests in tests/run_mll.rs.
 #
 # Cases that cannot be twinned are excluded here, each with a recorded
-# reason (see `excluded_reason` below). Cases whose mata-ll output is KNOWN
-# to differ from GHC's are still goldened; the differences are pinned in
-# tests/ghc-golden/divergent/ and listed in tests/ghc-golden/DIVERGENCES.md.
-# Cases whose divergence aborts the GHC twin itself (an assert that encodes
-# mata-ll's output format fails under GHC) cannot be goldened at all; they
-# are excluded with reason "diverges:" and documented in DIVERGENCES.md.
+# reason (see `excluded_reason` below). If a case's mata-ll output is ever
+# KNOWN to differ from GHC's, it is still goldened; the difference is pinned
+# in tests/ghc-golden/divergent/ and listed in tests/ghc-golden/DIVERGENCES.md
+# (currently empty — the historical show divergences are resolved). A
+# divergence that aborts the GHC twin itself (an assert encoding mata-ll's
+# output fails under GHC) cannot be goldened; exclude it with a "diverges:"
+# reason and document it in DIVERGENCES.md.
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -53,6 +54,7 @@ excluded_reason() {
         cases/error_forces_message)      echo "imports LString (Lua string FFI)";;
         cases/exitvalue_prelude)         echo "ExitValue/exit (Lua process control)";;
         cases/ffi)                       echo "FFI declarations";;
+        cases/ffi_multi_return)          echo "LuaPure FFI declarations (math.modf multi-return)";;
         cases/ffi_constructed_values)    echo "FFI declarations";;
         cases/ffi_maybe_args)            echo "FFI declarations";;
         cases/ffi_strictness)            echo "FFI declarations";;
@@ -98,24 +100,6 @@ excluded_reason() {
         cases/ExportHelper)              echo "helper module (twinned for import, no main)";;
         cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
 
-        # -- known divergences that abort the GHC twin ------------------------
-        # An assert in the case encodes mata-ll's output format; under GHC the
-        # assert fails, so no golden can exist. Details: DIVERGENCES.md.
-        cases/edge_cases)                echo "diverges: asserts show \"\" == \"\" (GHC: \"\\\"\\\"\")";;
-        cases/haskell_compat)            echo "diverges: asserts show [1,2,3] == \"[1, 2, 3]\"";;
-        cases/instance_context)          echo "diverges: asserts show (Leaf \"s\") == \"Leaf s\"";;
-        cases/instance_context_multi)    echo "diverges: asserts show (Pair 1 \"hi\") == \"Pair 1 hi\"";;
-        cases/instance_context_paren)    echo "diverges: asserts show (Wrap (Wrap \"x\")) == \"Wrap Wrap x\"";;
-        cases/lazy_index_thunk_leak)     echo "diverges: asserts show (1, True) == \"(1, True)\"";;
-        cases/mangle_collision)          echo "diverges: asserts show (MkAB, MkC) == \"(MkAB, MkC)\"";;
-        cases/pair_ord_fields)           echo "diverges: asserts show of nested Pair without string quotes";;
-        cases/poly_recursion)            echo "diverges: asserts list show with \", \" spacing";;
-        cases/show_either)               echo "diverges: asserts show (Left \"x\") == \"Left x\"";;
-        cases/tuple_field_laziness)      echo "diverges: asserts tuple show with \", \" spacing";;
-        cases/typeclasses_full)          echo "diverges: asserts show (Circle 3.0) == \"Circle 3\"";;
-        cases/unit_type)                 echo "diverges: asserts show [(), ()] == \"[(), ()]\"";;
-        ghc/ghc_cgrun030)                echo "diverges: asserts show [1,2,3] == \"[1, 2, 3]\"";;
-        ghc/ghc_regr003)                 echo "diverges: asserts show \"red\" == \"red\" (unquoted)";;
         *) : ;;
     esac
 }

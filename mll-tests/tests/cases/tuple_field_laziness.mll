@@ -90,13 +90,13 @@ main = do
     -- `show (1, 2)` — cheap eager fields — could not catch). Each field here is
     -- a function application, so it is a genuine thunk; `show`/`==` must force
     -- it to the real value, not render/compare the raw thunk table.
-    assert (show (inc 41, inc 1) == "(42, 2)") "tuple show forces thunked fields (2-tuple)"
-    assert (show (tri 3, tri 4) == "(6, 10)") "tuple show forces non-inlinable thunked fields"
-    assert (show (inc 1, inc 2, inc 3) == "(2, 3, 4)") "tuple show forces thunked fields (3-tuple)"
-    assert (show (inc 1, (inc 2, inc 3)) == "(2, (3, 4))") "tuple show forces nested thunked fields"
-    assert (show [(inc 1, inc 2), (inc 3, inc 4)] == "[(2, 3), (4, 5)]") "tuple show forces fields of tuples in a list"
-    assert (show (Just (inc 5, inc 6)) == "Just (6, 7)") "tuple show forces fields of a tuple inside an ADT"
-    assert (show (Box (inc 5) (inc 6), inc 7) == "(Box 6 7, 8)") "tuple show forces an ADT field inside a tuple"
+    assert (show (inc 41, inc 1) == "(42,2)") "tuple show forces thunked fields (2-tuple)"
+    assert (show (tri 3, tri 4) == "(6,10)") "tuple show forces non-inlinable thunked fields"
+    assert (show (inc 1, inc 2, inc 3) == "(2,3,4)") "tuple show forces thunked fields (3-tuple)"
+    assert (show (inc 1, (inc 2, inc 3)) == "(2,(3,4))") "tuple show forces nested thunked fields"
+    assert (show [(inc 1, inc 2), (inc 3, inc 4)] == "[(2,3),(4,5)]") "tuple show forces fields of tuples in a list"
+    assert (show (Just (inc 5, inc 6)) == "Just (6,7)") "tuple show forces fields of a tuple inside an ADT"
+    assert (show (Box (inc 5) (inc 6), inc 7) == "(Box 6 7,8)") "tuple show forces an ADT field inside a tuple"
     assert ((inc 41, inc 1) == (42, 2)) "tuple equality forces thunked fields"
     assert (find (\p -> fst p == 2) [(1, 10), (2, 20)] == Just (2, 20)) "find over a list of pairs"
 

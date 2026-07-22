@@ -16,10 +16,10 @@ MATA-LL TODO
       committed goldens; the `ghc_oracle_*` tests in
       `mll-tests/tests/run_mll.rs` diff mata-ll's runtime output against
       them byte-exactly (254 cases; CI needs no GHC). Known differences are
-      pinned and enumerated in `mll-tests/tests/ghc-golden/DIVERGENCES.md`
-      — all reduce to three `show` behaviours (unquoted strings, `", "`
-      list/tuple separators, Lua `%.14g` for `Number`); a fix or a drift on
-      any of them fails the suite. Suggested by the independent 2026-07-21
+      pinned and enumerated in `mll-tests/tests/ghc-golden/DIVERGENCES.md`;
+      a fix or a drift on any of them fails the suite. (The three `show`
+      divergences this system originally caught — unquoted strings, `", "`
+      separators, `%.14g` for `Number` — are resolved: `show` matches GHC.) Suggested by the independent 2026-07-21
       review.
 
 - [x] **Lua AST in codegen (was planned #1).** String-based emission replaced

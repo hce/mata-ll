@@ -22,7 +22,7 @@
 use crate::tir::*;
 use super::CodeGen;
 use super::lua::{Block, Expr, Stmt};
-use super::names::{lua_field_index, lua_quoted_string, sanitize_name};
+use super::names::{lua_field_index, lua_number_literal, lua_quoted_string, sanitize_name};
 
 impl CodeGen {
     /// The `error("Non-exhaustive patterns")` fall-off statement.
@@ -372,7 +372,10 @@ impl CodeGen {
                     // See literal_ast: i64::MIN has no decimal Lua spelling.
                     TLiteral::Integer(i64::MIN) => "0x8000000000000000".to_string(),
                     TLiteral::Integer(n) => format!("{}", n),
-                    TLiteral::Number(n) => format!("{}", n),
+                    // Float spelling, matching literal_ast (Lua compares
+                    // 10 == 10.0 numerically, but the emitted literal must
+                    // still denote the Double the pattern was written at).
+                    TLiteral::Number(n) => lua_number_literal(*n),
                     // The canonical escaper: an unescaped quote or control
                     // character in a string PATTERN would otherwise emit
                     // unloadable Lua (`if _arg0 == "a"b" then`).

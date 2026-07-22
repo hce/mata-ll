@@ -193,64 +193,84 @@ impl Checker {
                 }
             ];
 
-            // Build body: "ConName" ++ " " ++ show p0 ++ " " ++ show p1 ...
-            let mut body = TExpr::new(
-                TExprKind::Lit(TLiteral::Str(con.name.clone())),
+            let str_ty = Ty::Con("String".into());
+            let lit = |s: &str| TExpr::new(
+                TExprKind::Lit(TLiteral::Str(s.into())),
                 Ty::Con("String".into()),
             );
-
-            for (i, pname) in param_names.iter().enumerate() {
+            let concat = |lhs: TExpr, rhs: TExpr| TExpr::new(
+                TExprKind::InfixApp {
+                    op: "<>".into(),
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                Ty::Con("String".into()),
+            );
+            // show field_i — precedence depends on the syntax (see below).
+            let show_field = |i: usize, pname: &String, arg_prec: bool| {
                 let field_ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
-
-                // " "
-                let space = TExpr::new(
-                    TExprKind::Lit(TLiteral::Str(" ".into())),
-                    Ty::Con("String".into()),
-                );
-                // concat body <> " "
-                body = TExpr::new(
-                    TExprKind::InfixApp {
-                        op: "<>".into(),
-                        lhs: Box::new(body),
-                        rhs: Box::new(space),
-                    },
-                    Ty::Con("String".into()),
-                );
-
-                // __mll_show_arg (show field_i) — parenthesize the field if it is
-                // a constructor application or negative number (GHC showsPrec 11).
-                let field_shown = TExpr::new(
+                let shown = TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(
-                            TExprKind::Var("__mll_show_arg".into()),
-                            Ty::arrow(Ty::Con("String".into()), Ty::Con("String".into())),
+                            TExprKind::Var("show".into()),
+                            Ty::arrow(field_ty.clone(), Ty::Con("String".into())),
                         )),
-                        Box::new(TExpr::new(
-                            TExprKind::App(
-                                Box::new(TExpr::new(
-                                    TExprKind::Var("show".into()),
-                                    Ty::arrow(field_ty.clone(), Ty::Con("String".into())),
-                                )),
-                                Box::new(TExpr::new(
-                                    TExprKind::Var(pname.clone()),
-                                    field_ty,
-                                )),
-                            ),
-                            Ty::Con("String".into()),
-                        )),
+                        Box::new(TExpr::new(TExprKind::Var(pname.clone()), field_ty)),
                     ),
                     Ty::Con("String".into()),
                 );
-
-                body = TExpr::new(
-                    TExprKind::InfixApp {
-                        op: "<>".into(),
-                        lhs: Box::new(body),
-                        rhs: Box::new(field_shown),
-                    },
+                if !arg_prec {
+                    return shown;
+                }
+                // __mll_show_arg (show field_i) — parenthesize the field if
+                // it is a constructor application or negative number (GHC
+                // showsPrec 11).
+                TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(
+                            TExprKind::Var("__mll_show_arg".into()),
+                            Ty::arrow(str_ty.clone(), str_ty.clone()),
+                        )),
+                        Box::new(shown),
+                    ),
                     Ty::Con("String".into()),
-                );
-            }
+                )
+            };
+
+            let named_fields: Option<Vec<String>> = match &con.fields {
+                ConstructorFields::Named(fs) if !fs.is_empty() =>
+                    Some(fs.iter().map(|f| f.name.clone()).collect()),
+                _ => None,
+            };
+
+            let body = match named_fields {
+                // Record syntax shows as GHC does: `Con {f1 = v1, f2 = v2}`,
+                // with ", " between fields and each value at precedence 0
+                // (never parenthesized — `P {px = -1}` has no inner parens).
+                Some(fnames) => {
+                    let mut body = lit(&format!("{} {{", con.name));
+                    for (i, (pname, fname)) in
+                        param_names.iter().zip(fnames.iter()).enumerate()
+                    {
+                        if i > 0 {
+                            body = concat(body, lit(", "));
+                        }
+                        body = concat(body, lit(&format!("{} = ", fname)));
+                        body = concat(body, show_field(i, pname, false));
+                    }
+                    concat(body, lit("}"))
+                }
+                // Positional: "ConName" ++ " " ++ show p0 ++ " " ++ show p1 …
+                // with each field at argument precedence (showsPrec 11).
+                None => {
+                    let mut body = lit(&con.name);
+                    for (i, pname) in param_names.iter().enumerate() {
+                        body = concat(body, lit(" "));
+                        body = concat(body, show_field(i, pname, true));
+                    }
+                    body
+                }
+            };
 
             clauses.push(TClause {
                 span: None,

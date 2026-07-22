@@ -647,6 +647,7 @@ mll_test!(superclass, "superclass.mll");
 mll_test!(where_clauses, "where_clauses.mll");
 mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(bind_first_class, "bind_first_class.mll");
+mll_test!(show_ghc_parity, "show_ghc_parity.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
@@ -3997,14 +3998,14 @@ fn show_tuple_with_list_element() {
     let source = r#"
 main :: IO ()
 main = do
-  assert (show (1, [2, 3]) == "(1, [2, 3])") "tuple with list as second element"
-  assert (show ([1, 2], [3, 4]) == "([1, 2], [3, 4])") "tuple of two lists"
-  assert (show ([1, 2], 3) == "([1, 2], 3)") "tuple with list as first element"
-  assert (show (1, 2) == "(1, 2)") "plain tuple"
+  assert (show (1, [2, 3]) == "(1,[2,3])") "tuple with list as second element"
+  assert (show ([1, 2], [3, 4]) == "([1,2],[3,4])") "tuple of two lists"
+  assert (show ([1, 2], 3) == "([1,2],3)") "tuple with list as first element"
+  assert (show (1, 2) == "(1,2)") "plain tuple"
   -- An empty-list element must show as "[]", not the type-erased "Nothing"
   -- (the post-mono verifier flagged this latent tuple-show leak).
-  assert (show ((1 :: Integer), ([] :: [Integer])) == "(1, [])") "tuple with empty list element"
-  assert (show ((Just (1 :: Integer)), (Nothing :: Maybe Integer)) == "(Just 1, Nothing)") "tuple of Maybe elements"
+  assert (show ((1 :: Integer), ([] :: [Integer])) == "(1,[])") "tuple with empty list element"
+  assert (show ((Just (1 :: Integer)), (Nothing :: Maybe Integer)) == "(Just 1,Nothing)") "tuple of Maybe elements"
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])
         .expect("should compile")
@@ -7121,7 +7122,7 @@ main = do
         .sequence_values::<String>()
         .collect::<mlua::Result<_>>()
         .unwrap();
-    assert_eq!(lines, vec!["[]", "[[1, 2], []]", "Nothing"]);
+    assert_eq!(lines, vec!["[]", "[[1,2],[]]", "Nothing"]);
 }
 
 #[test]
@@ -7335,7 +7336,7 @@ main = do
             "Nothing",
             "Just (Just 5)",
             "Just (-5)",
-            "[Just 1, Nothing, Just 3]",
+            "[Just 1,Nothing,Just 3]",
             "Just Nothing", // injective Just: distinct from Nothing
         ]
     );
@@ -7417,7 +7418,7 @@ main = do
     putStrLn (show (Just [1, 2] :: Maybe [Integer]))
 "#;
     let lines = run_capturing_lines(source, "just_empty_list");
-    assert_eq!(lines, vec!["Just []", "Nothing", "False", "Just [1, 2]"]);
+    assert_eq!(lines, vec!["Just []", "Nothing", "False", "Just [1,2]"]);
 }
 
 #[test]
@@ -7448,7 +7449,7 @@ main = do
             "1",         // head (tail (iterate inc 0)) — leaked "(function: 0x.., False)"
             "6",         // [1..] !! 5 — index 5 of [1,2,3,...] is 6; printed garbage pre-fix
             "20",        // (iterate inc 0 !! 2) * 10 — crashed on arithmetic
-            "[0, 1, 2]", // take must materialize values, not thunks
+            "[0,1,2]", // take must materialize values, not thunks
         ]
     );
 }
@@ -9321,7 +9322,7 @@ main = do
     };
 
     // Standalone with a CLI argument: first vararg == arg[1] == "alpha" → run.
-    assert_eq!(run(Some("alpha"), "alpha"), vec!["MAIN", "[alpha]"]);
+    assert_eq!(run(Some("alpha"), "alpha"), vec!["MAIN", "[\"alpha\"]"]);
 
     // Required for its exports: first vararg is the module name "prog" while the
     // host passed no args (arg[1] unset), so they differ → main stays dormant.
@@ -9523,6 +9524,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_do_eval_order, "cases", "do_eval_order.mll"),
         (ghc_oracle_do_let_scoping, "cases", "do_let_scoping.mll"),
         (ghc_oracle_do_notation, "cases", "do_notation.mll"),
+        (ghc_oracle_edge_cases, "cases", "edge_cases.mll"),
         (ghc_oracle_either_ordering, "cases", "either_ordering.mll"),
         (ghc_oracle_enum_range, "cases", "enum_range.mll"),
         (ghc_oracle_even_odd, "cases", "even_odd.mll"),
@@ -9538,10 +9540,15 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_foldable_user_instance, "cases", "foldable_user_instance.mll"),
         (ghc_oracle_functor_applicative, "cases", "functor_applicative.mll"),
         (ghc_oracle_gadts, "cases", "gadts.mll"),
+        (ghc_oracle_guard_strict_entry, "cases", "guard_strict_entry.mll"),
         (ghc_oracle_guards, "cases", "guards.mll"),
+        (ghc_oracle_haskell_compat, "cases", "haskell_compat.mll"),
         (ghc_oracle_higher_order, "cases", "higher_order.mll"),
         (ghc_oracle_import_hiding, "cases", "import_hiding.mll"),
         (ghc_oracle_infix_def, "cases", "infix_def.mll"),
+        (ghc_oracle_instance_context, "cases", "instance_context.mll"),
+        (ghc_oracle_instance_context_multi, "cases", "instance_context_multi.mll"),
+        (ghc_oracle_instance_context_paren, "cases", "instance_context_paren.mll"),
         (ghc_oracle_instance_context_superclass, "cases", "instance_context_superclass.mll"),
         (ghc_oracle_instance_forward_ref, "cases", "instance_forward_ref.mll"),
         (ghc_oracle_integral_semantics, "cases", "integral_semantics.mll"),
@@ -9551,6 +9558,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_lazy_cheap_bindings, "cases", "lazy_cheap_bindings.mll"),
         (ghc_oracle_lazy_head_projection, "cases", "lazy_head_projection.mll"),
         (ghc_oracle_lazy_index_laziness_contract, "cases", "lazy_index_laziness_contract.mll"),
+        (ghc_oracle_lazy_index_thunk_leak, "cases", "lazy_index_thunk_leak.mll"),
         (ghc_oracle_lazy_take_zip, "cases", "lazy_take_zip.mll"),
         (ghc_oracle_let_exprs, "cases", "let_exprs.mll"),
         (ghc_oracle_let_pattern_recursive, "cases", "let_pattern_recursive.mll"),
@@ -9562,6 +9570,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_list_element_laziness, "cases", "list_element_laziness.mll"),
         (ghc_oracle_lists, "cases", "lists.mll"),
         (ghc_oracle_local_overflow, "cases", "local_overflow.mll"),
+        (ghc_oracle_locals_iife_limit, "cases", "locals_iife_limit.mll"),
+        (ghc_oracle_mangle_collision, "cases", "mangle_collision.mll"),
         (ghc_oracle_mapm, "cases", "mapm.mll"),
         (ghc_oracle_mapm_return_position, "cases", "mapm_return_position.mll"),
         (ghc_oracle_mapm_underscore, "cases", "mapm_underscore.mll"),
@@ -9576,14 +9586,17 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_nested_calls, "cases", "nested_calls.mll"),
         (ghc_oracle_nested_eq, "cases", "nested_eq.mll"),
         (ghc_oracle_nested_just_pattern, "cases", "nested_just_pattern.mll"),
+        (ghc_oracle_non_exhaustive_live, "cases", "non_exhaustive_live.mll"),
         (ghc_oracle_non_strict, "cases", "non_strict.mll"),
         (ghc_oracle_num_polymorphic, "cases", "num_polymorphic.mll"),
         (ghc_oracle_num_user_instance, "cases", "num_user_instance.mll"),
         (ghc_oracle_operator_fixity, "cases", "operator_fixity.mll"),
         (ghc_oracle_operator_sections, "cases", "operator_sections.mll"),
         (ghc_oracle_operators, "cases", "operators.mll"),
+        (ghc_oracle_pair_ord_fields, "cases", "pair_ord_fields.mll"),
         (ghc_oracle_pattern_matching, "cases", "pattern_matching.mll"),
         (ghc_oracle_pointfree_caf, "cases", "pointfree_caf.mll"),
+        (ghc_oracle_poly_recursion, "cases", "poly_recursion.mll"),
         (ghc_oracle_promoted_nat_kind, "cases", "promoted_nat_kind.mll"),
         (ghc_oracle_rank2, "cases", "rank2.mll"),
         (ghc_oracle_read_typeclass, "cases", "read_typeclass.mll"),
@@ -9600,6 +9613,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_seq_forms, "cases", "seq_forms.mll"),
         (ghc_oracle_seq_tco, "cases", "seq_tco.mll"),
         (ghc_oracle_seq_when_putstr, "cases", "seq_when_putstr.mll"),
+        (ghc_oracle_show_either, "cases", "show_either.mll"),
+        (ghc_oracle_show_ghc_parity, "cases", "show_ghc_parity.mll"),
         (ghc_oracle_show_required, "cases", "show_required.mll"),
         (ghc_oracle_source_class_nullary, "cases", "source_class_nullary.mll"),
         (ghc_oracle_spec_limit_sibling, "cases", "spec_limit_sibling.mll"),
@@ -9619,10 +9634,12 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_stress_many_instances, "cases", "stress_many_instances.mll"),
         (ghc_oracle_stress_nested_expr, "cases", "stress_nested_expr.mll"),
         (ghc_oracle_strings, "cases", "strings.mll"),
+        (ghc_oracle_tco_case_let, "cases", "tco_case_let.mll"),
         (ghc_oracle_traversable, "cases", "traversable.mll"),
         (ghc_oracle_trees, "cases", "trees.mll"),
         (ghc_oracle_tuple_ctor, "cases", "tuple_ctor.mll"),
         (ghc_oracle_tuple_eq_adt_elems, "cases", "tuple_eq_adt_elems.mll"),
+        (ghc_oracle_tuple_field_laziness, "cases", "tuple_field_laziness.mll"),
         (ghc_oracle_tuples, "cases", "tuples.mll"),
         (ghc_oracle_type_alias, "cases", "type_alias.mll"),
         (ghc_oracle_type_alias_tuple, "cases", "type_alias_tuple.mll"),
@@ -9631,10 +9648,13 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_type_family_clause_priority, "cases", "type_family_clause_priority.mll"),
         (ghc_oracle_type_level_nats, "cases", "type_level_nats.mll"),
         (ghc_oracle_typeclasses, "cases", "typeclasses.mll"),
+        (ghc_oracle_typeclasses_full, "cases", "typeclasses_full.mll"),
+        (ghc_oracle_unit_type, "cases", "unit_type.mll"),
         (ghc_oracle_user_class_method_per_use, "cases", "user_class_method_per_use.mll"),
         (ghc_oracle_value_forward_alias, "cases", "value_forward_alias.mll"),
         (ghc_oracle_vec_nat, "cases", "vec_nat.mll"),
         (ghc_oracle_where_clauses, "cases", "where_clauses.mll"),
+        (ghc_oracle_where_group_mutual, "cases", "where_group_mutual.mll"),
         (ghc_oracle_where_func_order, "cases", "where_func_order.mll"),
         (ghc_oracle_where_io_types, "cases", "where_io_types.mll"),
         (ghc_oracle_t001_fmap, "ghc", "T001_fmap.mll"),
@@ -9666,6 +9686,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ghc_cgrun027, "ghc", "ghc_cgrun027.mll"),
         (ghc_oracle_ghc_cgrun028, "ghc", "ghc_cgrun028.mll"),
         (ghc_oracle_ghc_cgrun029, "ghc", "ghc_cgrun029.mll"),
+        (ghc_oracle_ghc_cgrun030, "ghc", "ghc_cgrun030.mll"),
         (ghc_oracle_ghc_cgrun031, "ghc", "ghc_cgrun031.mll"),
         (ghc_oracle_ghc_cgrun032, "ghc", "ghc_cgrun032.mll"),
         (ghc_oracle_ghc_cgrun033, "ghc", "ghc_cgrun033.mll"),
@@ -9721,6 +9742,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ghc_ds014, "ghc", "ghc_ds014.mll"),
         (ghc_oracle_ghc_regr001, "ghc", "ghc_regr001.mll"),
         (ghc_oracle_ghc_regr002, "ghc", "ghc_regr002.mll"),
+        (ghc_oracle_ghc_regr003, "ghc", "ghc_regr003.mll"),
         (ghc_oracle_ghc_regr004, "ghc", "ghc_regr004.mll"),
         (ghc_oracle_ghc_regr006, "ghc", "ghc_regr006.mll"),
         (ghc_oracle_ghc_regr007, "ghc", "ghc_regr007.mll"),

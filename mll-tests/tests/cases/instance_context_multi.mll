@@ -16,7 +16,7 @@ instance (Show a, Eq a) => Eq (Tagged a) where
 
 main :: IO ()
 main = do
-    assert (show (Pair 1 "hi") == "Pair 1 hi") "two-variable context"
+    assert (show (Pair 1 "hi") == "Pair 1 \"hi\"") "two-variable context"
     assert (show (Pair True (Pair 2 3)) == "Pair True Pair 2 3")
         "two-variable context, nested"
     assert (Tagged 3 == Tagged 3) "Show+Eq context on one variable"

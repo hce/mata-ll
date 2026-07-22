@@ -13,8 +13,8 @@ data C   = MkC  deriving (Show, Eq)
 
 main :: IO ()
 main = do
-    assert (show (MkAB, MkC) == "(MkAB, MkC)") "show (A_B, C)"
-    assert (show (MkA, MkBC) == "(MkA, MkBC)") "show (A, B_C)"
+    assert (show (MkAB, MkC) == "(MkAB,MkC)") "show (A_B, C)"
+    assert (show (MkA, MkBC) == "(MkA,MkBC)") "show (A, B_C)"
     assert ((MkAB, MkC) == (MkAB, MkC)) "eq (A_B, C)"
     assert ((MkA, MkBC) == (MkA, MkBC)) "eq (A, B_C)"
     putStrLn "ok"

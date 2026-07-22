@@ -1,0 +1,44 @@
+"hi"
+""
+"a\nb\tc\rd\\e\"f"
+"nul:\NUL5"
+[1,2,3]
+[]
+(1,True,"x")
+[(1,"a"),(2,"b")]
+[[1,2],[],[3]]
+P {px = 1, py = "s"}
+P {px = -1, py = ""}
+Just (P {px = 2, py = "q"})
+MkT (-1) 2.5
+Just (-1)
+Just (Just 3)
+Left "x"
+[Just 1,Nothing]
+0.0
+-0.0
+1.0
+3.0
+0.1
+0.30000000000000004
+0.3333333333333333
+123.456
+-2.5
+1234567.0
+9999999.5
+1.2345678e7
+1.0e7
+1.0e-2
+1.0e20
+6.02214076e23
+1.0e-9
+0.0
+Infinity
+-Infinity
+NaN
+MkN (-0.0)
+MkN Infinity
+MkN (-Infinity)
+MkN NaN
+Just (-2.5)
+show_ghc_parity: done

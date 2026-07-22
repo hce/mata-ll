@@ -53,10 +53,10 @@ main = do
     assert (doubleSized Red == 2) "doubleSize color"
     assert (doubleSized (Container 3) == 6) "doubleSize container"
 
-    -- show on describe result (typeclass method on typeclass method result)
-    -- In mll, show of String is identity (no quotes added)
-    assert (showDescribed Red == "red") "showDescribed color"
-    assert (showDescribed (Button "ok") == "button:ok") "showDescribed button"
+    -- show on describe result (typeclass method on typeclass method result);
+    -- show of String quotes, as in GHC
+    assert (showDescribed Red == "\"red\"") "showDescribed color"
+    assert (showDescribed (Button "ok") == "\"button:ok\"") "showDescribed button"
 
     -- Arithmetic on size results
     assert (size Red + size (Button "x") == 2) "size sum"

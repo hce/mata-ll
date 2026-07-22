@@ -18,7 +18,7 @@ use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
-use super::names::{is_builtin_op, lua_field_index, lua_quoted_string, primitive_method_lua_op, sanitize_name};
+use super::names::{is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
@@ -1470,7 +1470,11 @@ impl CodeGen {
             // The hex spelling is defined to wrap to the integer subtype.
             TLiteral::Integer(i64::MIN) => Expr::lit("0x8000000000000000"),
             TLiteral::Integer(n) => Expr::lit(n.to_string()),
-            TLiteral::Number(n) => Expr::lit(n.to_string()),
+            // Emitted as a FLOAT literal ("10.0"/"1e20", never "10"): Lua
+            // 5.3+ reads a bare integer spelling as a native integer, which
+            // put wrapping 64-bit integer arithmetic behind Double-typed
+            // expressions (see lua_number_literal).
+            TLiteral::Number(n) => Expr::lit(lua_number_literal(*n)),
             // Routed through the canonical escaper shared with pattern
             // literals and table keys (see `lua_quoted_string`).
             TLiteral::Str(s) => Expr::lit(lua_quoted_string(s)),

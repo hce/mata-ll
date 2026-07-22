@@ -1431,7 +1431,24 @@ Bounded, Functor, ToJSON, FromJSON, and LuaDict:
 
 The compiler generates the obvious structural instances. Enum and
 Bounded are supported for simple enum types (constructors with no
-fields). `LuaDict` generates no instance functions; it instead marks
+fields).
+
+`show` output matches GHC exactly. Strings are quoted and escaped by
+GHC's rules (`show "a\nb"` is `"\"a\\nb\""`, control characters take
+their GHC names — `\NUL`, `\ESC` — bytes above `\DEL` escape
+numerically, and GHC's `\&` breaks the two ambiguous juxtapositions).
+Lists and tuples separate with `,` and no space (`show [1,2]` is
+`"[1,2]"`, `show (1,2)` is `"(1,2)"`); record constructors show in
+record syntax (`P {px = 1, py = "s"}`, fields at precedence 0);
+positional constructor fields parenthesize at argument precedence
+(`Just (-1)`). `Number` (Double) uses GHC's shortest-identifying-digits
+algorithm (a port of GHC's `floatToDigits`) with GHC's layout:
+positional inside `[0.1, 10^7)` with a mandatory `.0` for integral
+values (`show 3.0` is `"3.0"`), `d.ddde<exp>` outside (`show 0.01` is
+`"1.0e-2"`, `show 12345678.0` is `"1.2345678e7"`), plus `NaN`,
+`Infinity`, `-Infinity`, and a signed `-0.0`.
+
+`LuaDict` generates no instance functions; it instead marks
 the type's Lua-boundary layout — a record crosses as a keyed table,
 and a nullary constructor of a `LuaDict` type crosses as its tag
 string (see "Boundaries between standard Lua and MATA-LL").

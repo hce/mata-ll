@@ -27,7 +27,7 @@ main = do
     assert (show v == "2") "let-bound (!!) element used in show"
     assert (show (head (tail (iterate inc 0))) == "1") "show of head.tail of iterate"
     assert (show ([1 ..] !! 5) == "6") "show of (!!) into enumFrom"
-    assert (show (iterate inc 0 !! 1, True) == "(1, True)")
+    assert (show (iterate inc 0 !! 1, True) == "(1,True)")
         "projected element inside a shown tuple"
 
     -- ============================================================
@@ -47,7 +47,7 @@ main = do
     -- take must materialize forced elements, not thunks
     -- ============================================================
     assert (take 3 (iterate inc 0) == [0, 1, 2]) "take of iterate"
-    assert (show (take 3 (iterate inc 0)) == "[0, 1, 2]") "show of take of iterate"
+    assert (show (take 3 (iterate inc 0)) == "[0,1,2]") "show of take of iterate"
 
     -- ============================================================
     -- Deeper head/tail chains

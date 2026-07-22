@@ -117,10 +117,12 @@ mechanical GHC twin of every eligible test case (through the shared shim
 goldens; the `ghc_oracle_*` tests then compare mata-ll's runtime output against
 those goldens byte-exactly on every test run, with no GHC needed in CI. Every
 measured divergence is itself pinned and enumerated in
-`mll-tests/tests/ghc-golden/DIVERGENCES.md`; all of them reduce to three `show`
-behaviours (unquoted `String` show, `", "` list/tuple separators, `Number`
-formatted via `%.14g`), and both a silent drift and a silent fix fail the
-suite.
+`mll-tests/tests/ghc-golden/DIVERGENCES.md`, and both a silent drift and a
+silent fix fail the suite. The original harvest: every runtime divergence
+reduced to three `show` behaviours (unquoted `String` show, `", "`
+list/tuple separators, `Number` formatted via `%.14g`), all three since
+converged on GHC — `show` now quotes and escapes strings, uses GHC's
+separators, and formats `Double` with a port of GHC's own `floatToDigits`.
 
 This removes belief from the *expected outputs*: for the oracle-covered cases
 the referee is GHC itself, not the author's recollection of GHC. It is only a

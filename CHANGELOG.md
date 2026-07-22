@@ -31,6 +31,33 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Breaking: `show` output now matches GHC exactly.** The three measured
+  divergences recorded in `DIVERGENCES.md` are converged:
+  - `show` of `String` quotes and escapes by GHC's rules: `show "hi"` is
+    `"\"hi\""`, control characters take their GHC names (`\NUL`, `\ESC`),
+    `\n`/`\t`/`\a`-style shorthands apply, bytes above `\DEL` escape
+    numerically, and GHC's `\&` rule breaks the two ambiguous
+    juxtapositions (a numeric escape before a digit, `\SO` before `H`).
+  - List and tuple separators are `,` with no space (`show [1,2]` is
+    `"[1,2]"`, `show (1,2)` is `"(1,2)"`), as in GHC. Record constructors
+    show in GHC's record syntax — `P {px = 1, py = "s"}`, fields at
+    precedence 0 — instead of positionally.
+  - `Number` (`Double`) show is a faithful port of GHC's Burger-Dybvig
+    `floatToDigits` plus `showFloat`'s layout: shortest identifying digits,
+    positional inside `[0.1, 10^7)` with a mandatory `.0` (`show 3.0` is
+    `"3.0"`), `d.ddde<exp>` outside (`show 0.01` is `"1.0e-2"`,
+    `show 12345678.0` is `"1.2345678e7"`), and GHC's `NaN`/`Infinity`/
+    `-0.0` spellings. Not a printf probe: GHC's stopping bounds are strict
+    and its tie rounds up, which differs from correctly-rounding shortest
+    printers in half-ulp boundary cases; the port is verified
+    byte-identical to GHC 9.14.1 over a 100k random-bit-pattern corpus on
+    Lua 5.5 and LuaJIT.
+  Negative numbers and negative specials parenthesize at argument
+  precedence exactly as GHC: `show (Just (-1))` is `"Just (-1)"`,
+  `MkN (-Infinity)` parenthesizes, `MkN NaN` does not. With this,
+  `DIVERGENCES.md` carries no pinned runtime divergences; the nineteen
+  formerly divergent cases are ordinary GHC-goldened oracle cases now.
+
 - **Breaking: `LuaIterator`'s result must now be written as an explicit
   list.** `LuaIterator "string.gmatch" [String]` names the result list
   directly; the old bare-element shorthand (`LuaIterator "string.gmatch"
@@ -269,6 +296,13 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`Number` literals emit as Lua floats.** A `Number` literal with a whole
+  value (`10.0`, `1.0`) was emitted as a bare integer spelling, which Lua
+  5.3+ reads as a native integer — so Double-typed arithmetic silently ran
+  on wrapping 64-bit integers (`10.0^20`-style products wrapped past 2^63)
+  and `negate 0.0` lost the sign of zero. Number literals now always carry
+  the float marker (`10.0`, `1e20`) in the generated Lua, in expressions
+  and patterns both.
 - First-class `>>=`/`>>` no longer crash or miscompile. `m >>= f` with a
   non-lambda continuation (`step 1 >>= print`) executed the chain and then
   raised "attempt to call a nil value": the generated code called the result
