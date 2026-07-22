@@ -16,6 +16,42 @@ MATA-LL TODO
       collapses), or maintain the env's free-variable set incrementally.
       Needs its own change with the perf benchmarks re-run.
 
+- [ ] **Lexer string escapes are a GHC subset.** The input side accepts only
+      `\n \t \r \\ \" \0`; GHC also has `\a \b \f \v`, numeric escapes
+      (`\181`), named control escapes (`\SOH` … `\US`, `\DEL`), and the `\&`
+      empty escape. Worse than missing: mata-ll's `\0` is not maximal-munch,
+      so GHC source `"\05"` means `['\5']` but mata-ll reads `['\0','5']` — a
+      silent wrong value, not a rejection. The `show` side is full GHC parity
+      (byte-verified against GHC's `showLitString`); this is the remaining
+      input-syntax gap. Fix is lexer-only: maximal-munch numeric escapes,
+      the named/shorthand tables (they already exist in the show runtime),
+      and `\&` as a zero-width separator.
+
+- [ ] **No scientific-notation literals.** `1.0e-2` lexes as the application
+      `1.0 e - 2` and fails with "Unbound variable: e". GHC accepts
+      `1.0e-2`, `1e5`, `2.5E+3` (integer literals with an exponent are
+      Fractional). Ironic asymmetry: `show` now PRODUCES GHC's exponent
+      notation (`1.2345678e7`) but the lexer cannot read it back, so show
+      output is not round-trippable as source. Lexer + literal-typing change.
+
+- [ ] **Right-section operand precedence is more permissive than GHC.**
+      Prefix minus in right sections now rejects per GHC (`(+ -2)`), but the
+      general rule is not enforced: `(== a || b)` is accepted where GHC
+      requires the section operand to parse at the operator's right binding
+      power (it reads it as `(== (a || b))` — wrong grouping, not just lax
+      acceptance). Enforcing it changes acceptance of existing programs, so
+      it needs a deliberate pass with a clear error message and a corpus
+      check, same shape as the prefix-minus change.
+
+- [ ] **Type-erased generic `show` cannot split Integer/Double on LuaJIT.**
+      LuaJIT has no `math.type`, so the last-resort runtime-dispatch `show`
+      path shows the double `1.0` as `1` there. Every type-directed path
+      (`show_Number`, `show_Integer`, containers with known element types —
+      i.e. everything realistic code reaches) is exact on every interpreter.
+      Options if it ever matters: carry a type tag into the generic path, or
+      accept and document as an interpreter limitation alongside the
+      existing 64-bit LuaJIT skips.
+
 ## Completed
 
 - [x] **GHC as a differential oracle (was planned #2).** The parity suite
