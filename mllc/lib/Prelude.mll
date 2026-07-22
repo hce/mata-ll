@@ -175,6 +175,16 @@ sum t = foldl (\acc x -> acc + x) 0 t
 product :: (Foldable t, Num a) => t a -> a
 product t = foldl (\acc x -> acc * x) 1 t
 
+-- Parity predicates over any Integral, defined via `rem` exactly as GHC:
+-- `rem` truncates toward zero, so the sign of a negative argument never
+-- reaches the comparison against 0 with a nonzero remainder of the wrong
+-- sign — (-3) `rem` 2 is -1, and -1 == 0 is False, as required.
+even :: Integral a => a -> Bool
+even n = n `rem` 2 == 0
+
+odd :: Integral a => a -> Bool
+odd = not . even
+
 -- Largest / smallest element. Both error on an empty structure.
 maximum :: (Ord a, Foldable t) => t a -> a
 maximum t = case foldr (\x xs -> x : xs) [] t of

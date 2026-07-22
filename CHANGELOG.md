@@ -86,6 +86,12 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **`even` and `odd` in the Prelude (GHC parity).** GHC's exact signatures
+  (`even, odd :: Integral a => a -> Bool`) and semantics, including
+  negatives. HASKDIFF.md's closing example `take 10 (filter even [1 ..])`
+  now compiles and runs as documented. Pinned against real GHC in the
+  differential oracle (`even_odd.mll`); unused, the definitions are removed
+  by dead-code elimination, so existing programs compile byte-identical.
 - **Record braces may open on a following line.** Record construction and
   record update now use the same cross-line continuation rule as application
   arguments: the `{ … }` may sit on the next line when indented strictly past

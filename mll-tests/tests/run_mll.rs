@@ -748,6 +748,7 @@ mll_test!(linear_affine_basic, "linear_affine_basic.mll");
 mll_test!(linear_mult_poly, "linear_mult_poly.mll");
 mll_test!(getline, "getline.mll");
 mll_test!(readline, "readline.mll");
+mll_test!(even_odd, "even_odd.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
@@ -9298,6 +9299,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_do_notation, "cases", "do_notation.mll"),
         (ghc_oracle_either_ordering, "cases", "either_ordering.mll"),
         (ghc_oracle_enum_range, "cases", "enum_range.mll"),
+        (ghc_oracle_even_odd, "cases", "even_odd.mll"),
         (ghc_oracle_exceptions, "cases", "exceptions.mll"),
         (ghc_oracle_existential_constraints, "cases", "existential_constraints.mll"),
         (ghc_oracle_existentials, "cases", "existentials.mll"),
