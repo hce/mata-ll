@@ -169,6 +169,13 @@ fn emitted_parens_are_normalized() {
             // A case that needs CLI-only setup is not this test's business.
             Err(_) => continue,
         };
+        // Dead-branch cleanup (pass 2): the `otherwise` guard arm is
+        // always rewritten to `else`.
+        assert!(
+            !lua.contains("elseif true then"),
+            "{}: `elseif true` survived dead-branch cleanup",
+            path.display()
+        );
         for forbidden in [
             "return (__mll",
             "return (__force",
@@ -737,6 +744,7 @@ mll_test!(tuple_eq_adt_elems, "tuple_eq_adt_elems.mll");
 mll_test!(multi_clause_class_constraint, "multi_clause_class_constraint.mll");
 mll_test!(lazy_cheap_bindings, "lazy_cheap_bindings.mll");
 mll_test!(nested_just_pattern, "nested_just_pattern.mll");
+mll_test!(non_exhaustive_live, "non_exhaustive_live.mll");
 mll_test!(constructor_shadowing, "constructor_shadowing.mll");
 mll_test!(constructor_shadowing_json, "constructor_shadowing_json.mll");
 mll_test!(exitvalue_prelude, "exitvalue_prelude.mll");

@@ -26,11 +26,173 @@
 //! an unrecognized name can be a multi-returning host function, and there
 //! `(f(x))` is Lua's truncation operator.
 
+//! Pass 2 — dead-branch and wrapper cleanup. Four rewrites, applied
+//! bottom-up per block: (1) an `elseif true` arm (the `otherwise` guard)
+//! becomes `else`, later arms are dead; a whole `if true` becomes a `do`
+//! block (NOT a splice — its locals must stay scoped away from following
+//! statements). (2) A two-arm chain whose second condition is the first
+//! with one top-level ==/~= swapped becomes if/else — sound because the
+//! complement evaluates exactly the subexpressions the first condition
+//! already evaluated (thunk forces are memoized). (3) Statements after a
+//! diverging statement (every path returns or raises) are dead and
+//! dropped — this kills the non-exhaustive fall-off after an exhaustive
+//! chain. A `Stmt::Raw` is never treated as diverging. (4) A `do` block
+//! in final position splices into its parent: nothing follows, so its
+//! locals leak nowhere observable.
+
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 
 /// Run all passes over the module body.
 pub(super) fn run(stmts: &mut Vec<Stmt>) {
     normalize_parens_block(stmts);
+    dead_branch_block(stmts);
+}
+
+fn is_true_lit(e: &Expr) -> bool {
+    matches!(e, Expr::Lit(s) if s == "true")
+}
+
+/// Render an expression to text for syntactic comparison (comparison only —
+/// never used to rewrite).
+fn render_str(e: &Expr) -> String {
+    let mut s = String::new();
+    e.render(0, &mut s);
+    s
+}
+
+/// `b` is `a` with the one top-level `==`/`~=` swapped.
+fn complement_conds(a: &Expr, b: &Expr) -> bool {
+    let (Expr::Binop(op1, l1, r1), Expr::Binop(op2, l2, r2)) = (a, b) else {
+        return false;
+    };
+    let swapped = (op1 == "==" && op2 == "~=") || (op1 == "~=" && op2 == "==");
+    swapped && render_str(l1) == render_str(l2) && render_str(r1) == render_str(r2)
+}
+
+/// Every path through the statement ends in `return` or a raised error.
+fn stmt_diverges(s: &Stmt) -> bool {
+    match s {
+        Stmt::Return(_) => true,
+        Stmt::Expr(Expr::Call(f, _)) => matches!(f.as_ref(), Expr::Name(n) if n == "error"),
+        Stmt::If { then_b, elseifs, else_b: Some(else_b), .. } => {
+            block_diverges(then_b)
+                && elseifs.iter().all(|(_, b)| block_diverges(b))
+                && block_diverges(else_b)
+        }
+        Stmt::Do(b) => block_diverges(b),
+        _ => false,
+    }
+}
+
+fn block_diverges(b: &Block) -> bool {
+    b.0.last().is_some_and(stmt_diverges)
+}
+
+fn dead_branch_block(stmts: &mut Vec<Stmt>) {
+    // Bottom-up: children first, then this block's own rewrites.
+    for s in stmts.iter_mut() {
+        dead_branch_stmt(s);
+    }
+    // (3) Drop statements after the first diverging one.
+    if let Some(i) = stmts.iter().position(stmt_diverges)
+        && i + 1 < stmts.len()
+    {
+        stmts.truncate(i + 1);
+    }
+    // (4) Splice a final `do` block into this one.
+    if matches!(stmts.last(), Some(Stmt::Do(_))) {
+        let Some(Stmt::Do(Block(inner))) = stmts.pop() else { unreachable!() };
+        stmts.extend(inner);
+    }
+}
+
+fn dead_branch_stmt(stmt: &mut Stmt) {
+    // Recurse into nested function-literal bodies inside expressions.
+    fn expr_bodies(e: &mut Expr) {
+        match e {
+            Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
+            Expr::Paren(e) | Expr::Neg(e) => expr_bodies(e),
+            Expr::Call(f, args) => {
+                expr_bodies(f);
+                for a in args {
+                    expr_bodies(a);
+                }
+            }
+            Expr::Method(recv, _, args) => {
+                expr_bodies(recv);
+                for a in args {
+                    expr_bodies(a);
+                }
+            }
+            Expr::Index(base, _) => expr_bodies(base),
+            Expr::Binop(_, l, r) => {
+                expr_bodies(l);
+                expr_bodies(r);
+            }
+            Expr::Table(items) | Expr::TableSpaced(items) => {
+                for item in items {
+                    match item {
+                        Item::Pos(e) | Item::KV(_, e) => expr_bodies(e),
+                    }
+                }
+            }
+            Expr::Func(_, body) => match body {
+                FuncBody::Inline(stmts) => dead_branch_block(stmts),
+                FuncBody::Block(Block(stmts)) => dead_branch_block(stmts),
+            },
+        }
+    }
+
+    match stmt {
+        Stmt::Raw(_) => {}
+        Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
+            expr_bodies(e)
+        }
+        Stmt::Local(_, None) => {}
+        Stmt::AssignIf { cond, then_e, else_e, .. } => {
+            expr_bodies(cond);
+            expr_bodies(then_e);
+            expr_bodies(else_e);
+        }
+        Stmt::Do(b) => dead_branch_block(&mut b.0),
+        Stmt::Function { body, .. } => dead_branch_block(&mut body.0),
+        Stmt::ReturnTable(entries) => {
+            for (_, e) in entries {
+                expr_bodies(e);
+            }
+        }
+        Stmt::If { cond, then_b, elseifs, else_b } => {
+            expr_bodies(cond);
+            dead_branch_block(&mut then_b.0);
+            for (c, b) in elseifs.iter_mut() {
+                expr_bodies(c);
+                dead_branch_block(&mut b.0);
+            }
+            if let Some(b) = else_b.as_mut() {
+                dead_branch_block(&mut b.0);
+            }
+            // (1) `elseif true` becomes `else`; later arms and the old
+            // `else` are unreachable.
+            if let Some(i) = elseifs.iter().position(|(c, _)| is_true_lit(c)) {
+                let (_, b) = elseifs.swap_remove(i);
+                elseifs.truncate(i);
+                *else_b = Some(b);
+            }
+            // A whole `if true` keeps only its first arm, as a `do` block
+            // so its locals stay scoped; a final-position `do` is spliced
+            // by the parent block's rewrite (4).
+            if is_true_lit(cond) {
+                let then_b = std::mem::replace(then_b, Block(Vec::new()));
+                *stmt = Stmt::Do(then_b);
+                return;
+            }
+            // (2) Complement collapse: `if C … elseif ¬C …` → if/else.
+            if elseifs.len() == 1 && else_b.is_none() && complement_conds(cond, &elseifs[0].0) {
+                let (_, b) = elseifs.pop().expect("one elseif");
+                *else_b = Some(b);
+            }
+        }
+    }
 }
 
 /// What the position enclosing an expression slot proves about a `Paren`

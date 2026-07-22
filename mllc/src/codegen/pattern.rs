@@ -74,6 +74,11 @@ impl CodeGen {
         if clauses.iter().any(|c| !c.guards.is_empty()) {
             return self.pattern_match_guarded_block(params, clauses);
         }
+        // When the clauses cover every constructor of the scrutinized type,
+        // the last clause's condition is implied by every earlier one failing:
+        // emit it as `else` and skip the non-exhaustive error. Only this
+        // TIR-facing layer can prove coverage — it has the constructor totals.
+        let exhaustive = self.clauses_cover_all_constructors(clauses);
         let mut chain: Option<(Expr, Block)> = None;
         let mut elseifs: Vec<(Expr, Block)> = Vec::new();
         let mut else_b: Option<Block> = None;
@@ -124,6 +129,13 @@ impl CodeGen {
             bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
             if chain.is_none() {
                 chain = Some((cond, Block(bs)));
+            } else if exhaustive && i == clauses.len() - 1 {
+                // Last clause of a constructor-exhaustive match: its
+                // condition always holds when reached (the bindings embed
+                // their own scrutinee forces, and every earlier clause
+                // already forced the same scrutinee).
+                else_b = Some(Block(bs));
+                fell_through = false;
             } else {
                 elseifs.push((cond, Block(bs)));
             }
@@ -214,6 +226,91 @@ impl CodeGen {
         }
         stmts.push(Self::non_exhaustive_stmt());
         Block(stmts)
+    }
+
+    /// True when every clause is a bare constructor match in ONE shared
+    /// column — every other column irrefutable, every constructor argument
+    /// irrefutable — and the constructors seen cover the scrutinized type
+    /// completely. The builtin two-variant types (Bool, Maybe, list) are
+    /// covered by name; registered ADTs and enums by their variant totals.
+    /// Any shape this cannot prove (literals, nested refutable patterns,
+    /// newtypes, unregistered constructors) reports false and keeps the
+    /// non-exhaustive fall-off.
+    fn clauses_cover_all_constructors(&self, clauses: &[TClause]) -> bool {
+        fn strip(p: &TPattern) -> &TPattern {
+            let mut p = p;
+            while let TPattern::Paren(inner) = p {
+                p = inner;
+            }
+            p
+        }
+        fn irrefutable(p: &TPattern) -> bool {
+            matches!(strip(p), TPattern::Var(..) | TPattern::Wildcard)
+        }
+        if clauses.len() < 2 {
+            return false;
+        }
+        // Exactly one refutable column, shared by every clause.
+        let ncols = clauses[0].patterns.len();
+        let mut col: Option<usize> = None;
+        for c in clauses {
+            if c.patterns.len() != ncols {
+                return false;
+            }
+            let mut this = None;
+            for (i, p) in c.patterns.iter().enumerate() {
+                if !irrefutable(p) {
+                    if this.is_some() {
+                        return false;
+                    }
+                    this = Some(i);
+                }
+            }
+            let Some(i) = this else { return false };
+            match col {
+                None => col = Some(i),
+                Some(j) if j == i => {}
+                _ => return false,
+            }
+        }
+        let col = col.expect("at least one clause");
+        let mut names: Vec<&str> = Vec::new();
+        for c in clauses {
+            let TPattern::Constructor { name, args } = strip(&c.patterns[col]) else {
+                return false;
+            };
+            if self.is_newtype(name) || !args.iter().all(irrefutable) {
+                return false;
+            }
+            if !names.contains(&name.as_str()) {
+                names.push(name);
+            }
+        }
+        let covers_pair = |a: &str, b: &str| {
+            names.iter().all(|n| *n == a || *n == b)
+                && names.contains(&a)
+                && names.contains(&b)
+        };
+        if covers_pair("True", "False") || covers_pair("Just", "Nothing") || covers_pair(":", "[]")
+        {
+            return true;
+        }
+        // Registered constructors: the typechecker guarantees one type per
+        // match, so coverage is "every variant tag seen".
+        let mut tags = std::collections::HashSet::new();
+        let mut total = None;
+        for n in &names {
+            let Some((tag, t, _)) = self.constructor_info(n) else {
+                return false;
+            };
+            tags.insert(tag);
+            match total {
+                None => total = Some(t),
+                Some(prev) if prev == t => {}
+                _ => return false,
+            }
+        }
+        total.is_some_and(|t| tags.len() == t)
     }
 
     /// A sub-pattern that inspects its value (matches a tag, compares a
