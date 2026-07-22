@@ -646,6 +646,7 @@ mll_test!(typeclasses, "typeclasses.mll");
 mll_test!(superclass, "superclass.mll");
 mll_test!(where_clauses, "where_clauses.mll");
 mll_test!(where_io_types, "where_io_types.mll");
+mll_test!(bind_first_class, "bind_first_class.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
@@ -9491,6 +9492,7 @@ macro_rules! for_each_ghc_oracle_case {
         $cb! {
         (ghc_oracle_action_result_whnf, "cases", "action_result_whnf.mll"),
         (ghc_oracle_basics, "cases", "basics.mll"),
+        (ghc_oracle_bind_first_class, "cases", "bind_first_class.mll"),
         (ghc_oracle_case_guards, "cases", "case_guards.mll"),
         (ghc_oracle_case_in_do_let, "cases", "case_in_do_let.mll"),
         (ghc_oracle_clause_local_scope, "cases", "clause_local_scope.mll"),

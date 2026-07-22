@@ -463,12 +463,30 @@ impl CodeGen {
                             let b = self.bind_chain_block(expr, true);
                             return Expr::Func(vec![], FuncBody::Block(b));
                         } else {
-                            // m >>= f (non-lambda): wrap as action
-                            let f_e = self.expr_ast(rhs);
+                            // m >>= f (non-lambda RHS, e.g. `step 1 >>= print`):
+                            // under the calling convention, applying an IO-typed
+                            // function to its argument PERFORMS the action and
+                            // returns the result carrying at most one pending
+                            // pure box (see the __mll_run contract in the
+                            // runtime). So the continuation's application must
+                            // flow through the FORWARDING runner, which returns
+                            // a plain result as-is, forwards a pure box, and
+                            // calls a first-class action closure. Calling the
+                            // application result unconditionally — the previous
+                            // emission — crashed ("attempt to call a nil
+                            // value") whenever `f x` returned a plain value,
+                            // which is the normal case.
+                            let f_e = if self.expr_yields_whnf(rhs) {
+                                self.callee_ast(rhs)
+                            } else {
+                                // A thunk-valued continuation (a lazily bound
+                                // local) must be forced to a callable first.
+                                Expr::force(self.expr_ast(rhs))
+                            };
                             let m_e = self.action_run_ast(lhs, false);
-                            return Expr::inline_fn0(Expr::call(
-                                Expr::call(Expr::paren(f_e), vec![m_e]),
-                                vec![],
+                            return Expr::inline_fn0(Expr::call_named(
+                                "__mll_run_tail",
+                                vec![Expr::call(f_e, vec![m_e])],
                             ));
                         }
                     }
@@ -826,6 +844,54 @@ impl CodeGen {
                         FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
                             "__mll_cons",
                             vec![Expr::name("_a"), Expr::name("_b")],
+                        ))]),
+                    );
+                }
+                if op == ">>=" {
+                    // First-class (>>=) at an action monad (IO/LuaIO/ST —
+                    // Maybe/[] resolve to bind_Maybe/bind_List in mono).
+                    // Applying it must BUILD an action value, not perform
+                    // it: return a deferred closure that, when run, runs
+                    // the LHS action and forwards the continuation's
+                    // application through the tail runner — the same shape
+                    // the inline `m >>= f` non-lambda arm emits. The old
+                    // fallback emitted `_a >>= _b` verbatim: a Lua syntax
+                    // error.
+                    return Expr::Func(
+                        vec!["_a".into(), "_b".into()],
+                        FuncBody::Inline(vec![Stmt::Return(Expr::inline_fn0(
+                            Expr::call_named(
+                                "__mll_run_tail",
+                                vec![Expr::call(
+                                    Expr::force(Expr::name("_b")),
+                                    vec![Expr::call_named(
+                                        "__mll_run",
+                                        vec![Expr::name("_a")],
+                                    )],
+                                )],
+                            ),
+                        ))]),
+                    );
+                }
+                if op == ">>" {
+                    // First-class (>>) at an action monad: build a deferred
+                    // closure that performs the LHS for its effects (result
+                    // discarded, so the forwarding runner suffices) and
+                    // tail-runs the RHS. See the (>>=) arm above.
+                    return Expr::Func(
+                        vec!["_a".into(), "_b".into()],
+                        FuncBody::Inline(vec![Stmt::Return(Expr::Func(
+                            vec![],
+                            FuncBody::Inline(vec![
+                                Stmt::Expr(Expr::call_named(
+                                    "__mll_run_tail",
+                                    vec![Expr::name("_a")],
+                                )),
+                                Stmt::Return(Expr::call_named(
+                                    "__mll_run_tail",
+                                    vec![Expr::name("_b")],
+                                )),
+                            ]),
                         ))]),
                     );
                 }

@@ -269,6 +269,19 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- First-class `>>=`/`>>` no longer crash or miscompile. `m >>= f` with a
+  non-lambda continuation (`step 1 >>= print`) executed the chain and then
+  raised "attempt to call a nil value": the generated code called the result
+  of `f x` as if it were an action closure, but applying an IO-typed function
+  already performs the action and returns its result. The application now
+  flows through the runtime's forwarding runner, which returns a plain result
+  as-is, forwards a pure box, and calls a first-class action closure — so
+  non-lambda continuations, chains (`a >>= f >>= g`), and continuations
+  ending in `return` all behave as in GHC. Passing the operators themselves
+  as values (`apply2 (>>=)`, `thenOp (>>)`) emitted `_a >>= _b` verbatim into
+  the Lua output — a Lua syntax error; they now build proper deferred action
+  closures. Both shapes were unreachable while `>>=` was wrongly
+  right-associative and became ordinary code with the `infixl 1` fixity fix.
 - **Standalone programs run `main` even when invoked with command-line
   arguments.** The entry-point stub decided "loaded via `require`?" by testing
   whether the chunk's first vararg was nil — but a standalone interpreter
