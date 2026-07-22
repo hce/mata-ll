@@ -1411,9 +1411,18 @@ impl Checker {
                         current = body;
                         continue;
                     }
-                    // >>= without Lambda rhs — not a bind chain continuation
-                    stmts.push(BindStmt::Bind { op, lhs, param: "_" });
-                    current = rhs;
+                    // Non-lambda RHS: a first-class use of the operator —
+                    // `m >>= f` applies a continuation FUNCTION, `a >> b`
+                    // sequences two action expressions. Either way the whole
+                    // InfixApp is the chain's TERMINAL, typed below by the
+                    // ordinary infix rule (the same one that types it at top
+                    // level). It must NOT be flattened into one more
+                    // statement: doing so made the rhs the terminal, so a
+                    // final `step 1 >>= print` after another do-statement
+                    // unified `print`'s function type with the do-block's
+                    // monad ("Cannot unify 'IO a' with 'b -> IO ()'"), and a
+                    // final `a >> b` forced `>>`'s second argument against a
+                    // synthetic continuation arrow ("'IO a' with 'b -> c'").
                     break;
                 }
                 Expr::Let { binds, body } => {

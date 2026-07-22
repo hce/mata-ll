@@ -325,6 +325,20 @@ API of the `mllc` library crate.)
   and `negate 0.0` lost the sign of zero. Number literals now always carry
   the float marker (`10.0`, `1e20`) in the generated Lua, in expressions
   and patterns both.
+- **A non-lambda bind as the final do-statement now typechecks.** With at
+  least one statement before it, a final `step 1 >>= print` (or
+  `a >> print 9`, or a chain) was rejected — "Cannot unify 'IO a' with
+  'b -> IO ()'" — even though the same expression typechecked at top level
+  and in non-final statement position. The do-chain flattener treated the
+  operator's right operand as the chain's next statement, so `print`'s
+  function type was unified with the do-block's monad (and `>>`'s second
+  argument against a synthetic continuation arrow). A non-lambda right
+  operand now ends the flattened spine: the whole expression is the chain's
+  terminal, typed by the ordinary infix rule. Ill-typed finals keep GHC's
+  rejection: a final `IO Integer` statement in an `IO ()` do-block fails
+  with the same Integer-vs-() mismatch as GHC. This defect predates the
+  fixity fix (it reproduces on builds where `>>=` was still
+  right-associative); the `infixl 1` change only made the shape common.
 - First-class `>>=`/`>>` no longer crash or miscompile. `m >>= f` with a
   non-lambda continuation (`step 1 >>= print`) executed the chain and then
   raised "attempt to call a nil value": the generated code called the result

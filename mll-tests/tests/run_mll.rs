@@ -6660,6 +6660,35 @@ fn non_associative_chains_are_rejected_impl() {
     }
 }
 
+/// A non-lambda-RHS bind in FINAL do-statement position, preceded by
+/// another statement, must type like the same expression at top level
+/// (the flattener treats it as the chain terminal). The well-typed shapes
+/// are covered by the bind_first_class GHC-golden case; this pins the
+/// ill-typed one: a final `step 1 >>= step` in an `IO ()` do-block is
+/// rejected — by GHC ("Couldn't match type 'Integer' with '()'",
+/// verified against 9.14.1) and by mata-ll with the same unification
+/// mismatch. The regression this guards: the flattener used to treat the
+/// continuation FUNCTION as the terminal and reject even well-typed
+/// programs with "Cannot unify 'IO a' with 'b -> IO ()'".
+#[test]
+fn final_do_bind_types_like_top_level() {
+    on_compiler_stack(final_do_bind_types_like_top_level_impl)
+}
+
+fn final_do_bind_types_like_top_level_impl() {
+    let e = compile_err(
+        "step :: Integer -> IO Integer\nstep n = return (n + 1)\n\nmain :: IO ()\nmain = do\n    putStrLn \"x\"\n    step 1 >>= step\n",
+    );
+    assert!(
+        e.contains("Integer") && e.contains("()"),
+        "must reject with the Integer-vs-() mismatch GHC reports, got: {e}"
+    );
+    assert!(
+        !e.contains("->"),
+        "must not leak a synthetic continuation arrow into the error, got: {e}"
+    );
+}
+
 /// Prefix minus follows GHC exactly: it has the fixity of binary '-'
 /// (infixl 6). It cannot be the right operand of any precedence >= 6
 /// operator (`a + -b`, `a * -2`, ``a `div` -2`` are parse errors), its

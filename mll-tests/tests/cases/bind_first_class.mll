@@ -41,3 +41,24 @@ main = do
   -- first-class bind bound locally
   let b = (>>=)
   b (step 40) print
+  finalChain
+  finalThen
+  -- FINAL do-statement position, preceded by other statements: the
+  -- typechecker's chain flattener must treat a non-lambda-RHS bind as the
+  -- chain's terminal expression, not as one more statement (it used to
+  -- unify `print`'s function type with the do-block's monad and reject
+  -- this program: "Cannot unify 'IO a' with 'b -> IO ()'").
+  step 50 >>= print
+
+-- chained binds as the final statement of a do block
+finalChain :: IO ()
+finalChain = do
+  putStrLn "chain"
+  step 60 >>= step >>= print
+
+-- `>>` with non-lambda operands as the final statement (was rejected with
+-- "Cannot unify 'IO a' with 'b -> c'")
+finalThen :: IO ()
+finalThen = do
+  putStrLn "then"
+  step 70 >> print 71
