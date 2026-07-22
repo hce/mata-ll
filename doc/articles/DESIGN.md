@@ -309,6 +309,23 @@ tree and the tree is printed once at the end. No generator writes
 output text directly, so statement well-formedness and grouping are
 carried by structure rather than re-proven at each emission site.
 
+Before printing, an optimization pipeline (`opt.rs`) runs over the
+finished statement list: paren normalization (grouping parens are
+explicit nodes placed defensively by emission sites; the pass drops
+one exactly where the enclosing position proves it redundant, keeping
+`return f(x)` a proper tail call while preserving the
+paren-as-truncation semantics around possibly multi-returning
+callees), dead-branch cleanup (the `otherwise` arm becomes `else`,
+complementary two-arm chains collapse to if/else, statements after a
+diverging statement are dropped), IIFE flattening (value- and
+return-position `case`/`let` closures splice into the enclosing
+block, budgeted against Lua's 200-local limit), and a
+force-of-known-WHNF safety net (`__force(x)` of a single-assignment
+local whose one value is WHNF by construction rewrites to `x`).
+`Raw` nodes are opaque to every pass. The pipeline runs before
+printing, so the on-demand prelude scan sees the optimized body and
+shrinks with it.
+
 Generated output is deterministic: compiling the same source twice
 produces byte-identical Lua. The last source of non-determinism
 (specialization resolution order in the monomorphizer's

@@ -86,6 +86,40 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **AST optimization pipeline over the emitted Lua.** A pass pipeline
+  (`codegen/opt.rs`) now runs on the finished statement tree before printing;
+  runtime behavior is unchanged (the GHC differential goldens, the laziness
+  contract cases, and the full corpus pass on Lua 5.5 and LuaJIT), while the
+  output gets smaller and faster:
+  - *Paren normalization.* Redundant grouping parens are dropped exactly where
+    the enclosing position proves them so; `return (f(x))` becomes the proper
+    tail call `return f(x)` for provably single-return callees and in thunk
+    bodies. Parens around possibly multi-returning host calls are kept — there
+    the paren is Lua's truncation operator.
+  - *Dead-branch cleanup.* The `otherwise` guard arm becomes `else`,
+    complementary two-arm chains collapse to if/else, and statements after a
+    diverging statement are dropped. With the new exhaustive-match emission
+    (below), dead `error("Non-exhaustive patterns")` fall-offs in the test
+    corpus went from 790 to 296.
+  - *IIFE flattening.* Value- and return-position `case`/`let` closures splice
+    into the enclosing block (corpus IIFE count 3153 → 2468), budgeted against
+    Lua's 200-local limit and declining on any name collision.
+  - *Force-of-known-WHNF locals.* `__force(x)` of a single-assignment local
+    whose one value is WHNF by construction rewrites to `x`.
+- **Exhaustive constructor matches emit `else`.** When a guard-free clause
+  chain covers every constructor of the scrutinized type, the last clause is
+  emitted as `else` and the unreachable non-exhaustive error is dropped.
+- **Fewer redundant forces.** Where-bound function-group names and
+  `_warg`/`_arg` entry rebinds are marked concrete, so their uses are no
+  longer re-forced (`__force(go)(…)` → `go(…)`); guard chains that provably
+  force a parameter on every path now force it once at entry instead of at
+  every use. Guard conditions also render at the correct indentation (they
+  were previously printed relative to column 0). Tracker benchmark: ~9%
+  faster on LuaJIT (median 11.6 s → 10.6 s for the 47 s reference decode).
+- **Single-result FFI wrappers truncate.** A foreign import whose declared
+  result is a single value now truncates a multi-returning host call
+  (`return (math.modf(x))`) instead of forwarding stray extra values — the
+  declared type is the contract.
 - **`even` and `odd` in the Prelude (GHC parity).** GHC's exact signatures
   (`even, odd :: Integral a => a -> Bool`) and semantics, including
   negatives. HASKDIFF.md's closing example `take 10 (filter even [1 ..])`
