@@ -632,6 +632,7 @@ mll_test!(show_either, "show_either.mll");
 mll_test!(case_guards, "case_guards.mll");
 mll_test!(infix_def, "infix_def.mll");
 mll_test!(seq_tco, "seq_tco.mll");
+mll_test!(tco_case_let, "tco_case_let.mll");
 mll_test!(seq_forms, "seq_forms.mll");
 mll_test!(self_referential_caf, "self_referential_caf.mll");
 mll_test!(lazy_take_zip, "lazy_take_zip.mll");
@@ -687,6 +688,7 @@ mll_test!(derive_enum, "derive_enum.mll");
 mll_test!(nested_eq, "nested_eq.mll");
 mll_test!(st_return, "st_return.mll");
 mll_test!(local_overflow, "local_overflow.mll");
+mll_test!(locals_iife_limit, "locals_iife_limit.mll");
 mll_test!(existentials, "existentials.mll");
 // Constrained existentials (`forall a. Show a => Con a`): the pack side
 // proves the instance, the unpack side gets exactly the declared classes
