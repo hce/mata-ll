@@ -35,6 +35,22 @@ fn run_mll_file(path: &Path) {
     }
 }
 
+/// Run a test body on a thread with the compiler's calibrated stack.
+/// Any test that calls `mllc::compile` on nontrivial input must go through
+/// this (or `run_mll_file`): the nesting-depth limit assumes
+/// `mllc::COMPILER_STACK_SIZE`, and libtest worker threads are far smaller —
+/// corpus cases like stress_long_do_200 overflow them in debug builds.
+fn on_compiler_stack(f: impl FnOnce() + Send + 'static) {
+    let result = std::thread::Builder::new()
+        .stack_size(mllc::COMPILER_STACK_SIZE)
+        .spawn(f)
+        .unwrap()
+        .join();
+    if let Err(e) = result {
+        std::panic::resume_unwind(e);
+    }
+}
+
 macro_rules! mll_test {
     ($name:ident, $file:expr) => {
         #[test]
@@ -156,6 +172,10 @@ main = do
 /// single-value result KEEPS its truncating paren.
 #[test]
 fn emitted_parens_are_normalized() {
+    on_compiler_stack(emitted_parens_are_normalized_impl)
+}
+
+fn emitted_parens_are_normalized_impl() {
     let lib_path = Path::new("../lib").to_path_buf();
     let dir = Path::new("tests/cases");
     for entry in std::fs::read_dir(dir).expect("read tests/cases") {
@@ -225,6 +245,10 @@ fn emitted_parens_are_normalized() {
 /// concrete; opt.rs pass 4 is the safety net).
 #[test]
 fn where_group_calls_not_forced() {
+    on_compiler_stack(where_group_calls_not_forced_impl)
+}
+
+fn where_group_calls_not_forced_impl() {
     let source = std::fs::read_to_string("tests/cases/where_group_mutual.mll")
         .expect("read where_group_mutual.mll");
     let lua = mllc::compile(&source, Path::new("tests/cases"), &[])
@@ -6588,6 +6612,10 @@ fn compile_err(source: &str) -> String {
 /// these programs the same way.
 #[test]
 fn non_associative_chains_are_rejected() {
+    on_compiler_stack(non_associative_chains_are_rejected_impl)
+}
+
+fn non_associative_chains_are_rejected_impl() {
     // The classic: comparison operators do not chain.
     let e = compile_err("main :: IO ()\nmain = print (1 == 2 == True)\n");
     assert!(e.contains("non-associative"), "got: {e}");
@@ -6633,6 +6661,10 @@ fn non_associative_chains_are_rejected() {
 /// opposite associativities defines no grouping either.
 #[test]
 fn conflicting_associativities_at_same_precedence_are_rejected() {
+    on_compiler_stack(conflicting_associativities_impl)
+}
+
+fn conflicting_associativities_impl() {
     // infixl 6 <#> against the builtin infixr 6 <>.
     let e = compile_err(
         "infixl 6 <#>\n(<#>) :: String -> String -> String\na <#> b = a ++ b\nmain :: IO ()\nmain = putStrLn (\"a\" <#> \"b\" <> \"c\")\n",
@@ -6653,6 +6685,10 @@ fn conflicting_associativities_at_same_precedence_are_rejected() {
 /// fixity travels with the export (FixityOps declares `infix 4 ~=~`).
 #[test]
 fn imported_infix_operator_is_non_associative_at_import_site() {
+    on_compiler_stack(imported_infix_non_associative_impl)
+}
+
+fn imported_infix_non_associative_impl() {
     let src = "import FixityOps\nmain :: IO ()\nmain = print (1 ~=~ 2 ~=~ 3)\n";
     let e = match mllc::compile(src, Path::new("tests/cases"), &[]) {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
