@@ -53,10 +53,7 @@ main = do
     assert (parityName 9 == "odd")     "parityName 9"
     assert (agree (-5) && agree 0 && agree 12) "even and odd always disagree"
 
-    -- Large exact integers: parity survives beyond the double mantissa
-    -- (2^53 is even, 2^53 + 1 is odd).
-    assert (even 9007199254740992)      "even 2^53"
-    assert (odd 9007199254740993)       "odd 2^53+1"
-    assert (odd (-9007199254740993))    "odd -(2^53+1)"
+    -- Beyond-2^53 parity lives in even_odd_64bit.mll: it needs 64-bit
+    -- integers, which LuaJIT's double-only numbers cannot represent.
 
     putStrLn "even_odd ok"
