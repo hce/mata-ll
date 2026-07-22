@@ -113,6 +113,16 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **Parser fuzzing.** A deterministic, fully offline fuzz pass
+  (`mll-tests/tests/parser_fuzz.rs`) generates random-but-structured .mll
+  modules — operator chains over randomly declared fixities, backtick
+  operators, sections, prefix minus, layout continuations, and nesting
+  probes straddling `MAX_NESTING_DEPTH` — and asserts the parser accepts
+  or rejects cleanly: no panics, no aborts, no hangs (a watchdog enforces
+  a per-input timeout). Inputs derive from a fixed seed through SplitMix64,
+  so any failure reproduces from the seed and index alone. A 2,000-input
+  smoke batch runs on every `cargo test`; a 100,000-input batch is
+  available behind `--ignored`.
 - **AST optimization pipeline over the emitted Lua.** A pass pipeline
   (`codegen/opt.rs`) now runs on the finished statement tree before printing;
   runtime behavior is unchanged (the GHC differential goldens, the laziness

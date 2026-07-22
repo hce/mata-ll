@@ -3,7 +3,18 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-(empty)
+- [ ] **Quadratic typechecking of long do-blocks.** Found by the parser
+      fuzzer's deep probes: each do-`let` binding calls `generalize`, which
+      recomputes `TypeEnv::free_vars` by walking EVERY scheme in the
+      environment (the whole Prelude plus all previous bindings) with
+      `Vec::contains` de-duplication — O(statements × env) overall.
+      Measured (debug): 500 lets 1.0 s, 1000 → 3.0 s, 2000 → 11.8 s,
+      3000 → 29.6 s; `sample` shows the time in `infer_expr` →
+      `TyVar::eq`/`slice_contains`. Compilation is correct, just
+      superlinear. Candidate fix: cache per-scheme free variables at
+      `Scheme` construction (top-level schemes are closed, so the env scan
+      collapses), or maintain the env's free-variable set incrementally.
+      Needs its own change with the perf benchmarks re-run.
 
 ## Completed
 
