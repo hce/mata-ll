@@ -13,12 +13,12 @@ main = do
     assert (pure 99 == [99]) "pure list"
 
     -- <$> on list
-    assert ((*3) <$> [1, 2, 3] == [3, 6, 9]) "<$> list"
+    assert (((*3) <$> [1, 2, 3]) == [3, 6, 9]) "<$> list"
 
     -- <*> on list
-    assert ([(+1), (*2)] <*> [10, 20] == [11, 21, 20, 40]) "<*> list"
+    assert (([(+1), (*2)] <*> [10, 20]) == [11, 21, 20, 40]) "<*> list"
 
     -- <*> with empty
-    assert ([(+1)] <*> [] == ([] :: [Integer])) "<*> list empty"
+    assert (([(+1)] <*> []) == ([] :: [Integer])) "<*> list empty"
 
     pure ()

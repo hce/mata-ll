@@ -141,19 +141,22 @@ pub fn compile_with_options(
     // Lex
     let tokens = lexer::lex(source).map_err(CompileError::Lex)?;
 
+    // The module loader is created before parsing: fixity travels with an
+    // import in Haskell, so the root module's expressions must be parsed
+    // under the fixities its imports (and the implicit Prelude) declare.
+    let mut loader = modules::ModuleLoader::new(source_dir);
+    for path in lib_paths {
+        loader.add_search_path(path.to_path_buf());
+    }
+    let fixities = loader.fixities_for(&tokens);
+
     // Parse
-    let parsed = parser::parse(&tokens).map_err(CompileError::Parse)?;
+    let parsed = parser::parse_with_fixities(&tokens, &fixities).map_err(CompileError::Parse)?;
 
     // Parse the prelude up-front: its signature shapes are the baseline against
     // which unqualified imports are checked for incompatible-type collisions.
     let prelude_decls = parse_prelude()?;
     let prelude_shapes = modules::signature_shapes(&prelude_decls);
-
-    // Resolve imports
-    let mut loader = modules::ModuleLoader::new(source_dir);
-    for path in lib_paths {
-        loader.add_search_path(path.to_path_buf());
-    }
     let module = loader.resolve_imports(&parsed).map_err(CompileError::Import)?;
     // Reject unqualified imports that would clash in the flattened namespace,
     // with a clear message, rather than letting the clash surface downstream.

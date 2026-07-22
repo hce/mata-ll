@@ -38,7 +38,7 @@ main = do
     assert (length [1,3..19] == 10) "length odd 1..19"
 
     -- elem in range
-    assert (7 `elem` [1..10] == True)  "elem in range"
-    assert (11 `elem` [1..10] == False) "elem not in range"
+    assert ((7 `elem` [1..10]) == True)  "elem in range"
+    assert ((11 `elem` [1..10]) == False) "elem not in range"
 
     putStrLn "ok"

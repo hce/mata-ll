@@ -24,7 +24,7 @@ main = do
     assert (fmap (f . g) [1, 2, 3] == (fmap f . fmap g) [1, 2, 3]) "list compose"
 
     -- <$> is fmap
-    assert ((+ 1) <$> Just 5 == Just 6) "<$> maybe"
-    assert ((+ 1) <$> [1, 2, 3] == [2, 3, 4]) "<$> list"
+    assert (((+ 1) <$> Just 5) == Just 6) "<$> maybe"
+    assert (((+ 1) <$> [1, 2, 3]) == [2, 3, 4]) "<$> list"
 
     putStrLn "ok"

@@ -52,9 +52,17 @@ distinct tokens. Block comments `{- ... -}` nest.
 
 The parser is a hand-written recursive-descent parser with operator
 precedence climbing for infix expressions. It maintains a fixity table
-(`HashMap<String, (Assoc, u8)>`) populated by `infixl`/`infixr`/`infix`
-declarations. Backtick notation (`` `foo` ``) turns any function into
-an infix operator.
+(`HashMap<String, (Assoc, u8)>`) seeded before parsing from a token
+scan of the module's own `infixl`/`infixr`/`infix` declarations (a
+declaration governs the whole module, not just the text below it) and
+from the fixities of imported modules and the implicit Prelude, which
+the module loader collects (fixity travels with an import, as in GHC).
+While climbing, the operator whose right-hand side is being parsed is
+carried into the recursion so same-precedence neighbors can be
+checked: a chain is rejected when either operator is non-associative
+or their associativities disagree — the GHC precedence-parsing rule.
+Backtick notation (`` `foo` ``) turns any function into an infix
+operator.
 
 Layout-sensitivity is handled by an indentation stack. Continuation
 lines indented deeper than the start of an expression are merged into

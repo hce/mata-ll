@@ -18,8 +18,8 @@ main = do
     assert (showEither (fmap (+1) (Left "err")) == "Left err") "fmap Either Left"
 
     -- Functor: <$> operator (alias for fmap)
-    assert ((+1) <$> Just 5 == Just 6) "<$> Maybe"
-    assert ((+1) <$> [1, 2, 3] == [2, 3, 4]) "<$> list"
+    assert (((+1) <$> Just 5) == Just 6) "<$> Maybe"
+    assert (((+1) <$> [1, 2, 3]) == [2, 3, 4]) "<$> list"
 
     -- Functor: fmap on IO
     let io_action = fmap (+1) (pure 41) :: IO Integer
@@ -31,11 +31,11 @@ main = do
     assert (pure 5 == [5]) "pure list"
 
     -- Applicative: <*> on Maybe
-    assert (Just (+1) <*> Just 5 == Just 6) "<*> Maybe Just"
-    assert (Just (+1) <*> Nothing == Nothing) "<*> Maybe Nothing"
+    assert ((Just (+1) <*> Just 5) == Just 6) "<*> Maybe Just"
+    assert ((Just (+1) <*> Nothing) == Nothing) "<*> Maybe Nothing"
 
     -- Applicative: <*> on list
-    assert ([(+1), (*2)] <*> [10, 20] == [11, 21, 20, 40]) "<*> list"
+    assert (([(+1), (*2)] <*> [10, 20]) == [11, 21, 20, 40]) "<*> list"
 
     -- Applicative: <*> on IO
     let io_ap = pure (+1) <*> pure 99 :: IO Integer

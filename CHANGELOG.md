@@ -242,6 +242,31 @@ API of the `mllc` library crate.)
   made the program look like a required module and `main` silently did not
   run. The stub now compares the first vararg against `arg[1]`, which
   distinguishes the two invocation styles reliably.
+- Non-associative operators no longer chain. `a == b == c` is now a parse
+  error, exactly as in GHC: `==` is `infix 4`, so the expression has no defined
+  grouping (the error suggests parenthesizing one side, or `&&` for a
+  three-way comparison). The full GHC precedence-parsing rule is enforced — a
+  chain of same-precedence operators is rejected when any of them is
+  non-associative or when their associativities disagree (an `infixl` next to
+  an `infixr` at the same level). Previously every precedence-4 operator
+  parsed left-associatively and such chains were silently accepted with a
+  grouping GHC would refuse.
+- Fixity now travels with an import, as in GHC. An operator imported from
+  another module keeps the fixity its defining module declared — `infixr 6 -.`
+  in the exporting module groups `10 -. 3 -. 2` rightward at the import site,
+  and an imported `infix 4` operator is non-associative there too. Previously
+  imported operators silently fell back to the `infixl 9` default. A fixity
+  declaration also now governs its whole module, including uses that precede
+  it textually (Haskell scoping), instead of applying only from its line down.
+- The Prelude's fixity interface now matches GHC and reaches user code:
+  `infixl 4 <$>, <*>` apply in every module (previously only inside the
+  Prelude itself), and `div`, `mod`, `elem`, and `seq` carry their GHC
+  fixities (`infixl 7`, `infix 4`, `infixr 0`). This corrects real groupings:
+  ``5 * 2 `div` 4`` is now `(5 * 2) `div` 4` = 2 as in GHC, previously
+  ``5 * (2 `div` 4)`` = 0. `>>=` and `>>` are now `infixl 1` as in GHC
+  (previously right-associative). Fixity declarations additionally accept
+  GHC's full form: backtick-quoted names (``infixl 7 `div` ``), comma lists
+  (`infixl 7 *, /`), and a precedence outside 0-9 is rejected.
 
 ## [0.1.4] - 2026-07-17
 

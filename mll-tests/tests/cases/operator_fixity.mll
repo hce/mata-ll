@@ -54,7 +54,9 @@ main = do
 
     -- Precedence: |+| has prec 4, * has prec 7
     -- 1 |+| 2 * 3 should be 1 |+| (2 * 3) = 1 + 6 = 7
-    assert (1 |+| 2 * 3 == 7) "low prec: |+| after *"
+    -- (parenthesized against ==, which shares precedence 4 with |+| —
+    -- an unparenthesized mix of infixl 4 and infix 4 is rejected, as in GHC)
+    assert ((1 |+| 2 * 3) == 7) "low prec: |+| after *"
 
     -- |*| has prec 8 (higher than +, prec 6)
     -- 1 + 2 |*| 3 should be 1 + (2 |*| 3) = 1 + 6 = 7

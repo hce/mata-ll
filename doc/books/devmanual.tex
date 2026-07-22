@@ -178,7 +178,13 @@ symbol characters.
 
 A hand-written recursive-descent parser with operator-precedence climbing for
 infix expressions.  Fixity is tracked in a \texttt{HashMap<String, (Assoc, u8)>}
-and respects user \texttt{infixl}/\texttt{infixr}/\texttt{infix} declarations.
+seeded before parsing from a token scan of the module's own
+\texttt{infixl}/\texttt{infixr}/\texttt{infix} declarations (a declaration
+governs the whole module, including earlier uses) plus the fixities the module
+loader collects from imports and the implicit Prelude --- fixity travels with
+an import, as in GHC.  Same-precedence chains are rejected when an operator is
+non-associative or the associativities disagree (the GHC precedence-parsing
+rule), so \texttt{a == b == c} is a parse error.
 
 Layout handling: a wrapped line indented past the enclosing layout block's
 column is merged into the same declaration.  Record construction and record

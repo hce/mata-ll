@@ -59,7 +59,7 @@ main = do
     assert (fmap (+1) (Err "oops") == Err "oops") "fmap Result Err"
 
     -- <$> operator alias
-    assert ((+1) <$> MkBox 10 == MkBox 11) "<$> Box"
+    assert (((+1) <$> MkBox 10) == MkBox 11) "<$> Box"
 
     -- Binary tree (recursive, derived Eq works with the fix)
     let tree = Branch (Leaf 1) (Branch (Leaf 2) (Leaf 3))

@@ -1391,10 +1391,29 @@ User-defined fixity is supported:
     infixl 6 +
     infixr 5 :
     infix 4 ==
+    infixl 7 `div`, `mod`
 
-Precedence levels 0-9, with left, right, or no associativity.
-Haskell defaults are used for standard operators when no declaration
-is given.
+Precedence levels 0-9, with left, right, or no associativity; an
+operator list may be comma-separated, and named (backtick) operators
+may be declared with or without backticks. Haskell defaults are used
+for standard operators when no declaration is given; an undeclared
+operator is `infixl 9`.
+
+Fixity follows Haskell scoping rules:
+
+- A declaration governs the whole module, including uses that precede
+  it textually.
+- Fixity travels with an import: `import M` brings M's fixity
+  declarations (and, transitively, those of M's imports) into the
+  importing module, as in GHC. The implicit Prelude contributes its
+  own (`infixl 4 <$>, <*>`, `infixl 7 div, mod`, `infix 4 elem`,
+  `infixr 0 seq`).
+
+A chain of same-precedence operators is rejected — as in GHC — when
+any operator in it is non-associative (`infix`), or when the operators
+disagree on associativity (an `infixl` next to an `infixr` at the same
+level). So `a == b == c` is a parse error: `==` is `infix 4`, and the
+expression has no defined grouping without parentheses.
 
 # Deriving
 

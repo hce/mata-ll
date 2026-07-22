@@ -48,7 +48,7 @@ main = do
     -- inside an IO bind chain.
     assert (fmap (+1) [1, 2, 3] == [2, 3, 4]) "fmap list unaffected"
     assert (fmap (+1) (Just 41) == Just 42) "fmap Maybe unaffected"
-    assert ((+1) <$> Just 41 == Just 42) "<$> Maybe unaffected"
+    assert (((+1) <$> Just 41) == Just 42) "<$> Maybe unaffected"
 
     -- Guard: fmap over a concretely-IO action (worked before the fix too).
     args <- fmap length getArgs

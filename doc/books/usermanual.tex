@@ -413,9 +413,19 @@ infixl 6 -
 infixl 7 *
 infixr 5 :
 infixr 0 $
+infix  4 ==
 \end{lstlisting}
 
-Standard Haskell fixities are the defaults.
+Standard Haskell fixities are the defaults; an undeclared operator is
+\texttt{infixl 9}. A fixity declaration governs the whole module, including
+uses above it, and travels with an import: an operator imported from another
+module keeps the fixity its defining module declared, as in GHC.
+
+Operators declared \texttt{infix} are non-associative, so \texttt{a == b == c}
+is a parse error --- parenthesize one side, or chain comparisons with
+\texttt{\&\&}. Mixing an \texttt{infixl} and an \texttt{infixr} operator of the
+same precedence without parentheses is rejected the same way, exactly as in
+GHC.
 
 \subsection{Guards}
 

@@ -31,15 +31,37 @@ pub struct ModuleLoader {
     resolved: HashMap<String, Module>,
     /// Modules currently being resolved (cycle detection)
     in_progress: HashSet<String>,
+    /// Fixities a module carries to its importers (its own declarations plus
+    /// those of its imports, transitively — mata-ll merges every import into
+    /// one namespace, and fixity travels with the operator).
+    fixity_cache: HashMap<String, HashMap<String, (Assoc, u8)>>,
+    /// Modules whose fixities are currently being computed (cycle detection).
+    fixities_in_progress: HashSet<String>,
+    /// The Prelude's fixity declarations, in force in every module (the
+    /// implicit `import Prelude`).
+    prelude_fixities: HashMap<String, (Assoc, u8)>,
 }
 
 impl ModuleLoader {
     pub fn new(source_dir: &Path) -> Self {
+        // The embedded Prelude always lexes — it is compiled into the crate
+        // and parsed on every compilation.
+        let prelude_fixities = lexer::lex(crate::stdlib::PRELUDE)
+            .map(|tokens| {
+                parser::scan_fixities(&tokens)
+                    .into_iter()
+                    .map(|(op, assoc, prec)| (op, (assoc, prec)))
+                    .collect()
+            })
+            .unwrap_or_default();
         ModuleLoader {
             search_paths: vec![source_dir.to_path_buf()],
             loaded: HashMap::new(),
             resolved: HashMap::new(),
             in_progress: HashSet::new(),
+            fixity_cache: HashMap::new(),
+            fixities_in_progress: HashSet::new(),
+            prelude_fixities,
         }
     }
 
@@ -81,15 +103,74 @@ impl ModuleLoader {
         };
 
         let tokens = lexer::lex(&source)?;
+        // Fixity is part of a module's interface: this module's operators
+        // must group under the fixities its imports (and the implicit
+        // Prelude) declare, so those are collected before parsing.
+        let fixities = self.fixities_for(&tokens);
         // An imported module's syntax errors surface through the import-error
         // channel, prefixed with the module that failed to parse.
-        let module = parser::parse(&tokens).map_err(|diags| {
+        let module = parser::parse_with_fixities(&tokens, &fixities).map_err(|diags| {
             let msgs: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
             format!("in module '{}': {}", key, msgs.join("\n"))
         })?;
 
         self.loaded.insert(key.clone(), module);
         Ok(self.loaded.get(&key).unwrap())
+    }
+
+    /// The fixities in force for a module with the given token stream: the
+    /// implicit Prelude's, plus everything its imports carry (transitively).
+    /// The module's own declarations are layered on top by the parser itself.
+    /// An import that cannot be loaded is skipped here — `resolve_imports`
+    /// reports it through the normal import-error channel.
+    pub fn fixities_for(&mut self, tokens: &[lexer::Located]) -> HashMap<String, (Assoc, u8)> {
+        let mut fixities = self.prelude_fixities.clone();
+        for path in parser::scan_imports(tokens) {
+            if let Ok(imported) = self.imported_fixities(&path) {
+                fixities.extend(imported);
+            }
+        }
+        fixities
+    }
+
+    /// The fixities a module exports to an importer: its own declarations
+    /// plus its imports' (transitively), own winning on a clash. On an
+    /// import cycle the cycled-on module contributes nothing, matching how
+    /// `resolve_imports` breaks cycles.
+    fn imported_fixities(&mut self, module_path: &[String]) -> Result<HashMap<String, (Assoc, u8)>, String> {
+        let key = module_path.join(".");
+        if let Some(cached) = self.fixity_cache.get(&key) {
+            return Ok(cached.clone());
+        }
+        if self.fixities_in_progress.contains(&key) {
+            return Ok(HashMap::new());
+        }
+        self.fixities_in_progress.insert(key.clone());
+        let result: Result<HashMap<String, (Assoc, u8)>, String> = (|| {
+            self.load_module(module_path)?;
+            let module = self.loaded.get(&key).unwrap();
+            let mut fixities = HashMap::new();
+            let mut own = Vec::new();
+            let mut imports = Vec::new();
+            for decl in &module.decls {
+                match decl {
+                    Decl::FixityDecl { assoc, prec, op } => {
+                        own.push((op.clone(), (*assoc, *prec)));
+                    }
+                    Decl::Import { module_path, .. } => imports.push(module_path.clone()),
+                    _ => {}
+                }
+            }
+            for import in imports {
+                fixities.extend(self.imported_fixities(&import)?);
+            }
+            fixities.extend(own);
+            Ok(fixities)
+        })();
+        self.fixities_in_progress.remove(&key);
+        let fixities = result?;
+        self.fixity_cache.insert(key, fixities.clone());
+        Ok(fixities)
     }
 
     /// Process all imports in a module, returning merged declarations.

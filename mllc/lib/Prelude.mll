@@ -397,6 +397,13 @@ ffi_tonumber_float :: String -> LuaPure "tonumber" Number
 infixl 4 <$>
 infixl 4 <*>
 
+-- Fixities of the named (backtick) operators, matching the GHC Prelude.
+-- div, mod, and seq are compiler builtins; their fixities live here so they
+-- reach every module like the rest of the Prelude interface.
+infixl 7 `div`, `mod`
+infix  4 `elem`
+infixr 0 `seq`
+
 -- Monadic combinators
 -- Result-discarding traversal (works in any monad).
 mapM_ :: Monad m => (a -> m b) -> [a] -> m ()

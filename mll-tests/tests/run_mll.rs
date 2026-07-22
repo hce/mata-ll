@@ -601,6 +601,7 @@ mll_test!(seq_when_putstr, "seq_when_putstr.mll");
 mll_test!(any_type, "any_type.mll");
 mll_test!(bytestring, "bytestring.mll");
 mll_test!(operator_fixity, "operator_fixity.mll");
+mll_test!(fixity_import, "fixity_import.mll");
 mll_test!(export_module, "export_module.mll");
 mll_test!(import_hiding, "import_hiding.mll");
 mll_test!(record_update, "record_update.mll");
@@ -6473,6 +6474,85 @@ fn compile_err(source: &str) -> String {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
         Err(e) => e.to_string(),
     }
+}
+
+/// The Haskell precedence-parsing rule: a chain of same-precedence operators
+/// is rejected when any of them is non-associative. GHC rejects every one of
+/// these programs the same way.
+#[test]
+fn non_associative_chains_are_rejected() {
+    // The classic: comparison operators do not chain.
+    let e = compile_err("main :: IO ()\nmain = print (1 == 2 == True)\n");
+    assert!(e.contains("non-associative"), "got: {e}");
+    assert!(e.contains("'=='"), "got: {e}");
+    assert!(e.contains("parenthesize"), "got: {e}");
+
+    // Two different comparison operators conflict too, and the notes offer
+    // the three-way-comparison rewrite.
+    let e = compile_err("main :: IO ()\nmain = print (1 < 2 <= 3)\n");
+    assert!(e.contains("non-associative"), "got: {e}");
+    assert!(e.contains("&&"), "got: {e}");
+
+    // A user-declared `infix` operator is non-associative as well.
+    let e = compile_err(
+        "infix 5 <+>\n(<+>) :: Integer -> Integer -> Integer\na <+> b = a + b\nmain :: IO ()\nmain = print (1 <+> 2 <+> 3)\n",
+    );
+    assert!(e.contains("non-associative"), "got: {e}");
+    assert!(e.contains("'<+>'"), "got: {e}");
+
+    // Prelude `elem` is infix 4 (as in GHC), so it cannot chain with ==.
+    let e = compile_err("main :: IO ()\nmain = print (1 `elem` [1] == True)\n");
+    assert!(e.contains("`elem`"), "got: {e}");
+    assert!(e.contains("non-associative"), "got: {e}");
+
+    // The Prelude's <$> and <*> are infixl 4 (as in GHC): mixing them with a
+    // comparison at the same precedence is rejected.
+    let e = compile_err("main :: IO ()\nmain = print ((+1) <$> Just 1 == Just 2)\n");
+    assert!(e.contains("'<$>'"), "got: {e}");
+    assert!(e.contains("'=='"), "got: {e}");
+
+    // Parenthesized, every one of them compiles.
+    for src in [
+        "main :: IO ()\nmain = print ((1 == 2) == True)\n",
+        "main :: IO ()\nmain = print (1 < 2 && 2 <= 3)\n",
+        "main :: IO ()\nmain = print ((1 `elem` [1]) == True)\n",
+        "main :: IO ()\nmain = print (((+1) <$> Just 1) == Just 2)\n",
+    ] {
+        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+    }
+}
+
+/// The other half of the precedence-parsing rule: same precedence but
+/// opposite associativities defines no grouping either.
+#[test]
+fn conflicting_associativities_at_same_precedence_are_rejected() {
+    // infixl 6 <#> against the builtin infixr 6 <>.
+    let e = compile_err(
+        "infixl 6 <#>\n(<#>) :: String -> String -> String\na <#> b = a ++ b\nmain :: IO ()\nmain = putStrLn (\"a\" <#> \"b\" <> \"c\")\n",
+    );
+    assert!(e.contains("opposite directions"), "got: {e}");
+    assert!(e.contains("infixl 6") && e.contains("infixr 6"), "got: {e}");
+
+    // Same-precedence, same-associativity chains still parse: both infixl...
+    let ok_l = "infixl 6 <#>\n(<#>) :: Integer -> Integer -> Integer\na <#> b = a + b\nmain :: IO ()\nmain = print (1 <#> 2 - 3)\n";
+    // ...and both infixr.
+    let ok_r = "infixr 6 <#>\n(<#>) :: String -> String -> String\na <#> b = a <> b\nmain :: IO ()\nmain = putStrLn (\"a\" <#> \"b\" <> \"c\")\n";
+    for src in [ok_l, ok_r] {
+        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+    }
+}
+
+/// An imported `infix` operator is non-associative at the import site too:
+/// fixity travels with the export (FixityOps declares `infix 4 ~=~`).
+#[test]
+fn imported_infix_operator_is_non_associative_at_import_site() {
+    let src = "import FixityOps\nmain :: IO ()\nmain = print (1 ~=~ 2 ~=~ 3)\n";
+    let e = match mllc::compile(src, Path::new("tests/cases"), &[]) {
+        Ok(_) => panic!("expected compilation to fail, but it succeeded"),
+        Err(e) => e.to_string(),
+    };
+    assert!(e.contains("non-associative"), "got: {e}");
+    assert!(e.contains("'~=~'"), "got: {e}");
 }
 
 #[test]
