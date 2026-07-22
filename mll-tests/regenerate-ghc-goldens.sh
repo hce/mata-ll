@@ -96,6 +96,7 @@ excluded_reason() {
         cases/DiamondLeaf)               echo "helper module (twinned for import, no main)";;
         cases/DiamondMid)                echo "helper module (twinned for import, no main)";;
         cases/ExportHelper)              echo "helper module (twinned for import, no main)";;
+        cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
 
         # -- known divergences that abort the GHC twin ------------------------
         # An assert in the case encodes mata-ll's output format; under GHC the
@@ -177,7 +178,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid ExportHelper; do
+for helper in DiamondLeaf DiamondMid ExportHelper FixityOps; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

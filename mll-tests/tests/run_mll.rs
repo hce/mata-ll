@@ -9386,6 +9386,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_existential_constraints, "cases", "existential_constraints.mll"),
         (ghc_oracle_existentials, "cases", "existentials.mll"),
         (ghc_oracle_feature_interactions, "cases", "feature_interactions.mll"),
+        (ghc_oracle_fixity_import, "cases", "fixity_import.mll"),
         (ghc_oracle_fizzbuzz, "cases", "fizzbuzz.mll"),
         (ghc_oracle_fmap_pure_bind_chain, "cases", "fmap_pure_bind_chain.mll"),
         (ghc_oracle_foldable, "cases", "foldable.mll"),

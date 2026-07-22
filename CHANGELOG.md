@@ -267,6 +267,9 @@ API of the `mllc` library crate.)
   (previously right-associative). Fixity declarations additionally accept
   GHC's full form: backtick-quoted names (``infixl 7 `div` ``), comma lists
   (`infixl 7 *, /`), and a precedence outside 0-9 is rejected.
+- A parenthesized operator in a module export list — `module M ((-.)) where`,
+  the GHC form — now parses. It was previously skipped as an unknown token,
+  corrupting the export list and failing on the rest of the header.
 
 ## [0.1.4] - 2026-07-17
 

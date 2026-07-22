@@ -188,6 +188,16 @@ impl Parser {
                             }
                         }
                         Token::Operator(op) => { exports.push(op); self.advance(); }
+                        // Parenthesized operator export, GHC style:
+                        // `module M ((-.), (~=~)) where`.
+                        Token::LeftParen => {
+                            self.advance();
+                            if let Token::Operator(op) = self.peek().clone() {
+                                exports.push(op);
+                                self.advance();
+                            }
+                            if self.at(&Token::RightParen) { self.advance(); }
+                        }
                         _ => { self.advance(); } // skip unknown
                     }
                     self.skip_newlines_and_indent();

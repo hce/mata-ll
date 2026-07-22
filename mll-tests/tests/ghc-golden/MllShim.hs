@@ -12,17 +12,16 @@
 --   * length, take, drop, replicate, (!!)
 --                   — mata-ll types these with Integer, GHC with Int.
 --   * (==) (/=) (<) (<=) (>) (>=) `elem`
---                   — same semantics as Prelude, but declared infixl 4.
---                     mata-ll's parser treats Haskell's non-associative
---                     precedence-4 operators as left-associative, so the
---                     corpus writes `f <$> x == y` (parsed as
---                     `(f <$> x) == y`); GHC's infix 4 rejects that mix.
---                     infixl 4 wrappers reproduce mata-ll's grammar.
---   * (<$>), (<*>)  — same semantics as Prelude, but declared infixl 9:
---                     mata-ll module-local fixity declarations do not cross
---                     module boundaries, so in test-case code these bind at
---                     the default (tightest) precedence, e.g.
---                     `a == f <$> xs` parses as `a == (f <$> xs)`.
+--                   — same semantics and fixity (infix 4) as Prelude; only
+--                     re-exported because the Integer-typed shims above hide
+--                     the Prelude names wholesale. mata-ll enforces
+--                     Haskell's non-associative precedence-4 grammar itself
+--                     (`a == b == c` is a parse error on both sides), so
+--                     the old infixl 4 compatibility fixity is gone.
+--   * (<$>), (<*>)  — same semantics and fixity (infixl 4) as Prelude.
+--                     mata-ll's Prelude fixity declarations now cross
+--                     module boundaries, so these bind at infixl 4 in
+--                     test-case code exactly as under GHC.
 --   * when          — in mata-ll's Prelude; GHC has it in Control.Monad.
 --   * getArgs       — mata-ll builtin; GHC has it in System.Environment.
 --   * Multiplicity(..) — puts One/Many in scope for `%Many ->` arrows
@@ -88,9 +87,10 @@ replicate n = P.replicate (fromInteger n)
 (!!) :: [a] -> Integer -> a
 xs !! n = xs P.!! fromInteger n
 
--- Comparison operators at mata-ll's fixity (infixl 4 instead of infix 4).
-infixl 4 ==, /=, <, <=, >, >=
-infixl 4 `elem`
+-- Comparison operators at the shared GHC/mata-ll fixity (infix 4,
+-- non-associative — mata-ll enforces the same rejection rule now).
+infix 4 ==, /=, <, <=, >, >=
+infix 4 `elem`
 
 (==), (/=) :: Eq a => a -> a -> Bool
 (==) = (P.==)
@@ -105,8 +105,9 @@ infixl 4 `elem`
 elem :: (Eq a, Foldable t) => a -> t a -> Bool
 elem = P.elem
 
--- Functor/Applicative operators at mata-ll's effective (default) precedence.
-infixl 9 <$>, <*>
+-- Functor/Applicative operators at the shared GHC/mata-ll fixity: the
+-- Prelude's infixl 4 declarations now reach every mata-ll module.
+infixl 4 <$>, <*>
 
 (<$>) :: Functor f => (a -> b) -> f a -> f b
 (<$>) = (P.<$>)
