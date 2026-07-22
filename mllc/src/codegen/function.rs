@@ -338,6 +338,14 @@ impl CodeGen {
                     stmts.extend(self.declare_local_fwd_stmts(&sname));
                 }
                 if is_func {
+                    // A where-bound function-group name holds a Lua function
+                    // from its group assignment on — never a thunk. Marking
+                    // it concrete here (before any body is emitted) lets
+                    // every call in the clause, including the group's own
+                    // mutually recursive bodies, skip the __force. Any
+                    // same-named VALUE binding in an inner scope re-decides
+                    // its own concreteness at assignment (where_value_stmt).
+                    self.concrete_vars.insert(sname);
                     let name = &binds[i].name;
                     while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
                         i += 1;
@@ -432,21 +440,19 @@ impl CodeGen {
     }
 
     pub(super) fn where_func_group_assign_stmts(&mut self, binds: &[TLocalDef], start: usize) -> Vec<Stmt> {
-        // Build as assignment (name already forward-declared)
-        self.where_func_group_impl_stmts(binds, start, true)
-    }
-
-    pub(super) fn where_func_group_impl_stmts(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) -> Vec<Stmt> {
+        // Build as assignment (every group name was forward-declared by
+        // where_binds_stmts — the streaming emitter's not-pre-declared
+        // emission path is gone).
         // A local function's result is not the enclosing function's result:
         // its body must not inherit the outer deep result demand.
         let saved_result_demand =
             std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
-        let stmts = self.where_func_group_body_stmts(binds, start, pre_declared);
+        let stmts = self.where_func_group_body_stmts(binds, start);
         self.cur_result_demand = saved_result_demand;
         stmts
     }
 
-    pub(super) fn where_func_group_body_stmts(&mut self, binds: &[TLocalDef], start: usize, pre_declared: bool) -> Vec<Stmt> {
+    pub(super) fn where_func_group_body_stmts(&mut self, binds: &[TLocalDef], start: usize) -> Vec<Stmt> {
         let name = &binds[start].name;
         let mut clauses = Vec::new();
         let num_params = binds[start].patterns.len();
@@ -467,27 +473,15 @@ impl CodeGen {
             .collect();
         let params_str = params.join(", ");
         let sname = sanitize_name(name);
-        if !pre_declared {
-            self.local_vars.insert(sname.clone());
-            self.local_count += 1;
-        }
         let mut stmts = Vec::new();
-        let header = if pre_declared {
-            // Name was forward-declared; use assignment form
-            let lref = self.lua_ref(&sname);
-            format!("{} = function({})", lref, params_str)
-        } else if self.local_count > Self::LOCAL_LIMIT {
-            if !self.var_table_emitted {
-                self.var_table_emitted = true;
-                stmts.push(Stmt::Local(vec!["_v".into()], Some(Expr::Table(vec![]))));
-            }
-            self.var_slots_next += 1;
-            self.var_slots.insert(sname.clone(), self.var_slots_next);
-            format!("_v[{}] = function({})", self.var_slots_next, params_str)
-        } else {
-            format!("local function {}({})", sname, params_str)
-        };
+        // Name was forward-declared; use assignment form.
+        let header = format!("{} = function({})", self.lua_ref(&sname), params_str);
         let mut body = Vec::new();
+        // The `_wargN = __force(_wargN)` entry rebinds below leave the param
+        // provably WHNF: mark it concrete so the clause conditions built by
+        // match_scrutinee do not re-force it. `_warg` names are shared by
+        // every where-group, so the marks must not outlive this one.
+        let saved_concrete = self.concrete_vars.clone();
 
         if clauses.len() == 1 {
             let clause = &clauses[0];
@@ -511,6 +505,7 @@ impl CodeGen {
                             format!("_warg{}", j),
                             Expr::force(Expr::name(format!("_warg{}", j))),
                         ));
+                        self.concrete_vars.insert(format!("_warg{}", j));
                     }
                 }
                 body.extend(self.pattern_match_block(&params, &clauses).0);
@@ -527,10 +522,12 @@ impl CodeGen {
                         format!("_warg{}", j),
                         Expr::force(Expr::name(format!("_warg{}", j))),
                     ));
+                    self.concrete_vars.insert(format!("_warg{}", j));
                 }
             }
             body.extend(self.pattern_match_block(&params, &clauses).0);
         }
+        self.concrete_vars = saved_concrete;
 
         stmts.push(Stmt::Function { header, body: Block(body) });
         stmts

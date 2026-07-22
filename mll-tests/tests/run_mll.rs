@@ -219,6 +219,34 @@ fn emitted_parens_are_normalized() {
     );
 }
 
+/// Where-bound function-group names hold Lua function values from their
+/// group assignment on — never thunks — and a `_warg` entry rebind leaves
+/// the parameter WHNF. Neither may be re-forced (function.rs marks both
+/// concrete; opt.rs pass 4 is the safety net).
+#[test]
+fn where_group_calls_not_forced() {
+    let source = std::fs::read_to_string("tests/cases/where_group_mutual.mll")
+        .expect("read where_group_mutual.mll");
+    let lua = mllc::compile(&source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    for forbidden in ["__force(go)", "__force(swap)"] {
+        assert!(
+            !lua.contains(forbidden),
+            "where-group emission must not re-force `{forbidden}`: {lua}"
+        );
+    }
+    // `__force(_warg…)` may appear only as the entry rebind itself
+    // (`_wargN = __force(_wargN)`), never as a re-force at a use site.
+    for line in lua.lines().filter(|l| l.contains("__force(_warg")) {
+        let t = line.trim_start();
+        assert!(
+            t.starts_with("_warg") && t.contains(" = __force(_warg"),
+            "entry-rebound _warg param re-forced at a use site: {line}"
+        );
+    }
+}
+
 /// Constructor-level DCE: a `data` definition none of whose constructors is
 /// constructed (`Con`) or matched (pattern) by live code contributes NOTHING
 /// to the emitted Lua. Checked two ways: (1) adding a dead user `data`
@@ -668,6 +696,7 @@ mll_test!(feature_interactions, "feature_interactions.mll");
 mll_test!(demand_analysis, "demand_analysis.mll");
 mll_test!(ffi_strictness, "ffi_strictness.mll");
 mll_test!(where_func_order, "where_func_order.mll");
+mll_test!(where_group_mutual, "where_group_mutual.mll");
 mll_test!(type_alias, "type_alias.mll");
 mll_test!(selective_import, "selective_import.mll");
 mll_test!(multiline_list, "multiline_list.mll");
