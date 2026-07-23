@@ -32,37 +32,27 @@ mll -r fib.mll     # compile and run immediately
 
 ## Changelog
 
-Latest release — 0.1.4:
+Latest release — 0.1.5:
 
-- Types: a full kind system. Kinds (`Type`, `Symbol`, `Type -> Type`, …) are
-  inferred for every type-level declaration and every written type is
-  kind-checked, so an ill-kinded instance head or signature (`instance Show
-  Maybe`, `Foldable Int`) is now a compile-time error with a plain-language
-  explanation instead of silently miscompiling.
-- Types: promoted data types now have real kinds (DataKinds), and closed type
-  families reduce symbolically during unification — so a length-indexed
-  `Vec (Plus n m)` type-checks, runs with correct lengths, and keeps a length
-  mismatch a compile error.
-- Types: `Foldable`, `Traversable`, `Semigroup` and `Monoid` are now proper
-  typeclasses. `foldr`/`foldl` are Foldable methods; `length`/`null`/`elem`/
-  `sum`/`product` are generic over Foldable; user types join with ordinary
-  `instance` declarations. New `Data.Foldable`/`Data.Traversable` modules.
-- Soundness: unpacking an existential constructor now skolemizes the hidden
-  type variable, closing a hole where `coerce (MkShowBox x _) = x` coerced any
-  type to any type. Constructor contexts (`forall a. Show a => …`) are enforced
-  both ways.
-- Correctness: a `<-`-bound result of a user action is no longer assumed
-  already-forced (fixing a runtime "arithmetic on a table value" crash on a
-  strict use), and `runST` forces the state thread's result to WHNF.
-- Performance: the tracker benchmark recovers the JIT multiplier a 0.1.3
-  regression cost it — per-field demand analysis plus redundant-force
-  elimination take `HongKong_Music.it` from 338 s to 102 s (2.50× → 0.76×
-  real-time) at 15 MB, decoded output byte-identical.
-- Robustness: pathologically nested input and self-doubling type aliases now
-  report clean depth/size errors instead of crashing or hanging the compiler;
-  every Lua string literal escapes through one canonical routine; FFI target
-  names are validated at compile time; and every compiled module carries
-  `__MLLC_VERSION`/`__MLLC_COMMIT` provenance.
+- Breaking: the integer type is now `Int`, not `Integer`. mata-ll's integer
+  wraps at 64 bits — exactly GHC's `Int` — so it carries that name; there is no
+  arbitrary-precision `Integer`. Writing `Integer` (or `toInteger`) is a compile
+  error with a note pointing at `Int`, and a literal past `maxBound :: Int` is
+  rejected rather than silently wrapped. Numeric defaulting is `default (Int,
+  Number)`. Migration is mechanical: `Integer` → `Int`.
+- Correctness: `show` now matches GHC byte-for-byte — string quoting/escaping,
+  `,`-no-space list and tuple separators, record syntax, and a faithful
+  Burger-Dybvig `Number` (`Double`) formatter, all verified against GHC 9.14.1.
+- Laziness: extracting a list tail no longer forces the next spine cell, so
+  spine walkers stop exactly where GHC does (`take 2 (1 : 2 : error "boom")` is
+  `[1, 2]`); IO sequencing is a proper Lua tail call, so `mapM_` streams a
+  million-element list in constant stack and constant memory.
+- Syntax: `LuaIterator` and `LuaTry` results are written explicitly as a list
+  (`LuaIterator "string.gmatch" [String]`) or `Either String a`; the old
+  bare-payload shorthands are rejected at parse time with the required shape.
+- Determinism: compiling the same source twice yields byte-identical Lua,
+  guarded by a test; the code generator is now AST-based (malformed statements
+  unrepresentable), and demand analysis removes more thunk allocations.
 
 See [CHANGELOG.md](https://github.com/hce/mata-ll/blob/main/CHANGELOG.md) for the
 full history.

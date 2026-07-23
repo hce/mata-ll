@@ -29,7 +29,25 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+## [0.1.5] - 2026-07-23
+
 ### Changed
+
+- **Breaking: the integer type is `Int`, not `Integer`.** mata-ll's integer is
+  Lua's 64-bit signed integer — it wraps on overflow, exactly like GHC's `Int`
+  — so it now carries that name instead of `Integer` (GHC's arbitrary-precision
+  type), which mata-ll never implemented. Naming a wrapping type `Integer` was a
+  silent soundness deviation against the GHC oracle; this closes it. `Integer`
+  written in a type is now a compile error with a `note:` pointing at `Int`;
+  `toInteger` is likewise gone (its result would be the absent `Integer`), while
+  `fromInteger` stays; and an integer literal past `maxBound :: Int` is a hard
+  compile error (GHC only warns, via `-Woverflowed-literals`). Numeric
+  defaulting is now `default (Int, Number)`. The `Int`/`Integer` alias that made
+  both spellings interchangeable is removed — no back door. Migration is
+  mechanical: replace `Integer` with `Int` (and `AnyInteger` →`AnyInt`,
+  `toJSONInteger`/`fromJSONInteger` → `toJSONInt`/`fromJSONInt`). Generated Lua
+  and runtime behavior are unchanged — only the type's name and the three new
+  rejections differ.
 
 - **Breaking: `show` output now matches GHC exactly.** The three measured
   divergences recorded in `DIVERGENCES.md` are converged:
