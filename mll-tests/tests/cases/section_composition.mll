@@ -3,23 +3,23 @@
 -- `function(_sec) ... end(x)` — which Lua's grammar rejects. Callees that
 -- are function literals must be parenthesized: `(function() ... end)(x)`.
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
-dbl :: Integer -> Integer
+dbl :: Int -> Int
 dbl x = x * 2
 
 -- Inline-path coverage: `app` and `comp` are small pure single-clause
 -- functions, so codegen inlines them at exact-arity call sites and their
 -- bodies go through the substituting emitter (gen_expr_subst), which had
 -- the same bug for `$` and emitted `.` as an invalid Lua infix operator.
-app :: (Integer -> Integer) -> Integer -> Integer
+app :: (Int -> Int) -> Int -> Int
 app f x = f $ x
 
-comp :: (Integer -> Integer) -> (Integer -> Integer) -> Integer -> Integer
+comp :: (Int -> Int) -> (Int -> Int) -> Int -> Int
 comp f g = f . g
 
-addN :: Integer -> (Integer -> Integer)
+addN :: Int -> (Int -> Int)
 addN n = (+n)
 
 main :: IO ()

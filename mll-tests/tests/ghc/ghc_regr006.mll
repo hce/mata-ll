@@ -3,7 +3,7 @@
 data Priority = P0 | P1 | P2 | P3 | P4 | P5 | P6 | P7 | P8 | P9 | P10
     deriving (Show, Eq, Ord, Enum, Bounded)
 
-toInt :: Priority -> Integer
+toInt :: Priority -> Int
 toInt P0  = 0
 toInt P1  = 1
 toInt P2  = 2

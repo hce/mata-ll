@@ -12,7 +12,7 @@ Comments are done with -- just like in haskell and -- wow! -- Lua!
 
 Our primitive data types should match the Lua ones:
 
-    String, Integer, Number, Bool
+    String, Int, Number, Bool
 
 Lua tables with continuous integer keys (i.e., arrays) should be written as
 
@@ -33,7 +33,7 @@ user-defined ADT. The built-in operations are:
     hmLookup   :: k -> HashMap k v -> Maybe v
     hmDelete   :: k -> HashMap k v -> HashMap k v
     hmMember   :: k -> HashMap k v -> Bool
-    hmSize     :: HashMap k v -> Integer
+    hmSize     :: HashMap k v -> Int
     hmKeys     :: HashMap k v -> [k]
     hmValues   :: HashMap k v -> [v]
     hmToList   :: HashMap k v -> [(k, v)]
@@ -60,7 +60,7 @@ element-for-element with `zip (hmKeys m) (hmValues m)`.
 
 We support haskell's algebraic datatypes:
 
-    data A = A String | B Integer Integer
+    data A = A String | B Int Int
 
 This datatype is internally represented as:
 
@@ -115,12 +115,12 @@ GHC's postfix grammar.
 
 And also newtype:
 
-    newtype A = A Integer
+    newtype A = A Int
 
 In order to make it easier to interact with plain Lua, the prelude
 defines:
 
-    data Any = AnyString String | AnyInteger Integer
+    data Any = AnyString String | AnyInt Int
              | AnyNumber Number | AnyBool Bool | AnyNull
 
 Though this should rarely be used.
@@ -132,9 +132,9 @@ Generalized Algebraic Data Types (GADTs). GADTs allow each constructor
 to specify its own return type, refining the type variable:
 
     data Expr a where
-        LitI :: Integer -> Expr Integer
+        LitI :: Int -> Expr Int
         LitB :: Bool -> Expr Bool
-        Add  :: Expr Integer -> Expr Integer -> Expr Integer
+        Add  :: Expr Int -> Expr Int -> Expr Int
         If   :: Expr Bool -> Expr a -> Expr a -> Expr a
 
 Pattern matching on a GADT constructor introduces local type
@@ -146,8 +146,8 @@ equalities into scope for that branch. For example:
     eval (Add x y)    = eval x + eval y
     eval (If c t e)   = if eval c then eval t else eval e
 
-In the `LitI` branch, the compiler knows `a ~ Integer`, so returning
-`n :: Integer` as `a` is valid. In the `LitB` branch, `a ~ Bool`.
+In the `LitI` branch, the compiler knows `a ~ Int`, so returning
+`n :: Int` as `a` is valid. In the `LitB` branch, `a ~ Bool`.
 This refinement is purely compile-time; the runtime representation is
 identical to standard ADTs (tag at index 1, fields after). The above
 could translate to:
@@ -275,7 +275,7 @@ are specified should also be supported.
 
 An example implementation would be this:
 
-    add :: Integer -> Integer -> Integer
+    add :: Int -> Int -> Int
     add a b = a + b
 
 Could translate to
@@ -311,8 +311,8 @@ and monads:
 To define a typeclass:
 
     class X T where
-        fun :: T -> Integer
-        (+) :: T -> T -> Integer
+        fun :: T -> Int
+        (+) :: T -> T -> Int
 
 Since we don't want to support full haskell, for now we only support
 typeclasses with a single type argument for now.
@@ -378,7 +378,7 @@ contributes zero, which then trips the leak check.
 
 ## Scalars: strict parity, no exemption
 
-A scalar (`Integer`, `Number`, `Bool`, `String`) derived from a `%1`/`%m`
+A scalar (`Int`, `Number`, `Bool`, `String`) derived from a `%1`/`%m`
 value is tracked exactly-once like every other alias — there is no
 `Movable`-style relaxation. Duplicating a scalar is operationally
 harmless under the memoizing runtime, but GHC's type system has no scalar
@@ -418,7 +418,7 @@ declared arrows are not both literally `%1`.
 MATA-LL has a full kind system. Kinds classify types the way types
 classify values:
 
-    Type          -- complete types (Integer, Bool, Maybe String, ...)
+    Type          -- complete types (Int, Bool, Maybe String, ...)
     Symbol        -- type-level strings, used in FFI declarations
     k1 -> k2      -- type constructors (Maybe : Type -> Type,
                   --   Either : Type -> Type -> Type,
@@ -429,7 +429,7 @@ and anything left unconstrained defaults to `Type` (GHC's Haskell-2010
 kind defaulting). There is no kind polymorphism.
 
 - A `data`/`newtype` parameter's kind comes from how the parameter is
-  used in the fields: `data Wrap f = Wrap (f Integer)` gives
+  used in the fields: `data Wrap f = Wrap (f Int)` gives
   `Wrap : (Type -> Type) -> Type`. Mutually recursive declarations are
   solved together.
 - A class variable's kind comes from the method signatures:
@@ -442,8 +442,8 @@ kind defaulting). There is no kind polymorphism.
 Every type the program writes is then kind-checked: signatures, data
 fields, class methods, instance declarations, type-family equations and
 expression ascriptions. Applying a complete type to an argument
-(`Maybe Integer Bool`), using an unsaturated constructor where a
-complete type is required (`f :: Maybe -> Integer`), and using one type
+(`Maybe Int Bool`), using an unsaturated constructor where a
+complete type is required (`f :: Maybe -> Int`), and using one type
 variable at two kinds (`g :: t -> t a`) are all compile-time kind
 errors.
 
@@ -461,7 +461,7 @@ Promoted data types (DataKinds, see below) have REAL kinds. A
 parameterless data type `T` promotes to a kind named `T`: `data Nat =
 Z | S Nat` gives the kind `Nat` with `'Z :: Nat` and `'S :: Nat -> Nat`
 (and the builtin `Bool` promotes, `'True`/`'False :: Bool`). An index is
-checked to have exactly that kind, so `Vec 'True Integer` is a kind
+checked to have exactly that kind, so `Vec 'True Int` is a kind
 error (expected `Nat`, got `Bool`). Two limits: only parameterless,
 non-GADT data types promote (others keep the `Type` approximation, as
 promoting them would need kind polymorphism), and — with no kind-
@@ -532,7 +532,7 @@ Example:
 
     export processEvent :: forall s. LuaFunction s -> LuaIO s ()
     processEvent luafn = do
-        let f = engage luafn :: Integer -> LuaIO s Integer
+        let f = engage luafn :: Int -> LuaIO s Int
         result <- f 42
         liftIO $ putStrLn (show result)
 
@@ -612,12 +612,12 @@ API that calls the callback once per item and threads its return value
 as the next state (e.g. a SQL driver folding over result rows):
 
     foldRows :: String
-             -> (Integer -> acc -> acc)        -- pure callback
+             -> (Int -> acc -> acc)        -- pure callback
              -> acc
              -> LuaPure "db.fold" acc
 
     foldRowsIO :: String
-               -> (Integer -> acc -> LuaIO s acc)  -- effectful callback
+               -> (Int -> acc -> LuaIO s acc)  -- effectful callback
                -> acc
                -> LuaIO "db.fold" acc
 
@@ -777,13 +777,13 @@ variable.
 
     class Read a where
         read :: String -> a
-        -- Instances: Integer, Number, Bool, String
+        -- Instances: Int, Number, Bool, String
 
     class Enum a where
         succ        :: a -> a
         pred        :: a -> a
-        toEnum      :: Integer -> a
-        fromEnum    :: a -> Integer
+        toEnum      :: Int -> a
+        fromEnum    :: a -> Int
         enumFrom    :: a -> [a]          -- [n..]
         enumFromThen :: a -> a -> [a]    -- [n,m..]
         enumFromTo  :: a -> a -> [a]     -- [n..m]
@@ -869,7 +869,7 @@ must be *importable*) and its RESULT crosses MATA-LL→Lua (it must be
 *exportable*). The allowed *value* set, in both directions and
 recursively, is:
 
-  - scalars — `Integer`, `Number`, `Bool`, `String`, `ByteString` (and
+  - scalars — `Int`, `Number`, `Bool`, `String`, `ByteString` (and
     the FFI aliases `Int`/`Double`/`Float`/`Char`) — and `()`;
   - the opaque `LuaUserData` interop handle;
   - `[a]`, tuples, and any data type — `Maybe`, `Either`, `Ordering`,
@@ -940,7 +940,7 @@ Pattern matching semantics:
 
     data Tree a = Branch (Tree a) (Tree a) | Leaf a
 
-    depth :: Tree a -> Integer
+    depth :: Tree a -> Int
     depth (Leaf _)          = 0
     depth (Branch a b)      = 1 + max (depth a) (depth b)
 
@@ -1002,7 +1002,7 @@ For both, library functions should be used:
   getArgs :: IO [String]
   exit :: ExitValue -> IO ()
 
-  data ExitValue = Normal | Err Integer
+  data ExitValue = Normal | Err Int
 
 # Do-notation
 
@@ -1075,11 +1075,11 @@ Pattern matching in lambda arguments is supported.
 
 Guards are supported on function definitions and case branches:
 
-    abs :: Integer -> Integer
+    abs :: Int -> Int
     abs n | n < 0     = -n
           | otherwise = n
 
-    classify :: Integer -> String
+    classify :: Int -> String
     classify n = case n of
         0             -> "zero"
         n | n > 0     -> "positive"
@@ -1108,17 +1108,17 @@ literal), and a decimal literal has type `Fractional a => a` (it is
     42    :: Num a => a
     3.14  :: Fractional a => a
 
-At a concrete `Integer` or `Number` type `fromInteger`/`fromRational`
-is the identity and is erased, so `(42 :: Integer)` and
+At a concrete `Int` or `Number` type `fromInteger`/`fromRational`
+is the identity and is erased, so `(42 :: Int)` and
 `(3.14 :: Number)` still compile to the bare Lua values `42` and
 `3.14`.
 
 An unconstrained numeric literal is resolved by GHC's defaulting rule
-`default (Integer, Number)` (`Number` standing in for GHC's `Double`):
-the first of `Integer` then `Number` whose instances satisfy the
+`default (Int, Number)` (`Number` standing in for GHC's `Double`):
+the first of `Int` then `Number` whose instances satisfy the
 variable's (standard) class constraints is chosen. So `show 5` is
-`show (5 :: Integer)`, while `show (5 / 2)` resolves to `Number`
-(because `Integer` is not `Fractional`). A variable also constrained
+`show (5 :: Int)`, while `show (5 / 2)` resolves to `Number`
+(because `Int` is not `Fractional`). A variable also constrained
 by a non-standard (user) class is not defaulted — such a use is
 ambiguous and needs an annotation, matching GHC.
 
@@ -1135,7 +1135,7 @@ The numeric typeclass hierarchy is built in, with GHC's signatures:
     class Num a where
         (+), (-), (*) :: a -> a -> a
         negate, abs, signum :: a -> a
-        fromInteger :: Integer -> a
+        fromInteger :: Int -> a
 
     class Num a => Fractional a where
         (/) :: a -> a -> a
@@ -1147,10 +1147,10 @@ The numeric typeclass hierarchy is built in, with GHC's signatures:
     class (Real a, Enum a) => Integral a where
         quot, rem, div, mod :: a -> a -> a
         quotRem, divMod :: a -> a -> (a, a)
-        toInteger :: a -> Integer
+        toInteger :: a -> Int
 
-`Integer` is `Num`, `Real`, and `Integral`. `Number` is `Num`,
-`Real`, and `Fractional` (`Integer` is deliberately not `Fractional`
+`Int` is `Num`, `Real`, and `Integral`. `Number` is `Num`,
+`Real`, and `Fractional` (`Int` is deliberately not `Fractional`
 and `Number` is deliberately not `Integral`, exactly as GHC). You can
 write ordinary polymorphic numeric code (`sum :: Num a => [a] -> a`,
 `average :: Fractional a => [a] -> a`) and give a hand-written `Num`
@@ -1202,7 +1202,7 @@ dictionary-passing for the whole function.
 
     main :: IO ()
     main = do
-        let n = NCons (1 :: Integer)
+        let n = NCons (1 :: Int)
                       (NCons [2, 3]
                              (NCons [[4, 5], [6]] NNil))
         putStrLn (showNested n)
@@ -1214,8 +1214,8 @@ program compiles and runs, printing:
     1 > [2, 3] > [[4, 5], [6]] > end
 
 Mechanically: monomorphization tries to specialize `showNested` at
-`Nested Integer`, which demands a specialization at `Nested [Integer]`,
-which demands `Nested [[Integer]]`, and so on. When more than 16
+`Nested Int`, which demands a specialization at `Nested [Int]`,
+which demands `Nested [[Int]]`, and so on. When more than 16
 trial specializations of one function accumulate, the compiler gives
 up on that function, **discards those trial specializations, and
 rewrites the entire function to dictionary-passing** — there is no
@@ -1225,7 +1225,7 @@ typeclass method is then looked up from a Lua table parameter instead
 of being resolved statically. The emitted top-level call and the
 recursive call look like:
 
-    showNested({ show = show_Integer }, value)   -- from main
+    showNested({ show = show_Int }, value)   -- from main
     showNested(__dict_Show, rest)                -- the recursive call
 
 Limitation — read this before relying on it. The dictionary is built
@@ -1238,7 +1238,7 @@ numbers structurally, which is why the example above prints correctly
 — but it is wrong when a derived instance differs per level. With
 `data Box a = Box a deriving (Show)` and `Deep (Box a)` recursion,
 `show (Box 2)` on its own correctly prints `Box 2`, yet inside the
-polymorphic recursion the threaded `show_Integer` is applied to the
+polymorphic recursion the threaded `show_Int` is applied to the
 `Box` value and it prints `(2)` instead. In other words, mata-ll
 compiles and runs genuinely polymorphic-recursive code, but the
 dictionary-passing fallback does not transform the dictionary at each
@@ -1444,7 +1444,7 @@ Bounded, Functor, ToJSON, FromJSON, and LuaDict:
     data Tree a = Leaf a | Branch (Tree a) (Tree a)
         deriving (Show, Eq, Functor)
 
-    data Person = Person { pName :: String, pAge :: Integer }
+    data Person = Person { pName :: String, pAge :: Int }
         deriving (Show, ToJSON, FromJSON)
 
 The compiler generates the obvious structural instances. Enum and
@@ -1486,7 +1486,7 @@ codec writes and reads to tell the constructors apart — nullary
 constructors encode as the bare external string, fielded ones carry
 it as the `"tag"` value:
 
-    data Outcome = Ok Integer as "ok" | Err String as "error"
+    data Outcome = Ok Int as "ok" | Err String as "error"
         deriving (Show, ToJSON, FromJSON)
 
     -- encodeToJSON (Err "x") == {"tag":"error","contents":"x"}
@@ -1511,7 +1511,7 @@ constructor of an untagged type
 
 Definitions are exported to plain Lua via the `export` keyword:
 
-    export fibonacci :: Integer -> [Integer]
+    export fibonacci :: Int -> [Int]
     fibonacci = flip take fib
 
 Exports appear in the module's return table. An export may be a
@@ -1533,13 +1533,13 @@ contract).
 It uses the same rank-2 scope-sealing technique as `LuaIO s`:
 
     runST        :: (forall s. ST s a) -> a
-    newSTArray   :: Integer -> Integer -> ST s (STArray s)
-    readSTArray  :: STArray s -> Integer -> ST s Integer
-    writeSTArray :: STArray s -> Integer -> Integer -> ST s ()
-    modifySTArray :: STArray s -> Integer -> (Integer -> Integer) -> ST s ()
-    stArrayLength :: STArray s -> ST s Integer
-    newSTArrayFromList :: [Integer] -> ST s (STArray s)
-    stArrayToList :: STArray s -> ST s [Integer]
+    newSTArray   :: Int -> Int -> ST s (STArray s)
+    readSTArray  :: STArray s -> Int -> ST s Int
+    writeSTArray :: STArray s -> Int -> Int -> ST s ()
+    modifySTArray :: STArray s -> Int -> (Int -> Int) -> ST s ()
+    stArrayLength :: STArray s -> ST s Int
+    newSTArrayFromList :: [Int] -> ST s (STArray s)
+    stArrayToList :: STArray s -> ST s [Int]
 
 `ST s` is the same runtime as IO but with a type-level distinction.
 The `forall s.` in `runST` prevents mutable state from escaping.

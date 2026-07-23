@@ -44,7 +44,7 @@ lookup = hmLookup
 member :: k -> Map k v -> Bool
 member = hmMember
 
-size :: Map k v -> Integer
+size :: Map k v -> Int
 size = hmSize
 
 keys :: Map k v -> [k]

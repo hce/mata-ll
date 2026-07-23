@@ -14,10 +14,10 @@ fmapRose :: (a -> b) -> Rose a -> Rose b
 fmapRose f (RLeaf x)  = RLeaf (f x)
 fmapRose f (RNode cs) = RNode (map (fmapRose f) cs)
 
-double :: Integer -> Integer
+double :: Int -> Int
 double x = x * 2
 
-addTen :: Integer -> Integer
+addTen :: Int -> Int
 addTen x = x + 10
 
 -- Functor law 1: fmap id == id
@@ -32,11 +32,11 @@ main = do
 
     -- Law 1: fmap id = id
     assert (fmap id (Full 7) == Full 7) "law1 full"
-    assert (fmap id Empty == (Empty :: Box Integer)) "law1 empty"
+    assert (fmap id Empty == (Empty :: Box Int)) "law1 empty"
 
     -- Law 2: composition
     assert (fmap (addTen . double) (Full 3) == fmap addTen (fmap double (Full 3))) "law2 full"
-    assert (fmap (addTen . double) Empty == fmap addTen (fmap double (Empty :: Box Integer))) "law2 empty"
+    assert (fmap (addTen . double) Empty == fmap addTen (fmap double (Empty :: Box Int))) "law2 empty"
 
     -- Pair functor
     assert (fmap double (Pair 3 4) == Pair 6 8) "pair fmap"

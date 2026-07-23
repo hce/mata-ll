@@ -1,13 +1,13 @@
 -- GHC cgrun034: Tuple operations
 -- Tests tuple construction, pattern matching, fst/snd
 
-swap :: (Integer, Integer) -> (Integer, Integer)
+swap :: (Int, Int) -> (Int, Int)
 swap (a, b) = (b, a)
 
-addPair :: (Integer, Integer) -> Integer
+addPair :: (Int, Int) -> Int
 addPair (a, b) = a + b
 
-both :: (Integer -> Integer) -> (Integer, Integer) -> (Integer, Integer)
+both :: (Int -> Int) -> (Int, Int) -> (Int, Int)
 both f (a, b) = (f a, f b)
 
 main :: IO ()

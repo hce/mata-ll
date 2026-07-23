@@ -281,7 +281,17 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 });
             } else {
                 let s: String = chars[start..pos].iter().collect();
-                let n: i64 = s.parse().map_err(|e| format!("Invalid integer '{}': {}", s, e))?;
+                // Only ASCII digits were consumed, so the sole way `parse` fails
+                // is overflow past `maxBound :: Int` (i64::MAX). mata-ll's `Int`
+                // is 64-bit and wrapping (GHC's `Int` semantics); there is no
+                // arbitrary-precision `Integer`, so a literal that does not fit is
+                // a hard compile error rather than a silent wrap. GHC only warns
+                // here (-Woverflowed-literals); rejecting is stricter, which the
+                // GHC-parity criterion permits.
+                let n: i64 = s.parse().map_err(|_| format!(
+                    "integer literal '{}' does not fit in Int — it exceeds maxBound :: Int \
+                     (9223372036854775807). mata-ll has no arbitrary-precision Integer; \
+                     its Int is 64-bit and wrapping, like GHC's Int.", s))?;
                 tokens.push(Located {
                     token: Token::IntLit(n),
                     line: tok_line,

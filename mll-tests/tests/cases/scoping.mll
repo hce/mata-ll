@@ -1,20 +1,20 @@
 -- Comprehensive scoping tests
 
 -- Top-level let-in value bindings
-topLetVal :: Integer
+topLetVal :: Int
 topLetVal = let x = 1 in let y = 2 in x + y
 
-topShadow :: Integer
+topShadow :: Int
 topShadow = let x = 1 in let x = 2 in x
 
 -- Where clause scoping
-addSquares :: Integer -> Integer -> Integer
+addSquares :: Int -> Int -> Int
 addSquares a b = sa + sb
     where sa = a * a
           sb = b * b
 
 -- Where with local function
-collatz :: Integer -> Integer
+collatz :: Int -> Int
 collatz n = go n 0
     where go 1 steps = steps
           go n steps
@@ -22,16 +22,16 @@ collatz n = go n 0
               | otherwise = go (3 * n + 1) (steps + 1)
 
 -- Mutual recursion
-isEven' :: Integer -> Bool
+isEven' :: Int -> Bool
 isEven' 0 = True
 isEven' n = isOdd' (n - 1)
 
-isOdd' :: Integer -> Bool
+isOdd' :: Int -> Bool
 isOdd' 0 = False
 isOdd' n = isEven' (n - 1)
 
 -- Closure over free variables
-makeAdder :: Integer -> Integer -> Integer
+makeAdder :: Int -> Int -> Int
 makeAdder n = \x -> x + n
 
 -- Higher-order with closures

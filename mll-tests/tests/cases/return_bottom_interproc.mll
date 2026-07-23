@@ -8,11 +8,11 @@
 -- raising where GHC does not. The fix tags such an escaped pure value so the
 -- runner unwraps it without forcing or calling it.
 
-boom :: Integer
+boom :: Int
 boom = error "boom: interprocedural return forced its argument"
 
 -- Applied function (takes n) whose terminal action is a possibly-⊥ pure value.
-mk :: Integer -> IO Integer
+mk :: Int -> IO Int
 mk n = do
     _ <- return ()
     pure (boom + n)
@@ -20,13 +20,13 @@ mk n = do
 -- Applied function returning a FUNCTION value via pure. The old runtime, unable
 -- to tell a value-action from an action closure, CALLED this with no arguments
 -- ("arithmetic on a nil value"); the tag makes it a value, delivered intact.
-mkFn :: Integer -> IO (Integer -> Integer)
+mkFn :: Int -> IO (Int -> Int)
 mkFn k = do
     _ <- return ()
     pure (\x -> x + k)
 
 -- Effectful accumulator whose terminal `pure (acc + row)` escapes to the caller.
-step :: Integer -> Integer -> IO Integer
+step :: Int -> Int -> IO Int
 step row acc = do
     _ <- return ()
     pure (acc + row)

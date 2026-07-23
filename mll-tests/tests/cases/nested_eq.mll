@@ -11,7 +11,7 @@ main = do
     -- List of Maybe
     assert ([Just 1, Nothing] == [Just 1, Nothing]) "list of maybe eq"
     assert ([Just 1] /= [Just 2]) "list of maybe neq"
-    assert ([Nothing] == [Nothing :: Maybe Integer]) "list of nothing eq"
+    assert ([Nothing] == [Nothing :: Maybe Int]) "list of nothing eq"
 
     -- Tuple of lists
     assert (([1, 2], [3, 4]) == ([1, 2], [3, 4])) "tuple of lists eq"

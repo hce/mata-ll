@@ -91,7 +91,7 @@ test_non_io_bind = do
     assert (mz == Just 6) "maybe >>="
     let mn = Just 1 >> Just 2
     assert (mn == Just 2) "maybe >>"
-    let mq = (Nothing :: Maybe Integer) >>= \x -> Just (x + 1)
+    let mq = (Nothing :: Maybe Int) >>= \x -> Just (x + 1)
     assert (mq == Nothing) "maybe >>= nothing"
 
 main :: IO ()

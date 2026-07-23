@@ -1,7 +1,7 @@
 -- GHC cgrun043: Do-notation and IO sequencing
 -- Tests monadic IO operations in do blocks
 
-printN :: Integer -> Integer -> IO ()
+printN :: Int -> Int -> IO ()
 printN n max
     | n > max   = pure ()
     | otherwise = do
@@ -9,7 +9,7 @@ printN n max
         putStr " "
         printN (n + 1) max
 
-countdown :: Integer -> [Integer]
+countdown :: Int -> [Int]
 countdown 0 = [0]
 countdown n = n : countdown (n - 1)
 

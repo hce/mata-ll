@@ -1,15 +1,15 @@
 -- GHC cgrun062: Interpreter for a tiny language (variables, add, let)
 
-data Expr = Lit Integer | Var String | Add Expr Expr | MLet String Expr Expr
+data Expr = Lit Int | Var String | Add Expr Expr | MLet String Expr Expr
     deriving (Show, Eq)
 
-lookupEnv :: String -> [(String, Integer)] -> Maybe Integer
+lookupEnv :: String -> [(String, Int)] -> Maybe Int
 lookupEnv _ [] = Nothing
 lookupEnv k ((k2, v) : rest)
     | k == k2   = Just v
     | otherwise = lookupEnv k rest
 
-eval :: [(String, Integer)] -> Expr -> Maybe Integer
+eval :: [(String, Int)] -> Expr -> Maybe Int
 eval _ (Lit n) = Just n
 eval env (Var x) = lookupEnv x env
 eval env (Add e1 e2) = eval env e1 >>= \v1 -> eval env e2 >>= \v2 -> Just (v1 + v2)

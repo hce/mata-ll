@@ -10,9 +10,9 @@
 -- method; user classes have no such fallback.
 
 class CSize a where
-    csize :: a -> Integer
+    csize :: a -> Int
 
-instance CSize Integer where
+instance CSize Int where
     csize _ = 1
 
 instance CSize a => CSize [a] where
@@ -24,22 +24,22 @@ instance CSize a => CSize (Maybe a) where
     csize (Just x) = csize x
 
 -- Recursion at [a]: depth 0 uses the dictionary directly.
-poly :: CSize a => Integer -> a -> Integer
+poly :: CSize a => Int -> a -> Int
 poly 0 x = csize x
 poly n x = poly (n - 1) [x]
 
 -- Recursion that GROWS the structure: 2^n leaves, so the answer depends on
 -- the constructed [a] dictionary genuinely recursing per level.
-grow :: CSize a => Integer -> a -> Integer
+grow :: CSize a => Int -> a -> Int
 grow 0 x = csize x
 grow n x = grow (n - 1) [x, x]
 
 -- Recursion through a user instance on Maybe.
-wrap :: CSize a => Integer -> a -> Integer
+wrap :: CSize a => Int -> a -> Int
 wrap 0 x = csize x
 wrap n x = wrap (n - 1) (Just x)
 
-check :: String -> Integer -> Integer -> IO ()
+check :: String -> Int -> Int -> IO ()
 check name got want =
     if got == want
         then putStrLn ("ok " <> name)
@@ -50,22 +50,22 @@ main = do
     -- The element argument carries the user constraint `CSize a`; with
     -- polymorphic numeric literals its type is `(CSize a, Num a) => a`, which
     -- GHC (and mata-ll) cannot default — `CSize` is not a standard class — so
-    -- the literal is annotated to pin `a = Integer`.
-    check "poly-depth0" (poly 0 (7 :: Integer)) 1
-    check "poly-depth3" (poly 3 (7 :: Integer)) 1
-    check "grow-depth0" (grow 0 (5 :: Integer)) 1
-    check "grow-depth1" (grow 1 (5 :: Integer)) 2
-    check "grow-depth4" (grow 4 (5 :: Integer)) 16
-    check "wrap-depth3" (wrap 3 (9 :: Integer)) 1
+    -- the literal is annotated to pin `a = Int`.
+    check "poly-depth0" (poly 0 (7 :: Int)) 1
+    check "poly-depth3" (poly 3 (7 :: Int)) 1
+    check "grow-depth0" (grow 0 (5 :: Int)) 1
+    check "grow-depth1" (grow 1 (5 :: Int)) 2
+    check "grow-depth4" (grow 4 (5 :: Int)) 16
+    check "wrap-depth3" (wrap 3 (9 :: Int)) 1
     -- Built-in Show polymorphic recursion keeps working alongside.
     -- show [[1]] == "[[1]]", 5 characters
-    check "show-still-works" (lengthS (showdeep 2 (1 :: Integer))) 5
+    check "show-still-works" (lengthS (showdeep 2 (1 :: Int))) 5
 
-lengthS :: String -> Integer
+lengthS :: String -> Int
 lengthS s = sLen s
 
-sLen :: String -> LuaPure "string.len" Integer
+sLen :: String -> LuaPure "string.len" Int
 
-showdeep :: Show a => Integer -> a -> String
+showdeep :: Show a => Int -> a -> String
 showdeep 0 x = show x
 showdeep n x = showdeep (n - 1) [x]

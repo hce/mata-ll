@@ -3,7 +3,7 @@
 
 import Control.Monad (forM)
 
-safe :: Integer -> Maybe Integer
+safe :: Int -> Maybe Int
 safe n = if n < 0 then Nothing else Just (n * 2)
 
 main :: IO ()

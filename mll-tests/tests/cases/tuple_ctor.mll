@@ -2,7 +2,7 @@
 -- `(,,) :: a -> b -> c -> (a, b, c)`, etc. Desugars to a multi-param lambda,
 -- so it works fully applied, partially applied, and passed higher-order.
 
-fst3 :: (String, Integer, Integer) -> String
+fst3 :: (String, Int, Int) -> String
 fst3 (a, _, _) = a
 
 main :: IO ()

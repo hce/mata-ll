@@ -34,7 +34,7 @@ describeShapeTag (Tag lbl (Rect w h))
     | otherwise = lbl <> ":rect"
 
 -- 4-level: Maybe (Either (Tagged Color))
-data Nested = MkNested (Maybe (Either (Tagged Color) Integer))
+data Nested = MkNested (Maybe (Either (Tagged Color) Int))
     deriving (Show, Eq)
 
 nestedColorTag :: Color -> String -> String

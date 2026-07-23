@@ -1,30 +1,30 @@
 -- GHC cgrun069: Simple type inference (unification of simple types)
 
-data Ty = TyInt | TyBool | TyFun Ty Ty | TyVar Integer
+data Ty = TyInt | TyBool | TyFun Ty Ty | TyVar Int
     deriving (Show, Eq)
 
-applySubst :: [(Integer, Ty)] -> Ty -> Ty
+applySubst :: [(Int, Ty)] -> Ty -> Ty
 applySubst _ TyInt  = TyInt
 applySubst _ TyBool = TyBool
 applySubst s (TyFun a b) = TyFun (applySubst s a) (applySubst s b)
 applySubst s (TyVar n) = lookupVar n s
 
-lookupVar :: Integer -> [(Integer, Ty)] -> Ty
+lookupVar :: Int -> [(Int, Ty)] -> Ty
 lookupVar n [] = TyVar n
 lookupVar n ((k, v):rest)
     | n == k    = applySubst rest v
     | otherwise = lookupVar n rest
 
-occurs :: Integer -> Ty -> Bool
+occurs :: Int -> Ty -> Bool
 occurs n (TyVar m)   = n == m
 occurs _ TyInt       = False
 occurs _ TyBool      = False
 occurs n (TyFun a b) = occurs n a || occurs n b
 
-unify :: [(Integer, Ty)] -> Ty -> Ty -> Maybe [(Integer, Ty)]
+unify :: [(Int, Ty)] -> Ty -> Ty -> Maybe [(Int, Ty)]
 unify s t1 t2 = unify_ s (applySubst s t1) (applySubst s t2)
 
-unify_ :: [(Integer, Ty)] -> Ty -> Ty -> Maybe [(Integer, Ty)]
+unify_ :: [(Int, Ty)] -> Ty -> Ty -> Maybe [(Int, Ty)]
 unify_ s TyInt TyInt   = Just s
 unify_ s TyBool TyBool = Just s
 unify_ s (TyVar n) t
@@ -37,7 +37,7 @@ unify_ s t (TyVar n)
 unify_ s (TyFun a1 b1) (TyFun a2 b2) = unify s a1 a2 >>= \s2 -> unify s2 b1 b2
 unify_ _ _ _ = Nothing
 
-checkSubst :: Maybe [(Integer, Ty)] -> Integer -> Ty -> Bool
+checkSubst :: Maybe [(Int, Ty)] -> Int -> Ty -> Bool
 checkSubst Nothing _ _ = False
 checkSubst (Just s) var expected = applySubst s (TyVar var) == expected
 

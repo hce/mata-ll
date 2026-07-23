@@ -9,12 +9,12 @@
 import JSON
 
 -- Single-constructor record: decodes from an object keyed by field name.
-data Person = Person { name :: String, age :: Integer }
+data Person = Person { name :: String, age :: Int }
     deriving (Eq, FromJSON)
 
 -- Multi-constructor sum: record constructor (fields inline next to the tag),
 -- positional constructor (arguments under "contents"), nullary constructor.
-data Shape = Circle { radius :: Number } | Rect Integer Integer | Point0
+data Shape = Circle { radius :: Number } | Rect Int Int | Point0
     deriving (Eq, FromJSON)
 
 -- All-nullary sum: decodes from bare constructor-name strings.
@@ -23,14 +23,14 @@ data Color = RedC | GreenC | BlueC
 
 -- Single positional constructors: one argument is the value itself,
 -- several are an array.
-data Wrap = Wrap Integer
+data Wrap = Wrap Int
     deriving (Eq, FromJSON)
 
-data Pair2 = Pair2 Integer String
+data Pair2 = Pair2 Int String
     deriving (Eq, FromJSON)
 
 -- Single positional Maybe: null <-> Nothing at the top level.
-data OptW = OptW (Maybe Integer)
+data OptW = OptW (Maybe Int)
     deriving (Eq, FromJSON)
 
 -- Lone nullary constructor: the constructor name is the payload.
@@ -46,17 +46,17 @@ data Org = Org { teams :: [Team] }
     deriving (Eq, FromJSON)
 
 -- Recursive types.
-data JTree = JLeaf Integer | JNode [JTree]
+data JTree = JLeaf Int | JNode [JTree]
     deriving (Eq, FromJSON)
 
-data LL = LNil | LCons Integer LL
+data LL = LNil | LCons Int LL
     deriving (Eq, FromJSON)
 
 -- Mutual recursion: Fwd's decoder references Back's, declared later.
 data Fwd = Fwd { fb :: Maybe Back }
     deriving (Eq, FromJSON)
 
-data Back = Back { bn :: Integer, bf :: Maybe Fwd }
+data Back = Back { bn :: Int, bf :: Maybe Fwd }
     deriving (Eq, FromJSON)
 
 -- A raw Json field decodes as-is.
@@ -64,7 +64,7 @@ data Doc = Doc { title :: String, body :: Json }
     deriving (Eq, FromJSON)
 
 -- Lists of Maybe and nested lists as field types.
-data Grid = Grid { cells :: [[Integer]], marks :: [Maybe Integer] }
+data Grid = Grid { cells :: [[Int]], marks :: [Maybe Int] }
     deriving (Eq, FromJSON)
 
 -- Decode helpers (one per type: Eq dispatch is monomorphic) -----------
@@ -230,7 +230,7 @@ main = do
     assert (errIs (decP "{\"name\":\"Ann\",\"age\":3.5}")
         "while decoding Person: in field 'age': expected an integer, but found the non-integral number 3.5") "integrality enforced"
     assert (errIs (decP "{\"name\":\"Ann\",\"age\":1e300}")
-        "while decoding Person: in field 'age': the number 1e+300 is outside the 64-bit Integer range") "int64 range enforced"
+        "while decoding Person: in field 'age': the number 1e+300 is outside the 64-bit Int range") "int64 range enforced"
     assert (errIs (decP "{\"name\":\"Ann\",\"age\":30} x")
         "Unexpected character 'x' at position 25: the input continues after the end of the JSON value") "trailing garbage rejected"
 
@@ -301,7 +301,7 @@ main = do
 
     -- list-of-list and list-of-Maybe fields
     assert (okG (decG "{\"cells\":[[1,2],[],[3]],\"marks\":[1,null,3]}")
-        (Grid [[1, 2], [], [3]] [Just 1, Nothing, Just 3])) "[[Integer]] and [Maybe Integer]"
+        (Grid [[1, 2], [], [3]] [Just 1, Nothing, Just 3])) "[[Int]] and [Maybe Int]"
     assert (errIs (decG "{\"cells\":[[1,\"x\"]],\"marks\":[]}")
         "while decoding Grid: in field 'cells': at array index 0: at array index 1: expected an integer, but found a string") "nested list error path"
 

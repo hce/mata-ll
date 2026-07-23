@@ -6,22 +6,22 @@
 
 import Control.Monad (forM)
 
-safe :: Integer -> Maybe Integer
+safe :: Int -> Maybe Int
 safe n = if n < 0 then Nothing else Just (n * 2)
 
-collectMaybe :: [Integer] -> Maybe [Integer]
+collectMaybe :: [Int] -> Maybe [Int]
 collectMaybe xs = mapM safe xs
 
-seqMaybe :: [Maybe Integer] -> Maybe [Integer]
+seqMaybe :: [Maybe Int] -> Maybe [Int]
 seqMaybe xs = sequence xs
 
-forMaybe :: [Integer] -> Maybe [Integer]
+forMaybe :: [Int] -> Maybe [Int]
 forMaybe xs = forM xs safe
 
-collectIO :: [Integer] -> IO [Integer]
+collectIO :: [Int] -> IO [Int]
 collectIO xs = mapM (\x -> return (x * x)) xs
 
-seqIO :: IO [Integer]
+seqIO :: IO [Int]
 seqIO = sequence [return 1, return 2, return 3]
 
 main :: IO ()

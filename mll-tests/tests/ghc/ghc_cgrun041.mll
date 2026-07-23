@@ -2,19 +2,19 @@
 -- Tests that unevaluated expressions are not forced prematurely
 
 -- const should not force its second argument
-constTest :: Integer
+constTest :: Int
 constTest = const 42 undefined
 
 -- head should not force the tail
-headTest :: Integer
+headTest :: Int
 headTest = head (1 : undefined)
 
 -- if-then-else short circuits
-ifTest :: Integer
+ifTest :: Int
 ifTest = if True then 42 else undefined
 
 -- infinite list via top-level recursion
-ones :: [Integer]
+ones :: [Int]
 ones = 1 : ones
 
 main :: IO ()

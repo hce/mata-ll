@@ -1,6 +1,6 @@
-iterateMe :: LuaIterator "myiterator" [Integer]
+iterateMe :: LuaIterator "myiterator" [Int]
 
-iterateMe' :: String -> LuaIterator "myiterator" [Integer]
+iterateMe' :: String -> LuaIterator "myiterator" [Int]
 
 iterateMe2 :: String -> String -> LuaIterator "string.gmatch" [String]
 

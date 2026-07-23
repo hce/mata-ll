@@ -24,7 +24,7 @@ removeFile :: String -> LuaIO "os.remove" ()
 -- Plain-text substring search (string.find with plain=True): Right when
 -- found, Left when not. Used to assert on the caught error message, which
 -- carries a Lua source-position prefix before our text.
-sfind :: String -> String -> Integer -> Bool -> LuaTry "string.find" (Either String Integer)
+sfind :: String -> String -> Int -> Bool -> LuaTry "string.find" (Either String Int)
 
 containsStr :: String -> String -> IO Bool
 containsStr s sub = do

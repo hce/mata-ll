@@ -143,13 +143,13 @@ ordinary source classes in the bundled Prelude, not compiler
 built-ins.) User-defined classes and instances are also supported.
 
 Instance resolution maps `(class_name, type_name)` to an `InstanceInfo`
-containing the mangled method names (e.g., `eq_Integer`, `show_String`,
+containing the mangled method names (e.g., `eq_Int`, `show_String`,
 `ord_lt__Number`). Superclass constraints are tracked.
 
 The numeric classes plug into this same machinery without a new code
 path. Their operator methods (`+`, `-`, `*`, `/`, `div`, `mod`, `quot`,
-`rem`) are registered in the `Integer`/`Number` instances as mapping to
-*themselves* — the instance method for `+` at `Integer` is literally
+`rem`) are registered in the `Int`/`Number` instances as mapping to
+*themselves* — the instance method for `+` at `Int` is literally
 `+`. The monomorphizer already leaves a class method whose resolved
 implementation equals the operator as an ordinary `InfixApp` (the trick
 that keeps IO's `>>=` inline), so at a concrete numeric type `+`/`-`/`*`
@@ -158,10 +158,10 @@ strict runtime cores — byte-identical to before the classes existed,
 with no dictionary. A *user* numeric type instead names real instance
 functions, which the monomorphizer dispatches to as a call. A numeric
 literal is `fromInteger`/`fromRational` applied to the raw literal; at
-`Integer`/`Number` that conversion is the identity and is erased in
+`Int`/`Number` that conversion is the identity and is erased in
 codegen, while a user `Num` type materialises the instance's
 `fromInteger` call around the literal. Unconstrained numeric variables
-are resolved by GHC-style defaulting (`Integer`, then `Number`) during
+are resolved by GHC-style defaulting (`Int`, then `Number`) during
 constraint discharge.
 
 Orphan instances (where neither the class nor the type is defined in
@@ -270,7 +270,7 @@ patterns, and signature mismatches.
 The monomorphizer walks the typed IR, collecting concrete type
 instantiations. For each unique `(function_name, concrete_type)` pair
 it generates a specialized copy with a mangled name (e.g.,
-`map_Integer_List_Integer`). Call sites are rewritten to use the
+`map_Int_List_Int`). Call sites are rewritten to use the
 specialized name.
 
 Typeclass method calls (e.g., `show`, `==`) are resolved to their
@@ -349,7 +349,7 @@ operations, bitwise operations, and FFI helpers.
 Multi-constructor types use Lua tables with an integer tag at index 1
 and fields at subsequent indices:
 
-    data A = A String | B Integer Integer
+    data A = A String | B Int Int
 
     A "hello"  →  {1, "hello"}
     B 17 23    →  {2, 17, 23}
@@ -425,7 +425,7 @@ Functions with multiple parameters compile to multi-argument Lua
 functions. When fully applied, the call is a direct multi-argument
 call. Partial application generates a closure:
 
-    add :: Integer -> Integer -> Integer
+    add :: Int -> Int -> Int
     add a b = a + b
     inc = add 1
 

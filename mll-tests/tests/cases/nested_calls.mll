@@ -3,51 +3,51 @@
 -- (Bug: is_cheap_arg treated nested calls as cheap, breaking thunking)
 
 -- Simple increment
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
 -- Conditional function (has branching, so thunking matters)
-clamp :: Integer -> Integer
+clamp :: Int -> Int
 clamp x = if x > 10 then 10 else x
 
 -- Stateful-looking: result depends on which branch was taken
-decOrKeep :: Integer -> Integer
+decOrKeep :: Int -> Int
 decOrKeep x = if x > 0 then x - 1 else x
 
 -- Test: nested form must equal let form
-nestedInc :: Integer -> Integer
+nestedInc :: Int -> Int
 nestedInc x = inc (inc (inc x))
 
-letInc :: Integer -> Integer
+letInc :: Int -> Int
 letInc x =
     let a = inc x
         b = inc a
     in inc b
 
-nestedClamp :: Integer -> Integer
+nestedClamp :: Int -> Int
 nestedClamp x = clamp (clamp (clamp x))
 
-letClamp :: Integer -> Integer
+letClamp :: Int -> Int
 letClamp x =
     let a = clamp x
         b = clamp a
     in clamp b
 
-nestedDec :: Integer -> Integer
+nestedDec :: Int -> Int
 nestedDec x = decOrKeep (decOrKeep (decOrKeep x))
 
-letDec :: Integer -> Integer
+letDec :: Int -> Int
 letDec x =
     let a = decOrKeep x
         b = decOrKeep a
     in decOrKeep b
 
 -- Deeply nested (5 levels)
-fiveInc :: Integer -> Integer
+fiveInc :: Int -> Int
 fiveInc x = inc (inc (inc (inc (inc x))))
 
 -- Mixed function nesting
-mixedNest :: Integer -> Integer
+mixedNest :: Int -> Int
 mixedNest x = clamp (inc (inc (inc x)))
 
 main :: IO ()

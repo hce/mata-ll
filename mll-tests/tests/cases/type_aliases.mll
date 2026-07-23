@@ -1,7 +1,7 @@
 -- Comprehensive type alias tests
 
 type Pair a = (a, a)
-type IntPair = Pair Integer
+type IntPair = Pair Int
 type StringList = [String]
 type Predicate a = a -> Bool
 type Transform a = a -> a
@@ -16,15 +16,15 @@ both p (x, y) = p x && p y
 applyBoth :: Transform a -> Pair a -> Pair a
 applyBoth f (x, y) = (f x, f y)
 
--- Int as alias for Integer
+-- Int as alias for Int
 addInts :: Int -> Int -> Int
 addInts x y = x + y
 
 -- Nested aliases
-type MaybeInt = Maybe Integer
+type MaybeInt = Maybe Int
 type MaybeList a = Maybe [a]
 
-fromMaybeInt :: MaybeInt -> Integer
+fromMaybeInt :: MaybeInt -> Int
 fromMaybeInt (Just x) = x
 fromMaybeInt Nothing = 0
 

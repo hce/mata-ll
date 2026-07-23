@@ -2,7 +2,7 @@
 //!
 //! Monomorphization has the static type of every expression. For the
 //! type-directed classes (`show`, `==`, …) it is supposed to resolve every
-//! concrete-typed use to a typed implementation (`show_Integer`,
+//! concrete-typed use to a typed implementation (`show_Int`,
 //! `show_LInteger`, a derived `show_Tree_…`, etc.). When it fails to, the call
 //! falls back to the *type-erased* runtime function (`show`, `__mll_eq`), which
 //! cannot recover structure from the value alone — that is exactly how an empty
@@ -19,7 +19,7 @@
 //! driver turns it into a hard error rather than emitting known-wrong code.
 //!
 //! Primitives are exempt: the generic runtime `show` is faithful for
-//! `Integer`/`Number`/`Bool`/`String`/`ByteString`, so `show_Integer` & co. are
+//! `Int`/`Number`/`Bool`/`String`/`ByteString`, so `show_Int` & co. are
 //! fine. Only *structured* types (lists, tuples, and applied type constructors
 //! like `Maybe a`, `Tree a b`) lose information, and only those are flagged.
 //!
@@ -185,23 +185,23 @@ mod tests {
     fn flags_type_erased_show_on_structured_concrete() {
         // bare `show` and the generic wrappers, at a concrete structured type
         for name in ["show", "show_Maybe", "show_List_"] {
-            let m = module_with(show_call(name, Ty::list(Ty::Con("Integer".into()))));
-            assert_eq!(check(&m, &cm()).len(), 1, "{name} on [Integer] should flag");
+            let m = module_with(show_call(name, Ty::list(Ty::Con("Int".into()))));
+            assert_eq!(check(&m, &cm()).len(), 1, "{name} on [Int] should flag");
         }
-        // Maybe Integer == App(Con Maybe, Integer)
-        let maybe_int = Ty::app(Ty::Con("Maybe".into()), Ty::Con("Integer".into()));
+        // Maybe Int == App(Con Maybe, Int)
+        let maybe_int = Ty::app(Ty::Con("Maybe".into()), Ty::Con("Int".into()));
         let m = module_with(show_call("show_Maybe", maybe_int));
-        assert_eq!(check(&m, &cm()).len(), 1, "show_Maybe on Maybe Integer should flag");
+        assert_eq!(check(&m, &cm()).len(), 1, "show_Maybe on Maybe Int should flag");
     }
 
     #[test]
     fn allows_resolved_and_primitive_and_polymorphic() {
         // A specialized show name is fine even on a structured type.
-        let m = module_with(show_call("show_LInteger", Ty::list(Ty::Con("Integer".into()))));
+        let m = module_with(show_call("show_LInt", Ty::list(Ty::Con("Int".into()))));
         assert!(check(&m, &cm()).is_empty(), "specialized show must not flag");
 
         // The generic `show` on a primitive is faithful — not flagged.
-        let m = module_with(show_call("show", Ty::Con("Integer".into())));
+        let m = module_with(show_call("show", Ty::Con("Int".into())));
         assert!(check(&m, &cm()).is_empty(), "primitive show must not flag");
 
         // A still-polymorphic argument is the legitimate fallback copy.

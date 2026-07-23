@@ -1,15 +1,15 @@
 -- GHC cgrun049: Maybe monad chain
 -- Tests Maybe >>= for short-circuiting computation
 
-safeDivM :: Integer -> Integer -> Maybe Integer
+safeDivM :: Int -> Int -> Maybe Int
 safeDivM _ 0 = Nothing
 safeDivM a b = Just (a `div` b)
 
 -- Chain: 100 / a / b / c
-chain :: Integer -> Integer -> Integer -> Maybe Integer
+chain :: Int -> Int -> Int -> Maybe Int
 chain a b c = safeDivM 100 a >>= \r1 -> safeDivM r1 b >>= \r2 -> safeDivM r2 c
 
-lookupM :: String -> [(String, Integer)] -> Maybe Integer
+lookupM :: String -> [(String, Int)] -> Maybe Int
 lookupM _ [] = Nothing
 lookupM k ((k2, v):rest)
     | k == k2   = Just v

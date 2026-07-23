@@ -16,26 +16,26 @@ appendL :: List a -> List a -> List a
 appendL Nil ys         = ys
 appendL (Cons x xs) ys = Cons x (appendL xs ys)
 
-lengthL :: List a -> Integer
+lengthL :: List a -> Int
 lengthL Nil         = 0
 lengthL (Cons _ xs) = 1 + lengthL xs
 
-reverseL :: List Integer -> List Integer
+reverseL :: List Int -> List Int
 reverseL xs = go Nil xs
   where
     go acc Nil         = acc
     go acc (Cons x rest) = go (Cons x acc) rest
 
-data BST = BLeaf | BNode BST Integer BST
+data BST = BLeaf | BNode BST Int BST
 
-insert :: Integer -> BST -> BST
+insert :: Int -> BST -> BST
 insert x BLeaf = BNode BLeaf x BLeaf
 insert x (BNode l v r)
     | x < v    = BNode (insert x l) v r
     | x > v    = BNode l v (insert x r)
     | otherwise = BNode l v r
 
-inorder :: BST -> [Integer]
+inorder :: BST -> [Int]
 inorder BLeaf = []
 inorder (BNode l v r) = appendList (inorder l) (v : inorder r)
 

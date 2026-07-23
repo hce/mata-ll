@@ -1,20 +1,20 @@
 -- ghc_regr015: GADT: type-safe expression evaluator
 
 data Expr a where
-    LitI  :: Integer -> Expr Integer
+    LitI  :: Int -> Expr Int
     LitB  :: Bool -> Expr Bool
     LitS  :: String -> Expr String
-    AddE  :: Expr Integer -> Expr Integer -> Expr Integer
-    MulE  :: Expr Integer -> Expr Integer -> Expr Integer
-    NegE  :: Expr Integer -> Expr Integer
+    AddE  :: Expr Int -> Expr Int -> Expr Int
+    MulE  :: Expr Int -> Expr Int -> Expr Int
+    NegE  :: Expr Int -> Expr Int
     AndE  :: Expr Bool -> Expr Bool -> Expr Bool
     OrE   :: Expr Bool -> Expr Bool -> Expr Bool
     NotE  :: Expr Bool -> Expr Bool
     IfE   :: Expr Bool -> Expr a -> Expr a -> Expr a
-    EqI   :: Expr Integer -> Expr Integer -> Expr Bool
+    EqI   :: Expr Int -> Expr Int -> Expr Bool
     AppendE :: Expr String -> Expr String -> Expr String
 
-evalI :: Expr Integer -> Integer
+evalI :: Expr Int -> Int
 evalI (LitI n)    = n
 evalI (AddE a b)  = evalI a + evalI b
 evalI (MulE a b)  = evalI a * evalI b
@@ -36,7 +36,7 @@ evalS (IfE c t f)   = if evalB c then evalS t else evalS f
 
 main :: IO ()
 main = do
-    -- Integer expressions
+    -- Int expressions
     assert (evalI (LitI 42) == 42) "lit 42"
     assert (evalI (AddE (LitI 3) (LitI 4)) == 7) "add"
     assert (evalI (MulE (LitI 6) (LitI 7)) == 42) "mul"
@@ -49,11 +49,11 @@ main = do
     assert (evalB (AndE (LitB True) (LitB False)) == False) "and"
     assert (evalB (OrE (LitB False) (LitB True)) == True) "or"
 
-    -- Integer equality as Bool
+    -- Int equality as Bool
     assert (evalB (EqI (LitI 3) (LitI 3)) == True) "eqi same"
     assert (evalB (EqI (LitI 3) (LitI 4)) == False) "eqi diff"
 
-    -- IfE on Integer
+    -- IfE on Int
     assert (evalI (IfE (LitB True) (LitI 1) (LitI 2)) == 1) "ifE true I"
     assert (evalI (IfE (LitB False) (LitI 1) (LitI 2)) == 2) "ifE false I"
 

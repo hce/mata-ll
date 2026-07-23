@@ -17,13 +17,13 @@ import Data.List (foldr)
 -- Recursive, NOT inline-eligible, so `slow n` is a genuine thunked application
 -- (a value that must be forced), never a folded constant. Passing `slow k` as an
 -- operand to a first-class `div`/`mod` proves the wrapper forces its arguments.
-slow :: Integer -> Integer
+slow :: Int -> Int
 slow 0 = 0
 slow n = 1 + slow (n - 1)
 
 -- Higher-order: takes a binary operator as a first-class value and applies it.
 -- `applyBin div a b` forces `div` to a value and calls it — the first-class path.
-applyBin :: (Integer -> Integer -> Integer) -> Integer -> Integer -> Integer
+applyBin :: (Int -> Int -> Int) -> Int -> Int -> Int
 applyBin f a b = f a b
 
 main :: IO ()

@@ -1,10 +1,10 @@
 -- GHC cgrun016: Nested pattern matching
 -- Tests pattern matching on ADTs with multiple levels
 
-data Expr = Lit Integer | Add Expr Expr | Mul Expr Expr | Neg Expr
+data Expr = Lit Int | Add Expr Expr | Mul Expr Expr | Neg Expr
     deriving (Show, Eq)
 
-eval :: Expr -> Integer
+eval :: Expr -> Int
 eval (Lit n)   = n
 eval (Add a b) = eval a + eval b
 eval (Mul a b) = eval a * eval b

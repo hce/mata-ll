@@ -10,10 +10,13 @@
 --   * Number        — mata-ll's floating type (Lua number) = Double.
 --   * assert        — mata-ll's test helper: "." per pass, error on fail.
 --   * length, take, drop, replicate, (!!)
---                   — mata-ll types these with Integer, GHC with Int.
+--                   — mata-ll and GHC both type these with Int (mata-ll's
+--                     integer type is `Int`; there is no arbitrary-precision
+--                     Integer). The shim exists to pin the same monomorphic
+--                     shapes the mata-ll Prelude gives them.
 --   * (==) (/=) (<) (<=) (>) (>=) `elem`
 --                   — same semantics and fixity (infix 4) as Prelude; only
---                     re-exported because the Integer-typed shims above hide
+--                     re-exported because the Int-typed shims above hide
 --                     the Prelude names wholesale. mata-ll enforces
 --                     Haskell's non-associative precedence-4 grammar itself
 --                     (`a == b == c` is a parse error on both sides), so
@@ -34,7 +37,7 @@
 --   * read_Integer, read_Number, read_Bool, read_String
 --                   — mata-ll's monomorphic read helpers.
 --   * ST, runST, STArray and the STArray operations
---                   — mata-ll's builtin mutable Integer array
+--                   — mata-ll's builtin mutable Int array
 --                     (newSTArray size init, 0-based indices).
 module MllShim
   ( Number
@@ -46,7 +49,7 @@ module MllShim
   , getArgs
   , Multiplicity (..)
   , try, catch
-  , read_Integer, read_Number, read_Bool, read_String
+  , read_Int, read_Number, read_Bool, read_String
   , ST, runST, STArray
   , newSTArray, readSTArray, writeSTArray, modifySTArray
   , stArrayLength, newSTArrayFromList, stArrayToList
@@ -71,21 +74,23 @@ assert :: Bool -> String -> IO ()
 assert True  _   = putStrLn "."
 assert False msg = error msg
 
--- Integer-typed list primitives (mata-ll builtins use Integer, not Int).
-length :: Foldable t => t a -> Integer
-length = fromIntegral . P.length
+-- Int-typed list primitives (mata-ll's integer type is Int; there is no
+-- arbitrary-precision Integer). These coincide with GHC's own Int-typed
+-- length/take/drop/replicate/(!!), so the shims are plain aliases.
+length :: Foldable t => t a -> Int
+length = P.length
 
-take :: Integer -> [a] -> [a]
-take n = P.take (fromInteger n)
+take :: Int -> [a] -> [a]
+take = P.take
 
-drop :: Integer -> [a] -> [a]
-drop n = P.drop (fromInteger n)
+drop :: Int -> [a] -> [a]
+drop = P.drop
 
-replicate :: Integer -> a -> [a]
-replicate n = P.replicate (fromInteger n)
+replicate :: Int -> a -> [a]
+replicate = P.replicate
 
-(!!) :: [a] -> Integer -> a
-xs !! n = xs P.!! fromInteger n
+(!!) :: [a] -> Int -> a
+(!!) = (P.!!)
 
 -- Comparison operators at the shared GHC/mata-ll fixity (infix 4,
 -- non-associative — mata-ll enforces the same rejection rule now).
@@ -125,8 +130,8 @@ catch :: IO a -> (String -> IO a) -> IO a
 catch a h = a `E.catch` \e -> h (show @E.SomeException e)
 
 -- Monomorphic read helpers from mata-ll's Prelude.
-read_Integer :: String -> Integer
-read_Integer = read
+read_Int :: String -> Int
+read_Int = read
 
 read_Number :: String -> Number
 read_Number = read
@@ -137,31 +142,31 @@ read_Bool s = if s P.== "True" then True else False
 read_String :: String -> String
 read_String s = s
 
--- mata-ll's STArray: a mutable, 0-indexed Integer array scoped to ST s.
--- Backed here by an STRef over Map Integer Integer; the corpus only uses
+-- mata-ll's STArray: a mutable, 0-indexed Int array scoped to ST s.
+-- Backed here by an STRef over Map Int Int; the corpus only uses
 -- small arrays, so the representation cost is irrelevant.
-newtype STArray s = STArray (STRef s (Map.Map Integer Integer))
+newtype STArray s = STArray (STRef s (Map.Map Int Int))
 
 -- newSTArray size init: indices 0 .. size-1, all set to init.
-newSTArray :: Integer -> Integer -> ST s (STArray s)
+newSTArray :: Int -> Int -> ST s (STArray s)
 newSTArray n x =
   STArray <$> newSTRef (Map.fromList [(i, x) | i <- [0 .. n - 1]])
 
-readSTArray :: STArray s -> Integer -> ST s Integer
+readSTArray :: STArray s -> Int -> ST s Int
 readSTArray (STArray r) i = (Map.! i) <$> readSTRef r
 
-writeSTArray :: STArray s -> Integer -> Integer -> ST s ()
+writeSTArray :: STArray s -> Int -> Int -> ST s ()
 writeSTArray (STArray r) i v = modifySTRef' r (Map.insert i v)
 
-modifySTArray :: STArray s -> Integer -> (Integer -> Integer) -> ST s ()
+modifySTArray :: STArray s -> Int -> (Int -> Int) -> ST s ()
 modifySTArray (STArray r) i f = modifySTRef' r (Map.adjust f i)
 
-stArrayLength :: STArray s -> ST s Integer
-stArrayLength (STArray r) = (fromIntegral . Map.size) <$> readSTRef r
+stArrayLength :: STArray s -> ST s Int
+stArrayLength (STArray r) = Map.size <$> readSTRef r
 
-newSTArrayFromList :: [Integer] -> ST s (STArray s)
+newSTArrayFromList :: [Int] -> ST s (STArray s)
 newSTArrayFromList xs =
   STArray <$> newSTRef (Map.fromList (P.zip [0 ..] xs))
 
-stArrayToList :: STArray s -> ST s [Integer]
+stArrayToList :: STArray s -> ST s [Int]
 stArrayToList (STArray r) = Map.elems <$> readSTRef r

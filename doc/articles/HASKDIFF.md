@@ -1,5 +1,48 @@
 # Important differences to Haskell to be aware of.
 
+## Why GHC parity — and the criterion for deviations
+
+mata-ll tracks GHC because the alternative is inventing a language.
+Haskell's design decisions, debatable as some are, have been debugged
+by three decades of use; every deviation mata-ll invents is a decision
+the project must then own, defend, and document forever. So GHC parity
+is the primary design goal — but "parity" is two properties, and they
+are not equally binding:
+
+**Soundness against GHC.** Any program mata-ll accepts and runs
+produces what GHC produces. This half is non-negotiable. It is what
+makes GHC usable as a differential oracle (the golden-test suite in
+`mll-tests/`), and it keeps "correct" an objective, externally
+checkable property rather than an opinion. Every silent deviation
+shrinks the domain where GHC can adjudicate.
+
+**Completeness against GHC.** Every valid Haskell program is accepted.
+This half is negotiable, prioritized by how common the idiom is. A
+rejection is loud — the user knows they are off the map, and nothing
+wrong is ever computed. Where mata-ll declines to implement something,
+the rejection should say so with a `note:`.
+
+The resulting rule: **a deviation must be loud and documented; a
+silent one is a defect.** One example on each side:
+
+- String is opaque rather than `[Char]` (next section): `++` on a
+  String is a compile-time type error. A completeness gap —
+  acceptable, and kept deliberately.
+- An integer type wrapping at 64 bits under the arbitrary-precision name
+  `Integer` would be a soundness violation — a GHC-valid program accepted
+  and computing a different value with no error. mata-ll avoids it by
+  naming the type honestly: the type is `Int` (64-bit, wrapping, exactly
+  GHC's `Int`), there is no `Integer`, and mata-ll is defined as GHC with
+  an implicit `default (Int, Number)` — so the literal-defaulting hole is
+  closed with Haskell's own mechanism rather than an invented rule. See
+  "Integers are fixed-width" below.
+
+The deliberate exception category is the FFI, where mata-ll is a Lua
+guest rather than a Haskell twin — e.g. `LBit` carries Lua bit
+semantics by design. Evaluation strategy (non-strict with eagerness
+optimizations) is the remaining surface awaiting its own user-facing
+contract; see TODO.md, machinery in DESIGN.md.
+
 ## Strings and ByteStrings
 
 Haskell has:
@@ -32,12 +75,26 @@ represented as their integer code points. Use `strByte` to read a
 character code from a string and `strChar` to convert a code back to a
 single-character string.
 
-## Integers are fixed-width, not arbitrary precision
+## Integers are fixed-width (`Int`, not `Integer`)
 
-Haskell's `Integer` is arbitrary precision. mata-ll's `Integer` maps to
-Lua's integer type: 64-bit signed on Lua 5.4+ and LuaJIT. Overflow
-wraps silently. If you need big integers, you'll have to implement them
-yourself.
+mata-ll's integer type is `Int`, exactly as in GHC: it maps to Lua's
+integer type — 64-bit signed on Lua 5.4+ and LuaJIT — and overflow wraps
+silently, which is precisely GHC's `Int` semantics. If you need big
+integers, you'll have to implement them yourself.
+
+There is deliberately **no `Integer`**. Haskell's `Integer` is arbitrary
+precision; naming a 64-bit wrapping type `Integer` would be a silent
+soundness deviation (see the criterion at the top of this document), so
+mata-ll rejects `Integer` in a type with a compile error and a `note:`
+pointing at `Int`. For the same reason `toInteger` — whose only purpose
+is to escape to arbitrary precision — does not exist, and an integer
+literal that exceeds `maxBound :: Int` is a hard compile error (GHC only
+warns, via `-Woverflowed-literals`; rejecting is stricter, which the
+parity criterion permits).
+
+Unannotated numeric literals default as under GHC with an implicit
+`default (Int, Number)` (`Number` is GHC's `Double`), so GHC stays the
+referee for defaulted arithmetic, overflow included.
 
 `Number` maps to Lua's float type (double-precision IEEE 754).
 
@@ -46,19 +103,22 @@ yourself.
 The numeric hierarchy is present with GHC's signatures — `Num`
 (`+ - *`, `negate`, `abs`, `signum`, `fromInteger`), `Fractional`
 (`/`, `recip`, `fromRational`), `Real`, and `Integral` (`quot`, `rem`,
-`div`, `mod`, `quotRem`, `divMod`, `toInteger`). `Integer` is `Num`/
+`div`, `mod`, `quotRem`, `divMod`). `Int` is `Num`/
 `Real`/`Integral`; `Number` is `Num`/`Real`/`Fractional`. You can
 define `(+)` and the rest for your own types, and numeric literals are
 polymorphic (`Num a => a` / `Fractional a => a`) with GHC defaulting
-(`Integer`, then `Number`). Arithmetic at a concrete `Integer`/`Number`
+(`Int`, then `Number`). Arithmetic at a concrete `Int`/`Number`
 type still inlines to bare Lua operators — the classes are erased, not
 dictionary-dispatched.
 
-Two deliberate deviations remain, both because mata-ll has no
-`Rational` type: `fromRational` takes a `Number` argument rather than
-`Rational`, and `Real` has no `toRational` method. `Floating` and
-`RealFrac` are not yet classes (their operations exist as
-`Number`-typed functions). See CAVEATS.
+Deliberate deviations. Because mata-ll has no `Rational` type,
+`fromRational` takes a `Number` argument rather than `Rational`, and
+`Real` has no `toRational` method. Because mata-ll has no
+arbitrary-precision `Integer`, `Integral` has no `toInteger` method (its
+result type would be the absent `Integer`; `fromInteger` stays, since
+its argument is just the literal type `Int`). `Floating` and `RealFrac`
+are not yet classes (their operations exist as `Number`-typed
+functions). See CAVEATS.
 
 ## All top-level bindings require type signatures
 
@@ -67,7 +127,7 @@ type signatures on every top-level definition:
 
     -- Haskell: fine without a signature
     -- mata-ll: this won't compile without the line below
-    double :: Integer -> Integer
+    double :: Int -> Int
     double x = x * 2
 
 ## Import renaming requires `qualified`
@@ -131,7 +191,7 @@ mata-ll has a real kind system — data/newtype parameters, class
 variables, aliases and type families all get kinds inferred from use,
 every written type is kind-checked, and an instance head must match the
 class variable's kind (`instance Foldable []` is well-formed,
-`instance Foldable [a]` and `instance Foldable Integer` are kind
+`instance Foldable [a]` and `instance Foldable Int` are kind
 errors). Differences from GHC:
 
 - **No kind annotations or signatures.** GHC's
@@ -145,7 +205,7 @@ errors). Differences from GHC:
   data type promotes to a kind named after it: `data Nat = Z | S Nat`
   gives the kind `Nat` with `'Z :: Nat` and `'S :: Nat -> Nat`, and the
   builtin `Bool` promotes too (`'True`/`'False :: Bool`). An index is
-  checked to be exactly that kind, so `Vec 'True Integer` is a kind
+  checked to be exactly that kind, so `Vec 'True Int` is a kind
   error (`'True :: Bool`, but the index has kind `Nat`) — as in GHC.
   Limitations: only *parameterless, non-GADT* data types promote (a
   parameterised type would need kind polymorphism, which mata-ll lacks —
@@ -234,7 +294,7 @@ generic over them, as in GHC. The differences:
   partially-applied tuple constructor. Fold over tuple components
   explicitly.
 - **`sum`/`product` are `(Foldable t, Num a) => t a -> a`,** as in GHC
-  (they used to be fixed at `Integer` before the numeric classes
+  (they used to be fixed at `Int` before the numeric classes
   were added).
 - **`mapM`/`mapM_`/`sequence`/`forM` stay list-only** (`Monad m =>
   (a -> m b) -> [a] -> m [b]` etc.); GHC generalizes them to any
@@ -244,7 +304,7 @@ generic over them, as in GHC. The differences:
 - **A fold over `Either` needs the `Left` type determined.**
   `length (Right 1)` is an ambiguity error (monomorphization must pin
   the instance's type); annotate:
-  `length (Right 1 :: Either String Integer)`. GHC accepts the
+  `length (Right 1 :: Either String Int)`. GHC accepts the
   ambiguous form.
 - **`foldl'` stays list-only** (in `Data.List`/`Data.Foldable`).
 - **`toList` is only in `Data.Foldable`**, matching GHC's Prelude
@@ -307,7 +367,7 @@ GHC — a plain-arrow function is not interchangeable with a `%1` one
 (`map close conns` is a type error either way).
 
 **Scalars have no exemption — this is strict GHC parity.** A scalar
-(`Integer`, `Number`, `Bool`, `String`) derived from a `%1`/`%m` value —
+(`Int`, `Number`, `Bool`, `String`) derived from a `%1`/`%m` value —
 destructured from a match, `<-`-bound, or held in a `let`/`where`
 binding — is tracked exactly-once like every other alias, exactly as GHC
 does. GHC has no `Movable`-style relaxation in its type system, and

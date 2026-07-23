@@ -142,7 +142,7 @@ lua5.4 hello.lua               # runs standalone
 Start with \texttt{mll-repl}:
 
 \begin{lstlisting}[language={}]
-mll> x :: Integer \
+mll> x :: Int \
 ...> x = 42
 mll> x * 2 + 1
 85
@@ -174,7 +174,7 @@ When a definition spans more than one line, each wrapped line must be
 indented past the definition's start column:
 
 \begin{lstlisting}
-longExpression :: Integer
+longExpression :: Int
 longExpression = 1 + 2
     + 3 + 4    -- wrapped line: indented past 'l'
 \end{lstlisting}
@@ -185,7 +185,7 @@ All top-level definitions require explicit type signatures.  Local bindings
 (\texttt{let}, \texttt{where}) are inferred automatically.
 
 \begin{lstlisting}
-double :: Integer -> Integer
+double :: Int -> Int
 double x = x * 2
 \end{lstlisting}
 
@@ -200,7 +200,7 @@ escaped automatically in the generated code, so you can use them for
 variables, parameters, functions, and record fields:
 
 \begin{lstlisting}
-until :: Integer -> Bool
+until :: Int -> Bool
 until n = n > 100
 \end{lstlisting}
 
@@ -213,7 +213,7 @@ until n = n > 100
 \toprule
 \textbf{Type} & \textbf{Lua type} & \textbf{Examples} \\
 \midrule
-\texttt{Integer} & integer     & \texttt{42}, \texttt{-7}, \texttt{0} \\
+\texttt{Int} & integer     & \texttt{42}, \texttt{-7}, \texttt{0} \\
 \texttt{Number}  & float       & \texttt{3.14}, \texttt{-0.5} \\
 \texttt{String}  & string      & \texttt{"hello\textbackslash n"} \\
 \texttt{Bool}    & boolean     & \texttt{True}, \texttt{False} \\
@@ -240,21 +240,21 @@ Only strict \texttt{ByteString}s are supported.
 Lists are cons-cell linked lists (not Lua arrays):
 
 \begin{lstlisting}
-nums :: [Integer]
+nums :: [Int]
 nums = [1, 2, 3, 4, 5]
 
 -- Equivalent to:
-nums' :: [Integer]
+nums' :: [Int]
 nums' = 1 : 2 : 3 : 4 : 5 : []
 \end{lstlisting}
 
 \subsection{Tuples}
 
 \begin{lstlisting}
-pair :: (String, Integer)
+pair :: (String, Int)
 pair = ("age", 30)
 
-triple :: (Bool, Integer, String)
+triple :: (Bool, Int, String)
 triple = (True, 42, "hello")
 \end{lstlisting}
 
@@ -292,7 +292,7 @@ Named fields with accessor functions:
 
 \begin{lstlisting}
 data Person = Person { name :: String
-                     , age  :: Integer }
+                     , age  :: Int }
 
 greet :: Person -> String
 greet p = "Hello, " <> name p <> "!"
@@ -328,7 +328,7 @@ Zero-cost wrappers:
 
 \begin{lstlisting}
 newtype Metres = Metres Number
-newtype UserId = UserId Integer
+newtype UserId = UserId Int
 \end{lstlisting}
 
 \subsection{Type Aliases}
@@ -341,11 +341,11 @@ type Name = String
 \subsection{Maybe and Either}
 
 \begin{lstlisting}
-safeDivide :: Integer -> Integer -> Maybe Integer
+safeDivide :: Int -> Int -> Maybe Int
 safeDivide _ 0 = Nothing
 safeDivide a b = Just (a `div` b)
 
-parseAge :: String -> Either String Integer
+parseAge :: String -> Either String Int
 parseAge s = let n = read s
              in if n >= 0 then Right n
                 else Left "negative age"
@@ -357,26 +357,26 @@ parseAge s = let n = read s
 \subsection{Definition and Application}
 
 \begin{lstlisting}
-add :: Integer -> Integer -> Integer
+add :: Int -> Int -> Int
 add a b = a + b
 
 -- Application (no parentheses needed)
-result :: Integer
+result :: Int
 result = add 3 4    -- 7
 
 -- Partial application
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc = add 1
 \end{lstlisting}
 
 \subsection{Lambda Expressions}
 
 \begin{lstlisting}
-double :: Integer -> Integer
+double :: Int -> Int
 double = \x -> x * 2
 
 -- Multi-parameter
-add :: Integer -> Integer -> Integer
+add :: Int -> Int -> Int
 add = \a b -> a + b
 
 -- Pattern matching in lambdas
@@ -437,11 +437,11 @@ never a right section; \texttt{(-)} is the subtraction function.
 \subsection{Guards}
 
 \begin{lstlisting}
-abs :: Integer -> Integer
+abs :: Int -> Int
 abs n | n < 0     = -n
       | otherwise = n
 
-classify :: Integer -> String
+classify :: Int -> String
 classify n
     | n == 0    = "zero"
     | n > 0     = "positive"
@@ -479,7 +479,7 @@ cylinderVolume r h =
 \subsection{Function Definitions}
 
 \begin{lstlisting}
-factorial :: Integer -> Integer
+factorial :: Int -> Int
 factorial 0 = 1
 factorial n = n * factorial (n - 1)
 
@@ -503,7 +503,7 @@ describe xs = case xs of
 \subsection{Guards in Case}
 
 \begin{lstlisting}
-eval :: Expr -> Integer
+eval :: Expr -> Int
 eval e = case e of
     Lit n      -> n
     Add a b    -> eval a + eval b
@@ -524,7 +524,7 @@ class Printable a where
 \subsection{Instances}
 
 \begin{lstlisting}
-instance Printable Integer where
+instance Printable Int where
     display n = show n
 
 instance Printable Bool where
@@ -592,7 +592,7 @@ interop --- see Section~\ref{sec:luadict}.
 \subsection{Kinds and Higher-Kinded Classes}
 
 Kinds classify types the way types classify values: a complete type
-such as \texttt{Integer} or \texttt{Maybe String} has kind
+such as \texttt{Int} or \texttt{Maybe String} has kind
 \texttt{Type}, while a type constructor that still needs arguments has
 an arrow kind (\texttt{Maybe} is \texttt{Type -> Type}, \texttt{Either}
 is \texttt{Type -> Type -> Type}). There is no syntax for kinds ---
@@ -603,10 +603,10 @@ A class variable's kind comes from the method signatures. In
 
 \begin{lstlisting}
 class Collapse t where
-    collapse :: t Integer -> Integer
+    collapse :: t Int -> Int
 \end{lstlisting}
 
-the use \texttt{t Integer} forces \texttt{t} to kind
+the use \texttt{t Int} forces \texttt{t} to kind
 \texttt{Type -> Type}, so instances must supply a type
 \emph{constructor}, not a complete type. The bare, unapplied list
 constructor is written \texttt{[]}, and constructors may be partially
@@ -618,16 +618,16 @@ instance Collapse Maybe where ...
 instance Collapse (Either c) where ...  -- Either, one argument short
 
 instance Collapse [a] where ...       -- KIND ERROR: [a] is complete
-instance Collapse Integer where ...   -- KIND ERROR
+instance Collapse Int where ...   -- KIND ERROR
 \end{lstlisting}
 
 Data types may take higher-kinded parameters the same way ---
-\texttt{data Wrap f = Wrap (f Integer)} infers \texttt{f} at
+\texttt{data Wrap f = Wrap (f Int)} infers \texttt{f} at
 \texttt{Type -> Type} --- and every type you write (signatures, fields,
 ascriptions) is kind-checked, so applying a complete type to an
-argument (\texttt{Maybe Integer Bool}) or using an unsaturated
+argument (\texttt{Maybe Int Bool}) or using an unsaturated
 constructor where a complete type is required
-(\texttt{f :: Maybe -> Integer}) is a compile-time error.
+(\texttt{f :: Maybe -> Int}) is a compile-time error.
 
 %======================================================================
 \section{Monads and IO}
@@ -711,14 +711,14 @@ Values are memoized once forced.
 
 \begin{lstlisting}
 -- Infinite list -- only computed as needed
-nats :: [Integer]
+nats :: [Int]
 nats = [1..]
 
-fibs :: [Integer]
+fibs :: [Int]
 fibs = 1 : 1 : zipWith (+) fibs (tail fibs)
 
 -- take 10 fibs evaluates only 10 elements
-first10 :: [Integer]
+first10 :: [Int]
 first10 = take 10 fibs
 \end{lstlisting}
 
@@ -730,7 +730,7 @@ Use \texttt{seq} to force evaluation:
 seq :: a -> b -> b
 -- Forces first argument, returns second
 
-strictSum :: [Integer] -> Integer
+strictSum :: [Int] -> Int
 strictSum = go 0
     where go acc []     = acc
           go acc (x:xs) = seq acc (go (acc + x) xs)
@@ -752,11 +752,11 @@ Everything else stays a thunk.  Most programs do not need manual
 
 \begin{lstlisting}
 -- Generators and guards
-evens :: [Integer]
+evens :: [Int]
 evens = [x | x <- [1..20], x `mod` 2 == 0]
 
 -- Multiple generators (nested loops)
-pairs :: [(Integer, Integer)]
+pairs :: [(Int, Int)]
 pairs = [(x, y) | x <- [1..3], y <- [1..3], x /= y]
 
 -- Pattern-matching generators
@@ -985,7 +985,7 @@ For Lua functions with no side effects:
 \begin{lstlisting}
 sin :: Number -> LuaPure "math.sin" Number
 cos :: Number -> LuaPure "math.cos" Number
-strlen :: String -> LuaPure "string.len" Integer
+strlen :: String -> LuaPure "string.len" Int
 \end{lstlisting}
 
 \texttt{LuaPure "name" T} reduces to \texttt{T} --- the function is
@@ -996,7 +996,7 @@ callable as a pure expression.
 For Lua functions that perform I/O or have side effects:
 
 \begin{lstlisting}
-rnd :: Integer -> Integer -> LuaIO "math.random" Integer
+rnd :: Int -> Int -> LuaIO "math.random" Int
 clock :: LuaIO "os.clock" Number
 \end{lstlisting}
 
@@ -1058,7 +1058,7 @@ is structural and recursive, at every depth:
     state) round-trips intact.
 \end{itemize}
 
-So a \texttt{HashMap String [Integer]} reaches the host as a dictionary
+So a \texttt{HashMap String [Int]} reaches the host as a dictionary
 of arrays, and a record whose field is a list of records is fully
 converted.  Marshalling is non-destructive: the argument is copied into
 fresh Lua values, so the original remains usable in your program after
@@ -1107,7 +1107,7 @@ position, and the host function), instead of surfacing later as an
 arbitrary Lua error deep in your program:
 
 \begin{lstlisting}[language={}]
-FFI result: declared Integer but the host returned nil
+FFI result: declared Int but the host returned nil
   (field 'certPort' of record Cert; in the result of host.cert)
 \end{lstlisting}
 
@@ -1123,12 +1123,12 @@ state, such as a SQL driver folding over result rows:
 
 \begin{lstlisting}
 foldRows :: String
-         -> (Integer -> acc -> acc)          -- pure callback
+         -> (Int -> acc -> acc)          -- pure callback
          -> acc
          -> LuaPure "db.fold" acc
 
 foldRowsIO :: String
-           -> (Integer -> acc -> LuaIO s acc)  -- effectful callback
+           -> (Int -> acc -> LuaIO s acc)  -- effectful callback
            -> acc
            -> LuaIO "db.fold" acc
 \end{lstlisting}
@@ -1172,16 +1172,16 @@ list is decoded like any other FFI result):
 gmatch :: String -> String -> LuaIterator "string.gmatch" [String]
 
 -- host yields plain integers -> a list of integers
-counter :: LuaIterator "count" [Integer]
+counter :: LuaIterator "count" [Int]
 
 -- host yields Lua arrays of ints -> a list of lists
-rows :: LuaIterator "rows" [[Integer]]
+rows :: LuaIterator "rows" [[Int]]
 \end{lstlisting}
 
 The result is always written as an explicit list. A bare element type
 (\texttt{LuaIterator "string.gmatch" String}) is rejected: because a
-list argument such as \texttt{[[Integer]]} already means ``an iterator
-yielding \texttt{[Integer]}'', a bare element would make the argument
+list argument such as \texttt{[[Int]]} already means ``an iterator
+yielding \texttt{[Int]}'', a bare element would make the argument
 ambiguous, so it must always name the result list directly.
 
 \subsubsection{Memory Behaviour of Iterator Lists}
@@ -1237,13 +1237,13 @@ unbounded until memory exhaustion.
 
 \begin{lstlisting}
 -- Retains every realized cell for the life of the module:
-events :: LuaIterator "events" [Integer]
+events :: LuaIterator "events" [Int]
 
 -- Streams in constant space: parameterized binding, applied
 -- at the use site, consumed by a strict tail-call walker.
-mkEvents :: Integer -> LuaIterator "events" [Integer]
+mkEvents :: Int -> LuaIterator "events" [Int]
 
-walk :: Integer -> [Integer] -> Integer
+walk :: Int -> [Int] -> Int
 walk n []     = n
 walk n (_:ys) = seq n (walk (n + 1) ys)
 
@@ -1268,7 +1268,7 @@ message), a normal return becomes \texttt{Right}.
 
 \begin{lstlisting}
 -- pure call, result Either String a
-charOf :: Integer -> LuaCatch "string.char" (Either String String)
+charOf :: Int -> LuaCatch "string.char" (Either String String)
 
 -- effectful call, result IO (Either String a)
 readAll :: Handle -> LuaIOCatch ":read" (Either String String)
@@ -1297,10 +1297,10 @@ action, wrap it in \texttt{try} (see \emph{Exception Handling}).
 Use \texttt{export} to make functions callable from Lua:
 
 \begin{lstlisting}
-fib :: [Integer]
+fib :: [Int]
 fib = 1 : 1 : zipWith (+) fib (tail fib)
 
-export fibonacci :: Integer -> [Integer]
+export fibonacci :: Int -> [Int]
 fibonacci = flip take fib
 \end{lstlisting}
 
@@ -1341,10 +1341,10 @@ number or string, a tuple or plain record as a positional table, a
 runs the action when called and returns its marshalled result.
 
 \begin{lstlisting}
-export answer :: Integer
+export answer :: Int
 answer = 42
 
-export tick :: IO Integer
+export tick :: IO Int
 tick = return 99
 \end{lstlisting}
 
@@ -1382,8 +1382,8 @@ moment it is constructed, so it can be handed to (or received from) Lua
 functions with no conversion cost.
 
 \begin{lstlisting}
-data Config = Config { width  :: Integer
-                     , height :: Integer
+data Config = Config { width  :: Int
+                     , height :: Int
                      , title  :: String
                      } deriving (Show, Eq, LuaDict)
 
@@ -1466,15 +1466,15 @@ a Lua API will expect \texttt{width}, not \texttt{cfgWidth}.  The
 \texttt{as} annotation renames the Lua table key:
 
 \begin{lstlisting}
-data Config = Config { cfgWidth  as "width"  :: Integer
-                     , cfgHeight as "height" :: Integer
+data Config = Config { cfgWidth  as "width"  :: Int
+                     , cfgHeight as "height" :: Int
                      , cfgTitle  as "title"  :: String
                      } deriving (Show, Eq, LuaDict)
 
-area :: Config -> Integer
+area :: Config -> Int
 area c = cfgWidth c * cfgHeight c   -- Haskell name, unchanged
 
-resize :: Config -> Integer -> Config
+resize :: Config -> Int -> Config
 resize c w = c { cfgWidth = w }     -- updates the "width" key
 \end{lstlisting}
 
@@ -1494,7 +1494,7 @@ rename drives both boundaries:
 
 \begin{lstlisting}
 data Acct = Acct { acctName  as "name" :: String
-                 , acctScore :: Integer
+                 , acctScore :: Int
                  } deriving (Eq, LuaDict, ToJSON, FromJSON)
 
 -- at runtime the value is the Lua table
@@ -1581,7 +1581,7 @@ decodeJSON   :: FromJSON a => String -> Either String a
 \begin{lstlisting}
 import JSON
 
-data Person = Person { name :: String, age :: Integer }
+data Person = Person { name :: String, age :: Int }
     deriving (Eq, ToJSON, FromJSON)
 
 main :: IO ()
@@ -1620,7 +1620,7 @@ constructors apart:
 
 \begin{lstlisting}
 data Shape = Circle { radius :: Number }
-           | Rect Integer Integer
+           | Rect Int Int
            | Point0
     deriving (Eq, ToJSON, FromJSON)
 
@@ -1640,8 +1640,8 @@ A type with a single \emph{positional} constructor is untagged: one
 argument encodes as the value itself, several as an array.
 
 \begin{lstlisting}
-data Wrap  = Wrap Integer          deriving (ToJSON, FromJSON)
-data Pair2 = Pair2 Integer String  deriving (ToJSON, FromJSON)
+data Wrap  = Wrap Int          deriving (ToJSON, FromJSON)
+data Pair2 = Pair2 Int String  deriving (ToJSON, FromJSON)
 
 -- encodeToJSON (Wrap 7)       ==  7
 -- encodeToJSON (Pair2 7 "a")  ==  [7,"a"]
@@ -1663,7 +1663,7 @@ data Team = Team { leader  :: Person
 -- {"leader":{"name":"A","age":1},
 --  "members":[{"name":"B","age":2}],"motto":null}
 
-data JTree = JLeaf Integer | JNode [JTree]
+data JTree = JLeaf Int | JNode [JTree]
     deriving (Eq, ToJSON, FromJSON)
 
 -- encodeToJSON (JNode [JLeaf 1]) ==
@@ -1686,7 +1686,7 @@ fielded one carries it as the \texttt{"tag"} value:
 data Suit = Clubs as "clubs" | Spades as "spades"
     deriving (Show, Eq, ToJSON, FromJSON)
 
-data Outcome = Ok Integer as "ok" | Err String as "error"
+data Outcome = Ok Int as "ok" | Err String as "error"
     deriving (Show, Eq, ToJSON, FromJSON)
 
 -- encodeToJSON Spades    == "spades"
@@ -1740,7 +1740,7 @@ decodeJSON "{...,\"members\":[{\"name\":\"B\",\"age\":2},{\"name\":\"C\"}]}"
 
 Numbers are handled exactly: integers round-trip with full 64-bit
 precision (beyond the $2^{53}$ range of a double), and decoding an
-\texttt{Integer} field rejects non-integral numbers (\texttt{3.5}) and
+\texttt{Int} field rejects non-integral numbers (\texttt{3.5}) and
 numbers outside the 64-bit range instead of silently rounding.
 
 \subsubsection{What Can Be Derived}
@@ -1757,7 +1757,7 @@ compile time, which places requirements on the type:
         concrete types and wrap each instantiation you need in its own
         data type.)
   \item No GADT or existential constructors.
-  \item Every field must be \texttt{Integer}, \texttt{Number},
+  \item Every field must be \texttt{Int}, \texttt{Number},
         \texttt{String}, \texttt{Bool}, \texttt{Json} (kept verbatim),
         a list or \texttt{Maybe} of a supported type, or a type that
         itself has a \texttt{ToJSON}/\texttt{FromJSON} instance.
@@ -1796,9 +1796,9 @@ parameters:
 
 \begin{lstlisting}
 data Expr a where
-    LitI :: Integer -> Expr Integer
+    LitI :: Int -> Expr Int
     LitB :: Bool -> Expr Bool
-    Add  :: Expr Integer -> Expr Integer -> Expr Integer
+    Add  :: Expr Int -> Expr Int -> Expr Int
     If   :: Expr Bool -> Expr a -> Expr a -> Expr a
 
 eval :: Expr a -> a
@@ -1882,13 +1882,13 @@ The \texttt{ST} monad provides mutable arrays inside pure computations:
 \begin{lstlisting}
 import Data.List (replicate)
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList xs = runST (do
     acc <- newSTArrayFromList [0]
     go acc xs
     readSTArray acc 0)
 
-go :: STArray s -> [Integer] -> ST s ()
+go :: STArray s -> [Int] -> ST s ()
 go acc []     = return ()
 go acc (x:rest) = do
     cur <- readSTArray acc 0
@@ -1904,8 +1904,8 @@ from escaping.
 When exporting functions that receive Lua callbacks:
 
 \begin{lstlisting}
-export processEvent :: forall s. (Integer -> Integer -> LuaIO s Integer)
-                    -> Integer -> LuaIO s Integer
+export processEvent :: forall s. (Int -> Int -> LuaIO s Int)
+                    -> Int -> LuaIO s Int
 processEvent f n = do
     (liftIO . putStrLn) $ "Called with " <> show n
     f n (n + 1)
@@ -1924,7 +1924,7 @@ of a \texttt{\%1} value is the double-close/double-free class of bug,
 and \emph{zero} uses leak the resource --- both are compile errors:
 
 \begin{lstlisting}
-data Conn = Conn Integer
+data Conn = Conn Int
 
 close :: Conn %1 -> IO ()
 close (Conn fd) = putStrLn ("closed " <> show fd)
@@ -1951,7 +1951,7 @@ consumed one, or a \texttt{let} binding whose right-hand side did.
 Because evaluation is lazy, a \texttt{\%1} value parked in a binding
 that is never forced is \emph{not} consumed and is rejected, as is
 matching part of one with a wildcard (\texttt{\_}), or discarding a
-non-\texttt{()} result built from one. A scalar (\texttt{Integer},
+non-\texttt{()} result built from one. A scalar (\texttt{Int},
 \texttt{Number}, \texttt{Bool}, \texttt{String}) derived from a
 \texttt{\%1} value is tracked \emph{exactly once} like any other alias
 --- there is no memoization exemption, in strict parity with GHC, so
@@ -2090,12 +2090,12 @@ If you are coming from Haskell, keep these differences in mind:
 
 \begin{lstlisting}
 data Dict k v = Empty
-              | Node Integer k v (Dict k v) (Dict k v)
+              | Node Int k v (Dict k v) (Dict k v)
 
 empty :: Dict k v
 empty = Empty
 
-height :: Dict k v -> Integer
+height :: Dict k v -> Int
 height Empty = 0
 height (Node h _ _ _ _) = h
 
@@ -2131,10 +2131,10 @@ main = do
 A library module that exports an efficient Fibonacci function to Lua:
 
 \begin{lstlisting}
-fib :: [Integer]
+fib :: [Int]
 fib = 1 : 1 : zipWith (+) fib (tail fib)
 
-export fibonacci :: Integer -> [Integer]
+export fibonacci :: Int -> [Int]
 fibonacci = flip take fib
 \end{lstlisting}
 
@@ -2174,8 +2174,8 @@ flip  :: (a -> b -> c) -> b -> a -> c
 -- Arithmetic (numeric-class methods)
 (+), (-), (*)      :: Num a => a -> a -> a
 negate, abs, signum :: Num a => a -> a
-(/), recip         :: Fractional a => a -> a  -- Number, not Integer
-div, mod, quot, rem :: Integral a => a -> a -> a  -- Integer
+(/), recip         :: Fractional a => a -> a  -- Number, not Int
+div, mod, quot, rem :: Integral a => a -> a -> a  -- Int
 
 -- Comparison (require Eq/Ord instances)
 (==), (/=) :: Eq a  => a -> a -> Bool
@@ -2195,9 +2195,9 @@ foldl     :: (b -> a -> b) -> b -> [a] -> b
 foldr     :: (a -> b -> b) -> b -> [a] -> b
 head      :: [a] -> a
 tail      :: [a] -> [a]
-take      :: Integer -> [a] -> [a]
-drop      :: Integer -> [a] -> [a]
-length    :: [a] -> Integer
+take      :: Int -> [a] -> [a]
+drop      :: Int -> [a] -> [a]
+length    :: [a] -> Int
 reverse   :: [a] -> [a]
 elem      :: Eq a => a -> [a] -> Bool
 zipWith   :: (a -> b -> c) -> [a] -> [b] -> [c]
@@ -2235,7 +2235,7 @@ underscore variants (\texttt{mapM\_}, \texttt{sequence\_},
 data Maybe a = Nothing | Just a
 data Either a b = Left a | Right b
 data Ordering = LT | EQ | GT
-data ExitValue = Normal | Err Integer
+data ExitValue = Normal | Err Int
 \end{lstlisting}
 
 \end{document}

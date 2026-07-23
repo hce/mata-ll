@@ -3,13 +3,13 @@
 main :: IO ()
 main = do
     -- Test 1: try succeeds → Right
-    result1 <- try (pure (42 :: Integer))
+    result1 <- try (pure (42 :: Int))
     case result1 of
         Right v -> assert (v == 42) "try pure gives Right"
         Left _  -> error "should not be Left"
 
     -- Test 2: try catches error → Left
-    result2 <- try (error "boom" :: IO Integer)
+    result2 <- try (error "boom" :: IO Int)
     case result2 of
         Right _ -> error "should not be Right"
         Left _  -> putStrLn "try error gives Left"
@@ -21,17 +21,17 @@ main = do
         Left _  -> error "putStrLn should not fail"
 
     -- Test 4: catch with no error → runs action
-    v4 <- catch (pure (10 :: Integer)) (\_ -> pure 0)
+    v4 <- catch (pure (10 :: Int)) (\_ -> pure 0)
     assert (v4 == 10) "catch no error"
 
     -- Test 5: catch with error → runs handler
-    v5 <- catch (error "oops" :: IO Integer) (\_ -> pure 99)
+    v5 <- catch (error "oops" :: IO Int) (\_ -> pure 99)
     assert (v5 == 99) "catch with error runs handler"
 
     -- Test 6: nested try
     result6 <- try (do
-        x <- pure (1 :: Integer)
-        y <- pure (2 :: Integer)
+        x <- pure (1 :: Int)
+        y <- pure (2 :: Int)
         pure (x + y))
     case result6 of
         Right v -> assert (v == 3) "nested try"
@@ -45,7 +45,7 @@ main = do
     -- `pure (head xs)` would return `Right <thunk>` and the error would escape
     -- the `try` — exactly as in GHC, where you would write `try (evaluate ...)`.
     result7 <- try (do
-        let xs = [] :: [Integer]
+        let xs = [] :: [Int]
         head xs `seq` pure ())
     case result7 of
         Right () -> error "head [] should fail"

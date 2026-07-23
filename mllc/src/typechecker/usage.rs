@@ -121,7 +121,7 @@
 //!     rejected (skippable path). (The Prelude cannot be redefined — the
 //!     typechecker rejects that separately — so the set is stable.)
 //!
-//! SCALARS AND UNIT. A *derived* binder of builtin scalar type — Integer,
+//! SCALARS AND UNIT. A *derived* binder of builtin scalar type — Int,
 //! Number, Bool, String — gets NO exemption: it is tracked exactly-once
 //! like every other derived alias, matching GHC (which has no Movable-style
 //! scalar rule in the type system). Duplicating such a scalar would be
@@ -135,7 +135,7 @@
 //! duplication (`go + go where go = useOnce t`), a deliberate parity
 //! decision. `()`-typed derived binders remain fully exempt — the
 //! run-for-effect idiom (`shred t >> …`) discards unit results by design.
-//! A binder the user annotates `%1` DIRECTLY (`f :: Integer %1 -> …;
+//! A binder the user annotates `%1` DIRECTLY (`f :: Int %1 -> …;
 //! f n = …`) is enforced as written, exactly once — as it always was.
 //!
 //! MULTIPLICITY POLYMORPHISM. A signature may quantify over a multiplicity

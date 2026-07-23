@@ -5,23 +5,23 @@ import JSON
 -- A user-defined type with combinator-based codecs written as top-level
 -- functions — the working hand-decode pattern today, and the same calls a
 -- derived FromJSON will generate.
-data Point = Point Integer Integer
+data Point = Point Int Int
     deriving (Eq)
 
 pointToJSON :: Point -> Json
-pointToJSON (Point x y) = JObj [("x", toJSONInteger x), ("y", toJSONInteger y)]
+pointToJSON (Point x y) = JObj [("x", toJSONInt x), ("y", toJSONInt y)]
 
 pointFromJSON :: Json -> Either String Point
-pointFromJSON j = jContext "Point" (jBind (jFieldWith fromJSONInteger "x" j) (\x -> jBind (jFieldWith fromJSONInteger "y" j) (\y -> Right (Point x y))))
+pointFromJSON j = jContext "Point" (jBind (jFieldWith fromJSONInt "x" j) (\x -> jBind (jFieldWith fromJSONInt "y" j) (\y -> Right (Point x y))))
 
-data Tagged = Tagged String (Maybe Integer)
+data Tagged = Tagged String (Maybe Int)
     deriving (Eq)
 
 taggedToJSON :: Tagged -> Json
-taggedToJSON (Tagged name mn) = JObj [("name", toJSONString name), ("value", toJSONMaybe toJSONInteger mn)]
+taggedToJSON (Tagged name mn) = JObj [("name", toJSONString name), ("value", toJSONMaybe toJSONInt mn)]
 
 taggedFromJSON :: Json -> Either String Tagged
-taggedFromJSON j = jContext "Tagged" (jBind (jFieldWith fromJSONString "name" j) (\name -> jBind (jOptFieldWith fromJSONInteger "value" j) (\mn -> Right (Tagged name mn))))
+taggedFromJSON j = jContext "Tagged" (jBind (jFieldWith fromJSONString "name" j) (\name -> jBind (jOptFieldWith fromJSONInt "value" j) (\mn -> Right (Tagged name mn))))
 
 -- A user-defined type with hand-written ToJSON/FromJSON instances against
 -- the imported classes (allowed because PtN is local to this module).
@@ -46,11 +46,11 @@ instance FromJSON PtN where
 -- codec combinators. Top-level signatures are pre-registered before instance
 -- bodies are type-checked (they used to be checked too early to see them),
 -- so this is the natural way to write a manual instance.
-data PtC = PtC Integer Integer
+data PtC = PtC Int Int
     deriving (Eq)
 
 instance FromJSON PtC where
-    fromJSON j = jContext "PtC" (jBind (jFieldWith fromJSONInteger "x" j) (\x -> jBind (jFieldWith fromJSONInteger "y" j) (\y -> Right (PtC x y))))
+    fromJSON j = jContext "PtC" (jBind (jFieldWith fromJSONInt "x" j) (\x -> jBind (jFieldWith fromJSONInt "y" j) (\y -> Right (PtC x y))))
 
 -- Helpers -------------------------------------------------------------
 
@@ -70,11 +70,11 @@ isLeft :: Either String Json -> Bool
 isLeft (Left _) = True
 isLeft (Right _) = False
 
-rightIntIs :: Either String Integer -> Integer -> Bool
+rightIntIs :: Either String Int -> Int -> Bool
 rightIntIs (Right n) m = n == m
 rightIntIs (Left _) _ = False
 
-leftInt :: Either String Integer -> Bool
+leftInt :: Either String Int -> Bool
 leftInt (Left _) = True
 leftInt (Right _) = False
 
@@ -98,15 +98,15 @@ rightBoolIs :: Either String Bool -> Bool -> Bool
 rightBoolIs (Right a) b = a == b
 rightBoolIs (Left _) _ = False
 
-rightIntsIs :: Either String [Integer] -> [Integer] -> Bool
+rightIntsIs :: Either String [Int] -> [Int] -> Bool
 rightIntsIs (Right xs) ys = xs == ys
 rightIntsIs (Left _) _ = False
 
-leftInts :: Either String [Integer] -> Bool
+leftInts :: Either String [Int] -> Bool
 leftInts (Left _) = True
 leftInts (Right _) = False
 
-rightMaybeIntIs :: Either String (Maybe Integer) -> Maybe Integer -> Bool
+rightMaybeIntIs :: Either String (Maybe Int) -> Maybe Int -> Bool
 rightMaybeIntIs (Right a) b = a == b
 rightMaybeIntIs (Left _) _ = False
 
@@ -166,17 +166,17 @@ qq = strChar 34
 -- probed via hasIntegerSubtype.
 -- note: LuaJIT has no integer subtype — every number is an IEEE-754 double,
 -- so the int64 boundaries round (9223372036854775807 becomes 2^63) and the
--- strict range check in fromJSONInteger correctly rejects them there. On
+-- strict range check in fromJSONInt correctly rejects them there. On
 -- such interpreters we assert exact decoding at the double-safe boundary
 -- (±2^53) instead; on Lua 5.3+ the full int64 asserts always run.
 int64CodecChecks :: Bool -> IO ()
 int64CodecChecks True = do
-    assert (rightIntIs (fromJSONInteger (mustParse "9223372036854775807")) 9223372036854775807) "fromJSONInteger int64 max"
-    assert (rightIntIs (fromJSONInteger (mustParse "-9223372036854775808")) (0 - 9223372036854775807 - 1)) "fromJSONInteger int64 min exact"
+    assert (rightIntIs (fromJSONInt (mustParse "9223372036854775807")) 9223372036854775807) "fromJSONInt int64 max"
+    assert (rightIntIs (fromJSONInt (mustParse "-9223372036854775808")) (0 - 9223372036854775807 - 1)) "fromJSONInt int64 min exact"
 int64CodecChecks False = do
     putStrLn "note: no integer subtype (LuaJIT) - asserting the double-safe 2^53 boundary instead of the full int64 range"
-    assert (rightIntIs (fromJSONInteger (mustParse "9007199254740992")) 9007199254740992) "fromJSONInteger 2^53 (no integer subtype)"
-    assert (rightIntIs (fromJSONInteger (mustParse "-9007199254740992")) (-9007199254740992)) "fromJSONInteger -2^53 (no integer subtype)"
+    assert (rightIntIs (fromJSONInt (mustParse "9007199254740992")) 9007199254740992) "fromJSONInt 2^53 (no integer subtype)"
+    assert (rightIntIs (fromJSONInt (mustParse "-9007199254740992")) (-9007199254740992)) "fromJSONInt -2^53 (no integer subtype)"
 
 main :: IO ()
 main = do
@@ -247,8 +247,8 @@ main = do
     assert (encodeJSON JNull == "null") "encode null"
     assert (encodeJSON (JBool True) == "true") "encode true"
     assert (encodeJSON (JBool False) == "false") "encode false"
-    assert (encodeJSON (toJSONInteger 42) == "42") "encode integer"
-    assert (encodeJSON (toJSONInteger (-7)) == "-7") "encode negative integer"
+    assert (encodeJSON (toJSONInt 42) == "42") "encode integer"
+    assert (encodeJSON (toJSONInt (-7)) == "-7") "encode negative integer"
     assert (encodeJSON (JNum 3.5) == "3.5") "encode float"
     assert (encodeJSON (JStr "hi") == qq <> "hi" <> qq) "encode plain string"
     assert (encodeJSON (JStr "") == qq <> qq) "encode empty string"
@@ -260,8 +260,8 @@ main = do
     assert (encodeJSON (JStr (strChar 31)) == qq <> bs <> "u001f" <> qq) "escape control as \\u001f"
     assert (encodeJSON (JArr []) == "[]") "encode empty array"
     assert (encodeJSON (JObj []) == "{}") "encode empty object"
-    assert (encodeJSON (JArr [toJSONInteger 1, JNull, JBool True]) == "[1,null,true]") "encode array"
-    assert (encodeJSON (JObj [("a", JArr [toJSONInteger 1, JNull]), ("b", JStr "x")]) == "{" <> qq <> "a" <> qq <> ":[1,null]," <> qq <> "b" <> qq <> ":" <> qq <> "x" <> qq <> "}") "encode nested object"
+    assert (encodeJSON (JArr [toJSONInt 1, JNull, JBool True]) == "[1,null,true]") "encode array"
+    assert (encodeJSON (JObj [("a", JArr [toJSONInt 1, JNull]), ("b", JStr "x")]) == "{" <> qq <> "a" <> qq <> ":[1,null]," <> qq <> "b" <> qq <> ":" <> qq <> "x" <> qq <> "}") "encode nested object"
 
     -- ============================================================
     -- Round-trips
@@ -269,12 +269,12 @@ main = do
     assert (rt (JStr ("quote:" <> qq <> " back:" <> bs <> " nl:" <> strChar 10 <> " tab:" <> strChar 9))) "rt tricky string"
     assert (rt (JStr (strChar 226 <> strChar 130 <> strChar 172 <> " euro"))) "rt UTF-8 string"
     assert (rt (JStr (strChar 0 <> strChar 1 <> strChar 31))) "rt control chars"
-    assert (rt (JObj [("k", JArr [toJSONInteger 1, JNum 2.5, JStr "s", JNull, JBool False]), ("m", JObj [])])) "rt nested"
+    assert (rt (JObj [("k", JArr [toJSONInt 1, JNum 2.5, JStr "s", JNull, JBool False]), ("m", JObj [])])) "rt nested"
     assert (rt (JNum 0.1)) "rt 0.1"
     assert (rt (JNum (toNumber "1e300"))) "rt 1e300"
     assert (rt (JNum (1.0 / 3.0))) "rt 1/3 exact"
-    assert (rt (toJSONInteger 9007199254740993)) "rt integer beyond 2^53"
-    assert (rt (toJSONInteger (-9223372036854775807))) "rt near Integer min"
+    assert (rt (toJSONInt 9007199254740993)) "rt integer beyond 2^53"
+    assert (rt (toJSONInt (-9223372036854775807))) "rt near Int min"
     assert (rtText "[1,null,true,\"a\",{\"b\":2.5}]") "rt canonical text"
     assert (rtText "{\"x\":[[]],\"y\":{}}") "rt canonical nested text"
 
@@ -284,24 +284,24 @@ main = do
     -- ============================================================
     -- Primitive codec combinators
     -- ============================================================
-    assert (rightIntIs (fromJSONInteger (mustParse "42")) 42) "fromJSONInteger"
-    assert (rightIntIs (fromJSONInteger (mustParse "-3")) (-3)) "fromJSONInteger negative"
-    assert (rightIntIs (fromJSONInteger (mustParse "1e2")) 100) "fromJSONInteger integral float"
-    assert (rightIntIs (fromJSONInteger (mustParse "2.0")) 2) "fromJSONInteger 2.0"
-    assert (leftInt (fromJSONInteger (mustParse "3.5"))) "fromJSONInteger rejects non-integral"
-    assert (leftInt (fromJSONInteger (mustParse "\"42\""))) "fromJSONInteger rejects string"
-    assert (leftInt (fromJSONInteger (mustParse "1e300"))) "fromJSONInteger rejects out of range"
-    assert (leftInt (fromJSONInteger JNull)) "fromJSONInteger rejects null"
+    assert (rightIntIs (fromJSONInt (mustParse "42")) 42) "fromJSONInt"
+    assert (rightIntIs (fromJSONInt (mustParse "-3")) (-3)) "fromJSONInt negative"
+    assert (rightIntIs (fromJSONInt (mustParse "1e2")) 100) "fromJSONInt integral float"
+    assert (rightIntIs (fromJSONInt (mustParse "2.0")) 2) "fromJSONInt 2.0"
+    assert (leftInt (fromJSONInt (mustParse "3.5"))) "fromJSONInt rejects non-integral"
+    assert (leftInt (fromJSONInt (mustParse "\"42\""))) "fromJSONInt rejects string"
+    assert (leftInt (fromJSONInt (mustParse "1e300"))) "fromJSONInt rejects out of range"
+    assert (leftInt (fromJSONInt JNull)) "fromJSONInt rejects null"
     -- int64 boundary exactness: the full range decodes with integer
     -- precision, and one-past-the-end is rejected even though Lua's float
     -- conversion rounds it onto the boundary.
     int64CodecChecks hasIntegerSubtype
-    assert (leftInt (fromJSONInteger (mustParse "9223372036854775808"))) "fromJSONInteger rejects max+1"
-    assert (leftInt (fromJSONInteger (mustParse "-9223372036854775809"))) "fromJSONInteger rejects min-1"
+    assert (leftInt (fromJSONInt (mustParse "9223372036854775808"))) "fromJSONInt rejects max+1"
+    assert (leftInt (fromJSONInt (mustParse "-9223372036854775809"))) "fromJSONInt rejects min-1"
     -- float syntax at the exact minimum is ambiguous after rounding and is
     -- rejected (see the numToIntegerFloat note; aeson accepts it because it
     -- parses numbers exactly).
-    assert (leftInt (fromJSONInteger (mustParse "-9223372036854775808.0"))) "fromJSONInteger rejects min in float syntax"
+    assert (leftInt (fromJSONInt (mustParse "-9223372036854775808.0"))) "fromJSONInt rejects min in float syntax"
     assert (rightNumIs (fromJSONNumber (mustParse "3.5")) 3.5) "fromJSONNumber"
     assert (leftNum (fromJSONNumber (mustParse "true"))) "fromJSONNumber rejects bool"
     assert (rightStrIs (fromJSONString (mustParse "\"hi\"")) "hi") "fromJSONString"
@@ -312,30 +312,30 @@ main = do
     assert (encodeJSON (toJSONBool False) == "false") "toJSONBool"
 
     -- Lists
-    assert (rightIntsIs (fromJSONList fromJSONInteger (mustParse "[1,2,3]")) [1, 2, 3]) "fromJSONList"
-    assert (rightIntsIs (fromJSONList fromJSONInteger (mustParse "[]")) []) "fromJSONList empty"
-    assert (leftInts (fromJSONList fromJSONInteger (mustParse "[1,\"x\"]"))) "fromJSONList bad element"
-    assert (leftInts (fromJSONList fromJSONInteger (mustParse "{}"))) "fromJSONList rejects object"
-    assert (encodeJSON (toJSONList toJSONInteger [1, 2]) == "[1,2]") "toJSONList"
+    assert (rightIntsIs (fromJSONList fromJSONInt (mustParse "[1,2,3]")) [1, 2, 3]) "fromJSONList"
+    assert (rightIntsIs (fromJSONList fromJSONInt (mustParse "[]")) []) "fromJSONList empty"
+    assert (leftInts (fromJSONList fromJSONInt (mustParse "[1,\"x\"]"))) "fromJSONList bad element"
+    assert (leftInts (fromJSONList fromJSONInt (mustParse "{}"))) "fromJSONList rejects object"
+    assert (encodeJSON (toJSONList toJSONInt [1, 2]) == "[1,2]") "toJSONList"
 
     -- Maybe <-> null
-    assert (rightMaybeIntIs (fromJSONMaybe fromJSONInteger (mustParse "null")) Nothing) "fromJSONMaybe null"
-    assert (rightMaybeIntIs (fromJSONMaybe fromJSONInteger (mustParse "5")) (Just 5)) "fromJSONMaybe just"
-    assert (encodeJSON (toJSONMaybe toJSONInteger Nothing) == "null") "toJSONMaybe nothing"
-    assert (encodeJSON (toJSONMaybe toJSONInteger (Just 7)) == "7") "toJSONMaybe just"
+    assert (rightMaybeIntIs (fromJSONMaybe fromJSONInt (mustParse "null")) Nothing) "fromJSONMaybe null"
+    assert (rightMaybeIntIs (fromJSONMaybe fromJSONInt (mustParse "5")) (Just 5)) "fromJSONMaybe just"
+    assert (encodeJSON (toJSONMaybe toJSONInt Nothing) == "null") "toJSONMaybe nothing"
+    assert (encodeJSON (toJSONMaybe toJSONInt (Just 7)) == "7") "toJSONMaybe just"
 
     -- ============================================================
     -- Object decoder combinators
     -- ============================================================
     let obj = mustParse "{\"a\": 1, \"b\": null}"
-    assert (rightJsonIs (jField "a" obj) (toJSONInteger 1)) "jField present"
+    assert (rightJsonIs (jField "a" obj) (toJSONInt 1)) "jField present"
     assert (leftJson (jField "zzz" obj)) "jField missing"
     assert (leftJson (jField "a" (mustParse "[1]"))) "jField on non-object"
-    assert (rightIntIs (jFieldWith fromJSONInteger "a" obj) 1) "jFieldWith"
-    assert (leftInt (jFieldWith fromJSONInteger "b" obj)) "jFieldWith wrong type"
-    assert (rightMaybeIntIs (jOptFieldWith fromJSONInteger "a" obj) (Just 1)) "jOptFieldWith present"
-    assert (rightMaybeIntIs (jOptFieldWith fromJSONInteger "zzz" obj) Nothing) "jOptFieldWith missing"
-    assert (rightMaybeIntIs (jOptFieldWith fromJSONInteger "b" obj) Nothing) "jOptFieldWith null"
+    assert (rightIntIs (jFieldWith fromJSONInt "a" obj) 1) "jFieldWith"
+    assert (leftInt (jFieldWith fromJSONInt "b" obj)) "jFieldWith wrong type"
+    assert (rightMaybeIntIs (jOptFieldWith fromJSONInt "a" obj) (Just 1)) "jOptFieldWith present"
+    assert (rightMaybeIntIs (jOptFieldWith fromJSONInt "zzz" obj) Nothing) "jOptFieldWith missing"
+    assert (rightMaybeIntIs (jOptFieldWith fromJSONInt "b" obj) Nothing) "jOptFieldWith null"
     case jExpectObj obj of
         Right fields -> assert (length fields == 2) "jExpectObj"
         Left _ -> assert False "jExpectObj"

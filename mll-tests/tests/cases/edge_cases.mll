@@ -5,21 +5,21 @@
 -- Empty / zero / boundary conditions
 -- ============================================================
 
-emptyList :: [Integer]
+emptyList :: [Int]
 emptyList = []
 
-singletonList :: [Integer]
+singletonList :: [Int]
 singletonList = [42]
 
 -- Zero-arg functions
-unitFn :: Integer
+unitFn :: Int
 unitFn = 42
 
 -- Negative numbers
-negTest :: Integer -> Integer
+negTest :: Int -> Int
 negTest n = n * (-1)
 
-describe :: Integer -> String
+describe :: Int -> String
 describe 0 = "zero"
 describe 1 = "one"
 describe _ = "other"
@@ -29,10 +29,10 @@ main = do
     -- Empty list operations
     assert (length emptyList == 0) "empty length"
     assert (length singletonList == 1) "singleton length"
-    assert (map (* 2) [] == ([] :: [Integer])) "map empty"
-    assert (filter (> 0) [] == ([] :: [Integer])) "filter empty"
+    assert (map (* 2) [] == ([] :: [Int])) "map empty"
+    assert (filter (> 0) [] == ([] :: [Int])) "filter empty"
     assert (foldl (+) 0 [] == 0) "foldl empty"
-    assert (reverse [] == ([] :: [Integer])) "reverse empty"
+    assert (reverse [] == ([] :: [Int])) "reverse empty"
 
     -- Negative numbers
     assert (negTest 5 == (-5)) "negate"
@@ -142,8 +142,8 @@ main = do
     -- ============================================================
     -- List comprehension edge cases
     -- ============================================================
-    assert ([x | x <- []] == ([] :: [Integer])) "comp empty src"
-    assert ([x | x <- [1], False] == ([] :: [Integer])) "comp false guard"
+    assert ([x | x <- []] == ([] :: [Int])) "comp empty src"
+    assert ([x | x <- [1], False] == ([] :: [Int])) "comp false guard"
     assert ([x | x <- [1], True] == [1]) "comp true guard"
     assert (length [x | x <- [1,2,3,4,5], x > 3] == 2) "comp count"
 

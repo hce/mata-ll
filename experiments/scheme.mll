@@ -15,7 +15,7 @@
 -- answer; a wrong result -> assert -> error -> the program (and test) fails.
 
 -- Runtime values.
-data Value = VNum Integer
+data Value = VNum Int
            | VBool Bool
            | VNil
            | VCons Value Value
@@ -23,7 +23,7 @@ data Value = VNum Integer
            | VPrim String
 
 -- Expression AST.
-data Expr = ENum Integer
+data Expr = ENum Int
           | EBool Bool
           | EVar String
           | EIf Expr Expr Expr
@@ -83,7 +83,7 @@ applyPrim name    _                = error ("scheme: bad primitive call " <> nam
 
 -- ── result extraction ──────────────────────────────────────────────────────
 
-asNum :: Value -> Integer
+asNum :: Value -> Int
 asNum (VNum n) = n
 asNum _        = error "scheme: expected a number"
 
@@ -126,7 +126,7 @@ factLam = ELambda ["self", "n"]
                  (prim2 "*" (EVar "n")
                         (EApp (EVar "self") [EVar "self", prim2 "-" (EVar "n") (ENum 1)])))
 
-factOf :: Integer -> Expr
+factOf :: Int -> Expr
 factOf k = EApp factLam [factLam, ENum k]
 
 -- sum of a cons-list 1..n, also via self-application

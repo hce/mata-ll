@@ -1,6 +1,6 @@
 -- GHC cgrun010: Tuple pattern binding
 
-fst_ :: (Integer, Integer) -> Integer
+fst_ :: (Int, Int) -> Int
 fst_ (a, b) = a
 
 main :: IO ()

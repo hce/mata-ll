@@ -11,28 +11,28 @@
 -- instantiated to a function.
 
 -- Top-level function whose body is a nested curried lambda (eta path).
-mk2 :: Integer -> Integer -> Integer -> Integer
+mk2 :: Int -> Int -> Int -> Int
 mk2 x = \y -> \z -> x * 100 + y * 10 + z
 
-add :: Integer -> Integer -> Integer
+add :: Int -> Int -> Int
 add a b = a + b
 
-double :: Integer -> Integer
+double :: Int -> Int
 double x = x * 2
 
-myid :: Integer -> Integer
+myid :: Int -> Int
 myid x = x
 
 -- where-bound curried lambda: direct, staged, and partial application.
-whereApply :: Integer
+whereApply :: Int
 whereApply = f 1 2
   where f = \x -> \y -> x + y
 
-whereStaged :: Integer
+whereStaged :: Int
 whereStaged = (f 1) 2
   where f = \x -> \y -> x + y
 
-wherePartial :: Integer
+wherePartial :: Int
 wherePartial = add10 5
   where
     f = \x -> \y -> x + y

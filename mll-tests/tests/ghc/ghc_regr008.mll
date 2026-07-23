@@ -1,7 +1,7 @@
 -- ghc_regr008: Where clause bindings used in guards
 
 -- Where bindings referenced in guards
-classify :: Integer -> String
+classify :: Int -> String
 classify n
     | n < low   = "tiny"
     | n < mid   = "small"
@@ -15,7 +15,7 @@ classify n
     huge = 10000
 
 -- Where binding that is a function
-categorize :: [Integer] -> String
+categorize :: [Int] -> String
 categorize xs
     | total == 0     = "empty"
     | avg < 0        = "negative"
@@ -63,7 +63,7 @@ main = do
     assert (bmiCategory 50.0 1.75 == "underweight") "bmi underweight"
     assert (bmiCategory 100.0 1.75 == "obese") "bmi obese"
 
-    assert (describeList ([] :: [Integer]) == "empty list") "empty"
+    assert (describeList ([] :: [Int]) == "empty list") "empty"
     assert (describeList [1] == "singleton list") "singleton"
     assert (describeList [1, 2, 3] == "short list of 3") "short"
     assert (describeList [1..10] == "long list of 10") "long"

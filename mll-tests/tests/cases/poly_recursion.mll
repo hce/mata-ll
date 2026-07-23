@@ -1,6 +1,6 @@
 data Nested a = NNil | NCons a (Nested [a])
 
-depth :: Nested a -> Integer
+depth :: Nested a -> Int
 depth NNil = 0
 depth (NCons _ rest) = 1 + depth rest
 
@@ -10,13 +10,13 @@ showNested (NCons x rest) = "Cons " <> show x <> " (" <> showNested rest <> ")"
 
 -- Deep nesting test: each level wraps in Box, creating polymorphic recursion.
 -- showDeep calls itself at progressively different types:
---   Deep Integer -> Deep (Box Integer) -> Deep (Box (Box Integer)) -> ...
+--   Deep Int -> Deep (Box Int) -> Deep (Box (Box Int)) -> ...
 data Box a = Box a
     deriving (Show, Eq)
 
 data Deep a = DNil | DCons a (Deep (Box a))
 
-depthD :: Deep a -> Integer
+depthD :: Deep a -> Int
 depthD DNil = 0
 depthD (DCons _ rest) = 1 + depthD rest
 

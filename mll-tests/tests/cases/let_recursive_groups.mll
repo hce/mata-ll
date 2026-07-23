@@ -8,7 +8,7 @@
 -- plus mutually-recursive let functions, self-referential lazy values, and the
 -- preservation of shadowing / separate-`let`-statement capture semantics.
 
-isEvenDo :: Integer -> Bool
+isEvenDo :: Int -> Bool
 isEvenDo m = go m
   where go n = if n == 0 then True else goOdd (n - 1)
         goOdd n = if n == 0 then False else go (n - 1)

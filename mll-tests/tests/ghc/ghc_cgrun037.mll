@@ -1,19 +1,19 @@
 -- GHC cgrun037: Map lookup and association lists
 -- Tests using list of pairs as a lookup table
 
-lookup_ :: String -> [(String, Integer)] -> Maybe Integer
+lookup_ :: String -> [(String, Int)] -> Maybe Int
 lookup_ _ [] = Nothing
 lookup_ key ((k, v):rest)
     | key == k  = Just v
     | otherwise = lookup_ key rest
 
-insert_ :: String -> Integer -> [(String, Integer)] -> [(String, Integer)]
+insert_ :: String -> Int -> [(String, Int)] -> [(String, Int)]
 insert_ k v [] = [(k, v)]
 insert_ k v ((k2, v2):rest)
     | k == k2   = (k, v) : rest
     | otherwise  = (k2, v2) : insert_ k v rest
 
-delete_ :: String -> [(String, Integer)] -> [(String, Integer)]
+delete_ :: String -> [(String, Int)] -> [(String, Int)]
 delete_ _ [] = []
 delete_ k ((k2, v2):rest)
     | k == k2   = rest

@@ -8,10 +8,10 @@ import Data.Traversable (traverse, sequenceA)
 main :: IO ()
 main = do
     assert (toList (Just 5) == [5]) "toList Just"
-    assert (toList (Nothing :: Maybe Integer) == []) "toList Nothing"
+    assert (toList (Nothing :: Maybe Int) == []) "toList Nothing"
     assert (toList [1, 2, 3] == [1, 2, 3]) "toList list"
-    assert (toList (Right 9 :: Either String Integer) == [9]) "toList Right"
-    assert (toList (Left "e" :: Either String Integer) == []) "toList Left"
+    assert (toList (Right 9 :: Either String Int) == [9]) "toList Right"
+    assert (toList (Left "e" :: Either String Int) == []) "toList Left"
     -- toList streams lazily: it can take from an infinite structure
     assert (take 3 (toList (iterate (\x -> x * 2) 1)) == [1, 2, 4]) "toList infinite"
     -- re-exports picked up through Data.Foldable

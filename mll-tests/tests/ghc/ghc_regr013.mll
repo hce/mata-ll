@@ -1,20 +1,20 @@
--- ghc_regr013: Mixed Integer and Number arithmetic
+-- ghc_regr013: Mixed Int and Number arithmetic
 
--- Integer division and modulo
-divMod' :: Integer -> Integer -> (Integer, Integer)
+-- Int division and modulo
+divMod' :: Int -> Int -> (Int, Int)
 divMod' a b = (a `div` b, a `mod` b)
 
 -- Number (float) operations
 circleArea :: Number -> Number
 circleArea r = 3.14159265 * r * r
 
--- Integer power via recursion
-ipow :: Integer -> Integer -> Integer
+-- Int power via recursion
+ipow :: Int -> Int -> Int
 ipow _ 0 = 1
 ipow base n = base * ipow base (n - 1)
 
 -- Euclidean distance squared (all integer)
-distSq :: Integer -> Integer -> Integer -> Integer -> Integer
+distSq :: Int -> Int -> Int -> Int -> Int
 distSq x1 y1 x2 y2 = (x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1)
 
 -- Number arithmetic
@@ -28,7 +28,7 @@ numSum (x:xs) = x + numSum xs
 
 main :: IO ()
 main = do
-    -- Basic Integer ops
+    -- Basic Int ops
     assert (10 `div` 3 == 3) "div"
     assert (10 `mod` 3 == 1) "mod"
     assert (divMod' 17 5 == (3, 2)) "divMod'"
@@ -38,7 +38,7 @@ main = do
     assert (ipow 3 5 == 243) "ipow 3 5"
     assert (ipow 10 0 == 1) "ipow base 0"
 
-    -- Integer comparison
+    -- Int comparison
     assert (distSq 0 0 3 4 == 25) "distSq 3-4-5"
     assert (distSq 1 1 4 5 == 25) "distSq shifted"
 
@@ -53,8 +53,8 @@ main = do
     assert (numSum [] == 0.0) "numSum empty"
     assert (approxEq (numSum [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]) 55.0) "numSum 1..10"
 
-    -- Integer sums
-    let isum = foldl (+) 0 [1..10 :: Integer]
+    -- Int sums
+    let isum = foldl (+) 0 [1..10 :: Int]
     assert (isum == 55) "isum"
 
     -- Number product

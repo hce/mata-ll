@@ -7,14 +7,14 @@ import ExportHelper
 -- ============================================================
 
 -- A helper function used by the exported function
-helper :: Integer -> Integer
+helper :: Int -> Int
 helper n = n * 10
 
 -- Export declaration (also serves as type signature)
 export greet :: String -> String
 greet name = "Hello, " <> name <> "!"
 
-export compute :: Integer -> Integer
+export compute :: Int -> Int
 compute n = helper n + 1
 
 -- ============================================================

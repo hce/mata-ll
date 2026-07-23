@@ -1,9 +1,9 @@
 -- Tests for record update syntax: expr { field = newVal }
 
-data Person = Person { personName :: String, personAge :: Integer }
+data Person = Person { personName :: String, personAge :: Int }
     deriving (Show, Eq)
 
-data Point = Point { pointX :: Integer, pointY :: Integer }
+data Point = Point { pointX :: Int, pointY :: Int }
     deriving (Show, Eq)
 
 main :: IO ()

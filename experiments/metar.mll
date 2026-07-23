@@ -4,11 +4,11 @@
 import LString
 
 -- Parser combinator library (monadic, position-based on a string)
--- A Parser a is: String -> Integer -> Maybe (a, Integer)
+-- A Parser a is: String -> Int -> Maybe (a, Int)
 -- We represent this as a newtype for clarity, but since MLL newtypes
 -- are zero-cost, this has no overhead.
 
-newtype Parser a = Parser (String -> Integer -> Maybe (a, Integer))
+newtype Parser a = Parser (String -> Int -> Maybe (a, Int))
 
 runParser :: Parser a -> String -> Maybe a
 runParser (Parser p) s = case p s 1 of
@@ -50,7 +50,7 @@ pfail = Parser (\_ _ -> Nothing)
 infixl 3 <|>
 
 -- Consume one character satisfying a predicate
-satisfy :: (Integer -> Bool) -> Parser String
+satisfy :: (Int -> Bool) -> Parser String
 satisfy pred = Parser (\s i ->
     if i > strLen s then Nothing
     else let c = strByte s i
@@ -58,7 +58,7 @@ satisfy pred = Parser (\s i ->
             else Nothing)
 
 -- Consume a specific character (by ASCII code)
-char :: Integer -> Parser String
+char :: Int -> Parser String
 char expected = satisfy (\c -> c == expected)
 
 -- Consume a specific string literal
@@ -103,19 +103,19 @@ nonSpace :: Parser String
 nonSpace = satisfy (\c -> c /= 32)
 
 -- Parse a natural number (sequence of digits)
-number :: Parser Integer
+number :: Parser Int
 number = do
     ds <- many1 digit
     pure (read (strConcat ds))
 
 -- Parse exactly N digits as a number
-digits :: Integer -> Parser Integer
+digits :: Int -> Parser Int
 digits n = do
     ds <- count n digit
     pure (read (strConcat ds))
 
 -- Parse exactly N items
-count :: Integer -> Parser a -> Parser [a]
+count :: Int -> Parser a -> Parser [a]
 count 0 _ = pure []
 count n p = do
     x <- p
@@ -138,7 +138,7 @@ eof :: Parser ()
 eof = Parser (\s i -> if i > strLen s then Just ((), i) else Nothing)
 
 -- Peek without consuming
-peek :: Parser Integer
+peek :: Parser Int
 peek = Parser (\s i ->
     if i > strLen s then Nothing
     else Just (strByte s i, i))
@@ -153,40 +153,40 @@ skipToken = do
 -- METAR data types
 ------------------------------------------------------------------------
 
-data WindDir = WindDeg Integer | WindVariable
+data WindDir = WindDeg Int | WindVariable
     deriving Show
 
 data Wind = Wind
     { windDir   :: WindDir
-    , windSpeed :: Integer
-    , windGust  :: Maybe Integer
+    , windSpeed :: Int
+    , windGust  :: Maybe Int
     , windUnit  :: String }
     deriving Show
 
-data Visibility = VisMiles Integer
-                | VisMetres Integer
+data Visibility = VisMiles Int
+                | VisMetres Int
                 | VisCavok
     deriving Show
 
 data CloudAmount = Few | Scattered | Broken | Overcast
     deriving Show
 
-data CloudLayer = CloudLayer CloudAmount Integer
-                | VerticalVisibility Integer
+data CloudLayer = CloudLayer CloudAmount Int
+                | VerticalVisibility Int
                 | SkyClear
     deriving Show
 
 data Metar = Metar
     { metarStation    :: String
-    , metarDay        :: Integer
-    , metarHour       :: Integer
-    , metarMinute     :: Integer
+    , metarDay        :: Int
+    , metarHour       :: Int
+    , metarMinute     :: Int
     , metarWind       :: Wind
     , metarVisibility :: Visibility
     , metarClouds     :: [CloudLayer]
-    , metarTempC      :: Integer
-    , metarDewpointC  :: Integer
-    , metarAltimeter  :: Maybe Integer }
+    , metarTempC      :: Int
+    , metarDewpointC  :: Int
+    , metarAltimeter  :: Maybe Int }
     deriving Show
 
 ------------------------------------------------------------------------
@@ -207,7 +207,7 @@ station = do
     pure (strConcat cs)
 
 -- Day/time group: DDHHMMz
-timeGroup :: Parser (Integer, Integer, Integer)
+timeGroup :: Parser (Int, Int, Int)
 timeGroup = do
     day  <- digits 2
     hour <- digits 2
@@ -241,7 +241,7 @@ normalWind = do
                , windGust = gust
                , windUnit = unit })
 
-optionalGust :: Parser (Maybe Integer)
+optionalGust :: Parser (Maybe Int)
 optionalGust = (do
     _ <- char 71  -- 'G'
     g <- digits 2 <|> digits 3
@@ -297,27 +297,27 @@ cloudAmount :: Parser CloudAmount
 cloudAmount = (string "FEW" >>= \_ -> pure Few) <|> (string "SCT" >>= \_ -> pure Scattered) <|> (string "BKN" >>= \_ -> pure Broken) <|> (string "OVC" >>= \_ -> pure Overcast)
 
 -- Temperature / dewpoint: (M)?dd/(M)?dd
-temperature :: Parser (Integer, Integer)
+temperature :: Parser (Int, Int)
 temperature = do
     t <- signedTemp
     _ <- char 47  -- '/'
     d <- signedTemp
     pure (t, d)
 
-signedTemp :: Parser Integer
+signedTemp :: Parser Int
 signedTemp = negTemp <|> posTemp
 
-negTemp :: Parser Integer
+negTemp :: Parser Int
 negTemp = do
     _ <- char 77  -- 'M'
     n <- digits 2
     pure (0 - n)
 
-posTemp :: Parser Integer
+posTemp :: Parser Int
 posTemp = digits 2
 
 -- Altimeter: A followed by 4 digits (hundredths of inHg)
-altimeter :: Parser Integer
+altimeter :: Parser Int
 altimeter = do
     _ <- char 65  -- 'A'
     n <- digits 4

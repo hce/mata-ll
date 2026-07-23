@@ -21,10 +21,10 @@ instance Traversable Tree where
                (traverse f l)
                (liftA2 (\x2 r2 -> (x2, r2)) (f x) (traverse f r))
 
-t1 :: Tree Integer
+t1 :: Tree Int
 t1 = Node (Node Leaf 1 Leaf) 2 (Node Leaf 3 Leaf)
 
-half :: Integer -> Maybe Integer
+half :: Int -> Maybe Int
 half n = if mod n 2 == 0 then Just (div n 2) else Nothing
 
 main :: IO ()
@@ -32,7 +32,7 @@ main = do
     assert (toList t1 == [1, 2, 3]) "toList Tree (in-order)"
     assert (sum t1 == 6) "sum Tree"
     assert (length t1 == 3) "length Tree"
-    assert (null (Leaf :: Tree Integer)) "null Leaf"
+    assert (null (Leaf :: Tree Int)) "null Leaf"
     assert (not (null t1)) "null Node"
     assert (elem 2 t1) "elem Tree"
     assert (maximum t1 == 3) "maximum Tree"

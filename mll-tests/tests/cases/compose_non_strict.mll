@@ -9,13 +9,13 @@
 -- contract (bottom is never forced by a consumer that does not demand it)
 -- holds through composition, not only through direct application.
 
-ignore :: Integer -> Integer
+ignore :: Int -> Int
 ignore _ = 5
 
-add1 :: Integer -> Integer
+add1 :: Int -> Int
 add1 z = z + 1
 
-dbl :: Integer -> Integer
+dbl :: Int -> Int
 dbl z = z * 2
 
 main :: IO ()

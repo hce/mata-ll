@@ -11,10 +11,10 @@
 -- the same computation routed through a function on runtime values (opaque
 -- to the folder), across every sign combination.
 
-d :: Integer -> Integer -> Integer
+d :: Int -> Int -> Int
 d a b = a `div` b
 
-m :: Integer -> Integer -> Integer
+m :: Int -> Int -> Int
 m a b = a `mod` b
 
 main :: IO ()

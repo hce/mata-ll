@@ -3,14 +3,14 @@
 data RBColor = RBRed | RBBlack
     deriving (Show, Eq)
 
-data RBTree = RBLeaf | RBNode RBColor RBTree Integer RBTree
+data RBTree = RBLeaf | RBNode RBColor RBTree Int RBTree
     deriving (Show, Eq)
 
 -- Check BST property
 isBST :: RBTree -> Bool
 isBST t = isBSTHelper t Nothing Nothing
 
-isBSTHelper :: RBTree -> Maybe Integer -> Maybe Integer -> Bool
+isBSTHelper :: RBTree -> Maybe Int -> Maybe Int -> Bool
 isBSTHelper RBLeaf _ _ = True
 isBSTHelper (RBNode _ l x r) lo hi =
     loOk lo x && hiOk x hi && isBSTHelper l lo (Just x) && isBSTHelper r (Just x) hi
@@ -21,7 +21,7 @@ isBSTHelper (RBNode _ l x r) lo hi =
     hiOk x (Just hi_) = x < hi_
 
 -- Black height: -1 if violated
-blackHeight :: RBTree -> Integer
+blackHeight :: RBTree -> Int
 blackHeight RBLeaf = 1
 blackHeight (RBNode c l _ r) =
     let lh = blackHeight l

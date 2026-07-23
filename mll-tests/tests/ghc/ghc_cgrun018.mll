@@ -1,23 +1,23 @@
 -- GHC cgrun018: Either operations
 -- Tests Either pattern matching and mapping
 
-safeDiv :: Integer -> Integer -> Either String Integer
+safeDiv :: Int -> Int -> Either String Int
 safeDiv _ 0 = Left "division by zero"
 safeDiv a b = Right (a `div` b)
 
-mapRight :: (Integer -> Integer) -> Either String Integer -> Either String Integer
+mapRight :: (Int -> Int) -> Either String Int -> Either String Int
 mapRight _ (Left e)  = Left e
 mapRight f (Right x) = Right (f x)
 
-fromRight :: Integer -> Either String Integer -> Integer
+fromRight :: Int -> Either String Int -> Int
 fromRight def (Left _)  = def
 fromRight _   (Right x) = x
 
-isLeft :: Either String Integer -> Bool
+isLeft :: Either String Int -> Bool
 isLeft (Left _)  = True
 isLeft (Right _) = False
 
-eqEither :: Either String Integer -> Either String Integer -> Bool
+eqEither :: Either String Int -> Either String Int -> Bool
 eqEither (Left a)  (Left b)  = a == b
 eqEither (Right a) (Right b) = a == b
 eqEither _         _         = False

@@ -2,13 +2,13 @@
 -- Data.Map defines map/filter/null/lookup, which collide with the Prelude;
 -- qualification is what lets both coexist. Exercises:
 --   * qualified value use-sites (M.insert, M.empty, ...)
---   * a qualified type in a signature (M.Map String Integer)
+--   * a qualified type in a signature (M.Map String Int)
 --   * the colliding names resolving to the Data.Map versions
 --   * internal cross-references inside Data.Map (map -> fromList/toList, etc.)
 import qualified Data.Map as M
 
 -- Qualified type in a signature; also forces Data.Map's `size` (not Prelude's).
-count :: M.Map String Integer -> Integer
+count :: M.Map String Int -> Int
 count = M.size
 
 main :: IO ()
@@ -35,5 +35,5 @@ main = do
     assert (M.values m == [1, 2, 3]) "values by sorted key"
     -- Prelude's colliding names still work unqualified in the same module.
     assert (map (\x -> x + 1) [1, 2, 3] == [2, 3, 4]) "Prelude map still works"
-    assert (null ([] :: [Integer])) "Prelude null still works"
+    assert (null ([] :: [Int])) "Prelude null still works"
     assert (filter (\x -> x > 1) [1, 2, 3] == [2, 3]) "Prelude filter still works"

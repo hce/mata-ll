@@ -7,7 +7,7 @@ main = do
     assert (zipWith (*) [1, 2, 3] [4, 5, 6] == [4, 10, 18]) "zipWith *"
     assert (zipWith (+) [1, 2] [10, 20, 30] == [11, 22]) "zipWith short left"
     assert (zipWith (+) [1, 2, 3] [10, 20] == [11, 22]) "zipWith short right"
-    assert (zipWith (+) ([] :: [Integer]) [1, 2] == []) "zipWith empty"
+    assert (zipWith (+) ([] :: [Int]) [1, 2] == []) "zipWith empty"
 
     -- Dot product
     let dot xs ys = foldl (+) 0 (zipWith (*) xs ys)

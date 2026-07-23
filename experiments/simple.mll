@@ -1,2 +1,2 @@
-foo :: Integer
+foo :: Int
 foo = 42

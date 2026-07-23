@@ -10,13 +10,13 @@
 -- loop-frame stack across nested loops.) Fixed by scoping the local set per
 -- clause, since each clause is an independent Lua branch.
 
-ioId :: Integer -> IO Integer
+ioId :: Int -> IO Int
 ioId n = return n
 
-slow :: Integer -> Integer
+slow :: Int -> Int
 slow n = n + 0
 
-make :: Integer -> IO (Integer -> Integer)
+make :: Int -> IO (Int -> Int)
 make 0 = do
     r <- ioId 0
     return (\q -> q + r)

@@ -10,13 +10,13 @@ applyBoth f x y = (f x, f y)
 on :: (b -> b -> c) -> (a -> b) -> a -> a -> c
 on op f x y = op (f x) (f y)
 
-myNegate :: Integer -> Integer
+myNegate :: Int -> Int
 myNegate x = 0 - x
 
-double :: Integer -> Integer
+double :: Int -> Int
 double x = x * 2
 
-square :: Integer -> Integer
+square :: Int -> Int
 square x = x * x
 
 applyList :: (a -> b) -> [a] -> [b]

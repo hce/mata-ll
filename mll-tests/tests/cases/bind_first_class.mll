@@ -8,20 +8,20 @@
 -- while `>>=` was wrongly right-associative; the infixl 1 fixity fix made
 -- them reachable in ordinary code.
 
-step :: Integer -> IO Integer
+step :: Int -> IO Int
 step n = do
   print n
   return (n + 1)
 
-double :: Integer -> IO Integer
+double :: Int -> IO Int
 double n = return (n * 2)
 
 -- (>>=) passed as an ordinary function value.
-apply2 :: (IO Integer -> (Integer -> IO Integer) -> IO Integer) -> IO Integer
+apply2 :: (IO Int -> (Int -> IO Int) -> IO Int) -> IO Int
 apply2 b = b (step 10) step
 
 -- (>>) passed as an ordinary function value.
-thenOp :: (IO Integer -> IO () -> IO ()) -> IO ()
+thenOp :: (IO Int -> IO () -> IO ()) -> IO ()
 thenOp t = t (step 20) (putStrLn "then done")
 
 main :: IO ()

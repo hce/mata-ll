@@ -12,10 +12,10 @@ cargo install mata-ll
 Write some Haskell — `fib.mll`:
 
 ```haskell
-fib :: [Integer]
+fib :: [Int]
 fib = 1 : 1 : zipWith (+) fib (tail fib)
 
-export fibonacci :: Integer -> [Integer]
+export fibonacci :: Int -> [Int]
 fibonacci = flip take fib
 ```
 
@@ -37,7 +37,7 @@ Latest release — 0.1.4:
 - Types: a full kind system. Kinds (`Type`, `Symbol`, `Type -> Type`, …) are
   inferred for every type-level declaration and every written type is
   kind-checked, so an ill-kinded instance head or signature (`instance Show
-  Maybe`, `Foldable Integer`) is now a compile-time error with a plain-language
+  Maybe`, `Foldable Int`) is now a compile-time error with a plain-language
   explanation instead of silently miscompiling.
 - Types: promoted data types now have real kinds (DataKinds), and closed type
   families reduce symbolically during unification — so a length-indexed

@@ -1,15 +1,15 @@
 -- Pure AVL hash map with collision buckets
 
-data Tree v = TEmpty | TNode Integer Integer v (Tree v) (Tree v)
+data Tree v = TEmpty | TNode Int Int v (Tree v) (Tree v)
 
-theight :: Tree v -> Integer
+theight :: Tree v -> Int
 theight TEmpty = 0
 theight (TNode h _ _ _ _) = h
 
-tnode :: Integer -> v -> Tree v -> Tree v -> Tree v
+tnode :: Int -> v -> Tree v -> Tree v -> Tree v
 tnode k v l r = TNode (1 + max (theight l) (theight r)) k v l r
 
-tbalance :: Tree v -> Integer
+tbalance :: Tree v -> Int
 tbalance TEmpty = 0
 tbalance (TNode _ _ _ l r) = theight l - theight r
 
@@ -30,14 +30,14 @@ trebalance (TNode h k v l r)
     | tbalance (TNode h k v l r) < -1                   = trotateLeft (tnode k v l r)
     | otherwise                                          = TNode h k v l r
 
-tinsert :: Integer -> v -> Tree v -> Tree v
+tinsert :: Int -> v -> Tree v -> Tree v
 tinsert k v TEmpty = tnode k v TEmpty TEmpty
 tinsert k v (TNode h nk nv left right)
     | k < nk    = trebalance (tnode nk nv (tinsert k v left) right)
     | k > nk    = trebalance (tnode nk nv left (tinsert k v right))
     | otherwise = TNode h k v left right
 
-tlookup :: Integer -> Tree v -> Maybe v
+tlookup :: Int -> Tree v -> Maybe v
 tlookup _ TEmpty = Nothing
 tlookup k (TNode _ nk nv left right)
     | k < nk    = tlookup k left
@@ -58,18 +58,18 @@ binsert k v (BCons bk bv rest)
     | k == bk   = BCons k v rest
     | otherwise = BCons bk bv (binsert k v rest)
 
-bsize :: Bucket k v -> Integer
+bsize :: Bucket k v -> Int
 bsize BEmpty = 0
 bsize (BCons _ _ rest) = 1 + bsize rest
 
 data PureMap k v = PureMap (Tree (Bucket k v))
 
-hashStr :: String -> LuaPure "__mll_hashstr" Integer
+hashStr :: String -> LuaPure "__mll_hashstr" Int
 
 pmEmpty :: PureMap k v
 pmEmpty = PureMap TEmpty
 
-bucketFor :: Integer -> Tree (Bucket k v) -> Bucket k v
+bucketFor :: Int -> Tree (Bucket k v) -> Bucket k v
 bucketFor h tree = case tlookup h tree of
     Just b  -> b
     Nothing -> BEmpty
@@ -87,11 +87,11 @@ pmMember k m = case pmLookup k m of
     Just _  -> True
     Nothing -> False
 
-treeSize :: Tree (Bucket k v) -> Integer
+treeSize :: Tree (Bucket k v) -> Int
 treeSize TEmpty = 0
 treeSize (TNode _ _ bucket left right) = bsize bucket + treeSize left + treeSize right
 
-pmSize :: PureMap k v -> Integer
+pmSize :: PureMap k v -> Int
 pmSize (PureMap tree) = treeSize tree
 
 fromMaybe :: a -> Maybe a -> a

@@ -15,6 +15,6 @@ main = do
     assert (catMaybes [Just 1, Nothing, Just 3] == [1, 3]) "catMaybes"
     assert (mapMaybe (\x -> if x > 2 then Just (x * 10) else Nothing) [1, 2, 3, 4] == [30, 40]) "mapMaybe"
     assert (listToMaybe [1, 2, 3] == Just 1) "listToMaybe"
-    assert (listToMaybe ([] :: [Integer]) == Nothing) "listToMaybe empty"
+    assert (listToMaybe ([] :: [Int]) == Nothing) "listToMaybe empty"
     assert (maybeToList (Just 1) == [1]) "maybeToList Just"
-    assert (maybeToList (Nothing :: Maybe Integer) == []) "maybeToList Nothing"
+    assert (maybeToList (Nothing :: Maybe Int) == []) "maybeToList Nothing"

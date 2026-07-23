@@ -4,7 +4,7 @@
 data Sign = Neg | Zero | Pos
     deriving (Show, Eq)
 
-signOf :: Integer -> Sign
+signOf :: Int -> Sign
 signOf n
     | n < 0     = Neg
     | n == 0    = Zero
@@ -17,8 +17,8 @@ describeSign s = case s of
     Zero -> "zero"
     Pos  -> "positive"
 
--- Guards in case on Integer
-category :: Integer -> String
+-- Guards in case on Int
+category :: Int -> String
 category n
     | n == 0    = "none"
     | n < 0     = "below"
@@ -35,7 +35,7 @@ bmi b
     | otherwise = "obese"
 
 -- Guards + where
-quadrant :: Integer -> Integer -> String
+quadrant :: Int -> Int -> String
 quadrant x y
     | posX && posY  = "I"
     | negX && posY  = "II"

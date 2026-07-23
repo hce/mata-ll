@@ -4,5 +4,5 @@ module DiamondMid (midFn) where
 
 import DiamondLeaf (leafA)
 
-midFn :: Integer -> Integer
+midFn :: Int -> Int
 midFn x = leafA (leafA x)

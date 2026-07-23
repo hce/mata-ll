@@ -12,7 +12,7 @@ balanced parens = go parens 0
         | p == Open  = go ps (depth + 1)
         | otherwise  = go ps (depth - 1)
 
-rep :: a -> Integer -> [a]
+rep :: a -> Int -> [a]
 rep _ 0 = []
 rep x n = x : rep x (n - 1)
 

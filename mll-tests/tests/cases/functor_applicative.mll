@@ -1,6 +1,6 @@
 -- Test Functor and Applicative typeclasses
 
-showEither :: Either String Integer -> String
+showEither :: Either String Int -> String
 showEither (Left s) = "Left " <> s
 showEither (Right n) = "Right " <> show n
 
@@ -22,7 +22,7 @@ main = do
     assert (((+1) <$> [1, 2, 3]) == [2, 3, 4]) "<$> list"
 
     -- Functor: fmap on IO
-    let io_action = fmap (+1) (pure 41) :: IO Integer
+    let io_action = fmap (+1) (pure 41) :: IO Int
     result <- io_action
     assert (result == 42) "fmap IO"
 
@@ -38,12 +38,12 @@ main = do
     assert (([(+1), (*2)] <*> [10, 20]) == [11, 21, 20, 40]) "<*> list"
 
     -- Applicative: <*> on IO
-    let io_ap = pure (+1) <*> pure 99 :: IO Integer
+    let io_ap = pure (+1) <*> pure 99 :: IO Int
     r <- io_ap
     assert (r == 100) "<*> IO"
 
     -- Monad: return resolves per-type
-    let mx = return 42 :: Maybe Integer
+    let mx = return 42 :: Maybe Int
     assert (mx == Just 42) "return Maybe"
 
     pure ()

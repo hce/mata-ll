@@ -8,23 +8,23 @@ buildSentence (w:ws) = case ws of
     _  -> w <> " " <> buildSentence ws
 
 -- Repeat a string n times
-repeatStr :: Integer -> String -> String
+repeatStr :: Int -> String -> String
 repeatStr 0 _ = ""
 repeatStr n s = s <> repeatStr (n - 1) s
 
 -- Pad a string on the left with n pad strings (n is the number of pads)
-padLeft :: Integer -> String -> String -> String
+padLeft :: Int -> String -> String -> String
 padLeft n pad s = repeatStr n pad <> s
 
 -- Embed show into strings
-formatEntry :: String -> Integer -> String
+formatEntry :: String -> Int -> String
 formatEntry key val = key <> "=" <> show val
 
-joinRest :: [(String, Integer)] -> String
+joinRest :: [(String, Int)] -> String
 joinRest []          = "}"
 joinRest (p:rest)    = ", " <> formatEntry (fst p) (snd p) <> joinRest rest
 
-formatList :: [(String, Integer)] -> String
+formatList :: [(String, Int)] -> String
 formatList []      = "{}"
 formatList (p:rest) = "{" <> formatEntry (fst p) (snd p) <> joinRest rest
 

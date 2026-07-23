@@ -1,5 +1,5 @@
 rr :: LuaIO "math.random" Number
-rr2 :: Integer -> Integer -> LuaIO "math.random" Integer
+rr2 :: Int -> Int -> LuaIO "math.random" Int
 
 main :: IO ()
 main = do

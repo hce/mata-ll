@@ -3,6 +3,29 @@ MATA-LL TODO
 
 ## Planned — top priority
 
+- [ ] **`String`-vs-list type errors should explain the design.** String
+      stays opaque — decided 2026-07-22: the `[Char]` fiction would buy
+      neither speed nor expressiveness, and `[Char]` itself remains
+      usable as an ordinary list type. `++` on a String failing is a
+      completeness gap, not a soundness violation (see HASKDIFF.md, "Why
+      GHC parity"), so the remaining work is making the rejection
+      maximally informative per the error-message convention:
+      `Cannot unify '[a]' with 'String'` should carry a `note:` saying
+      mata-ll's String is not `[Char]`, that `<>` concatenates, and
+      pointing at HASKDIFF.md. Error-path-only change.
+
+- [ ] **Document the user-facing evaluation-strategy contract.**
+      HASKDIFF.md has no section on evaluation. DESIGN.md describes the
+      machinery (memoizing thunks by default, cheapness and demand
+      analysis for eagerness) and SPEC.md states the "bottom is never
+      evaluated eagerly" contract, but the user-facing question — which
+      GHC laziness idioms hold (sharing, infinite structures,
+      knot-tying), which don't, and where the eagerness optimizations
+      are observable — is answered nowhere. Agreed 2026-07-22 that this
+      must be documented; the substantive discussion of the deviation
+      surface is deferred, so this entry is: have that discussion, then
+      write the HASKDIFF.md section from its outcome.
+
 - [ ] **Quadratic typechecking of long do-blocks.** Found by the parser
       fuzzer's deep probes: each do-`let` binding calls `generalize`, which
       recomputes `TypeEnv::free_vars` by walking EVERY scheme in the
@@ -53,6 +76,32 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Renamed `Integer` → `Int` — the type is 64-bit and wrapping, and
+      its name now says so.** Decided 2026-07-22, done in the same batch;
+      rationale in HASKDIFF.md ("Why GHC parity" and "Integers are
+      fixed-width"). mata-ll's integer wraps at 64 bits (a double on
+      LuaJIT), which is exactly GHC's `Int` — so carrying the
+      arbitrary-precision name `Integer` was a silent soundness deviation
+      against the GHC oracle. `Int` is now the sole canonical builtin
+      integer: the `Int`→`Integer` alias and its warning are gone (no back
+      door), and every internal dispatch helper moved in lockstep
+      (`show_Int`, `eq_Int`, the Enum/Num/Integral `*_Int` runtime helpers,
+      the JSON `toJSONInt`/`fromJSONInt`, the `AnyInt` constructor). Three
+      new rejections, each loud with a `note:`: (1) `Integer` in a type is
+      an unknown-type error pointing at `Int`; (2) `toInteger` (whose
+      result would be the absent `Integer`) is removed from `Integral` and
+      reports the same note — `fromInteger` stays, its argument being just
+      the `Int` literal type; (3) an integer literal past `maxBound :: Int`
+      is a hard lexer error (GHC only warns via `-Woverflowed-literals`;
+      stricter-than-GHC rejection is criterion-permitted). Defaulting is
+      now `default (Int, Number)`, and `regenerate-ghc-goldens.sh` injects
+      `default (Int, Double)` after the last import of each twin (the
+      `MllShim` list/STArray primitives retype to `Int`), so GHC stays the
+      referee for defaulted arithmetic including overflow. The rename does
+      not change runtime output, so the committed goldens stay byte-valid;
+      full workspace suite green. Golden *regeneration* is deferred to a
+      GHC host (none locally), with no regression in the meantime.
 
 - [x] **GHC as a differential oracle (was planned #2).** The parity suite
       asserted what the author believed GHC does; belief-driven tests share
@@ -286,7 +335,9 @@ MATA-LL TODO
 - [x] Type substitution in monomorphized specializations
 - [x] undefined (bottom) value — thunk that errors when forced
 - [x] WASM build target (mllc-wasm crate, browser playground)
-- [x] Type aliases (`type Pair a = (a, a)`, `Int` as alias for Integer)
+- [x] Type aliases (`type Pair a = (a, a)`) — note: `Int` is no longer an
+      alias; it is the canonical builtin integer type (see the Integer→Int
+      rename above)
 - [x] `module Name (exports) where` header parsing
 - [x] `putStr` (io.write FFI)
 - [x] Skip main when loaded via require

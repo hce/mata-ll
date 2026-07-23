@@ -17,13 +17,13 @@ konstMaybe = konst "y"
 
 -- Result-only variable where the pinning monad is the list monad.
 konstList :: [()]
-konstList = konst (42 :: Integer)
+konstList = konst (42 :: Int)
 
 main :: IO ()
 main = do
   -- Pinned by the IO () expected type of the do-statement.
   konst "x"
-  konst (1 :: Integer)
+  konst (1 :: Int)
   -- Pinned via the codomain of a function-typed argument's use.
   apply1 putStrLn "hello from apply1"
   assert (konstMaybe == Just ()) "konst pinned to Maybe"

@@ -1,9 +1,9 @@
 -- GHC-style test: fmap over various functors
 
-double :: Integer -> Integer
+double :: Int -> Int
 double x = x * 2
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
 main :: IO ()

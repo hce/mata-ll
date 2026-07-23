@@ -44,7 +44,7 @@ pub struct DemandInfo {
 /// strict positions are stated here and seeded into the demand environment
 /// keyed by the source name gen_arg looks up. Two families:
 ///   * ByteString primitives — first-order, strict in every argument (they
-///     read a ByteString/Integer/String immediately; you cannot index/measure/
+///     read a ByteString/Int/String immediately; you cannot index/measure/
 ///     slice through a thunk).
 ///   * ST array primitives — strict in the array and index (always forced),
 ///     lazy in the stored value (matching Haskell's `newArray`/`writeArray`).
@@ -89,19 +89,19 @@ const STRICT_BUILTINS: &[(&str, &[bool])] = &[
 
 /// Monomorphized primitive typeclass methods that codegen inlines as Lua
 /// binary operators (see the `lua_op` table in `gen_expr`) and whose runtime
-/// fallbacks (`local function eq_Integer(a, b) … __force(a); __force(b) …`)
+/// fallbacks (`local function eq_Int(a, b) … __force(a); __force(b) …`)
 /// force both operands. They are strict in both arguments exactly like the
 /// corresponding `InfixApp` operators — without this seed, every guard or
 /// condition written with `==`/`<`/`>=` on a primitive type hides its
 /// operands from the analysis (the comparison survives to TIR as
-/// `App(App(Var("ord_ge__Integer"), a), b)`), which is what kept hot-loop
+/// `App(App(Var("ord_ge__Int"), a), b)`), which is what kept hot-loop
 /// counters lazy (see experiments/tracker/PERF-REGRESSION.md).
 const PRIMITIVE_BINOP_METHODS: &[&str] = &[
-    "eq_Integer", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
-    "ord_lt__Integer", "ord_lt__Number", "ord_lt__String", "ord_lt__ByteString",
-    "ord_gt__Integer", "ord_gt__Number", "ord_gt__String", "ord_gt__ByteString",
-    "ord_le__Integer", "ord_le__Number", "ord_le__String", "ord_le__ByteString",
-    "ord_ge__Integer", "ord_ge__Number", "ord_ge__String", "ord_ge__ByteString",
+    "eq_Int", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
+    "ord_lt__Int", "ord_lt__Number", "ord_lt__String", "ord_lt__ByteString",
+    "ord_gt__Int", "ord_gt__Number", "ord_gt__String", "ord_gt__ByteString",
+    "ord_le__Int", "ord_le__Number", "ord_le__String", "ord_le__ByteString",
+    "ord_ge__Int", "ord_ge__Number", "ord_ge__String", "ord_ge__ByteString",
     "semigroup_String",
 ];
 
@@ -129,7 +129,7 @@ const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     // type-directed shim is an unconditional `return show(x)` or forces
     // its argument itself (show_ByteString, show_HashMap).
     ("show", &[true]),
-    ("show_Integer", &[true]),
+    ("show_Int", &[true]),
     ("show_Number", &[true]),
     ("show_String", &[true]),
     ("show_Bool", &[true]),
@@ -179,7 +179,7 @@ pub fn analyze(module: &TModule) -> DemandInfo {
     // Seed compiler builtins that are strict but are not mata-ll functions, so
     // the fixed point below never sees a body for them. The ByteString
     // primitives immediately consume their arguments — you cannot measure,
-    // index, slice, or convert through a thunk — so every ByteString/Integer/
+    // index, slice, or convert through a thunk — so every ByteString/Int/
     // String argument is forced. Marking them strict lets gen_arg pass address
     // arithmetic like `off + 17` in place instead of thunking it (hot in binary
     // decoders such as the tracker). Higher-order primitives (bsMap, bsFoldl,

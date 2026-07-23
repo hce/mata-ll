@@ -25,7 +25,7 @@ get k v = case jLookup k v of
     Just x -> x
     Nothing -> JNull
 
-idx :: Integer -> Json -> Json
+idx :: Int -> Json -> Json
 idx i v = case jIndex i v of
     Just x -> x
     Nothing -> JNull

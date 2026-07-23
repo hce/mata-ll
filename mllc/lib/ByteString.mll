@@ -8,30 +8,30 @@
 --
 -- Construction:
 --   bsEmpty     :: ByteString
---   bsSingleton :: Integer -> ByteString
---   bsCons      :: Integer -> ByteString -> ByteString
---   bsSnoc      :: ByteString -> Integer -> ByteString
+--   bsSingleton :: Int -> ByteString
+--   bsCons      :: Int -> ByteString -> ByteString
+--   bsSnoc      :: ByteString -> Int -> ByteString
 --   bsConcat     :: ByteString -> ByteString -> ByteString
 --   bsConcatList :: [ByteString] -> ByteString
---   bsReplicate  :: Integer -> Integer -> ByteString
---   bsPack       :: [Integer] -> ByteString
+--   bsReplicate  :: Int -> Int -> ByteString
+--   bsPack       :: [Int] -> ByteString
 --
 -- Deconstruction:
---   bsHead      :: ByteString -> Integer
+--   bsHead      :: ByteString -> Int
 --   bsTail      :: ByteString -> ByteString
---   bsUnpack    :: ByteString -> [Integer]
+--   bsUnpack    :: ByteString -> [Int]
 --
 -- Query:
---   bsLength    :: ByteString -> Integer
---   bsIndex     :: ByteString -> Integer -> Integer
+--   bsLength    :: ByteString -> Int
+--   bsIndex     :: ByteString -> Int -> Int
 --   bsNull      :: ByteString -> Bool
---   bsSub       :: ByteString -> Integer -> Integer -> ByteString
+--   bsSub       :: ByteString -> Int -> Int -> ByteString
 --
 -- Transformations:
---   bsMap       :: (Integer -> Integer) -> ByteString -> ByteString
---   bsFoldl     :: (a -> Integer -> a) -> a -> ByteString -> a
+--   bsMap       :: (Int -> Int) -> ByteString -> ByteString
+--   bsFoldl     :: (a -> Int -> a) -> a -> ByteString -> a
 --   bsXor       :: ByteString -> ByteString -> ByteString
---   bsZipWith   :: (Integer -> Integer -> Integer) -> ByteString -> ByteString -> ByteString
+--   bsZipWith   :: (Int -> Int -> Int) -> ByteString -> ByteString -> ByteString
 --
 -- Conversion:
 --   bsToString   :: ByteString -> String

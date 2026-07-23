@@ -4,10 +4,10 @@
 data Color = Red | Green | Blue
     deriving (Show, Eq, Ord)
 
-data Shape = Circle Integer | Rect Integer Integer
+data Shape = Circle Int | Rect Int Int
     deriving (Show, Eq)
 
-area :: Shape -> Integer
+area :: Shape -> Int
 area (Circle r) = r * r * 3
 area (Rect w h) = w * h
 

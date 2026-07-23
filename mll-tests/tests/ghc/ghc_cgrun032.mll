@@ -2,7 +2,7 @@
 -- Tests tail-recursive style with accumulators
 
 -- Digits of a number
-digits :: Integer -> [Integer]
+digits :: Int -> [Int]
 digits 0 = [0]
 digits n = go n []
   where
@@ -10,7 +10,7 @@ digits n = go n []
     go n acc = go (n `div` 10) ((n `mod` 10) : acc)
 
 -- Digital root (repeated digit sum until single digit)
-digitalRoot :: Integer -> Integer
+digitalRoot :: Int -> Int
 digitalRoot n
     | n < 10    = n
     | otherwise = digitalRoot (digitSum n)
@@ -19,7 +19,7 @@ digitalRoot n
     digitSum n = n `mod` 10 + digitSum (n `div` 10)
 
 -- Collatz sequence length
-collatz :: Integer -> Integer
+collatz :: Int -> Int
 collatz n = go n 0
   where
     go 1 steps = steps

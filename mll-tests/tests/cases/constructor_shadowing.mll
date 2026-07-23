@@ -2,22 +2,22 @@
 -- auto-imported (Prelude/builtin) constructor used to silently miscompile.
 -- The typechecker's name->constructor map was last-writer-wins while codegen's
 -- tag table resolved first-match, so the two phases disagreed on the tag:
---   data Foo = Err Integer | Other        -- crashed "Non-exhaustive patterns"
+--   data Foo = Err Int | Other        -- crashed "Non-exhaustive patterns"
 --   data P   = Low | Normal | High        -- derived Ord indexed a number
--- (and `data Result = Ok Integer | Err String` only worked because its Err
+-- (and `data Result = Ok Int | Err String` only worked because its Err
 -- happened to land on the same tag as ExitValue's — pure declaration-order
 -- luck). Now a local constructor properly shadows the non-local one, GHC-style,
 -- in either field order.
 
 -- The Prelude's ExitValue claims `Err` at tag 2. Shadow it from tag 1:
-data Foo = Err Integer | Other deriving (Show, Eq)
+data Foo = Err Int | Other deriving (Show, Eq)
 
 fooLabel :: Foo -> String
 fooLabel (Err n) = show n
 fooLabel Other = "other"
 
 -- ... and from tag 2 (the "lucky" ordering must keep working too):
-data Result = Ok Integer | Failed String deriving (Show, Eq)
+data Result = Ok Int | Failed String deriving (Show, Eq)
 
 resLabel :: Result -> String
 resLabel (Ok n) = show n
@@ -29,9 +29,9 @@ data P = Low | Normal | High deriving (Show, Eq, Ord, Enum, Bounded)
 
 -- Shadowing a *builtin* constructor: Maybe's Just is nil/value-encoded in
 -- codegen by name, so the shadowing constructor must not be mistaken for it.
-data Opt = Just Integer | None deriving (Show, Eq)
+data Opt = Just Int | None deriving (Show, Eq)
 
-pick :: Opt -> Integer
+pick :: Opt -> Int
 pick (Just x) = x
 pick None = 0
 
@@ -39,11 +39,11 @@ pick None = 0
 -- instances keep dispatching on the Prelude Ordering's EQ internally.
 data Tri = MyLT | EQ | MyGT deriving (Show, Eq)
 
-data PairT = PairT Integer Integer deriving (Eq, Ord)
+data PairT = PairT Int Int deriving (Eq, Ord)
 
 -- A newtype constructor shares the namespace and may shadow too: this one
 -- shadows Either's Left, which the Prelude itself pattern-matches internally.
-newtype Left = Integer
+newtype Left = Int
 
 main :: IO ()
 main = do

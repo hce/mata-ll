@@ -1,7 +1,7 @@
 -- Regression test: multi-line case in do-let must not consume
 -- the next do-statement as an argument.
 
-classify :: Integer -> String
+classify :: Int -> String
 classify n = case n of
     0 -> "zero"
     1 -> "one"

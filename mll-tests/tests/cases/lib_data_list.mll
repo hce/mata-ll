@@ -4,7 +4,7 @@ import Data.List
 main :: IO ()
 main = do
     -- Basic functions
-    assert (null ([] :: [Integer])) "null empty"
+    assert (null ([] :: [Int])) "null empty"
     assert (not (null [1])) "null nonempty"
     assert (last [1, 2, 3] == 3) "last"
     assert (init [1, 2, 3] == [1, 2]) "init"

@@ -27,25 +27,25 @@
 import LBit (band, bor, shiftL, shiftR)
 
 -- 2^63 - 1 and -2^63, written in corpus style (2^63 overflows a literal).
-maxI63 :: Integer
+maxI63 :: Int
 maxI63 = 9223372036854775807
 
-minI63 :: Integer
+minI63 :: Int
 minI63 = 0 - 9223372036854775807 - 1
 
 -- Big-endian readers, mirroring ZBytes exactly (bsIndex-based).
-getU16BE :: ByteString -> Integer -> Integer
+getU16BE :: ByteString -> Int -> Int
 getU16BE b off = bsIndex b off * 256 + bsIndex b (off + 1)
 
-getU32BE :: ByteString -> Integer -> Integer
+getU32BE :: ByteString -> Int -> Int
 getU32BE b off = shiftL (getU16BE b off) 16 + getU16BE b (off + 2)
 
-getU64BE :: ByteString -> Integer -> Integer
+getU64BE :: ByteString -> Int -> Int
 getU64BE b off = bor (shiftL (getU32BE b off) 32) (getU32BE b (off + 4))
 
 -- Little-endian 64-bit read, built from the bsGetU32LE intrinsic (as ZBytes
 -- getU64LE is): high dword shifted up (into the sign bit) or'd with the low.
-getU64LE :: ByteString -> Integer -> Integer
+getU64LE :: ByteString -> Int -> Int
 getU64LE b off = bor (bsGetU32LE b off) (shiftL (bsGetU32LE b (off + 4)) 32)
 
 main :: IO ()

@@ -6,8 +6,8 @@ data Tree a = Leaf | Node (Tree a) a (Tree a)
 data MyList a = Nil | Cons a (MyList a)
     deriving (Show, Eq)
 
--- Insert into BST (Integer only to avoid compare constraint)
-insertBST :: Integer -> Tree Integer -> Tree Integer
+-- Insert into BST (Int only to avoid compare constraint)
+insertBST :: Int -> Tree Int -> Tree Int
 insertBST x Leaf = Node Leaf x Leaf
 insertBST x (Node l v r)
     | x < v    = Node (insertBST x l) v r
@@ -32,14 +32,14 @@ fromMyList :: MyList a -> [a]
 fromMyList Nil        = []
 fromMyList (Cons x xs) = x : fromMyList xs
 
-myListLength :: MyList a -> Integer
+myListLength :: MyList a -> Int
 myListLength Nil        = 0
 myListLength (Cons _ xs) = 1 + myListLength xs
 
 main :: IO ()
 main = do
     -- Show on recursive types works (format may vary, just check non-empty string)
-    assert (show (Leaf :: Tree Integer) /= "") "show Leaf"
+    assert (show (Leaf :: Tree Int) /= "") "show Leaf"
     assert (show (Node Leaf 1 Leaf) /= "") "show node"
 
     -- BST operations
@@ -55,7 +55,7 @@ main = do
     assert (t1 /= t3) "tree neq"
 
     -- MyList show (format may vary, just check non-empty string)
-    assert (show (Nil :: MyList Integer) /= "") "show Nil"
+    assert (show (Nil :: MyList Int) /= "") "show Nil"
     assert (show (Cons 1 (Cons 2 Nil)) /= "") "show Cons"
 
     -- MyList operations

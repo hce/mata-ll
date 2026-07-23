@@ -11,7 +11,7 @@ data Result a = Ok a | Err String
 -- Guards + where + pattern matching
 -- ============================================================
 
-classifyTree :: Tree Integer -> String
+classifyTree :: Tree Int -> String
 classifyTree (Leaf n)
     | n < 0     = "negative leaf: " <> label
     | n == 0    = "zero leaf"
@@ -24,7 +24,7 @@ classifyTree (Node l r)
     where dl = treeDepth l
           dr = treeDepth r
 
-treeDepth :: Tree a -> Integer
+treeDepth :: Tree a -> Int
 treeDepth (Leaf _) = 0
 treeDepth (Node l r) = 1 + max (treeDepth l) (treeDepth r)
 
@@ -33,7 +33,7 @@ treeDepth (Node l r) = 1 + max (treeDepth l) (treeDepth r)
 -- ============================================================
 
 -- Explicit recursion style (pattern-matching generators also work now)
-getOks :: [Result Integer] -> [Integer]
+getOks :: [Result Int] -> [Int]
 getOks [] = []
 getOks (Ok x : rest) = x : getOks rest
 getOks (Err _ : rest) = getOks rest
@@ -49,11 +49,11 @@ applyAndShow f x = show (f x)
 -- Case in guards
 -- ============================================================
 
-safeDiv :: Integer -> Integer -> Result Integer
+safeDiv :: Int -> Int -> Result Int
 safeDiv _ 0 = Err "division by zero"
 safeDiv a b = Ok (a `div` b)
 
-describeSafe :: Integer -> Integer -> String
+describeSafe :: Int -> Int -> String
 describeSafe a b
     | isOk result = "ok: " <> show (getVal result)
     | otherwise   = "error"
@@ -129,7 +129,7 @@ main = do
     -- Filter by constructor
     let results = [Ok 1, Err "bad", Ok 2, Err "nope", Ok 3]
     assert (getOks results == [1, 2, 3]) "filter constructors"
-    assert (getOks [] == ([] :: [Integer])) "filter empty"
+    assert (getOks [] == ([] :: [Int])) "filter empty"
 
     -- Higher-order + show
     assert (applyAndShow (* 2) 5 == "10") "apply and show"

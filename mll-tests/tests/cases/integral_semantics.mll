@@ -39,7 +39,8 @@ main = do
     assert ((-17) == 5 * ((-17) `quot` 5) + ((-17) `rem` 5)) "quot/rem identity"
     assert ((-17) == 5 * ((-17) `div`  5) + ((-17) `mod` 5)) "div/mod identity"
 
-    -- toInteger on Integer is the identity.
-    assert (toInteger (42 :: Integer) == 42) "toInteger Integer"
+    -- fromInteger is the identity at Int (no bignum type to convert through).
+    assert (fromInteger 42 == (42 :: Int)) "fromInteger Int"
+
 
     putStrLn "integral_semantics ok"

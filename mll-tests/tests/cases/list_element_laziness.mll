@@ -11,14 +11,14 @@
 
 import Data.List (find, drop)
 
-ignore :: Integer -> Integer
+ignore :: Int -> Int
 ignore _ = 5
 
-errInt :: Integer
+errInt :: Int
 errInt = error "unreached"
 
 -- A cons head matched by a nested (tuple) pattern must be forced by the match.
-lookupKey :: Integer -> [(Integer, Integer)] -> Integer
+lookupKey :: Int -> [(Int, Int)] -> Int
 lookupKey _ [] = 0
 lookupKey k ((k2, v) : rest) = if k == k2 then v else lookupKey k rest
 

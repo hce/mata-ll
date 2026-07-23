@@ -1,26 +1,26 @@
 -- ghc_regr018: do-notation: let + bind + when + mapM_ mixed
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList []     = 0
 sumList (x:xs) = x + sumList xs
 
-double :: Integer -> Integer
+double :: Int -> Int
 double n = n * 2
 
-square :: Integer -> Integer
+square :: Int -> Int
 square n = n * n
 
-addOne :: Integer -> Integer
+addOne :: Int -> Int
 addOne n = n + 1
 
 main :: IO ()
 main = do
     -- Basic let in do
-    let a = 42 :: Integer
+    let a = 42 :: Int
     assert (a == 42) "basic let"
 
     -- Multiple chained lets
-    let b = 10 :: Integer
+    let b = 10 :: Int
     let c = b + 5
     assert (c == 15) "let chain"
 
@@ -36,36 +36,36 @@ main = do
     when False (return ())
 
     -- mapM_ over non-empty list
-    let xs = [1 :: Integer, 2, 3]
+    let xs = [1 :: Int, 2, 3]
     mapM_ (\x -> assert (x > 0) "positive") xs
 
     -- mapM_ over empty list (nothing should happen)
-    mapM_ (\_ -> return ()) ([] :: [Integer])
+    mapM_ (\_ -> return ()) ([] :: [Int])
 
     -- let with computed value
-    let n = 5 :: Integer
+    let n = 5 :: Int
     let sq = square n
     assert (sq == 25) "square"
 
     -- when with computed condition
-    let total = sumList [1 :: Integer, 2, 3, 4, 5]
+    let total = sumList [1 :: Int, 2, 3, 4, 5]
     assert (total == 15) "sumList"
     when (total > 10) (assert True "total gt 10")
     when (total < 0) (return ())
 
     -- seq: force evaluation order
-    let forced = seq (1 + 1 :: Integer) True
+    let forced = seq (1 + 1 :: Int) True
     assert forced "seq forces"
 
     -- mapM_ with assertion on each element
-    let ys = [10 :: Integer, 20, 30]
+    let ys = [10 :: Int, 20, 30]
     mapM_ (\y -> assert (y >= 10) "ys element") ys
 
     -- nested when
     when True (when True (assert True "nested when"))
 
     -- mapM_ with multiple operations
-    let zs = [1 :: Integer, 2, 3, 4, 5]
+    let zs = [1 :: Int, 2, 3, 4, 5]
     mapM_ (\z -> assert (z * z > 0) "z squared") zs
 
     putStrLn "ok"

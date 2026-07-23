@@ -2,7 +2,7 @@
 
 data Tree a = Leaf a | Branch (Tree a) (Tree a)
 
-height :: Tree a -> Integer
+height :: Tree a -> Int
 height (Leaf _) = 1
 height (Branch t1 t2) = 1 + max (height t1) (height t2)
 

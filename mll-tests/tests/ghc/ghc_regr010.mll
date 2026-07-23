@@ -4,30 +4,30 @@
 myIterate :: (a -> a) -> a -> [a]
 myIterate f x = x : myIterate f (f x)
 
-takeN :: Integer -> [a] -> [a]
+takeN :: Int -> [a] -> [a]
 takeN 0 _      = []
 takeN _ []     = []
 takeN n (x:xs) = x : takeN (n - 1) xs
 
-dropN :: Integer -> [a] -> [a]
+dropN :: Int -> [a] -> [a]
 dropN 0 xs     = xs
 dropN _ []     = []
 dropN n (_:xs) = dropN (n - 1) xs
 
 -- naturals: 0, 1, 2, ...
-naturals :: [Integer]
+naturals :: [Int]
 naturals = myIterate (\n -> n + 1) 0
 
 -- powers of 2: 1, 2, 4, 8, ...
-powersOf2 :: [Integer]
+powersOf2 :: [Int]
 powersOf2 = myIterate (\n -> n * 2) 1
 
 -- Fibonacci via zip with tail of self
-fibs :: [Integer]
+fibs :: [Int]
 fibs = 0 : 1 : zipWith (+) fibs (tail fibs)
 
 -- Collatz sequence (not infinite but uses lazy style)
-collatz :: Integer -> [Integer]
+collatz :: Int -> [Int]
 collatz n
     | n == 1         = [1]
     | n `mod` 2 == 0 = n : collatz (n `div` 2)

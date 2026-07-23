@@ -37,7 +37,7 @@ test_lambda = do
     assert (const 42 99 == 42) "const"
 
 -- 3.4 Case expressions
-caseTest :: Integer -> String
+caseTest :: Int -> String
 caseTest x = case x of
     1 -> "one"
     2 -> "two"
@@ -66,13 +66,13 @@ id' :: a -> a
 id' x = x
 
 -- 4.2 Function bindings with pattern matching
-fib :: Integer -> Integer
+fib :: Int -> Int
 fib 0 = 0
 fib 1 = 1
 fib n = fib (n - 1) + fib (n - 2)
 
 -- 4.3 Guards
-classify :: Integer -> String
+classify :: Int -> String
 classify n
     | n < 0     = "negative"
     | n == 0    = "zero"
@@ -100,7 +100,7 @@ data Point = Point { pointX :: Number, pointY :: Number }
 newtype Meters = Meters Number
 
 -- 5.4 Maybe and Either (prelude types)
-safeDivide :: Integer -> Integer -> Maybe Integer
+safeDivide :: Int -> Int -> Maybe Int
 safeDivide _ 0 = Nothing
 safeDivide a b = Just (a `div` b)
 

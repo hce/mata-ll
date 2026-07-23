@@ -1,4 +1,4 @@
--- The Prelude's `data ExitValue = Normal | Err Integer` must stay fully usable
+-- The Prelude's `data ExitValue = Normal | Err Int` must stay fully usable
 -- from user code that does NOT shadow its constructors: constructing,
 -- pattern-matching, and passing to `exit`'s argument type all resolve to the
 -- Prelude's own tags. (Companion to constructor_shadowing.mll, which checks

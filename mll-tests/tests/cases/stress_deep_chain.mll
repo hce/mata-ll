@@ -9,12 +9,12 @@
 -- sub-expressions into `let` bindings (flat sibling locals) so nesting
 -- stays bounded. Operands are top-level CAFs so folding cannot collapse them.
 
-a :: Integer
+a :: Int
 a = 1
-b :: Integer
+b :: Int
 b = 2
 
-chainSum :: Integer
+chainSum :: Int
 chainSum = a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b+a+b
 
 sx :: String
@@ -25,10 +25,10 @@ sy = "y"
 chainStr :: String
 chainStr = sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy <> sx <> sy
 
-x :: Integer
+x :: Int
 x = 7
 
-chainList :: [Integer]
+chainList :: [Int]
 chainList = x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : x : []
 
 main :: IO ()

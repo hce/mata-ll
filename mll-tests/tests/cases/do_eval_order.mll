@@ -63,15 +63,15 @@ main = do
     assert (m2 == 43) "let across IO"
 
     -- Test 9: bind with pure (was a known bug: thunk not unwrapped)
-    v1 <- pure (99 :: Integer)
+    v1 <- pure (99 :: Int)
     assert (v1 == 99) "bind pure integer"
 
     -- Test 10: bind with return
-    v2 <- return (7 :: Integer)
+    v2 <- return (7 :: Int)
     assert (v2 == 7) "bind return integer"
 
     -- Test 11: bind pure then use in let
-    v3 <- pure (50 :: Integer)
+    v3 <- pure (50 :: Int)
     let v4 = v3 + 10
     assert (v4 == 60) "bind pure then let"
 

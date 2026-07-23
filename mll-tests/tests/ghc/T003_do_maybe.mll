@@ -3,7 +3,7 @@
 main :: IO ()
 main = do
     -- return in Maybe context
-    let r = return 42 :: Maybe Integer
+    let r = return 42 :: Maybe Int
     assert (r == Just 42) "return Maybe"
 
     -- fmap on Maybe

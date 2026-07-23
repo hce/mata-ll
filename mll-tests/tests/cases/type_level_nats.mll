@@ -17,7 +17,7 @@ vtail (VCons _ xs) = xs
 vSecond :: Vec ('S ('S n)) a -> a
 vSecond (VCons _ (VCons y _)) = y
 
-vlength :: Vec n a -> Integer
+vlength :: Vec n a -> Int
 vlength VNil = 0
 vlength (VCons _ xs) = 1 + vlength xs
 

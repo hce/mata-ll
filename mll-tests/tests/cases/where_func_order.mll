@@ -4,7 +4,7 @@
 -- (Bug: generated Lua emitted value bindings before function definitions)
 
 -- Value bindings reference a later-defined where function
-mulLimb :: Integer -> Integer -> Integer
+mulLimb :: Int -> Int -> Int
 mulLimb a o = direct + 38 * wrap
   where
     direct = helper a o 0 o
@@ -14,7 +14,7 @@ mulLimb a o = direct + 38 * wrap
       | otherwise = a + helper a o (j + 1) jmax
 
 -- Multiple value bindings referencing the same where function
-splitCompute :: Integer -> Integer
+splitCompute :: Int -> Int
 splitCompute x = low + high
   where
     low  = scale x 1
@@ -22,7 +22,7 @@ splitCompute x = low + high
     scale a b = a * b + 1
 
 -- Where function with pattern matching and guards
-classify :: Integer -> String
+classify :: Int -> String
 classify n = label
   where
     label = descr (categorize n)
@@ -35,7 +35,7 @@ classify n = label
     descr _ = "positive"
 
 -- Recursive where function referenced by a value binding
-sumRange :: Integer -> Integer
+sumRange :: Int -> Int
 sumRange n = result
   where
     result = go 0 n

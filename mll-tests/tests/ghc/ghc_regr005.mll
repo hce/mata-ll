@@ -7,7 +7,7 @@ fromMaybe _ (Just x) = x
 main :: IO ()
 main = do
     -- Build a map from scratch
-    let m0 = hmEmpty :: HashMap String Integer
+    let m0 = hmEmpty :: HashMap String Int
     let m1 = hmInsert "a" 1 m0
     let m2 = hmInsert "b" 2 m1
     let m3 = hmInsert "c" 3 m2

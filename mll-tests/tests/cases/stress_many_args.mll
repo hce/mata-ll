@@ -1,15 +1,15 @@
 -- Stress test: functions with many arguments
 
-sum15 :: Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer
+sum15 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int
 sum15 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 a11 a12 a13 a14 a15 = a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15
 
-pack10 :: Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> Integer -> (Integer, Integer)
+pack10 :: Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> Int -> (Int, Int)
 pack10 a1 a2 a3 a4 a5 a6 a7 a8 a9 a10 = (a1 + a2 + a3 + a4 + a5, a6 + a7 + a8 + a9 + a10)
 
-add5 :: Integer -> Integer -> Integer -> Integer -> Integer -> Integer
+add5 :: Int -> Int -> Int -> Int -> Int -> Int
 add5 a b c d e = a + b + c + d + e
 
-compose5 :: Integer -> Integer
+compose5 :: Int -> Int
 compose5 n = add5 (add5 n n n n n) (add5 n n n n n) (add5 n n n n n) (add5 n n n n n) (add5 n n n n n)
 
 main :: IO ()

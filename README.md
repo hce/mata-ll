@@ -11,13 +11,13 @@ Calling from Lua into mata-ll:
 
 | `callfib.lua` | `fib.mll` |
 |---------------|-----------|
-| <pre>local fib = require "fib"<br><br>local fibs = fib.fibonacci(8)<br>for i, n in ipairs(fibs) do<br>    print(i, n)<br>end</pre> | <pre>fib :: [Integer]<br>fib = 1:1:zipWith (+) fib (tail fib)<br><br>export fibonacci :: Integer -> [Integer]<br>fibonacci = flip take fib</pre> |
+| <pre>local fib = require "fib"<br><br>local fibs = fib.fibonacci(8)<br>for i, n in ipairs(fibs) do<br>    print(i, n)<br>end</pre> | <pre>fib :: [Int]<br>fib = 1:1:zipWith (+) fib (tail fib)<br><br>export fibonacci :: Int -> [Int]<br>fibonacci = flip take fib</pre> |
 
 Calling Lua library functions from mata-ll:
 
 ```haskell
 rr :: LuaIO "math.random" Number
-rr2 :: Integer -> Integer -> LuaIO "math.random" Integer
+rr2 :: Int -> Int -> LuaIO "math.random" Int
 
 main :: IO ()
 main = do
@@ -31,7 +31,7 @@ Passing Lua callbacks to mata-ll:
 
 | `callwritefibs.lua` | `writefibs.mll` |
 |---------------------|-----------------|
-| <pre>local wf = require "writefibs"<br>local writer = function(fibString)<br>    print("From mata-ll:", fibString)<br>end<br>wf.writeFibs(writer, 12)</pre> | <pre>export writeFibs :: (String -> LuaIO s ())<br>                 -> Integer -> LuaIO s ()<br>writeFibs writer = loop 1 1<br>  where<br>    loop _ _ 0 = return ()<br>    loop cur next count = do<br>      writer (show cur)<br>      loop next (cur+next) (count-1)</pre> |
+| <pre>local wf = require "writefibs"<br>local writer = function(fibString)<br>    print("From mata-ll:", fibString)<br>end<br>wf.writeFibs(writer, 12)</pre> | <pre>export writeFibs :: (String -> LuaIO s ())<br>                 -> Int -> LuaIO s ()<br>writeFibs writer = loop 1 1<br>  where<br>    loop _ _ 0 = return ()<br>    loop cur next count = do<br>      writer (show cur)<br>      loop next (cur+next) (count-1)</pre> |
 
 Lua functions like `string.format` that accept a variable number of
 arguments cannot be given a single type signature in mata-ll. Instead,

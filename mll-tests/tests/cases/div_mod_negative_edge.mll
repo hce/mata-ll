@@ -15,23 +15,23 @@
 -- pinning 7 `quot` (-2) == -3 and 7 `rem` (-2) == 1, distinct from
 -- div/mod.
 
-dDiv :: Integer -> Integer -> Integer
+dDiv :: Int -> Int -> Int
 dDiv a b = a `div` b
 
-dMod :: Integer -> Integer -> Integer
+dMod :: Int -> Int -> Int
 dMod a b = a `mod` b
 
 -- Law: (a `div` b) * b + (a `mod` b) == a, evaluated at runtime.
 -- (This law holds under Euclidean semantics too, so it does not detect
 -- the fold/runtime split by itself -- it guards the runtime pair being
 -- mutually consistent.)
-divModIdentity :: Integer -> Integer -> Bool
+divModIdentity :: Int -> Int -> Bool
 divModIdentity a b = (a `div` b) * b + (a `mod` b) == a
 
 -- Floor-specific law: the remainder lies in [0, b) for b > 0 and in
 -- (b, 0] for b < 0 -- i.e. it takes the divisor's sign. The Euclidean
 -- remainder violates the b < 0 half.
-modRangeOk :: Integer -> Integer -> Bool
+modRangeOk :: Int -> Int -> Bool
 modRangeOk a b =
     let r = a `mod` b
     in if b > 0 then r >= 0 && r < b

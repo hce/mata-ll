@@ -5,11 +5,11 @@
 -- SOME guard path must stay lazy — bottom there is observable only when
 -- that path actually runs.
 
-count :: Integer -> Integer -> Integer
+count :: Int -> Int -> Int
 count n i | i >= 10 = n
           | otherwise = count (n + 1) (i + 1)
 
-pick :: Integer -> Integer -> Integer
+pick :: Int -> Int -> Int
 pick x y | x > 0 = x
          | otherwise = y
 

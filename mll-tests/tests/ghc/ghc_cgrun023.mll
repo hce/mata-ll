@@ -3,17 +3,17 @@
 
 data Person = Person
     { personName :: String
-    , personAge  :: Integer
+    , personAge  :: Int
     }
     deriving (Show)
 
 greet :: Person -> String
 greet p = "Hello, " <> personName p <> "! You are " <> show (personAge p)
 
-data Wrapper = Wrapper Integer
+data Wrapper = Wrapper Int
     deriving (Show, Eq)
 
-getVal :: Wrapper -> Integer
+getVal :: Wrapper -> Int
 getVal (Wrapper x) = x
 
 main :: IO ()

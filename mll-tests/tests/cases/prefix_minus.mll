@@ -6,10 +6,10 @@
 -- infixl 6 operator the negation takes only the tight operand:
 -- `- a + b` is `negate a + b`.
 
-a :: Integer
+a :: Int
 a = 7
 
-b :: Integer
+b :: Int
 b = 2
 
 main :: IO ()

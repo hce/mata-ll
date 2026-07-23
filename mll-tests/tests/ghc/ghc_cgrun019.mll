@@ -1,7 +1,7 @@
 -- GHC cgrun019: List comprehensions (advanced)
 -- Tests multiple generators, guards, and nested comprehensions
 
-pythag :: Integer -> [(Integer, Integer, Integer)]
+pythag :: Int -> [(Int, Int, Int)]
 pythag n = [(a, b, c) | c <- [1..n], b <- [1..c], a <- [1..b], a*a + b*b == c*c]
 
 main :: IO ()

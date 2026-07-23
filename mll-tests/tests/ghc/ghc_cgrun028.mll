@@ -1,10 +1,10 @@
 -- GHC cgrun028: Lambda expressions
 -- Tests lambda syntax in various positions
 
-add :: Integer -> Integer -> Integer
+add :: Int -> Int -> Int
 add = \x y -> x + y
 
-mul :: Integer -> Integer -> Integer
+mul :: Int -> Int -> Int
 mul = \x y -> x * y
 
 main :: IO ()

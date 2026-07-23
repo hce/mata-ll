@@ -9,7 +9,7 @@
 -- into the output) and the arithmetic path (runtime crash), so every value
 -- pulled out here is consumed BOTH ways.
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
 main :: IO ()

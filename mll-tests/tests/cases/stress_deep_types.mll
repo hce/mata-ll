@@ -1,49 +1,49 @@
 -- Stress test: deeply nested data types and recursive structures
 
-data Tree = Leaf Integer | Branch Tree Tree
+data Tree = Leaf Int | Branch Tree Tree
     deriving (Show, Eq)
 
-completeBTree :: Integer -> Integer -> Tree
+completeBTree :: Int -> Int -> Tree
 completeBTree val 0 = Leaf val
 completeBTree val d = Branch (completeBTree (val * 2) (d - 1)) (completeBTree (val * 2 + 1) (d - 1))
 
-countNodes :: Tree -> Integer
+countNodes :: Tree -> Int
 countNodes (Leaf _) = 1
 countNodes (Branch l r) = 1 + countNodes l + countNodes r
 
-sumLeaves :: Tree -> Integer
+sumLeaves :: Tree -> Int
 sumLeaves (Leaf n) = n
 sumLeaves (Branch l r) = sumLeaves l + sumLeaves r
 
-treeDepth :: Tree -> Integer
+treeDepth :: Tree -> Int
 treeDepth (Leaf _) = 0
 treeDepth (Branch l r) = 1 + maxInt (treeDepth l) (treeDepth r)
 
-maxInt :: Integer -> Integer -> Integer
+maxInt :: Int -> Int -> Int
 maxInt a b = if a > b then a else b
 
 mirror :: Tree -> Tree
 mirror (Leaf n) = Leaf n
 mirror (Branch l r) = Branch (mirror r) (mirror l)
 
-data NestM = NestM (Maybe (Maybe (Maybe Integer)))
+data NestM = NestM (Maybe (Maybe (Maybe Int)))
     deriving (Show, Eq)
 
-unwrapNest :: NestM -> Integer
+unwrapNest :: NestM -> Int
 unwrapNest (NestM (Just (Just (Just n)))) = n
 unwrapNest _ = -1
 
 data Result a = Ok a | Err String
     deriving (Show, Eq)
 
-data Nested = N1 (Result (Result (Result Integer)))
+data Nested = N1 (Result (Result (Result Int)))
     deriving (Show, Eq)
 
-deepUnwrap :: Nested -> Integer
+deepUnwrap :: Nested -> Int
 deepUnwrap (N1 (Ok (Ok (Ok n)))) = n
 deepUnwrap _ = -1
 
-treeList :: Integer -> [Tree]
+treeList :: Int -> [Tree]
 treeList 0 = []
 treeList n = completeBTree 1 3 : treeList (n - 1)
 

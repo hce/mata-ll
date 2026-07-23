@@ -1,4 +1,4 @@
-data Person = Person { personName :: String, personAge :: Integer }
+data Person = Person { personName :: String, personAge :: Int }
 
 main :: IO ()
 main = do

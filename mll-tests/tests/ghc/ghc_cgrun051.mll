@@ -1,14 +1,14 @@
--- GHC cgrun051: Binary encoding/decoding (Integer to/from list of bits)
+-- GHC cgrun051: Binary encoding/decoding (Int to/from list of bits)
 
-toBitsHelper :: Integer -> [Integer]
+toBitsHelper :: Int -> [Int]
 toBitsHelper 0 = []
 toBitsHelper n = (n `mod` 2) : toBitsHelper (n `div` 2)
 
-toBits :: Integer -> [Integer]
+toBits :: Int -> [Int]
 toBits 0 = [0]
 toBits n = reverse (toBitsHelper n)
 
-fromBits :: [Integer] -> Integer
+fromBits :: [Int] -> Int
 fromBits bits = foldl (\acc b -> acc * 2 + b) 0 bits
 
 main :: IO ()

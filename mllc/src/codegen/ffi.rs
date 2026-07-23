@@ -197,7 +197,7 @@ impl CodeGen {
                     // by x's type), `Nothing` becomes `nil` (an absent field).
                     // This matches __mll_to_lua and is the exact inverse of the
                     // result decoder's Maybe case (nil -> Nothing, value -> Just).
-                    // Always Some, so even a `Maybe Integer` field is unwrapped,
+                    // Always Some, so even a `Maybe Int` field is unwrapped,
                     // not handed over as the raw `{x}` wrapper table.
                     //
                     // The TOP-LEVEL optional positional-argument path is separate:
@@ -236,7 +236,7 @@ impl CodeGen {
                     // result decoder (and __mll_to_lua), we never convert keys,
                     // only marshal each VALUE by the value type. Always Some, the
                     // dual of the decoder, which always descends a HashMap: a
-                    // `HashMap String [Integer]` must reach the host as a dict of
+                    // `HashMap String [Int]` must reach the host as a dict of
                     // real arrays, `HashMap String (Maybe X)` / `HashMap String
                     // Record` / nested maps marshal recursively.
                     let vdesc = child(self, args[1], stack);
@@ -309,7 +309,7 @@ impl CodeGen {
     /// nothing can be checked for them, so they stay pass-through.
     pub(super) fn scalar_lua_type(ty: &Ty) -> Option<&'static str> {
         match con_name(ty) {
-            Some("Integer") | Some("Int") | Some("Number") | Some("Double") | Some("Float") => {
+            Some("Int") | Some("Number") | Some("Double") | Some("Float") => {
                 Some("number")
             }
             Some("String") | Some("Char") | Some("ByteString") => Some("string"),

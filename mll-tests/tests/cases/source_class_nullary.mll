@@ -11,7 +11,7 @@ class Default a where
     name :: a -> String
 
 data Colour = Red | Blue
-data Count  = Count Integer
+data Count  = Count Int
 
 instance Default Colour where
     def      = Red

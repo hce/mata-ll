@@ -5,12 +5,12 @@ data Tree a = Leaf | Node (Tree a) a (Tree a)
     deriving (Show, Eq)
 
 -- Count nodes
-size :: Tree a -> Integer
+size :: Tree a -> Int
 size Leaf = 0
 size (Node l _ r) = 1 + size l + size r
 
 -- Depth
-depth :: Tree a -> Integer
+depth :: Tree a -> Int
 depth Leaf = 0
 depth (Node l _ r) = 1 + max (depth l) (depth r)
 
@@ -20,7 +20,7 @@ mirror Leaf = Leaf
 mirror (Node l v r) = Node (mirror r) v (mirror l)
 
 -- Insert into BST
-bstInsert :: Integer -> Tree Integer -> Tree Integer
+bstInsert :: Int -> Tree Int -> Tree Int
 bstInsert x Leaf = Node Leaf x Leaf
 bstInsert x (Node l v r)
     | x < v    = Node (bstInsert x l) v r
@@ -28,7 +28,7 @@ bstInsert x (Node l v r)
     | otherwise = Node l v r
 
 -- In-order traversal
-inorder :: Tree Integer -> [Integer]
+inorder :: Tree Int -> [Int]
 inorder Leaf = []
 inorder (Node l v r) = appendList (inorder l) (v : inorder r)
 
@@ -37,7 +37,7 @@ appendList [] ys = ys
 appendList (x:xs) ys = x : appendList xs ys
 
 -- Build from list
-fromList :: [Integer] -> Tree Integer
+fromList :: [Int] -> Tree Int
 fromList [] = Leaf
 fromList (x:xs) = bstInsert x (fromList xs)
 

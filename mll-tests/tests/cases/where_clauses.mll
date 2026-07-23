@@ -1,8 +1,8 @@
-tripled :: Integer -> Integer
+tripled :: Int -> Int
 tripled x = result
     where result = x + x + x
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList xs = go 0 xs
     where
         go acc [] = acc

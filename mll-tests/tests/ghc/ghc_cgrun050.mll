@@ -1,13 +1,13 @@
 -- GHC cgrun050: Sieve of Eratosthenes (lazy list filtering)
 
-sieve :: [Integer] -> [Integer]
+sieve :: [Int] -> [Int]
 sieve [] = []
 sieve (p:xs) = p : sieve (filter (\x -> x `mod` p /= 0) xs)
 
-nats :: Integer -> [Integer]
+nats :: Int -> [Int]
 nats n = n : nats (n + 1)
 
-primes :: [Integer]
+primes :: [Int]
 primes = sieve (nats 2)
 
 main :: IO ()

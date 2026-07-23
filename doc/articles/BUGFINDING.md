@@ -22,13 +22,13 @@ This program printed `(1, 1, 144, 233)` instead of the expected
 `(144, 233, 144, 233)`:
 
 ```haskell
-fib' :: [Integer]
+fib' :: [Int]
 fib' = [1, 1] ++ zipWith (+) fib' (drop 1 fib')
 
-fibonacci' :: Integer -> Integer
+fibonacci' :: Int -> Int
 fibonacci' = head . reverse . flip take fib'
 
-fibonacci :: Integer -> Integer
+fibonacci :: Int -> Int
 fibonacci = head . reverse . flip take fib
   where
     fib = [1, 1] ++ zipWith (+) fib (drop 1 fib)

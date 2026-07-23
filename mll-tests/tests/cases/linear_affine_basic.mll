@@ -5,36 +5,36 @@
 -- unrestricted flow, aliasing, dropped paths) is covered by the
 -- linear_rejects_* tests in run_mll.rs.
 
-data Token = Token Integer
+data Token = Token Int
 data Box = Box Token
 
 -- A %1 consumer may destructure its argument; the scalar field is tracked
 -- exactly-once like every other part of the value (GHC parity — no scalar
 -- exemption), and the one strict `*` here is its one consumption.
-useOnce :: Token %1 -> Integer
+useOnce :: Token %1 -> Int
 useOnce (Token n) = n * 2
 
 -- Session style: consume the resource once and hand it back.
-step :: Token %1 -> (Token, Integer)
+step :: Token %1 -> (Token, Int)
 step t = (t, 5)
 
 -- One use per branch is one use (branches are alternatives).
-branchy :: Token %1 -> Integer -> Integer
+branchy :: Token %1 -> Int -> Int
 branchy t n = if n > 0 then useOnce t else useOnce t + 1
 
 -- Recursion: each path still consumes the argument exactly once.
-countdown :: Token %1 -> Integer -> Integer
+countdown :: Token %1 -> Int -> Int
 countdown t n = if n > 0 then countdown t (n - 1) else useOnce t
 
 -- A tainted case: the binder aliases the %1 value and is itself consumed
 -- exactly once.
-unwrap :: Box %1 -> Integer
+unwrap :: Box %1 -> Int
 unwrap b = case b of
   Box t -> useOnce t
 
 -- Exactly-once through every alternative of a case (only one branch runs,
 -- and each consumes the tainted binder once).
-caseBoth :: Box %1 -> Integer -> Integer
+caseBoth :: Box %1 -> Int -> Int
 caseBoth b n = case b of
   Box t -> case n > 0 of
     True -> useOnce t
@@ -42,7 +42,7 @@ caseBoth b n = case b of
 
 -- A %1 function applied through a higher-order %1 parameter, with the
 -- lambda's binder checked against the propagated multiplicity.
-withToken :: (Token %1 -> Integer) -> Integer
+withToken :: (Token %1 -> Int) -> Int
 withToken f = f (Token 21)
 
 -- A scalar where-binding built from a %1 value is tracked exactly-once
@@ -50,19 +50,19 @@ withToken f = f (Token 21)
 -- once. (Reading `go` twice — the old scalar-memoization relaxation — now
 -- rejects; see linear_rejects_scalar_where_binding_double_use in
 -- run_mll.rs.)
-onceVia :: Token %1 -> Integer
+onceVia :: Token %1 -> Int
 onceVia t = go + 1
   where go = useOnce t
 
 -- The explicit unrestricted spellings are accepted and mean a plain arrow.
-plainMany :: Token %Many -> Integer
+plainMany :: Token %Many -> Int
 plainMany (Token n) = n + n
 
-plainManyTick :: Token %'Many -> Integer
+plainManyTick :: Token %'Many -> Int
 plainManyTick t = plainMany t + 1
 
 -- A tuple-pattern %1 argument: each component used once.
-both :: (Token, Token) %1 -> Integer
+both :: (Token, Token) %1 -> Int
 both (a, b) = useOnce a + useOnce b
 
 -- IO: a %1 action consumer, used once inside a do-block, with the argument

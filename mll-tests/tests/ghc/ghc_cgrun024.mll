@@ -1,10 +1,10 @@
 -- GHC cgrun024: Case expressions with nested patterns
 -- Tests case-of with various pattern shapes
 
-data Token = TNum Integer | TOp String | TEnd
+data Token = TNum Int | TOp String | TEnd
     deriving (Show, Eq)
 
-classifyNum :: Integer -> String
+classifyNum :: Int -> String
 classifyNum n
     | n < 0     = "negative"
     | n == 0    = "zero"

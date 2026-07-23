@@ -4,10 +4,10 @@
 -- it exercises both arms without a custom host function.
 
 -- Pure pcall FFI.
-charOf :: Integer -> LuaCatch "string.char" (Either String String)
+charOf :: Int -> LuaCatch "string.char" (Either String String)
 
 -- Effectful pcall FFI (deferred as an IO action).
-charOfIO :: Integer -> LuaIOCatch "string.char" (Either String String)
+charOfIO :: Int -> LuaIOCatch "string.char" (Either String String)
 
 isRight :: Either String String -> Bool
 isRight e = case e of

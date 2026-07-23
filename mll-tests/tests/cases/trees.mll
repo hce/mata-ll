@@ -1,8 +1,8 @@
 -- Recursive data types and tree operations
 
-data Tree = Branch Tree Tree | Leaf Integer
+data Tree = Branch Tree Tree | Leaf Int
 
-depth :: Tree -> Integer
+depth :: Tree -> Int
 depth (Leaf _) = 0
 depth (Branch a b) = 1 + max (depth a) (depth b)
 

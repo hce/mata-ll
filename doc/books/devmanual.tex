@@ -431,7 +431,7 @@ data Vec n a where          -- n : Nat inferred from 'Z / 'S below
     VNil  :: Vec 'Z a
     VCons :: a -> Vec n a -> Vec ('S n) a
 
-bad :: Vec 'True Integer -> Integer   -- kind error: 'True :: Bool, not Nat
+bad :: Vec 'True Int -> Int   -- kind error: 'True :: Bool, not Nat
 \end{lstlisting}
 mata-ll has no kind-signature syntax (no \texttt{data Handle (s ::
 Safety)}), so a promoted index is pinned through a GADT constructor
@@ -469,7 +469,7 @@ the binder's use count.  That last rule is the laziness answer: a
 thunk's FORCE is memoized (once), but the value it yields is consumed
 once per use of the binder, so the binder's use count is the sound
 bound.  Scalars get no exemption: a scalar
-(\texttt{Integer}/\texttt{Number}/\texttt{Bool}/\texttt{String}) derived
+(\texttt{Int}/\texttt{Number}/\texttt{Bool}/\texttt{String}) derived
 from a linear value is tracked exactly-once like any other alias --- strict
 GHC parity, dropping the earlier \texttt{Movable}-style memoization
 relaxation (which had opened an accept-direction hole by untracking a
@@ -504,7 +504,7 @@ in front of it.  A zero-argument \texttt{LuaPure} reads a constant:
 \begin{lstlisting}[language=MLL]
 sin :: Number -> LuaPure "math.sin" Number
 pi :: LuaPure "math.pi" Number
-randomInt :: Integer -> Integer -> LuaIO "math.random" Integer
+randomInt :: Int -> Int -> LuaIO "math.random" Int
 \end{lstlisting}
 
 Method-call syntax uses a colon prefix.  Note the result is written
@@ -558,7 +558,7 @@ Key intentional differences:
   \item \texttt{String} is a native Lua string, not \texttt{[Char]}.
         No \texttt{Char} type exists.
   \item The numeric classes (\texttt{Num}/\texttt{Fractional}/\texttt{Real}/
-        \texttt{Integral}) are present, but at concrete \texttt{Integer}/
+        \texttt{Integral}) are present, but at concrete \texttt{Int}/
         \texttt{Number} the operator methods are erased to built-in Lua
         operators (no dictionary); \texttt{fromRational} takes a \texttt{Number}
         and \texttt{Real} has no \texttt{toRational} (mata-ll has no

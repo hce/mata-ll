@@ -4,12 +4,12 @@ class Describable a where
     describe :: a -> String
 
 class Sizeable a where
-    size :: a -> Integer
+    size :: a -> Int
 
 data Color = Red | Green | Blue
     deriving (Show, Eq)
 
-data Widget = Button String | Label String | Container Integer
+data Widget = Button String | Label String | Container Int
     deriving (Show, Eq)
 
 instance Describable Color where
@@ -34,7 +34,7 @@ instance Sizeable Widget where
 showDescribed :: Describable a => a -> String
 showDescribed x = show (describe x)
 
-doubleSized :: Sizeable a => a -> Integer
+doubleSized :: Sizeable a => a -> Int
 doubleSized x = size x * 2
 
 main :: IO ()

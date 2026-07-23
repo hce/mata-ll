@@ -13,13 +13,13 @@ infixr 5 <|
 -- Define a custom left-associative operator
 infixl 6 <+>
 
-(<+>) :: Integer -> Integer -> Integer
+(<+>) :: Int -> Int -> Int
 (<+>) a b = a + b + 1
 
 -- Define a non-associative comparison-like operator
 infix 4 ===
 
-(===) :: Integer -> Integer -> Bool
+(===) :: Int -> Int -> Bool
 (===) a b = a == b
 
 -- ============================================================
@@ -29,13 +29,13 @@ infix 4 ===
 -- Custom operator with lower precedence than + (prec 6)
 infixl 4 |+|
 
-(|+|) :: Integer -> Integer -> Integer
+(|+|) :: Int -> Int -> Int
 (|+|) a b = a + b
 
 -- Custom operator with higher precedence than + (prec 6)
 infixl 8 |*|
 
-(|*|) :: Integer -> Integer -> Integer
+(|*|) :: Int -> Int -> Int
 (|*|) a b = a * b
 
 main :: IO ()

@@ -7,7 +7,7 @@ main = do
     assert ([1..5] == [1, 2, 3, 4, 5]) "1..5"
 
     -- Empty range
-    assert ([5..1] == ([] :: [Integer])) "5..1 empty"
+    assert ([5..1] == ([] :: [Int])) "5..1 empty"
 
     -- Step range
     assert ([1, 3..10] == [1, 3, 5, 7, 9]) "1,3..10"

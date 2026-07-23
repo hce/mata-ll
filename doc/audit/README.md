@@ -16,7 +16,7 @@ Reproduced by hand with `./target/debug/mll` (the `-r` runner, or `-e` + a
 
 | Repro | Bug | Was (pre-fix) | Regression test |
 |-------|-----|---------------|-----------------|
-| `t1-instance-dispatch-ignores-args.mll` | Instance resolution keyed on the outer constructor, ignoring arguments (**soundness**) | ran the `[Integer]` body on a `[Bool]` | `argument_specialized_instance_head_rejected` |
+| `t1-instance-dispatch-ignores-args.mll` | Instance resolution keyed on the outer constructor, ignoring arguments (**soundness**) | ran the `[Int]` body on a `[Bool]` | `argument_specialized_instance_head_rejected` |
 | `t2-instance-overlapping-heads.mll` | Two element-specialized heads (**soundness**) | both calls picked the last-declared instance | `overlapping_instances_rejected` |
 | `t3-instance-duplicate.mll` | Duplicate instance silently accepted | printed `second`, no error | `duplicate_instance_is_hard_error` |
 | `t4-caf-self-ref-truncates.mll` | Self-referential value CAF lost the self-reference (**soundness**) | `[1]` instead of `[1,2,3,4]` | `self_referential_caf` |

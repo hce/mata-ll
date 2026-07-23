@@ -14,7 +14,7 @@
 -- mantissa before the divide even happens:
 --   9007199254740993 `div` 1  currently returns 9007199254740992
 --   4611686018427387905 `div` 3 is off by 85
--- Integer division must be EXACT over the full 64-bit range.
+-- Int division must be EXACT over the full 64-bit range.
 --
 -- Every expected value below was verified by hand:
 --   2^53+1  = 9007199254740993
@@ -36,13 +36,13 @@
 -- folded path (fold.rs works in i64, which is exact for positive
 -- divisors).
 
-dz :: Integer -> Integer -> Integer
+dz :: Int -> Int -> Int
 dz a b = a `div` b
 
-mz :: Integer -> Integer -> Integer
+mz :: Int -> Int -> Int
 mz a b = a `mod` b
 
-law :: Integer -> Integer -> Bool
+law :: Int -> Int -> Bool
 law a b = dz a b * b + mz a b == a
 
 main :: IO ()

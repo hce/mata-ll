@@ -20,24 +20,24 @@
 
 -- Runtime path: the folder only folds InfixApp with literal operands,
 -- so `a` and `b` here are opaque to it.
-dDiv :: Integer -> Integer -> Integer
+dDiv :: Int -> Int -> Int
 dDiv a b = a `div` b
 
-dMod :: Integer -> Integer -> Integer
+dMod :: Int -> Int -> Int
 dMod a b = a `mod` b
 
 -- Extra-opaque runtime path: operands read back out of a list, so even
 -- a future const-propagation through trivial wrappers won't fold this.
-opaque :: Integer -> Integer
+opaque :: Int -> Int
 opaque n = head [n]
 
 -- Half-literal path: one literal, one variable. Never folded (the
 -- folder needs both sides literal), but exercises the direct InfixApp
 -- codegen for div/mod rather than the call/inline path.
-negTwo :: Integer
+negTwo :: Int
 negTwo = -2
 
-posTwo :: Integer
+posTwo :: Int
 posTwo = 2
 
 test_div_lit :: IO ()

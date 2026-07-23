@@ -11,7 +11,7 @@
 class Named a where
     getName :: a -> String
 
-data Player = Player String Integer deriving (Show, Eq)
+data Player = Player String Int deriving (Show, Eq)
 data Team = Team String deriving (Show, Eq)
 
 instance Named Player where

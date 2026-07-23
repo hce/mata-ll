@@ -13,12 +13,12 @@
 -- result to WHNF (GHC: demanding `runST m` demands the returned value), so a
 -- suspended terminal `pure e` cannot escape as a raw thunk into show/print.
 
-g :: Integer -> Integer
+g :: Int -> Int
 g x = x + 1
 
 -- Closure-form ST action ending in `pure <application>`: the pure argument is
 -- not provably total, so it is suspended, and the run result is a thunk.
-stHelper :: STArray s -> Integer -> ST s Integer
+stHelper :: STArray s -> Int -> ST s Int
 stHelper arr n
   | n > 100   = return 0
   | otherwise = do
@@ -27,14 +27,14 @@ stHelper arr n
         pure (g x * 2)
 
 -- The bound `v` is used in a strict position (arithmetic): it MUST be forced.
-useST :: Integer -> Integer
+useST :: Int -> Int
 useST n = runST (do
     arr <- newSTArrayFromList [n]
     v <- stHelper arr n
     return (v + 1))
 
 -- Same shape through IO: bound result of an applied user action, used strictly.
-mkIO :: Integer -> IO Integer
+mkIO :: Int -> IO Int
 mkIO n = do
     _ <- return ()
     pure (g n * 2)

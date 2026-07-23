@@ -41,7 +41,7 @@ impl CodeGen {
                 if op == "div" || op == "mod" || op == "quot" || op == "rem" {
                     // Runtime helpers, not inline float math / bare `%`:
                     // math.floor(a/0) yields inf (a float escaping into
-                    // Integer) instead of raising, and float division is
+                    // Int) instead of raising, and float division is
                     // inexact past 2^53. __mll_div/__mll_mod raise a clear
                     // error on a zero divisor and use native integer floor
                     // division (Lua 5.3+ `//`) when the host has it. quot/rem

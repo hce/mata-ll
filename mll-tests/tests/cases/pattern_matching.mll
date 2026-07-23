@@ -3,16 +3,16 @@
 data Tree a = Leaf a | Branch (Tree a) (Tree a)
     deriving (Show, Eq)
 
-data Expr = Num Integer | Add Expr Expr | Mul Expr Expr
+data Expr = Num Int | Add Expr Expr | Mul Expr Expr
 
 -- Basic constructor patterns
-eval :: Expr -> Integer
+eval :: Expr -> Int
 eval (Num n) = n
 eval (Add a b) = eval a + eval b
 eval (Mul a b) = eval a * eval b
 
 -- Nested patterns
-depth :: Tree a -> Integer
+depth :: Tree a -> Int
 depth (Leaf _) = 0
 depth (Branch l r) = 1 + max (depth l) (depth r)
 
@@ -21,13 +21,13 @@ first :: (a, b, c) -> a
 first (x, _, _) = x
 
 -- Literal patterns
-describe :: Integer -> String
+describe :: Int -> String
 describe 0 = "zero"
 describe 1 = "one"
 describe _ = "other"
 
 -- Guard patterns
-clamp :: Integer -> Integer -> Integer -> Integer
+clamp :: Int -> Int -> Int -> Int
 clamp lo hi x
     | x < lo = lo
     | x > hi = hi
@@ -43,7 +43,7 @@ bmi weight
           normal = 25.0
 
 -- Nested constructor + literal
-isLeafOne :: Tree Integer -> Bool
+isLeafOne :: Tree Int -> Bool
 isLeafOne (Leaf 1) = True
 isLeafOne _ = False
 

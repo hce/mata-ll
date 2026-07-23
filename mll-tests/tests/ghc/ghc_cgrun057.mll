@@ -1,16 +1,16 @@
--- GHC cgrun057: Caesar cipher on Integer lists
+-- GHC cgrun057: Caesar cipher on Int lists
 -- Treat values as letter indices [0..25], shift by n
 
-shiftLetter :: Integer -> Integer -> Integer
+shiftLetter :: Int -> Int -> Int
 shiftLetter n c = (c + n) `mod` 26
 
-unshiftLetter :: Integer -> Integer -> Integer
+unshiftLetter :: Int -> Int -> Int
 unshiftLetter n c = (c - n + 26) `mod` 26
 
-encrypt :: Integer -> [Integer] -> [Integer]
+encrypt :: Int -> [Int] -> [Int]
 encrypt n cs = map (shiftLetter n) cs
 
-decrypt :: Integer -> [Integer] -> [Integer]
+decrypt :: Int -> [Int] -> [Int]
 decrypt n cs = map (unshiftLetter n) cs
 
 main :: IO ()

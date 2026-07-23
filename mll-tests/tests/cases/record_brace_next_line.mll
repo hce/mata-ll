@@ -3,9 +3,9 @@
 -- enclosing block column is a continuation). The same-line forms are covered
 -- by records.mll / record_update.mll; this case pins the cross-line forms.
 
-data Rec = MkRec { ra :: Integer, rb :: Integer }
+data Rec = MkRec { ra :: Int, rb :: Int }
 
-mk :: Integer -> Rec
+mk :: Int -> Rec
 mk n = MkRec
          { ra = n
          , rb = n * 10 }

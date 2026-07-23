@@ -172,7 +172,7 @@ impl Checker {
     }
 
     /// Match a use type against a registered instance's target type,
-    /// positionally: `Tree Integer` against `Tree a` yields {a: Integer}.
+    /// positionally: `Tree Int` against `Tree a` yields {a: Int}.
     /// Only plain-variable instance arguments bind anything. Returns None when
     /// the two argument spines have different lengths — the caller then defers
     /// rather than guessing.
@@ -314,7 +314,7 @@ impl Checker {
             // a and b as shared free variables, so two uses of the method in
             // one definition had to agree on them: `myfmap (+1) (Just 1)`
             // then `myfmap not (Just True)` failed with a false
-            // "Cannot unify Integer with Bool". Each occurrence must get a
+            // "Cannot unify Int with Bool". Each occurrence must get a
             // fresh instantiation of the full scheme, as GHC does.
             let mut qvars: Vec<TyVar> = ty.free_vars();
             if !qvars.iter().any(|v| v.name == tv.name) {
@@ -343,11 +343,11 @@ impl Checker {
             //
             // Scoped precisely to avoid over-constraining: emit ONLY when the
             // method's signature actually mentions the class variable. When it
-            // does not (a degenerate `foo :: Integer`), the wanted's variable
+            // does not (a degenerate `foo :: Int`), the wanted's variable
             // would be pinned by nothing and *every* use would be ambiguous —
             // so we leave such a method exactly as it compiles today rather
             // than newly rejecting it. When the variable appears in an
-            // ARGUMENT (`op :: t a -> Integer`), the constraint is still
+            // ARGUMENT (`op :: t a -> Int`), the constraint is still
             // emitted but the discharge machinery leaves it satisfied: the
             // argument's type is a `binder_type`, so the variable is
             // "determined" and never reported as ambiguous — the same reason
@@ -378,7 +378,7 @@ impl Checker {
     }
 
     /// Extract the head type constructor name from a Type.
-    /// e.g. `Maybe a` -> "Maybe", `Integer` -> "Integer", `[a]` -> "List"
+    /// e.g. `Maybe a` -> "Maybe", `Int` -> "Int", `[a]` -> "List"
     pub(super) fn type_head_name(ty: &Type) -> Option<String> {
         match ty {
             Type::Con(name) => Some(name.clone()),
@@ -498,8 +498,8 @@ impl Checker {
     }
 
     /// Is `ty` a valid instance HEAD — a type constructor applied only to
-    /// DISTINCT type variables (`Integer`, `[a]`, `Maybe a`, `(a, b)`, `Pair a
-    /// b`)? Not `[Integer]`, `Maybe Bool`, `Pair a a`. Dispatch keys on the
+    /// DISTINCT type variables (`Int`, `[a]`, `Maybe a`, `(a, b)`, `Pair a
+    /// b`)? Not `[Int]`, `Maybe Bool`, `Pair a a`. Dispatch keys on the
     /// head constructor alone, so anything more specific is ambiguous with the
     /// general head and is rejected.
     fn instance_head_general(ty: &Ty) -> bool {
@@ -513,7 +513,7 @@ impl Checker {
                 while let Ty::App(f, x) = cur { a.push(x.as_ref()); cur = f.as_ref(); }
                 a
             }
-            // Con (nullary like Integer), Unit, LuaIO, etc.: no ordinary type
+            // Con (nullary like Int), Unit, LuaIO, etc.: no ordinary type
             // arguments to constrain here — accept.
             _ => return true,
         };
@@ -551,10 +551,10 @@ impl Checker {
 
         // Instance dispatch keys on the head constructor alone (InstHead), so
         // the head's type arguments must be DISTINCT type variables — an
-        // argument-specialized head like `Pretty [Integer]` or `Pretty (Pair
-        // Integer Integer)` shares its head (`List`, `Pair`) with `Pretty [a]`
+        // argument-specialized head like `Pretty [Int]` or `Pretty (Pair
+        // Int Int)` shares its head (`List`, `Pair`) with `Pretty [a]`
         // / `Pretty (Pair a b)` and every other argument choice, and would
-        // silently mis-dispatch (`pretty [True]` running the `[Integer]` body).
+        // silently mis-dispatch (`pretty [True]` running the `[Int]` body).
         // Reject it — GHC needs FlexibleInstances/OverlappingInstances for such
         // heads, which mata-ll does not have.
         if !Self::instance_head_general(&target_ty) {
@@ -592,7 +592,7 @@ impl Checker {
                      constructor is already declared\nnote: mata-ll allows one \
                      instance per (class, head constructor); two declarations that \
                      share a head — a repeat, or overlapping heads like '[a]' and \
-                     '[Integer]' — would mis-dispatch. Remove or merge one.",
+                     '[Int]' — would mis-dispatch. Remove or merge one.",
                     class_name, ty_str
                 )),
                 format!("instance {} {}", class_name, ty_str),
@@ -714,7 +714,7 @@ impl Checker {
                 }
             };
 
-            // Generate mangled name: show_Integer, show_Bool, etc.
+            // Generate mangled name: show_Int, show_Bool, etc.
             let mangled_name = format!("{}_{}", method_def.name, ty_str);
             instance_info.method_fns.insert(method_def.name.clone(), mangled_name.clone());
 

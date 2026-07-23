@@ -17,14 +17,14 @@
 -- folded path as well. Negative-divisor LITERAL forms live in the
 -- separate probe file div_mod_negative_literal_folding.mll.
 
-dz :: Integer -> Integer -> Integer
+dz :: Int -> Int -> Int
 dz a b = a `div` b
 
-mz :: Integer -> Integer -> Integer
+mz :: Int -> Int -> Int
 mz a b = a `mod` b
 
 -- The defining law: (a `div` b) * b + (a `mod` b) == a
-law :: Integer -> Integer -> Bool
+law :: Int -> Int -> Bool
 law a b = dz a b * b + mz a b == a
 
 main :: IO ()

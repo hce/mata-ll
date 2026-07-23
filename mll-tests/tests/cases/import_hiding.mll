@@ -3,7 +3,7 @@
 import ExportHelper hiding (publicFn)
 
 -- Define our own publicFn, which would conflict without hiding
-publicFn :: Integer -> Integer
+publicFn :: Int -> Int
 publicFn x = x * 100
 
 main :: IO ()

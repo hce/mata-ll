@@ -1,39 +1,39 @@
 -- GHC cgrun052: Matrix as list of lists (transpose, element-wise operations)
 
-transpose_ :: [[Integer]] -> [[Integer]]
+transpose_ :: [[Int]] -> [[Int]]
 transpose_ [] = []
 transpose_ (r:_) = if length r == 0 then [] else transposeGo (r : tail (r : []))
   where
     transposeGo _ = []
 
 -- Simple transpose via index
-transposeM :: [[Integer]] -> [[Integer]]
+transposeM :: [[Int]] -> [[Int]]
 transposeM rows = case rows of
     [] -> []
     (r:_) -> [getCol j rows | j <- [0..(length r - 1)]]
 
-getCol :: Integer -> [[Integer]] -> [Integer]
+getCol :: Int -> [[Int]] -> [Int]
 getCol _ [] = []
 getCol j (row:rows) = nth j row : getCol j rows
 
-nth :: Integer -> [a] -> a
+nth :: Int -> [a] -> a
 nth 0 (x:_) = x
 nth n (_:xs) = nth (n - 1) xs
 nth _ [] = error "index out of bounds"
 
-matAdd :: [[Integer]] -> [[Integer]] -> [[Integer]]
+matAdd :: [[Int]] -> [[Int]] -> [[Int]]
 matAdd a b = zipWith (zipWith (+)) a b
 
-matScale :: Integer -> [[Integer]] -> [[Integer]]
+matScale :: Int -> [[Int]] -> [[Int]]
 matScale k m = map (map (* k)) m
 
-dot :: [Integer] -> [Integer] -> Integer
+dot :: [Int] -> [Int] -> Int
 dot xs ys = foldl (+) 0 (zipWith (*) xs ys)
 
-matMul :: [[Integer]] -> [[Integer]] -> [[Integer]]
+matMul :: [[Int]] -> [[Int]] -> [[Int]]
 matMul a b = let bt = transposeM b in map (\row -> map (dot row) bt) a
 
-identity :: Integer -> [[Integer]]
+identity :: Int -> [[Int]]
 identity n = [[if i == j then 1 else 0 | j <- [0..(n-1)]] | i <- [0..(n-1)]]
 
 main :: IO ()

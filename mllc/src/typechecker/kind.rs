@@ -1,10 +1,10 @@
 //! Kind inference and kind checking.
 //!
 //! Kinds classify types the way types classify values: a complete type
-//! (`Integer`, `Maybe String`) has kind `Type`, a type constructor that still
+//! (`Int`, `Maybe String`) has kind `Type`, a type constructor that still
 //! needs arguments has an arrow kind (`Maybe : Type -> Type`,
 //! `Either : Type -> Type -> Type`), and a constructor can take a
-//! higher-kinded argument (`data Wrap f = Wrap (f Integer)` gives
+//! higher-kinded argument (`data Wrap f = Wrap (f Int)` gives
 //! `Wrap : (Type -> Type) -> Type`). mata-ll has no surface syntax for kinds
 //! at all — every kind is inferred from use, and unconstrained kinds default
 //! to `Type`, exactly GHC's Haskell-2010 kind defaulting.
@@ -33,7 +33,7 @@
 //!
 //! An instance head must have the kind the class variable was inferred at:
 //! `instance Foldable []` is well-formed because `[] : Type -> Type` matches
-//! Foldable's `t : Type -> Type`, while `instance Foldable Integer` and
+//! Foldable's `t : Type -> Type`, while `instance Foldable Int` and
 //! `instance Show Maybe` are kind errors. Class kinds live in
 //! `Checker::class_kinds` (builtin classes are seeded in `init_kinds`; user
 //! classes are inferred by `infer_class_kinds`), parallel to the constructor

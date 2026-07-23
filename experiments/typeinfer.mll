@@ -9,26 +9,26 @@
 -- type with variables normalized to a, b, c... and asserts the string, so it
 -- is robust to which fresh ids the engine happens to allocate.
 
--- Bitless FFI: turn an Integer 0..25 into a letter via string.char.
-chrFFI :: Integer -> LuaPure "string.char" String
+-- Bitless FFI: turn an Int 0..25 into a letter via string.char.
+chrFFI :: Int -> LuaPure "string.char" String
 
 -- Types and terms.
-data Ty = TVar Integer | TInt | TBool | TFun Ty Ty
+data Ty = TVar Int | TInt | TBool | TFun Ty Ty
   deriving Eq
 
 data Term = Var String
-          | Lit Integer
+          | Lit Int
           | BLit Bool
           | Lam String Term
           | App Term Term
           | Let String Term Term
 
-type Subst = [(Integer, Ty)]
+type Subst = [(Int, Ty)]
 type Env   = [(String, Ty)]
 
 -- ── lookups ───────────────────────────────────────────────────────────────
 
-lookupSub :: Integer -> Subst -> Maybe Ty
+lookupSub :: Int -> Subst -> Maybe Ty
 lookupSub _ [] = Nothing
 lookupSub n ((k, v):rest) = if n == k then Just v else lookupSub n rest
 
@@ -55,12 +55,12 @@ compose s2 s1 = map (\kv -> (fst kv, applyTy s2 (snd kv))) s1 ++ s2
 
 -- ── unification ───────────────────────────────────────────────────────────
 
-occurs :: Integer -> Ty -> Bool
+occurs :: Int -> Ty -> Bool
 occurs n (TVar m) = n == m
 occurs n (TFun a b) = occurs n a || occurs n b
 occurs _ _ = False
 
-bindVar :: Integer -> Ty -> Either String Subst
+bindVar :: Int -> Ty -> Either String Subst
 bindVar n (TVar m) = if n == m then Right [] else Right [(n, TVar m)]
 bindVar n t = if occurs n t then Left "occurs check" else Right [(n, t)]
 
@@ -80,7 +80,7 @@ unify _ _ = Left "type mismatch"
 -- ── inference (Algorithm W, monomorphic let) ──────────────────────────────
 
 -- State-passed fresh-variable counter; result threads (nextId, subst, type).
-infer :: Integer -> Env -> Term -> Either String (Integer, Subst, Ty)
+infer :: Int -> Env -> Term -> Either String (Int, Subst, Ty)
 infer n env (Var x) =
   case lookupEnv x env of
     Just t  -> Right (n, [], t)
@@ -113,24 +113,24 @@ infer n env (Let x e body) =
 
 -- ── rendering (normalize tyvars to a, b, c...) ────────────────────────────
 
-collectVars :: Ty -> [Integer]
+collectVars :: Ty -> [Int]
 collectVars (TVar n) = [n]
 collectVars TInt = []
 collectVars TBool = []
 collectVars (TFun a b) = collectVars a ++ collectVars b
 
-nubInts :: [Integer] -> [Integer]
+nubInts :: [Int] -> [Int]
 nubInts [] = []
 nubInts (x:xs) = x : nubInts (filter (\y -> not (y == x)) xs)
 
-indexOf :: Integer -> [Integer] -> Integer
+indexOf :: Int -> [Int] -> Int
 indexOf _ [] = 0
 indexOf x (y:ys) = if x == y then 0 else 1 + indexOf x ys
 
-letterFor :: Integer -> String
+letterFor :: Int -> String
 letterFor i = chrFFI (97 + i)
 
-renderWith :: [Integer] -> Ty -> String
+renderWith :: [Int] -> Ty -> String
 renderWith vars (TVar n) = letterFor (indexOf n vars)
 renderWith _ TInt = "Int"
 renderWith _ TBool = "Bool"

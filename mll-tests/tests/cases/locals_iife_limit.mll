@@ -3,7 +3,7 @@
 -- that would add locals past the limit instead of emitting invalid
 -- Lua. The exact value pins that declining changed no behavior.
 
-big :: Integer -> Integer
+big :: Int -> Int
 big x0 =
     let x1 = x0 + 1
         x2 = x1 + 1

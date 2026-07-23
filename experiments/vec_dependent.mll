@@ -57,8 +57,8 @@ vtoList (VCons x xs) = x : vtoList xs
 
 main :: IO ()
 main = do
-    let v3 = VCons 10 (VCons 20 (VCons 30 VNil))  -- Vec ('Succ ('Succ ('Succ 'Zero))) Integer
-    let w2 = VCons 40 (VCons 50 VNil)             -- Vec ('Succ ('Succ 'Zero)) Integer
+    let v3 = VCons 10 (VCons 20 (VCons 30 VNil))  -- Vec ('Succ ('Succ ('Succ 'Zero))) Int
+    let w2 = VCons 40 (VCons 50 VNil)             -- Vec ('Succ ('Succ 'Zero)) Int
     -- vhead is legal here: v3's length is 'Succ (…), provably non-empty.
     putStrLn ("vhead v3:        " <> show (vhead v3))
     putStrLn ("vmap (*2) v3:    " <> show (vtoList (vmap (\x -> x * 2) v3)))

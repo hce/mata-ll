@@ -315,7 +315,7 @@ impl CodeGen {
                 if op == "div" || op == "mod" || op == "quot" || op == "rem" {
                     // Runtime helpers, not inline float math / bare `%`:
                     // math.floor(a/0) yields inf (a float escaping into
-                    // Integer) instead of raising, and float division is
+                    // Int) instead of raising, and float division is
                     // inexact past 2^53. __mll_div/__mll_mod raise a clear
                     // error on a zero divisor and use native integer floor
                     // division (Lua 5.3+ `//`) when the host has it. quot/rem
@@ -1300,7 +1300,7 @@ impl CodeGen {
             // __mll_try. The SUCCESS payload crosses the FFI boundary
             // like any other result, so it carries the same
             // type-directed decode descriptor (a raw Lua array where
-            // [Integer] was declared must become a cons list, not be
+            // [Int] was declared must become a cons list, not be
             // walked as a cons cell later).
             let desc = self.ffi_catch_decode_desc(&expr.ty);
             let desc_str = desc.as_deref().unwrap_or("false").to_string();

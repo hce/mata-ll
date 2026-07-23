@@ -1,6 +1,6 @@
 module Main where
-data Stream = S Integer Stream
-sHead :: Stream -> Integer
+data Stream = S Int Stream
+sHead :: Stream -> Int
 sHead (S x _) = x
 sTail :: Stream -> Stream
 sTail (S _ r) = r

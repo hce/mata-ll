@@ -1,14 +1,14 @@
 -- GHC cgrun027: GCD and integer arithmetic
 -- Tests recursive arithmetic, mod, div
 
-gcd_ :: Integer -> Integer -> Integer
+gcd_ :: Int -> Int -> Int
 gcd_ a 0 = a
 gcd_ a b = gcd_ b (a `mod` b)
 
-lcm_ :: Integer -> Integer -> Integer
+lcm_ :: Int -> Int -> Int
 lcm_ a b = (a * b) `div` gcd_ a b
 
-isPrime :: Integer -> Bool
+isPrime :: Int -> Bool
 isPrime n
     | n < 2     = False
     | n == 2    = True
@@ -19,7 +19,7 @@ isPrime n
         | n `mod` d == 0 = False
         | otherwise      = go (d + 1)
 
-pow_ :: Integer -> Integer -> Integer
+pow_ :: Int -> Int -> Int
 pow_ _ 0 = 1
 pow_ b 1 = b
 pow_ b n = if n `mod` 2 == 0

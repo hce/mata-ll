@@ -5,7 +5,7 @@ main :: IO ()
 main = do
     -- concatMap basics
     assert (concatMap (\x -> [x, x * 10]) [1, 2, 3] == [1, 10, 2, 20, 3, 30]) "concatMap"
-    assert (concatMap (\_ -> ([] :: [Integer])) [1, 2, 3] == []) "concatMap empty"
+    assert (concatMap (\_ -> ([] :: [Int])) [1, 2, 3] == []) "concatMap empty"
     assert (concatMap (\x -> [x]) [1, 2, 3] == [1, 2, 3]) "concatMap singleton"
 
     -- List bind (>>=)
@@ -17,6 +17,6 @@ main = do
     assert (pairs == [11, 21, 12, 22, 13, 23]) "list nested >>="
 
     -- return for list
-    assert ((return 42 :: [Integer]) == [42]) "list return"
+    assert ((return 42 :: [Int]) == [42]) "list return"
 
     putStrLn "ok"

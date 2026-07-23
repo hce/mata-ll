@@ -9,28 +9,28 @@ import Data.List (dropWhile)
 data Dir = L | R | S
 
 -- Transition rule: (from_state, read_symbol) → (to_state, write_symbol, direction)
-data Rule = Rule Integer Integer Integer Integer Dir
+data Rule = Rule Int Int Int Int Dir
 
 -- Result of a TM run
-data Result = Result Tape Integer Integer
+data Result = Result Tape Int Int
 
 resultTape :: Result -> Tape
 resultTape (Result t _ _) = t
 
-resultSteps :: Result -> Integer
+resultSteps :: Result -> Int
 resultSteps (Result _ _ s) = s
 
 -- Tape as zipper, blank symbol = 0
-data Tape = Tape [Integer] Integer [Integer]
+data Tape = Tape [Int] Int [Int]
 
-mkTape :: [Integer] -> Tape
+mkTape :: [Int] -> Tape
 mkTape []     = Tape [] 0 []
 mkTape (x:xs) = Tape [] x xs
 
-rdHead :: Tape -> Integer
+rdHead :: Tape -> Int
 rdHead (Tape _ c _) = c
 
-wrHead :: Integer -> Tape -> Tape
+wrHead :: Int -> Tape -> Tape
 wrHead s (Tape ls _ rs) = Tape ls s rs
 
 move :: Dir -> Tape -> Tape
@@ -41,7 +41,7 @@ move L (Tape (l:ls) c rs) = Tape ls l (c:rs)
 move S t                  = t
 
 -- Look up the first matching rule for (state, symbol)
-findRule :: [Rule] -> Integer -> Integer -> Maybe (Integer, Integer, Dir)
+findRule :: [Rule] -> Int -> Int -> Maybe (Int, Int, Dir)
 findRule [] _ _ = Nothing
 findRule (Rule fs rs ts ws d : rest) st sym =
     if fs == st && rs == sym
@@ -49,20 +49,20 @@ findRule (Rule fs rs ts ws d : rest) st sym =
     else findRule rest st sym
 
 -- Extract tape contents trimming leading/trailing blanks
-tapeToList :: Tape -> [Integer]
+tapeToList :: Tape -> [Int]
 tapeToList (Tape ls c rs) = trimBlanks (reverse ls ++ [c] ++ rs)
 
-trimBlanks :: [Integer] -> [Integer]
+trimBlanks :: [Int] -> [Int]
 trimBlanks xs = reverse (dropWhile (\x -> x == 0) (reverse (dropWhile (\x -> x == 0) xs)))
 
 -- Count ones on the tape
-countOnes :: [Integer] -> Integer
+countOnes :: [Int] -> Int
 countOnes []     = 0
 countOnes (1:xs) = 1 + countOnes xs
 countOnes (_:xs) = countOnes xs
 
 -- Run the machine until it halts or gets stuck
-runTM :: [Rule] -> [Integer] -> Integer -> Tape -> Integer -> Result
+runTM :: [Rule] -> [Int] -> Int -> Tape -> Int -> Result
 runTM rules halts state tape steps =
     if elem state halts
     then Result tape state steps

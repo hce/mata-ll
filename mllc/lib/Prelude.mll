@@ -23,7 +23,7 @@ getLine = do
         Right s -> pure s
 
 -- Process control
-data ExitValue = Normal | Err Integer
+data ExitValue = Normal | Err Int
 
 -- Testing
 assert :: Bool -> String -> IO ()
@@ -31,7 +31,7 @@ assert True _ = putStrLn "."
 assert False msg = error msg
 
 -- Common data types
-data Any = AnyString String | AnyInteger Integer | AnyNumber Number | AnyBool Bool | AnyNull
+data Any = AnyString String | AnyInt Int | AnyNumber Number | AnyBool Bool | AnyNull
 
 data Either a b = Left a | Right b
     deriving (Show)
@@ -74,7 +74,7 @@ instance Foldable (Either c) where
 
 -- Length-generic Foldable functions, defined over foldr/foldl.
 -- (toList lives in Data.Foldable, matching GHC's Prelude exports.)
-length :: Foldable t => t a -> Integer
+length :: Foldable t => t a -> Int
 length t = foldl (\n _ -> n + 1) 0 t
 
 reverse :: [a] -> [a]
@@ -123,7 +123,7 @@ concat []         = []
 concat (xs : xss) = xs ++ concat xss
 
 -- n copies of x (empty when n <= 0).
-replicate :: Integer -> a -> [a]
+replicate :: Int -> a -> [a]
 replicate n x = if n <= 0 then [] else x : replicate (n - 1) x
 
 -- The infinite list [x, f x, f (f x), ...]. Lazy in the spine.
@@ -344,43 +344,43 @@ bind_List xs f = concatMap f xs
 then_List :: [a] -> [b] -> [b]
 then_List xs ys = concatMap (\_ -> ys) xs
 
--- Enum instance for Integer
-succ_Integer :: Integer -> Integer
-succ_Integer n = n + 1
+-- Enum instance for Int
+succ_Int :: Int -> Int
+succ_Int n = n + 1
 
-pred_Integer :: Integer -> Integer
-pred_Integer n = n - 1
+pred_Int :: Int -> Int
+pred_Int n = n - 1
 
-toEnum_Integer :: Integer -> Integer
-toEnum_Integer n = n
+toEnum_Int :: Int -> Int
+toEnum_Int n = n
 
-fromEnum_Integer :: Integer -> Integer
-fromEnum_Integer n = n
+fromEnum_Int :: Int -> Int
+fromEnum_Int n = n
 
-enumFrom_Integer :: Integer -> [Integer]
-enumFrom_Integer n = n : enumFrom_Integer (n + 1)
+enumFrom_Int :: Int -> [Int]
+enumFrom_Int n = n : enumFrom_Int (n + 1)
 
-enumFromThen_Integer :: Integer -> Integer -> [Integer]
-enumFromThen_Integer n m = enumFromThenHelper_Integer n (m - n)
+enumFromThen_Int :: Int -> Int -> [Int]
+enumFromThen_Int n m = enumFromThenHelper_Int n (m - n)
 
-enumFromThenHelper_Integer :: Integer -> Integer -> [Integer]
-enumFromThenHelper_Integer x step = x : enumFromThenHelper_Integer (x + step) step
+enumFromThenHelper_Int :: Int -> Int -> [Int]
+enumFromThenHelper_Int x step = x : enumFromThenHelper_Int (x + step) step
 
-enumFromTo_Integer :: Integer -> Integer -> [Integer]
-enumFromTo_Integer n m = if n > m then [] else n : enumFromTo_Integer (n + 1) m
+enumFromTo_Int :: Int -> Int -> [Int]
+enumFromTo_Int n m = if n > m then [] else n : enumFromTo_Int (n + 1) m
 
-enumFromThenTo_Integer :: Integer -> Integer -> Integer -> [Integer]
-enumFromThenTo_Integer n next m = enumFromThenToHelper_Integer n (next - n) m
+enumFromThenTo_Int :: Int -> Int -> Int -> [Int]
+enumFromThenTo_Int n next m = enumFromThenToHelper_Int n (next - n) m
 
-enumFromThenToHelper_Integer :: Integer -> Integer -> Integer -> [Integer]
-enumFromThenToHelper_Integer x step m =
+enumFromThenToHelper_Int :: Int -> Int -> Int -> [Int]
+enumFromThenToHelper_Int x step m =
     if step > 0
-    then if x > m then [] else x : enumFromThenToHelper_Integer (x + step) step m
-    else if x < m then [] else x : enumFromThenToHelper_Integer (x + step) step m
+    then if x > m then [] else x : enumFromThenToHelper_Int (x + step) step m
+    else if x < m then [] else x : enumFromThenToHelper_Int (x + step) step m
 
 -- Read instances
-read_Integer :: String -> Integer
-read_Integer s = ffi_tonumber s
+read_Int :: String -> Int
+read_Int s = ffi_tonumber s
 
 read_Number :: String -> Number
 read_Number s = ffi_tonumber_float s
@@ -391,7 +391,7 @@ read_Bool s = if s == "True" then True else False
 read_String :: String -> String
 read_String s = s
 
-ffi_tonumber :: String -> LuaPure "tonumber" Integer
+ffi_tonumber :: String -> LuaPure "tonumber" Int
 ffi_tonumber_float :: String -> LuaPure "tonumber" Number
 
 infixl 4 <$>

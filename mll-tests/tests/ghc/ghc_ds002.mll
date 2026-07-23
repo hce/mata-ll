@@ -18,11 +18,11 @@ myDropWhile p (x:xs)
     | p x       = myDropWhile p xs
     | otherwise  = x : xs
 
-myLast :: [Integer] -> Integer
+myLast :: [Int] -> Int
 myLast [] = error "empty"
 myLast (x:xs) = if length xs == 0 then x else myLast xs
 
-myInit :: [Integer] -> [Integer]
+myInit :: [Int] -> [Int]
 myInit [] = error "empty"
 myInit (x:xs) = if length xs == 0 then [] else x : myInit xs
 
@@ -30,7 +30,7 @@ main :: IO ()
 main = do
     assert (myZip [1, 2, 3] [10, 20, 30] == [(1, 10), (2, 20), (3, 30)]) "zip"
     assert (myZip [1, 2] [10, 20, 30] == [(1, 10), (2, 20)]) "zip short"
-    assert (myZip ([] :: [Integer]) [1, 2] == []) "zip empty"
+    assert (myZip ([] :: [Int]) [1, 2] == []) "zip empty"
 
     assert (myTakeWhile (< 5) [1, 2, 3, 4, 5, 6] == [1, 2, 3, 4]) "takeWhile"
     assert (myDropWhile (< 5) [1, 2, 3, 4, 5, 6] == [5, 6]) "dropWhile"

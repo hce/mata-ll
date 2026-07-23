@@ -10,10 +10,10 @@ check name got want =
         then putStrLn ("ok " <> name)
         else error ("FAIL " <> name <> ": got " <> show got <> " want " <> show want)
 
-selfRef :: Integer
+selfRef :: Int
 selfRef = let (a, b) = (1, a) in b
 
-viaParam :: Integer -> Integer
+viaParam :: Int -> Int
 viaParam n = let (a, b) = (n + 1, a * 2) in b
 
 main :: IO ()
@@ -22,14 +22,14 @@ main = do
     check "self-ref" selfRef 1
     check "via-param" (viaParam 10) 22
     -- Do-block form.
-    let (x, y) = (5 :: Integer, x + 1)
+    let (x, y) = (5 :: Int, x + 1)
     check "do-form" (x + y) 11
     -- The pattern variables are in scope for SIBLING bindings in the group
     -- (expression-form let, whose groups may mix pattern and named binds).
-    check "sibling" (let (p, q) = (2 :: Integer, 3 :: Integer)
+    check "sibling" (let (p, q) = (2 :: Int, 3 :: Int)
                          s = p + q
                      in s) 5
     -- Laziness: an unmatched pattern binding whose variables are never
     -- demanded must not be forced (GHC: `let (a, b) = undefined in 5` is 5).
     let (u, v) = error "must stay unevaluated"
-    check "lazy-unforced" (42 :: Integer) 42
+    check "lazy-unforced" (42 :: Int) 42

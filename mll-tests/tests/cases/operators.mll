@@ -1,4 +1,4 @@
-add :: Integer -> Integer -> Integer
+add :: Int -> Int -> Int
 add a b = a + b
 
 main :: IO ()

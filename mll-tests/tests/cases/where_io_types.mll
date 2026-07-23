@@ -1,11 +1,11 @@
 -- Test: where-clause functions with IO types should have resolved types
 -- (regression: fresh type variables were not unified with inferred types)
 
-run :: Integer -> IO ()
+run :: Int -> IO ()
 run n = printNum n
     where printNum x = putStrLn (show x)
 
-compute :: Integer -> Integer
+compute :: Int -> Int
 compute n = helper n
     where helper x = x * x + 1
 

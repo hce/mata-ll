@@ -2,10 +2,10 @@
 
 data Config = Config
     { cfgHost    :: String
-    , cfgPort    :: Integer
+    , cfgPort    :: Int
     , cfgDebug   :: Bool
-    , cfgTimeout :: Integer
-    , cfgMaxConn :: Integer
+    , cfgTimeout :: Int
+    , cfgMaxConn :: Int
     } deriving (Show, Eq)
 
 defaultConfig :: Config

@@ -1,6 +1,6 @@
 -- Stress test: long do-notation chain with 40 sequential operations
 
-data Ref = Ref Integer
+data Ref = Ref Int
     deriving (Show, Eq)
 
 main :: IO ()

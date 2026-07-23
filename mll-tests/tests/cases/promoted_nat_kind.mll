@@ -8,11 +8,11 @@
 data Nat = Z | S Nat
 
 -- `Nat` as a VALUE type: build and consume runtime Nats.
-toInt :: Nat -> Integer
+toInt :: Nat -> Int
 toInt Z     = 0
 toInt (S n) = 1 + toInt n
 
-fromInt :: Integer -> Nat
+fromInt :: Int -> Nat
 fromInt 0 = Z
 fromInt n = S (fromInt (n - 1))
 
@@ -22,7 +22,7 @@ data Vec n a where
     VNil  :: Vec 'Z a
     VCons :: a -> Vec n a -> Vec ('S n) a
 
-vlen :: Vec n a -> Integer
+vlen :: Vec n a -> Int
 vlen VNil        = 0
 vlen (VCons _ xs) = 1 + vlen xs
 
@@ -30,7 +30,7 @@ vhead :: Vec ('S n) a -> a
 vhead (VCons x _) = x
 
 -- A promoted index written out explicitly is accepted because its kind is Nat.
-v3 :: Vec ('S ('S ('S 'Z))) Integer
+v3 :: Vec ('S ('S ('S 'Z))) Int
 v3 = VCons 1 (VCons 2 (VCons 3 VNil))
 
 main :: IO ()

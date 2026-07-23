@@ -32,7 +32,7 @@ loadAndRun path = do
     run (buildState (sortProg (parseSource ls)))
 
 -- Parse every numbered, non-blank source line into (lineNo, statements).
-parseSource :: [String] -> [(Integer, [Stmt])]
+parseSource :: [String] -> [(Int, [Stmt])]
 parseSource [] = []
 parseSource (line : rest) =
     let toks = tokenize line
@@ -42,7 +42,7 @@ parseSource (line : rest) =
             Left e   -> error ("line " <> show n <> ": " <> e)
             Right ss -> (n, ss) : parseSource rest
 
-sortProg :: [(Integer, [Stmt])] -> [(Integer, [Stmt])]
+sortProg :: [(Int, [Stmt])] -> [(Int, [Stmt])]
 sortProg = sortBy (\a b -> compare (fst a) (fst b))
 
 -- ---------------------------------------------------------------------------
@@ -56,7 +56,7 @@ startRepl = do
 
 -- The program under construction maps a line number to (source text,
 -- statements): the text is kept for LIST, the statements for RUN.
-replLoop :: HashMap Integer (String, [Stmt]) -> IO ()
+replLoop :: HashMap Int (String, [Stmt]) -> IO ()
 replLoop prog = do
     putStr "] "
     line <- readLine
@@ -78,20 +78,20 @@ replLoop prog = do
             Left e   -> putStrLn ("?SYNTAX: " <> e) >> replLoop prog
             Right ss -> execImmediate ss >> replLoop prog
 
-lineNo :: Number -> Integer
+lineNo :: Number -> Int
 lineNo = floorLine
 
-floorLine :: Number -> LuaPure "math.floor" Integer
+floorLine :: Number -> LuaPure "math.floor" Int
 
 -- The runnable program: statements in line-number order.
-programOf :: HashMap Integer (String, [Stmt]) -> [(Integer, [Stmt])]
+programOf :: HashMap Int (String, [Stmt]) -> [(Int, [Stmt])]
 programOf prog =
     map (\k -> (k, snd (entryAt k prog))) (sortBy (\a b -> compare a b) (hmKeys prog))
 
-listProg :: HashMap Integer (String, [Stmt]) -> IO ()
+listProg :: HashMap Int (String, [Stmt]) -> IO ()
 listProg prog = mapM_ (\k -> putStrLn (fst (entryAt k prog))) (sortBy (\a b -> compare a b) (hmKeys prog))
 
-entryAt :: Integer -> HashMap Integer (String, [Stmt]) -> (String, [Stmt])
+entryAt :: Int -> HashMap Int (String, [Stmt]) -> (String, [Stmt])
 entryAt k prog = case hmLookup k prog of
     Just e  -> e
     Nothing -> ("", [])

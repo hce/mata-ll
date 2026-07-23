@@ -8,32 +8,32 @@
 -- forwards to the referent at call time.
 
 -- A bare alias to a function defined BELOW.
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc = bump
 
-bump :: Integer -> Integer
+bump :: Int -> Int
 bump n = n + 1
 
 -- A point-free precedence-ladder chain, like the BASIC expression parser:
 -- each rung is defined point-free in terms of the next, which appears later.
-classify :: Integer -> String
+classify :: Int -> String
 classify = stageA
 
-stageA :: Integer -> String
+stageA :: Int -> String
 stageA = stageB
 
 -- Partial application forward-referencing a later binding (the other shape).
-stageB :: Integer -> String
+stageB :: Int -> String
 stageB = label "n="
 
-label :: String -> Integer -> String
+label :: String -> Int -> String
 label prefix n = prefix <> show n
 
 -- A point-free predicate aliasing a function defined below.
-nonNeg :: Integer -> Bool
+nonNeg :: Int -> Bool
 nonNeg = atLeastZero
 
-atLeastZero :: Integer -> Bool
+atLeastZero :: Int -> Bool
 atLeastZero n = n >= 0
 
 main :: IO ()

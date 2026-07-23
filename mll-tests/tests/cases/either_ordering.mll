@@ -2,7 +2,7 @@ fromEither :: Either a a -> a
 fromEither (Left x) = x
 fromEither (Right x) = x
 
-compareInt :: Integer -> Integer -> Ordering
+compareInt :: Int -> Int -> Ordering
 compareInt a b
     | a < b     = LT
     | a == b    = EQ

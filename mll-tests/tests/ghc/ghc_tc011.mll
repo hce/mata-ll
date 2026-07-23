@@ -1,7 +1,7 @@
 -- GHC tc011: Multiway if desugaring
 -- Nested if-then-else chains (the manual desugaring of MultiWayIf)
 
-classify :: Integer -> String
+classify :: Int -> String
 classify n =
     if n < 0
         then "negative"
@@ -13,7 +13,7 @@ classify n =
                     then "medium"
                     else "large"
 
-fizzbuzz :: Integer -> String
+fizzbuzz :: Int -> String
 fizzbuzz n =
     if n `mod` 15 == 0
         then "FizzBuzz"
@@ -24,12 +24,12 @@ fizzbuzz n =
                 else "other"
 
 -- Nested if used as an expression inside arithmetic
-absoluteDiff :: Integer -> Integer -> Integer
+absoluteDiff :: Int -> Int -> Int
 absoluteDiff a b =
     if a > b then a - b else b - a
 
 -- Nested if in a list comprehension result
-labels :: [Integer] -> [String]
+labels :: [Int] -> [String]
 labels ns = map (\n -> if n > 0 then "pos" else if n == 0 then "zero" else "neg") ns
 
 main :: IO ()

@@ -17,7 +17,7 @@ replace k v ((k', v'):xs)
     | k == k'    = (k, v):xs
     | otherwise  = (k', v'):(replace k v xs)
 
-count :: Eq a => [a] -> [(a, Integer)] -> [(a, Integer)]
+count :: Eq a => [a] -> [(a, Int)] -> [(a, Int)]
 count []     l = l
 count (x:xs) l = count xs l'
   where
@@ -28,7 +28,7 @@ count (x:xs) l = count xs l'
 -- Keys are unique here, so ordering by the key (fst) is a total order.
 -- mata-ll has no Ord instance for tuples, hence comparing fst rather than the
 -- whole pair; and lists concatenate with ++ (<> is for String only).
-sort :: Ord a => [(a, Integer)] -> [(a, Integer)]
+sort :: Ord a => [(a, Int)] -> [(a, Int)]
 sort []       = []
 sort (a:[])   = [a]
 sort (a:b:[]) = if fst a > fst b then b:a:[] else a:b:[]
@@ -36,7 +36,7 @@ sort (x:xs)   = if fst x > fst y then xs' ++ [x] else x:xs'
                    where xs' = sort xs
                          y   = head xs'
 
-trie :: (Eq a, Ord a) => [a] -> Tree a Integer
+trie :: (Eq a, Ord a) => [a] -> Tree a Int
 trie [] = DeadTree
 trie l  = (makeTree . sort) (count l [])
   where

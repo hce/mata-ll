@@ -1,21 +1,21 @@
 -- Infix-LHS definitions: an operator or a backtick'd name may appear between
 -- its two operands on the left of `=`, as in standard Haskell.
 
-(|+|) :: Integer -> Integer -> Integer
+(|+|) :: Int -> Int -> Int
 a |+| b = a + b
 
 -- Backtick'd function name with variable operands.
-add3 :: Integer -> Integer -> Integer
+add3 :: Int -> Int -> Int
 x `add3` y = x + y + 3
 
 -- Infix-LHS with guards in the body.
-clampLo :: Integer -> Integer -> Integer
+clampLo :: Int -> Int -> Int
 lo `clampLo` v
     | v < lo    = lo
     | otherwise = v
 
 -- Multiple clauses, infix LHS, with a `where`.
-(|*|) :: Integer -> Integer -> Integer
+(|*|) :: Int -> Int -> Int
 a |*| b = scaled
   where scaled = a * b
 

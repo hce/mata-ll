@@ -17,10 +17,10 @@
 -- neighbours, and a merely stored `head`/`!!` application stays a thunk
 -- until demanded.
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
-ones :: [Integer]
+ones :: [Int]
 ones = 1 : ones
 
 main :: IO ()

@@ -1,6 +1,6 @@
 -- GHC ds011: List comprehension with pattern matching generators
 
-listIndex :: [a] -> Integer -> a
+listIndex :: [a] -> Int -> a
 listIndex (x:_)  0 = x
 listIndex (_:xs) n = listIndex xs (n - 1)
 listIndex []     _ = error "index out of bounds"
@@ -13,19 +13,19 @@ area (Circle r)  = 3.14159 * r * r
 area (Rect w h)  = w * h
 
 -- Pattern match in generator: only Just values
-fromJusts :: [Maybe Integer] -> [Integer]
+fromJusts :: [Maybe Int] -> [Int]
 fromJusts ms = [x | Just x <- ms]
 
 -- Pattern match on pairs
-swapPairs :: [(Integer, Integer)] -> [(Integer, Integer)]
+swapPairs :: [(Int, Int)] -> [(Int, Int)]
 swapPairs ps = [(b, a) | (a, b) <- ps]
 
 -- Nested comprehension
-matrix :: [[Integer]]
+matrix :: [[Int]]
 matrix = [[i * j | j <- [1..4]] | i <- [1..3]]
 
 -- Comprehension with multiple guards
-tripleFilter :: [Integer] -> [Integer] -> [(Integer, Integer)]
+tripleFilter :: [Int] -> [Int] -> [(Int, Int)]
 tripleFilter xs ys = [(x, y) | x <- xs, y <- ys, x + y > 5, x /= y]
 
 -- Comprehension using pattern and guard together
@@ -37,7 +37,7 @@ main = do
     -- fromJusts via pattern generator
     let ms = [Just 1, Nothing, Just 2, Nothing, Just 3]
     assert (fromJusts ms == [1, 2, 3]) "fromJusts"
-    assert (fromJusts [Nothing, Nothing] == ([] :: [Integer])) "fromJusts empty"
+    assert (fromJusts [Nothing, Nothing] == ([] :: [Int])) "fromJusts empty"
 
     -- pair pattern in generator
     assert (swapPairs [(1,2),(3,4)] == [(2,1),(4,3)]) "swapPairs"

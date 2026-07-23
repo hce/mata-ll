@@ -3,7 +3,7 @@
 
 data Config = Config
     { host :: String
-    , port :: Integer
+    , port :: Int
     , debug :: Bool
     }
     deriving (Show, Eq)

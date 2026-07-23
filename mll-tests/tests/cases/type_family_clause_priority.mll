@@ -6,7 +6,7 @@
 data Nat = Z | S Nat
 
 type family F n where
-    F 'Z = Integer
+    F 'Z = Int
     F n  = String
 
 -- The specific clause wins for 'Z...
@@ -28,10 +28,10 @@ data BoolW b where
     WT :: BoolW 'True
     WF :: BoolW 'False
 
-eqII :: BoolW (Same Integer Integer)
+eqII :: BoolW (Same Int Int)
 eqII = WT
 
-neIB :: BoolW (Same Integer Bool)
+neIB :: BoolW (Same Int Bool)
 neIB = WF
 
 tag :: BoolW b -> String

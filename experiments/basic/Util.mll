@@ -19,5 +19,5 @@ joinStr sep (x:rest) = x <> sep <> joinStr sep rest
 upperStr :: String -> String
 upperStr s = concatStr (map (\b -> strChar (toUpperByte b)) (strToInts s))
 
-toUpperByte :: Integer -> Integer
+toUpperByte :: Int -> Int
 toUpperByte b = if b >= 97 && b <= 122 then b - 32 else b

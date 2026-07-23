@@ -33,7 +33,7 @@ append :: [a] -> [a] -> [a]
 append [] ys = ys
 append (x:xs) ys = x : append xs ys
 
-drop :: Integer -> [a] -> [a]
+drop :: Int -> [a] -> [a]
 drop 0 xs = xs
 drop _ [] = []
 drop n (_:xs) = drop (n - 1) xs

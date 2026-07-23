@@ -42,7 +42,7 @@ main = do
 
     -- mempty determined by annotation at each element type.
     assert ((mempty :: String) == "") "mempty at String"
-    assert ((mempty :: [Integer]) == []) "mempty at [Integer]"
+    assert ((mempty :: [Int]) == []) "mempty at [Int]"
 
     -- foldMap routes through the moved Monoid instances for both targets.
     assert (foldMap show [1, 2, 3] == "123") "foldMap into String monoid"

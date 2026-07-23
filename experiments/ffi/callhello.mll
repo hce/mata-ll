@@ -8,12 +8,12 @@ data HandleMeOperation = Addition       as "+"
 data HandleMeParams = HandleMeParams
         { hmpMessage     as "message"   :: String
         , hmpOperation   as "operation" :: HandleMeOperation
-        , hmpOperands    as "operands"  :: [Integer] }
+        , hmpOperands    as "operands"  :: [Int] }
     deriving (Show, LuaDict)
 
 data HandleMeRet = HandleMeRet
         { hmrSuccess     as "success"   :: Bool
-        , hmrValue       as "value"     :: Integer }
+        , hmrValue       as "value"     :: Int }
     deriving (Show, LuaDict)
 
 handleMe :: HandleMeParams -> LuaPure "handle_me" HandleMeRet

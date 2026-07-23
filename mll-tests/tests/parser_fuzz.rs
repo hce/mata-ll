@@ -212,17 +212,17 @@ fn gen_module(r: &mut Rng) -> String {
     // Definitions so the operators exist (type errors are fine; panics are
     // not).
     for op in SYM_OPS {
-        s.push_str(&format!("({}) :: Integer -> Integer -> Integer\n", op));
+        s.push_str(&format!("({}) :: Int -> Int -> Int\n", op));
         s.push_str(&format!("({}) a b = a + b\n", op));
     }
     for op in BT_OPS {
-        s.push_str(&format!("{} :: Integer -> Integer -> Integer\n", op));
+        s.push_str(&format!("{} :: Int -> Int -> Int\n", op));
         s.push_str(&format!("{} a b = a * b\n", op));
     }
     // A couple of value bindings with generated bodies.
     for (i, v) in ["v1", "v2"].iter().enumerate() {
         if r.chance(1, 2) {
-            s.push_str(&format!("{} :: Integer\n", v));
+            s.push_str(&format!("{} :: Int\n", v));
         }
         s.push_str(&format!("{} = ", v));
         let mut body = String::new();

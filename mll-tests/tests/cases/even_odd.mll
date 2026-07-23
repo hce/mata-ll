@@ -8,7 +8,7 @@
 -- caller's own Integral constraint.
 
 -- even/odd reached through a polymorphic Integral-constrained function,
--- not just at a concrete Integer use site.
+-- not just at a concrete Int use site.
 parityName :: Integral a => a -> String
 parityName n = if even n then "even" else "odd"
 

@@ -6,7 +6,7 @@ import LString (strByte, strLen, strChar)
 
 -- The tape is a zipper: cells to the left (reversed), current cell, cells to the right.
 -- Cells are 8-bit unsigned integers (0–255) with wrapping arithmetic.
-data Tape = Tape [Integer] Integer [Integer]
+data Tape = Tape [Int] Int [Int]
 
 newTape :: Tape
 newTape = Tape [] 0 []
@@ -19,14 +19,14 @@ moveLeft :: Tape -> Tape
 moveLeft (Tape [] c rs)     = Tape [] 0 (c:rs)
 moveLeft (Tape (l:ls) c rs) = Tape ls l (c:rs)
 
-getCell :: Tape -> Integer
+getCell :: Tape -> Int
 getCell (Tape _ c _) = c
 
-setCell :: Integer -> Tape -> Tape
+setCell :: Int -> Tape -> Tape
 setCell v (Tape ls _ rs) = Tape ls v rs
 
 -- Find matching ']' scanning forward from pc with nesting depth
-findClose :: String -> Integer -> Integer -> Integer
+findClose :: String -> Int -> Int -> Int
 findClose prog pc depth =
   if pc > strLen prog then pc
   else if strByte prog pc == 91 then findClose prog (pc + 1) (depth + 1)
@@ -36,7 +36,7 @@ findClose prog pc depth =
   else findClose prog (pc + 1) depth
 
 -- Find matching '[' scanning backward from pc with nesting depth
-findOpen :: String -> Integer -> Integer -> Integer
+findOpen :: String -> Int -> Int -> Int
 findOpen prog pc depth =
   if pc < 1 then pc
   else if strByte prog pc == 93 then findOpen prog (pc - 1) (depth + 1)
@@ -47,7 +47,7 @@ findOpen prog pc depth =
 
 -- Execute one instruction and continue
 -- 62 '>'  60 '<'  43 '+'  45 '-'  46 '.'  91 '['  93 ']'
-step :: Integer -> String -> Integer -> Tape -> IO ()
+step :: Int -> String -> Int -> Tape -> IO ()
 step 62 prog pc tape = run prog (pc + 1) (moveRight tape)
 step 60 prog pc tape = run prog (pc + 1) (moveLeft tape)
 step 43 prog pc tape = run prog (pc + 1) (setCell ((getCell tape + 1) `mod` 256) tape)
@@ -66,7 +66,7 @@ step 93 prog pc tape =
 step _ prog pc tape = run prog (pc + 1) tape
 
 -- Main interpreter loop
-run :: String -> Integer -> Tape -> IO ()
+run :: String -> Int -> Tape -> IO ()
 run prog pc tape =
     if pc > strLen prog
     then return ()

@@ -10,7 +10,7 @@ import FixityOps
 -- A local operator whose fixity declaration appears at the bottom of the
 -- file: a fixity declaration governs its whole scope, including uses that
 -- precede it textually.
-(//) :: Integer -> Integer -> Integer
+(//) :: Int -> Int -> Int
 a // b = a - b
 
 main :: IO ()

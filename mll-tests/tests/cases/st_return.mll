@@ -3,12 +3,12 @@
 
 main :: IO ()
 main = do
-    -- ST returning Integer
+    -- ST returning Int
     let r1 = runST (do
             arr <- newSTArray 1 0
             writeSTArray arr 0 42
             readSTArray arr 0)
-    assert (r1 == 42) "ST return Integer"
+    assert (r1 == 42) "ST return Int"
 
     -- ST returning tuple
     let r2 = runST (do

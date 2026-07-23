@@ -19,22 +19,22 @@ pickSecond _ ps2 = ps2
 -- ============================================================
 
 -- `incr` is strict in its argument (used in +)
-incr :: Integer -> Integer
+incr :: Int -> Int
 incr incn = incn + 1
 
 -- `applyIncr` calls incr — so it should also be strict in its arg
-applyIncr :: Integer -> Integer
+applyIncr :: Int -> Int
 applyIncr aix = incr aix
 
 -- Two levels of propagation
-doubleIncr :: Integer -> Integer
+doubleIncr :: Int -> Int
 doubleIncr dix = applyIncr dix + 1
 
 -- ============================================================
 -- Guards: condition variables are always demanded
 -- ============================================================
 
-classify :: Integer -> String
+classify :: Int -> String
 classify cn
     | cn < 0     = "negative"
     | cn == 0    = "zero"
@@ -42,7 +42,7 @@ classify cn
 
 -- Guard with unused variable in one branch
 -- gpy is only used when gpx > 0, so gpy should not be strict
-guardPartial :: Integer -> Integer -> String
+guardPartial :: Int -> Int -> String
 guardPartial gpx gpy
     | gpx > 0    = show (gpx + gpy)
     | otherwise = "non-positive"
@@ -52,12 +52,12 @@ guardPartial gpx gpy
 -- ============================================================
 
 -- Both clauses use bn, so bn is strict
-bothBranches :: Bool -> Integer -> String
+bothBranches :: Bool -> Int -> String
 bothBranches True bn = show bn
 bothBranches False bn = show (bn + 1)
 
 -- Only one clause uses obn, so obn should NOT be strict
-oneBranch :: Bool -> Integer -> String
+oneBranch :: Bool -> Int -> String
 oneBranch True _ = "yes"
 oneBranch False obn = show obn
 
@@ -75,12 +75,12 @@ unbox (MkBox ubx) = ubx
 -- ============================================================
 
 -- Body demands `ltdoubled`, which demands `ltn` via its definition
-letTransitive :: Integer -> Integer
+letTransitive :: Int -> Int
 letTransitive ltn = ltdoubled + 1
     where ltdoubled = ltn * 2
 
 -- Body demands `lclabel` which demands `lcn` through show
-letChain :: Integer -> String
+letChain :: Int -> String
 letChain lcn = "value: " <> lclabel
     where lclabel = show lcn
 
@@ -96,24 +96,24 @@ consPair cp1 cp2 = cp1 : cp2 : []
 -- Operators force both sides
 -- ============================================================
 
-addTwo :: Integer -> Integer -> Integer
+addTwo :: Int -> Int -> Int
 addTwo at1 at2 = at1 + at2
 
-mulTwo :: Integer -> Integer -> Integer
+mulTwo :: Int -> Int -> Int
 mulTwo mt1 mt2 = mt1 * mt2
 
 -- ============================================================
 -- If-then-else: both branches use same var → strict
 -- ============================================================
 
-ifBothUse :: Bool -> Integer -> Integer
+ifBothUse :: Bool -> Int -> Int
 ifBothUse ibc ibn = if ibc then ibn + 1 else ibn * 2
 
 -- ============================================================
 -- Case expression: scrutinee is always forced
 -- ============================================================
 
-describeSign :: Integer -> String
+describeSign :: Int -> String
 describeSign dsn = case dsn > 0 of
     True  -> "positive"
     False -> "non-positive"
@@ -122,11 +122,11 @@ describeSign dsn = case dsn > 0 of
 -- Recursive function strictness
 -- ============================================================
 
-sumTo :: Integer -> Integer
+sumTo :: Int -> Int
 sumTo 0 = 0
 sumTo stn = stn + sumTo (stn - 1)
 
-factorial :: Integer -> Integer
+factorial :: Int -> Int
 factorial 0 = 1
 factorial facn = facn * factorial (facn - 1)
 
@@ -141,7 +141,7 @@ applyFn afnf afnx = afnf afnx
 -- Where clause demands propagate to parameters
 -- ============================================================
 
-squarePlus :: Integer -> Integer -> Integer
+squarePlus :: Int -> Int -> Int
 squarePlus spa spb = spsq + spb
     where spsq = spa * spa
 

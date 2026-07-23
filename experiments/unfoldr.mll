@@ -4,7 +4,7 @@ unfoldr gen state =
         Nothing          -> []
         Just (a, state') -> a:unfoldr gen state'
 
-rangor :: Integer -> Integer -> [Integer]
+rangor :: Int -> Int -> [Int]
 rangor from to =
     unfoldr (\s -> if s > to then Nothing else Just (s, s + 1)) from
 

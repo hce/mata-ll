@@ -1,12 +1,12 @@
 -- Mutually recursive data types and functions
 
 data Forest = Empty | Cons Tree Forest
-data Tree = Node Integer Forest
+data Tree = Node Int Forest
 
-countNodes :: Tree -> Integer
+countNodes :: Tree -> Int
 countNodes (Node _ forest) = 1 + countForest forest
 
-countForest :: Forest -> Integer
+countForest :: Forest -> Int
 countForest Empty = 0
 countForest (Cons t f) = countNodes t + countForest f
 

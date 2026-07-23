@@ -1,11 +1,11 @@
 -- GHC cgrun020: Mutual recursion
 -- Tests mutually recursive functions
 
-isEven :: Integer -> Bool
+isEven :: Int -> Bool
 isEven 0 = True
 isEven n = isOdd (n - 1)
 
-isOdd :: Integer -> Bool
+isOdd :: Int -> Bool
 isOdd 0 = False
 isOdd n = isEven (n - 1)
 

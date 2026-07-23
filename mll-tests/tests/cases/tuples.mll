@@ -2,19 +2,19 @@
 swap :: (a, b) -> (b, a)
 swap (x, y) = (y, x)
 
-addPair :: (Integer, Integer) -> Integer
+addPair :: (Int, Int) -> Int
 addPair (a, b) = a + b
 
 -- Nested tuples
-nested :: ((Integer, String), Bool) -> Integer
+nested :: ((Int, String), Bool) -> Int
 nested ((n, _), _) = n
 
 -- Tuples in let bindings
-letTuple :: Integer -> Integer
+letTuple :: Int -> Int
 letTuple _ = let p = (10, 20) in fst p + snd p
 
 -- 3-tuples
-triple :: (Integer, Integer, Integer) -> Integer
+triple :: (Int, Int, Int) -> Int
 triple (a, b, c) = a + b + c
 
 main :: IO ()

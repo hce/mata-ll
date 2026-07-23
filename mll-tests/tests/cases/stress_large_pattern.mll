@@ -1,6 +1,6 @@
 -- Stress test: large pattern matching with many branches and nested patterns
 
-data Shape = Circle Integer | Rect Integer Integer | Triangle Integer Integer Integer | Point
+data Shape = Circle Int | Rect Int Int | Triangle Int Int Int | Point
     deriving (Show, Eq)
 
 data Color = Red | Green | Blue | Yellow | White | Black
@@ -9,7 +9,7 @@ data Color = Red | Green | Blue | Yellow | White | Black
 data Colored = Colored Color Shape
     deriving (Show, Eq)
 
-area :: Shape -> Integer
+area :: Shape -> Int
 area (Circle r) = r * r * 3
 area (Rect w h) = w * h
 area (Triangle a b c) = a + b + c
@@ -35,7 +35,7 @@ classifyHelper c (Rect w h) =
 classifyHelper _ (Triangle _ _ _) = "triangle"
 classifyHelper _ Point = "point"
 
-colorValue :: Color -> Integer
+colorValue :: Color -> Int
 colorValue Red = 1
 colorValue Green = 2
 colorValue Blue = 3
@@ -46,7 +46,7 @@ colorValue Black = 6
 data Container = Box Colored | Empty
     deriving (Show, Eq)
 
-containerArea :: Container -> Integer
+containerArea :: Container -> Int
 containerArea Empty = 0
 containerArea (Box (Colored _ s)) = area s
 

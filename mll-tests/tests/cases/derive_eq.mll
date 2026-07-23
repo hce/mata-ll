@@ -30,7 +30,7 @@ data Pair2 a = MkPair2 [a] [a]
     deriving (Show, Eq)
 
 -- Type with concrete non-primitive field (no type vars)
-data Config = MkConfig String [Integer]
+data Config = MkConfig String [Int]
     deriving (Show, Eq)
 
 -- Recursive type with extra field
@@ -51,11 +51,11 @@ main = do
     assert (MkBag [1, 2, 3] == MkBag [1, 2, 3]) "bag eq"
     assert (MkBag [1, 2, 3] /= MkBag [1, 2, 4]) "bag neq elem"
     assert (MkBag [1, 2] /= MkBag [1, 2, 3]) "bag neq len"
-    assert (MkBag ([] :: [Integer]) == MkBag []) "bag eq empty"
+    assert (MkBag ([] :: [Int]) == MkBag []) "bag eq empty"
 
     -- Maybe field
     assert (MkOptional (Just 42) == MkOptional (Just 42)) "optional eq just"
-    assert (MkOptional (Nothing :: Maybe Integer) == MkOptional Nothing) "optional eq nothing"
+    assert (MkOptional (Nothing :: Maybe Int) == MkOptional Nothing) "optional eq nothing"
     assert (MkOptional (Just 1) /= MkOptional (Just 2)) "optional neq"
     assert (MkOptional (Just 1) /= MkOptional Nothing) "optional neq just/nothing"
 
@@ -65,10 +65,10 @@ main = do
     assert (MkLabeled "x" [1, 2] /= MkLabeled "x" [1, 3]) "labeled neq list"
 
     -- Multi-constructor with list
-    assert ((Empty :: Collection Integer) == Empty) "collection eq empty"
+    assert ((Empty :: Collection Int) == Empty) "collection eq empty"
     assert (Items [1, 2] == Items [1, 2]) "collection eq items"
     assert (Items [1, 2] /= Items [1, 3]) "collection neq items"
-    assert ((Empty :: Collection Integer) /= Items []) "collection neq empty/items"
+    assert ((Empty :: Collection Int) /= Items []) "collection neq empty/items"
 
     -- Nested: list of Maybe
     assert (MkMaybeList [Just 1, Nothing] == MkMaybeList [Just 1, Nothing]) "maybelist eq"

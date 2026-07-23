@@ -5,11 +5,11 @@
 -- ============================================================
 
 -- seq forces its first argument strictly
-seqResult :: Integer
+seqResult :: Int
 seqResult = seq (1 + 1) 42
 
 -- seq with unit: force a value for its side-effect in pure code
-seqChain :: Integer
+seqChain :: Int
 seqChain = seq (2 * 3) (seq (4 + 5) 100)
 
 -- ============================================================

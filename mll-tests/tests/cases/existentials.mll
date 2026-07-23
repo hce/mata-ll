@@ -8,7 +8,7 @@ showIt sb = case sb of
     MkShowBox x f -> f x
 
 -- Multiple existential constructors
-data AnyNum = forall a. MkInt a (a -> Integer)
+data AnyNum = forall a. MkInt a (a -> Int)
             | forall a. MkStr a (a -> String)
 
 extractStr :: AnyNum -> String
@@ -24,7 +24,7 @@ showPair p = case p of
     MkPair x y fx fy -> fx x <> ", " <> fy y
 
 -- Mix of existential and non-existential constructors
-data Tagged = TagInt Integer
+data Tagged = TagInt Int
             | forall a. TagAny a (a -> String)
 
 showTagged :: Tagged -> String
@@ -33,9 +33,9 @@ showTagged t = case t of
     TagAny x f -> f x
 
 -- Existential wrapping a function (the hidden type is a function type)
-data Reducer = forall a. MkReducer a (a -> Integer -> a) (a -> Integer)
+data Reducer = forall a. MkReducer a (a -> Int -> a) (a -> Int)
 
-runReducer :: Reducer -> [Integer] -> Integer
+runReducer :: Reducer -> [Int] -> Int
 runReducer r xs = case r of
     MkReducer init step done -> done (foldl step init xs)
 
@@ -48,13 +48,13 @@ showMaybe ms = case ms of
     NothingShow  -> "Nothing"
 
 -- Existential used as accumulator state
-data Counter = forall s. MkCounter s (s -> s) (s -> Integer)
+data Counter = forall s. MkCounter s (s -> s) (s -> Int)
 
 tick :: Counter -> Counter
 tick c = case c of
     MkCounter s step get -> MkCounter (step s) step get
 
-getCount :: Counter -> Integer
+getCount :: Counter -> Int
 getCount c = case c of
     MkCounter s step get -> get s
 

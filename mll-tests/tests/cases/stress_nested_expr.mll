@@ -1,6 +1,6 @@
 -- Stress test: deeply nested expressions (case, if, let)
 
-deepIf :: Integer -> Integer
+deepIf :: Int -> Int
 deepIf n =
     if n > 30
     then 130
@@ -94,7 +94,7 @@ deepIf n =
                                                                                                                         else
                                                                                                                             0
 
-deepLet :: Integer -> Integer
+deepLet :: Int -> Int
 deepLet n =
     let a1 = n + 1 in
         let a2 = n + 2 in
@@ -123,10 +123,10 @@ deepLet n =
                                                                                                     let a25 = n + 25 in
                                                                                                         a1 + a25
 
-data Wrap = WrapI Integer | WrapB Bool | WrapN
+data Wrap = WrapI Int | WrapB Bool | WrapN
     deriving (Show, Eq)
 
-deepCase :: Integer -> Integer
+deepCase :: Int -> Int
 deepCase n = case n > 0 of
     True -> case n > 10 of
         True -> case n > 20 of

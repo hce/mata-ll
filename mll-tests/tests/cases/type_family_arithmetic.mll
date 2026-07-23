@@ -27,7 +27,7 @@ vappend (VCons x xs) ys = VCons x (vappend xs ys)
 vappend3 :: Vec n a -> Vec m a -> Vec p a -> Vec (Plus n (Plus m p)) a
 vappend3 xs ys zs = vappend xs (vappend ys zs)
 
-vlen :: Vec n a -> Integer
+vlen :: Vec n a -> Int
 vlen VNil = 0
 vlen (VCons _ xs) = 1 + vlen xs
 
@@ -58,7 +58,7 @@ main = do
     assert (vtoList w == [10, 20, 30]) "vappend3 order"
 
     -- Appending an empty vector on the left (Plus 'Z m = m) is the identity.
-    let e = vappend (VNil :: Vec 'Z Integer) v3
+    let e = vappend (VNil :: Vec 'Z Int) v3
     assert (vtoList e == [3, 4, 5]) "vappend VNil ys == ys"
 
     putStrLn "type-family arithmetic ok"

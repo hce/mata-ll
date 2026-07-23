@@ -16,7 +16,7 @@ data Cfg = Cfg { cfgTags :: [String], cfgSep :: String }
     deriving (Eq, FromJSON)
 
 tblconcat  :: [String]  -> String -> LuaPure "table.concat" String
-concatInts :: [Integer] -> String -> LuaPure "table.concat" String
+concatInts :: [Int] -> String -> LuaPure "table.concat" String
 upper'     :: String    -> LuaPure "string.upper" String
 rep'       :: String -> Number -> Maybe String -> LuaPure ":rep" String
 mn         :: Number -> Maybe Number -> LuaPure "math.min" Number
@@ -29,15 +29,15 @@ cfg = case decodeJSON "{\"cfgTags\": [\"alpha\", \"beta\", \"gamma\"], \"cfgSep\
 main :: IO ()
 main = do
     -- [String] built by mapping show over a range: each element is a thunk
-    -- over a computed Integer, not a native string until forced.
+    -- over a computed Int, not a native string until forced.
     let shown = map show [1..4]
     assert (tblconcat shown "," == "1,2,3,4")
         "map-show-built [String] crosses as a plain array of native strings"
 
-    -- [Integer] built by filtering a range.
+    -- [Int] built by filtering a range.
     let evens = filter (\n -> n `mod` 2 == 0) [1..10]
     assert (concatInts evens "-" == "2-4-6-8-10")
-        "filter-built [Integer] crosses as a plain array of forced numbers"
+        "filter-built [Int] crosses as a plain array of forced numbers"
 
     -- JSON-decoded list and separator: the exact shape that regressed —
     -- decoded Strings are cons structures until marshalled.

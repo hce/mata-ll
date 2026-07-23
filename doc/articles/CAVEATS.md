@@ -56,7 +56,7 @@ fallthrough that calls:
 That runtime message does not include the function name or source location, so
 it can be hard to track down.
 
-## Integer overflow wraps silently
+## Int overflow wraps silently
 
 mata-ll integers are Lua integers (64-bit signed on Lua 5.4+, or floats on
 Lua 5.3 and earlier). Overflow wraps silently — there is no checked arithmetic
@@ -86,11 +86,14 @@ mata-ll has no `Rational` type. A decimal literal is a `Number` (an IEEE-754
 double) at the source level, so the `Fractional` method `fromRational` takes a
 `Number` argument rather than GHC's `Rational` — this is the numeric tower's
 one signature deviation, made because introducing an exact `Rational` (with its
-own `Integer`-pair arithmetic and `Show`/`Eq`) would be disproportionate to its
+own `Int`-pair arithmetic and `Show`/`Eq`) would be disproportionate to its
 value in a Lua-hosted language whose fractional type is already a double. For
 the same reason the `Real` class carries no `toRational` method; it exists only
 as the `(Num a, Ord a) =>` superclass marker that `Integral` sits above.
-`toInteger` (Integral) is present and behaves as in GHC.
+GHC's `Integral` method `toInteger` is likewise absent: its result type is
+the arbitrary-precision `Integer`, which mata-ll does not have, so a use of
+`toInteger` is rejected with a `note:` pointing at `Int` (`fromInteger`
+stays — its argument is just the literal type `Int`).
 
 ## `Floating` and `RealFrac` are functions, not classes
 
@@ -105,23 +108,25 @@ present, so this is a missing abstraction, not missing functionality.
 ## Numeric-literal patterns are monomorphic; some literal errors defer
 
 A numeric *literal pattern* (`f 0 = …`) matches at the concrete literal type
-(`Integer` or `Number`), not at a polymorphic `Num a`. This differs from GHC,
+(`Int` or `Number`), not at a polymorphic `Num a`. This differs from GHC,
 where a literal pattern is `(== fromInteger n)` and works at any `Num`/`Eq`
 type; in practice the scrutinee is almost always concrete, so this rarely
 shows. Separately, because integer literals are now `Num a => a`, a mismatch
 like `let x = 5 in putStrLn x` is reported as a deferred `No instance for
 (Num String)` at the enclosing binding rather than a use-site "cannot unify
-Integer with String" — the program is still rejected, but the message is the
+Int with String" — the program is still rejected, but the message is the
 instance error GHC also gives.
 
 ## Numeric defaulting only applies to standard classes
 
-An unconstrained numeric literal defaults `Integer` then `Number` (GHC's
-`default (Integer, Double)`). As in GHC, defaulting applies only when every
+An unconstrained numeric literal defaults `Int` then `Number` — mata-ll is
+defined as GHC with an implicit `default (Int, Double)` (`Number` = GHC's
+`Double`), where standard GHC would use `default (Integer, Double)`. As in
+GHC, defaulting applies only when every
 class constraining the variable is *standard* (a numeric class, `Eq`, `Ord`,
 `Show`, `Read`, `Enum`, `Bounded`). A literal also constrained by a user class
 — e.g. `myClassMethod 5` where `5 :: (MyClass a, Num a) => a` — is
-ambiguous and must be annotated (`myClassMethod (5 :: Integer)`), exactly as
+ambiguous and must be annotated (`myClassMethod (5 :: Int)`), exactly as
 GHC requires.
 
 ## Existential record fields have no selector and no record update
@@ -295,7 +300,7 @@ mata-ll it does: the list controls which of the module's names other
 But that is its entire job. It puts nothing in the compiled module's
 Lua `return { … }` table — only `export` declarations do that:
 
-    export addup :: Integer -> Integer -> Integer
+    export addup :: Int -> Int -> Int
     addup a b = a + b
 
 A module with a header export list but neither a `main` nor any
@@ -367,7 +372,7 @@ SPEC.md). Two consequences to be aware of:
 
 Promoted data types have real kinds (`data Nat` gives the kind `Nat`;
 see SPEC.md), so a type-level index is checked to be exactly the right
-kind — `Vec 'True Integer` is a kind error because `'True :: Bool`, not
+kind — `Vec 'True Int` is a kind error because `'True :: Bool`, not
 `Nat`. Because mata-ll has no kind-signature syntax, the *only* way to
 give a type parameter a promoted kind is to pin it through a GADT
 constructor's return type:
@@ -380,8 +385,8 @@ constructor's return type:
 A NON-GADT type parameter used only as a phantom defaults to kind
 `Type`, so it cannot carry a promoted tag:
 
-    data Tagged a = Tagged Integer
-    f :: Tagged 'Red -> Integer   -- KIND ERROR: 'Red :: Color, param : Type
+    data Tagged a = Tagged Int
+    f :: Tagged 'Red -> Int   -- KIND ERROR: 'Red :: Color, param : Type
 
 GHC rejects this too without a `data Tagged (a :: Color)` kind
 signature; mata-ll has no such signature, so make `Tagged` a GADT that
@@ -391,7 +396,7 @@ pins the tag in its constructor's result type instead.
 
 The linear-types usage checker (see SPEC.md) is sound in the sense that
 matters — it never accepts a double-use or a leak of a `%1` value that
-GHC would reject, and scalars get no special treatment (`Integer`,
+GHC would reject, and scalars get no special treatment (`Int`,
 `Number`, `Bool` and `String` derived from a `%1` value are tracked
 exactly-once, in strict parity with GHC). But its approximations mean
 some programs that are *actually* linear are still rejected, always

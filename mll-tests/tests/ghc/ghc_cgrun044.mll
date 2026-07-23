@@ -8,17 +8,17 @@ main :: IO ()
 main = do
     -- Identity law on Maybe
     assert (fmap id (Just 42) == Just 42) "maybe id just"
-    assert (fmap id (Nothing :: Maybe Integer) == Nothing) "maybe id nothing"
+    assert (fmap id (Nothing :: Maybe Int) == Nothing) "maybe id nothing"
 
     -- Composition law on Maybe
     let f = (* 2)
     let g = (+ 3)
     assert (fmap (f . g) (Just 5) == (fmap f . fmap g) (Just 5)) "maybe compose just"
-    assert (fmap (f . g) (Nothing :: Maybe Integer) == (fmap f . fmap g) (Nothing :: Maybe Integer)) "maybe compose nothing"
+    assert (fmap (f . g) (Nothing :: Maybe Int) == (fmap f . fmap g) (Nothing :: Maybe Int)) "maybe compose nothing"
 
     -- Identity law on lists
     assert (fmap id [1, 2, 3] == [1, 2, 3]) "list id"
-    assert (fmap id ([] :: [Integer]) == []) "list id empty"
+    assert (fmap id ([] :: [Int]) == []) "list id empty"
 
     -- Composition law on lists
     assert (fmap (f . g) [1, 2, 3] == (fmap f . fmap g) [1, 2, 3]) "list compose"

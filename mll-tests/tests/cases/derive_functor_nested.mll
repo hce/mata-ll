@@ -7,11 +7,11 @@ data T a = T (Maybe [a]) deriving (Show, Eq, Functor)
 
 data Rose a = Rose a [Rose a] deriving (Show, Eq, Functor)
 
-data P a = P (Integer, [a]) deriving (Show, Eq, Functor)
+data P a = P (Int, [a]) deriving (Show, Eq, Functor)
 
-data G a = G (Integer -> a) deriving (Functor)
+data G a = G (Int -> a) deriving (Functor)
 
-apG :: G a -> Integer -> a
+apG :: G a -> Int -> a
 apG (G g) n = g n
 
 check :: (Show a, Eq a) => String -> a -> a -> IO ()
@@ -24,7 +24,7 @@ main :: IO ()
 main = do
     check "maybe-list" (fmap (* 2) (T (Just [3, 4]))) (T (Just [6, 8]))
     check "maybe-nothing" (fmap (* 2) (T Nothing)) (T Nothing)
-    let r = Rose (1 :: Integer) [Rose 2 [], Rose 3 [Rose 4 []]]
+    let r = Rose (1 :: Int) [Rose 2 [], Rose 3 [Rose 4 []]]
     check "rose" (fmap (* 2) r) (Rose 2 [Rose 4 [], Rose 6 [Rose 8 []]])
     check "tuple-list" (fmap (+ 1) (P (9, [1, 2]))) (P (9, [2, 3]))
     -- Covariant function field: fmap post-composes.

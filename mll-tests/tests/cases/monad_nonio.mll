@@ -15,14 +15,14 @@ main = do
     assert (mj == Just 6) "maybe >>= Just"
 
     -- Maybe bind propagates Nothing
-    let mn = (Nothing :: Maybe Integer) >>= \x -> Just (x + 1)
+    let mn = (Nothing :: Maybe Int) >>= \x -> Just (x + 1)
     assert (mn == Nothing) "maybe >>= Nothing"
 
     -- Maybe then
     let mt1 = Just 1 >> Just 2
     assert (mt1 == Just 2) "maybe >> Just Just"
-    let mt2 = (Nothing :: Maybe Integer) >> Just 2
-    assert (mt2 == (Nothing :: Maybe Integer)) "maybe >> Nothing Just"
+    let mt2 = (Nothing :: Maybe Int) >> Just 2
+    assert (mt2 == (Nothing :: Maybe Int)) "maybe >> Nothing Just"
 
     -- Chained list binds
     let zs = [1, 2] >>= \x -> [10, 20] >>= \y -> [x + y]
@@ -48,6 +48,6 @@ main = do
 
     putStrLn "."
 
-compute :: Integer -> [Integer]
+compute :: Int -> [Int]
 compute n = xs
     where xs = [n] >>= \x -> [x + 1, x * 10]

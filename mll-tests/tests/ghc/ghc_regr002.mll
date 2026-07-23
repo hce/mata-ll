@@ -6,28 +6,28 @@ foldlStrict f acc []     = acc
 foldlStrict f acc (x:xs) = seq (f acc x) (foldlStrict f (f acc x) xs)
 
 -- Sum using strict accumulator
-sumStrict :: [Integer] -> Integer
+sumStrict :: [Int] -> Int
 sumStrict xs = foldlStrict (+) 0 xs
 
 -- Product using strict accumulator
-productStrict :: [Integer] -> Integer
+productStrict :: [Int] -> Int
 productStrict xs = foldlStrict (*) 1 xs
 
 -- Max via strict fold
-maxStrict :: Integer -> [Integer] -> Integer
+maxStrict :: Int -> [Int] -> Int
 maxStrict z xs = foldlStrict (\a b -> if a > b then a else b) z xs
 
 -- Strict fibonacci via accumulator (iterative)
-fibStep :: Integer -> Integer -> Integer -> Integer
+fibStep :: Int -> Int -> Int -> Int
 fibStep n a b
     | n == 0    = a
     | otherwise = seq b (fibStep (n - 1) b (a + b))
 
-fib :: Integer -> Integer
+fib :: Int -> Int
 fib n = fibStep n 0 1
 
 -- Strict length via accumulator
-lengthStrict :: [a] -> Integer
+lengthStrict :: [a] -> Int
 lengthStrict []     = 0
 lengthStrict (x:xs) = seq x (1 + lengthStrict xs)
 

@@ -1,29 +1,29 @@
 -- Stress test: large list operations
 
-myTake :: Integer -> [a] -> [a]
+myTake :: Int -> [a] -> [a]
 myTake 0 _ = []
 myTake _ [] = []
 myTake n (x:xs) = x : myTake (n - 1) xs
 
-myDrop :: Integer -> [a] -> [a]
+myDrop :: Int -> [a] -> [a]
 myDrop 0 xs = xs
 myDrop _ [] = []
 myDrop n (_:xs) = myDrop (n - 1) xs
 
-myReplicate :: Integer -> a -> [a]
+myReplicate :: Int -> a -> [a]
 myReplicate 0 _ = []
 myReplicate n x = x : myReplicate (n - 1) x
 
-mySum :: [Integer] -> Integer
+mySum :: [Int] -> Int
 mySum xs = foldl (+) 0 xs
 
-myProduct :: [Integer] -> Integer
+myProduct :: [Int] -> Int
 myProduct xs = foldl (*) 1 xs
 
-range :: Integer -> Integer -> [Integer]
+range :: Int -> Int -> [Int]
 range a b = if a > b then [] else a : range (a + 1) b
 
-qsort :: [Integer] -> [Integer]
+qsort :: [Int] -> [Int]
 qsort [] = []
 qsort (p:xs) = appendList (appendList (qsort lesser) (p : equal)) (qsort greater)
   where
@@ -35,7 +35,7 @@ appendList :: [a] -> [a] -> [a]
 appendList [] ys = ys
 appendList (x:xs) ys = x : appendList xs ys
 
-isSorted :: [Integer] -> Bool
+isSorted :: [Int] -> Bool
 isSorted [] = True
 isSorted (_:[]) = True
 isSorted (a:b:rest) = a <= b && isSorted (b : rest)
@@ -45,7 +45,7 @@ myZipWith _ [] _ = []
 myZipWith _ _ [] = []
 myZipWith f (a:as_) (b:bs) = f a b : myZipWith f as_ bs
 
-isEven :: Integer -> Bool
+isEven :: Int -> Bool
 isEven x = x `mod` 2 == 0
 
 main :: IO ()

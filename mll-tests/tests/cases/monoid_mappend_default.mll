@@ -3,7 +3,7 @@
 -- first-class operator sections of class methods dispatch by instance
 -- (the same repro's `foldr (<>) mempty` used to compile `<>` to Lua string
 -- concatenation regardless of the type).
-data Sum = Sum Integer deriving (Show, Eq)
+data Sum = Sum Int deriving (Show, Eq)
 
 instance Semigroup Sum where
     (<>) (Sum a) (Sum b) = Sum (a + b)

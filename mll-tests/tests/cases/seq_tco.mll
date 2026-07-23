@@ -3,12 +3,12 @@
 -- non-tail `return (f x)`), or deep seq-strict recursion overflows the stack.
 -- This drives a strict accumulator far past any reasonable C-stack depth.
 
-sumStrict :: Integer -> Integer -> Integer
+sumStrict :: Int -> Int -> Int
 sumStrict 0 acc = acc
 sumStrict n acc = seq acc (sumStrict (n - 1) (acc + n))
 
 -- `seq` also forces an unevaluated thunk to WHNF before returning the result.
-forceFirst :: Integer
+forceFirst :: Int
 forceFirst = seq (1 + 2) 99
 
 main :: IO ()

@@ -22,7 +22,7 @@ andThen (Right (a, ts)) f = f a ts
 -- ---------------------------------------------------------------------------
 
 -- If the token list starts with a number it is a program line number.
-lineNumberOf :: [Token] -> Maybe Integer
+lineNumberOf :: [Token] -> Maybe Int
 lineNumberOf (TNum n : _) = Just (floor n)
 lineNumberOf _            = Nothing
 
@@ -117,7 +117,7 @@ parseBranch ts =
             (TOp ":" : rest) -> parseBranch rest `andThen` \sts ts2 -> Right (st : sts, ts2)
             _                -> Right ([st], ts1)
 
-parseJump :: (Integer -> Stmt) -> [Token] -> PR Stmt
+parseJump :: (Int -> Stmt) -> [Token] -> PR Stmt
 parseJump mk (TNum n : rest) = Right (mk (floor n), rest)
 parseJump _ ts = Left ("expected a line number, got " <> showToks ts)
 

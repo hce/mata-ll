@@ -209,11 +209,11 @@ pub(super) fn sanitize_name(name: &str) -> String {
 /// disagree about which calls become forced native operations.
 pub(super) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
     match name {
-        "eq_Integer" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
-        "ord_lt__Integer" | "ord_lt__Number" | "ord_lt__String" | "ord_lt__ByteString" => Some("<"),
-        "ord_gt__Integer" | "ord_gt__Number" | "ord_gt__String" | "ord_gt__ByteString" => Some(">"),
-        "ord_le__Integer" | "ord_le__Number" | "ord_le__String" | "ord_le__ByteString" => Some("<="),
-        "ord_ge__Integer" | "ord_ge__Number" | "ord_ge__String" | "ord_ge__ByteString" => Some(">="),
+        "eq_Int" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
+        "ord_lt__Int" | "ord_lt__Number" | "ord_lt__String" | "ord_lt__ByteString" => Some("<"),
+        "ord_gt__Int" | "ord_gt__Number" | "ord_gt__String" | "ord_gt__ByteString" => Some(">"),
+        "ord_le__Int" | "ord_le__Number" | "ord_le__String" | "ord_le__ByteString" => Some("<="),
+        "ord_ge__Int" | "ord_ge__Number" | "ord_ge__String" | "ord_ge__ByteString" => Some(">="),
         "semigroup_String" => Some(".."),
         _ => None,
     }

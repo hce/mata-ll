@@ -15,7 +15,7 @@ outer :: ((a, b), c) -> c
 outer (_, z) = z
 
 -- Triple-nested
-deep :: (((Integer, Integer), Integer), Integer) -> Integer
+deep :: (((Int, Int), Int), Int) -> Int
 deep (((a, b), c), d) = a + b + c + d
 
 -- Tuple of tuples in a list
@@ -45,7 +45,7 @@ thd3 (_, _, z) = z
 main :: IO ()
 main = do
     -- Basic nested tuple access
-    let t = ((1, 2), 3) :: ((Integer, Integer), Integer)
+    let t = ((1, 2), 3) :: ((Int, Int), Int)
     assert (innerFst t == 1) "innerFst"
     assert (innerSnd t == 2) "innerSnd"
     assert (outer t == 3) "outer"

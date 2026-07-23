@@ -10,28 +10,28 @@ import Data.List (drop, replicate, take, foldl')
 -- FFI bindings
 -- ================================================================
 
-xorB :: Integer -> Integer -> LuaPure "__mll_bxor" Integer
-bandB :: Integer -> Integer -> LuaPure "__mll_band" Integer
-borB :: Integer -> Integer -> LuaPure "__mll_bor" Integer
-shlB :: Integer -> Integer -> LuaPure "__mll_shl" Integer
-shrB :: Integer -> Integer -> LuaPure "__mll_shr" Integer
-strChar :: Integer -> LuaPure "string.char" String
-strByte :: String -> Integer -> LuaPure "string.byte" Integer
-strLen :: String -> LuaPure "string.len" Integer
+xorB :: Int -> Int -> LuaPure "__mll_bxor" Int
+bandB :: Int -> Int -> LuaPure "__mll_band" Int
+borB :: Int -> Int -> LuaPure "__mll_bor" Int
+shlB :: Int -> Int -> LuaPure "__mll_shl" Int
+shrB :: Int -> Int -> LuaPure "__mll_shr" Int
+strChar :: Int -> LuaPure "string.char" String
+strByte :: String -> Int -> LuaPure "string.byte" Int
+strLen :: String -> LuaPure "string.len" Int
 
 -- ================================================================
 -- Utilities
 -- ================================================================
 
-u32 :: Integer -> Integer
+u32 :: Int -> Int
 u32 x = bandB x 4294967295
 
-idx :: [a] -> Integer -> a
+idx :: [a] -> Int -> a
 idx (x:_)  0 = x
 idx (_:xs) n = idx xs (n - 1)
 idx _      _ = error "idx: out of bounds"
 
-listSet :: [a] -> Integer -> a -> [a]
+listSet :: [a] -> Int -> a -> [a]
 listSet (_:xs) 0 v = v : xs
 listSet (x:xs) n v = x : listSet xs (n - 1) v
 listSet xs     _ _ = xs
@@ -40,14 +40,14 @@ listSet xs     _ _ = xs
 -- Type aliases
 -- ================================================================
 
-type W64 = (Integer, Integer)
--- GF = [Integer] (16-element list, each limb ~16 bits)
+type W64 = (Int, Int)
+-- GF = [Int] (16-element list, each limb ~16 bits)
 
 -- ================================================================
 -- 64-bit word operations (hi, lo) pairs of 32-bit values
 -- ================================================================
 
-w64 :: Integer -> Integer -> W64
+w64 :: Int -> Int -> W64
 w64 h l = (h, l)
 
 w64Xor :: W64 -> W64 -> W64
@@ -72,13 +72,13 @@ w64Add4 :: W64 -> W64 -> W64 -> W64 -> W64
 w64Add4 a b c d = w64Add (w64Add a b) (w64Add c d)
 
 -- Right rotate by n bits (0 < n < 32)
-w64RotRSmall :: W64 -> Integer -> W64
+w64RotRSmall :: W64 -> Int -> W64
 w64RotRSmall (h, l) n =
     (u32 (borB (shrB h n) (shlB l (32 - n))),
      u32 (borB (shrB l n) (shlB h (32 - n))))
 
 -- Right rotate by n bits (32 <= n < 64)
-w64RotRBig :: W64 -> Integer -> W64
+w64RotRBig :: W64 -> Int -> W64
 w64RotRBig (h, l) n = w64RotRSmall (l, h) (n - 32)
 
 -- Swap halves
@@ -86,7 +86,7 @@ w64Swap :: W64 -> W64
 w64Swap (h, l) = (l, h)
 
 -- General right rotate
-w64RotR :: W64 -> Integer -> W64
+w64RotR :: W64 -> Int -> W64
 w64RotR w n
     | n == 0    = w
     | n < 32    = w64RotRSmall w n
@@ -94,7 +94,7 @@ w64RotR w n
     | otherwise = w64RotRBig w n
 
 -- Right shift (logical)
-w64ShrR :: W64 -> Integer -> W64
+w64ShrR :: W64 -> Int -> W64
 w64ShrR (h, l) n
     | n == 0    = (h, l)
     | n < 32    = (shrB h n, u32 (borB (shrB l n) (shlB h (32 - n))))
@@ -139,7 +139,7 @@ sha512SSig1 :: W64 -> W64
 sha512SSig1 x = w64Xor (w64RotR x 19) (w64Xor (w64RotR x 61) (w64ShrR x 6))
 
 -- Parse 8 bytes (big-endian) into W64
-bytesToW64 :: [Integer] -> W64
+bytesToW64 :: [Int] -> W64
 bytesToW64 bs =
     let b0 = idx bs 0
         b1 = idx bs 1
@@ -154,11 +154,11 @@ bytesToW64 bs =
     in (hi, lo)
 
 -- Serialize W64 to 8 bytes (big-endian)
-w64ToBytes :: W64 -> [Integer]
+w64ToBytes :: W64 -> [Int]
 w64ToBytes (h, l) = [bandB (shrB h 24) 255, bandB (shrB h 16) 255, bandB (shrB h 8) 255, bandB h 255, bandB (shrB l 24) 255, bandB (shrB l 16) 255, bandB (shrB l 8) 255, bandB l 255]
 
 -- Parse bytes into list of W64 (16 words per 128-byte block)
-bytesToW64s :: [Integer] -> [W64]
+bytesToW64s :: [Int] -> [W64]
 bytesToW64s [] = []
 bytesToW64s bs = bytesToW64 (take 8 bs) : bytesToW64s (drop 8 bs)
 
@@ -179,7 +179,7 @@ sha512IV :: [W64]
 sha512IV = [(1779033703, 4089235720), (3144134277, 2227873595), (1013904242, 4271175723), (2773480762, 1595750129), (1359893119, 2917565137), (2600822924, 725511199), (528734635, 4215389547), (1541459225, 327033209)]
 
 -- One SHA-512 compression round
-sha512Round :: [W64] -> [W64] -> Integer -> [W64]
+sha512Round :: [W64] -> [W64] -> Int -> [W64]
 sha512Round state schedule i =
     let a = idx state 0
         b = idx state 1
@@ -204,7 +204,7 @@ sha512Compress state block =
     compressGo st sched i = compressGo (sha512Round st sched i) sched (i + 1)
 
 -- SHA-512 padding: append 1 bit, zeros, 128-bit length (big-endian)
-sha512Pad :: [Integer] -> [[Integer]]
+sha512Pad :: [Int] -> [[Int]]
 sha512Pad msg = blocks (msg ++ [128] ++ replicate padLen 0 ++ lenBytes)
   where
     len = length msg
@@ -231,28 +231,28 @@ sha512 input =
 -- 16 limbs, each nominally 16 bits
 -- ================================================================
 
-gfZero :: [Integer]
+gfZero :: [Int]
 gfZero = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
-gfOne :: [Integer]
+gfOne :: [Int]
 gfOne = [1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
 
-gfAdd :: [Integer] -> [Integer] -> [Integer]
+gfAdd :: [Int] -> [Int] -> [Int]
 gfAdd = zipWith (+)
 
-gfSub :: [Integer] -> [Integer] -> [Integer]
+gfSub :: [Int] -> [Int] -> [Int]
 gfSub = zipWith (-)
 
 -- Carry propagation (handles negative limbs via floor division)
-gfCarry :: [Integer] -> [Integer]
+gfCarry :: [Int] -> [Int]
 gfCarry xs = carryPass (carryPass xs)
 
 -- Single carry pass: propagate through all limbs, wrap top carry via *38
-carryPass :: [Integer] -> [Integer]
+carryPass :: [Int] -> [Int]
 carryPass xs = cpWrap (cpLinear xs 0)
 
 -- Linear carry propagation (no wrapping)
-cpLinear :: [Integer] -> Integer -> ([Integer], Integer)
+cpLinear :: [Int] -> Int -> ([Int], Int)
 cpLinear [] carry = ([], carry)
 cpLinear (x:rest) carry =
     let val = x + carry
@@ -262,13 +262,13 @@ cpLinear (x:rest) carry =
         (rest', finalCarry) -> (lo : rest', finalCarry)
 
 -- Wrap top carry back to limb 0 via *38, then repropagate
-cpWrap :: ([Integer], Integer) -> [Integer]
+cpWrap :: ([Int], Int) -> [Int]
 cpWrap (limbs, topCarry) = case limbs of
     (l0:rest) -> cpRecarry ((l0 + topCarry * 38) : rest) 0
     _ -> limbs
 
 -- Repropagate carries after wrap (most limbs won't need it)
-cpRecarry :: [Integer] -> Integer -> [Integer]
+cpRecarry :: [Int] -> Int -> [Int]
 cpRecarry [] _ = []
 cpRecarry (x:rest) carry =
     let val = x + carry
@@ -277,39 +277,39 @@ cpRecarry (x:rest) carry =
     in lo : cpRecarry rest c
 
 -- Field multiplication: output[o] = sum(a[i]*b[o-i]) + 38*sum(a[i]*b[o+16-i])
-gfMul :: [Integer] -> [Integer] -> [Integer]
+gfMul :: [Int] -> [Int] -> [Int]
 gfMul a b = gfCarry (map (mulLimb a b) [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15])
 
-mulLimb :: [Integer] -> [Integer] -> Integer -> Integer
+mulLimb :: [Int] -> [Int] -> Int -> Int
 mulLimb a b o = mlDirect a b o 0 + 38 * mlWrap a b o (o + 1)
 
-mlDirect :: [Integer] -> [Integer] -> Integer -> Integer -> Integer
+mlDirect :: [Int] -> [Int] -> Int -> Int -> Int
 mlDirect a b o j
   | j > o    = 0
   | j == o   = idx a j * idx b 0
   | otherwise = idx a j * idx b (o - j) + mlDirect a b o (j + 1)
 
-mlWrap :: [Integer] -> [Integer] -> Integer -> Integer -> Integer
+mlWrap :: [Int] -> [Int] -> Int -> Int -> Int
 mlWrap a b o j
   | j > 15   = 0
   | j == 15  = idx a 15 * idx b (o + 1)
   | otherwise = idx a j * idx b (o + 16 - j) + mlWrap a b o (j + 1)
 
 -- Field squaring
-gfSqr :: [Integer] -> [Integer]
+gfSqr :: [Int] -> [Int]
 gfSqr a = gfMul a a
 
 -- Conditional swap (constant-time-ish): if b == 1 swap, else don't
-gfSel :: Integer -> [Integer] -> [Integer] -> [Integer]
+gfSel :: Int -> [Int] -> [Int] -> [Int]
 gfSel 0 p _ = p
 gfSel _ _ q = q
 
 -- Field inversion: a^(p-2) mod p via addition chain
 -- p-2 = 2^255 - 21
-gfInv :: [Integer] -> [Integer]
+gfInv :: [Int] -> [Int]
 gfInv a = gfInvChain a
 
-gfInvChain :: [Integer] -> [Integer]
+gfInvChain :: [Int] -> [Int]
 gfInvChain z =
     let t0 = gfSqr z         -- z^2
         t1 = gfSqr t0        -- z^4
@@ -343,12 +343,12 @@ gfInvChain z =
         t4 = sqrN t3f 5
     in gfMul t4 t0b
 
-sqrN :: [Integer] -> Integer -> [Integer]
+sqrN :: [Int] -> Int -> [Int]
 sqrN x 0 = x
 sqrN x n = sqrN (gfSqr x) (n - 1)
 
 -- z^((p+3)/8) = z^(2^252 - 2) used for sqrt in point decompression
-pow2523 :: [Integer] -> [Integer]
+pow2523 :: [Int] -> [Int]
 pow2523 z =
     let t0 = gfSqr z
         t1 = gfSqr t0
@@ -375,18 +375,18 @@ pow2523 z =
     in gfMul t4 t0
 
 -- p as limbs (2^255 - 19)
-gfP :: [Integer]
+gfP :: [Int]
 gfP = [65517, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 65535, 32767]
 
 -- Try subtracting p; if borrow propagates out the top, keep original
-gfCondSub :: [Integer] -> [Integer]
+gfCondSub :: [Int] -> [Int]
 gfCondSub t =
     let diff = gfSub t gfP
         borrow = gfBorrow diff 0 0
     in if borrow < 0 then t else gfCarry diff
 
 -- Compute the borrow (final carry) from propagating carries through limbs
-gfBorrow :: [Integer] -> Integer -> Integer -> Integer
+gfBorrow :: [Int] -> Int -> Int -> Int
 gfBorrow _ 16 carry = carry
 gfBorrow xs i carry =
     let val = idx xs i + carry
@@ -394,14 +394,14 @@ gfBorrow xs i carry =
     in gfBorrow xs (i + 1) c
 
 -- Pack GF to 32 bytes (little-endian), fully reduced mod p
-gfPack :: [Integer] -> [Integer]
+gfPack :: [Int] -> [Int]
 gfPack a =
     let t0 = gfCarry (gfCarry a)
         t1 = gfCondSub t0
         t2 = gfCondSub t1
     in packLimbs t2
 
-packLimbs :: [Integer] -> [Integer]
+packLimbs :: [Int] -> [Int]
 packLimbs ls = plGo ls 0
   where
     plGo _ 16 = []
@@ -409,7 +409,7 @@ packLimbs ls = plGo ls 0
                 in bandB v 255 : bandB (shrB v 8) 255 : plGo xs (i + 1)
 
 -- Unpack 32 bytes to GF (little-endian, 16-bit limbs)
-gfUnpack :: [Integer] -> [Integer]
+gfUnpack :: [Int] -> [Int]
 gfUnpack bs = guGo 0
   where
     guGo 16 = []
@@ -418,17 +418,17 @@ gfUnpack bs = guGo 0
              in borB lo (shlB hi 8) : guGo (i + 1)
 
 -- Curve constant d = -121665/121666 mod p
-gfD :: [Integer]
+gfD :: [Int]
 gfD = [30883, 4953, 19914, 30187, 55467, 16705, 2637, 112,
        59544, 30585, 16505, 36039, 65139, 11119, 27886, 20995]
 
 -- 2*d
-gfD2 :: [Integer]
+gfD2 :: [Int]
 gfD2 = [61785, 9906, 39828, 60374, 45398, 33411, 5274, 224,
         53552, 61171, 33010, 6542, 64743, 22239, 55772, 9222]
 
 -- sqrt(-1) mod p
-gfI :: [Integer]
+gfI :: [Int]
 gfI = [41136, 18958, 6951, 50414, 58488, 44335, 6150, 12099,
        55207, 15867, 153, 11085, 57099, 20417, 9344, 11139]
 
@@ -437,7 +437,7 @@ gfI = [41136, 18958, 6951, 50414, 58488, 44335, 6150, 12099,
 -- Point = (X, Y, Z, T) where x=X/Z, y=Y/Z, x*y=T/Z
 -- ================================================================
 
-data ExtPoint = ExtPoint [Integer] [Integer] [Integer] [Integer]
+data ExtPoint = ExtPoint [Int] [Int] [Int] [Int]
 
 pointIdentity :: ExtPoint
 pointIdentity = ExtPoint gfZero gfOne gfOne gfZero
@@ -480,7 +480,7 @@ pointNeg :: ExtPoint -> ExtPoint
 pointNeg (ExtPoint x y z t) = ExtPoint (gfSub gfZero x) y z (gfSub gfZero t)
 
 -- Scalar multiplication: double-and-add, scanning bits 254 -> 0
-scalarMult :: [Integer] -> ExtPoint -> ExtPoint
+scalarMult :: [Int] -> ExtPoint -> ExtPoint
 scalarMult scalar p = smGo 254 pointIdentity
   where
     smGo (-1) acc = acc
@@ -539,10 +539,10 @@ pointDecode bs =
     in ExtPoint x2final y gfOne t
 
 -- Check if a field element is zero mod p (fully reduce and check)
-gfIsZero :: [Integer] -> Bool
+gfIsZero :: [Int] -> Bool
 gfIsZero xs = allZero (gfPack xs)
 
-allZero :: [Integer] -> Bool
+allZero :: [Int] -> Bool
 allZero [] = True
 allZero (0:rest) = allZero rest
 allZero _ = False
@@ -553,25 +553,25 @@ allZero _ = False
 -- ================================================================
 
 -- L as bytes (little-endian)
-scL :: [Integer]
+scL :: [Int]
 scL = [237, 211, 245, 92, 26, 99, 18, 88, 214, 156, 247, 162, 222, 249, 222, 20,
        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 16]
 
 -- Reduce 64-byte little-endian integer mod L (TweetNaCl's modL)
-scReduce :: [Integer] -> [Integer]
+scReduce :: [Int] -> [Int]
 scReduce x = take 32 (scFinal1 (scOuter (map (\v -> borB v 0) x) 63))
 
 -- Outer loop: i from 63 down to 32
-scOuter :: [Integer] -> Integer -> [Integer]
+scOuter :: [Int] -> Int -> [Int]
 scOuter xs i
   | i < 32   = xs
   | otherwise = scOuter (scInner xs (idx xs i) (i - 32) 0) (i - 1)
 
 -- Inner loop: j from (i-32) to (i-13), then set x[i]=0
-scInner :: [Integer] -> Integer -> Integer -> Integer -> [Integer]
+scInner :: [Int] -> Int -> Int -> Int -> [Int]
 scInner xs xi base carry = scInnerGo xs xi base carry 0
 
-scInnerGo :: [Integer] -> Integer -> Integer -> Integer -> Integer -> [Integer]
+scInnerGo :: [Int] -> Int -> Int -> Int -> Int -> [Int]
 scInnerGo xs xi base carry 20 =
     let xs1 = listSet xs (base + 20) (borB (idx xs (base + 20) + carry) 0)
     in listSet xs1 (base + 32) 0
@@ -582,12 +582,12 @@ scInnerGo xs xi base carry j =
     in scInnerGo (listSet xs (base + j) lo) xi base (borB c 0) (j + 1)
 
 -- Final reduction pass 1: subtract (x[31]>>4) * L and normalize
-scFinal1 :: [Integer] -> [Integer]
+scFinal1 :: [Int] -> [Int]
 scFinal1 xs =
     let top = borB (idx xs 31) 0 `div` 16
     in scF1Go xs top 0 0
 
-scF1Go :: [Integer] -> Integer -> Integer -> Integer -> [Integer]
+scF1Go :: [Int] -> Int -> Int -> Int -> [Int]
 scF1Go xs _ carry 32 = scF2Go xs carry 0
 scF1Go xs top carry j =
     let v = borB (idx xs j + carry - top * idx scL j) 0
@@ -596,7 +596,7 @@ scF1Go xs top carry j =
     in scF1Go (listSet xs j lo) top c (j + 1)
 
 -- Final reduction pass 2: subtract carry * L
-scF2Go :: [Integer] -> Integer -> Integer -> [Integer]
+scF2Go :: [Int] -> Int -> Int -> [Int]
 scF2Go xs _ 32 = xs
 scF2Go xs carry j =
     let lo = bandB (borB (idx xs j - carry * idx scL j) 0) 255
@@ -604,21 +604,21 @@ scF2Go xs carry j =
 
 -- Scalar multiply-add: (a * b + c) mod L
 -- a, b, c are 32-byte scalars; result is 32 bytes
-scMulAdd :: [Integer] -> [Integer] -> [Integer] -> [Integer]
+scMulAdd :: [Int] -> [Int] -> [Int] -> [Int]
 scMulAdd a b c = scReduce (smaOuter (smaAddC (replicate 64 0) c 0) a b 0)
 
 -- Add c bytes into accumulator
-smaAddC :: [Integer] -> [Integer] -> Integer -> [Integer]
+smaAddC :: [Int] -> [Int] -> Int -> [Int]
 smaAddC acc [] _ = acc
 smaAddC acc (y:ys) i = smaAddC (listSet acc i (borB (idx acc i + y) 0)) ys (i + 1)
 
 -- Outer loop over a's bytes
-smaOuter :: [Integer] -> [Integer] -> [Integer] -> Integer -> [Integer]
+smaOuter :: [Int] -> [Int] -> [Int] -> Int -> [Int]
 smaOuter acc _ _ 32 = acc
 smaOuter acc a b i = smaOuter (smaInner acc (idx a i) b i 0) a b (i + 1)
 
 -- Inner loop: accumulate a[i] * b[j] at position i+j
-smaInner :: [Integer] -> Integer -> [Integer] -> Integer -> Integer -> [Integer]
+smaInner :: [Int] -> Int -> [Int] -> Int -> Int -> [Int]
 smaInner acc _ _ _ 32 = acc
 smaInner acc ai b i j =
     let v = borB (idx acc (i + j) + ai * idx b j) 0
@@ -629,7 +629,7 @@ smaInner acc ai b i j =
 -- ================================================================
 
 -- Clamp a 32-byte scalar per Ed25519 rules
-clampScalar :: [Integer] -> [Integer]
+clampScalar :: [Int] -> [Int]
 clampScalar s =
     let s1 = listSet s 0 (bandB (idx s 0) 248)
         s2 = listSet s1 31 (borB (bandB (idx s1 31) 127) 64)

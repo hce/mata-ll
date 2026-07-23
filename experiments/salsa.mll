@@ -4,44 +4,44 @@
 import Data.List (drop, replicate, take)
 
 -- Bitwise FFI
-xorB :: Integer -> Integer -> LuaPure "__mll_bxor" Integer
-bandB :: Integer -> Integer -> LuaPure "__mll_band" Integer
-borB :: Integer -> Integer -> LuaPure "__mll_bor" Integer
-shlB :: Integer -> Integer -> LuaPure "__mll_shl" Integer
-shrB :: Integer -> Integer -> LuaPure "__mll_shr" Integer
+xorB :: Int -> Int -> LuaPure "__mll_bxor" Int
+bandB :: Int -> Int -> LuaPure "__mll_band" Int
+borB :: Int -> Int -> LuaPure "__mll_bor" Int
+shlB :: Int -> Int -> LuaPure "__mll_shl" Int
+shrB :: Int -> Int -> LuaPure "__mll_shr" Int
 
 -- String FFI
-strByte :: String -> Integer -> LuaPure "string.byte" Integer
-strLen :: String -> LuaPure "string.len" Integer
-strChar :: Integer -> LuaPure "string.char" String
+strByte :: String -> Int -> LuaPure "string.byte" Int
+strLen :: String -> LuaPure "string.len" Int
+strChar :: Int -> LuaPure "string.char" String
 
 -- 32-bit mask
-u32 :: Integer -> Integer
+u32 :: Int -> Int
 u32 x = bandB x 4294967295
 
 -- Addition mod 2^32
-add32 :: Integer -> Integer -> Integer
+add32 :: Int -> Int -> Int
 add32 a b = bandB (a + b) 4294967295
 
 -- Rotate left (32-bit)
-rotL :: Integer -> Integer -> Integer
+rotL :: Int -> Int -> Int
 rotL x n = let m = u32 x in bandB (borB (shlB m n) (shrB m (32 - n))) 4294967295
 
 -- List index (manual, since !! is not built-in)
-idx :: [Integer] -> Integer -> Integer
+idx :: [Int] -> Int -> Int
 idx (x:_)  0 = x
 idx (_:xs) n = idx xs (n - 1)
 idx _      _ = 0
 
 -- List update: set element at index i to value v
-listSet :: [Integer] -> Integer -> Integer -> [Integer]
+listSet :: [Int] -> Int -> Int -> [Int]
 listSet (_:xs) 0 v = v : xs
 listSet (x:xs) n v = x : listSet xs (n - 1) v
 listSet xs     _ _ = xs
 
 -- Quarter round: Salsa20 column/row operation
 -- qr(a, b, c, d) modifies state at indices a, b, c, d
-quarterRound :: [Integer] -> Integer -> Integer -> Integer -> Integer -> [Integer]
+quarterRound :: [Int] -> Int -> Int -> Int -> Int -> [Int]
 quarterRound s a b c d = s4
   where
     sa = idx s a
@@ -58,7 +58,7 @@ quarterRound s a b c d = s4
     s4 = listSet s3 d sd'
 
 -- Column round: apply quarter rounds to columns
-columnRound :: [Integer] -> [Integer]
+columnRound :: [Int] -> [Int]
 columnRound s = s4
   where
     s1 = quarterRound s  0 4 8  12
@@ -67,7 +67,7 @@ columnRound s = s4
     s4 = quarterRound s3 15 3 7 11
 
 -- Row round: apply quarter rounds to rows
-rowRound :: [Integer] -> [Integer]
+rowRound :: [Int] -> [Int]
 rowRound s = s4
   where
     s1 = quarterRound s  0 1 2  3
@@ -76,24 +76,24 @@ rowRound s = s4
     s4 = quarterRound s3 15 12 13 14
 
 -- Double round = column round then row round
-doubleRound :: [Integer] -> [Integer]
+doubleRound :: [Int] -> [Int]
 doubleRound = rowRound . columnRound
 
 -- Apply n double rounds
-applyRounds :: Integer -> [Integer] -> [Integer]
+applyRounds :: Int -> [Int] -> [Int]
 applyRounds 0 s = s
 applyRounds n s = applyRounds (n - 1) (doubleRound s)
 
 -- Salsa20 core: 20 rounds (10 double rounds), then add original state
-salsa20Core :: [Integer] -> [Integer]
+salsa20Core :: [Int] -> [Int]
 salsa20Core input = zipWith add32 input (applyRounds 10 input)
 
 -- Little-endian: 4 bytes -> 32-bit word
-littleEndian :: Integer -> Integer -> Integer -> Integer -> Integer
+littleEndian :: Int -> Int -> Int -> Int -> Int
 littleEndian b0 b1 b2 b3 = borB (borB b0 (shlB b1 8)) (borB (shlB b2 16) (shlB b3 24))
 
 -- Load 16 little-endian words from 64 bytes
-loadWords :: [Integer] -> [Integer]
+loadWords :: [Int] -> [Int]
 loadWords bs = lwGo bs 0
   where
     lwGo _ 16 = []
@@ -101,46 +101,46 @@ loadWords bs = lwGo bs 0
     lwGo _ _ = []
 
 -- Store 32-bit word as 4 little-endian bytes
-storeWord :: Integer -> [Integer]
+storeWord :: Int -> [Int]
 storeWord w = [bandB w 255, bandB (shrB w 8) 255, bandB (shrB w 16) 255, bandB (shrB w 24) 255]
 
 -- Store 16 words as 64 bytes
-storeWords :: [Integer] -> [Integer]
+storeWords :: [Int] -> [Int]
 storeWords [] = []
 storeWords (w:ws) = storeWord w ++ storeWords ws
 
 -- Salsa20 hash: 64 bytes -> 64 bytes
-salsa20Hash :: [Integer] -> [Integer]
+salsa20Hash :: [Int] -> [Int]
 salsa20Hash input = storeWords (salsa20Core (loadWords input))
 
 -- "expand 32-byte k" constants (sigma)
-sigma0 :: Integer
+sigma0 :: Int
 sigma0 = littleEndian 101 120 112 97    -- "expa"
 
-sigma1 :: Integer
+sigma1 :: Int
 sigma1 = littleEndian 110 100 32 51     -- "nd 3"
 
-sigma2 :: Integer
+sigma2 :: Int
 sigma2 = littleEndian 50 45 98 121      -- "2-by"
 
-sigma3 :: Integer
+sigma3 :: Int
 sigma3 = littleEndian 116 101 32 107    -- "te k"
 
 -- "expand 16-byte k" constants (tau)
-tau0 :: Integer
+tau0 :: Int
 tau0 = littleEndian 101 120 112 97      -- "expa"
 
-tau1 :: Integer
+tau1 :: Int
 tau1 = littleEndian 110 100 32 49       -- "nd 1"
 
-tau2 :: Integer
+tau2 :: Int
 tau2 = littleEndian 54 45 98 121        -- "6-by"
 
-tau3 :: Integer
+tau3 :: Int
 tau3 = littleEndian 116 101 32 107      -- "te k"
 
 -- Load 4 little-endian words from 4 consecutive groups of 4 bytes
-load4Words :: [Integer] -> [Integer]
+load4Words :: [Int] -> [Int]
 load4Words (a:b:c:d:e:f:g:h:i:j:k:l:m:n:o:p:_) =
     [littleEndian a b c d, littleEndian e f g h,
      littleEndian i j k l, littleEndian m n o p]
@@ -148,7 +148,7 @@ load4Words _ = [0, 0, 0, 0]
 
 -- Salsa20 expansion for 32-byte key
 -- key: 32 bytes, nonce: 16 bytes (8-byte nonce + 8-byte counter)
-salsa20Expand32 :: [Integer] -> [Integer] -> [Integer]
+salsa20Expand32 :: [Int] -> [Int] -> [Int]
 salsa20Expand32 key nonce = salsa20Core state
   where
     k0 = load4Words (take 16 key)
@@ -160,7 +160,7 @@ salsa20Expand32 key nonce = salsa20Core state
              idx k1 1, idx k1 2, idx k1 3, sigma3]
 
 -- Salsa20 expansion for 16-byte key
-salsa20Expand16 :: [Integer] -> [Integer] -> [Integer]
+salsa20Expand16 :: [Int] -> [Int] -> [Int]
 salsa20Expand16 key nonce = salsa20Core state
   where
     k = load4Words key
@@ -171,7 +171,7 @@ salsa20Expand16 key nonce = salsa20Core state
              idx k 1, idx k 2, idx k 3, tau3]
 
 -- Increment 64-bit little-endian counter in nonce bytes (bytes 8-15)
-incCounter :: [Integer] -> [Integer]
+incCounter :: [Int] -> [Int]
 incCounter nonce = take 8 nonce ++ incLE (drop 8 nonce)
   where
     incLE [] = []
@@ -180,7 +180,7 @@ incCounter nonce = take 8 nonce ++ incLE (drop 8 nonce)
       | otherwise = (b + 1) : bs
 
 -- Generate keystream: 64 bytes at a time
-salsa20Keystream :: [Integer] -> [Integer] -> Integer -> [Integer]
+salsa20Keystream :: [Int] -> [Int] -> Int -> [Int]
 salsa20Keystream key nonce 0 = []
 salsa20Keystream key nonce n = take n' block ++ salsa20Keystream key (incCounter nonce) (n - n')
   where
@@ -188,31 +188,31 @@ salsa20Keystream key nonce n = take n' block ++ salsa20Keystream key (incCounter
     n' = if n > 64 then 64 else n
 
 -- Encrypt/decrypt (XOR with keystream)
-salsa20Crypt :: [Integer] -> [Integer] -> [Integer] -> [Integer]
+salsa20Crypt :: [Int] -> [Int] -> [Int] -> [Int]
 salsa20Crypt key nonce msg = zipWith xorB msg (salsa20Keystream key nonce (length msg))
 
 -- ========== Hex utilities ==========
 
-hexNibble :: Integer -> Integer
+hexNibble :: Int -> Int
 hexNibble n
   | n < 10    = n + 48
   | otherwise = n + 87
 
-hexByte :: Integer -> String
+hexByte :: Int -> String
 hexByte b = strChar (hexNibble (shrB b 4)) <> strChar (hexNibble (bandB b 15))
 
-bytesToHex :: [Integer] -> String
+bytesToHex :: [Int] -> String
 bytesToHex [] = ""
 bytesToHex (b:bs) = hexByte b <> bytesToHex bs
 
-hexVal :: Integer -> Integer
+hexVal :: Int -> Int
 hexVal c
   | c >= 48 && c <= 57  = c - 48
   | c >= 97 && c <= 102 = c - 87
   | c >= 65 && c <= 70  = c - 55
   | otherwise            = 0
 
-hexToBytes :: String -> [Integer]
+hexToBytes :: String -> [Int]
 hexToBytes s = hexGo 1
   where
     len = strLen s
@@ -220,7 +220,7 @@ hexToBytes s = hexGo 1
       | i + 1 > len = []
       | otherwise    = borB (shlB (hexVal (strByte s i)) 4) (hexVal (strByte s (i + 1))) : hexGo (i + 2)
 
-wordsToHex :: [Integer] -> String
+wordsToHex :: [Int] -> String
 wordsToHex [] = ""
 wordsToHex (w:ws) = bytesToHex (storeWord w) <> wordsToHex ws
 

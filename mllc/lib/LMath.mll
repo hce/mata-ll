@@ -3,8 +3,8 @@
 -- Constants
 pi :: LuaPure "math.pi" Number
 huge :: LuaPure "math.huge" Number
-maxinteger :: LuaPure "math.maxinteger" Integer
-mininteger :: LuaPure "math.mininteger" Integer
+maxinteger :: LuaPure "math.maxinteger" Int
+mininteger :: LuaPure "math.mininteger" Int
 
 -- Trigonometric
 sin :: Number -> LuaPure "math.sin" Number
@@ -22,20 +22,20 @@ logBase :: Number -> Number -> LuaPure "math.log" Number
 sqrt :: Number -> LuaPure "math.sqrt" Number
 
 -- Multi-return (packed into tuples)
-frexp :: Number -> LuaPure "math.frexp" (Number, Integer)
+frexp :: Number -> LuaPure "math.frexp" (Number, Int)
 modf :: Number -> LuaPure "math.modf" (Number, Number)
 
 -- Rounding / remainder
 abs :: Number -> LuaPure "math.abs" Number
-ceil :: Number -> LuaPure "math.ceil" Integer
-floor :: Number -> LuaPure "math.floor" Integer
+ceil :: Number -> LuaPure "math.ceil" Int
+floor :: Number -> LuaPure "math.floor" Int
 fmod :: Number -> Number -> LuaPure "math.fmod" Number
 
--- Integer
-tointeger :: Number -> LuaPure "math.tointeger" Integer
-ult :: Integer -> Integer -> LuaPure "math.ult" Bool
+-- Int
+tointeger :: Number -> LuaPure "math.tointeger" Int
+ult :: Int -> Int -> LuaPure "math.ult" Bool
 
 -- Random (effectful)
 random :: LuaIO "math.random" Number
-randomInt :: Integer -> Integer -> LuaIO "math.random" Integer
-randomseed :: Integer -> LuaIO "math.randomseed" ()
+randomInt :: Int -> Int -> LuaIO "math.random" Int
+randomseed :: Int -> LuaIO "math.randomseed" ()

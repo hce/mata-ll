@@ -1,7 +1,7 @@
 -- GHC cgrun015: Guards and where clauses
 -- Tests guard expressions with local bindings
 
-classify :: Integer -> String
+classify :: Int -> String
 classify n
     | n < 0     = "negative"
     | n == 0    = "zero"

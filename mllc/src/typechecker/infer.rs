@@ -213,12 +213,14 @@ impl Checker {
             }).collect();
             self.fn_dict_constraints.insert(name.to_string(), renamed);
         }
-        // ---- Numeric defaulting (Haskell 2010 / GHC `default (Integer, Double)`) ----
+        // ---- Numeric defaulting (mata-ll's `default (Int, Number)`; GHC's
+        // Haskell-2010 rule is `default (Integer, Double)`, but mata-ll has no
+        // Integer, so `Int` is the first candidate) ----
         // Resolve type variables that appear ONLY in the wanted constraints of
         // this binding (never in its signature type) and are constrained solely
         // by standard classes including at least one numeric class. Without this,
         // an in-expression literal like `show 5` would be reported ambiguous.
-        // The chosen default (Integer first, then Number for Double) is folded
+        // The chosen default (Int first, then Number for Double) is folded
         // into `overall_subst` BEFORE it is applied to the TIR clauses, so the
         // literal nodes carry the concrete type codegen ultimately emits.
         {
@@ -368,7 +370,7 @@ impl Checker {
     /// `C (f v)`), every such class is a *standard* class, at least one is a
     /// numeric class, and the variable does NOT appear in this binding's own
     /// (signature) type — i.e. it is ambiguous, resolvable only by defaulting.
-    /// For each candidate the default types are tried in order — `Integer`,
+    /// For each candidate the default types are tried in order — `Int`,
     /// then `Number` (GHC's `Double`) — and the first that satisfies every
     /// constraint on the variable is chosen. Returns the substitution to fold
     /// into `overall_subst`.
@@ -425,7 +427,7 @@ impl Checker {
             if !info.classes.iter().any(|c| Self::is_numeric_class(c)) { continue; }
             // Try the default types in order; pick the first for which EVERY
             // original constraint on the variable has an instance.
-            for cand in &["Integer", "Number"] {
+            for cand in &["Int", "Number"] {
                 let ct = Ty::Con((*cand).to_string());
                 let sub = Subst::singleton(v.clone(), ct);
                 if info.full.iter().all(|(class, fty)| self.has_instance(class, &fty.apply_subst(&sub))) {
@@ -976,8 +978,8 @@ impl Checker {
                 // `Fractional a => a` (via `fromRational`). We give the literal a
                 // fresh type variable and emit the corresponding wanted; the
                 // variable is later unified with the surrounding concrete type,
-                // or resolved by defaulting (Integer, then Number) if it stays
-                // free. The TIR keeps the raw literal — at a concrete Integer or
+                // or resolved by defaulting (Int, then Number) if it stays
+                // free. The TIR keeps the raw literal — at a concrete Int or
                 // Number type `fromInteger`/`fromRational` is the identity and is
                 // erased in codegen; only a user Num type materialises the call
                 // (see the monomorphizer's Lit handling).
@@ -1245,7 +1247,7 @@ impl Checker {
             Expr::Ascription(inner, declared_ty) => {
                 // The ascribed type is user-written type syntax like any
                 // signature: it must be a well-kinded complete type
-                // (`x :: Maybe` or `xs :: [] Integer Integer` is a kind
+                // (`x :: Maybe` or `xs :: [] Int Int` is a kind
                 // error, not a unification puzzle).
                 self.check_type_kind(declared_ty, "a type ascription");
                 let expected = self.ast_type_to_ty(declared_ty);

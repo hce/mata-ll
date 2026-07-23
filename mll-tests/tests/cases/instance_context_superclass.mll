@@ -3,7 +3,7 @@
 -- variable: the declared `MyOrd a` context must provide it (class_satisfies
 -- via the superclass edge). Also exercises: an instance whose superclass
 -- instance (MyEq (Box a)) is itself context-constrained, and instance
--- registration being order-independent (MyEq Integer is declared after the
+-- registration being order-independent (MyEq Int is declared after the
 -- Box instances that need it).
 class MyEq a where
     myeq :: a -> a -> Bool
@@ -19,10 +19,10 @@ instance MyEq a => MyEq (Box a) where
 instance MyOrd a => MyOrd (Box a) where
     mylt (Box x) (Box y) = if myeq x y then False else mylt x y
 
-instance MyEq Integer where
+instance MyEq Int where
     myeq x y = x == y
 
-instance MyOrd Integer where
+instance MyOrd Int where
     mylt x y = x < y
 
 main :: IO ()
@@ -30,6 +30,6 @@ main = do
     -- `MyOrd`/`MyEq` are user classes, so a `Box` of an integer literal is
     -- `(MyOrd a, Num a) => Box a` etc. — ambiguous under GHC defaulting. Pin the
     -- element type on one operand (the other unifies to it).
-    assert (mylt (Box (1 :: Integer)) (Box 2)) "context method via superclass"
-    assert (not (mylt (Box (2 :: Integer)) (Box 2))) "superclass method in MyOrd body"
-    assert (myeq (Box (3 :: Integer)) (Box 3)) "context-constrained superclass instance"
+    assert (mylt (Box (1 :: Int)) (Box 2)) "context method via superclass"
+    assert (not (mylt (Box (2 :: Int)) (Box 2))) "superclass method in MyOrd body"
+    assert (myeq (Box (3 :: Int)) (Box 3)) "context-constrained superclass instance"

@@ -31,11 +31,11 @@
 import LBit (xor, band, bor, bnot, shiftL, shiftR)
 
 -- 2^63 - 1, the largest positive 64-bit signed integer.
-maxI63 :: Integer
+maxI63 :: Int
 maxI63 = 9223372036854775807
 
 -- -2^63, the most-negative 64-bit signed integer (= 1 << 63 as a bit pattern).
-minI63 :: Integer
+minI63 :: Int
 minI63 = 0 - 9223372036854775807 - 1
 
 main :: IO ()

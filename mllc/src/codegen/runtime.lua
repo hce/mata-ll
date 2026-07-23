@@ -319,7 +319,7 @@ local function __mll_ffi_decode(desc, v, root, dir)
                     "the map is declared with String keys but this key is a " .. kt ..
                     " (e.g. a plain array); return a string-keyed table from the Lua host, " ..
                     "or declare the field as a list", dir)
-            elseif (desc.kt == "Integer" or desc.kt == "Number" or desc.kt == "Double") and kt ~= "number" then
+            elseif (desc.kt == "Int" or desc.kt == "Number" or desc.kt == "Double") and kt ~= "number" then
                 __mll_ffi_mismatch(desc, key, root,
                     "the map is declared with numeric keys but this key is a " .. kt, dir)
             end
@@ -976,7 +976,7 @@ do
     end
 end
 
--- Integer-position number show. On Lua 5.3+ an Integer value is a native
+-- Int-position number show. On Lua 5.3+ an Int value is a native
 -- integer and tostring is exact; a whole float (LuaJIT has only doubles)
 -- prints via %.0f so large magnitudes never fall into e-notation.
 local function __mll_show_integer(x)
@@ -996,9 +996,9 @@ local function liftIO(action) return action end
 local function show(x)
     x = __force(x)
     if type(x) == "number" then
-        -- Type-erased dispatch: a native integer (Lua 5.3+) is an Integer,
+        -- Type-erased dispatch: a native integer (Lua 5.3+) is an Int,
         -- a float a Double. On LuaJIT (doubles only) a whole number prints
-        -- integer-style — the erased path cannot distinguish 1 :: Integer
+        -- integer-style — the erased path cannot distinguish 1 :: Int
         -- from 1.0 :: Double there; the type-directed show_Number path can
         -- and does.
         if math.type ~= nil then
@@ -1058,7 +1058,7 @@ local function return_(x) return function() return x end end
 -- `Nothing` stays nil.
 local function Just(x) return setmetatable({x}, __just_mt) end
 local Nothing = nil
-local function show_Integer(x) return __mll_show_integer(__force(x)) end
+local function show_Int(x) return __mll_show_integer(__force(x)) end
 -- Type-directed Double show: a Number-typed value may be held as a native
 -- integer (integer-valued arithmetic on Lua 5.3+, every LuaJIT number), so
 -- the double formatter is called unconditionally — GHC shows 3 :: Double
@@ -1071,7 +1071,7 @@ local function show_Maybe(x) return show(x) end
 -- Unit's runtime rep is nil (same as Nothing/[]), so the type-erased generic
 -- `show` cannot render it; the Show () instance dispatches here type-directedly.
 local function show_Unit(x) return "()" end
-local function eq_Integer(a, b) a = __force(a); b = __force(b); return a == b end
+local function eq_Int(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Number(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_String(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Bool(a, b) a = __force(a); b = __force(b); return a == b end
@@ -1084,16 +1084,16 @@ local function ord_le__Unit(a, b) return true end
 local function ord_ge__Unit(a, b) return true end
 local function ord_compare__Unit(a, b) return 2 end
 local function __mll_eq(a, b) a = __force(a); b = __force(b); return a == b end
-local function ord_lt__Integer(a, b) a = __force(a); b = __force(b); return a < b end
+local function ord_lt__Int(a, b) a = __force(a); b = __force(b); return a < b end
 local function ord_lt__Number(a, b) a = __force(a); b = __force(b); return a < b end
 local function ord_lt__String(a, b) a = __force(a); b = __force(b); return a < b end
-local function ord_gt__Integer(a, b) a = __force(a); b = __force(b); return a > b end
+local function ord_gt__Int(a, b) a = __force(a); b = __force(b); return a > b end
 local function ord_gt__Number(a, b) a = __force(a); b = __force(b); return a > b end
 local function ord_gt__String(a, b) a = __force(a); b = __force(b); return a > b end
-local function ord_le__Integer(a, b) a = __force(a); b = __force(b); return a <= b end
+local function ord_le__Int(a, b) a = __force(a); b = __force(b); return a <= b end
 local function ord_le__Number(a, b) a = __force(a); b = __force(b); return a <= b end
 local function ord_le__String(a, b) a = __force(a); b = __force(b); return a <= b end
-local function ord_ge__Integer(a, b) a = __force(a); b = __force(b); return a >= b end
+local function ord_ge__Int(a, b) a = __force(a); b = __force(b); return a >= b end
 local function ord_ge__Number(a, b) a = __force(a); b = __force(b); return a >= b end
 local function ord_ge__String(a, b) a = __force(a); b = __force(b); return a >= b end
 -- ByteString is a Lua string; `<` is byte-lexicographic, same as String.
@@ -1102,7 +1102,7 @@ local function ord_gt__ByteString(a, b) a = __force(a); b = __force(b); return a
 local function ord_le__ByteString(a, b) a = __force(a); b = __force(b); return a <= b end
 local function ord_ge__ByteString(a, b) a = __force(a); b = __force(b); return a >= b end
 -- compare returns the Ordering enum: LT=1, EQ=2, GT=3 (constructor index)
-local function ord_compare__Integer(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
+local function ord_compare__Int(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function ord_compare__Number(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function ord_compare__String(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function ord_compare__ByteString(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
@@ -1111,20 +1111,19 @@ local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .
 -- OPERATORS (+ - * / div mod quot rem) never reach these — they inline to Lua
 -- operators / the strict div/mod/quot/rem cores. Only the NAMED methods land
 -- here, and only when a program references them (tree-shaken like every other
--- helper). fromInteger/fromRational/toInteger are the identity at Integer/Number
+-- helper). fromInteger/fromRational are the identity at Int/Number
 -- (the representations coincide); a user Num type supplies its own via its
 -- instance, so these built-in ones are pure passthroughs.
-local function negate_Integer(x) return -__force(x) end
+local function negate_Int(x) return -__force(x) end
 local function negate_Number(x) return -__force(x) end
-local function abs_Integer(x) x = __force(x); if x < 0 then return -x else return x end end
+local function abs_Int(x) x = __force(x); if x < 0 then return -x else return x end end
 local function abs_Number(x) x = __force(x); if x < 0 then return -x else return x end end
-local function signum_Integer(x) x = __force(x); if x < 0 then return -1 elseif x > 0 then return 1 else return 0 end end
+local function signum_Int(x) x = __force(x); if x < 0 then return -1 elseif x > 0 then return 1 else return 0 end end
 local function signum_Number(x) x = __force(x); if x < 0 then return -1.0 elseif x > 0 then return 1.0 else return 0.0 end end
-local function fromInteger_Integer(x) return __force(x) end
+local function fromInteger_Int(x) return __force(x) end
 local function fromInteger_Number(x) return __force(x) end
 local function recip_Number(x) return 1.0 / __force(x) end
 local function fromRational_Number(x) return __force(x) end
-local function toInteger_Integer(x) return __force(x) end
 -- head forces the element (a value-consumer under the head-consumption
 -- contract): it RETURNS the head as its result, and the WHNF-return invariant
 -- says a function may never return a raw thunk — the caller's one-level
@@ -1445,12 +1444,12 @@ else
     end
 end
 
--- Integer division and modulo (Haskell `div`/`mod`: FLOOR semantics — the
+-- Int division and modulo (Haskell `div`/`mod`: FLOOR semantics — the
 -- quotient rounds toward negative infinity, the remainder takes the sign of
 -- the divisor; the constant folder in fold.rs mirrors exactly this). A zero
 -- divisor raises on every host: mathematically there is no result, and the
 -- old float path (`math.floor(a/0)`) returned `inf` — a float silently
--- flowing on as if it were an Integer. On Lua 5.3+ the native integer floor
+-- flowing on as if it were an Int. On Lua 5.3+ the native integer floor
 -- division `//` is exact over the full 64-bit range; on LuaJIT / Lua 5.1-5.2
 -- every number is an IEEE-754 double, so math.floor(a/b) is the best those
 -- hosts can do and quotients are exact only while the operands fit in 2^53
@@ -1508,8 +1507,8 @@ local function __mll_rem_fn(a, b) return __mll_rem(__force(a), __force(b)) end
 -- Integral quotRem/divMod: both quotient and remainder as a pair (a 2-tuple is
 -- a Lua `{q, r}` table). Defined here, after __mll_quot/__mll_rem/__mll_div/
 -- __mll_mod, since they call those strict cores.
-local function quotRem_Integer(a, b) a = __force(a); b = __force(b); return { __mll_quot(a, b), __mll_rem(a, b) } end
-local function divMod_Integer(a, b) a = __force(a); b = __force(b); return { __mll_div(a, b), __mll_mod(a, b) } end
+local function quotRem_Int(a, b) a = __force(a); b = __force(b); return { __mll_quot(a, b), __mll_rem(a, b) } end
+local function divMod_Int(a, b) a = __force(a); b = __force(b); return { __mll_div(a, b), __mll_mod(a, b) } end
 
 -- Number subtype probe (Lua 5.3+ native math.type, else a portable fallback).
 -- LuaJIT and Lua 5.1/5.2 have no integer subtype: every number is an IEEE-754

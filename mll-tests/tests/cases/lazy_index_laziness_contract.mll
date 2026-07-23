@@ -5,16 +5,16 @@
 -- the selected element, not every head it walks past. A spurious force is
 -- observable: `error "boom: ..."` fires and the run fails with that message.
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
-boom :: Integer
+boom :: Int
 boom = error "boom: unconsumed element was forced"
 
 -- The stdlib has no `repeat` (and `repeat` is a Lua keyword anyway); a
 -- user-level equivalent exercises the same shape: an infinite list whose
 -- every head is the same value.
-repeatI :: Integer -> [Integer]
+repeatI :: Int -> [Int]
 repeatI x = x : repeatI x
 
 main :: IO ()

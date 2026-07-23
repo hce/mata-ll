@@ -2,9 +2,9 @@
 -- this type are desugared through the instance's `fromInteger`, and the
 -- operators dispatch to the instance methods (NOT the built-in Lua operators).
 
-newtype Z5 = Z5 Integer
+newtype Z5 = Z5 Int
 
-unZ5 :: Z5 -> Integer
+unZ5 :: Z5 -> Int
 unZ5 (Z5 n) = n
 
 instance Num Z5 where
@@ -36,6 +36,6 @@ main = do
     assert (unZ5 (1 - 3 :: Z5) == 3) "user (-) wraps"
     -- Polymorphic Num code specialised at the user type.
     assert (unZ5 (triple (4 :: Z5)) == 2) "polymorphic triple at Z5"
-    -- Same polymorphic function at Integer keeps native arithmetic.
-    assert (triple (4 :: Integer) == 12) "polymorphic triple at Integer"
+    -- Same polymorphic function at Int keeps native arithmetic.
+    assert (triple (4 :: Int) == 12) "polymorphic triple at Int"
     putStrLn "num_user_instance ok"

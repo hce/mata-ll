@@ -61,8 +61,8 @@ tokenize s = go 1
       in if c2 == 61 then TOp ">=" : go (i + 2)
          else TOp ">" : go (i + 1)
 
-isDigit :: Integer -> Bool
+isDigit :: Int -> Bool
 isDigit c = c >= 48 && c <= 57
 
-isAlpha :: Integer -> Bool
+isAlpha :: Int -> Bool
 isAlpha c = (c >= 65 && c <= 90) || (c >= 97 && c <= 122)

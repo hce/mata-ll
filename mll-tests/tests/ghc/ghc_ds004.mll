@@ -1,25 +1,25 @@
 -- GHC ds004: Where clause scoping
 -- Tests that where bindings have correct scoping
 
-f :: Integer -> Integer
+f :: Int -> Int
 f x = a + b
   where
     a = x * 2
     b = 1
 
-g :: Integer -> Integer -> Integer
+g :: Int -> Int -> Int
 g x y = p + q
   where
     p = x * x
     q = y * y
 
 -- Recursive list sum
-h :: [Integer] -> Integer
+h :: [Int] -> Int
 h [] = 0
 h (x:xs) = x + h xs
 
 -- Where with helper function
-nested :: Integer -> Integer
+nested :: Int -> Int
 nested x = inner (x + offset)
   where
     offset = 10

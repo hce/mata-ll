@@ -3,13 +3,13 @@
 
 import LString (strLen)
 
-clockRaw :: Integer -> LuaIO "os.clock" Number
+clockRaw :: Int -> LuaIO "os.clock" Number
 
 clock :: IO Number
 clock = clockRaw 0
 
 -- Arithmetic-heavy: sum 1 to n
-sumTo :: Integer -> Integer
+sumTo :: Int -> Int
 sumTo n = go 0 0
     where
         go acc i
@@ -17,23 +17,23 @@ sumTo n = go 0 0
             | otherwise = go (acc + i) (i + 1)
 
 -- List creation: build a list of n elements
-buildList :: Integer -> [Integer]
+buildList :: Int -> [Int]
 buildList n = go n []
     where
         go 0 acc = acc
         go i acc = go (i - 1) (i : acc)
 
 -- List traversal: sum all elements
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList [] = 0
 sumList (x:xs) = x + sumList xs
 
 -- Map + filter + fold pipeline
-pipeline :: [Integer] -> Integer
+pipeline :: [Int] -> Int
 pipeline xs = foldl (+) 0 (filter (\x -> x > 50) (map (*2) xs))
 
 -- Recursive fibonacci (exponential, stress test)
-fib :: Integer -> Integer
+fib :: Int -> Int
 fib 0 = 0
 fib 1 = 1
 fib n = fib (n - 1) + fib (n - 2)
@@ -41,12 +41,12 @@ fib n = fib (n - 1) + fib (n - 2)
 -- Pattern matching heavy: classify many values
 data Color = Red | Green | Blue
 
-colorVal :: Color -> Integer
+colorVal :: Color -> Int
 colorVal Red = 1
 colorVal Green = 2
 colorVal Blue = 3
 
-colorBench :: Integer -> Integer
+colorBench :: Int -> Int
 colorBench n = go 0 0
     where
         go acc i
@@ -54,7 +54,7 @@ colorBench n = go 0 0
             | otherwise = go (acc + colorVal Red + colorVal Green + colorVal Blue) (i + 1)
 
 -- String concatenation
-buildString :: Integer -> String
+buildString :: Int -> String
 buildString 0 = ""
 buildString n = "x" <> buildString (n - 1)
 
@@ -62,7 +62,7 @@ buildString n = "x" <> buildString (n - 1)
 -- `seq` forces the accumulator to WHNF each step, so the strict result is
 -- built incrementally instead of as a million-deep thunk chain (which would
 -- overflow the stack when finally forced).
-applyN :: Integer -> (a -> a) -> a -> a
+applyN :: Int -> (a -> a) -> a -> a
 applyN 0 _ x = x
 applyN n f x = seq x (applyN (n - 1) f (f x))
 

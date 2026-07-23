@@ -10,13 +10,13 @@
 import JSON
 
 -- Single-constructor record: encodes to an object keyed by field name.
-data Person = Person { name :: String, age :: Integer }
+data Person = Person { name :: String, age :: Int }
     deriving (Eq, ToJSON, FromJSON)
 
 -- Multi-constructor sum: record constructor (fields inline next to the tag),
 -- positional constructor (arguments under "contents"), nullary constructor
 -- (bare string).
-data Shape = Circle { radius :: Number } | Rect Integer Integer | Point0
+data Shape = Circle { radius :: Number } | Rect Int Int | Point0
     deriving (Eq, ToJSON, FromJSON)
 
 -- All-nullary sum: encodes to bare constructor-name strings.
@@ -25,14 +25,14 @@ data Color = RedC | GreenC | BlueC
 
 -- Single positional constructors: one argument is the value itself,
 -- several are an array.
-data Wrap = Wrap Integer
+data Wrap = Wrap Int
     deriving (Eq, ToJSON, FromJSON)
 
-data Pair2 = Pair2 Integer String
+data Pair2 = Pair2 Int String
     deriving (Eq, ToJSON, FromJSON)
 
 -- Single positional Maybe: Nothing <-> null at the top level.
-data OptW = OptW (Maybe Integer)
+data OptW = OptW (Maybe Int)
     deriving (Eq, ToJSON, FromJSON)
 
 -- Lone nullary constructor: the constructor name is the payload.
@@ -44,10 +44,10 @@ data Team = Team { leader :: Person, members :: [Person], motto :: Maybe String 
     deriving (Eq, ToJSON, FromJSON)
 
 -- Recursive types.
-data JTree = JLeaf Integer | JNode [JTree]
+data JTree = JLeaf Int | JNode [JTree]
     deriving (Eq, ToJSON, FromJSON)
 
-data LL = LNil | LCons Integer LL
+data LL = LNil | LCons Int LL
     deriving (Eq, ToJSON, FromJSON)
 
 -- Mutual recursion: Fwd's encoder references Back's, declared later
@@ -55,7 +55,7 @@ data LL = LNil | LCons Integer LL
 data Fwd = Fwd { fb :: Maybe Back }
     deriving (Eq, ToJSON, FromJSON)
 
-data Back = Back { bn :: Integer, bf :: Maybe Fwd }
+data Back = Back { bn :: Int, bf :: Maybe Fwd }
     deriving (Eq, ToJSON, FromJSON)
 
 -- A raw Json field encodes as-is.
@@ -63,18 +63,18 @@ data Doc = Doc { title :: String, body :: Json }
     deriving (Eq, ToJSON, FromJSON)
 
 -- Lists of Maybe and nested lists as field types.
-data Grid = Grid { cells :: [[Integer]], marks :: [Maybe Integer] }
+data Grid = Grid { cells :: [[Int]], marks :: [Maybe Int] }
     deriving (Eq, ToJSON, FromJSON)
 
 -- `as`-renamed fields: the JSON object key is the RENAMED key in both
 -- directions; the Haskell accessor keeps the field name. The renamed Maybe
 -- field exercises the optional-field decode path under the renamed key.
-data Acct = Acct { acctName as "name" :: String, acctScore :: Integer, acctNote as "note" :: Maybe String }
+data Acct = Acct { acctName as "name" :: String, acctScore :: Int, acctNote as "note" :: Maybe String }
     deriving (Eq, ToJSON, FromJSON)
 
 -- A renamed field in a tagged sum: the rename applies inline in the
 -- tagged object.
-data Ev = Tick { evAt as "at" :: Integer } | Stop
+data Ev = Tick { evAt as "at" :: Int } | Stop
     deriving (Eq, ToJSON, FromJSON)
 
 -- Round-trip helpers (one per type: Eq dispatch is monomorphic) ---------
@@ -234,7 +234,7 @@ main = do
     assert (encodeToJSON (Doc "t" (mustParse "{\"any\":[1,true,null]}"))
         == "{\"title\":\"t\",\"body\":{\"any\":[1,true,null]}}") "Json field emitted verbatim"
     assert (encodeToJSON (Grid [[1, 2], [], [3]] [Just 1, Nothing, Just 3])
-        == "{\"cells\":[[1,2],[],[3]],\"marks\":[1,null,3]}") "[[Integer]] and [Maybe Integer]"
+        == "{\"cells\":[[1,2],[],[3]],\"marks\":[1,null,3]}") "[[Int]] and [Maybe Int]"
 
     -- ============================================================
     -- `as`-renamed fields: the encoded JSON uses the RENAMED keys

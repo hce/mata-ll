@@ -1608,7 +1608,7 @@ impl Parser {
                     self.advance();
                     return Ok(Type::Unit);
                 }
-                // An operator in type position, e.g. `f :: (+) -> Integer`.
+                // An operator in type position, e.g. `f :: (+) -> Int`.
                 // This used to be silently parsed as the unit type, so the
                 // program compiled with a signature that meant something
                 // entirely different from what was written — reject it with

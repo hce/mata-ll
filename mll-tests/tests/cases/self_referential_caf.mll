@@ -5,20 +5,20 @@
 -- as a lazy constructor field.
 
 -- self-reference passed by name to a function whose body is a cons
-myCons :: Integer -> [Integer] -> [Integer]
+myCons :: Int -> [Int] -> [Int]
 myCons a b = a : b
 
-ones :: [Integer]
+ones :: [Int]
 ones = myCons 1 ones
 
 -- self-reference nested inside a call argument
-incs :: [Integer]
+incs :: [Int]
 incs = map (+ 1) (0 : incs)
 
 -- self-reference as a lazy constructor field
-data Stream = S Integer Stream
+data Stream = S Int Stream
 
-sHead :: Stream -> Integer
+sHead :: Stream -> Int
 sHead (S x _) = x
 
 sTail :: Stream -> Stream
@@ -29,7 +29,7 @@ nats = go 0
   where go n = S n (go (n + 1))
 
 -- a genuinely self-referential Stream value
-repeatS :: Integer -> Stream
+repeatS :: Int -> Stream
 repeatS x = let s = S x s in s
 
 main :: IO ()

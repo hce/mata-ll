@@ -1,53 +1,53 @@
 -- Stress test: a complete non-trivial program (balanced BST with insert/lookup/delete)
 
-data BST = BSTLeaf | BSTNode Integer BST BST
+data BST = BSTLeaf | BSTNode Int BST BST
     deriving (Show, Eq)
 
-bstInsert :: Integer -> BST -> BST
+bstInsert :: Int -> BST -> BST
 bstInsert x BSTLeaf = BSTNode x BSTLeaf BSTLeaf
 bstInsert x (BSTNode v l r)
     | x < v    = BSTNode v (bstInsert x l) r
     | x > v    = BSTNode v l (bstInsert x r)
     | otherwise = BSTNode v l r
 
-bstMember :: Integer -> BST -> Bool
+bstMember :: Int -> BST -> Bool
 bstMember _ BSTLeaf = False
 bstMember x (BSTNode v l r)
     | x < v    = bstMember x l
     | x > v    = bstMember x r
     | otherwise = True
 
-bstSize :: BST -> Integer
+bstSize :: BST -> Int
 bstSize BSTLeaf = 0
 bstSize (BSTNode _ l r) = 1 + bstSize l + bstSize r
 
-bstMin :: BST -> Integer
+bstMin :: BST -> Int
 bstMin BSTLeaf = error "empty tree"
 bstMin (BSTNode v l _) = case l of
     BSTLeaf -> v
     _       -> bstMin l
 
-bstMax :: BST -> Integer
+bstMax :: BST -> Int
 bstMax BSTLeaf = error "empty tree"
 bstMax (BSTNode v _ r) = case r of
     BSTLeaf -> v
     _       -> bstMax r
 
-bstDelete :: Integer -> BST -> BST
+bstDelete :: Int -> BST -> BST
 bstDelete _ BSTLeaf = BSTLeaf
 bstDelete x (BSTNode v l r)
     | x < v    = BSTNode v (bstDelete x l) r
     | x > v    = BSTNode v l (bstDelete x r)
     | otherwise = bstDeleteNode v l r
 
-bstDeleteNode :: Integer -> BST -> BST -> BST
+bstDeleteNode :: Int -> BST -> BST -> BST
 bstDeleteNode _ BSTLeaf r = r
 bstDeleteNode _ l BSTLeaf = l
 bstDeleteNode _ l r =
     let successor = bstMin r
     in BSTNode successor l (bstDelete successor r)
 
-bstToList :: BST -> [Integer]
+bstToList :: BST -> [Int]
 bstToList BSTLeaf = []
 bstToList (BSTNode v l r) = appendList (bstToList l) (v : bstToList r)
 
@@ -55,21 +55,21 @@ appendList :: [a] -> [a] -> [a]
 appendList [] ys = ys
 appendList (x:xs) ys = x : appendList xs ys
 
-isSorted :: [Integer] -> Bool
+isSorted :: [Int] -> Bool
 isSorted [] = True
 isSorted (_:[]) = True
 isSorted (a:b:rest) = a <= b && isSorted (b : rest)
 
-fromList :: [Integer] -> BST
+fromList :: [Int] -> BST
 fromList [] = BSTLeaf
 fromList (x:xs) = bstInsert x (fromList xs)
 
-interleave :: [Integer] -> [Integer] -> [Integer]
+interleave :: [Int] -> [Int] -> [Int]
 interleave [] ys = ys
 interleave xs [] = xs
 interleave (x:xs) (y:ys) = x : y : interleave xs ys
 
-range :: Integer -> Integer -> [Integer]
+range :: Int -> Int -> [Int]
 range a b = if a > b then [] else a : range (a + 1) b
 
 main :: IO ()

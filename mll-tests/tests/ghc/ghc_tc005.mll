@@ -18,8 +18,8 @@ toList :: Tree a -> [a]
 toList Leaf         = []
 toList (Node l v r) = appendList (toList l) (v : toList r)
 
--- Build an Integer tree
-buildIntTree :: [Integer] -> Tree Integer
+-- Build an Int tree
+buildIntTree :: [Int] -> Tree Int
 buildIntTree [] = Leaf
 buildIntTree (x:xs) = insertT (<) x (buildIntTree xs)
 
@@ -28,7 +28,7 @@ buildStrTree :: [String] -> Tree String
 buildStrTree [] = Leaf
 buildStrTree (x:xs) = insertT (<) x (buildStrTree xs)
 
-depthT :: Tree a -> Integer
+depthT :: Tree a -> Int
 depthT Leaf         = 0
 depthT (Node l _ r) = 1 + max (depthT l) (depthT r)
 

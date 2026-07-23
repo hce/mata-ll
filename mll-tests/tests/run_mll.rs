@@ -68,7 +68,7 @@ macro_rules! mll_test {
 fn codegen_is_deterministic() {
     let source = r#"
 data Color = Red | Green | Blue deriving (Show, Eq, Ord)
-data Person = Person { pName :: String, pAge :: Integer, pCity :: String, pActive :: Bool }
+data Person = Person { pName :: String, pAge :: Int, pCity :: String, pActive :: Bool }
 data Tree a = Leaf a | Branch (Tree a) (Tree a) deriving (Show, Eq)
 
 class Describe a where
@@ -82,7 +82,7 @@ mapList :: (a -> b) -> [a] -> [b]
 mapList _ [] = []
 mapList f (x:xs) = f x : mapList f xs
 
-depth :: Tree a -> Integer
+depth :: Tree a -> Int
 depth (Leaf _) = 0
 depth (Branch l r) = 1 + max (depth l) (depth r)
 
@@ -116,21 +116,21 @@ main = do
 }
 
 /// The numeric classes (Num/Fractional/Integral) must be fully ERASED at
-/// concrete Integer/Number types: `+ - * /` emit bare Lua operators, `div`/`mod`
+/// concrete Int/Number types: `+ - * /` emit bare Lua operators, `div`/`mod`
 /// emit the existing strict cores, and NO dictionary is passed and NO named
-/// instance helper (fromInteger_Integer, plus_*, a dict table) is materialised.
+/// instance helper (fromInteger_Int, plus_*, a dict table) is materialised.
 /// This is the byte-identity guarantee for concrete arithmetic — the hot path
 /// (e.g. the tracker mixer) must not gain an allocation or an indirection.
 #[test]
 fn numeric_classes_erased_at_concrete_types() {
     let source = r#"
-hot :: Integer -> Integer -> Integer
+hot :: Int -> Int -> Int
 hot a b = a * b + a - b
 
 frac :: Number -> Number -> Number
 frac x y = x / y + x * y
 
-flr :: Integer -> Integer -> Integer
+flr :: Int -> Int -> Int
 flr a b = (a `div` b) + (a `mod` b)
 
 main :: IO ()
@@ -143,8 +143,8 @@ main = do
         .expect("compile should succeed")
         .lua_code;
 
-    // Concrete Integer/Number arithmetic inlines to bare Lua operators…
-    assert!(lua.contains("(a * b)"), "Integer * must inline to bare Lua *: {lua}");
+    // Concrete Int/Number arithmetic inlines to bare Lua operators…
+    assert!(lua.contains("(a * b)"), "Int * must inline to bare Lua *: {lua}");
     assert!(lua.contains("(x / y)"), "Number / must inline to bare Lua /: {lua}");
     // …div/mod stay on the existing strict cores…
     assert!(lua.contains("__mll_div("), "div must stay on __mll_div: {lua}");
@@ -152,8 +152,8 @@ main = do
     // …and NOTHING dispatches through a Num/Fractional/Integral dictionary or a
     // per-type instance helper at these concrete types.
     for forbidden in [
-        "fromInteger_Integer", "fromInteger_Number", "fromRational_Number",
-        "plus_Integer", "times_Integer", "__mll_dict", "__dict_Num",
+        "fromInteger_Int", "fromInteger_Number", "fromRational_Number",
+        "plus_Int", "times_Int", "__mll_dict", "__dict_Num",
     ] {
         assert!(
             !lua.contains(forbidden),
@@ -280,12 +280,12 @@ fn where_group_calls_not_forced_impl() {
 /// this pass), pinned as a bound on `__mll_fn` slot assignments.
 #[test]
 fn constructor_dce_unused_data_adds_nothing() {
-    let base = "double :: Integer -> Integer\n\
+    let base = "double :: Int -> Int\n\
                 double x = x * 2\n\
                 main :: IO ()\n\
                 main = print (double 21)\n";
     let with_dead = format!(
-        "data Unused = UnusedA | UnusedB Integer deriving (Show, Eq)\n{}",
+        "data Unused = UnusedA | UnusedB Int deriving (Show, Eq)\n{}",
         base
     );
     let dir = Path::new("tests/cases");
@@ -323,10 +323,10 @@ fn constructor_dce_unused_data_adds_nothing() {
 #[test]
 fn constructor_dce_keeps_metadata_for_flow_through_types() {
     let source = "data Config = Config\n\
-                  \x20 { port :: Integer\n\
+                  \x20 { port :: Int\n\
                   \x20 , host :: String\n\
                   \x20 } deriving (LuaDict)\n\
-                  export readPort :: Config -> Integer\n\
+                  export readPort :: Config -> Int\n\
                   readPort c = port c\n";
     let lua = mllc::compile(source, Path::new("tests/cases"), &[])
         .expect("flow-through program must compile")
@@ -360,12 +360,12 @@ fn constructor_dce_keeps_metadata_for_flow_through_types() {
 #[test]
 fn cheap_eagerness_whnf_bindings_stay_strict() {
     let source = r#"
-f :: Integer -> Integer
+f :: Int -> Int
 f x = let n = 5
           m = n + x
       in m + n
 
-g :: Bool -> Integer
+g :: Bool -> Int
 g x = let y = error "boom"
           z = y + 1
       in if x then z else 0
@@ -472,7 +472,7 @@ fn compiled_module_carries_mllc_provenance() {
 
     // An exporting module surfaces the stamps as module properties, so a Lua
     // host can read them from the required table.
-    let module = "export answer :: Integer\nanswer :: Integer\nanswer = 42\n";
+    let module = "export answer :: Int\nanswer :: Int\nanswer = 42\n";
     let lua = mllc::compile(module, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
@@ -498,7 +498,7 @@ fn compiled_module_carries_mllc_provenance() {
 #[test]
 fn header_only_root_module_warns_instead_of_silent_empty_output() {
     let src = "module C (addup) where\n\n\
-               addup :: Integer -> Integer -> Integer\n\
+               addup :: Int -> Int -> Int\n\
                addup a b = a + b\n";
     let result = mllc::compile(src, Path::new("tests/cases"), &[])
         .expect("a header-form library must still compile");
@@ -550,7 +550,7 @@ fn header_only_root_module_warns_instead_of_silent_empty_output() {
 /// all) compiled as the root also has nothing to run or call.
 #[test]
 fn bare_library_root_warns_with_generic_guidance() {
-    let src = "addup :: Integer -> Integer -> Integer\naddup a b = a + b\n";
+    let src = "addup :: Int -> Int -> Int\naddup a b = a + b\n";
     let result = mllc::compile(src, Path::new("tests/cases"), &[])
         .expect("compile should succeed");
     assert_eq!(result.warnings.len(), 1);
@@ -573,7 +573,7 @@ fn modules_with_a_host_surface_do_not_warn() {
     assert!(result.warnings.is_empty(), "program with main must not warn");
 
     // `export`-keyword module root.
-    let module = "export answer :: Integer\nanswer :: Integer\nanswer = 42\n";
+    let module = "export answer :: Int\nanswer :: Int\nanswer = 42\n";
     let result = mllc::compile(module, Path::new("tests/cases"), &[])
         .expect("compile should succeed");
     assert!(result.warnings.is_empty(), "exporting module must not warn");
@@ -1046,7 +1046,7 @@ fn fromjson_derive_requires_json_import() {
     // combinators the generated code calls are not in scope, and the error
     // must say exactly what to add.
     let source = r#"
-data P = P { x :: Integer } deriving (FromJSON)
+data P = P { x :: Int } deriving (FromJSON)
 
 main :: IO ()
 main = putStrLn "hi"
@@ -1069,7 +1069,7 @@ fn fromjson_derive_rejects_function_field() {
     let source = r#"
 import JSON
 
-data H = H { hop :: Integer -> Integer } deriving (FromJSON)
+data H = H { hop :: Int -> Int } deriving (FromJSON)
 
 main :: IO ()
 main = putStrLn "hi"
@@ -1118,7 +1118,7 @@ fn fromjson_derive_rejects_field_without_instance() {
     let source = r#"
 import JSON
 
-data Plain = Plain Integer
+data Plain = Plain Int
 
 data Holder = Holder { inner :: Plain } deriving (FromJSON)
 
@@ -1164,7 +1164,7 @@ fn tojson_derive_requires_json_import() {
     // combinators the generated code calls are not in scope, and the error
     // must say exactly what to add.
     let source = r#"
-data P = P { x :: Integer } deriving (ToJSON)
+data P = P { x :: Int } deriving (ToJSON)
 
 main :: IO ()
 main = putStrLn "hi"
@@ -1187,7 +1187,7 @@ fn tojson_derive_rejects_function_field() {
     let source = r#"
 import JSON
 
-data H = H { hop :: Integer -> Integer } deriving (ToJSON)
+data H = H { hop :: Int -> Int } deriving (ToJSON)
 
 main :: IO ()
 main = putStrLn "hi"
@@ -1210,7 +1210,7 @@ fn tojson_derive_rejects_field_without_instance() {
     let source = r#"
 import JSON
 
-data Plain = Plain Integer
+data Plain = Plain Int
 
 data Holder = Holder { inner :: Plain } deriving (ToJSON)
 
@@ -1263,7 +1263,7 @@ fn duplicate_local_constructor_rejected() {
     // the wrong tag at runtime with no diagnostic. Same-module duplicates are
     // now a compile error naming both types (GHC: "Multiple declarations").
     let source = r#"
-data A = Ok Integer | Bad
+data A = Ok Int | Bad
 data B = Ok String | Worse
 
 main :: IO ()
@@ -1287,9 +1287,9 @@ main = putStrLn "should not compile"
 fn duplicate_newtype_constructor_rejected() {
     // Newtype constructors live in the same namespace.
     let source = r#"
-data A = Wrap Integer
+data A = Wrap Int
 
-newtype Wrap = Integer
+newtype Wrap = Int
 
 main :: IO ()
 main = putStrLn "should not compile"
@@ -1311,7 +1311,7 @@ fn shadowed_prelude_constructor_stays_shadowed() {
     // so passing it where an ExitValue is expected is a *type* error, not a
     // silent reuse of the Prelude constructor.
     let source = r#"
-data Foo = Err Integer | Other
+data Foo = Err Int | Other
 
 main :: IO ()
 main = exit (Err 1)
@@ -1376,7 +1376,7 @@ fn vec_nat_rejects_vtail_of_empty() {
 vtail :: Vec ('S n) a -> Vec n a
 vtail (VCons _ xs) = xs
 
-vlen :: Vec n a -> Integer
+vlen :: Vec n a -> Int
 vlen VNil = 0
 vlen (VCons _ xs) = 1 + vlen xs
 
@@ -1402,7 +1402,7 @@ fn vec_nat_rejects_overlong_vector_literal() {
         "{}{}",
         VEC_NAT_PREAMBLE,
         r#"
-v2 :: Vec ('S ('S 'Z)) Integer
+v2 :: Vec ('S ('S 'Z)) Int
 v2 = VCons 1 (VCons 2 (VCons 3 VNil))
 
 main :: IO ()
@@ -1429,7 +1429,7 @@ fn vec_nat_rejects_short_vector_literal() {
         "{}{}",
         VEC_NAT_PREAMBLE,
         r#"
-v2 :: Vec ('S ('S 'Z)) Integer
+v2 :: Vec ('S ('S 'Z)) Int
 v2 = VCons 1 VNil
 
 main :: IO ()
@@ -1459,7 +1459,7 @@ fn json_derive_duplicate_effective_keys_rejected() {
         let source = format!(r#"
 import JSON
 
-data D = D {{ a as "k" :: Integer, b as "k" :: Integer }}
+data D = D {{ a as "k" :: Int, b as "k" :: Int }}
     deriving ({})
 
 main :: IO ()
@@ -1484,7 +1484,7 @@ fn json_derive_empty_effective_key_rejected() {
         let source = format!(r#"
 import JSON
 
-data D = D {{ a as "" :: Integer }}
+data D = D {{ a as "" :: Int }}
     deriving ({})
 
 main :: IO ()
@@ -1696,7 +1696,7 @@ fn constructor_as_on_untagged_single_constructor_rejected() {
     let source = r#"
 import JSON
 
-data W = W Integer as "w"
+data W = W Int as "w"
     deriving (ToJSON)
 
 main :: IO ()
@@ -1745,7 +1745,7 @@ fn shared_external_key_drives_lua_and_json() {
     let source = r#"
 import JSON
 
-data Acct = Acct { acctName as "name" :: String, acctScore :: Integer }
+data Acct = Acct { acctName as "name" :: String, acctScore :: Int }
     deriving (Eq, LuaDict, ToJSON, FromJSON)
 
 export mkAcct :: String -> Acct
@@ -1797,14 +1797,14 @@ fn luadict_enum_string_boundary_roundtrips() {
 data Perm = Anonymous as "anonymous" | User | Admin
     deriving (Eq, Ord, Enum, Bounded, Show, LuaDict)
 
-export mkFrom :: Integer -> Perm
+export mkFrom :: Int -> Perm
 mkFrom n = toEnum n
 
 export isAnon :: Perm -> Bool
 isAnon Anonymous = True
 isAnon _ = False
 
-export rankOf :: Perm -> Integer
+export rankOf :: Perm -> Int
 rankOf p = fromEnum p
 
 export below :: Perm -> Perm -> Bool
@@ -1901,7 +1901,7 @@ fn decode_json_without_instance_reported() {
     let source = r#"
 import JSON
 
-data Q = Q Integer
+data Q = Q Int
 
 main :: IO ()
 main = case (decodeJSON "1" :: Either String Q) of
@@ -1951,14 +1951,14 @@ main = do
 
 #[test]
 fn argument_specialized_instance_head_rejected() {
-    // Dispatch keys on the head constructor alone, so `Pretty [Integer]` would
+    // Dispatch keys on the head constructor alone, so `Pretty [Int]` would
     // silently run for `pretty [True]` — reject it. (Was: `pretty [True]` ran
-    // the `[Integer]` body.)
+    // the `[Int]` body.)
     let e = compile_err(
-        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty [Integer] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = putStrLn (pretty ([True] :: [Bool]))\n",
+        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty [Int] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = putStrLn (pretty ([True] :: [Bool]))\n",
     );
     assert!(e.contains("too specific"), "got: {e}");
-    assert!(e.contains("[Integer]"), "got: {e}");
+    assert!(e.contains("[Int]"), "got: {e}");
 
     // Repeated type argument (`Pair a a`) is likewise rejected.
     let e = compile_err(
@@ -1973,18 +1973,18 @@ fn duplicate_instance_is_hard_error() {
     // now a compile error, like GHC's duplicate-instance rejection. (Strict
     // version of `duplicate_instance_rejected`, which tolerated the old gap.)
     let e = compile_err(
-        "class Greet a where\n    greet :: a -> String\ninstance Greet Integer where\n    greet _ = \"first\"\ninstance Greet Integer where\n    greet _ = \"second\"\nmain :: IO ()\nmain = putStrLn (greet (1 :: Integer))\n",
+        "class Greet a where\n    greet :: a -> String\ninstance Greet Int where\n    greet _ = \"first\"\ninstance Greet Int where\n    greet _ = \"second\"\nmain :: IO ()\nmain = putStrLn (greet (1 :: Int))\n",
     );
-    assert!(e.contains("Duplicate instance") && e.contains("Greet Integer"), "got: {e}");
+    assert!(e.contains("Duplicate instance") && e.contains("Greet Int"), "got: {e}");
 }
 
 #[test]
 fn overlapping_instances_rejected() {
-    // `instance Pretty [a]` and `instance Pretty [Integer]` overlap at head
+    // `instance Pretty [a]` and `instance Pretty [Int]` overlap at head
     // `[]`; both `pretty [1]` and `pretty [True]` used to pick the
     // last-declared body. Now the specific head is rejected.
     let e = compile_err(
-        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty a => Pretty [a] where\n    pretty _ = \"generic\"\ninstance Pretty [Integer] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = pure ()\n",
+        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty a => Pretty [a] where\n    pretty _ = \"generic\"\ninstance Pretty [Int] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(e.contains("too specific") || e.contains("Duplicate instance"), "got: {e}");
 }
@@ -2088,7 +2088,7 @@ fn unqualified_conflicting_import_rejected() {
 #[test]
 fn show_without_instance_rejected() {
     let source = r#"
-data Secret = Secret Integer
+data Secret = Secret Int
 
 main :: IO ()
 main = putStrLn (show (Secret 42))
@@ -2134,7 +2134,7 @@ fn unknown_type_in_signature_rejected() {
     // The same undefined name in a function signature must be caught too —
     // previously it flowed through as an opaque type and compiled silently.
     let source = r#"
-f :: Boolean -> Integer
+f :: Boolean -> Int
 f x = 1
 
 main :: IO ()
@@ -2159,7 +2159,7 @@ fn defined_type_without_show_still_reports_missing_instance() {
     // unknown-type error. "Type exists but lacks an instance" and "type does
     // not exist" are different diagnoses.
     let source = r#"
-data Baz = Baz Integer
+data Baz = Baz Int
 
 data Foo = Foo { a :: String, b :: Baz } deriving (Show)
 
@@ -2312,7 +2312,7 @@ fn sibling_clause_error_does_not_suppress_genuine_ambiguity() {
     // be reported — dropping the clean clause's ambiguity would hide a real
     // problem behind an unrelated sibling error.
     let source = r#"
-f :: Integer -> IO ()
+f :: Int -> IO ()
 f 0 = putStrLn (show Nothing)
 f n = putStrLn (n <> "x")
 
@@ -2322,7 +2322,7 @@ main = f 1
     match mllc::compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
-            assert!(msg.contains("Cannot unify 'Integer' with 'String'"),
+            assert!(msg.contains("Cannot unify 'Int' with 'String'"),
                 "Expected the genuine unification error from clause 2, got: {}", msg);
             assert!(msg.contains("Ambiguous type"),
                 "Clause 1's genuine ambiguity must survive the sibling clause's error: {}", msg);
@@ -2339,10 +2339,10 @@ fn show_at_concrete_types_still_compiles() {
     let source = r#"
 main :: IO ()
 main = do
-    putStrLn (show (3 :: Integer))
-    putStrLn (show ([] :: [Integer]))
-    putStrLn (show (Nothing :: Maybe Integer))
-    putStrLn (show (Just (5 :: Integer)))
+    putStrLn (show (3 :: Int))
+    putStrLn (show ([] :: [Int]))
+    putStrLn (show (Nothing :: Maybe Int))
+    putStrLn (show (Just (5 :: Int)))
 "#;
     assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
         "show at concrete types should compile");
@@ -2359,9 +2359,9 @@ f = show
 
 main :: IO ()
 main = do
-    putStrLn (f ([] :: [Integer]))
-    putStrLn (f (Nothing :: Maybe Integer))
-    putStrLn (f (42 :: Integer))
+    putStrLn (f ([] :: [Int]))
+    putStrLn (f (Nothing :: Maybe Int))
+    putStrLn (f (42 :: Int))
 "#;
     assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
         "polymorphic Show-constrained function should compile");
@@ -2415,7 +2415,7 @@ main = putStrLn x
             assert!(msg.contains("Cannot unify") && msg.contains("where-binding 'x'"),
                 "Expected a mismatch error naming the where-binding, got: {}", msg);
         }
-        Ok(_) => panic!("Expected compilation to fail for a where binding defined as Integer but used as String"),
+        Ok(_) => panic!("Expected compilation to fail for a where binding defined as Int but used as String"),
     }
 }
 
@@ -2494,7 +2494,7 @@ fn valid_where_bindings_still_compile_and_run() {
     // value bindings referencing each other, a multi-clause recursive local
     // function with pattern parameters, and bindings used from guards.
     let source = r#"
-classify :: Integer -> String
+classify :: Int -> String
 classify n
   | n < low = "small"
   | n > high = "big"
@@ -2507,7 +2507,7 @@ message = greet <> "!"
   where greet = "hello " <> name
         name = "world"
 
-render :: [Integer] -> String
+render :: [Int] -> String
 render ys = fmt ys
   where fmt [] = "empty"
         fmt (x:xs) = show x <> "," <> fmt xs
@@ -2540,11 +2540,11 @@ f = show
 
 main :: IO ()
 main = do
-    putStrLn (show ([] :: [Integer]))
-    putStrLn (show (Nothing :: Maybe Integer))
-    putStrLn (show (Just (5 :: Integer)))
-    putStrLn (f ([] :: [Integer]))
-    putStrLn (f (Nothing :: Maybe Integer))
+    putStrLn (show ([] :: [Int]))
+    putStrLn (show (Nothing :: Maybe Int))
+    putStrLn (show (Just (5 :: Int)))
+    putStrLn (f ([] :: [Int]))
+    putStrLn (f (Nothing :: Maybe Int))
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])
         .expect("should compile")
@@ -2583,7 +2583,7 @@ poly :: a -> String
 poly x = show x
 
 main :: IO ()
-main = putStrLn (poly (5 :: Integer))
+main = putStrLn (poly (5 :: Int))
 "#;
     match mllc::compile(source, Path::new("."), &[]) {
         Err(e) => {
@@ -2603,7 +2603,7 @@ same :: a -> a -> Bool
 same x y = x == y
 
 main :: IO ()
-main = putStrLn (show (same (1 :: Integer) 2))
+main = putStrLn (show (same (1 :: Int) 2))
 "#;
     match mllc::compile(source, Path::new("."), &[]) {
         Err(e) => {
@@ -2623,7 +2623,7 @@ f :: Show a => a -> String
 f = show
 
 main :: IO ()
-main = putStrLn (f (5 :: Integer))
+main = putStrLn (f (5 :: Int))
 "#;
     assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
         "a declared `Show a =>` context should be accepted");
@@ -2638,7 +2638,7 @@ same :: Ord a => a -> a -> Bool
 same x y = x == y
 
 main :: IO ()
-main = putStrLn (show (same (1 :: Integer) 2))
+main = putStrLn (show (same (1 :: Int) 2))
 "#;
     assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
         "an Ord context should satisfy a wanted Eq constraint via the superclass");
@@ -2649,7 +2649,7 @@ fn bare_signature_without_definition_rejected() {
     // A type signature with no accompanying definition (and not an FFI binding)
     // used to silently compile to a nil value. It must now be rejected.
     let source = r#"
-foo :: Integer
+foo :: Int
 
 main :: IO ()
 main = print foo
@@ -2682,10 +2682,10 @@ main = print (sqrtNum 4.0)
 
 #[test]
 fn orphan_instance_rejected() {
-    // Show and Integer are both defined in the prelude, not locally.
+    // Show and Int are both defined in the prelude, not locally.
     // Defining an instance for them here is an orphan instance.
     let source = r#"
-instance Show Integer where
+instance Show Int where
     show x = "int"
 
 main :: IO ()
@@ -2743,7 +2743,7 @@ main = putStrLn (show (publicFn 5))
 #[test]
 fn type_mismatch_rejected() {
     let source = r#"
-f :: Integer -> Integer
+f :: Int -> Int
 f x = x
 
 main :: IO ()
@@ -2754,7 +2754,7 @@ main = print (f "hello")
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify"), "Expected 'Cannot unify' error, got: {}", msg);
         }
-        Ok(_) => panic!("Expected compilation to fail for String passed where Integer expected"),
+        Ok(_) => panic!("Expected compilation to fail for String passed where Int expected"),
     }
 }
 
@@ -2778,7 +2778,7 @@ fn duplicate_definition_rejected() {
     // Two separate FunDef blocks for the same name with incompatible bodies.
     // The compiler processes both; one will fail to unify against the single sig.
     let source = r#"
-f :: Integer -> Integer
+f :: Int -> Int
 f x = x + 1
 f x = "hello"
 
@@ -2959,10 +2959,10 @@ main = print (NoSuchCtor 42)
 fn constructor_wrong_fields_rejected() {
     // Just applies constructor to wrong number of args in a pattern.
     let source = r#"
-data Pair = Pair Integer Integer
+data Pair = Pair Int Int
     deriving Show
 
-fst2 :: Pair -> Integer
+fst2 :: Pair -> Int
 fst2 (Pair x) = x
 
 main :: IO ()
@@ -2983,9 +2983,9 @@ main = print (fst2 (Pair 1 2))
 #[test]
 fn let_type_mismatch_rejected() {
     // Top-level function whose declared type conflicts with the body.
-    // The body returns a String literal but the sig says Integer.
+    // The body returns a String literal but the sig says Int.
     let source = r#"
-answer :: Integer
+answer :: Int
 answer = "forty-two"
 
 main :: IO ()
@@ -2996,18 +2996,18 @@ main = print answer
             let msg = format!("{}", e);
             assert!(
                 msg.contains("Cannot unify") || msg.contains("doesn't match"),
-                "Expected type mismatch error for String body vs Integer sig, got: {}", msg
+                "Expected type mismatch error for String body vs Int sig, got: {}", msg
             );
         }
-        Ok(_) => panic!("Expected compilation to fail for String body where Integer declared"),
+        Ok(_) => panic!("Expected compilation to fail for String body where Int declared"),
     }
 }
 
 #[test]
 fn guard_non_bool_rejected() {
-    // Guard expression returns Integer, not Bool — should fail to unify.
+    // Guard expression returns Int, not Bool — should fail to unify.
     let source = r#"
-f :: Integer -> Integer
+f :: Int -> Int
 f x
     | x = x + 1
     | otherwise = x
@@ -3032,10 +3032,10 @@ fn duplicate_constructor_rejected() {
     // Two data types with the same constructor name in scope.
     // Known gap: the compiler may silently overwrite the first constructor.
     let source = r#"
-data Foo = MkThing Integer
+data Foo = MkThing Int
 data Bar = MkThing String
 
-useFoo :: Foo -> Integer
+useFoo :: Foo -> Int
 useFoo (MkThing n) = n
 
 main :: IO ()
@@ -3058,7 +3058,7 @@ main = print (useFoo (MkThing 42))
 fn class_method_wrong_type_rejected() {
     // Instance method body produces wrong type relative to the class declaration.
     let source = r#"
-data Wrapper = Wrapper Integer
+data Wrapper = Wrapper Int
     deriving Eq
 
 instance Show Wrapper where
@@ -3072,10 +3072,10 @@ main = putStrLn (show (Wrapper 42))
             let msg = format!("{}", e);
             assert!(
                 msg.contains("Cannot unify") || msg.contains("doesn't match"),
-                "Expected type error for show returning Integer instead of String, got: {}", msg
+                "Expected type error for show returning Int instead of String, got: {}", msg
             );
         }
-        Ok(_) => panic!("Expected compilation to fail when show returns Integer instead of String"),
+        Ok(_) => panic!("Expected compilation to fail when show returns Int instead of String"),
     }
 }
 
@@ -3085,7 +3085,7 @@ fn bind_return_unwraps_value() {
     let source = r#"
 main :: IO ()
 main = do
-    x <- return (10 :: Integer)
+    x <- return (10 :: Int)
     assert (x == 10) "bind return"
     putStrLn "ok"
 "#;
@@ -3109,7 +3109,7 @@ fn undefined_errors_when_forced() {
     let source = r#"
 main :: IO ()
 main = do
-    let x = undefined :: Integer
+    let x = undefined :: Int
     print x
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])
@@ -3205,9 +3205,9 @@ fn examples_curated_compile() {
 fn nullary_constructor_as_pattern_argument() {
     let source = r#"
 data Color = R | B
-data Box = Box Color Integer
+data Box = Box Color Int
 
-unwrap :: Box -> Integer
+unwrap :: Box -> Int
 unwrap (Box R n) = n
 unwrap (Box B n) = 0 - n
 
@@ -3257,14 +3257,14 @@ main = print (dot (scaleV 2.0 (V 5.0 7.0)))
 #[test]
 fn first_argument_on_next_line() {
     let source = r#"
-data T = L Integer | N T T
+data T = L Int | N T T
 
 deep :: T
 deep = N (N (L 1)
             (L 2))
          (L 3)
 
-size :: T -> Integer
+size :: T -> Int
 size (L _) = 1
 size (N a b) = size a + size b
 
@@ -3288,7 +3288,7 @@ fn shallow_multiline_continuation() {
     let source = r#"
 import Data.List (foldl')
 
-total :: Integer
+total :: Int
 total = foldl' (\a b -> a + b) 0
   [1, 2, 3, 4, 5]
 
@@ -3318,28 +3318,28 @@ main = print total
 #[test]
 fn recursive_lazy_value_in_where_let_and_do() {
     let source = r#"
-fibTop :: [Integer]
+fibTop :: [Int]
 fibTop = [1, 1] ++ zipWith (+) fibTop (drop 1 fibTop)
 
-nthWhere :: Integer -> Integer
+nthWhere :: Int -> Int
 nthWhere k = fib !! k
   where
     fib = [1, 1] ++ zipWith (+) fib (drop 1 fib)
 
-nthLet :: Integer -> Integer
+nthLet :: Int -> Int
 nthLet k =
   let fib = [1, 1] ++ zipWith (+) fib (drop 1 fib)
   in fib !! k
 
 -- mutually recursive let bindings
-isEven :: Integer -> Bool
+isEven :: Int -> Bool
 isEven n =
   let ev = \m -> if m == 0 then True else od (m - 1)
       od = \m -> if m == 0 then False else ev (m - 1)
   in ev n
 
 -- let-polymorphism must survive the recursive-let change
-polyPair :: (Integer, Bool)
+polyPair :: (Int, Bool)
 polyPair = let idf = \x -> x in (idf 5, idf True)
 
 main :: IO ()
@@ -3379,22 +3379,22 @@ main = do
 fn lazy_arguments_and_infinite_lists() {
     let source = r#"
 -- infinite list comprehension (desugars to concatMap) must stream
-evens :: [Integer]
+evens :: [Int]
 evens = [x | x <- [1..], x `mod` 2 == 0]
 
 -- a recursive call passed as a function argument must stay lazy
 consit :: a -> [a] -> [a]
 consit x rest = x : rest
 
-countFrom :: Integer -> [Integer]
+countFrom :: Int -> [Int]
 countFrom n = consit n (countFrom (n + 1))
 
 -- foldr building a list: cons whose tail is a variable
-copyList :: [Integer] -> [Integer]
+copyList :: [Int] -> [Int]
 copyList = foldr (\x acc -> x : acc) []
 
 -- guard recursion with a thunked argument (the param is used strictly)
-digitalRoot :: Integer -> Integer
+digitalRoot :: Int -> Int
 digitalRoot n
   | n < 10    = n
   | otherwise = digitalRoot (digitSum n)
@@ -3403,7 +3403,7 @@ digitalRoot n
     digitSum m = m `mod` 10 + digitSum (m `div` 10)
 
 -- higher-order: a lambda param may arrive as a thunk and must be forced
-makeAdder :: Integer -> Integer -> Integer
+makeAdder :: Int -> Int -> Int
 makeAdder n = \x -> x + n
 
 applyTwice :: (a -> a) -> a -> a
@@ -3436,7 +3436,7 @@ main = do
   assert (takeWhile (\x -> x < 4) [1, 2, 3, 4, 5] == [1, 2, 3]) "takeWhile finite"
   assert (takeWhile (\x -> x < 4) [1 ..] == [1, 2, 3]) "takeWhile infinite"
   assert (takeWhile (\x -> x < 10) [1, 2, 3] == [1, 2, 3]) "takeWhile exhausts"
-  assert (takeWhile (\x -> x > 9) [1, 2, 3] == ([] :: [Integer])) "takeWhile none"
+  assert (takeWhile (\x -> x > 9) [1, 2, 3] == ([] :: [Int])) "takeWhile none"
   assert (dropWhile (\x -> x < 3) [1, 2, 3, 4, 5] == [3, 4, 5]) "dropWhile finite"
   assert (dropWhile (\x -> x > 9) [1, 2, 3] == [1, 2, 3]) "dropWhile none"
 "#;
@@ -3461,20 +3461,20 @@ main = do
 #[test]
 fn ffi_list_argument_marshalled_to_array() {
     let source = r#"
-data Bag = Bag { bagItems as "items" :: [Integer], bagName as "name" :: String }
+data Bag = Bag { bagItems as "items" :: [Int], bagName as "name" :: String }
     deriving (Show, LuaDict)
 
 -- top-level list argument
-hostSum :: [Integer] -> LuaPure "host_sum" Integer
+hostSum :: [Int] -> LuaPure "host_sum" Int
 -- list nested inside a LuaDict record field
-hostBagSum :: Bag -> LuaPure "host_bagsum" Integer
+hostBagSum :: Bag -> LuaPure "host_bagsum" Int
 -- list of lists (nested list element needs its own conversion)
-hostSum2 :: [[Integer]] -> LuaPure "host_sum2" Integer
+hostSum2 :: [[Int]] -> LuaPure "host_sum2" Int
 
 main :: IO ()
 main = do
   -- literal list
-  assert (hostSum [10, 20, 30] == 60) "top-level [Integer] argument"
+  assert (hostSum [10, 20, 30] == 60) "top-level [Int] argument"
   -- computed elements (thunks): forcing at the boundary is exercised
   assert (hostSum (map (\x -> x * 2) [5, 10, 15]) == 60) "list argument with thunked elements"
   -- list nested in a record, alongside a scalar field
@@ -3591,7 +3591,7 @@ fn ffi_maybe_list_argument_preserves_positions() {
     // no compaction: `[Just 1, Nothing, Just 3]` reaches the host with 3 at
     // index 3, not shifted to index 2. Was: silently compacted to {1, 3}.
     let src = r#"
-at :: Integer -> [Maybe Integer] -> LuaPure "at" Integer
+at :: Int -> [Maybe Int] -> LuaPure "at" Int
 main :: IO ()
 main = do
     let xs = [Just 1, Nothing, Just 3]
@@ -3618,7 +3618,7 @@ fn growing_type_family_is_bounded() {
     std::thread::Builder::new()
         .stack_size(mllc::COMPILER_STACK_SIZE)
         .spawn(|| {
-            let src = "type family Grow x where\n  Grow x = Grow (Maybe x)\nf :: Grow Integer -> Integer\nf _ = 0\nmain :: IO ()\nmain = putStrLn \"x\"\n";
+            let src = "type family Grow x where\n  Grow x = Grow (Maybe x)\nf :: Grow Int -> Int\nf _ = 0\nmain :: IO ()\nmain = putStrLn \"x\"\n";
             match mllc::compile(src, Path::new("."), &[]) {
                 Err(e) => assert!(
                     format!("{}", e).contains("did not terminate"),
@@ -3631,18 +3631,18 @@ fn growing_type_family_is_bounded() {
         .unwrap();
 }
 
-// port back into a `Maybe Integer` result field, which the decoder must
+// port back into a `Maybe Int` result field, which the decoder must
 // reconstruct as Just/Nothing — encode-then-decode identity.
 #[test]
 fn ffi_maybe_field_marshalled_and_roundtrips() {
     let source = r#"
 data In = In
         { iName as "name" :: String
-        , iPort as "port" :: Maybe Integer
-        , iTags as "tags" :: Maybe [Integer] }
+        , iPort as "port" :: Maybe Int
+        , iTags as "tags" :: Maybe [Int] }
     deriving (Show, LuaDict)
 
-data Out = Out { oBack as "back" :: Maybe Integer, oSum as "sum" :: Integer }
+data Out = Out { oBack as "back" :: Maybe Int, oSum as "sum" :: Int }
     deriving (Show, LuaDict)
 
 probe :: In -> LuaPure "probe" Out
@@ -3655,14 +3655,14 @@ main = do
       case back of
         Just n  -> assert (n == 443) "Just Maybe field round-trips to Just (present)"
         Nothing -> error "expected Just 443 back, got Nothing"
-      assert (s == 6) "Just [Integer] field unwrapped and marshalled to an array (1+2+3)"
+      assert (s == 6) "Just [Int] field unwrapped and marshalled to an array (1+2+3)"
   -- Nothing: host sees nil for both optional fields; echoes Nothing back.
   case probe (In "h" Nothing Nothing) of
     Out back s -> do
       case back of
         Nothing -> putStrLn "Nothing Maybe field round-trips to Nothing (absent)"
         Just _  -> error "expected Nothing back, got Just"
-      assert (s == 0) "Nothing [Integer] field is nil (sum 0)"
+      assert (s == 0) "Nothing [Int] field is nil (sum 0)"
   putStrLn "ffi maybe-field marshalling ok"
 "#;
     let lib_path = Path::new("../lib");
@@ -3701,7 +3701,7 @@ main = do
 }
 
 // Regression (long-standing FFI bug): a `HashMap` argument crossing OUT to a
-// host must marshal its VALUES by the value type — `HashMap String [Integer]`
+// host must marshal its VALUES by the value type — `HashMap String [Int]`
 // reaches the host as a dict of plain arrays, `HashMap String (Maybe X)` as a
 // dict of bare values, `HashMap String Record` as a dict of dicts — recursively
 // at any nesting. The argument marshaller descended into lists/tuples/records/
@@ -3712,12 +3712,12 @@ fn ffi_hashmap_structured_values_marshalled() {
     let source = r#"
 import qualified Data.Map as Map
 
-data V = V { vName as "name" :: String, vNums as "nums" :: [Integer] }
+data V = V { vName as "name" :: String, vNums as "nums" :: [Int] }
     deriving (Show, LuaDict)
 
-mapLists  :: HashMap String [Integer]      -> LuaPure "mp_lists"  Integer
-mapMaybes :: HashMap String (Maybe Integer) -> LuaPure "mp_maybes" Integer
-mapRecs   :: HashMap String V              -> LuaPure "mp_recs"   Integer
+mapLists  :: HashMap String [Int]      -> LuaPure "mp_lists"  Int
+mapMaybes :: HashMap String (Maybe Int) -> LuaPure "mp_maybes" Int
+mapRecs   :: HashMap String V              -> LuaPure "mp_recs"   Int
 
 main :: IO ()
 main = do
@@ -3782,16 +3782,16 @@ fn ffi_arg_marshal_roundtrips_all_containers() {
     let source = r#"
 import qualified Data.Map as Map
 
-data Rec = Rec { rTag as "tag" :: String, rMaybe as "m" :: Maybe Integer }
+data Rec = Rec { rTag as "tag" :: String, rMaybe as "m" :: Maybe Int }
     deriving (Show, Eq, LuaDict)
 
-echoList  :: [Integer]                 -> LuaPure "echo" [Integer]
-echoPairs :: [(Integer, String)]       -> LuaPure "echo" [(Integer, String)]
+echoList  :: [Int]                 -> LuaPure "echo" [Int]
+echoPairs :: [(Int, String)]       -> LuaPure "echo" [(Int, String)]
 echoRec   :: Rec                        -> LuaPure "echo" Rec
 echoRecs  :: [Rec]                      -> LuaPure "echo" [Rec]
-echoMap   :: HashMap String [Integer]  -> LuaPure "echo" (HashMap String [Integer])
+echoMap   :: HashMap String [Int]  -> LuaPure "echo" (HashMap String [Int])
 
-lk :: String -> HashMap String [Integer] -> [Integer]
+lk :: String -> HashMap String [Int] -> [Int]
 lk k m = case Map.lookup k m of
            Just v  -> v
            Nothing -> []
@@ -3840,19 +3840,19 @@ fn ffi_json_constructed_record_crosses_boundary() {
     let source = r#"
 import JSON
 
-data Peer = Peer { peerHost as "host" :: String, peerPort as "port" :: Maybe Integer }
+data Peer = Peer { peerHost as "host" :: String, peerPort as "port" :: Maybe Int }
     deriving (Eq, Show, FromJSON, LuaDict)
 
 data Job = Job
         { jobName as "name" :: String
-        , jobRetries as "retries" :: Integer
+        , jobRetries as "retries" :: Int
         , jobPeers as "peers" :: [Peer]
         , jobNote as "note" :: Maybe String }
     deriving (Eq, Show, FromJSON, LuaDict)
 
 data Verdict = Verdict
         { vOk as "ok" :: Bool
-        , vTotal as "total" :: Integer
+        , vTotal as "total" :: Int
         , vFirst as "first" :: Maybe String }
     deriving (Show, LuaDict)
 
@@ -3927,18 +3927,18 @@ main =
 fn local_binding_shadows_prelude_function() {
     let source = r#"
 -- parameter named like a prelude function (multi-clause, not inlined)
-fParam :: Integer -> Integer
+fParam :: Int -> Int
 fParam 0 = 0
 fParam elem = elem + 1
 
 -- case-pattern variable named like a prelude function
-fCase :: Maybe Integer -> Integer
+fCase :: Maybe Int -> Int
 fCase m = case m of
   Just reverse -> reverse + 1
   Nothing -> 0
 
 -- let-bound variable named like a prelude function
-fLet :: Integer
+fLet :: Int
 fLet = let length = 41 in length + 1
 
 main :: IO ()
@@ -3964,7 +3964,7 @@ fn prelude_list_helpers_without_import() {
     let source = r#"
 main :: IO ()
 main = do
-  assert (null ([] :: [Integer])) "null"
+  assert (null ([] :: [Int])) "null"
   assert (last [1, 2, 3] == 3) "last"
   assert (init [1, 2, 3] == [1, 2]) "init"
   assert (concat [[1, 2], [3]] == [1, 2, 3]) "concat"
@@ -4005,8 +4005,8 @@ main = do
   assert (show (1, 2) == "(1,2)") "plain tuple"
   -- An empty-list element must show as "[]", not the type-erased "Nothing"
   -- (the post-mono verifier flagged this latent tuple-show leak).
-  assert (show ((1 :: Integer), ([] :: [Integer])) == "(1,[])") "tuple with empty list element"
-  assert (show ((Just (1 :: Integer)), (Nothing :: Maybe Integer)) == "(Just 1,Nothing)") "tuple of Maybe elements"
+  assert (show ((1 :: Int), ([] :: [Int])) == "(1,[])") "tuple with empty list element"
+  assert (show ((Just (1 :: Int)), (Nothing :: Maybe Int)) == "(Just 1,Nothing)") "tuple of Maybe elements"
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])
         .expect("should compile")
@@ -4023,13 +4023,13 @@ main = do
 #[test]
 fn case_nested_pattern_forces_thunked_field() {
     let source = r#"
-data Pair = Pair (Integer, Integer)
+data Pair = Pair (Int, Int)
 
-slow :: Integer -> Integer
+slow :: Int -> Int
 slow 0 = 0
 slow n = slow (n - 1) + 1
 
-mkPair :: Integer -> Pair
+mkPair :: Int -> Pair
 mkPair x = Pair (slow x, slow x + 1)
 
 main :: IO ()
@@ -4051,9 +4051,9 @@ main = case mkPair 3 of
 #[test]
 fn record_accessor_first_class() {
     let source = r#"
-data R = R { rfn :: Integer -> Integer, rval :: Integer }
+data R = R { rfn :: Int -> Int, rval :: Int }
 
-applyAcc :: (R -> Integer) -> R -> Integer
+applyAcc :: (R -> Int) -> R -> Int
 applyAcc f r = f r
 
 main :: IO ()
@@ -4066,7 +4066,7 @@ main = do
   -- over-applied function-typed field accessor: (rfn r) 10
   assert (rfn r 10 == 11) "over-applied function field accessor"
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList [] = 0
 sumList (x:xs) = x + sumList xs
 "#;
@@ -4137,7 +4137,7 @@ fn compile_ffi_module(source: &str) -> (mlua::Lua, mlua::Table) {
 fn lua_iterator_result_must_be_an_explicit_list() {
     // The LuaIterator type argument always names the result list, so a bare
     // (non-list) element type is rejected: it would make the argument
-    // ambiguous with a genuine list-yielding iterator (`[[Integer]]`).
+    // ambiguous with a genuine list-yielding iterator (`[[Int]]`).
     let source = r#"
 gm :: String -> String -> LuaIterator "string.gmatch" String
 
@@ -4161,22 +4161,22 @@ fn lua_iterator_type_argument_is_the_result_list_and_elements_decode() {
     // experiments/iterator/ regression, two properties in one:
     //
     // 1. The `LuaIterator "f" T` type argument names the RESULT list. A list
-    //    argument `[Integer]` reduces to `[Integer]` (the iterator yields the
-    //    ELEMENTS, one Integer per step) — NOT `[[Integer]]`. So `yields`,
-    //    whose host yields plain ints, is a flat `[Integer]`.
+    //    argument `[Int]` reduces to `[Int]` (the iterator yields the
+    //    ELEMENTS, one Int per step) — NOT `[[Int]]`. So `yields`,
+    //    whose host yields plain ints, is a flat `[Int]`.
     // 2. A structured element type is DECODED per element, exactly as an
-    //    ordinary FFI result: `arrs :: LuaIterator "…" [[Integer]]` reduces to
-    //    `[[Integer]]`, and each yielded Lua array becomes a cons list (so
+    //    ordinary FFI result: `arrs :: LuaIterator "…" [[Int]]` reduces to
+    //    `[[Int]]`, and each yielded Lua array becomes a cons list (so
     //    `map sum` works). Before the fix elements were stored raw and any
     //    list op failed with "expected a list but got a raw … value".
     let src = r#"
-yields :: LuaIterator "yieldints" [Integer]
-arrs   :: LuaIterator "yieldarrs" [[Integer]]
+yields :: LuaIterator "yieldints" [Int]
+arrs   :: LuaIterator "yieldarrs" [[Int]]
 
 main :: IO ()
 main = do
-    -- (1) list-arg iterator over a scalar-yielding host is a FLAT [Integer].
-    assert (take 3 yields == [10, 20, 30]) "list-arg iterator yields a flat [Integer]"
+    -- (1) list-arg iterator over a scalar-yielding host is a FLAT [Int].
+    assert (take 3 yields == [10, 20, 30]) "list-arg iterator yields a flat [Int]"
     -- (2) structured element (a list) is decoded to a cons list.
     assert (map sum (take 2 arrs) == [3, 7]) "each yielded array decoded to a cons list"
     putStrLn "ok"
@@ -4218,16 +4218,16 @@ main = do
 #[test]
 fn ffi_export_pure_functions() {
     let source = r#"
-export add :: Integer -> Integer -> Integer
+export add :: Int -> Int -> Int
 add x y = x + y
 
-export double :: Integer -> Integer
+export double :: Int -> Int
 double n = n * 2
 
-export negate :: Integer -> Integer
+export negate :: Int -> Int
 negate n = 0 - n
 
-export isEven :: Integer -> Bool
+export isEven :: Int -> Bool
 isEven n = n `mod` 2 == 0
 
 main :: IO ()
@@ -4235,7 +4235,7 @@ main = pure ()
 "#;
     let (_lua, module) = compile_ffi_module(source);
 
-    // Integer arithmetic
+    // Int arithmetic
     let add: mlua::Function = module.get("add").unwrap();
     let result: i64 = add.call((3, 4)).unwrap();
     assert_eq!(result, 7, "add 3 4 == 7");
@@ -4288,17 +4288,17 @@ main = pure ()
 #[test]
 fn ffi_export_list_functions() {
     let source = r#"
-range :: Integer -> [Integer]
+range :: Int -> [Int]
 range n = if n <= 0 then [] else go 1 n
   where go i m = if i > m then [] else i : go (i + 1) m
 
-export getRange :: Integer -> [Integer]
+export getRange :: Int -> [Int]
 getRange n = range n
 
-export squares :: Integer -> [Integer]
+export squares :: Int -> [Int]
 squares n = map (\x -> x * x) (range n)
 
-export countTo :: Integer -> Integer
+export countTo :: Int -> Int
 countTo n = foldl (+) 0 (range n)
 
 main :: IO ()
@@ -4320,7 +4320,7 @@ main = pure ()
     let result: Vec<i64> = squares.call(4).unwrap();
     assert_eq!(result, vec![1, 4, 9, 16], "squares 4");
 
-    // List → Integer (fold)
+    // List → Int (fold)
     let count: mlua::Function = module.get("countTo").unwrap();
     let result: i64 = count.call(10).unwrap();
     assert_eq!(result, 55, "countTo 10 == 55 (triangle number)");
@@ -4329,11 +4329,11 @@ main = pure ()
 #[test]
 fn ffi_export_maybe_either() {
     let source = r#"
-export safeDiv :: Integer -> Integer -> Maybe Integer
+export safeDiv :: Int -> Int -> Maybe Int
 safeDiv _ 0 = Nothing
 safeDiv x y = Just (x `div` y)
 
-export classify :: Integer -> Either String Integer
+export classify :: Int -> Either String Int
 classify n = if n < 0 then Left "negative" else Right n
 
 main :: IO ()
@@ -4371,16 +4371,16 @@ fn ffi_export_higher_order() {
 applyTwice :: (a -> a) -> a -> a
 applyTwice f x = f (f x)
 
-double :: Integer -> Integer
+double :: Int -> Int
 double x = x * 2
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
-export doubleDouble :: Integer -> Integer
+export doubleDouble :: Int -> Int
 doubleDouble n = applyTwice double n
 
-export incInc :: Integer -> Integer
+export incInc :: Int -> Int
 incInc n = applyTwice inc n
 
 main :: IO ()
@@ -4400,10 +4400,10 @@ main = pure ()
 #[test]
 fn ffi_export_tuples() {
     let source = r#"
-export swap :: (Integer, Integer) -> (Integer, Integer)
+export swap :: (Int, Int) -> (Int, Int)
 swap (a, b) = (b, a)
 
-export firstPlusSecond :: (Integer, Integer) -> Integer
+export firstPlusSecond :: (Int, Int) -> Int
 firstPlusSecond (a, b) = a + b
 
 main :: IO ()
@@ -4426,13 +4426,13 @@ fn ffi_export_thunked_values() {
     // Regression: top-level values defined via point-free or partial
     // application are thunks — export wrapper must __force before calling
     let source = r#"
-export increment :: Integer -> Integer
+export increment :: Int -> Int
 increment = (+1)
 
-fib :: [Integer]
+fib :: [Int]
 fib = 1 : 1 : zipWith (+) fib (drop 1 fib)
 
-export fibonacci :: Integer -> [Integer]
+export fibonacci :: Int -> [Int]
 fibonacci = flip take fib
 
 main :: IO ()
@@ -4454,15 +4454,15 @@ fn ffi_export_adt() {
     let source = r#"
 data Color = Red | Green | Blue
 
-export colorCode :: Color -> Integer
+export colorCode :: Color -> Int
 colorCode Red = 1
 colorCode Green = 2
 colorCode Blue = 3
 
-export mkRed :: Integer -> Color
+export mkRed :: Int -> Color
 mkRed _ = Red
 
-export mkGreen :: Integer -> Color
+export mkGreen :: Int -> Color
 mkGreen _ = Green
 
 main :: IO ()
@@ -4487,14 +4487,14 @@ main = pure ()
 fn ffi_export_multi_arg() {
     // Test multi-arg exported functions and string operations
     let source = r#"
-export strRepeat :: String -> Integer -> String
+export strRepeat :: String -> Int -> String
 strRepeat _ 0 = ""
 strRepeat s n = s <> strRepeat s (n - 1)
 
-export clamp :: Integer -> Integer -> Integer -> Integer
+export clamp :: Int -> Int -> Int -> Int
 clamp lo hi x = if x < lo then lo else if x > hi then hi else x
 
-export between :: Integer -> Integer -> Bool
+export between :: Int -> Int -> Bool
 between lo hi = lo < hi
 
 main :: IO ()
@@ -4525,13 +4525,13 @@ main = pure ()
 fn ffi_export_deep_force() {
     // Regression: lazy thunks (e.g. from map) must be fully forced across FFI
     let source = r#"
-export mapDouble :: [Integer] -> [Integer]
+export mapDouble :: [Int] -> [Int]
 mapDouble xs = map (\x -> x * 2) xs
 
-export mapShow :: [Integer] -> [String]
+export mapShow :: [Int] -> [String]
 mapShow xs = map show xs
 
-export listOfStrings :: Integer -> [String]
+export listOfStrings :: Int -> [String]
 listOfStrings _ = ["hello", "world", "foo"]
 
 main :: IO ()
@@ -4559,20 +4559,20 @@ main = pure ()
 fn ffi_export_lua_to_mll_lists() {
     // Lua arrays passed as arguments must be converted to MLL cons lists
     let source = r#"
-export sumList :: [Integer] -> Integer
+export sumList :: [Int] -> Int
 sumList xs = foldl (+) 0 xs
 
-export headOf :: [Integer] -> Integer
+export headOf :: [Int] -> Int
 headOf xs = head xs
 
-export lengthOf :: [Integer] -> Integer
+export lengthOf :: [Int] -> Int
 lengthOf [] = 0
 lengthOf (_:xs) = 1 + lengthOf xs
 
-export appendLists :: [Integer] -> [Integer] -> [Integer]
+export appendLists :: [Int] -> [Int] -> [Int]
 appendLists xs ys = xs ++ ys
 
-export reverseList :: [Integer] -> [Integer]
+export reverseList :: [Int] -> [Int]
 reverseList xs = foldl (flip (:)) [] xs
 
 main :: IO ()
@@ -4616,14 +4616,14 @@ fn ffi_export_string_lists() {
     // and never-called — function compiled anyway. It now uses a real
     // string-length FFI declaration and is actually exercised.)
     let source = r#"
-strLen :: String -> LuaPure "string.len" Integer
+strLen :: String -> LuaPure "string.len" Int
 
 export joinWith :: String -> [String] -> String
 joinWith _ [] = ""
 joinWith _ [x] = x
 joinWith sep (x:xs) = x <> sep <> joinWith sep xs
 
-export filterLong :: Integer -> [String] -> [String]
+export filterLong :: Int -> [String] -> [String]
 filterLong n xs = filter (\s -> lengthS s > n) xs
   where lengthS s = strLen s
 
@@ -4656,13 +4656,13 @@ main = pure ()
 fn ffi_export_mixed_args() {
     // Functions with both list and non-list arguments
     let source = r#"
-export takeN :: Integer -> [Integer] -> [Integer]
+export takeN :: Int -> [Int] -> [Int]
 takeN n xs = take n xs
 
-export dropN :: Integer -> [Integer] -> [Integer]
+export dropN :: Int -> [Int] -> [Int]
 dropN n xs = drop n xs
 
-export replicate :: Integer -> Integer -> [Integer]
+export replicate :: Int -> Int -> [Int]
 replicate 0 _ = []
 replicate n x = x : replicate (n - 1) x
 
@@ -4671,7 +4671,7 @@ main = pure ()
 "#;
     let (_lua, module) = compile_ffi_module(source);
 
-    // Integer arg + list arg
+    // Int arg + list arg
     let take_n: mlua::Function = module.get("takeN").unwrap();
     let result: Vec<i64> = take_n.call((3, vec![10, 20, 30, 40, 50])).unwrap();
     assert_eq!(result, vec![10, 20, 30], "takeN 3 [10..50]");
@@ -4696,22 +4696,22 @@ fn ffi_export_values() {
     // (keyed table), a tuple (positional table), etc. A function export and an
     // IO-action export in the same module must keep their performing wrappers.
     let source = r#"
-data Config = Config { width :: Integer, height :: Integer }
+data Config = Config { width :: Int, height :: Int }
   deriving (LuaDict)
 
-export answer :: Integer
+export answer :: Int
 answer = 42
 
 export config :: Config
 config = Config { width = 640, height = 480 }
 
-export pairV :: (Integer, String)
+export pairV :: (Int, String)
 pairV = (7, "seven")
 
-export incr :: Integer -> Integer
+export incr :: Int -> Int
 incr n = n + 1
 
-export runIt :: IO Integer
+export runIt :: IO Int
 runIt = pure 99
 
 main :: IO ()
@@ -4777,40 +4777,40 @@ fn ffi_export_rejects_unmarshallable_types() {
     assert!(e.contains("dictionary"), "dictionary note: {e}");
 
     // A region-scoped ST handle, in both directions.
-    let e = compile_err("export g :: [Integer] -> ST s (STArray s)\ng xs = newSTArrayFromList xs\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("export g :: [Int] -> ST s (STArray s)\ng xs = newSTArrayFromList xs\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Export 'g'") && e.contains("the result"), "ST result rejected: {e}");
     assert!(e.contains("STArray") && e.contains("region-scoped"), "ST note: {e}");
 
-    let e = compile_err("export f :: forall s. STArray s -> Integer\nf _ = 5\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("export f :: forall s. STArray s -> Int\nf _ = 5\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Export 'f'") && e.contains("argument 1") && e.contains("STArray"),
         "ST argument rejected: {e}");
 
     // An IO action cannot be supplied by a Lua caller (import position).
-    let e = compile_err("export bad :: IO () -> Integer\nbad _ = 5\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("export bad :: IO () -> Int\nbad _ = 5\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Export 'bad'") && e.contains("argument 1") && e.contains("IO ()"),
         "IO-in-argument rejected: {e}");
     assert!(e.contains("cannot supply an IO/LuaIO action"), "IO-arg note: {e}");
 
     // Recursion + direction-flip: a rejected type nested inside a tuple, a list,
     // and a Maybe is still caught and located.
-    let e = compile_err("export t :: (Integer, a) -> Integer\nt (n, _) = n\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("(inside '(Integer, a)')"), "nested-in-tuple culprit located: {e}");
-    let e = compile_err("export h :: [a] -> Integer\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("export t :: (Int, a) -> Int\nt (n, _) = n\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("(inside '(Int, a)')"), "nested-in-tuple culprit located: {e}");
+    let e = compile_err("export h :: [a] -> Int\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("(inside '[a]')"), "nested-in-list culprit located: {e}");
-    let e = compile_err("export j :: Maybe a -> Integer\nj _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("export j :: Maybe a -> Int\nj _ = 0\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("(inside 'Maybe a')"), "nested-in-Maybe culprit located: {e}");
 
     // A callback whose own signature contains a rejected type. The callback's
     // RESULT is in the import direction (unwrapping its LuaIO), so an ST handle
     // there is rejected.
     let e = compile_err(
-        "export ap :: forall s. (Integer -> LuaIO s (ST s (STArray s))) -> LuaIO s Integer\nap f = pure 0\nmain :: IO ()\nmain = pure ()\n");
+        "export ap :: forall s. (Int -> LuaIO s (ST s (STArray s))) -> LuaIO s Int\nap f = pure 0\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Export 'ap'") && e.contains("STArray"), "callback-result ST rejected: {e}");
 
     // The callback's ARGUMENT flips to the export (result) direction — a type
     // variable there is reported as a result-direction failure.
     let e = compile_err(
-        "export cb :: forall s. (a -> LuaIO s Integer) -> LuaIO s Integer\ncb f = pure 0\nmain :: IO ()\nmain = pure ()\n");
+        "export cb :: forall s. (a -> LuaIO s Int) -> LuaIO s Int\ncb f = pure 0\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Export 'cb'") && e.contains("result direction"),
         "callback-argument direction flip: {e}");
 
@@ -4818,24 +4818,24 @@ fn ffi_export_rejects_unmarshallable_types() {
     // Nested inside a container it is passed opaque by codegen, so it is
     // rejected — here a callback nested in a Maybe inside a tuple argument.
     let e = compile_err(
-        "export ap :: (Maybe (Bool -> [Integer]), Integer) -> Integer\nap _ = 0\nmain :: IO ()\nmain = pure ()\n");
+        "export ap :: (Maybe (Bool -> [Int]), Int) -> Int\nap _ = 0\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Export 'ap'") && e.contains("argument 1"), "nested callback rejected: {e}");
-    assert!(e.contains("Bool -> [Integer]") && e.contains("(inside '(Maybe (Bool -> [Integer]), Integer)')"),
+    assert!(e.contains("Bool -> [Int]") && e.contains("(inside '(Maybe (Bool -> [Int]), Int)')"),
         "names the nested callback and its position: {e}");
     assert!(e.contains("DIRECT top-level argument"), "callback-position note: {e}");
 
     // A function nested in the RESULT is rejected (a list of functions — a bare
-    // `Integer -> (Bool -> Integer)` would just be a two-argument export).
+    // `Int -> (Bool -> Int)` would just be a two-argument export).
     let e = compile_err(
-        "export rf :: Integer -> [Bool -> Integer]\nrf n = [\\b -> n]\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'rf'") && e.contains("the result") && e.contains("Bool -> Integer"),
+        "export rf :: Int -> [Bool -> Int]\nrf n = [\\b -> n]\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'rf'") && e.contains("the result") && e.contains("Bool -> Int"),
         "function nested in result rejected: {e}");
 
     // A callback whose OWN argument is a callback (callback-taking-a-callback):
     // codegen passes the inner function opaque, so reject it.
     let e = compile_err(
-        "export cc :: forall s. ((Integer -> Integer) -> LuaIO s Integer) -> LuaIO s Integer\ncc _ = pure 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'cc'") && e.contains("callback argument") && e.contains("Integer -> Integer"),
+        "export cc :: forall s. ((Int -> Int) -> LuaIO s Int) -> LuaIO s Int\ncc _ = pure 0\nmain :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'cc'") && e.contains("callback argument") && e.contains("Int -> Int"),
         "callback-taking-a-callback rejected: {e}");
 }
 
@@ -4846,12 +4846,12 @@ fn ffi_export_deep_nesting_allowed() {
     // marshallable as a direct top-level export argument; see the reject test).
     // A second export exercises the SUPPORTED callback shape.
     let source = r#"
-export deep :: (Maybe [Integer], Bool) -> [Either String Integer]
+export deep :: (Maybe [Int], Bool) -> [Either String Int]
 deep (m, b) = case m of
     Just xs -> map (\x -> if b then Right x else Left "neg") xs
     Nothing -> []
 
-export cbSum :: forall s. (Integer -> LuaIO s [Integer]) -> LuaIO s Integer
+export cbSum :: forall s. (Int -> LuaIO s [Int]) -> LuaIO s Int
 cbSum f = do
     xs <- f 3
     pure (sum xs)
@@ -4884,7 +4884,7 @@ main = pure ()
 
     // The SUPPORTED callback shape — a top-level `(A -> LuaIO s R)` argument —
     // stays accepted (the module loaded) and runs: the host callback yields a
-    // Lua array, decoded to `[Integer]`, and `sum` folds it.
+    // Lua array, decoded to `[Int]`, and `sum` folds it.
     let cb_sum: mlua::Function = module.get("cbSum")
         .expect("a top-level (A -> LuaIO s R) callback export is accepted");
     let cb = lua.create_function(|lua, n: i64| {
@@ -4903,29 +4903,29 @@ fn ffi_outgoing_callback_fold() {
     // callback, and an opaque tuple state that must round-trip through Lua.
     let source = r#"
 -- Pure outgoing callback: state `acc` is opaque (a polymorphic type variable).
-foldRows :: String -> (Integer -> acc -> acc) -> acc -> LuaPure "db.fold" acc
+foldRows :: String -> (Int -> acc -> acc) -> acc -> LuaPure "db.fold" acc
 
 -- Effectful outgoing callback: returns LuaIO s acc, may do I/O per row.
-foldRowsIO :: String -> (Integer -> acc -> LuaIO s acc) -> acc -> LuaIO "db.fold" acc
+foldRowsIO :: String -> (Int -> acc -> LuaIO s acc) -> acc -> LuaIO "db.fold" acc
 
-stepIO :: Integer -> Integer -> LuaIO s Integer
+stepIO :: Int -> Int -> LuaIO s Int
 stepIO row acc = do
     liftIO (putStr "")
     pure (acc + row)
 
--- Pure sum into an Integer accumulator (uncurry + value return).
-export sumRows :: Integer -> Integer
+-- Pure sum into an Int accumulator (uncurry + value return).
+export sumRows :: Int -> Int
 sumRows seed = foldRows "select" (\row acc -> acc + row) seed
 
 -- Opaque tuple state (sum, count): proves the state survives the Lua round-trip
 -- intact (the FFI converters would otherwise flatten a tuple to a cons list).
-export sumCount :: Integer -> Integer
+export sumCount :: Int -> Int
 sumCount _ =
     case foldRows "select" (\row acc -> case acc of (s, c) -> (s + row, c + 1)) (0, 0) of
         (s, c) -> s * 1000 + c
 
 -- Effectful fold, returned as IO; the export wrapper runs the action.
-export runEffectful :: Integer -> IO Integer
+export runEffectful :: Int -> IO Int
 runEffectful seed = foldRowsIO "select" stepIO seed
 
 main :: IO ()
@@ -4975,36 +4975,36 @@ fn ffi_decode_shape_mismatch_errors() {
     // checks must NOT reject valid host values (the false-positive regression
     // guarded by the n == 0 cases below).
     let source = r#"
-data Cert = Cert { certName :: String, certPort :: Integer }
+data Cert = Cert { certName :: String, certPort :: Int }
     deriving (Show, LuaDict)
 
-getCert :: Integer -> LuaPure "host.cert" Cert
-getPorts :: Integer -> LuaPure "host.ports" [Integer]
-getPair :: Integer -> LuaPure "host.pair" (String, Integer)
-getEntries :: Integer -> LuaPure "host.entries" [(String, Integer)]
+getCert :: Int -> LuaPure "host.cert" Cert
+getPorts :: Int -> LuaPure "host.ports" [Int]
+getPair :: Int -> LuaPure "host.pair" (String, Int)
+getEntries :: Int -> LuaPure "host.entries" [(String, Int)]
 
-export certPortOf :: Integer -> Integer
+export certPortOf :: Int -> Int
 certPortOf n = certPort (getCert n)
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList xs = case xs of
     []     -> 0
     (y:ys) -> y + sumList ys
 
-export sumPorts :: Integer -> Integer
+export sumPorts :: Int -> Int
 sumPorts n = sumList (getPorts n)
 
-export pairSnd :: Integer -> Integer
+export pairSnd :: Int -> Int
 pairSnd n =
     case getPair n of
         (_, p) -> p
 
-sumValues :: [(String, Integer)] -> Integer
+sumValues :: [(String, Int)] -> Int
 sumValues xs = case xs of
     []          -> 0
     ((_, v):ys) -> v + sumValues ys
 
-export entrySum :: Integer -> Integer
+export entrySum :: Int -> Int
 entrySum n = sumValues (getEntries n)
 
 main :: IO ()
@@ -5061,7 +5061,7 @@ main = pure ()
 
     // A declared record field the host left out.
     let e = cert_port.call::<i64>(1).unwrap_err().to_string();
-    assert!(e.contains("declared Integer but the host returned nil"), "got: {e}");
+    assert!(e.contains("declared Int but the host returned nil"), "got: {e}");
     assert!(e.contains("field 'certPort' of record Cert"), "got: {e}");
     assert!(e.contains("in the result of host.cert"), "got: {e}");
 
@@ -5077,33 +5077,33 @@ main = pure ()
 
     // A scalar where a list was declared.
     let e = sum_ports.call::<i64>(1).unwrap_err().to_string();
-    assert!(e.contains("declared [Integer] but the host returned the number 443"), "got: {e}");
+    assert!(e.contains("declared [Int] but the host returned the number 443"), "got: {e}");
     assert!(e.contains("a list must arrive from the host as a Lua array"), "got: {e}");
     assert!(e.contains("in the result of host.ports"), "got: {e}");
 
     // A list element of the wrong type.
     let e = sum_ports.call::<i64>(2).unwrap_err().to_string();
     assert!(
-        e.contains("declared Integer but the host returned the string \"eighty\""),
+        e.contains("declared Int but the host returned the string \"eighty\""),
         "got: {e}"
     );
-    assert!(e.contains("an element of the list declared [Integer]"), "got: {e}");
+    assert!(e.contains("an element of the list declared [Int]"), "got: {e}");
 
     // A tuple element (multi-return value) of the wrong type.
     let e = pair_snd.call::<i64>(1).unwrap_err().to_string();
-    assert!(e.contains("declared Integer but the host returned the string \"b\""), "got: {e}");
-    assert!(e.contains("element 2 of the tuple declared (String, Integer)"), "got: {e}");
+    assert!(e.contains("declared Int but the host returned the string \"b\""), "got: {e}");
+    assert!(e.contains("element 2 of the tuple declared (String, Int)"), "got: {e}");
     assert!(e.contains("in the result of host.pair"), "got: {e}");
 
     // A tuple element (multi-return value) the host left out entirely.
     let e = pair_snd.call::<i64>(2).unwrap_err().to_string();
-    assert!(e.contains("declared Integer but the host returned nil"), "got: {e}");
-    assert!(e.contains("element 2 of the tuple declared (String, Integer)"), "got: {e}");
+    assert!(e.contains("declared Int but the host returned nil"), "got: {e}");
+    assert!(e.contains("element 2 of the tuple declared (String, Int)"), "got: {e}");
 
     // A scalar where a tuple was declared (nested inside a list).
     let e = entry_sum.call::<i64>(1).unwrap_err().to_string();
     assert!(
-        e.contains("declared (String, Integer) but the host returned the string \"a\""),
+        e.contains("declared (String, Int) but the host returned the string \"a\""),
         "got: {e}"
     );
     assert!(e.contains("a tuple must arrive from the host as a Lua array"), "got: {e}");
@@ -5112,10 +5112,10 @@ main = pure ()
     // A wrong-typed element of a tuple nested inside a list.
     let e = entry_sum.call::<i64>(2).unwrap_err().to_string();
     assert!(
-        e.contains("declared Integer but the host returned the string \"two\""),
+        e.contains("declared Int but the host returned the string \"two\""),
         "got: {e}"
     );
-    assert!(e.contains("element 2 of the tuple declared (String, Integer)"), "got: {e}");
+    assert!(e.contains("element 2 of the tuple declared (String, Int)"), "got: {e}");
 }
 
 // --- The FFI boundary is uniformly type-directed (audit findings 4, 5, 7, 8,
@@ -5127,29 +5127,29 @@ main = pure ()
 #[test]
 fn luatry_success_payload_decodes_and_error_is_stringified() {
     // Audit finding 7 (doc/audit/t9): a structured LuaTry success payload
-    // (a raw Lua array where [Integer] was declared) was returned undecoded
+    // (a raw Lua array where [Int] was declared) was returned undecoded
     // and later walked as a cons cell -> "attempt to index a number value".
     // And finding 17 (the LuaTry half): a non-string `err` in the Lua
     // (val, err) convention landed raw in Left :: String.
     let source = r#"
-tryList   :: Integer -> LuaTry "try_list" (Either String [Integer])
-tryNested :: Integer -> LuaTry "try_nested" (Either String [[Integer]])
+tryList   :: Int -> LuaTry "try_list" (Either String [Int])
+tryNested :: Int -> LuaTry "try_nested" (Either String [[Int]])
 
-export sumTry :: Integer -> IO Integer
+export sumTry :: Int -> IO Int
 sumTry n = do
     r <- tryList n
     case r of
         Right xs -> pure (sum xs)
         Left _   -> pure (0 - 1)
 
-export sumNestedTry :: Integer -> IO Integer
+export sumNestedTry :: Int -> IO Int
 sumNestedTry n = do
     r <- tryNested n
     case r of
         Right xs -> pure (sum (map sum xs))
         Left _   -> pure (0 - 1)
 
-export errText :: Integer -> IO String
+export errText :: Int -> IO String
 errText n = do
     r <- tryList n
     case r of
@@ -5196,24 +5196,24 @@ main = pure ()
 #[test]
 fn export_arguments_decode_type_directed() {
     // Audit finding 5: exported functions cons-ified every table argument and
-    // only when the TOP-LEVEL type was a list. A `Maybe Integer` argument
+    // only when the TOP-LEVEL type was a list. A `Maybe Int` argument
     // never got its tagged wrapper, and structure nested under a non-list
     // argument (a tuple's list element, a record's list field, a [record])
     // crashed or corrupted.
     let source = r#"
-data Tag = Tag { tName :: String, tVals :: [Integer] }
+data Tag = Tag { tName :: String, tVals :: [Int] }
     deriving (Show, Eq, LuaDict)
 
-export pairSum :: (Integer, [Integer]) -> Integer
+export pairSum :: (Int, [Int]) -> Int
 pairSum (n, xs) = n + sum xs
 
-export tagSum :: Tag -> Integer
+export tagSum :: Tag -> Int
 tagSum t = sum (tVals t)
 
-export tagSums :: [Tag] -> Integer
+export tagSums :: [Tag] -> Int
 tagSums ts = sum (map tagSum ts)
 
-export maybeOr :: Maybe Integer -> Integer
+export maybeOr :: Maybe Int -> Int
 maybeOr (Just v) = v * 2
 maybeOr Nothing  = 0 - 5
 
@@ -5270,10 +5270,10 @@ fn export_results_marshal_type_directed() {
     // the shape-based deep-force conversion, which compacted interior
     // Nothings in a [Maybe a] (elements shifted into their slots).
     let source = r#"
-export mkML :: Integer -> [Maybe Integer]
+export mkML :: Int -> [Maybe Int]
 mkML n = map (\k -> if k `mod` 2 == 0 then Nothing else Just k) (enumFromTo 1 n)
 
-export emptyOut :: Integer -> [Integer]
+export emptyOut :: Int -> [Int]
 emptyOut n = filter (\k -> k > 100) (enumFromTo 1 n)
 
 main :: IO ()
@@ -5306,28 +5306,28 @@ fn exported_callback_results_decode_type_directed() {
     let source = r#"
 import qualified Data.Map as Map
 
-data Pt = Pt { px :: Integer, py :: Integer } deriving (Show, LuaDict)
+data Pt = Pt { px :: Int, py :: Int } deriving (Show, LuaDict)
 
-export applyM :: forall s. (Integer -> LuaIO s (Map.Map String Integer)) -> LuaIO s Integer
+export applyM :: forall s. (Int -> LuaIO s (Map.Map String Int)) -> LuaIO s Int
 applyM f = do
     mp <- f 3
     case Map.lookup "a" mp of
         Just v  -> pure v
         Nothing -> pure (0 - 99)
 
-export applyR :: forall s. (Integer -> LuaIO s Pt) -> LuaIO s Integer
+export applyR :: forall s. (Int -> LuaIO s Pt) -> LuaIO s Int
 applyR f = do
     p <- f 2
     pure (px p * 100 + py p)
 
-export applyMaybe :: forall s. (Integer -> LuaIO s (Maybe Integer)) -> LuaIO s Integer
+export applyMaybe :: forall s. (Int -> LuaIO s (Maybe Int)) -> LuaIO s Int
 applyMaybe f = do
     m <- f 1
     case m of
         Just v  -> pure v
         Nothing -> pure (0 - 1)
 
-export feed :: forall s. ([Integer] -> LuaIO s Integer) -> Integer -> LuaIO s Integer
+export feed :: forall s. ([Int] -> LuaIO s Int) -> Int -> LuaIO s Int
 feed f n = f (map (\k -> k * n) (enumFromTo 1 3))
 
 main :: IO ()
@@ -5383,17 +5383,17 @@ fn outgoing_callback_edges_agree_with_ffi_edges() {
     // callback edge — corrupting it silently. Both edges must use the same
     // (monomorphized) type-directed descriptors.
     let source = r#"
-foldHost :: [Integer] -> (Integer -> acc -> acc) -> acc -> LuaPure "fold_host" acc
+foldHost :: [Int] -> (Int -> acc -> acc) -> acc -> LuaPure "fold_host" acc
 
-export listAcc :: Integer -> Integer
+export listAcc :: Int -> Int
 listAcc n = sum (foldHost (enumFromTo 1 n) (\x xs -> x : xs) [])
 
-export tupleAcc :: Integer -> Integer
+export tupleAcc :: Int -> Int
 tupleAcc n =
     case foldHost (enumFromTo 1 n) (\x st -> case st of (c, xs) -> (c + 1, x : xs)) (0, []) of
         (c, xs) -> c * 1000 + sum xs
 
-export scalarAcc :: Integer -> Integer
+export scalarAcc :: Int -> Int
 scalarAcc n = foldHost (enumFromTo 1 n) (\x c -> c + x) 0
 
 main :: IO ()
@@ -5411,13 +5411,13 @@ main = pure ()
     .exec()
     .unwrap();
 
-    // acc instantiated at [Integer]: the accumulator list survives the
+    // acc instantiated at [Int]: the accumulator list survives the
     // round trips through the host intact.
     let list_acc: mlua::Function = module.get("listAcc").unwrap();
-    let v: i64 = list_acc.call(4).expect("[Integer] accumulator round-trips");
+    let v: i64 = list_acc.call(4).expect("[Int] accumulator round-trips");
     assert_eq!(v, 10, "sum of the accumulated list");
 
-    // acc instantiated at (Integer, [Integer]): structure nested in a tuple.
+    // acc instantiated at (Int, [Int]): structure nested in a tuple.
     let tuple_acc: mlua::Function = module.get("tupleAcc").unwrap();
     let v: i64 = tuple_acc.call(3).expect("tuple accumulator round-trips");
     assert_eq!(v, 3006, "count 3, sum 6");
@@ -5432,7 +5432,7 @@ main = pure ()
 
 #[test]
 fn ill_kinded_family_equation_rejected_at_definition() {
-    // `Mix 'Z = Integer; Mix 'True = Bool` uses the family argument at kind
+    // `Mix 'Z = Int; Mix 'True = Bool` uses the family argument at kind
     // Nat in one equation and Bool in another. This must be an error AT THE
     // DEFINITION — even with the bad equation never used — not a deferred
     // use-site error blaming the user's signature.
@@ -5440,7 +5440,7 @@ fn ill_kinded_family_equation_rejected_at_definition() {
 data Nat = Z | S Nat
 
 type family Mix a where
-    Mix 'Z    = Integer
+    Mix 'Z    = Int
     Mix 'True = Bool
 
 main :: IO ()
@@ -5471,7 +5471,7 @@ fn kind_conflicting_family_results_rejected_at_definition() {
 data Nat = Z | S Nat
 
 type family Bad a where
-    Bad Integer = 'Z
+    Bad Int = 'Z
     Bad Bool    = 'True
 
 main :: IO ()
@@ -5500,9 +5500,9 @@ fn unsaturated_type_family_rejected() {
 type family Ident x where
     Ident x = x
 
-data Wrap f = Wrap (f Integer)
+data Wrap f = Wrap (f Int)
 
-bad :: Wrap Ident -> Integer
+bad :: Wrap Ident -> Int
 bad (Wrap n) = n
 
 main :: IO ()
@@ -5567,11 +5567,11 @@ main = pure ()
 
 #[test]
 fn derive_functor_contravariant_rejected() {
-    // `data F a = F (a -> Integer)`: the class variable in a function
+    // `data F a = F (a -> Int)`: the class variable in a function
     // ARGUMENT position has no lawful fmap. GHC rejects the deriving clause;
     // mata-ll used to accept it and crash at the first fmap use.
     let source = r#"
-data F a = F (a -> Integer) deriving (Functor)
+data F a = F (a -> Int) deriving (Functor)
 
 main :: IO ()
 main = pure ()
@@ -5593,10 +5593,10 @@ main = pure ()
 #[test]
 fn derive_functor_non_last_argument_rejected() {
     // The class variable used in a non-last argument of a constructor
-    // (`Either a Integer`): fmap only reaches the last argument, so GHC
+    // (`Either a Int`): fmap only reaches the last argument, so GHC
     // rejects this deriving too.
     let source = r#"
-data W a = W (Either a Integer) deriving (Functor)
+data W a = W (Either a Int) deriving (Functor)
 
 main :: IO ()
 main = pure ()
@@ -5627,7 +5627,7 @@ fn prelude_is_emitted_on_demand() {
 
     // But a program that uses a feature must still carry its runtime, or it
     // would break at runtime — reachability, not blanket removal.
-    let uses_list_show = mllc::compile("main :: IO ()\nmain = print [1, 2, 3 :: Integer]\n", Path::new("."), &[])
+    let uses_list_show = mllc::compile("main :: IO ()\nmain = print [1, 2, 3 :: Int]\n", Path::new("."), &[])
         .expect("list-show program should compile")
         .lua_code;
     assert!(uses_list_show.contains("__mll_show_list"), "list show must be present when used");
@@ -5648,7 +5648,7 @@ fn dead_code_is_eliminated() {
     // A trivial program must not carry the unused auto-prelude.
     let trivial = fn_count("main :: IO ()\nmain = putStrLn \"hi\"\n");
     let prelude_heavy = fn_count(
-        "main :: IO ()\nmain = print (foldr (+) 0 (map (\\x -> x * 2) (filter (\\x -> x > 0) [1, 2, 3, 4 :: Integer])))\n",
+        "main :: IO ()\nmain = print (foldr (+) 0 (map (\\x -> x * 2) (filter (\\x -> x > 0) [1, 2, 3, 4 :: Int])))\n",
     );
     assert!(trivial < prelude_heavy,
         "trivial ({trivial} fns) should emit fewer functions than prelude-heavy ({prelude_heavy} fns)");
@@ -5657,7 +5657,7 @@ fn dead_code_is_eliminated() {
     // Exports are roots: an exported function survives DCE even when `main`
     // never calls it (it is reachable only from outside).
     let (_lua, module) = compile_ffi_module(
-        "export twice :: Integer -> Integer\ntwice x = x + x\nmain :: IO ()\nmain = pure ()\n",
+        "export twice :: Int -> Int\ntwice x = x + x\nmain :: IO ()\nmain = pure ()\n",
     );
     let twice: mlua::Function = module.get("twice").unwrap();
     let r: i64 = twice.call(21).unwrap();
@@ -5720,12 +5720,12 @@ fn curried_lambda_captures_outer_binding() {
 #[test]
 fn curried_lambda_non_integer_result() {
     // const-like: returns the first argument, ignores the second
-    assert_mll("    assert ((\\s -> \\n -> s) \"hi\" (5 :: Integer) == \"hi\") \"const\"");
+    assert_mll("    assert ((\\s -> \\n -> s) \"hi\" (5 :: Int) == \"hi\") \"const\"");
 }
 
 #[test]
 fn curried_lambda_returns_list() {
-    assert_mll("    assert ((\\x -> \\y -> [x, y]) (1 :: Integer) 2 == [1, 2]) \"list result\"");
+    assert_mll("    assert ((\\x -> \\y -> [x, y]) (1 :: Int) 2 == [1, 2]) \"list result\"");
 }
 
 #[test]
@@ -5764,18 +5764,18 @@ main = do
 
 #[test]
 fn operator_in_type_position_rejected() {
-    // `f :: (+) -> Integer` used to parse `(+)` silently as the unit type, so
+    // `f :: (+) -> Int` used to parse `(+)` silently as the unit type, so
     // the program compiled with a signature meaning something entirely
     // different from what was written (`f ()` ran fine). An operator in type
     // position must be a parse error that explains why, with a note on the
     // GHC deviation (TypeOperators).
-    let e = compile_err("f :: (+) -> Integer\nf _ = 1\nmain :: IO ()\nmain = print (f ())\n");
+    let e = compile_err("f :: (+) -> Int\nf _ = 1\nmain :: IO ()\nmain = print (f ())\n");
     assert!(e.contains("The operator '+' cannot appear in a type"), "got: {e}");
     assert!(e.contains("'(+)' names a function (a value)"), "got: {e}");
     assert!(e.contains("note:") && e.contains("TypeOperators"), "got: {e}");
 
     // Same rejection for other operators and positions inside the type.
-    let e = compile_err("g :: Integer -> (<>)\ng x = x\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("g :: Int -> (<>)\ng x = x\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("The operator '<>' cannot appear in a type"), "got: {e}");
 }
 
@@ -5789,7 +5789,7 @@ fn operator_in_type_position_rejected() {
 #[test]
 fn kind_error_unsaturated_constructor_in_signature() {
     // `Maybe` alone is not a type — it still needs its element type.
-    let e = compile_err("f :: Maybe -> Integer\nf _ = 1\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("f :: Maybe -> Int\nf _ = 1\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Kind error"), "got: {e}");
     assert!(e.contains("'Maybe' has kind Type -> Type"), "got: {e}");
     assert!(e.contains("still needs 1 more type argument"), "got: {e}");
@@ -5798,11 +5798,11 @@ fn kind_error_unsaturated_constructor_in_signature() {
 
 #[test]
 fn kind_error_saturated_type_applied_to_argument() {
-    // `Maybe Integer` is complete; applying it to `Bool` is a kind error.
-    let e = compile_err("x :: Maybe Integer Bool\nx = undefined\nmain :: IO ()\nmain = pure ()\n");
+    // `Maybe Int` is complete; applying it to `Bool` is a kind error.
+    let e = compile_err("x :: Maybe Int Bool\nx = undefined\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Kind error"), "got: {e}");
     assert!(
-        e.contains("'Maybe Integer' is applied to the type argument 'Bool'"),
+        e.contains("'Maybe Int' is applied to the type argument 'Bool'"),
         "got: {e}"
     );
     assert!(e.contains("takes no type arguments"), "got: {e}");
@@ -5811,7 +5811,7 @@ fn kind_error_saturated_type_applied_to_argument() {
 #[test]
 fn kind_error_type_application_argument_kind() {
     // HashMap's parameters are complete types; a bare `Maybe` is not one.
-    let e = compile_err("h :: HashMap Maybe Integer -> Integer\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("h :: HashMap Maybe Int -> Int\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
     assert!(
         e.contains("'HashMap' needs an argument of kind Type, but 'Maybe' has kind Type -> Type"),
         "got: {e}"
@@ -5829,7 +5829,7 @@ fn kind_error_data_field_must_be_complete_type() {
 #[test]
 fn kind_error_type_variable_used_at_two_kinds() {
     // `t` is used bare (kind Type) AND applied (`t a`) in one signature.
-    let e = compile_err("g :: t -> t a -> Integer\ng _ _ = 1\nmain :: IO ()\nmain = pure ()\n");
+    let e = compile_err("g :: t -> t a -> Int\ng _ _ = 1\nmain :: IO ()\nmain = pure ()\n");
     assert!(e.contains("Kind error"), "got: {e}");
     assert!(
         e.contains("a single type variable cannot be used at two different kinds"),
@@ -5850,10 +5850,10 @@ fn kind_error_instance_head_needs_unapplied_constructor() {
     // A Type -> Type class rejects a complete type as its instance head —
     // and the note must point at the [] / Maybe spelling.
     let e = compile_err(
-        "class Collapse t where\n    collapse :: t Integer -> Integer\ninstance Collapse Integer where\n    collapse x = x\nmain :: IO ()\nmain = pure ()\n",
+        "class Collapse t where\n    collapse :: t Int -> Int\ninstance Collapse Int where\n    collapse x = x\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(
-        e.contains("'instance Collapse Integer' is ill-kinded"),
+        e.contains("'instance Collapse Int' is ill-kinded"),
         "got: {e}"
     );
     assert!(
@@ -5863,7 +5863,7 @@ fn kind_error_instance_head_needs_unapplied_constructor() {
 
     // The classic trap: `instance C [a]` where `instance C []` is meant.
     let e = compile_err(
-        "class Collapse t where\n    collapse :: t Integer -> Integer\ninstance Collapse [a] where\n    collapse _ = 0\nmain :: IO ()\nmain = pure ()\n",
+        "class Collapse t where\n    collapse :: t Int -> Int\ninstance Collapse [a] where\n    collapse _ = 0\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(e.contains("'instance Collapse [a]' is ill-kinded"), "got: {e}");
     assert!(
@@ -5906,12 +5906,12 @@ fn higher_kinded_class_variable_inferred_from_constraint() {
     // `t : Type -> Type`, so using `t` bare in the same signature is a kind
     // error even though the body never applies it.
     let e = compile_err(
-        "f :: Foldable t => t -> Integer\nf _ = 0\nmain :: IO ()\nmain = pure ()\n",
+        "f :: Foldable t => t -> Int\nf _ = 0\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(e.contains("Kind error"), "got: {e}");
 
     // And the well-kinded spelling still compiles.
-    let src = "f :: Foldable t => t Integer -> Integer\nf t = sum t\nmain :: IO ()\nmain = print (f [1, 2, 3])\n";
+    let src = "f :: Foldable t => t Int -> Int\nf t = sum t\nmain :: IO ()\nmain = print (f [1, 2, 3])\n";
     assert!(
         mllc::compile(src, Path::new("."), &[]).is_ok(),
         "well-kinded Foldable signature should compile"
@@ -5933,14 +5933,14 @@ fn kind_class_var_from_superclass_declared_after_is_order_independent() {
     // The adversarial case for `infer_class_kinds`: `Sub`'s own method does
     // NOT mention its type variable `t`, so the method signatures cannot pin
     // `t`'s kind. The kind is knowable ONLY through the superclass `Super t`,
-    // which forces `t : Type -> Type` (`op :: t Integer -> Integer`) — and
+    // which forces `t : Type -> Type` (`op :: t Int -> Int`) — and
     // `Super` is declared AFTER `Sub` in source order. Before the
     // shared-substitution prepass, `Sub`'s `t` wrongly defaulted to `Type`
     // (the later superclass was skipped), so this exact program failed while
     // the superclass-first spelling compiled. Both orders must now behave
     // identically: `Sub`'s `t` is `Type -> Type`, and an instance on a
     // `Type -> Type` type (Box) is accepted.
-    let after = "class Super t => Sub t where\n    marker :: Integer\n\nclass Super t where\n    op :: t Integer -> Integer\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
+    let after = "class Super t => Sub t where\n    marker :: Int\n\nclass Super t where\n    op :: t Int -> Int\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
     assert!(
         mllc::compile(after, Path::new("."), &[]).is_ok(),
         "subclass kind must be inferred from a superclass declared LATER (was order-dependent)"
@@ -5948,7 +5948,7 @@ fn kind_class_var_from_superclass_declared_after_is_order_independent() {
 
     // Control: the SAME program with the superclass declared first. This
     // always worked; it must keep working, and both orders must agree.
-    let before = "class Super t where\n    op :: t Integer -> Integer\n\nclass Super t => Sub t where\n    marker :: Integer\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
+    let before = "class Super t where\n    op :: t Int -> Int\n\nclass Super t => Sub t where\n    marker :: Int\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
     assert!(
         mllc::compile(before, Path::new("."), &[]).is_ok(),
         "control: superclass-first ordering must still compile"
@@ -5959,13 +5959,13 @@ fn kind_class_var_from_superclass_declared_after_is_order_independent() {
 fn kind_class_var_from_superclass_after_still_rejects_wrong_instance() {
     // Proves the fix infers the RIGHT kind, not merely "accepts everything":
     // with `Sub`'s `t` correctly `Type -> Type` (from a superclass declared
-    // after), an instance head at kind `Type` (Integer) is still a kind
+    // after), an instance head at kind `Type` (Int) is still a kind
     // error. A regression that made class kinds default to `Type` would make
     // this program compile — this test would then fail loudly.
     let e = compile_err(
-        "class Super t => Sub t where\n    marker :: Integer\n\nclass Super t where\n    op :: t Integer -> Integer\n\ninstance Sub Integer where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n",
+        "class Super t => Sub t where\n    marker :: Int\n\nclass Super t where\n    op :: t Int -> Int\n\ninstance Sub Int where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n",
     );
-    assert!(e.contains("'instance Sub Integer' is ill-kinded"), "got: {e}");
+    assert!(e.contains("'instance Sub Int' is ill-kinded"), "got: {e}");
     assert!(
         e.contains("use its type variable 't' at kind Type -> Type"),
         "got: {e}"
@@ -5975,13 +5975,13 @@ fn kind_class_var_from_superclass_after_still_rejects_wrong_instance() {
 #[test]
 fn kind_class_genuine_superclass_conflict_is_reported() {
     // A genuine, unsatisfiable conflict: `Sub`'s own method uses `t` bare
-    // (`bad :: t -> Integer`, so `t : Type`) while its superclass `Super`
-    // uses it applied (`op :: t Integer -> Integer`, so `t : Type -> Type`).
+    // (`bad :: t -> Int`, so `t : Type`) while its superclass `Super`
+    // uses it applied (`op :: t Int -> Int`, so `t : Type -> Type`).
     // The two constraints share one variable and cannot both hold. The
     // silent prepass keeps a first solution; the reporting pass 2b MUST
     // still surface the clash rather than swallow it.
     let e = compile_err(
-        "class Super t => Sub t where\n    bad :: t -> Integer\n\nclass Super t where\n    op :: t Integer -> Integer\n\nmain :: IO ()\nmain = pure ()\n",
+        "class Super t => Sub t where\n    bad :: t -> Int\n\nclass Super t where\n    op :: t Int -> Int\n\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(e.contains("Kind error"), "conflict must not be swallowed, got: {e}");
 }
@@ -5989,7 +5989,7 @@ fn kind_class_genuine_superclass_conflict_is_reported() {
 #[test]
 fn kind_mutually_recursive_data_conflict_is_reported() {
     // Two mutually-recursive data types whose parameter kinds conflict
-    // THROUGH the shared substitution: `P a` uses `a` applied (`a Integer`,
+    // THROUGH the shared substitution: `P a` uses `a` applied (`a Int`,
     // so `a : Type -> Type`) and references `Q a`; `Q b` uses `b` bare
     // (a field of type `b`, so `b : Type`) and references `P b`. The
     // cross-references force `P`'s and `Q`'s parameters to the same kind,
@@ -5997,24 +5997,24 @@ fn kind_mutually_recursive_data_conflict_is_reported() {
     // registers a first-solution kind for each; the reporting checking pass
     // must still find the conflict.
     let e = compile_err(
-        "data P a = MkP (a Integer) (Q a)\ndata Q b = MkQ b (P b)\n\nmain :: IO ()\nmain = pure ()\n",
+        "data P a = MkP (a Int) (Q a)\ndata Q b = MkQ b (P b)\n\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(e.contains("Kind error"), "mutual conflict must not be swallowed, got: {e}");
 }
 
 #[test]
 fn kind_ill_kinded_use_at_wrong_arity_surfaces_at_use_site() {
-    // `T` is legitimately higher-kinded: `data T a = MkT (a Integer)` gives
+    // `T` is legitimately higher-kinded: `data T a = MkT (a Int)` gives
     // `T : (Type -> Type) -> Type` (a valid kind, no error at T itself).
     // A LATER declaration then applies it at the wrong argument kind
-    // (`T Integer`, where `Integer : Type`). The registered kind of `T` must
+    // (`T Int`, where `Int : Type`). The registered kind of `T` must
     // drive the check at the use site so the misuse surfaces there — the
     // first (well-kinded) declaration must not mask the second's error.
     let e = compile_err(
-        "data T a = MkT (a Integer)\ndata U = MkU (T Integer)\n\nmain :: IO ()\nmain = pure ()\n",
+        "data T a = MkT (a Int)\ndata U = MkU (T Int)\n\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(
-        e.contains("'T' needs an argument of kind Type -> Type, but 'Integer' has kind Type"),
+        e.contains("'T' needs an argument of kind Type -> Type, but 'Int' has kind Type"),
         "got: {e}"
     );
     assert!(e.contains("in the definition of data type 'U'"), "got: {e}");
@@ -6027,12 +6027,12 @@ fn kind_intra_declaration_conflict_caught_in_both_field_orders() {
     // which field comes first, so the silent prepass's arbitrary
     // first-solution choice cannot mask the conflict.
     let e_bare_first = compile_err(
-        "data Bad a = MkBad a (a Integer)\nmain :: IO ()\nmain = pure ()\n",
+        "data Bad a = MkBad a (a Int)\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(e_bare_first.contains("Kind error"), "bare-first order, got: {e_bare_first}");
 
     let e_applied_first = compile_err(
-        "data Bad2 a = MkBad2 (a Integer) a\nmain :: IO ()\nmain = pure ()\n",
+        "data Bad2 a = MkBad2 (a Int) a\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(e_applied_first.contains("Kind error"), "applied-first order, got: {e_applied_first}");
 }
@@ -6045,7 +6045,7 @@ fn kind_phantom_param_defaults_to_type_and_higher_kinded_use_rejected() {
     // kind error caught at the use site — the default must not be silently
     // widened to fit the use.
     let e = compile_err(
-        "data Phantom a = MkPhantom Integer\nuseHK :: Phantom Maybe -> Integer\nuseHK _ = 0\nmain :: IO ()\nmain = pure ()\n",
+        "data Phantom a = MkPhantom Int\nuseHK :: Phantom Maybe -> Int\nuseHK _ = 0\nmain :: IO ()\nmain = pure ()\n",
     );
     assert!(
         e.contains("'Phantom' needs an argument of kind Type, but 'Maybe' has kind Type -> Type"),
@@ -6070,7 +6070,7 @@ fn list_semigroup_operator_still_rejected_after_move() {
     let e = compile_err(
         "main :: IO ()\nmain = putStrLn (show ([1, 2] <> [3, 4]))\n",
     );
-    assert!(e.contains("No instance for '<>' on type '[Integer]'"), "got: {e}");
+    assert!(e.contains("No instance for '<>' on type '[Int]'"), "got: {e}");
     assert!(
         e.contains("lists are concatenated with ++"),
         "the ++ guidance note must still fire, got: {e}"
@@ -6101,7 +6101,7 @@ fn mempty_ambiguity_preserved_after_move() {
     // A determined `mempty` still resolves at each element type.
     for src in [
         "main :: IO ()\nmain = putStrLn (mempty :: String)\n",
-        "main :: IO ()\nmain = putStrLn (show (mempty :: [Integer]))\n",
+        "main :: IO ()\nmain = putStrLn (show (mempty :: [Int]))\n",
     ] {
         assert!(
             mllc::compile(src, Path::new("."), &[]).is_ok(),
@@ -6204,12 +6204,12 @@ fn type_family_concrete_reduction_still_works() {
     // The pre-existing concrete/ground reduction (reduced eagerly at
     // AST-to-Ty conversion) must not regress now that the unifier also
     // reduces symbolically.
-    let src = "type family Id x where\n    Id x = x\nf :: Id Integer -> Integer\nf n = n + 1\nmain :: IO ()\nmain = putStrLn (show (f 41))\n";
+    let src = "type family Id x where\n    Id x = x\nf :: Id Int -> Int\nf n = n + 1\nmain :: IO ()\nmain = putStrLn (show (f 41))\n";
     let lua = mllc::compile(src, Path::new("."), &[])
         .expect("concrete type-family reduction should compile")
         .lua_code;
     let l = mlua::Lua::new();
-    l.load(&lua).set_name("tf_id").exec().expect("Id Integer program should run");
+    l.load(&lua).set_name("tf_id").exec().expect("Id Int program should run");
 }
 
 #[test]
@@ -6243,7 +6243,7 @@ fn type_family_head_of_empty_append_rejected() {
 vhead :: Vec ('S n) a -> a\n\
 vhead (VCons x _) = x\n\
 main :: IO ()\n\
-main = print (vhead (vappend (VNil :: Vec 'Z Integer) (VNil :: Vec 'Z Integer)))\n"
+main = print (vhead (vappend (VNil :: Vec 'Z Int) (VNil :: Vec 'Z Int)))\n"
     );
     let e = compile_err(&src);
     assert!(e.contains("Cannot unify"), "vhead of empty vappend must be rejected, got: {e}");
@@ -6274,7 +6274,7 @@ fn type_family_divergence_errors_not_hangs() {
     // divergence, not loop or overflow the stack. (compile_err runs the
     // compiler in-process; if reduction were unbounded this test would hang or
     // crash the harness — so reaching the assertion is itself the guarantee.)
-    let src = "type family Loop x where\n    Loop x = Loop x\nf :: Loop Integer -> Integer\nf n = 0\nmain :: IO ()\nmain = pure ()\n";
+    let src = "type family Loop x where\n    Loop x = Loop x\nf :: Loop Int -> Int\nf n = 0\nmain :: IO ()\nmain = pure ()\n";
     let e = compile_err(src);
     assert!(
         e.contains("did not terminate") && e.contains("Loop"),
@@ -6299,7 +6299,7 @@ data Vec n a where\n\
 #[test]
 fn promoted_kind_rejects_bool_tag_for_nat_index() {
     // `'True :: Bool`, but `Vec`'s index has kind `Nat`.
-    let src = format!("{PROMOTED_VEC_PRELUDE}bad :: Vec 'True Integer -> Integer\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    let src = format!("{PROMOTED_VEC_PRELUDE}bad :: Vec 'True Int -> Int\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
     let e = compile_err(&src);
     assert!(e.contains("Kind error"), "got: {e}");
     assert!(
@@ -6312,7 +6312,7 @@ fn promoted_kind_rejects_bool_tag_for_nat_index() {
 fn promoted_kind_rejects_wrong_user_tag_for_nat_index() {
     // A promoted constructor of ANOTHER user data type (`'Red :: Color`) where
     // a `Nat` is required.
-    let src = format!("data Color = Red | Blue\n{PROMOTED_VEC_PRELUDE}bad :: Vec 'Red Integer -> Integer\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
+    let src = format!("data Color = Red | Blue\n{PROMOTED_VEC_PRELUDE}bad :: Vec 'Red Int -> Int\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
     let e = compile_err(&src);
     assert!(
         e.contains("needs an argument of kind Nat") && e.contains("'Red has kind Color"),
@@ -6361,10 +6361,10 @@ fn promoted_kind_well_kinded_index_accepted() {
     // (bare variable, `'Z`, and `'S`-applied) must still compile.
     let src = format!(
         "{PROMOTED_VEC_PRELUDE}\
-vlen :: Vec n a -> Integer\n\
+vlen :: Vec n a -> Int\n\
 vlen VNil = 0\n\
 vlen (VCons _ xs) = 1 + vlen xs\n\
-v2 :: Vec ('S ('S 'Z)) Integer\n\
+v2 :: Vec ('S ('S 'Z)) Int\n\
 v2 = VCons 1 (VCons 2 VNil)\n\
 main :: IO ()\n\
 main = print (vlen v2)\n"
@@ -6379,7 +6379,7 @@ main = print (vlen v2)\n"
 fn promoted_type_still_usable_as_a_value_type() {
     // Promoting `Nat` to a kind must not stop it being an ordinary value type:
     // `S (S Z)` is still a runtime value of type `Nat`. (Type/kind duality.)
-    let src = "data Nat = Z | S Nat\ntoInt :: Nat -> Integer\ntoInt Z = 0\ntoInt (S n) = 1 + toInt n\nmain :: IO ()\nmain = print (toInt (S (S Z)))\n";
+    let src = "data Nat = Z | S Nat\ntoInt :: Nat -> Int\ntoInt Z = 0\ntoInt (S n) = 1 + toInt n\nmain :: IO ()\nmain = print (toInt (S (S Z)))\n";
     assert!(
         mllc::compile(src, Path::new("."), &[]).is_ok(),
         "a promoted data type must still work as a value type"
@@ -6395,13 +6395,13 @@ fn promoted_kind_non_gadt_phantom_tag_rejected_but_gadt_pins_it() {
     // signature. The escape hatch is a GADT that PINS the index through a
     // constructor return type (as `datakinds.mll` does), which is checked and
     // accepted.
-    let phantom = "data Color = Red | Blue\ndata Tagged a = Tagged Integer\nf :: Tagged 'Red -> Integer\nf (Tagged n) = n\nmain :: IO ()\nmain = pure ()\n";
+    let phantom = "data Color = Red | Blue\ndata Tagged a = Tagged Int\nf :: Tagged 'Red -> Int\nf (Tagged n) = n\nmain :: IO ()\nmain = pure ()\n";
     let e = compile_err(phantom);
     assert!(e.contains("Kind error"), "phantom promoted tag should be rejected, got: {e}");
     assert!(e.contains("'Red has kind Color"), "got: {e}");
 
     // The GADT form pins the index's kind and is accepted.
-    let gadt = "data Color = Red | Blue\ndata Tagged a where\n    MkTagged :: Integer -> Tagged 'Red\nf :: Tagged 'Red -> Integer\nf (MkTagged n) = n\nmain :: IO ()\nmain = print (f (MkTagged 7))\n";
+    let gadt = "data Color = Red | Blue\ndata Tagged a where\n    MkTagged :: Int -> Tagged 'Red\nf :: Tagged 'Red -> Int\nf (MkTagged n) = n\nmain :: IO ()\nmain = print (f (MkTagged 7))\n";
     assert!(
         mllc::compile(gadt, Path::new("."), &[]).is_ok(),
         "a GADT that pins a promoted index must compile"
@@ -6419,7 +6419,7 @@ fn prelude_builtin_redefinition_reports_user_site_not_prelude() {
     // `error` is a builtin the Prelude's own code depends on (assert, init,
     // last). Redefining it used to fail inside those Prelude functions.
     let e = compile_err(
-        "error :: String -> Integer\nerror s = 42\n\nmain :: IO ()\nmain = print (error \"hi\")\n",
+        "error :: String -> Int\nerror s = 42\n\nmain :: IO ()\nmain = print (error \"hi\")\n",
     );
     assert!(
         e.contains("'error' is already provided by the Prelude and cannot be redefined"),
@@ -6440,7 +6440,7 @@ fn prelude_load_bearing_name_redefinition_rejected() {
     // `map` is a builtin the Prelude uses internally (ap_List). Redefining it
     // used to compile silently and corrupt `<*>` on lists.
     let e = compile_err(
-        "map :: (Integer -> Integer) -> [Integer] -> [Integer]\nmap f xs = xs\n\nmain :: IO ()\nmain = print (map (\\x -> x + 1) [1, 2, 3])\n",
+        "map :: (Int -> Int) -> [Int] -> [Int]\nmap f xs = xs\n\nmain :: IO ()\nmain = print (map (\\x -> x + 1) [1, 2, 3])\n",
     );
     assert!(
         e.contains("'map' is already provided by the Prelude and cannot be redefined"),
@@ -6454,8 +6454,8 @@ fn prelude_same_type_duplicate_definition_rejected() {
     // A definition duplicating a Prelude function at its exact type used to
     // HANG the compiler (demand analysis never converged on the two same-name
     // same-type functions). If this test times out, that regressed.
-    // (This used `sum :: [Integer] -> Integer` before sum was generalized to
-    // `Foldable t => t Integer -> Integer`; the monomorphic signature is now a
+    // (This used `sum :: [Int] -> Int` before sum was generalized to
+    // `Foldable t => t Int -> Int`; the monomorphic signature is now a
     // DIFFERENT type, i.e. an allowed user-wins redefinition — see the test
     // below — so the exact-duplicate case is probed with `reverse` instead.)
     let e = compile_err(
@@ -6474,7 +6474,7 @@ fn prelude_foldable_generic_allows_monomorphic_redefinition() {
     // (monomorphic list) type is the documented user-wins case, and the
     // user's definition is the one that runs.
     let source =
-        "sum :: [Integer] -> Integer\nsum xs = 999\n\nmain :: IO ()\nmain = putStrLn (show (sum [1, 2, 3]))\n";
+        "sum :: [Int] -> Int\nsum xs = 999\n\nmain :: IO ()\nmain = putStrLn (show (sum [1, 2, 3]))\n";
     let lua_code = mllc::compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
@@ -6509,7 +6509,7 @@ fn prelude_redefinition_breaking_prelude_body_reports_user_not_prelude() {
     // Prelude-internal error (formerly "Cannot unify '[String]' with 'String'
     // at 96:11") into the same clear redefinition report.
     let e = compile_err(
-        "replicate :: Integer -> String -> String\nreplicate n s = s\n\nmain :: IO ()\nmain = putStrLn (replicate 3 \"x\")\n",
+        "replicate :: Int -> String -> String\nreplicate n s = s\n\nmain :: IO ()\nmain = putStrLn (replicate 3 \"x\")\n",
     );
     assert!(
         e.contains("'replicate' is already provided by the Prelude and cannot be redefined"),
@@ -6524,14 +6524,14 @@ fn prelude_benign_shadowing_still_compiles() {
     // The permitted cases must NOT be rejected (no over-triggering):
     // a builtin that no Prelude code depends on (`head`) redefined at a
     // narrower type, GHC-shadow style — the user's definition wins…
-    let src = "head :: [Integer] -> Integer\nhead xs = 0\n\nmain :: IO ()\nmain = print (head [1, 2, 3])\n";
+    let src = "head :: [Int] -> Int\nhead xs = 0\n\nmain :: IO ()\nmain = print (head [1, 2, 3])\n";
     let lua = mllc::compile(src, Path::new("."), &[]).expect("head shadow should compile").lua_code;
     let l = mlua::Lua::new();
     l.load(&lua).set_name("head_shadow").exec().expect("head shadow should run");
 
     // …and a Prelude function redefined at a genuinely different (here
     // monomorphic) type, the pattern the FFI-export tests rely on.
-    let src = "replicate :: Integer -> Integer -> [Integer]\nreplicate 0 _ = []\nreplicate n x = x : replicate (n - 1) x\n\nmain :: IO ()\nmain = pure ()\n";
+    let src = "replicate :: Int -> Int -> [Int]\nreplicate 0 _ = []\nreplicate n x = x : replicate (n - 1) x\n\nmain :: IO ()\nmain = pure ()\n";
     mllc::compile(src, Path::new("."), &[]).expect("monomorphic replicate should compile");
 }
 
@@ -6547,22 +6547,22 @@ fn no_show_instance_for_function() {
 
 #[test]
 fn no_eq_instance_for_function() {
-    let e = compile_err("main :: IO ()\nmain = print ((\\x -> x :: Integer) == (\\x -> x))\n");
-    assert!(e.contains("No instance for 'Eq (Integer -> Integer)'"), "got: {e}");
+    let e = compile_err("main :: IO ()\nmain = print ((\\x -> x :: Int) == (\\x -> x))\n");
+    assert!(e.contains("No instance for 'Eq (Int -> Int)'"), "got: {e}");
 }
 
 #[test]
 fn no_ord_instance_for_function() {
     let e = compile_err(
-        "f :: (Integer -> Integer) -> Bool\nf g = g < g\nmain :: IO ()\nmain = print (f (\\x -> x))\n",
+        "f :: (Int -> Int) -> Bool\nf g = g < g\nmain :: IO ()\nmain = print (f (\\x -> x))\n",
     );
-    assert!(e.contains("No instance for 'Ord (Integer -> Integer)'"), "got: {e}");
+    assert!(e.contains("No instance for 'Ord (Int -> Int)'"), "got: {e}");
 }
 
 #[test]
 fn no_show_instance_for_tuple_containing_function() {
-    let e = compile_err("main :: IO ()\nmain = putStrLn (show ((1 :: Integer), (\\x -> x :: Integer)))\n");
-    assert!(e.contains("No instance for 'Show (Integer, Integer -> Integer)'"), "got: {e}");
+    let e = compile_err("main :: IO ()\nmain = putStrLn (show ((1 :: Int), (\\x -> x :: Int)))\n");
+    assert!(e.contains("No instance for 'Show (Int, Int -> Int)'"), "got: {e}");
 }
 
 #[test]
@@ -6583,9 +6583,9 @@ fn constraint_propagates_through_print() {
 #[test]
 fn constraint_propagates_through_user_function() {
     let e = compile_err(
-        "needsShow :: Show a => a -> String\nneedsShow x = show x\nmain :: IO ()\nmain = putStrLn (needsShow (\\y -> y + (1 :: Integer)))\n",
+        "needsShow :: Show a => a -> String\nneedsShow x = show x\nmain :: IO ()\nmain = putStrLn (needsShow (\\y -> y + (1 :: Int)))\n",
     );
-    assert!(e.contains("No instance for 'Show (Integer -> Integer)'"), "got: {e}");
+    assert!(e.contains("No instance for 'Show (Int -> Int)'"), "got: {e}");
 }
 
 #[test]
@@ -6593,11 +6593,11 @@ fn valid_show_constraints_still_compile() {
     // Base types, structural containers, and a properly-constrained polymorphic
     // function must all still type-check.
     for src in [
-        "main :: IO ()\nmain = print (42 :: Integer)\n",
-        "main :: IO ()\nmain = print (Just [1, 2, 3 :: Integer])\n",
-        "main :: IO ()\nmain = print ([(1, 2), (3, 4)] :: [(Integer, Integer)])\n",
-        "p :: Show a => a -> IO ()\np x = putStrLn (show x)\nmain :: IO ()\nmain = p (42 :: Integer)\n",
-        "main :: IO ()\nmain = print (Just (1 :: Integer) == Just 1)\n",
+        "main :: IO ()\nmain = print (42 :: Int)\n",
+        "main :: IO ()\nmain = print (Just [1, 2, 3 :: Int])\n",
+        "main :: IO ()\nmain = print ([(1, 2), (3, 4)] :: [(Int, Int)])\n",
+        "p :: Show a => a -> IO ()\np x = putStrLn (show x)\nmain :: IO ()\nmain = p (42 :: Int)\n",
+        "main :: IO ()\nmain = print (Just (1 :: Int) == Just 1)\n",
     ] {
         assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
     }
@@ -6633,7 +6633,7 @@ fn non_associative_chains_are_rejected_impl() {
 
     // A user-declared `infix` operator is non-associative as well.
     let e = compile_err(
-        "infix 5 <+>\n(<+>) :: Integer -> Integer -> Integer\na <+> b = a + b\nmain :: IO ()\nmain = print (1 <+> 2 <+> 3)\n",
+        "infix 5 <+>\n(<+>) :: Int -> Int -> Int\na <+> b = a + b\nmain :: IO ()\nmain = print (1 <+> 2 <+> 3)\n",
     );
     assert!(e.contains("non-associative"), "got: {e}");
     assert!(e.contains("'<+>'"), "got: {e}");
@@ -6665,7 +6665,7 @@ fn non_associative_chains_are_rejected_impl() {
 /// (the flattener treats it as the chain terminal). The well-typed shapes
 /// are covered by the bind_first_class GHC-golden case; this pins the
 /// ill-typed one: a final `step 1 >>= step` in an `IO ()` do-block is
-/// rejected — by GHC ("Couldn't match type 'Integer' with '()'",
+/// rejected — by GHC ("Couldn't match type 'Int' with '()'",
 /// verified against 9.14.1) and by mata-ll with the same unification
 /// mismatch. The regression this guards: the flattener used to treat the
 /// continuation FUNCTION as the terminal and reject even well-typed
@@ -6677,11 +6677,11 @@ fn final_do_bind_types_like_top_level() {
 
 fn final_do_bind_types_like_top_level_impl() {
     let e = compile_err(
-        "step :: Integer -> IO Integer\nstep n = return (n + 1)\n\nmain :: IO ()\nmain = do\n    putStrLn \"x\"\n    step 1 >>= step\n",
+        "step :: Int -> IO Int\nstep n = return (n + 1)\n\nmain :: IO ()\nmain = do\n    putStrLn \"x\"\n    step 1 >>= step\n",
     );
     assert!(
-        e.contains("Integer") && e.contains("()"),
-        "must reject with the Integer-vs-() mismatch GHC reports, got: {e}"
+        e.contains("Int") && e.contains("()"),
+        "must reject with the Int-vs-() mismatch GHC reports, got: {e}"
     );
     assert!(
         !e.contains("->"),
@@ -6758,7 +6758,7 @@ fn conflicting_associativities_impl() {
     assert!(e.contains("infixl 6") && e.contains("infixr 6"), "got: {e}");
 
     // Same-precedence, same-associativity chains still parse: both infixl...
-    let ok_l = "infixl 6 <#>\n(<#>) :: Integer -> Integer -> Integer\na <#> b = a + b\nmain :: IO ()\nmain = print (1 <#> 2 - 3)\n";
+    let ok_l = "infixl 6 <#>\n(<#>) :: Int -> Int -> Int\na <#> b = a + b\nmain :: IO ()\nmain = print (1 <#> 2 - 3)\n";
     // ...and both infixr.
     let ok_r = "infixr 6 <#>\n(<#>) :: String -> String -> String\na <#> b = a <> b\nmain :: IO ()\nmain = putStrLn (\"a\" <#> \"b\" <> \"c\")\n";
     for src in [ok_l, ok_r] {
@@ -6788,7 +6788,7 @@ fn ffi_outgoing_callback_rejects_bad_signatures() {
     // Effectful callbacks must use `LuaIO s acc`, not `IO acc`.
     let e = compile_err(
         r#"
-bad :: String -> (Integer -> acc -> IO acc) -> acc -> LuaPure "h.f" acc
+bad :: String -> (Int -> acc -> IO acc) -> acc -> LuaPure "h.f" acc
 main :: IO ()
 main = pure ()
 "#,
@@ -6798,7 +6798,7 @@ main = pure ()
     // The callback's result must be the threaded state, not some other type.
     let e = compile_err(
         r#"
-bad :: String -> (Integer -> acc -> LuaIO s Bool) -> acc -> LuaPure "h.f" acc
+bad :: String -> (Int -> acc -> LuaIO s Bool) -> acc -> LuaPure "h.f" acc
 main :: IO ()
 main = pure ()
 "#,
@@ -6808,7 +6808,7 @@ main = pure ()
     // A polymorphic callback requires a polymorphic (variable) FFI return type.
     let e = compile_err(
         r#"
-bad :: String -> (Integer -> a -> a) -> Integer -> LuaPure "h.f" Integer
+bad :: String -> (Int -> a -> a) -> Int -> LuaPure "h.f" Int
 main :: IO ()
 main = pure ()
 "#,
@@ -6841,7 +6841,7 @@ main = print (length "hello")
     let e = compile_err(
         r#"
 main :: IO ()
-main = print ([1, 2] <> [3, 4] :: [Integer])
+main = print ([1, 2] <> [3, 4] :: [Int])
 "#,
     );
     assert!(e.contains("No instance for '<>'"), "got: {e}");
@@ -6849,7 +6849,7 @@ main = print ([1, 2] <> [3, 4] :: [Integer])
 
     // Ordering whole tuples is rejected at type-check with the missing-instance
     // explanation (the checker discharges the Ord constraint before codegen).
-    // The tuple is annotated `(Integer, Integer)` so the rejection is the
+    // The tuple is annotated `(Int, Int)` so the rejection is the
     // missing tuple-Ord instance, not literal-defaulting ambiguity: with
     // polymorphic literals `(1, 2)` alone is `(Num a, Num b) => (a, b)`, and
     // since mata-ll has no `Ord (a, b)` instance the elements cannot default,
@@ -6857,10 +6857,10 @@ main = print ([1, 2] <> [3, 4] :: [Integer])
     let e = compile_err(
         r#"
 main :: IO ()
-main = print (((1, 2) :: (Integer, Integer)) > (1, 3))
+main = print (((1, 2) :: (Int, Int)) > (1, 3))
 "#,
     );
-    assert!(e.contains("No instance for 'Ord (Integer, Integer)'"), "got: {e}");
+    assert!(e.contains("No instance for 'Ord (Int, Int)'"), "got: {e}");
     assert!(e.contains("no Ord instance"), "missing tuple Ord note, got: {e}");
 }
 
@@ -6874,7 +6874,7 @@ fn existential_unpacking_skolemizes() {
         r#"
 data Foo = forall a. Foo a
 
-unFoo :: Foo -> Integer
+unFoo :: Foo -> Int
 unFoo (Foo x) = x + 1
 
 main :: IO ()
@@ -6882,8 +6882,8 @@ main = putStrLn (show (unFoo (Foo "hello")))
 "#,
     );
     assert!(
-        e.contains("Cannot match 'a' with 'Integer'"),
-        "the skolem must not unify with Integer, got: {e}"
+        e.contains("Cannot match 'a' with 'Int'"),
+        "the skolem must not unify with Int, got: {e}"
     );
     assert!(e.contains("rigid type variable"), "must explain rigidity, got: {e}");
     assert!(e.contains("in definition of 'unFoo'"), "must locate the clause, got: {e}");
@@ -6905,7 +6905,7 @@ main = putStrLn (show (unFoo (Foo "hello")))
 data Box where
   MkBox :: a -> Box
 
-coerce :: Box -> Integer
+coerce :: Box -> Int
 coerce (MkBox x) = x
 
 main :: IO ()
@@ -6913,7 +6913,7 @@ main = putStrLn (show (coerce (MkBox "boom") + 1))
 "#,
     );
     assert!(
-        e.contains("Cannot match 'a' with 'Integer'")
+        e.contains("Cannot match 'a' with 'Int'")
             || e.contains("escapes its scope"),
         "GADT-syntax existential must be rigid too, got: {e}"
     );
@@ -6956,7 +6956,7 @@ main = putStrLn "no"
         r#"
 data Foo = forall a. Foo a
 
-useCase :: Foo -> Integer
+useCase :: Foo -> Int
 useCase f = case f of
   Foo x -> x
 
@@ -6972,7 +6972,7 @@ main = putStrLn "no"
     // Escape through a where-function's type: where-bindings are
     // monomorphic, so `unpack e1` and `unpack e2` would claim the SAME
     // hidden type for two different boxes — with an Eq-constrained
-    // existential that "equates" an Integer with a String.
+    // existential that "equates" an Int with a String.
     let e = compile_err(
         r#"
 data EqBox = forall a. Eq a => EqBox a
@@ -7003,20 +7003,20 @@ fn existential_constraints_enforced_both_ways() {
         r#"
 data Showable = forall a. Show a => Showable a
 
-bad :: Showable -> Integer
+bad :: Showable -> Int
 bad s = case s of
-  Showable x -> x + (1 :: Integer)
+  Showable x -> x + (1 :: Int)
 
 main :: IO ()
 main = putStrLn "no"
 "#,
     );
-    // The literal is annotated `Integer` so `+` forces the hidden type to be
-    // Integer, surfacing the rigid-match rejection. (An un-annotated `x + 1`
+    // The literal is annotated `Int` so `+` forces the hidden type to be
+    // Int, surfacing the rigid-match rejection. (An un-annotated `x + 1`
     // now leaves the sum at the existential type `a`, which is reported instead
     // as `a` escaping the match — also a rejection, but a different message.)
     assert!(
-        e.contains("Cannot match 'a' with 'Integer'"),
+        e.contains("Cannot match 'a' with 'Int'"),
         "undeclared class use must be rejected, got: {e}"
     );
     assert!(
@@ -7031,14 +7031,14 @@ main = putStrLn "no"
 data Showable = forall a. Show a => Showable a
 
 pack :: Showable
-pack = Showable (\x -> (x :: Integer))
+pack = Showable (\x -> (x :: Int))
 
 main :: IO ()
 main = putStrLn "no"
 "#,
     );
     assert!(
-        e.contains("No instance for 'Show (Integer -> Integer)'"),
+        e.contains("No instance for 'Show (Int -> Int)'"),
         "packing an instance-less type must be rejected, got: {e}"
     );
 
@@ -7105,10 +7105,10 @@ fn mono_error_reports_source_location() {
     let e = compile_err(
         r#"
 main :: IO ()
-main = print ([1, 2] <> [3, 4] :: [Integer])
+main = print ([1, 2] <> [3, 4] :: [Int])
 "#,
     );
-    assert!(e.contains("No instance for '<>' on type '[Integer]'"), "got: {e}");
+    assert!(e.contains("No instance for '<>' on type '[Int]'"), "got: {e}");
     assert!(
         e.contains("at 3:6, in definition of 'main'"),
         "mono error must carry the clause's source location, got: {e}"
@@ -7124,7 +7124,7 @@ fn parser_reports_multiple_errors_per_run() {
     let e = compile_err(
         r#"data Foo = = Bar
 
-good :: Integer -> Integer
+good :: Int -> Int
 good x = x + 1
 
 main :: IO ()
@@ -7171,14 +7171,14 @@ main = do
 fn print_of_empty_list_shows_brackets_not_nothing() {
     // Regression: [] and Nothing share a runtime rep (Lua nil). `print` used the
     // type-erased generic show, which guessed "Nothing" for nil — so an empty
-    // [Integer] (even nested) printed as "Nothing". `print` must use the typed
+    // [Int] (even nested) printed as "Nothing". `print` must use the typed
     // list show (which knows nil means []), while real Nothing still shows.
     let source = r#"
 main :: IO ()
 main = do
-    print ([] :: [Integer])
-    print ([[1, 2], []] :: [[Integer]])
-    print (Nothing :: Maybe Integer)
+    print ([] :: [Int])
+    print ([[1, 2], []] :: [[Int]])
+    print (Nothing :: Maybe Int)
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])
         .expect("should compile")
@@ -7221,13 +7221,13 @@ fn ffi_result_marshalling_decodes_host_values() {
     let source = r#"
 data Params = Params { host :: String } deriving (Show, LuaDict)
 
-data Cert = Cert { ip :: String, chain :: [Integer] } deriving (Show, LuaDict)
+data Cert = Cert { ip :: String, chain :: [Int] } deriving (Show, LuaDict)
 
 data Resp = Resp
         { certificates :: [Cert]
         , errors :: [String]
         , note :: Maybe String
-        , count :: Integer }
+        , count :: Int }
     deriving (Show, LuaDict)
 
 fetch :: Params -> LuaIO "luarest.fetch" Resp
@@ -7236,7 +7236,7 @@ expect :: Bool -> String -> IO ()
 expect True _ = pure ()
 expect False m = error m
 
-len :: [a] -> Integer
+len :: [a] -> Int
 len [] = 0
 len (_:xs) = 1 + len xs
 
@@ -7329,12 +7329,12 @@ data Tree a b = Leaf a b | Branch (Tree a b) (Tree a b) deriving (Show)
 data Box a = MkBox a deriving (Show)
 data C = Red | Green deriving (Show)
 data P a = P a a deriving (Show)
-data B = MkB Integer deriving (Show)
+data B = MkB Int deriving (Show)
 
 main :: IO ()
 main = do
-    print (Branch (Leaf (1 :: Integer) (2 :: Integer)) (Leaf 3 4))
-    print (MkBox (MkBox (5 :: Integer)))
+    print (Branch (Leaf (1 :: Int) (2 :: Int)) (Leaf 3 4))
+    print (MkBox (MkBox (5 :: Int)))
     print (P Red Green)
     print (MkB (0 - 5))
 "#;
@@ -7381,12 +7381,12 @@ fn show_maybe_renders_just() {
     let source = r#"
 main :: IO ()
 main = do
-    print (Just (5 :: Integer))
-    print (Nothing :: Maybe Integer)
-    print (Just (Just (5 :: Integer)))
-    print (Just (0 - 5 :: Integer))
-    print [Just (1 :: Integer), Nothing, Just 3]
-    print (Just (Nothing :: Maybe Integer))
+    print (Just (5 :: Int))
+    print (Nothing :: Maybe Int)
+    print (Just (Just (5 :: Int)))
+    print (Just (0 - 5 :: Int))
+    print [Just (1 :: Int), Nothing, Just 3]
+    print (Just (Nothing :: Maybe Int))
 "#;
     let lua_code = mllc::compile(source, Path::new("."), &[])
         .expect("should compile")
@@ -7457,23 +7457,23 @@ import qualified Data.Maybe as M
 
 main :: IO ()
 main = do
-    putStrLn (show (Nothing :: Maybe (Maybe Integer)))
-    putStrLn (show (Just Nothing :: Maybe (Maybe Integer)))
-    putStrLn (show (Just (Just 5) :: Maybe (Maybe Integer)))
-    putStrLn (show ((Just Nothing :: Maybe (Maybe Integer)) == Nothing))
-    putStrLn (show ((Just Nothing :: Maybe (Maybe Integer)) == Just Nothing))
-    putStrLn (show ((Just (Just 5) :: Maybe (Maybe Integer)) == Just (Just 5)))
-    putStrLn (show (M.isJust (Just Nothing :: Maybe (Maybe Integer))))
-    putStrLn (show (M.isNothing (Just Nothing :: Maybe (Maybe Integer))))
-    putStrLn (show (M.fromJust (Just (Just 7)) :: Maybe Integer))
-    putStrLn (show (M.fromMaybe (Just 9) (Just Nothing :: Maybe (Maybe Integer))))
-    putStrLn (show (M.maybe 0 (M.fromMaybe 1) (Just (Just 8) :: Maybe (Maybe Integer))))
+    putStrLn (show (Nothing :: Maybe (Maybe Int)))
+    putStrLn (show (Just Nothing :: Maybe (Maybe Int)))
+    putStrLn (show (Just (Just 5) :: Maybe (Maybe Int)))
+    putStrLn (show ((Just Nothing :: Maybe (Maybe Int)) == Nothing))
+    putStrLn (show ((Just Nothing :: Maybe (Maybe Int)) == Just Nothing))
+    putStrLn (show ((Just (Just 5) :: Maybe (Maybe Int)) == Just (Just 5)))
+    putStrLn (show (M.isJust (Just Nothing :: Maybe (Maybe Int))))
+    putStrLn (show (M.isNothing (Just Nothing :: Maybe (Maybe Int))))
+    putStrLn (show (M.fromJust (Just (Just 7)) :: Maybe Int))
+    putStrLn (show (M.fromMaybe (Just 9) (Just Nothing :: Maybe (Maybe Int))))
+    putStrLn (show (M.maybe 0 (M.fromMaybe 1) (Just (Just 8) :: Maybe (Maybe Int))))
 "#;
     let lines = run_capturing_lines(source, "nested_maybe");
     assert_eq!(
         lines,
         vec![
-            "Nothing",         // Nothing :: Maybe (Maybe Integer)
+            "Nothing",         // Nothing :: Maybe (Maybe Int)
             "Just Nothing",    // distinct from Nothing
             "Just (Just 5)",
             "False",           // Just Nothing /= Nothing
@@ -7495,10 +7495,10 @@ fn just_of_empty_list_distinct_from_nothing() {
     let source = r#"
 main :: IO ()
 main = do
-    putStrLn (show (Just [] :: Maybe [Integer]))
-    putStrLn (show (Nothing :: Maybe [Integer]))
-    putStrLn (show ((Just [] :: Maybe [Integer]) == Nothing))
-    putStrLn (show (Just [1, 2] :: Maybe [Integer]))
+    putStrLn (show (Just [] :: Maybe [Int]))
+    putStrLn (show (Nothing :: Maybe [Int]))
+    putStrLn (show ((Just [] :: Maybe [Int]) == Nothing))
+    putStrLn (show (Just [1, 2] :: Maybe [Int]))
 "#;
     let lines = run_capturing_lines(source, "just_empty_list");
     assert_eq!(lines, vec!["Just []", "Nothing", "False", "Just [1,2]"]);
@@ -7514,7 +7514,7 @@ fn lazy_index_elements_print_as_values() {
     // value". Asserting on the captured output catches the leak even when
     // it does NOT crash.
     let source = r#"
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
 main :: IO ()
@@ -7543,7 +7543,7 @@ fn maybe_ffi_single_level_boundary_preserved() {
     // `Maybe a` marshals `Just v -> v` and `Nothing -> nil` for the Lua host.
     // (Lua's nil cannot represent nested optionals; that is an accepted limit.)
     let source = r#"
-export find :: Integer -> Maybe Integer
+export find :: Int -> Maybe Int
 find 0 = Nothing
 find n = Just (n * 10)
 "#;
@@ -7672,7 +7672,7 @@ fn embed_var_merges_with_existing_exports() {
     // A module with real `export`s: __SOURCE_CODE must join the exports table
     // without displacing them.
     let source = r#"
-export double :: Integer -> Integer
+export double :: Int -> Int
 double n = n * 2
 
 main :: IO ()
@@ -7714,7 +7714,7 @@ fn luadict_on_multi_constructor_rejected() {
     // single-constructor record. Deriving it elsewhere must fail with an
     // explanation, not silently miscompile.
     let source = r#"
-data T = A { x :: Integer } | B { y :: Integer }
+data T = A { x :: Int } | B { y :: Int }
     deriving (LuaDict)
 
 main :: IO ()
@@ -7733,7 +7733,7 @@ main = pure ()
 #[test]
 fn luadict_on_positional_fields_rejected() {
     let source = r#"
-data P = P Integer Integer
+data P = P Int Int
     deriving (LuaDict)
 
 main :: IO ()
@@ -7755,10 +7755,10 @@ fn luadict_exported_value_is_a_named_table() {
     // real dictionary keyed by field name — not the empty table that positional
     // `ipairs` marshalling would produce. This is the whole point of LuaDict.
     let source = r#"
-data Config = Config { width :: Integer, height :: Integer, title :: String }
+data Config = Config { width :: Int, height :: Int, title :: String }
   deriving (LuaDict)
 
-export mkConfig :: Integer -> Integer -> Config
+export mkConfig :: Int -> Int -> Config
 mkConfig w h = Config { width = w, height = h, title = "win" }
 
 main :: IO ()
@@ -7783,24 +7783,24 @@ fn luadict_renamed_keys_round_trip_ffi_boundary() {
     // must use the renamed key: an exported record reaches Lua keyed by "key"
     // (and NOT by the Haskell field name), and a host table keyed by "key"
     // decodes back into the record — including through the type-directed
-    // decoder, which the [Integer] field forces (Lua array -> cons list).
+    // decoder, which the [Int] field forces (Lua array -> cons list).
     let source = r#"
 data Acct = Acct
   { acctName as "name" :: String
-  , acctScores as "scores" :: [Integer]
+  , acctScores as "scores" :: [Int]
   , acctActive :: Bool
   } deriving (LuaDict)
 
 export mkAcct :: String -> Acct
 mkAcct n = Acct { acctName = n, acctScores = [1, 2], acctActive = True }
 
-fetch :: Integer -> LuaIO "acct.fetch" Acct
+fetch :: Int -> LuaIO "acct.fetch" Acct
 
 expect :: Bool -> String -> IO ()
 expect True _ = pure ()
 expect False m = error m
 
-len :: [a] -> Integer
+len :: [a] -> Int
 len [] = 0
 len (_:xs) = 1 + len xs
 
@@ -7885,7 +7885,7 @@ fn luadict_duplicate_renamed_keys_rejected() {
     // Two fields mapping to the same effective Lua key would silently
     // overwrite each other in the runtime table.
     let source = r#"
-data D = D { a as "k" :: Integer, b as "k" :: Integer }
+data D = D { a as "k" :: Int, b as "k" :: Int }
     deriving (LuaDict)
 
 main :: IO ()
@@ -7906,7 +7906,7 @@ fn luadict_rename_colliding_with_plain_field_rejected() {
     // A rename may also collide with an *unrenamed* field's name — same
     // overwrite hazard, same rejection.
     let source = r#"
-data D = D { a as "b" :: Integer, b :: Integer }
+data D = D { a as "b" :: Int, b :: Int }
     deriving (LuaDict)
 
 main :: IO ()
@@ -7930,7 +7930,7 @@ fn luadict_rename_without_relevant_deriving_rejected() {
     // name, so the rename would be silently meaningless. The error must
     // name all three derivings that would give the rename meaning.
     let source = r#"
-data D = D { a as "k" :: Integer }
+data D = D { a as "k" :: Int }
     deriving (Show)
 
 main :: IO ()
@@ -7952,7 +7952,7 @@ main = pure ()
 #[test]
 fn luadict_empty_renamed_key_rejected() {
     let source = r#"
-data D = D { a as "" :: Integer }
+data D = D { a as "" :: Int }
     deriving (LuaDict)
 
 main :: IO ()
@@ -7993,7 +7993,7 @@ fn extract_from_plain_lua_rejected() {
 #[test]
 fn string_pattern_literal_with_quote_and_newline_is_escaped() {
     let source = r#"
-f :: String -> Integer
+f :: String -> Int
 f "a\"b\nc" = 1
 f _ = 0
 
@@ -8018,7 +8018,7 @@ main = if f "a\"b\nc" == 1 && f "x" == 0
 #[test]
 fn luadict_as_key_with_control_chars_is_escaped() {
     let source = r#"
-data Rec = Rec { field1 as "a\nb\tc" :: Integer } deriving (Show, LuaDict)
+data Rec = Rec { field1 as "a\nb\tc" :: Int } deriving (Show, LuaDict)
 
 main :: IO ()
 main = if field1 (Rec 5) == 5
@@ -8049,7 +8049,7 @@ main = if field1 (Rec 5) == 5
 fn ffi_target_with_space_is_rejected_at_compile_time() {
     let e = compile_err(
         r#"
-foo :: Integer -> LuaPure "a b" Integer
+foo :: Int -> LuaPure "a b" Int
 
 export doit :: IO ()
 doit = print (foo 3)
@@ -8067,7 +8067,7 @@ doit = print (foo 3)
 #[test]
 fn ffi_target_other_malformed_forms_are_rejected() {
     let e = compile_err(
-        "foo :: Integer -> LuaIO \"math..floor\" Integer\nmain :: IO ()\nmain = foo 3 >>= print\n",
+        "foo :: Int -> LuaIO \"math..floor\" Int\nmain :: IO ()\nmain = foo 3 >>= print\n",
     );
     assert!(
         e.contains("invalid Lua target") && e.contains("math..floor"),
@@ -8075,7 +8075,7 @@ fn ffi_target_other_malformed_forms_are_rejected() {
         e
     );
     let e = compile_err(
-        "foo :: Integer -> LuaPure \"os.end\" Integer\nmain :: IO ()\nmain = print (foo 3)\n",
+        "foo :: Int -> LuaPure \"os.end\" Int\nmain :: IO ()\nmain = print (foo 3)\n",
     );
     assert!(
         e.contains("invalid Lua target") && e.contains("reserved word"),
@@ -8089,9 +8089,9 @@ fn ffi_target_other_malformed_forms_are_rejected() {
 #[test]
 fn ffi_target_dotted_and_method_forms_still_work() {
     let source = r#"
-floorN :: Number -> LuaPure "math.floor" Integer
+floorN :: Number -> LuaPure "math.floor" Int
 
-repS :: String -> Integer -> LuaPure ":rep" String
+repS :: String -> Int -> LuaPure ":rep" String
 
 main :: IO ()
 main = if floorN 3.7 == 3 && repS "ab" 2 == "abab"
@@ -8113,9 +8113,9 @@ main = if floorN 3.7 == 3 && repS "ab" 2 == "abab"
 #[test]
 fn ffi_target_indexed_and_trailing_method_forms_compile() {
     let source = r#"
-runFirst :: Integer -> LuaPure "handlers[1].run" Integer
+runFirst :: Int -> LuaPure "handlers[1].run" Int
 
-readCfg :: Integer -> LuaPure "cfg[\"main\"].stream:read" Integer
+readCfg :: Int -> LuaPure "cfg[\"main\"].stream:read" Int
 
 export doit :: IO ()
 doit = print (runFirst 1 + readCfg 2)
@@ -8178,7 +8178,7 @@ fn deeply_nested_parens_yield_clean_depth_error() {
 fn deeply_nested_types_yield_clean_depth_error() {
     let n = mllc::MAX_NESTING_DEPTH + 1000;
     let source = format!(
-        "f :: {}Integer{} -> Integer\nf y = y\nmain :: IO ()\nmain = print (f 1)\n",
+        "f :: {}Int{} -> Int\nf y = y\nmain :: IO ()\nmain = print (f 1)\n",
         "(".repeat(n),
         ")".repeat(n)
     );
@@ -8198,12 +8198,12 @@ fn deeply_nested_types_yield_clean_depth_error() {
     // to a list nested `n` deep — deep structure, shallow source text, but
     // only linear SIZE (one node per level), so it stays within the alias
     // fuel and must hit the ast_type_to_ty depth guard, not the stack.
-    let mut source = String::from("type A0 = Integer\n");
+    let mut source = String::from("type A0 = Int\n");
     for i in 1..=n {
         source.push_str(&format!("type A{} = [A{}]\n", i, i - 1));
     }
     source.push_str(&format!(
-        "f :: A{} -> Integer\nf _ = 1\nmain :: IO ()\nmain = print (f [])\n",
+        "f :: A{} -> Int\nf _ = 1\nmain :: IO ()\nmain = print (f [])\n",
         n
     ));
     match compile_on_compiler_stack(source) {
@@ -8236,7 +8236,7 @@ fn doubling_alias_tower_yields_clean_size_error() {
     for i in 1..=10 {
         source.push_str(&format!("type P{} a = P{} (P{} a)\n", i, i - 1, i - 1));
     }
-    source.push_str("x :: P10 Integer\nx = undefined\nmain :: IO ()\nmain = putStrLn \"ok\"\n");
+    source.push_str("x :: P10 Int\nx = undefined\nmain :: IO ()\nmain = putStrLn \"ok\"\n");
     match compile_on_compiler_stack(source) {
         Err(e) => {
             let msg = format!("{}", e);
@@ -8256,7 +8256,7 @@ fn doubling_alias_tower_yields_clean_size_error() {
     for i in 1..=3 {
         ok.push_str(&format!("type Q{} a = Q{} (Q{} a)\n", i, i - 1, i - 1));
     }
-    ok.push_str("y :: Q3 Integer -> Integer\ny _ = 0\nmain :: IO ()\nmain = print (y undefined)\n");
+    ok.push_str("y :: Q3 Int -> Int\ny _ = 0\nmain :: IO ()\nmain = print (y undefined)\n");
     compile_on_compiler_stack(ok)
         .expect("a shallow (Q3) alias tower is small and must still compile");
 }
@@ -8270,7 +8270,7 @@ fn doubling_alias_tower_yields_clean_size_error() {
 fn operator_spine_past_limit_yields_clean_depth_error() {
     let n = mllc::MAX_NESTING_DEPTH + 1000;
     let source = format!(
-        "x :: Integer\nx = {}\nmain :: IO ()\nmain = print x\n",
+        "x :: Int\nx = {}\nmain :: IO ()\nmain = print x\n",
         vec!["1"; n].join("+")
     );
     match compile_on_compiler_stack(source) {
@@ -8294,7 +8294,7 @@ fn operator_spine_past_limit_yields_clean_depth_error() {
 fn thousand_element_list_literal_still_compiles_and_runs() {
     let n = 1200;
     let source = format!(
-        "xs :: [Integer]\nxs = [{}]\nmain :: IO ()\nmain = if sum xs == {} then putStrLn \"ok\" else error \"wrong sum\"\n",
+        "xs :: [Int]\nxs = [{}]\nmain :: IO ()\nmain = if sum xs == {} then putStrLn \"ok\" else error \"wrong sum\"\n",
         vec!["2"; n].join(","),
         2 * n
     );
@@ -8334,7 +8334,7 @@ fn expect_linear_reject(src: &str) -> String {
 #[test]
 fn linear_rejects_plain_double_use() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          dup :: Token %1 -> (Token, Token)\n\
          dup t = (t, t)\n\
          main :: IO ()\n\
@@ -8350,10 +8350,10 @@ fn linear_rejects_plain_double_use() {
 #[test]
 fn linear_rejects_flow_into_unrestricted_function() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         count :: Token -> Integer\n\
+        "data Token = Token Int\n\
+         count :: Token -> Int\n\
          count (Token n) = n\n\
-         g :: Token %1 -> Integer\n\
+         g :: Token %1 -> Int\n\
          g t = count t\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8366,7 +8366,7 @@ fn linear_rejects_flow_into_unrestricted_function() {
 #[test]
 fn linear_rejects_case_alias_double_use() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          data Box = Box Token\n\
          f :: Box %1 -> (Token, Token)\n\
          f b = case b of\n\
@@ -8382,7 +8382,7 @@ fn linear_rejects_case_alias_double_use() {
 #[test]
 fn linear_rejects_let_alias_double_use() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          f :: Token %1 -> (Token, Token)\n\
          f t = let u = t in (u, u)\n\
          main :: IO ()\n\
@@ -8396,8 +8396,8 @@ fn linear_rejects_let_alias_double_use() {
 #[test]
 fn linear_rejects_closure_capture() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         f :: Token %1 -> (Integer -> Token)\n\
+        "data Token = Token Int\n\
+         f :: Token %1 -> (Int -> Token)\n\
          f t = \\x -> t\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8411,7 +8411,7 @@ fn linear_rejects_closure_capture() {
 #[test]
 fn linear_rejects_duplicating_lambda_at_linear_hof() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          withToken :: (Token %1 -> (Token, Token)) -> (Token, Token)\n\
          withToken f = f (Token 1)\n\
          main :: IO ()\n\
@@ -8427,10 +8427,10 @@ fn linear_rejects_duplicating_lambda_at_linear_hof() {
 #[test]
 fn linear_rejects_unrestricted_function_at_linear_type() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         applyMany :: (Token -> Integer) -> Integer\n\
+         applyMany :: (Token -> Int) -> Int\n\
          applyMany f = f (Token 1) + f (Token 2)\n\
          main :: IO ()\n\
          main = print (applyMany useOnce)\n",
@@ -8443,7 +8443,7 @@ fn linear_rejects_unrestricted_function_at_linear_type() {
 #[test]
 fn linear_rejects_double_use_across_do_block() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          shred :: Token %1 -> IO ()\n\
          shred (Token n) = print n\n\
          f :: Token %1 -> IO ()\n\
@@ -8460,7 +8460,7 @@ fn linear_rejects_double_use_across_do_block() {
 #[test]
 fn linear_rejects_bind_alias_double_use() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          data Box = Box Token\n\
          unbox :: Box %1 -> Token\n\
          unbox (Box t) = t\n\
@@ -8482,7 +8482,7 @@ fn linear_rejects_bind_alias_double_use() {
 #[test]
 fn linear_rejects_shadowed_prelude_whitelist_name() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          f :: Token %1 -> (Token, Token)\n\
          f t = let pure = \\x -> (x, x) in pure t\n\
          main :: IO ()\n\
@@ -8495,7 +8495,7 @@ fn linear_rejects_shadowed_prelude_whitelist_name() {
 #[test]
 fn linear_rejects_instance_method_double_use() {
     let msg = expect_linear_reject(
-        "data Pair = Pair Integer Integer\n\
+        "data Pair = Pair Int Int\n\
          data Token = Token Pair\n\
          class Consume a where\n\
          \x20 consume :: a %1 -> (a, a)\n\
@@ -8512,10 +8512,10 @@ fn linear_rejects_instance_method_double_use() {
 /// Lua.
 #[test]
 fn linear_annotations_erase_to_identical_lua() {
-    let with_mult = "data Token = Token Integer\n\
+    let with_mult = "data Token = Token Int\n\
          shred :: Token %1 -> IO ()\n\
          shred (Token n) = if n == 42 then putStrLn \"ok\" else putStrLn \"bad\"\n\
-         step :: Token %1 -> (Token, Integer)\n\
+         step :: Token %1 -> (Token, Int)\n\
          step t = (t, 5)\n\
          main :: IO ()\n\
          main = do\n\
@@ -8563,12 +8563,12 @@ fn linear_rejects_double_use_in_mult_poly_definition() {
 #[test]
 fn linear_rejects_double_use_through_mult_poly_helper() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
          apply :: (a %m -> b) -> a %m -> b\n\
          apply f x = f x\n\
-         bad :: Token %1 -> Integer\n\
+         bad :: Token %1 -> Int\n\
          bad t = apply useOnce t + apply useOnce t\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8582,7 +8582,7 @@ fn linear_rejects_double_use_through_mult_poly_helper() {
 #[test]
 fn linear_rejects_duplicating_lambda_through_mult_poly_helper() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          apply :: (a %m -> b) -> a %m -> b\n\
          apply f x = f x\n\
          bad :: Token %1 -> (Token, Token)\n\
@@ -8629,7 +8629,7 @@ fn linear_rejects_rigid_mult_weakened_to_many() {
 #[test]
 fn linear_rejects_mult_var_alias_laundering() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          dup2 :: Token -> (Token, Token)\n\
          dup2 t = (t, t)\n\
          h :: (c %1 -> d) -> c %1 -> d\n\
@@ -8647,10 +8647,10 @@ fn linear_rejects_mult_var_alias_laundering() {
 #[test]
 fn linear_rejects_local_function_param_double_use() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         bad :: Token %1 -> Integer\n\
+         bad :: Token %1 -> Int\n\
          bad t = g t\n\
          \x20 where g x = useOnce x + useOnce x\n\
          main :: IO ()\n\
@@ -8664,10 +8664,10 @@ fn linear_rejects_local_function_param_double_use() {
 #[test]
 fn linear_rejects_double_call_of_forwarding_local_function() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         bad :: Token %1 -> Integer\n\
+         bad :: Token %1 -> Int\n\
          bad t = let g x = useOnce x in g t + g t\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8681,10 +8681,10 @@ fn linear_rejects_double_call_of_forwarding_local_function() {
 #[test]
 fn linear_rejects_recursive_local_function_double_use() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         bad :: Token %1 -> Integer -> Integer\n\
+         bad :: Token %1 -> Int -> Int\n\
          bad t n = go t n\n\
          \x20 where go x k = if k > 0 then go x (k - 1) + useOnce x else useOnce x\n\
          main :: IO ()\n\
@@ -8700,8 +8700,8 @@ fn linear_rejects_recursive_local_function_double_use() {
 #[test]
 fn linear_rejects_local_function_capture() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         bad :: Token %1 -> (Integer -> Token)\n\
+        "data Token = Token Int\n\
+         bad :: Token %1 -> (Int -> Token)\n\
          bad t = g\n\
          \x20 where g x = t\n\
          main :: IO ()\n\
@@ -8716,10 +8716,10 @@ fn linear_rejects_local_function_capture() {
 #[test]
 fn linear_rejects_double_use_in_maybe_do_block() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         bad :: Token %1 -> Maybe Integer\n\
+         bad :: Token %1 -> Maybe Int\n\
          bad t = do\n\
          \x20 a <- Just (useOnce t)\n\
          \x20 b <- Just (useOnce t)\n\
@@ -8736,10 +8736,10 @@ fn linear_rejects_double_use_in_maybe_do_block() {
 #[test]
 fn linear_rejects_affine_in_list_monad_bind() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         bad :: Token %1 -> [Integer]\n\
+         bad :: Token %1 -> [Int]\n\
          bad t = do\n\
          \x20 n <- [1, 2, 3]\n\
          \x20 pure (useOnce t + n)\n\
@@ -8755,8 +8755,8 @@ fn linear_rejects_affine_in_list_monad_bind() {
 #[test]
 fn linear_rejects_affine_in_user_monad_bind() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
          data Twice a = Twice a a\n\
          instance Functor Twice where\n\
@@ -8768,7 +8768,7 @@ fn linear_rejects_affine_in_user_monad_bind() {
          \x20 (>>=) (Twice a b) k = case k a of\n\
          \x20\x20 Twice x _ -> case k b of\n\
          \x20\x20\x20 Twice _ y -> Twice x y\n\
-         bad :: Token %1 -> Twice Integer\n\
+         bad :: Token %1 -> Twice Int\n\
          bad t = do\n\
          \x20 n <- Twice 1 2\n\
          \x20 pure (useOnce t + n)\n\
@@ -8783,12 +8783,12 @@ fn linear_rejects_affine_in_user_monad_bind() {
 /// with) must emit byte-identical Lua to the plain-arrow program.
 #[test]
 fn linear_mult_poly_erases_to_identical_lua() {
-    let with_mult = "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+    let with_mult = "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
          apply :: (a %m -> b) -> a %m -> b\n\
          apply f x = f x\n\
-         go :: Token %1 -> Integer\n\
+         go :: Token %1 -> Int\n\
          go t = apply useOnce t\n\
          main :: IO ()\n\
          main = print (go (Token 3))\n";
@@ -8813,8 +8813,8 @@ fn linear_mult_poly_erases_to_identical_lua() {
 #[test]
 fn linear_rejects_zero_uses() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         f :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         f :: Token %1 -> Int\n\
          f t = 5\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8827,8 +8827,8 @@ fn linear_rejects_zero_uses() {
 #[test]
 fn linear_rejects_wildcard_argument_pattern() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         f :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         f :: Token %1 -> Int\n\
          f _ = 5\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8843,10 +8843,10 @@ fn linear_rejects_wildcard_argument_pattern() {
 #[test]
 fn linear_rejects_use_in_one_branch_only() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         f :: Token %1 -> Integer -> Integer\n\
+         f :: Token %1 -> Int -> Int\n\
          f t n = case n > 0 of\n\
          \x20 True -> useOnce t\n\
          \x20 False -> 1\n\
@@ -8861,10 +8861,10 @@ fn linear_rejects_use_in_one_branch_only() {
 #[test]
 fn linear_rejects_use_in_one_if_arm_only() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         f :: Token %1 -> Integer -> Integer\n\
+         f :: Token %1 -> Int -> Int\n\
          f t n = if n > 0 then useOnce t else 1\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8879,10 +8879,10 @@ fn linear_rejects_use_in_one_if_arm_only() {
 #[test]
 fn linear_rejects_never_forced_let_binding() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         f :: Token %1 -> Integer\n\
+         f :: Token %1 -> Int\n\
          f t = let u = useOnce t in 5\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8895,10 +8895,10 @@ fn linear_rejects_never_forced_let_binding() {
 #[test]
 fn linear_rejects_never_forced_where_binding() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         f :: Token %1 -> Integer\n\
+         f :: Token %1 -> Int\n\
          f t = 5\n\
          \x20 where u = useOnce t\n\
          main :: IO ()\n\
@@ -8913,12 +8913,12 @@ fn linear_rejects_never_forced_where_binding() {
 #[test]
 fn linear_rejects_drop_after_mult_poly_forward() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
          apply :: (a %m -> b) -> a %m -> b\n\
          apply f x = f x\n\
-         bad :: Token %1 -> Integer\n\
+         bad :: Token %1 -> Int\n\
          bad t = let u = apply useOnce t in 5\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8932,7 +8932,7 @@ fn linear_rejects_drop_after_mult_poly_forward() {
 #[test]
 fn linear_rejects_unused_mult_var_argument() {
     let msg = expect_linear_reject(
-        "dropPoly :: a %m -> Integer\n\
+        "dropPoly :: a %m -> Int\n\
          dropPoly x = 5\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -8949,10 +8949,10 @@ fn linear_rejects_unused_mult_var_argument() {
 #[test]
 fn linear_rejects_consumption_in_maybe_continuation() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         bad :: Token %1 -> Maybe Integer\n\
+         bad :: Token %1 -> Maybe Int\n\
          bad t = do\n\
          \x20 n <- Just 1\n\
          \x20 pure (useOnce t + n)\n\
@@ -8969,8 +8969,8 @@ fn linear_rejects_consumption_in_maybe_continuation() {
 #[test]
 fn linear_rejects_discarded_tainted_bind_result() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
          f :: Token %1 -> IO ()\n\
          f t = do\n\
@@ -8987,8 +8987,8 @@ fn linear_rejects_discarded_tainted_bind_result() {
 #[test]
 fn linear_rejects_discarded_tainted_statement_result() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
          f :: Token %1 -> IO ()\n\
          f t = do\n\
@@ -9005,10 +9005,10 @@ fn linear_rejects_discarded_tainted_statement_result() {
 #[test]
 fn linear_rejects_wildcard_in_tainted_case() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         f :: (Token, Token) %1 -> Integer\n\
+         f :: (Token, Token) %1 -> Int\n\
          f p = case p of\n\
          \x20 (a, _) -> useOnce a\n\
          main :: IO ()\n\
@@ -9023,8 +9023,8 @@ fn linear_rejects_wildcard_in_tainted_case() {
 #[test]
 fn linear_rejects_dropping_local_function() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         bad :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         bad :: Token %1 -> Int\n\
          bad t = g t\n\
          \x20 where g x = 5\n\
          main :: IO ()\n\
@@ -9039,8 +9039,8 @@ fn linear_rejects_dropping_local_function() {
 #[test]
 fn linear_rejects_short_circuit_right_operand() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
          f :: Token %1 -> Bool -> Bool\n\
          f t b = b && (useOnce t > 0)\n\
@@ -9056,7 +9056,7 @@ fn linear_rejects_short_circuit_right_operand() {
 #[test]
 fn linear_rejects_fst_on_linear_pair() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          g :: (Token, Token) %1 -> Token\n\
          g p = fst p\n\
          main :: IO ()\n\
@@ -9073,12 +9073,12 @@ fn linear_rejects_fst_on_linear_pair() {
 #[test]
 fn linear_rejects_unused_scalar_alias() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         step :: Token %1 -> (Token, Integer)\n\
+         step :: Token %1 -> (Token, Int)\n\
          step t = (Token 0, useOnce t)\n\
-         f :: Token %1 -> Integer\n\
+         f :: Token %1 -> Int\n\
          f t = case step t of\n\
          \x20 (t2, n) -> useOnce t2\n\
          main :: IO ()\n\
@@ -9092,8 +9092,8 @@ fn linear_rejects_unused_scalar_alias() {
 #[test]
 fn linear_rejects_unused_scalar_field() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         sig :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         sig :: Token %1 -> Int\n\
          sig (Token n) = 5\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -9118,10 +9118,10 @@ fn linear_rejects_unused_scalar_field() {
 #[test]
 fn linear_rejects_scalar_where_binding_double_use() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         bad :: Token %1 -> Integer\n\
+         bad :: Token %1 -> Int\n\
          bad t = go + go\n\
          \x20 where go = useOnce t\n\
          main :: IO ()\n\
@@ -9139,10 +9139,10 @@ fn linear_rejects_scalar_where_binding_double_use() {
 #[test]
 fn linear_rejects_scalar_laundered_through_let_binding() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         constUnit :: Integer -> ()\n\
+         constUnit :: Int -> ()\n\
          constUnit x = ()\n\
          bad :: Token %1 -> ()\n\
          bad t = let n = useOnce t in constUnit n\n\
@@ -9160,14 +9160,14 @@ fn linear_rejects_scalar_laundered_through_let_binding() {
 #[test]
 fn linear_rejects_scalar_alias_flow_into_unrestricted_function() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         step :: Token %1 -> (Token, Integer)\n\
+         step :: Token %1 -> (Token, Int)\n\
          step t = (t, 5)\n\
-         constInt :: Integer -> Integer\n\
+         constInt :: Int -> Int\n\
          constInt x = 7\n\
-         bad :: Token %1 -> Integer\n\
+         bad :: Token %1 -> Int\n\
          bad t = case step t of\n\
          \x20 (t2, n) -> useOnce t2 + constInt n\n\
          main :: IO ()\n\
@@ -9185,8 +9185,8 @@ fn linear_rejects_scalar_alias_flow_into_unrestricted_function() {
 #[test]
 fn linear_rejects_scalar_captured_by_lambda() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         bad :: Token %1 -> (Integer -> Integer)\n\
+        "data Token = Token Int\n\
+         bad :: Token %1 -> (Int -> Int)\n\
          bad (Token n) = \\x -> n + x\n\
          main :: IO ()\n\
          main = putStrLn \"no\"\n",
@@ -9203,7 +9203,7 @@ fn linear_rejects_scalar_captured_by_lambda() {
 #[test]
 fn linear_rejects_unrestricted_bind_continuation() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
+        "data Token = Token Int\n\
          useTwiceIO :: Token -> IO ()\n\
          useTwiceIO (Token n) = print (n + n)\n\
          unbox :: Token %1 -> Token\n\
@@ -9225,10 +9225,10 @@ fn linear_rejects_unrestricted_bind_continuation() {
 #[test]
 fn linear_rejects_double_use_through_multi_source_taint() {
     let msg = expect_linear_reject(
-        "data Token = Token Integer\n\
-         useOnce :: Token %1 -> Integer\n\
+        "data Token = Token Int\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         g :: Token %1 -> Token %1 -> Integer\n\
+         g :: Token %1 -> Token %1 -> Int\n\
          g (Token a) t = case (a, t) of\n\
          \x20 (x, tok) -> useOnce tok + useOnce tok + x\n\
          main :: IO ()\n\
@@ -9243,16 +9243,16 @@ fn linear_rejects_double_use_through_multi_source_taint() {
 /// with and without the `%1` annotations.
 #[test]
 fn linear_exactly_once_erases_to_identical_lua() {
-    let with_mult = "data Token = Token Integer\n\
+    let with_mult = "data Token = Token Int\n\
          data Box = Box Token\n\
-         useOnce :: Token %1 -> Integer\n\
+         useOnce :: Token %1 -> Int\n\
          useOnce (Token n) = n\n\
-         caseBoth :: Box %1 -> Integer -> Integer\n\
+         caseBoth :: Box %1 -> Int -> Int\n\
          caseBoth b n = case b of\n\
          \x20 Box t -> if n > 0 then useOnce t else useOnce t + 1\n\
-         step :: Token %1 -> (Token, Integer)\n\
+         step :: Token %1 -> (Token, Int)\n\
          step t = (t, 5)\n\
-         f :: Token %1 -> Integer\n\
+         f :: Token %1 -> Int\n\
          f t = case step t of\n\
          \x20 (t2, n) -> useOnce t2 + n\n\
          main :: IO ()\n\

@@ -1,14 +1,14 @@
 -- GHC tc007: Type inference with numeric literals
--- Tests that numeric literals unify correctly with Integer and Number
+-- Tests that numeric literals unify correctly with Int and Number
 
-addI :: Integer -> Integer -> Integer
+addI :: Int -> Int -> Int
 addI x y = x + y
 
 addN :: Number -> Number -> Number
 addN x y = x + y
 
 -- Polymorphic numeric operations
-clamp :: Integer -> Integer -> Integer -> Integer
+clamp :: Int -> Int -> Int -> Int
 clamp lo hi x
     | x < lo    = lo
     | x > hi    = hi
@@ -17,20 +17,20 @@ clamp lo hi x
 average :: Number -> Number -> Number
 average a b = (a + b) / 2.0
 
-factorial :: Integer -> Integer
+factorial :: Int -> Int
 factorial n
     | n <= 0    = 1
     | otherwise = n * factorial (n - 1)
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList xs = foldl (+) 0 xs
 
-productList :: [Integer] -> Integer
+productList :: [Int] -> Int
 productList xs = foldl (*) 1 xs
 
 main :: IO ()
 main = do
-    -- Integer literal inference
+    -- Int literal inference
     assert (addI 3 4 == 7) "addI"
     assert (addI 100 200 == 300) "addI large"
     assert (addI 0 0 == 0) "addI zero"

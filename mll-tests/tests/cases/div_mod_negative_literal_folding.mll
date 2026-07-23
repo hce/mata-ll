@@ -19,17 +19,17 @@
 
 main :: IO ()
 main = do
-    assert (((-7) :: Integer) `div` 2 == (-4))     "literal -7 div 2"
-    assert (((-7) :: Integer) `mod` 2 == 1)        "literal -7 mod 2"
-    assert ((7 :: Integer) `div` (-2) == (-4))     "literal 7 div -2 (floor, not euclid)"
-    assert ((7 :: Integer) `mod` (-2) == (-1))     "literal 7 mod -2 (divisor sign)"
-    assert (((-7) :: Integer) `div` (-2) == 3)     "literal -7 div -2 (floor, not euclid)"
-    assert (((-7) :: Integer) `mod` (-2) == (-1))  "literal -7 mod -2 (divisor sign)"
+    assert (((-7) :: Int) `div` 2 == (-4))     "literal -7 div 2"
+    assert (((-7) :: Int) `mod` 2 == 1)        "literal -7 mod 2"
+    assert ((7 :: Int) `div` (-2) == (-4))     "literal 7 div -2 (floor, not euclid)"
+    assert ((7 :: Int) `mod` (-2) == (-1))     "literal 7 mod -2 (divisor sign)"
+    assert (((-7) :: Int) `div` (-2) == 3)     "literal -7 div -2 (floor, not euclid)"
+    assert (((-7) :: Int) `mod` (-2) == (-1))  "literal -7 mod -2 (divisor sign)"
 
     -- Folded and runtime routes must agree with each other, too.
-    let a = 7 :: Integer
-    let b = (-2) :: Integer
-    assert (a `div` b == (7 :: Integer) `div` (-2)) "runtime route agrees with folded route (div)"
-    assert (a `mod` b == (7 :: Integer) `mod` (-2)) "runtime route agrees with folded route (mod)"
+    let a = 7 :: Int
+    let b = (-2) :: Int
+    assert (a `div` b == (7 :: Int) `div` (-2)) "runtime route agrees with folded route (div)"
+    assert (a `mod` b == (7 :: Int) `mod` (-2)) "runtime route agrees with folded route (mod)"
 
     putStrLn "ok"

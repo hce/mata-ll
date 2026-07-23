@@ -3,7 +3,7 @@
 -- "divide by zero". `a `div` b` goes through __mll_div, which raises on a
 -- zero divisor on every host (it used to compile to `math.floor(a / b)`,
 -- FLOAT division: `1 `div` 0` silently yielded `inf`, a float posing as an
--- Integer, and `0 `div` 0` yielded nan). `mod` by zero raises the same way
+-- Int, and `0 `div` 0` yielded nan). `mod` by zero raises the same way
 -- through __mll_mod.
 --
 -- All divisions go through opaque top-level functions (variable operands),
@@ -20,10 +20,10 @@
 -- SPEC's eagerness contract), so `try (pure (dz 1 0))` would return
 -- `Right <thunk>` and the error would escape the `try` — exactly as in GHC.
 
-dz :: Integer -> Integer -> Integer
+dz :: Int -> Int -> Int
 dz a b = a `div` b
 
-mz :: Integer -> Integer -> Integer
+mz :: Int -> Int -> Int
 mz a b = a `mod` b
 
 main :: IO ()
@@ -58,19 +58,19 @@ main = do
         Left _   -> putStrLn "0 mod 0 raises"
 
     -- Bare infix literal forms (unfolded: fold.rs skips zero divisors).
-    r6 <- try (((1 :: Integer) `div` 0) `seq` pure ())
+    r6 <- try (((1 :: Int) `div` 0) `seq` pure ())
     case r6 of
         Right () -> error "1 `div` 0 must raise, but returned normally"
         Left _   -> putStrLn "div by zero raises (literal infix form)"
 
-    r7 <- try (((5 :: Integer) `mod` 0) `seq` pure ())
+    r7 <- try (((5 :: Int) `mod` 0) `seq` pure ())
     case r7 of
         Right () -> error "5 `mod` 0 must raise, but returned normally"
         Left _   -> putStrLn "mod by zero raises (literal infix form)"
 
     -- Divisor arriving through a binding, not a literal — the shape the
     -- optimizer is most tempted to pre-evaluate or specialize.
-    let zero = 0 :: Integer
+    let zero = 0 :: Int
     r8 <- try ((10 `div` zero) `seq` pure ())
     case r8 of
         Right () -> error "10 `div` zero must raise, but returned normally"

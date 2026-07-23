@@ -1,24 +1,24 @@
 -- GHC cgrun067: Natural number arithmetic via ADT (BigNat in base 10)
 -- Represents non-negative integers as lists of digits (least significant first)
 
-type Digit = Integer
+type Digit = Int
 type BigNat = [Digit]   -- digits in base 10, LSB first
 
-fromInteger_ :: Integer -> BigNat
+fromInteger_ :: Int -> BigNat
 fromInteger_ 0 = [0]
 fromInteger_ n = go n
   where
     go 0 = []
     go m = (m `mod` 10) : go (m `div` 10)
 
-toInteger_ :: BigNat -> Integer
+toInteger_ :: BigNat -> Int
 toInteger_ [] = 0
 toInteger_ (d:ds) = d + 10 * toInteger_ ds
 
 addBig :: BigNat -> BigNat -> BigNat
 addBig xs ys = addWithCarry xs ys 0
 
-addWithCarry :: BigNat -> BigNat -> Integer -> BigNat
+addWithCarry :: BigNat -> BigNat -> Int -> BigNat
 addWithCarry [] [] 0 = []
 addWithCarry [] [] c = [c]
 addWithCarry (x:xs) [] c = let s = x + c in (s `mod` 10) : addWithCarry xs [] (s `div` 10)
@@ -36,7 +36,7 @@ mulBig xs (y:ys) =
         shifted = 0 : mulBig xs ys
     in  addBig carry shifted
 
-normalise :: [Integer] -> BigNat
+normalise :: [Int] -> BigNat
 normalise ds = go ds 0
   where
     go [] 0 = []

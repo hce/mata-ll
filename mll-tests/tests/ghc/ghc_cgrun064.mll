@@ -1,11 +1,11 @@
 -- GHC cgrun064: Roman numeral conversion
 
-data RomanPair = RomanPair Integer String
+data RomanPair = RomanPair Int String
 
 romanTable :: [RomanPair]
 romanTable = [RomanPair 1000 "M", RomanPair 900 "CM", RomanPair 500 "D", RomanPair 400 "CD", RomanPair 100 "C", RomanPair 90 "XC", RomanPair 50 "L", RomanPair 40 "XL", RomanPair 10 "X", RomanPair 9 "IX", RomanPair 5 "V", RomanPair 4 "IV", RomanPair 1 "I"]
 
-toRoman :: Integer -> String
+toRoman :: Int -> String
 toRoman 0 = ""
 toRoman n = go n romanTable
   where

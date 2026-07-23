@@ -115,7 +115,7 @@ enum FfiDir {
 /// booleans). Keep in sync with that function.
 fn ffi_scalar_name(n: &str) -> bool {
     matches!(n,
-        "Integer" | "Int" | "Number" | "Double" | "Float"
+        "Int" | "Number" | "Double" | "Float"
         | "String" | "Char" | "ByteString" | "Bool")
 }
 
@@ -303,7 +303,7 @@ pub struct Checker {
     /// checked, to reject a second declaration for the same head. Instance
     /// dispatch keys on the head constructor alone (`InstHead`), so two
     /// declarations that share a head — a genuine duplicate (`instance Greet
-    /// Integer` twice) or two argument-specialized heads (`Pretty [Integer]`
+    /// Int` twice) or two argument-specialized heads (`Pretty [Int]`
     /// and `Pretty [Bool]`, both `List`) — would silently mis-dispatch. Caught
     /// at declaration instead, like GHC's duplicate/overlapping-instance error.
     checked_instance_heads: HashSet<(String, InstHead)>,
@@ -684,9 +684,6 @@ impl Checker {
                 // Check for type alias expansion
                 if let Some((params, alias_ty)) = self.type_aliases.get(name).cloned()
                     && params.is_empty() {
-                        if name == "Int" {
-                            eprintln!("Warning: Int is treated as Integer (Lua has no fixed-width integers)");
-                        }
                         // Charge by the size of the alias body before expanding
                         // — a nullary self-referential alias (`type A = [A]`)
                         // grows without bound and must be reported, not looped.
@@ -1104,7 +1101,7 @@ impl Checker {
     /// diagnostic can name the exact culprit.
     ///
     /// The allowed set is exactly what the marshaller round-trips CORRECTLY:
-    ///   - scalars (Integer/Int/Number/Double/Float/String/Char/ByteString/Bool),
+    ///   - scalars (Int/Int/Number/Double/Float/String/Char/ByteString/Bool),
     ///     `()`, and the opaque `LuaUserData` interop handle;
     ///   - `[a]`, tuples, and any data type — `Maybe`/`Either`/`Ordering`/`Any`/
     ///     a user ADT/newtype/LuaDict record — each iff every constructor field
@@ -1275,7 +1272,7 @@ impl Checker {
 
     /// Provenance notes for every existential skolem a diagnostic's types
     /// mention. A skolem prints as a plain type-variable name ('a'), which is
-    /// baffling in a message like "Cannot match 'a' with 'Integer'" or
+    /// baffling in a message like "Cannot match 'a' with 'Int'" or
     /// "No instance for 'Num a'" unless the reader is told that 'a' is the
     /// type a constructor hid — so every error path (push_error_ctx/_span)
     /// attaches where the skolem came from and what the constructor
@@ -1328,7 +1325,7 @@ impl Checker {
 
     fn literal_type(&self, lit: &Literal) -> Ty {
         match lit {
-            Literal::Integer(_) => Ty::Con("Integer".into()),
+            Literal::Integer(_) => Ty::Con("Int".into()),
             Literal::Number(_) => Ty::Con("Number".into()),
             Literal::Str(_) => Ty::Con("String".into()),
             Literal::Bool(_) => Ty::Con("Bool".into()),
@@ -1367,7 +1364,7 @@ impl Checker {
         let entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
             ("print", vec![], Ty::arrow(Ty::Con("String".into()), Ty::io(Ty::Unit))),
             ("++", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::list(ta.clone())], Ty::list(ta.clone()))),
-            ("!!", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::Con("Integer".into())], ta.clone())),
+            ("!!", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::Con("Int".into())], ta.clone())),
             ("$", vec![a.clone(), b.clone()], Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), ta.clone()], tb.clone())),
             (".", vec![a.clone(), b.clone(), c.clone()], Ty::fun(&[Ty::arrow(tb.clone(), tc.clone()), Ty::arrow(ta.clone(), tb.clone()), ta.clone()], tc.clone())),
             ("not", vec![], Ty::arrow(Ty::Con("Bool".into()), Ty::Con("Bool".into()))),
@@ -1400,7 +1397,7 @@ impl Checker {
             ("hmInsert", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), tb.clone(), hm_kv.clone()], hm_kv.clone())),
             ("hmLookup", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], Ty::app(Ty::Con("Maybe".into()), tb.clone()))),
             ("hmDelete", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], hm_kv.clone())),
-            ("hmSize", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::Con("Integer".into()))),
+            ("hmSize", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::Con("Int".into()))),
             ("hmKeys", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(ta.clone()))),
             ("hmValues", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(tb.clone()))),
             ("hmMember", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], Ty::Con("Bool".into()))),
@@ -1413,7 +1410,7 @@ impl Checker {
 
         // ByteString operations (backed by Lua strings as byte arrays)
         let bs = Ty::Con("ByteString".into());
-        let int = Ty::Con("Integer".into());
+        let int = Ty::Con("Int".into());
         let bool_ = Ty::Con("Bool".into());
         let bs_entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
             ("bsEmpty",     vec![], bs.clone()),
@@ -1463,7 +1460,7 @@ impl Checker {
             self.env.insert(op.to_string(), Scheme { vars: vec![], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Bool".into()), Ty::Con("Bool".into())], Ty::Con("Bool".into())) });
         }
         // div/mod/quot/rem are the Integral class methods (`forall a. a->a->a`,
-        // constrained to Integral below). Previously monomorphic Integer->Integer.
+        // constrained to Integral below). Previously monomorphic Int->Int.
         for name in &["mod", "div", "quot", "rem"] {
             self.env.insert(name.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
         }
@@ -1472,8 +1469,8 @@ impl Checker {
         self.env.insert("tail".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(Ty::list(ta.clone()), Ty::list(ta.clone())) });
         self.env.insert("map".into(), Scheme { vars: vec![a.clone(), b.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), Ty::list(ta.clone())], Ty::list(tb.clone())) });
         self.env.insert("filter".into(), Scheme { vars: vec![a.clone(), b.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::arrow(ta.clone(), Ty::Con("Bool".into())), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("take".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("drop".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Integer".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
+        self.env.insert("take".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Int".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
+        self.env.insert("drop".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Int".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
         self.env.insert("zipWith".into(), Scheme { vars: vec![a.clone(), b.clone(), c.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), Ty::list(ta.clone()), Ty::list(tb.clone())], Ty::list(tc.clone())) });
 
         // Maybe
@@ -1559,43 +1556,43 @@ impl Checker {
                 ta.clone(),
             ),
         });
-        // newSTArray :: Integer -> Integer -> ST s (STArray s)
+        // newSTArray :: Int -> Int -> ST s (STArray s)
         self.env.insert("newSTArray".into(), Scheme {
             vars: vec![s.clone()],
             mult_vars: vec![],
             ty: Ty::fun(&[int.clone(), int.clone()], st_s(sta_s.clone())),
         });
-        // readSTArray :: STArray s -> Integer -> ST s Integer
+        // readSTArray :: STArray s -> Int -> ST s Int
         self.env.insert("readSTArray".into(), Scheme {
             vars: vec![s.clone()],
             mult_vars: vec![],
             ty: Ty::fun(&[sta_s.clone(), int.clone()], st_s(int.clone())),
         });
-        // writeSTArray :: STArray s -> Integer -> Integer -> ST s ()
+        // writeSTArray :: STArray s -> Int -> Int -> ST s ()
         self.env.insert("writeSTArray".into(), Scheme {
             vars: vec![s.clone()],
             mult_vars: vec![],
             ty: Ty::fun(&[sta_s.clone(), int.clone(), int.clone()], st_s(Ty::Unit)),
         });
-        // modifySTArray :: STArray s -> Integer -> (Integer -> Integer) -> ST s ()
+        // modifySTArray :: STArray s -> Int -> (Int -> Int) -> ST s ()
         self.env.insert("modifySTArray".into(), Scheme {
             vars: vec![s.clone()],
             mult_vars: vec![],
             ty: Ty::fun(&[sta_s.clone(), int.clone(), Ty::arrow(int.clone(), int.clone())], st_s(Ty::Unit)),
         });
-        // stArrayLength :: STArray s -> ST s Integer
+        // stArrayLength :: STArray s -> ST s Int
         self.env.insert("stArrayLength".into(), Scheme {
             vars: vec![s.clone()],
             mult_vars: vec![],
             ty: Ty::arrow(sta_s.clone(), st_s(int.clone())),
         });
-        // newSTArrayFromList :: [Integer] -> ST s (STArray s)
+        // newSTArrayFromList :: [Int] -> ST s (STArray s)
         self.env.insert("newSTArrayFromList".into(), Scheme {
             vars: vec![s.clone()],
             mult_vars: vec![],
             ty: Ty::arrow(Ty::list(int.clone()), st_s(sta_s.clone())),
         });
-        // stArrayToList :: STArray s -> ST s [Integer]
+        // stArrayToList :: STArray s -> ST s [Int]
         self.env.insert("stArrayToList".into(), Scheme {
             vars: vec![s.clone()],
             mult_vars: vec![],
@@ -1934,15 +1931,15 @@ impl Checker {
         // Built-in Enum typeclass
         // succ :: a -> a
         // pred :: a -> a
-        // toEnum :: Integer -> a
-        // fromEnum :: a -> Integer
+        // toEnum :: Int -> a
+        // fromEnum :: a -> Int
         // enumFrom :: a -> [a]
         // enumFromThen :: a -> a -> [a]
         // enumFromTo :: a -> a -> [a]
         // enumFromThenTo :: a -> a -> a -> [a]
         let succ_ty = Ty::arrow(ta.clone(), ta.clone());
-        let to_enum_ty = Ty::arrow(Ty::Con("Integer".into()), ta.clone());
-        let from_enum_ty = Ty::arrow(ta.clone(), Ty::Con("Integer".into()));
+        let to_enum_ty = Ty::arrow(Ty::Con("Int".into()), ta.clone());
+        let from_enum_ty = Ty::arrow(ta.clone(), Ty::Con("Int".into()));
         let enum_from_ty = Ty::arrow(ta.clone(), Ty::List(Box::new(ta.clone())));
         let enum_from_then_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
         let enum_from_to_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
@@ -1976,20 +1973,20 @@ impl Checker {
             });
         }
 
-        // Enum instance for Integer
+        // Enum instance for Int
         {
             let mut method_fns = HashMap::new();
-            method_fns.insert("succ".to_string(), "succ_Integer".to_string());
-            method_fns.insert("pred".to_string(), "pred_Integer".to_string());
-            method_fns.insert("toEnum".to_string(), "toEnum_Integer".to_string());
-            method_fns.insert("fromEnum".to_string(), "fromEnum_Integer".to_string());
-            method_fns.insert("enumFrom".to_string(), "enumFrom_Integer".to_string());
-            method_fns.insert("enumFromThen".to_string(), "enumFromThen_Integer".to_string());
-            method_fns.insert("enumFromTo".to_string(), "enumFromTo_Integer".to_string());
-            method_fns.insert("enumFromThenTo".to_string(), "enumFromThenTo_Integer".to_string());
+            method_fns.insert("succ".to_string(), "succ_Int".to_string());
+            method_fns.insert("pred".to_string(), "pred_Int".to_string());
+            method_fns.insert("toEnum".to_string(), "toEnum_Int".to_string());
+            method_fns.insert("fromEnum".to_string(), "fromEnum_Int".to_string());
+            method_fns.insert("enumFrom".to_string(), "enumFrom_Int".to_string());
+            method_fns.insert("enumFromThen".to_string(), "enumFromThen_Int".to_string());
+            method_fns.insert("enumFromTo".to_string(), "enumFromTo_Int".to_string());
+            method_fns.insert("enumFromThenTo".to_string(), "enumFromThenTo_Int".to_string());
             self.register_instance(InstanceInfo {
                 class_name: "Enum".to_string(),
-                target_type: Ty::Con("Integer".to_string()),
+                target_type: Ty::Con("Int".to_string()),
                 method_fns,
                 context: None,
             });
@@ -2049,7 +2046,7 @@ impl Checker {
             ty: read_ty,
         });
         // Read instances for base types
-        for type_name in &["Integer", "Number", "Bool", "String"] {
+        for type_name in &["Int", "Number", "Bool", "String"] {
             let mut method_fns = HashMap::new();
             method_fns.insert("read".to_string(), format!("read_{}", type_name));
             self.register_instance(InstanceInfo {
@@ -2082,7 +2079,7 @@ impl Checker {
         });
 
         // Eq instances for base types
-        for type_name in &["Integer", "Number", "String", "Bool", "ByteString"] {
+        for type_name in &["Int", "Number", "String", "Bool", "ByteString"] {
             let target = Ty::Con(type_name.to_string());
             let mangled = format!("eq_{}", type_name);
             let mut method_fns = HashMap::new();
@@ -2143,7 +2140,7 @@ impl Checker {
         }
 
         // Ord instances for base types
-        for type_name in &["Integer", "Number", "String", "ByteString"] {
+        for type_name in &["Int", "Number", "String", "ByteString"] {
             let target = Ty::Con(type_name.to_string());
             let mut method_fns = HashMap::new();
             for op in &["<", ">", "<=", ">="] {
@@ -2163,7 +2160,7 @@ impl Checker {
         // Numeric class hierarchy: Num, Fractional, Real, Integral.
         // Registered built-in (like Eq/Ord) rather than as source classes,
         // because the operator methods (+ - * / div mod quot rem) must map to
-        // THEMSELVES in the Integer/Number instances so the monomorphizer keeps
+        // THEMSELVES in the Int/Number instances so the monomorphizer keeps
         // them as inline InfixApp (byte-identical concrete arithmetic) — a
         // self-reference no source `instance` body can express. The named
         // methods (negate/abs/signum/fromInteger/recip/fromRational/toInteger/
@@ -2172,14 +2169,13 @@ impl Checker {
         {
             let bin = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
             let un = Ty::arrow(ta.clone(), ta.clone());
-            let from_integer_ty = Ty::arrow(Ty::Con("Integer".into()), ta.clone());
+            let from_integer_ty = Ty::arrow(Ty::Con("Int".into()), ta.clone());
             // No Rational type in mata-ll: a fractional literal is a Number
             // (f64) at the source level, so `fromRational` takes that same
             // representation. Documented as the single numeric-tower deviation.
             let from_rational_ty = Ty::arrow(Ty::Con("Number".into()), ta.clone());
             let pair = Ty::Tuple(vec![ta.clone(), ta.clone()]);
             let to_pair = Ty::fun(&[ta.clone(), ta.clone()], pair);
-            let to_integer_ty = Ty::arrow(ta.clone(), Ty::Con("Integer".into()));
 
             // ---- class Num a ----
             self.classes.insert("Num".to_string(), ClassInfo {
@@ -2231,7 +2227,11 @@ impl Checker {
                     ("mod".to_string(), bin.clone()),
                     ("quotRem".to_string(), to_pair.clone()),
                     ("divMod".to_string(), to_pair.clone()),
-                    ("toInteger".to_string(), to_integer_ty.clone()),
+                    // GHC's `toInteger :: a -> Integer` is deliberately absent:
+                    // mata-ll has no arbitrary-precision Integer, so a method
+                    // whose whole purpose is to escape to bignum cannot be
+                    // honoured. Using `toInteger` is rejected with a note
+                    // pointing at `Int` (see Diagnostic::hint).
                 ],
                 default_methods: HashMap::new(),
             });
@@ -2243,7 +2243,6 @@ impl Checker {
                 ("fromInteger", &from_integer_ty),
                 ("recip", &un), ("fromRational", &from_rational_ty),
                 ("quotRem", &to_pair), ("divMod", &to_pair),
-                ("toInteger", &to_integer_ty),
             ];
             for (name, ty) in named {
                 self.env.insert(name.to_string(), Scheme {
@@ -2258,7 +2257,7 @@ impl Checker {
                 ("fromInteger", "Num"),
                 ("/", "Fractional"), ("recip", "Fractional"), ("fromRational", "Fractional"),
                 ("quot", "Integral"), ("rem", "Integral"), ("div", "Integral"), ("mod", "Integral"),
-                ("quotRem", "Integral"), ("divMod", "Integral"), ("toInteger", "Integral"),
+                ("quotRem", "Integral"), ("divMod", "Integral"),
             ];
             for (method, class) in ncm {
                 self.method_constraints.insert(method.to_string(), vec![TyConstraint {
@@ -2273,13 +2272,13 @@ impl Checker {
             let mk = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
                 pairs.iter().map(|(m, f)| (m.to_string(), f.to_string())).collect()
             };
-            // Num Integer
+            // Num Int
             self.register_instance(InstanceInfo {
                 class_name: "Num".to_string(),
-                target_type: Ty::Con("Integer".to_string()),
+                target_type: Ty::Con("Int".to_string()),
                 method_fns: mk(&[("+", "+"), ("-", "-"), ("*", "*"),
-                    ("negate", "negate_Integer"), ("abs", "abs_Integer"),
-                    ("signum", "signum_Integer"), ("fromInteger", "fromInteger_Integer")]),
+                    ("negate", "negate_Int"), ("abs", "abs_Int"),
+                    ("signum", "signum_Int"), ("fromInteger", "fromInteger_Int")]),
                 context: None,
             });
             // Num Number
@@ -2299,10 +2298,10 @@ impl Checker {
                     ("fromRational", "fromRational_Number")]),
                 context: None,
             });
-            // Real Integer / Real Number (no methods; just evidence Ord+Num).
+            // Real Int / Real Number (no methods; just evidence Ord+Num).
             self.register_instance(InstanceInfo {
                 class_name: "Real".to_string(),
-                target_type: Ty::Con("Integer".to_string()),
+                target_type: Ty::Con("Int".to_string()),
                 method_fns: HashMap::new(),
                 context: None,
             });
@@ -2315,10 +2314,9 @@ impl Checker {
             // Integral Integer (Number is NOT Integral, as GHC)
             self.register_instance(InstanceInfo {
                 class_name: "Integral".to_string(),
-                target_type: Ty::Con("Integer".to_string()),
+                target_type: Ty::Con("Int".to_string()),
                 method_fns: mk(&[("div", "div"), ("mod", "mod"), ("quot", "quot"), ("rem", "rem"),
-                    ("quotRem", "quotRem_Integer"), ("divMod", "divMod_Integer"),
-                    ("toInteger", "toInteger_Integer")]),
+                    ("quotRem", "quotRem_Int"), ("divMod", "divMod_Int")]),
                 context: None,
             });
         }
@@ -2359,7 +2357,7 @@ impl Checker {
         // it, exactly as for the builtin `mempty` before.
 
         // Show instances for base types and parameterized types
-        for type_name in &["Integer", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {
+        for type_name in &["Int", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {
             let target = Ty::Con(type_name.to_string());
             let mangled = format!("show_{}", type_name);
             let mut method_fns = HashMap::new();
@@ -2415,7 +2413,7 @@ impl Checker {
         // the FFI boundary (e.g. lib/LIO.mll's FileHandle wraps one); it must
         // be registered here like every other builtin so that references to
         // it pass the unknown-type check.
-        for name in &["Integer", "Number", "String", "Bool", "()", "ByteString", "LuaUserData"] {
+        for name in &["Int", "Number", "String", "Bool", "()", "ByteString", "LuaUserData"] {
             self.kinds.insert(name.to_string(), Kind::Type);
         }
         // Type constructors: kind Type -> Type
@@ -2459,9 +2457,12 @@ impl Checker {
             context: None,
         });
 
-        // Int as alias for Integer (Lua has no fixed-width integers)
-        self.type_aliases.insert("Int".to_string(),
-            (vec![], Type::Con("Integer".to_string())));
+        // `Int` is the canonical builtin fixed-width integer (registered with
+        // kind Type above). There is deliberately no `Int` type and no
+        // `Int`/`Int` alias: mata-ll's integer is 64-bit and wrapping, so
+        // it carries GHC's `Int` name, and `Integer` (arbitrary precision) is
+        // rejected with a note (see Diagnostic::hint) rather than silently
+        // aliased — the alias would be the soundness back door.
 
         // The builtin `Bool` promotes (DataKinds) like any parameterless data
         // type: `'True`/`'False` have kind `Bool`. `Bool` is already in
@@ -2492,7 +2493,7 @@ impl Checker {
     /// Promote a constructor field TYPE to the KIND it contributes to the
     /// promoted constructor. A field whose type is itself a promotable data
     /// type (`Nat` in `S Nat`) promotes to that type's kind (`Nat`); anything
-    /// else (a builtin like `Integer`, a compound type) is approximated as
+    /// else (a builtin like `Int`, a compound type) is approximated as
     /// `Type` — such a field is not a usable type-level index anyway, and the
     /// constructor's RESULT kind (what indexing checks against) is still exact.
     fn promote_field_kind(&self, ty: &Type) -> Kind {
@@ -2567,7 +2568,7 @@ impl Checker {
     /// Fallback kind registration for a data type: `Type -> … -> Type` from
     /// its parameter count. `infer_declared_kinds` (pass 1a) has already
     /// registered the real, inferred kind for every declaration in the
-    /// module — which may be higher-kinded (`data Wrap f = Wrap (f Integer)`
+    /// module — which may be higher-kinded (`data Wrap f = Wrap (f Int)`
     /// gives `(Type -> Type) -> Type`) — so this only fills the gap if a
     /// registration path was somehow not covered by that pass, and never
     /// overwrites an inferred kind.
@@ -2886,7 +2887,7 @@ impl Checker {
     }
 
     /// Register a newtype as a zero-cost wrapper.
-    /// `newtype Age = Integer` creates constructor `Age :: Integer -> Age`
+    /// `newtype Age = Int` creates constructor `Age :: Int -> Age`
     /// that is the identity function at runtime.
     fn register_newtype(&mut self, name: &str, type_vars: &[String], inner: &Type) {
         self.register_kind(name, type_vars.len());
@@ -3475,7 +3476,7 @@ impl Checker {
         }
 
         // Reject type signatures that have no accompanying definition and are
-        // not FFI bindings. Without this, `foo :: Integer` with no body silently
+        // not FFI bindings. Without this, `foo :: Int` with no body silently
         // compiles to a nil value that errors only when forced at runtime — a
         // soundness hole (the type promises a value the program never provides).
         // Body-less signatures are legitimate only for FFI declarations

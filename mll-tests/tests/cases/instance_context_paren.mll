@@ -8,5 +8,5 @@ instance (Show a) => Show (Wrap a) where
 
 main :: IO ()
 main = do
-    assert (show (Wrap 7) == "Wrap 7") "parenthesized context at Wrap Integer"
+    assert (show (Wrap 7) == "Wrap 7") "parenthesized context at Wrap Int"
     assert (show (Wrap (Wrap "x")) == "Wrap Wrap \"x\"") "parenthesized context, nested"

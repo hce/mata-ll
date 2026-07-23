@@ -3,11 +3,11 @@
 data Nat = Z | S Nat
     deriving (Show, Eq)
 
-toNat :: Integer -> Nat
+toNat :: Int -> Nat
 toNat 0 = Z
 toNat n = S (toNat (n - 1))
 
-fromNat :: Nat -> Integer
+fromNat :: Nat -> Int
 fromNat Z     = 0
 fromNat (S n) = 1 + fromNat n
 

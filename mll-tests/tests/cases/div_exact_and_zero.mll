@@ -2,7 +2,7 @@
 --
 -- `div` used to be emitted as `math.floor(a / b)` — float division — so:
 --   * `1 `div` 0` produced `inf`, a float silently flowing on as if it were
---     an Integer (mod by zero already raised, div did not);
+--     an Int (mod by zero already raised, div did not);
 --   * quotients of integers beyond 2^53 were wrong (float mantissa runs out:
 --     4611686018427387905 `div` 3 came out 85 too small).
 -- The runtime now routes div/mod through __mll_div/__mll_mod, which raise a
@@ -12,16 +12,16 @@
 -- numbers are doubles, so >2^53 exactness is a documented host limitation
 -- (doc/articles/CAVEATS.md) — the zero-divisor error raises there too.
 
-d :: Integer -> Integer -> Integer
+d :: Int -> Int -> Int
 d a b = a `div` b
 
-m :: Integer -> Integer -> Integer
+m :: Int -> Int -> Int
 m a b = a `mod` b
 
-sub :: Integer -> Integer -> Integer
+sub :: Int -> Int -> Int
 sub a b = a - b
 
--- True on hosts whose Integer is a real 64-bit integer (Lua 5.3+); False on
+-- True on hosts whose Int is a real 64-bit integer (Lua 5.3+); False on
 -- double-only hosts (LuaJIT / 5.1-5.2), where 2^53+1 and 2^53 are the SAME
 -- number, so their difference is 0. Computed through `sub` on the host so
 -- the compile-time constant folder (which works in exact 64-bit integers)
@@ -52,7 +52,7 @@ main = do
         Left _   -> putStrLn "mod by zero raises"
         Right () -> error "1 `mod` 0 must raise, not return"
 
-    -- Integer-exact division beyond the 2^53 float mantissa. This is the
+    -- Int-exact division beyond the 2^53 float mantissa. This is the
     -- CONTRACT on integer hosts (Lua 5.3+, including the embedded 5.4 the
     -- cargo test suite always runs on — the branch is always taken there).
     -- On a double-only host (LuaJIT) the literals themselves are already

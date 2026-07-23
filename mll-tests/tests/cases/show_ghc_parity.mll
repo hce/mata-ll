@@ -4,12 +4,12 @@
 -- (showsPrec 11) positions. The golden is derived by running this same
 -- program under GHC; every expected string below is GHC's.
 
-data P = P { px :: Integer, py :: String } deriving Show
-data T = MkT Integer Number deriving Show
+data P = P { px :: Int, py :: String } deriving Show
+data T = MkT Int Number deriving Show
 data N = MkN Number deriving Show
 
 -- 10^n as a Double, expressible without e-notation literals.
-pow10 :: Integer -> Number
+pow10 :: Int -> Number
 pow10 0 = 1.0
 pow10 n = if n > 0 then 10.0 * pow10 (n - 1) else pow10 (n + 1) / 10.0
 
@@ -24,7 +24,7 @@ main = do
   print ("nul:" <> "\0" <> "5")
   -- separators: lists "," / tuples "," / records ", "
   print [1, 2, 3]
-  print ([] :: [Integer])
+  print ([] :: [Int])
   print (1, True, "x")
   print [(1, "a"), (2, "b")]
   print [[1, 2], [], [3]]
@@ -37,7 +37,7 @@ main = do
   print (MkT (-1) 2.5)
   print (Just (-1))
   print (Just (Just 3))
-  print (Left "x" :: Either String Integer)
+  print (Left "x" :: Either String Int)
   print [Just 1, Nothing]
   -- Double formatting
   print (0.0 :: Number)

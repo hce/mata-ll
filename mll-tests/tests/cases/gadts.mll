@@ -1,10 +1,10 @@
 data Expr a where
-    LitI  :: Integer -> Expr Integer
+    LitI  :: Int -> Expr Int
     LitB  :: Bool -> Expr Bool
-    Add   :: Expr Integer -> Expr Integer -> Expr Integer
+    Add   :: Expr Int -> Expr Int -> Expr Int
     IfE   :: Expr Bool -> Expr a -> Expr a -> Expr a
 
-eval :: Expr Integer -> Integer
+eval :: Expr Int -> Int
 eval (LitI n) = n
 eval (Add a b) = eval a + eval b
 eval (IfE c t f) = if evalBool c then eval t else eval f

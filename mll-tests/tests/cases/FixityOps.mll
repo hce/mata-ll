@@ -5,9 +5,9 @@
 module FixityOps ((-.), (~=~)) where
 
 infixr 6 -.
-(-.) :: Integer -> Integer -> Integer
+(-.) :: Int -> Int -> Int
 a -. b = a - b
 
 infix 4 ~=~
-(~=~) :: Integer -> Integer -> Bool
+(~=~) :: Int -> Int -> Bool
 a ~=~ b = a == b

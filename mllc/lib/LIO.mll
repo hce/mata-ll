@@ -39,11 +39,11 @@ fRead :: FileHandle -> String -> LuaIO ":read" String
 -- the binary-safe counterpart for reading a byte count, e.g. fixed-size
 -- on-disk structures. At end of file Lua returns nil, which is an error
 -- here — seek within bounds before reading.
-fReadN :: FileHandle -> Integer -> LuaIO ":read" String
+fReadN :: FileHandle -> Int -> LuaIO ":read" String
 fReadLine :: FileHandle -> LuaIO ":read" (Maybe String)
 fWrite :: FileHandle -> String -> LuaIO ":write" ()
 fFlush :: FileHandle -> LuaIO ":flush" ()
-fSeek :: FileHandle -> String -> Integer -> LuaIO ":seek" Integer
+fSeek :: FileHandle -> String -> Int -> LuaIO ":seek" Int
 
 -- Read all lines from a file (eagerly, no lazy IO)
 fileLines :: String -> IO [String]

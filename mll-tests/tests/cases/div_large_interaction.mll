@@ -20,13 +20,13 @@
 --        q2*3 = 4611686018427387903;  q2*3+2 = 4611686018427387905
 --   q3 = 9223372036854775807 `div` 2 = 4611686018427387903 = q2*3
 
-dz :: Integer -> Integer -> Integer
+dz :: Int -> Int -> Int
 dz a b = a `div` b
 
-mz :: Integer -> Integer -> Integer
+mz :: Int -> Int -> Int
 mz a b = a `mod` b
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList xs = foldl (+) 0 xs
 
 main :: IO ()

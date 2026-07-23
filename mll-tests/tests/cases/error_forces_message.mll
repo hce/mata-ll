@@ -6,7 +6,7 @@
 
 import LString (strLen, strSub)
 
-boom :: Integer -> Integer
+boom :: Int -> Int
 boom n = error ("bad value: " <> show n)
 
 -- True if `s` ends with `suffix` (the caught message may carry a Lua location
@@ -17,12 +17,12 @@ endsWith suffix s = strSub s (strLen s - strLen suffix + 1) (strLen s) == suffix
 main :: IO ()
 main = do
     -- A computed (thunked) message.
-    v <- catch (seq (boom 5) (pure (0 :: Integer)))
+    v <- catch (seq (boom 5) (pure (0 :: Int)))
                (\msg -> if endsWith "bad value: 5" msg then pure 1 else pure 2)
     assert (v == 1) "computed error message is forced, not a thunk"
 
     -- A literal message still works.
-    w <- catch (seq (error "plain" :: Integer) (pure (0 :: Integer)))
+    w <- catch (seq (error "plain" :: Int) (pure (0 :: Int)))
                (\msg -> if endsWith "plain" msg then pure 1 else pure 2)
     assert (w == 1) "literal error message still works"
 

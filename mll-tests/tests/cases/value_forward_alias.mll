@@ -7,27 +7,27 @@
 -- (The function-typed analogue is covered by pointfree_caf.)
 
 -- A bare alias to a value defined below.
-aliasV :: Integer
+aliasV :: Int
 aliasV = targetV
 
-targetV :: Integer
+targetV :: Int
 targetV = 42
 
 -- A value defined in terms of a later binding via arithmetic.
-derivedV :: Integer
+derivedV :: Int
 derivedV = baseV + 1
 
-baseV :: Integer
+baseV :: Int
 baseV = 100
 
 -- A constructor field referencing a later binding.
-wrappedV :: Maybe Integer
+wrappedV :: Maybe Int
 wrappedV = Just innerV
 
-innerV :: Integer
+innerV :: Int
 innerV = 7
 
-unwrap :: Maybe Integer -> Integer
+unwrap :: Maybe Int -> Int
 unwrap (Just n) = n
 unwrap Nothing = 0
 

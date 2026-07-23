@@ -14,27 +14,27 @@
 
 import Data.List (foldr)
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
 -- Recursive: NOT an inline candidate, so `tri n` is a genuine thunked
 -- application, not a folded constant.
-tri :: Integer -> Integer
+tri :: Int -> Int
 tri 0 = 0
 tri n = n + tri (n - 1)
 
 -- Ignores its second argument entirely (so a seq result passed here is never
 -- consumed — its second-argument bottom must stay unforced).
-keepFirst :: Integer -> Integer -> Integer
+keepFirst :: Int -> Int -> Int
 keepFirst a _ = a
 
 -- Deep seq-strict accumulators, one per inline form, to prove both keep the
 -- proper tail call (constant stack). 1+2+...+N = N*(N+1)/2.
-sumPrefix :: Integer -> Integer -> Integer
+sumPrefix :: Int -> Int -> Int
 sumPrefix 0 acc = acc
 sumPrefix n acc = seq acc (sumPrefix (n - 1) (acc + n))
 
-sumBacktick :: Integer -> Integer -> Integer
+sumBacktick :: Int -> Int -> Int
 sumBacktick 0 acc = acc
 sumBacktick n acc = acc `seq` sumBacktick (n - 1) (acc + n)
 
@@ -71,5 +71,5 @@ main = do
     putStrLn "All seq application-form tests passed!"
 
 -- A bottom used only where it must never be forced.
-errInt :: Integer
+errInt :: Int
 errInt = error "seq must not force this"

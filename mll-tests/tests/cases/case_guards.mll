@@ -2,7 +2,7 @@
 -- definitions and case branches"). A branch whose pattern matches but
 -- whose guards all fail must fall through to the next branch.
 
-classify :: Integer -> String
+classify :: Int -> String
 classify n = case n of
     0             -> "zero"
     n | n > 0     -> "positive"
@@ -10,7 +10,7 @@ classify n = case n of
 
 -- Guard fallthrough across a constructor-pattern boundary: `Just 7`
 -- matches `Just n` but the guard fails, so it must reach `_`.
-describe :: Maybe Integer -> String
+describe :: Maybe Int -> String
 describe m = case m of
     Just 0           -> "exact zero"
     Just n | n > 100 -> "big"

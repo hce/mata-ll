@@ -45,10 +45,10 @@ member x (y:ys)
 
 main :: IO ()
 main = do
-    let a = fromList ([3,1,4,1,5,9,2,6] :: [Integer])
+    let a = fromList ([3,1,4,1,5,9,2,6] :: [Int])
     assert (a == [1,2,3,4,5,6,9]) "fromList dedup+sort"
 
-    let b = fromList ([2,4,6,8,10] :: [Integer])
+    let b = fromList ([2,4,6,8,10] :: [Int])
     assert (union_ a b == [1,2,3,4,5,6,8,9,10]) "union"
     assert (intersection a b == [2,4,6]) "intersection"
     assert (difference a b == [1,3,5,9]) "difference a-b"
@@ -57,7 +57,7 @@ main = do
     assert (member 5 a) "5 in a"
     assert (not (member 7 a)) "7 not in a"
 
-    let empty = ([] :: [Integer])
+    let empty = ([] :: [Int])
     assert (union_ empty a == a) "union empty a"
     assert (intersection empty a == empty) "intersection empty"
     assert (difference a empty == a) "diff a empty"

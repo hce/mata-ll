@@ -35,60 +35,60 @@ import Nvlist (parseNvlist, nvString, nvU64, nvList)
 -- Constants (the lexer has no hex literals; decimal values are annotated)
 -- ---------------------------------------------------------------------------
 
-ubMagic :: Integer
+ubMagic :: Int
 ubMagic = 12235020                   -- 0x00bab10c
 
-vdevLabelStart :: Integer
+vdevLabelStart :: Int
 vdevLabelStart = 4194304             -- 4 MB reserved for L0/L1 + boot block
 
-labelSize :: Integer
+labelSize :: Int
 labelSize = 262144                   -- one vdev label: 256K
 
-ubRingSize :: Integer
+ubRingSize :: Int
 ubRingSize = 131072                  -- uberblock ring: label bytes 128K..256K
 
-nvlistOffset :: Integer
+nvlistOffset :: Int
 nvlistOffset = 16384                 -- config nvlist: label bytes 16K..128K
 
-nvlistSize :: Integer
+nvlistSize :: Int
 nvlistSize = 114688
 
-mask48 :: Integer
+mask48 :: Int
 mask48 = 281474976710655             -- 2^48 - 1 (ZPL directory entry object id)
 
 -- 2^63 - 1 without hex literals: (1 << 63) wraps to the minimum 64-bit
 -- integer, and subtracting 1 wraps again to the maximum — the low 63 bits.
-bnot63 :: Integer
+bnot63 :: Int
 bnot63 = shiftL 1 63 - 1
 
-mzapBlockType :: Integer
+mzapBlockType :: Int
 mzapBlockType = bor (shiftL 1 63) 3  -- 0x8000000000000003
 
-fzapBlockType :: Integer
+fzapBlockType :: Int
 fzapBlockType = bor (shiftL 1 63) 1  -- 0x8000000000000001
 
-zbtLeaf :: Integer
+zbtLeaf :: Int
 zbtLeaf = shiftL 1 63                -- 0x8000000000000000
 
-saMagic :: Integer
+saMagic :: Int
 saMagic = 3100762                    -- 0x2F505A
 
-compOff :: Integer
+compOff :: Int
 compOff = 2
 
-compLz4 :: Integer
+compLz4 :: Int
 compLz4 = 15
 
-otDslDir :: Integer
+otDslDir :: Int
 otDslDir = 12                        -- DMU_OT_DSL_DIR (bonus type)
 
-otDslDataset :: Integer
+otDslDataset :: Int
 otDslDataset = 16                    -- DMU_OT_DSL_DATASET (bonus type)
 
-otZnode :: Integer
+otZnode :: Int
 otZnode = 17                         -- DMU_OT_ZNODE (pre-SA bonus type)
 
-otSa :: Integer
+otSa :: Int
 otSa = 44                            -- DMU_OT_SA (system-attribute bonus)
 
 -- ---------------------------------------------------------------------------
@@ -105,26 +105,26 @@ ctxEndian (Ctx _ e) = e
 data Pool = Pool { poolCtx :: Ctx
                  , poolName :: String
                  , poolMos :: Objset
-                 , poolRootDsl :: Integer
+                 , poolRootDsl :: Int
                  }
 
 -- An objset is represented by its meta dnode, whose data blocks are the
 -- objset's dnode array (object K = 512-byte slot K).
 data Objset = Objset Dnode
 
-data Dva = Dva Integer Integer Bool          -- vdev id, byte offset, gang bit
+data Dva = Dva Int Int Bool          -- vdev id, byte offset, gang bit
 
 data Blkptr = BpHole
-            | BpEmbedded Integer Integer ByteString  -- comp, lsize, payload
-            | Bp Dva Integer Integer Integer         -- dva, comp, lsize, psize
+            | BpEmbedded Int Int ByteString  -- comp, lsize, payload
+            | Bp Dva Int Int Int         -- dva, comp, lsize, psize
 
-data Dnode = Dnode { dnType :: Integer
-                   , dnIndBlkShift :: Integer
-                   , dnNLevels :: Integer
-                   , dnNBlkptr :: Integer
-                   , dnBonusType :: Integer
-                   , dnDataBlkSz :: Integer
-                   , dnMaxBlkId :: Integer
+data Dnode = Dnode { dnType :: Int
+                   , dnIndBlkShift :: Int
+                   , dnNLevels :: Int
+                   , dnNBlkptr :: Int
+                   , dnBonusType :: Int
+                   , dnDataBlkSz :: Int
+                   , dnMaxBlkId :: Int
                    , dnBlkptrs :: [Blkptr]
                    , dnBonus :: ByteString
                    }
@@ -133,7 +133,7 @@ data Dnode = Dnode { dnType :: Integer
 -- Device access
 -- ---------------------------------------------------------------------------
 
-devRead :: Ctx -> Integer -> Integer -> IO ByteString
+devRead :: Ctx -> Int -> Int -> IO ByteString
 devRead (Ctx devs _) off len = do
     let h = head devs
     _ <- fSeek h "set" off
@@ -176,7 +176,7 @@ parseBp end b =
 -- data in the pointer itself: payload words at bytes 0..47, 56..79 and
 -- 88..127, with sizes packed differently in props (lsize 25 bits,
 -- psize 7 bits).
-parseEmbedded :: Endian -> ByteString -> Integer -> Blkptr
+parseEmbedded :: Endian -> ByteString -> Int -> Blkptr
 parseEmbedded end b props = case end of
     BE -> error "embedded blkptr on a byteswapped (big-endian) pool is not supported"
     LE ->
@@ -190,7 +190,7 @@ parseEmbedded end b props = case end of
                 ]
         in BpEmbedded comp lsize (bsSub payload 0 psize)
 
-compName :: Integer -> String
+compName :: Int -> String
 compName c =
     if c == 3 then "lzjb"
     else if c >= 5 && c <= 13 then "gzip"
@@ -198,7 +198,7 @@ compName c =
     else if c == 16 then "zstd"
     else "code " <> show c
 
-decompress :: Integer -> ByteString -> Integer -> ByteString
+decompress :: Int -> ByteString -> Int -> ByteString
 decompress comp raw lsize =
     if comp == compOff
     then bsSub raw 0 lsize
@@ -243,7 +243,7 @@ parseDnode end b = Dnode { dnType = bsIndex b 0
 
 -- Read logical block `blkid` of an object, walking the indirect levels.
 -- Holes (at any level) read back as zeros of the data block size.
-readBlock :: Ctx -> Dnode -> Integer -> IO ByteString
+readBlock :: Ctx -> Dnode -> Int -> IO ByteString
 readBlock ctx dn blkid = do
     let levels = dnNLevels dn
         epbs = dnIndBlkShift dn - 7          -- log2 blkptrs per indirect blk
@@ -266,7 +266,7 @@ readBlock ctx dn blkid = do
 
 -- Object K's dnode: slot K of the meta dnode's data (512 bytes per slot;
 -- dn_extra_slots widens the slice for large dnodes).
-getDnode :: Ctx -> Objset -> Integer -> IO Dnode
+getDnode :: Ctx -> Objset -> Int -> IO Dnode
 getDnode ctx (Objset meta) objnum = do
     let bs = dnDataBlkSz meta
         per = div bs 512
@@ -285,7 +285,7 @@ getDnode ctx (Objset meta) objnum = do
 -- All entries of a ZAP object as (name, value ints). Values are returned as
 -- integer lists (directory ZAPs use a single uint64; SA layouts use uint16
 -- arrays).
-zapEntries :: Ctx -> Objset -> Integer -> IO [(String, [Integer])]
+zapEntries :: Ctx -> Objset -> Int -> IO [(String, [Int])]
 zapEntries ctx os objnum = do
     dn <- getDnode ctx os objnum
     blk0 <- readBlock ctx dn 0
@@ -299,7 +299,7 @@ zapEntries ctx os objnum = do
                 <> show bt <> ")")
 
 -- Microzap: a single block of 64-byte entries after a 64-byte header.
-mzapEntries :: Endian -> ByteString -> [(String, [Integer])]
+mzapEntries :: Endian -> ByteString -> [(String, [Int])]
 mzapEntries end blk = concatMap slot [1 .. div (bsLength blk) 64 - 1]
   where
     slot i =
@@ -312,7 +312,7 @@ mzapEntries end blk = concatMap slot [1 .. div (bsLength blk) 64 - 1]
 -- contribute their entry chunks. (Leaves are enumerated directly instead of
 -- going through the hash pointer table — every leaf is stored exactly once,
 -- and enumeration does not need the hash order.)
-fzapEntries :: Ctx -> Dnode -> IO [(String, [Integer])]
+fzapEntries :: Ctx -> Dnode -> IO [(String, [Int])]
 fzapEntries ctx dn = do
     parts <- mapM leafBlock [1 .. dnMaxBlkId dn]
     pure (concat parts)
@@ -328,7 +328,7 @@ fzapEntries ctx dn = do
 -- 24-byte chunks. Entry chunks (type 252) name their string and value via
 -- chains of array chunks (type 251, 21 payload bytes each). Fatzap array
 -- integers are big-endian on every host.
-leafEntries :: Endian -> Integer -> ByteString -> [(String, [Integer])]
+leafEntries :: Endian -> Int -> ByteString -> [(String, [Int])]
 leafEntries end bs d = concatMap chunkEntry [0 .. nchunks - 1]
   where
     chunksOff = 48 + div bs 16
@@ -358,7 +358,7 @@ leafEntries end bs d = concatMap chunkEntry [0 .. nchunks - 1]
                else bsConcat (bsSub d (base + 1) takeN)
                              (readArray (getU16 end d (base + 22)) (need - takeN))
 
-zapU64 :: String -> [(String, [Integer])] -> String -> Integer
+zapU64 :: String -> [(String, [Int])] -> String -> Int
 zapU64 what ents name = case assoc name ents of
     Just (v : _) -> v
     _ -> error (what <> ": missing ZAP key " <> name)
@@ -422,7 +422,7 @@ openDev path = do
         Left err -> error ("cannot open " <> path <> ": " <> err)
         Right h -> pure h
 
-devReadH :: FileHandle -> Integer -> Integer -> IO ByteString
+devReadH :: FileHandle -> Int -> Int -> IO ByteString
 devReadH h off len = do
     _ <- fSeek h "set" off
     s <- fReadN h len
@@ -431,7 +431,7 @@ devReadH h off len = do
 -- Scan the uberblock rings of all four labels (two at the device start, two
 -- at the end); each slot is 1 << max(ashift, 10) bytes. The byte order is
 -- detected from the magic; the winner is the valid slot with the highest txg.
-scanUberblocks :: FileHandle -> Integer -> Integer -> IO (Endian, Integer, ByteString)
+scanUberblocks :: FileHandle -> Int -> Int -> IO (Endian, Int, ByteString)
 scanUberblocks h size ashift = do
     let ubShift = if ashift > 10 then ashift else 10
         slotSize = shiftL 1 ubShift
@@ -468,7 +468,7 @@ scanUberblocks h size ashift = do
 -- ---------------------------------------------------------------------------
 
 -- (head_dataset_obj, child_dir_zapobj) from a dsl_dir's bonus buffer.
-dslDirInfo :: Pool -> Integer -> IO (Integer, Integer)
+dslDirInfo :: Pool -> Int -> IO (Int, Int)
 dslDirInfo pool dirobj = do
     dn <- getDnode (poolCtx pool) (poolMos pool) dirobj
     if dnBonusType dn /= otDslDir
@@ -482,7 +482,7 @@ dslDirInfo pool dirobj = do
 -- Depth-first walk of the DSL directory tree; hidden internal directories
 -- ($MOS, $FREE_DIR, $ORIGIN, ...) are skipped. Snapshots never appear here:
 -- they live under ds_snapnames_zapobj, which this walk does not touch.
-walkDsl :: Pool -> Integer -> String -> IO [(String, Integer)]
+walkDsl :: Pool -> Int -> String -> IO [(String, Int)]
 walkDsl pool dirobj name = do
     hd <- dslDirInfo pool dirobj
     ents <- zapEntries (poolCtx pool) (poolMos pool) (snd hd)
@@ -499,7 +499,7 @@ sortByName = sortBy cmp
   where
     cmp (a, _) (b, _) = if a < b then LT else if a > b then GT else EQ
 
-allDatasets :: Pool -> IO [(String, Integer)]
+allDatasets :: Pool -> IO [(String, Int)]
 allDatasets pool = walkDsl pool (poolRootDsl pool) (poolName pool)
 
 listDatasets :: Pool -> IO [String]
@@ -509,7 +509,7 @@ listDatasets pool = do
 
 -- The head dataset's objset: ds_bp lives at byte 128 of the dsl_dataset
 -- bonus buffer and points at the filesystem's objset.
-fsObjset :: Pool -> Integer -> IO Objset
+fsObjset :: Pool -> Int -> IO Objset
 fsObjset pool dsobj = do
     let ctx = poolCtx pool
         end = ctxEndian ctx
@@ -533,20 +533,20 @@ findDataset pool dsname = do
 -- ---------------------------------------------------------------------------
 
 -- ZPL directory entry: low 48 bits object id, top 4 bits the file type.
-dtDir :: Integer
+dtDir :: Int
 dtDir = 4
 
-dtReg :: Integer
+dtReg :: Int
 dtReg = 8
 
-entryObj :: Integer -> Integer
+entryObj :: Int -> Int
 entryObj v = band v mask48
 
-entryType :: Integer -> Integer
+entryType :: Int -> Int
 entryType v = band (shiftR v 60) 15
 
 -- Root directory object: master node (object 1) key "ROOT".
-fsRootDir :: Pool -> Objset -> IO Integer
+fsRootDir :: Pool -> Objset -> IO Int
 fsRootDir pool os = do
     master <- zapEntries (poolCtx pool) os 1
     pure (zapU64 "ZPL master node" master "ROOT")
@@ -571,7 +571,7 @@ listFiles pool dsname = do
 
 -- Resolve a relative path (components already split) to a regular file's
 -- object number.
-resolvePath :: Pool -> Objset -> Integer -> [String] -> IO Integer
+resolvePath :: Pool -> Objset -> Int -> [String] -> IO Int
 resolvePath _ _ _ [] = error "readPath: empty path"
 resolvePath pool os dirobj (c : rest) = do
     ents <- zapEntries (poolCtx pool) os dirobj
@@ -593,7 +593,7 @@ resolvePath pool os dirobj (c : rest) = do
 -- up from the filesystem's SA registry (master node SA_ATTRS -> REGISTRY /
 -- LAYOUTS), never assumed. Pre-SA pools (ZPL version <= 4) keep a fixed
 -- znode_phys in the bonus with zp_size at byte 80.
-fileSize :: Pool -> Objset -> Dnode -> IO Integer
+fileSize :: Pool -> Objset -> Dnode -> IO Int
 fileSize pool os dn =
     let end = ctxEndian (poolCtx pool)
         b = dnBonus dn
@@ -604,7 +604,7 @@ fileSize pool os dn =
        else error ("file dnode has unexpected bonus type "
                    <> show (dnBonusType dn))
 
-saSize :: Pool -> Objset -> ByteString -> IO Integer
+saSize :: Pool -> Objset -> ByteString -> IO Int
 saSize pool os b = do
     let end = ctxEndian (poolCtx pool)
     if getU32 end b 0 /= saMagic

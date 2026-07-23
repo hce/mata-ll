@@ -18,7 +18,7 @@ vhead (VCons x _) = x
 vtail :: Vec ('S n) a -> Vec n a
 vtail (VCons _ xs) = xs
 
-vlen :: Vec n a -> Integer
+vlen :: Vec n a -> Int
 vlen VNil = 0
 vlen (VCons _ xs) = 1 + vlen xs
 
@@ -28,13 +28,13 @@ vmap _ VNil = VNil
 vmap f (VCons x xs) = VCons (f x) (vmap f xs)
 
 -- Vectors with their lengths pinned by top-level annotations.
-v0 :: Vec 'Z Integer
+v0 :: Vec 'Z Int
 v0 = VNil
 
-v1 :: Vec ('S 'Z) Integer
+v1 :: Vec ('S 'Z) Int
 v1 = VCons 7 VNil
 
-v3 :: Vec ('S ('S ('S 'Z))) Integer
+v3 :: Vec ('S ('S ('S 'Z))) Int
 v3 = VCons 1 (VCons 2 (VCons 3 VNil))
 
 vs :: Vec ('S ('S 'Z)) String

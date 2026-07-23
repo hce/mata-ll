@@ -23,19 +23,19 @@ import LBit (band, bor, xor, shiftL, shiftR)
 
 -- Recursive: not an inline candidate, so `tri n` is a real thunked application.
 -- tri n = n + (n-1) + ... + 1 = n*(n+1)/2. tri 10 = 55.
-tri :: Integer -> Integer
+tri :: Int -> Int
 tri 0 = 0
 tri n = n + tri (n - 1)
 
 -- Another non-foldable thunk source: sum a list built lazily.
-sumTo :: Integer -> Integer
+sumTo :: Int -> Int
 sumTo n = go n 0
   where
     go 0 acc = acc
     go k acc = go (k - 1) (acc + k)
 
 -- A bottom that MUST stay unraised until forced, and MUST raise when it is.
-boomI :: Integer
+boomI :: Int
 boomI = error "boom: a bit-op forced a demanded bottom (correct) — or leaked a thunk"
 
 main :: IO ()

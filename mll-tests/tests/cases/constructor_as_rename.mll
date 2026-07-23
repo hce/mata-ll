@@ -18,7 +18,7 @@ data Suit = Clubs as "clubs" | Diamonds as "diamonds" | Hearts as "hearts" | Spa
 
 -- Fielded constructors renamed: the external name is the "tag" value,
 -- positional arguments stay under "contents".
-data Outcome = Ok Integer as "ok" | Err String as "error"
+data Outcome = Ok Int as "ok" | Err String as "error"
     deriving (Show, Eq, ToJSON, FromJSON)
 
 -- Mixed: renamed and unrenamed constructors in one type; the unrenamed ones
@@ -29,7 +29,7 @@ data Ev = Warn String as "warning" | Fatal String | Silent
 -- A renamed RECORD constructor in a tagged sum: the external name is the
 -- "tag" value, and a field-level rename applies inline next to it — the two
 -- rename levels compose.
-data Msg = Tick { mAt as "at" :: Integer } as "tick" | Stop as "stop"
+data Msg = Tick { mAt as "at" :: Int } as "tick" | Stop as "stop"
     deriving (Show, Eq, ToJSON, FromJSON)
 
 -- A lone nullary constructor is tagged by definition: the external name is

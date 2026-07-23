@@ -1,4 +1,4 @@
-export writeFibs :: (String -> LuaIO s ()) -> Integer -> LuaIO s ()
+export writeFibs :: (String -> LuaIO s ()) -> Int -> LuaIO s ()
 writeFibs writer = loop 1 1
   where
     loop _ _ 0 = return ()

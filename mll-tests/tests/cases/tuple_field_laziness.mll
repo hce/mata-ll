@@ -19,10 +19,10 @@ import Data.List (find)
 
 -- An inlined tuple body: `snd (mkPair (error ...))` must not run the error,
 -- so the inlined-substitution path must keep the field lazy too.
-mkPair :: Integer -> (Integer, Integer)
+mkPair :: Int -> (Int, Int)
 mkPair x = (x, 1)
 
-errInt :: Integer
+errInt :: Int
 errInt = error "unreached"
 
 -- A tuple field built from a function *application* is a genuine thunk (only a
@@ -31,27 +31,27 @@ errInt = error "unreached"
 -- is not an inline candidate and its call is a genuine thunked application. A
 -- value-consumer such as `show` MUST force such a field — before the fix, tuple
 -- `show` rendered the raw thunk table (`(function, False)`) instead of forcing.
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc x = x + 1
 
-tri :: Integer -> Integer
+tri :: Int -> Int
 tri 0 = 0
 tri n = n + tri (n - 1)
 
 -- An ADT whose fields (also thunked) sit inside a tuple, and vice versa.
-data Box = Box Integer Integer
+data Box = Box Int Int
     deriving (Eq, Show)
 
 -- A self-referential top-level list with a bottom head (the gen_expr_lazy site).
-badHeads :: [Integer]
+badHeads :: [Int]
 badHeads = errInt : badHeads
 
 -- Pattern-destructure a tuple whose first field is demanded, second discarded.
-takeFirst :: (Integer, Integer) -> Integer
+takeFirst :: (Int, Int) -> Int
 takeFirst (a, _) = a
 
 -- Sum the first components of a list of pairs; the seconds are never demanded.
-sumFirsts :: [(Integer, Integer)] -> Integer
+sumFirsts :: [(Int, Int)] -> Int
 sumFirsts [] = 0
 sumFirsts ((a, _) : rest) = a + sumFirsts rest
 

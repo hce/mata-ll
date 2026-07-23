@@ -12,9 +12,9 @@
 -- binding is its own memoized lazy list (its own coroutine run). A single
 -- shared binding would be memoized after the first demo, and the second
 -- demo would print no "Yielding" lines.
-myIter              :: LuaIterator "my_iter" [Integer]
-myIter'             :: LuaIterator "my_iter" [Integer]
-runawayLoopIterator :: LuaIterator "runaway_loop_iterator" [Integer]
+myIter              :: LuaIterator "my_iter" [Int]
+myIter'             :: LuaIterator "my_iter" [Int]
+runawayLoopIterator :: LuaIterator "runaway_loop_iterator" [Int]
 
 export run :: IO ()
 run = flip mapM_ myIter $ \item ->
@@ -25,7 +25,7 @@ runStrict = let myIter'' = length myIter' `seq` myIter' in
         flip mapM_ myIter'' $ \item ->
             putStrLn $ "Streaming from Lua to mata-ll, we got: " <> show item
 
-export runPartly :: Integer -> IO ()
+export runPartly :: Int -> IO ()
 runPartly c = print $ take c runawayLoopIterator
 
 main :: IO ()

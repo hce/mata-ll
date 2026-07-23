@@ -2,7 +2,7 @@
 -- not the effects themselves. Only >>= and >> may perform them.
 
 -- Helper: a mutable counter via STArray to track execution order
-countExecutions :: STArray s -> Integer -> ST s ()
+countExecutions :: STArray s -> Int -> ST s ()
 countExecutions arr idx = do
     n <- readSTArray arr idx
     writeSTArray arr idx (n + 1)

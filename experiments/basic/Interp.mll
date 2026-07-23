@@ -12,9 +12,9 @@ import LMath (floor, abs, sqrt, sin, cos, tan, atan, fmod, exp, log)
 import LIO (readLine)
 
 -- FFI bindings that return Number directly, so counts and truncations don't
--- have to bounce through Integer (which mata-ll keeps distinct from Number).
+-- have to bounce through Int (which mata-ll keeps distinct from Number).
 lenNum :: String -> LuaPure "string.len" Number
-byteNum :: String -> Integer -> LuaPure "string.byte" Number
+byteNum :: String -> Int -> LuaPure "string.byte" Number
 floorNum :: Number -> LuaPure "math.floor" Number
 
 -- math.random() with no arguments returns a fresh Number in [0,1). It is
@@ -24,37 +24,37 @@ rnd01 :: LuaIO "math.random" Number
 
 -- A dimensioned array: the per-dimension upper bounds and a sparse store of
 -- element values keyed by row-major flat index.
-data BArr = BArr [Integer] (HashMap Integer Value)
+data BArr = BArr [Int] (HashMap Int Value)
 
 -- An active FOR loop: control variable, limit, step, and the flat index of the
 -- statement just after FOR (where NEXT jumps back to).
-data ForFrame = ForFrame String Number Number Integer
+data ForFrame = ForFrame String Number Number Int
 
 -- The whole machine. stCode maps a flat statement index to its statement;
 -- stLineIx maps a BASIC line number to the flat index it starts at.
-data State = State { stVars :: HashMap String Value, stArrays :: HashMap String BArr, stCode :: HashMap Integer Stmt, stLineIx :: HashMap Integer Integer, stCount :: Integer, stPC :: Integer, stSubs :: [Integer], stFors :: [ForFrame] }
+data State = State { stVars :: HashMap String Value, stArrays :: HashMap String BArr, stCode :: HashMap Int Stmt, stLineIx :: HashMap Int Int, stCount :: Int, stPC :: Int, stSubs :: [Int], stFors :: [ForFrame] }
 
 -- What to do with the program counter after a statement runs.
-data Flow = FNext | FJump Integer | FHalt
+data Flow = FNext | FJump Int | FHalt
 
 -- ---------------------------------------------------------------------------
 -- Building the initial state from parsed, line-number-sorted source
 -- ---------------------------------------------------------------------------
 
-buildState :: [(Integer, [Stmt])] -> State
+buildState :: [(Int, [Stmt])] -> State
 buildState prog =
     let cells = concat (map (\lns -> map (\s -> (fst lns, s)) (snd lns)) prog)
         code = buildCode 0 cells
         lineix = buildLineIx 0 cells
     in State hmEmpty hmEmpty code lineix (length cells) 0 [] []
 
-buildCode :: Integer -> [(Integer, Stmt)] -> HashMap Integer Stmt
+buildCode :: Int -> [(Int, Stmt)] -> HashMap Int Stmt
 buildCode _ [] = hmEmpty
 buildCode i (c : rest) = hmInsert i (snd c) (buildCode (i + 1) rest)
 
 -- Map each line number to its first flat index. Recursing before inserting
 -- means the smallest (earliest) index for a line wins.
-buildLineIx :: Integer -> [(Integer, Stmt)] -> HashMap Integer Integer
+buildLineIx :: Int -> [(Int, Stmt)] -> HashMap Int Int
 buildLineIx _ [] = hmEmpty
 buildLineIx i (c : rest) = hmInsert (fst c) i (buildLineIx (i + 1) rest)
 
@@ -133,7 +133,7 @@ exec st (SInput prompt targets) = do
     st1 <- assignInputs st targets (splitComma line)
     return (st1, FNext)
 
-resolveLine :: State -> Integer -> Integer
+resolveLine :: State -> Int -> Int
 resolveLine st ln = fromMaybe (error ("undefined line " <> show ln)) (hmLookup ln (stLineIx st))
 
 -- FOR/NEXT: advance the innermost matching loop; jump back if it should run
@@ -185,10 +185,10 @@ dimOne st decl = do
 
 -- Look the array up (auto-dimensioning a missing one to bound 10 per index),
 -- then read or write the row-major element.
-getArr :: State -> String -> [Integer] -> BArr
+getArr :: State -> String -> [Int] -> BArr
 getArr st name idxs = fromMaybe (BArr (map (\_ -> 10) idxs) hmEmpty) (hmLookup name (stArrays st))
 
-flatIndex :: [Integer] -> [Integer] -> Integer
+flatIndex :: [Int] -> [Int] -> Int
 flatIndex dims idxs = foldl (\acc di -> acc * (fst di + 1) + snd di) 0 (zip dims idxs)
 
 readArr :: State -> String -> [Number] -> Value
@@ -324,7 +324,7 @@ powNum :: Number -> Number -> Number
 powNum base ex =
     if fmod ex 1.0 == 0.0 then intPow base (floor ex) else exp (ex * log base)
 
-intPow :: Number -> Integer -> Number
+intPow :: Number -> Int -> Number
 intPow base e =
     if e == 0 then 1.0
     else if e < 0 then 1.0 / intPow base (0 - e)
@@ -359,7 +359,7 @@ renderPrint st col (PVal e : rest) = do
 zonePad :: Number -> String
 zonePad col = spaces (floor (14.0 - fmod col 14.0))
 
-spaces :: Integer -> String
+spaces :: Int -> String
 spaces k = if k <= 0 then "" else " " <> spaces (k - 1)
 
 -- ---------------------------------------------------------------------------

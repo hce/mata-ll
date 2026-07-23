@@ -9,11 +9,11 @@
 -- `try` proves it STILL raises when actually demanded (laziness, not
 -- error-swallowing).
 
-boom :: Integer
+boom :: Int
 boom = error "boom: return forced its argument"
 
 -- Terminal `return bottom` in a function body (the do-block terminal path).
-returnsBottom :: IO Integer
+returnsBottom :: IO Int
 returnsBottom = return boom
 
 main :: IO ()
@@ -36,16 +36,16 @@ main = do
 
     -- 5. fmap with a non-strict function over a returned bottom keeps it lazy:
     --    fmap const (return ⊥) ~ return (const 99 ⊥) = return 99.
-    w <- fmap (\_ -> 99 :: Integer) (return boom)
+    w <- fmap (\_ -> 99 :: Int) (return boom)
     assert (w == 99) "5: fmap const over (return bottom) does not force the bottom"
 
     -- 6. Structured laziness is preserved: a returned tuple's bottom field is
     --    not forced (fst/snd laziness holds through return).
-    p <- return (7 :: Integer, boom)
+    p <- return (7 :: Int, boom)
     assert (fst p == 7) "6: returned tuple keeps its bottom field lazy"
 
     -- 7. The Maybe monad's return stays lazy as well (regression guard).
-    case (return boom :: Maybe Integer) of
+    case (return boom :: Maybe Int) of
         Just _  -> putStrLn "7: Maybe return does not force its argument"
         Nothing -> error "impossible"
 

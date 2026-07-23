@@ -2,21 +2,21 @@
 -- Self-balancing: O(log n) insert, lookup, and delete.
 
 data Dict k v = Empty
-              | Node Integer k v (Dict k v) (Dict k v)
+              | Node Int k v (Dict k v) (Dict k v)
 
--- The Integer field is the height of the subtree.
+-- The Int field is the height of the subtree.
 
 empty :: Dict k v
 empty = Empty
 
-height :: Dict k v -> Integer
+height :: Dict k v -> Int
 height Empty = 0
 height (Node h _ _ _ _) = h
 
 node :: k -> v -> Dict k v -> Dict k v -> Dict k v
 node k v l r = Node (1 + max (height l) (height r)) k v l r
 
-balance :: Dict k v -> Integer
+balance :: Dict k v -> Int
 balance Empty = 0
 balance (Node _ _ _ l r) = height l - height r
 
@@ -64,7 +64,7 @@ fromMaybe :: a -> Maybe a -> a
 fromMaybe def Nothing = def
 fromMaybe _ (Just x) = x
 
-size :: Dict k v -> Integer
+size :: Dict k v -> Int
 size Empty = 0
 size (Node _ _ _ left right) = 1 + size left + size right
 

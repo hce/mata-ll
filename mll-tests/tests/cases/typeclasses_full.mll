@@ -15,7 +15,7 @@ data Pair a = MkPair a a
     deriving Show
 
 -- Deriving Eq with fields
-data Point = Point Integer Integer
+data Point = Point Int Int
     deriving (Show, Eq)
 
 -- Eq for parameterized types
@@ -64,11 +64,11 @@ main = do
     assert ([1, 2, 3] == [1, 2, 3]) "list eq"
     assert ([1, 2] /= [1, 2, 3]) "list neq length"
     assert ([1, 2, 3] /= [1, 2, 4]) "list neq elem"
-    assert (([] :: [Integer]) == []) "list eq empty"
+    assert (([] :: [Int]) == []) "list eq empty"
 
     -- Eq for Maybe
     assert (Just 42 == Just 42) "maybe eq just"
-    assert (Nothing == (Nothing :: Maybe Integer)) "maybe eq nothing"
+    assert (Nothing == (Nothing :: Maybe Int)) "maybe eq nothing"
     assert (Just 1 /= Just 2) "maybe neq"
     assert (Just 1 /= Nothing) "maybe just vs nothing"
 
@@ -87,7 +87,7 @@ main = do
 
     -- Show for lists
     assert (show [1, 2, 3] == "[1,2,3]") "show list"
-    assert (show ([] :: [Integer]) == "[]") "show empty list"
+    assert (show ([] :: [Int]) == "[]") "show empty list"
 
     -- Show for basic types
     assert (show 42 == "42") "show int"

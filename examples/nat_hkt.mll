@@ -26,11 +26,11 @@ addNat :: Nat -> Nat -> Nat
 addNat Zero     m = m
 addNat (Succ n) m = Succ (addNat n m)
 
-toInt :: Nat -> Integer
+toInt :: Nat -> Int
 toInt Zero     = 0
 toInt (Succ n) = 1 + toInt n
 
-fromInt :: Integer -> Nat
+fromInt :: Int -> Nat
 fromInt n
   | n <= 0    = Zero
   | otherwise = Succ (fromInt (n - 1))
@@ -52,15 +52,15 @@ instance Foldable Tree where
     foldl _ z Leaf         = z
     foldl f z (Node l x r) = foldl f (f (foldl f z l) x) r
 
--- Insert an Integer (stored as a Nat) into a BST keyed by its Integer value.
-insert :: Integer -> Tree Nat -> Tree Nat
+-- Insert an Int (stored as a Nat) into a BST keyed by its Int value.
+insert :: Int -> Tree Nat -> Tree Nat
 insert k Leaf = Node Leaf (fromInt k) Leaf
 insert k (Node l x r)
   | k < toInt x = Node (insert k l) x r
   | k > toInt x = Node l x (insert k r)
   | otherwise   = Node l x r
 
-fromList :: [Integer] -> Tree Nat
+fromList :: [Int] -> Tree Nat
 fromList = foldr insert Leaf
 
 main :: IO ()

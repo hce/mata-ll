@@ -5,7 +5,7 @@
 //! negation of literals to their result literals.
 //!
 //! After monomorphization, typeclass methods (==, <, >, <>, etc.) are
-//! resolved to concrete functions like `eq_Integer`, `ord_gt__Number`,
+//! resolved to concrete functions like `eq_Int`, `ord_gt__Number`,
 //! `semigroup_String`.  We recognize these App(App(Var(name), lhs), rhs)
 //! patterns and fold them too.
 
@@ -59,12 +59,12 @@ fn unwrap_lit(expr: &TExpr) -> Option<&TLiteral> {
 fn resolved_method_to_op(name: &str) -> Option<&'static str> {
     match name {
         // Eq instances
-        "eq_Integer" | "eq_Number" | "eq_String" | "eq_Bool" => Some("=="),
+        "eq_Int" | "eq_Number" | "eq_String" | "eq_Bool" => Some("=="),
         // Ord instances
-        "ord_lt__Integer"  | "ord_lt__Number"  | "ord_lt__String"  => Some("<"),
-        "ord_gt__Integer"  | "ord_gt__Number"  | "ord_gt__String"  => Some(">"),
-        "ord_le__Integer"  | "ord_le__Number"  | "ord_le__String"  => Some("<="),
-        "ord_ge__Integer"  | "ord_ge__Number"  | "ord_ge__String"  => Some(">="),
+        "ord_lt__Int"  | "ord_lt__Number"  | "ord_lt__String"  => Some("<"),
+        "ord_gt__Int"  | "ord_gt__Number"  | "ord_gt__String"  => Some(">"),
+        "ord_le__Int"  | "ord_le__Number"  | "ord_le__String"  => Some("<="),
+        "ord_ge__Int"  | "ord_ge__Number"  | "ord_ge__String"  => Some(">="),
         // Semigroup
         "semigroup_String" => Some("<>"),
         _ => None,
@@ -189,7 +189,7 @@ fn fold_expr(expr: TExpr) -> TExpr {
 
 fn try_fold_infix(op: &str, lhs: &TExpr, rhs: &TExpr, ty: &Ty) -> Option<TExpr> {
     match (unwrap_lit(lhs), unwrap_lit(rhs)) {
-        // Integer op Integer
+        // Int op Int
         (Some(TLiteral::Integer(a)), Some(TLiteral::Integer(b))) => {
             fold_int_int(op, *a, *b, ty)
         }

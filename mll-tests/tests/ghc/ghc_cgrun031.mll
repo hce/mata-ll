@@ -1,10 +1,10 @@
 -- GHC cgrun031: Operator sections and partial application
 -- Tests operator sections (+ 1), (* 2)
 
-addOne :: Integer -> Integer
+addOne :: Int -> Int
 addOne = (+ 1)
 
-timesTwo :: Integer -> Integer
+timesTwo :: Int -> Int
 timesTwo = (* 2)
 
 main :: IO ()

@@ -22,16 +22,16 @@ decodeBool cb = cb True False
 churchPair :: a -> b -> (a -> b -> c) -> c
 churchPair x y f = f x y
 
-churchFstF :: Integer -> Integer -> Integer
+churchFstF :: Int -> Int -> Int
 churchFstF x y = x
 
-churchSndF :: Integer -> Integer -> Integer
+churchSndF :: Int -> Int -> Int
 churchSndF x y = y
 
-churchFst :: ((Integer -> Integer -> Integer) -> Integer) -> Integer
+churchFst :: ((Int -> Int -> Int) -> Int) -> Int
 churchFst p = p churchFstF
 
-churchSnd :: ((Integer -> Integer -> Integer) -> Integer) -> Integer
+churchSnd :: ((Int -> Int -> Int) -> Int) -> Int
 churchSnd p = p churchSndF
 
 main :: IO ()
@@ -45,7 +45,7 @@ main = do
     assert (decodeBool (churchOr churchFalse churchFalse) == False) "or F F"
     assert (decodeBool (churchNot churchTrue) == False) "not T"
     assert (decodeBool (churchNot churchFalse) == True) "not F"
-    let p = churchPair (42 :: Integer) (99 :: Integer)
+    let p = churchPair (42 :: Int) (99 :: Int)
     assert (churchFst p == 42) "fst pair"
     assert (churchSnd p == 99) "snd pair"
     putStrLn "ok"

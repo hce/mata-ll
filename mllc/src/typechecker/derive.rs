@@ -734,13 +734,13 @@ impl Checker {
         }
 
         let result_type = Ty::Con(type_name.to_string());
-        let int_ty = Ty::Con("Integer".into());
+        let int_ty = Ty::Con("Int".into());
         let list_ty = Ty::List(Box::new(result_type.clone()));
         let n = constructors.len();
 
         let mut functions = Vec::new();
 
-        // fromEnum_T :: T -> Integer
+        // fromEnum_T :: T -> Int
         let from_name = format!("fromEnum_{}", type_name);
         {
             let clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
@@ -762,7 +762,7 @@ impl Checker {
             });
         }
 
-        // toEnum_T :: Integer -> T
+        // toEnum_T :: Int -> T
         let to_name = format!("toEnum_{}", type_name);
         {
             let mut clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
@@ -1540,7 +1540,7 @@ impl Checker {
     }
 
     pub(super) fn jx_int(i: i64) -> TExpr {
-        TExpr::new(TExprKind::Lit(TLiteral::Integer(i)), Ty::Con("Integer".into()))
+        TExpr::new(TExprKind::Lit(TLiteral::Integer(i)), Ty::Con("Int".into()))
     }
 
     pub(super) fn jx_app(f: TExpr, arg: TExpr, ty: Ty) -> TExpr {
@@ -1627,7 +1627,7 @@ impl Checker {
     pub(super) fn fromjson_field_decoder(&self, field_ty: &Ty) -> Result<TExpr, (String, String)> {
         let dec_ty = Ty::arrow(Self::json_ty(), Self::estr_ty(field_ty));
         match field_ty {
-            Ty::Con(n) if n == "Integer" => Ok(Self::jx_var("fromJSONInteger", dec_ty)),
+            Ty::Con(n) if n == "Int" => Ok(Self::jx_var("fromJSONInt", dec_ty)),
             Ty::Con(n) if n == "Number" => Ok(Self::jx_var("fromJSONNumber", dec_ty)),
             Ty::Con(n) if n == "String" => Ok(Self::jx_var("fromJSONString", dec_ty)),
             Ty::Con(n) if n == "Bool" => Ok(Self::jx_var("fromJSONBool", dec_ty)),
@@ -1676,7 +1676,7 @@ impl Checker {
             )),
             other => Err((
                 format!("the type '{}' cannot be decoded from JSON", other),
-                "derived FromJSON supports Integer, Number, String, Bool, Json, lists, Maybe, and types that themselves have a FromJSON instance.".to_string(),
+                "derived FromJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a FromJSON instance.".to_string(),
             )),
         }
     }
@@ -1915,7 +1915,7 @@ impl Checker {
     /// Decoding convention (mirrors aeson's defaultOptions where mata-ll can):
     /// - a single-constructor record decodes from an object keyed by the
     ///   fields' effective keys (the `as "key"` rename when present, the
-    ///   Haskell field name otherwise): `data P = P { x :: Integer }` ⇐ `{"x":1}`
+    ///   Haskell field name otherwise): `data P = P { x :: Int }` ⇐ `{"x":1}`
     /// - a single positional constructor decodes from its argument directly
     ///   (one field) or from an array of its arguments (several)
     /// - a multi-constructor type (or a lone nullary constructor) is tagged:
@@ -2247,7 +2247,7 @@ impl Checker {
     pub(super) fn tojson_field_encoder(&self, field_ty: &Ty) -> Result<TExpr, (String, String)> {
         let enc_ty = Ty::arrow(field_ty.clone(), Self::json_ty());
         match field_ty {
-            Ty::Con(n) if n == "Integer" => Ok(Self::jx_var("toJSONInteger", enc_ty)),
+            Ty::Con(n) if n == "Int" => Ok(Self::jx_var("toJSONInt", enc_ty)),
             Ty::Con(n) if n == "Number" => Ok(Self::jx_var("toJSONNumber", enc_ty)),
             Ty::Con(n) if n == "String" => Ok(Self::jx_var("toJSONString", enc_ty)),
             Ty::Con(n) if n == "Bool" => Ok(Self::jx_var("toJSONBool", enc_ty)),
@@ -2296,7 +2296,7 @@ impl Checker {
             )),
             other => Err((
                 format!("the type '{}' cannot be encoded to JSON", other),
-                "derived ToJSON supports Integer, Number, String, Bool, Json, lists, Maybe, and types that themselves have a ToJSON instance.".to_string(),
+                "derived ToJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a ToJSON instance.".to_string(),
             )),
         }
     }
@@ -2386,7 +2386,7 @@ impl Checker {
     /// Encoding convention (mirrors aeson's defaultOptions where mata-ll can):
     /// - a single-constructor record encodes to an object keyed by the
     ///   fields' effective keys (the `as "key"` rename when present, the
-    ///   Haskell field name otherwise): `data P = P { x :: Integer }` ⇒ `{"x":1}`
+    ///   Haskell field name otherwise): `data P = P { x :: Int }` ⇒ `{"x":1}`
     /// - a single positional constructor encodes to its argument directly
     ///   (one field) or an array of its arguments (several)
     /// - a multi-constructor type (or a lone nullary constructor) is tagged:

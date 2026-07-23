@@ -1,14 +1,14 @@
 -- MLL bindings for Lua 5.4 string primitives
 
-strByte :: String -> Integer -> LuaPure "string.byte" Integer
-strLen :: String -> LuaPure "string.len" Integer
-strSub :: String -> Integer -> Integer -> LuaPure "string.sub" String
-strChar :: Integer -> LuaPure "string.char" String
+strByte :: String -> Int -> LuaPure "string.byte" Int
+strLen :: String -> LuaPure "string.len" Int
+strSub :: String -> Int -> Int -> LuaPure "string.sub" String
+strChar :: Int -> LuaPure "string.char" String
 
 -- Unpack a String into the integer code of each character, in order.
 -- mata-ll's String is opaque (not [Char]), so this is the bridge that lets
 -- you process a string's characters with ordinary list functions.
-strToInts :: String -> [Integer]
+strToInts :: String -> [Int]
 strToInts s = go 1
   where
     n = strLen s

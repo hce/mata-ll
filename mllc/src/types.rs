@@ -9,7 +9,7 @@ pub struct TyConstraint {
 }
 
 /// Kind of a type expression. Kinds classify types the way types classify
-/// values: a complete type (`Integer`, `Maybe String`) has kind `Type`, and a
+/// values: a complete type (`Int`, `Maybe String`) has kind `Type`, and a
 /// type constructor that still needs arguments has an arrow kind (`Maybe` is
 /// `Type -> Type`, `Either` is `Type -> Type -> Type`). Kinds are written the
 /// way GHC writes them (`Type`, `Type -> Type`); mata-ll has no surface
@@ -17,7 +17,7 @@ pub struct TyConstraint {
 /// typechecker/kind.rs).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Kind {
-    /// Regular types: Integer, String, Maybe Integer
+    /// Regular types: Int, String, Maybe Int
     Type,
     /// Type-level string literals (used in FFI type families)
     Symbol,
@@ -136,7 +136,7 @@ impl std::hash::Hash for Mult {
 /// Separate from the AST's Type to allow for unification variables.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
-    /// Concrete type: Integer, String, Bool, Number
+    /// Concrete type: Int, String, Bool, Number
     Con(String),
     /// Type variable (rigid or unification)
     Var(TyVar),
@@ -438,11 +438,11 @@ impl fmt::Display for Ty {
 /// resolved by the monomorphizer. mata-ll instances are per-head-constructor
 /// (an `instance C (Pair a b)` is the one and only C instance for `Pair`), so
 /// this key is exact. It replaces the old Display-string keys ("Pair a b",
-/// "[a]", "[Integer]"), which required prefix probes and positional guessing
+/// "[a]", "[Int]"), which required prefix probes and positional guessing
 /// to relate a use-site type to its instance.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum InstHead {
-    /// A named type constructor: `Integer`, `Maybe`, `Pair`, `IO`, `ST`, …
+    /// A named type constructor: `Int`, `Maybe`, `Pair`, `IO`, `ST`, …
     Con(String),
     /// The list constructor `[]`.
     List,
@@ -1270,19 +1270,19 @@ pub enum DiagnosticKind {
     /// type as the user wrote it; the kinds are fully defaulted.
     KindMismatch { ty: String, expected: Kind, found: Kind },
     /// A complete type (kind `Type`) is applied to a type argument, e.g.
-    /// `Maybe Integer Bool` (the inner `Maybe Integer` is already complete,
-    /// so the application to `Bool` is meaningless) or `Integer a`.
+    /// `Maybe Int Bool` (the inner `Maybe Int` is already complete,
+    /// so the application to `Bool` is meaningless) or `Int a`.
     /// `is_var` selects the wording: applying a type VARIABLE that another
     /// use in the same declaration already fixed at kind Type is a
     /// two-kinds-for-one-variable conflict, not a saturated constructor.
     KindSaturatedApp { ty: String, arg: String, is_var: bool, kind: Kind },
     /// A type application whose argument has the wrong kind for the
-    /// constructor's parameter, e.g. `HashMap Maybe Integer`: HashMap's
+    /// constructor's parameter, e.g. `HashMap Maybe Int`: HashMap's
     /// first parameter must be a complete type, but `Maybe` still needs an
     /// argument.
     KindArgMismatch { func: String, arg: String, expected: Kind, found: Kind },
     /// An instance head whose kind does not match the class variable's kind:
-    /// `instance Foldable Integer` (Foldable's methods apply the class
+    /// `instance Foldable Int` (Foldable's methods apply the class
     /// variable to an element type, so an instance must supply a
     /// `Type -> Type` constructor) or `instance Show Maybe` (Show constrains
     /// complete types).
@@ -1384,7 +1384,7 @@ impl Diagnostic {
                       the same way."),
             DiagnosticKind::AmbiguousType { .. } =>
                 Some("add a type annotation to pin the type down, e.g. \
-                      `show (Nothing :: Maybe Integer)`. GHC rejects this the same way."),
+                      `show (Nothing :: Maybe Int)`. GHC rejects this the same way."),
             DiagnosticKind::MissingContextConstraint { .. } =>
                 Some("a bare polymorphic variable has no instance unless the signature \
                       requires one. GHC reports this as \"add (C a) to the context\"."),
@@ -1417,13 +1417,21 @@ impl Diagnostic {
                     Some("the boolean type is spelled 'Bool', as in Haskell."),
                 "Char" =>
                     Some("mata-ll has no Char type — String is opaque, not [Char]. \
-                          Individual characters are Integer byte codes; see strByte and \
+                          Individual characters are Int byte codes; see strByte and \
                           strChar in LString."),
                 "Double" | "Float" =>
                     Some("the floating-point type is spelled 'Number' (Lua's number type); \
                           GHC's Double and Float do not exist in mata-ll."),
+                "Int" =>
+                    Some("mata-ll has no arbitrary-precision Integer. The fixed-width \
+                          integer type is spelled 'Int' — 64-bit and wrapping, exactly \
+                          like GHC's Int. Use Int; there is no bignum type."),
                 _ => None,
             },
+            DiagnosticKind::UnboundVariable(name) if name == "toInteger" =>
+                Some("mata-ll has no arbitrary-precision Integer, so 'toInteger' (which \
+                      would convert to it) does not exist. The integer type is already \
+                      'Int'; there is nothing to convert to."),
             _ => None,
         }
     }

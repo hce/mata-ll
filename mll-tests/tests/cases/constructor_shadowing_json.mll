@@ -7,7 +7,7 @@
 -- this ordering miscompiled.
 import JSON
 
-data Status = Err String | Ok Integer deriving (ToJSON, FromJSON, Show, Eq)
+data Status = Err String | Ok Int deriving (ToJSON, FromJSON, Show, Eq)
 
 main :: IO ()
 main = do

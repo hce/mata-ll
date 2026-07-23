@@ -6,7 +6,7 @@ data Suit = Hearts | Diamonds | Clubs | Spades
     deriving (Show, Eq)
 
 -- Record
-data Point = MkPoint { px :: Integer, py :: Integer }
+data Point = MkPoint { px :: Int, py :: Int }
     deriving (Show, Eq)
 
 -- Parameterized
@@ -14,7 +14,7 @@ data Box a = MkBox a
     deriving (Show, Eq)
 
 -- Multiple constructors (concrete types only)
-data Result = Success Integer | Failure Integer
+data Result = Success Int | Failure Int
     deriving (Show, Eq)
 
 main :: IO ()

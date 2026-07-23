@@ -1,7 +1,7 @@
 -- Stress test: function with 200+ where-clause bindings
 -- to verify _v[N] table fallback for Lua local variable limit
 
-bigSum :: Integer -> Integer
+bigSum :: Int -> Int
 bigSum x = result
   where
     v1 = x + 1

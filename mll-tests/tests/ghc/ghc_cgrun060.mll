@@ -1,31 +1,31 @@
--- GHC cgrun060: Simple key-value trie using Integer keys
+-- GHC cgrun060: Simple key-value trie using Int keys
 
-data Trie = TrieNode Bool [(Integer, Trie)]
+data Trie = TrieNode Bool [(Int, Trie)]
     deriving (Eq)
 
 emptyTrie :: Trie
 emptyTrie = TrieNode False []
 
-trieInsert :: [Integer] -> Trie -> Trie
+trieInsert :: [Int] -> Trie -> Trie
 trieInsert [] (TrieNode _ children) = TrieNode True children
 trieInsert (k:ks) (TrieNode end children) =
     case findChild k children of
         Nothing  -> TrieNode end ((k, trieInsert ks emptyTrie) : children)
         Just sub -> TrieNode end (updateChild k (trieInsert ks sub) children)
 
-findChild :: Integer -> [(Integer, Trie)] -> Maybe Trie
+findChild :: Int -> [(Int, Trie)] -> Maybe Trie
 findChild _ [] = Nothing
 findChild k ((k2, v):rest)
     | k == k2   = Just v
     | otherwise  = findChild k rest
 
-updateChild :: Integer -> Trie -> [(Integer, Trie)] -> [(Integer, Trie)]
+updateChild :: Int -> Trie -> [(Int, Trie)] -> [(Int, Trie)]
 updateChild _ _ [] = []
 updateChild k v ((k2, v2):rest)
     | k == k2   = (k, v) : rest
     | otherwise  = (k2, v2) : updateChild k v rest
 
-trieSearch :: [Integer] -> Trie -> Bool
+trieSearch :: [Int] -> Trie -> Bool
 trieSearch [] (TrieNode end _) = end
 trieSearch (k:ks) (TrieNode _ children) =
     case findChild k children of

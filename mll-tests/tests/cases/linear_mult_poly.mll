@@ -5,12 +5,12 @@
 -- function, or a non-IO bind — is covered by the linear_rejects_* tests in
 -- run_mll.rs.
 
-data Token = Token Integer
+data Token = Token Int
 
-useOnce :: Token %1 -> Integer
+useOnce :: Token %1 -> Int
 useOnce (Token n) = n
 
-count :: Token -> Integer
+count :: Token -> Int
 count (Token n) = n + n
 
 -- A multiplicity-polymorphic helper: `%m` is chosen by each caller. Applied
@@ -26,11 +26,11 @@ pipeTo x f = f x
 
 -- The linear value stays linear THROUGH the helper (m instantiates to One
 -- at this use, because useOnce's arrow is `%1`).
-viaApply :: Token %1 -> Integer
+viaApply :: Token %1 -> Int
 viaApply t = apply useOnce t
 
 -- The same helper at an unrestricted instantiation (m = Many).
-viaApplyMany :: Token -> Integer
+viaApplyMany :: Token -> Int
 viaApplyMany t = apply count t
 
 -- An alias of a `%m`-typed function keeps the SAME rigid m (the let scheme
@@ -41,17 +41,17 @@ viaAlias f x = let g = f in g x
 -- A linear value forwarded through a local `where` function: the pass
 -- infers that `go` uses its parameter exactly once and charges the call
 -- accordingly.
-viaWhere :: Token %1 -> Integer
+viaWhere :: Token %1 -> Int
 viaWhere t = go t
   where go x = useOnce x
 
 -- The same through a `let`-bound local function (desugars to a lambda).
-viaLet :: Token %1 -> Integer
+viaLet :: Token %1 -> Int
 viaLet t = let g x = useOnce x in g t
 
 -- A RECURSIVE local forwarder: one use per evaluation path, established by
 -- the fixpoint over the local group.
-viaRecursion :: Token %1 -> Integer -> Integer
+viaRecursion :: Token %1 -> Int -> Int
 viaRecursion t n = go t n
   where go x k = if k > 0 then go x (k - 1) else useOnce x
 
@@ -62,7 +62,7 @@ viaRecursion t n = go t n
 -- as in GHC — Maybe's bind cannot promise to run a linear continuation).
 -- The scalar `n` aliases the consumption and is itself tracked
 -- exactly-once; the continuation's single `n + 1` is that one use.
-viaMaybe :: Token %1 -> Maybe Integer
+viaMaybe :: Token %1 -> Maybe Int
 viaMaybe t = do
   n <- Just (useOnce t)
   pure (n + 1)

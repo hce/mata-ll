@@ -89,7 +89,7 @@ excluded_reason() {
         cases/linear_mult_poly)          echo "GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar";;
 
         # -- mata-ll-only grammar / name shadowing ----------------------------
-        cases/newtypes)                  echo "'newtype Age = Integer' implicit-constructor sugar is not Haskell";;
+        cases/newtypes)                  echo "'newtype Age = Int' implicit-constructor sugar is not Haskell";;
         cases/superclass)                echo "redefines the Eq/Ord classes (mata-ll builtin shadowing)";;
         cases/constructor_shadowing)     echo "redefines Just/Nothing constructors (Prelude shadowing)";;
         cases/lua_keywords)              echo "record fields named after Lua keywords collide with Prelude.until under GHC";;
@@ -116,7 +116,7 @@ qualprelude='import qualified Prelude as GhcPrelude'
 
 # Rewrite the body of a case for GHC:
 #  * Data.List / Data.Foldable also export the names the shim redefines at
-#    Integer types; hide (bare import) or strip (explicit import list) them
+#    Int types; hide (bare import) or strip (explicit import list) them
 #    so the shim's definitions are unambiguous. Purely mechanical; the
 #    imported functions have the same semantics.
 rewrite_body() {
@@ -137,6 +137,24 @@ rewrite_body() {
     '
 }
 
+# mata-ll is defined as GHC with an implicit `default (Int, Double)` and no
+# `Integer` in scope (see HASKDIFF.md, "Why GHC parity"): its integer is 64-bit
+# and wrapping (GHC's `Int`), so unannotated literals must default to `Int`, not
+# `Integer`, for GHC to stay the referee for defaulted arithmetic (overflow
+# included). We inject that declaration after the LAST import line — Haskell
+# requires every import to precede any top-level declaration, and a case body may
+# carry its own imports (Data.List, …), so it cannot go in the header block.
+inject_default() {
+    awk '
+        { lines[NR] = $0; if ($0 ~ /^import /) last_import = NR }
+        END {
+            for (i = 1; i <= NR; i++) {
+                print lines[i]
+                if (i == last_import) print "default (Int, Double)"
+            }
+        }'
+}
+
 # Build the twin for one file. Main-program files get a synthetic
 # `module Main where` header; helper-module files (those with their own
 # `module X (...) where` line) keep it, and the shim imports are inserted
@@ -150,14 +168,14 @@ make_twin() { # $1 = source .mll, $2 = output .hs
                 /^module .* where *$/ && !done {
                     print hiding; print qualprelude; print "import MllShim"; done = 1
                 }
-            ' "$1" | rewrite_body
+            ' "$1" | rewrite_body | inject_default
         } > "$2"
     else
         {
             printf '%s\nmodule Main where\n%s\n%s\nimport MllShim\n' \
                 "$pragmas" "$hiding" "$qualprelude"
             rewrite_body < "$1"
-        } > "$2"
+        } | inject_default > "$2"
     fi
 }
 

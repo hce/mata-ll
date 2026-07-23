@@ -5,15 +5,15 @@
 -- so Q 1 < Q 2 was False and compare (Q 1) (Q 2) was EQ.
 
 -- Single-field, single-constructor (the original bug reproducer)
-data Q = Q Integer
+data Q = Q Int
     deriving (Show, Eq, Ord)
 
 -- Multi-field plus nullary constructors on both sides
-data T = A | B Integer String | C
+data T = A | B Int String | C
     deriving (Show, Eq, Ord)
 
 -- Recursive ADT field (the type itself appears as a field)
-data Tree = Leaf | Node Tree Integer Tree
+data Tree = Leaf | Node Tree Int Tree
     deriving (Show, Eq, Ord)
 
 -- Parameterized ADT used at concrete types
@@ -75,12 +75,12 @@ main = do
     assert (Leaf < Node Leaf 0 Leaf) "leaf lt node"
 
     -- Parameterized ADT at concrete types (per-instantiation dispatch)
-    assert (compare (MkPair (1 :: Integer) "b") (MkPair 1 "a") == GT) "pair snd gt"
-    assert (compare (MkPair (1 :: Integer) "a") (MkPair 2 "a") == LT) "pair fst lt"
-    assert (MkPair (1 :: Integer) (2 :: Integer) < MkPair 1 3) "pair int lt"
-    assert (MkPair "x" (1 :: Integer) >= MkPair "x" 1) "pair ge eq"
+    assert (compare (MkPair (1 :: Int) "b") (MkPair 1 "a") == GT) "pair snd gt"
+    assert (compare (MkPair (1 :: Int) "a") (MkPair 2 "a") == LT) "pair fst lt"
+    assert (MkPair (1 :: Int) (2 :: Int) < MkPair 1 3) "pair int lt"
+    assert (MkPair "x" (1 :: Int) >= MkPair "x" 1) "pair ge eq"
     -- nested parameterized instantiation
-    assert (isLT (compare (MkPair (1 :: Integer) (MkPair (2 :: Integer) (3 :: Integer)))
+    assert (isLT (compare (MkPair (1 :: Int) (MkPair (2 :: Int) (3 :: Int)))
                           (MkPair 1 (MkPair 2 4)))) "pair nested lt"
 
     -- Enum ordering unchanged: pure declaration-index comparison

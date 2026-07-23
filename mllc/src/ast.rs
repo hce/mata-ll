@@ -31,7 +31,7 @@ pub struct Module {
 /// Top-level declarations.
 #[derive(Debug, Clone)]
 pub enum Decl {
-    /// Type signature: `add :: Integer -> Integer -> Integer`
+    /// Type signature: `add :: Int -> Int -> Int`
     TypeSig {
         name: String,
         ty: Type,
@@ -48,20 +48,20 @@ pub enum Decl {
         constructors: Vec<Constructor>,
         deriving: Vec<String>,
     },
-    /// Newtype: `newtype A = Integer`
+    /// Newtype: `newtype A = Int`
     NewtypeDef {
         name: String,
         type_vars: Vec<String>,
         inner: Type,
     },
-    /// Typeclass declaration: `class Eq a => Ord a where compare :: a -> a -> Integer`
+    /// Typeclass declaration: `class Eq a => Ord a where compare :: a -> a -> Int`
     ClassDecl {
         name: String,
         type_var: String,
         superclasses: Vec<String>,
         methods: Vec<ClassMethod>,
     },
-    /// Typeclass instance: `instance Show Integer where show x = ...`
+    /// Typeclass instance: `instance Show Int where show x = ...`
     InstanceDecl {
         class_name: String,
         target_type: Type,
@@ -72,7 +72,7 @@ pub enum Decl {
         context: Vec<Constraint>,
         methods: Vec<InstanceMethod>,
     },
-    /// Export declaration: `export add :: Integer -> Integer -> Integer`
+    /// Export declaration: `export add :: Int -> Int -> Int`
     ExportSig {
         name: String,
         ty: Type,
@@ -318,7 +318,7 @@ pub enum MultAnn {
 /// Type representation.
 #[derive(Debug, Clone)]
 pub enum Type {
-    /// Named type: `Integer`, `String`, `Tree`
+    /// Named type: `Int`, `String`, `Tree`
     Con(String),
     /// Type variable: `a`, `b`
     Var(String),
@@ -350,7 +350,7 @@ pub enum Type {
     /// `[E]` and the iterator yields one `E` per step, each decoded as the
     /// element type. The parser rejects a bare (non-list) element type.
     LuaIterator { lua_name: String, result: Box<Type> },
-    /// Tuple type: `(Integer, String, Bool)`
+    /// Tuple type: `(Int, String, Bool)`
     Tuple(Vec<Type>),
     /// FFI with Lua error convention: `LuaTry "io.open" (Either String FileHandle)`
     /// reduces to `IO (Either String FileHandle)`. The wrapped call uses Lua's
@@ -403,7 +403,7 @@ pub struct Constructor {
     pub name: String,
     pub external_name: Option<String>,
     pub fields: ConstructorFields,
-    /// GADT constructor type signature, e.g. `Integer -> Expr Integer`.
+    /// GADT constructor type signature, e.g. `Int -> Expr Int`.
     /// When present, field types and result type are extracted from this
     /// instead of from `fields`.
     pub gadt_type: Option<Type>,

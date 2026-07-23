@@ -1,7 +1,7 @@
 -- GHC tc002: Polymorphic list functions
 -- Tests polymorphic functions on lists of different types
 
-myLength :: [a] -> Integer
+myLength :: [a] -> Int
 myLength [] = 0
 myLength (_:xs) = 1 + myLength xs
 

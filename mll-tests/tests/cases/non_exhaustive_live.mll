@@ -6,7 +6,7 @@
 -- The exhaustive cases around it check the else-converted last clause
 -- still binds and evaluates correctly.
 
-sign :: Integer -> String
+sign :: Int -> String
 sign n | n < 0 = "neg"
        | n > 0 = "pos"
 
@@ -17,7 +17,7 @@ total3 A = "a"
 total3 B = "b"
 total3 C = "c"
 
-fromJust' :: Maybe Integer -> Integer
+fromJust' :: Maybe Int -> Int
 fromJust' (Just x) = x + 1
 fromJust' Nothing = 0
 

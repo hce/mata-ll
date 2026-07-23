@@ -3,13 +3,13 @@
 -- APIs that take dictionaries. Construction, field access, record update,
 -- pattern matching and derived Show/Eq must all go through the named keys.
 
-data Config = Config { width :: Integer, height :: Integer, title :: String }
+data Config = Config { width :: Int, height :: Int, title :: String }
   deriving (Show, Eq, LuaDict)
 
 -- A LuaDict whose field names are Lua reserved words, to exercise the
 -- bracketed-key path (`{["local"] = …}`, `t["end"]`) in construction, access
 -- and update. These are valid mata-ll identifiers but not valid bare Lua keys.
-data Span = Span { local :: Integer, end :: Integer }
+data Span = Span { local :: Int, end :: Int }
   deriving (Eq, LuaDict)
 
 -- Renamed keys: `field as "key"` changes only the key in the runtime Lua
@@ -18,30 +18,30 @@ data Span = Span { local :: Integer, end :: Integer }
 -- and one field stays unrenamed to check the two layouts mix.
 data Creds = Creds
   { credsUser as "user" :: String
-  , credsPort as "port" :: Integer
+  , credsPort as "port" :: Int
   , credsNote as "function" :: String
   , credsHost :: String
   } deriving (Show, Eq, LuaDict)
 
-area :: Config -> Integer
+area :: Config -> Int
 area c = c.width * c.height
 
 -- Positional pattern binds each variable from its named key.
-sumDims :: Config -> Integer
+sumDims :: Config -> Int
 sumDims (Config w h _) = w + h
 
-resize :: Config -> Integer -> Config
+resize :: Config -> Int -> Config
 resize c w = c { width = w }
 
 -- Positional pattern on a renamed record still binds by declaration order.
-portOf :: Creds -> Integer
+portOf :: Creds -> Int
 portOf (Creds _ p _ _) = p
 
 -- FFI: hand the LuaDict table straight to a Lua function that reads a named
 -- key. This only works if the value reaches Lua as a real dictionary.
-rawget :: Config -> String -> LuaPure "rawget" Integer
+rawget :: Config -> String -> LuaPure "rawget" Int
 
-rawgetInt :: Creds -> String -> LuaPure "rawget" Integer
+rawgetInt :: Creds -> String -> LuaPure "rawget" Int
 rawgetStr :: Creds -> String -> LuaPure "rawget" String
 
 main :: IO ()

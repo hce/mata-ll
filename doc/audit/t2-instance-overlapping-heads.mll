@@ -2,11 +2,11 @@ module Main where
 data Pair a b = Pair a b
 class Pretty a where
   pretty :: a -> String
-instance Pretty (Pair Integer Integer) where
+instance Pretty (Pair Int Int) where
   pretty _ = "ints"
 instance Pretty (Pair Bool Bool) where
   pretty _ = "bools"
-i2 :: Pair Integer Integer
+i2 :: Pair Int Int
 i2 = Pair 1 2
 bb :: Pair Bool Bool
 bb = Pair True False

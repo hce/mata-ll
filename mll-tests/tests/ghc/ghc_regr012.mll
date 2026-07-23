@@ -1,7 +1,7 @@
 -- ghc_regr012: Negative numbers in patterns and expressions
 
 -- Negative integer expressions and guards
-sign :: Integer -> String
+sign :: Int -> String
 sign n
     | n == 0    = "zero"
     | n == 1    = "one"
@@ -10,11 +10,11 @@ sign n
     | otherwise = "negative"
 
 -- Arithmetic with negatives
-negArith :: Integer -> Integer -> Integer -> Integer
+negArith :: Int -> Int -> Int -> Int
 negArith a b c = a * (-1) + b - (-c)
 
 -- Negative in list patterns
-headNeg :: [Integer] -> Integer
+headNeg :: [Int] -> Int
 headNeg []    = 0
 headNeg (x:_) = x
 
@@ -27,13 +27,13 @@ temperature t
     | otherwise   = "warm"
 
 -- Negative in case
-absVal :: Integer -> Integer
+absVal :: Int -> Int
 absVal n = case n of
     0 -> 0
     _ -> if n < 0 then 0 - n else n
 
 -- Negative ranges
-negRange :: [Integer]
+negRange :: [Int]
 negRange = [-5 .. -1]
 
 myMinimum :: Ord a => [a] -> a
@@ -78,7 +78,7 @@ main = do
     assert (myMaximum negRange == (0 - 1)) "neg range max"
 
     -- show negative integer
-    assert (show (-42 :: Integer) == "-42") "show neg int"
-    assert (show (-1 :: Integer) == "-1") "show neg one"
+    assert (show (-42 :: Int) == "-42") "show neg int"
+    assert (show (-1 :: Int) == "-1") "show neg one"
 
     putStrLn "ok"

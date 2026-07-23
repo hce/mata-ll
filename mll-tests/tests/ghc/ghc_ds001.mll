@@ -7,7 +7,7 @@ data Color = Red | Green | Blue
 data Shape = Circle Number | Square Number | Triangle Number Number Number
     deriving (Show, Eq)
 
-colorToInt :: Color -> Integer
+colorToInt :: Color -> Int
 colorToInt Red   = 0
 colorToInt Green = 1
 colorToInt Blue  = 2
@@ -20,11 +20,11 @@ perimeter (Triangle a b c) = a + b + c
 -- Nested pattern matching
 data Pair a b = MkPair a b
 
-firstColor :: Pair Color Integer -> Color
+firstColor :: Pair Color Int -> Color
 firstColor (MkPair c _) = c
 
 -- Wildcard in the middle
-middle :: Integer -> Integer -> Integer -> Integer
+middle :: Int -> Int -> Int -> Int
 middle _ x _ = x
 
 main :: IO ()

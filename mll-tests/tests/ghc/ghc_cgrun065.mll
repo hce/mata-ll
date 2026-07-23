@@ -1,16 +1,16 @@
 -- GHC cgrun065: Frequency counting
 
-data FreqEntry = FreqEntry Integer Integer
+data FreqEntry = FreqEntry Int Int
     deriving (Show, Eq)
 
-freqValue :: FreqEntry -> Integer
+freqValue :: FreqEntry -> Int
 freqValue (FreqEntry x _) = x
 
-freqCount :: FreqEntry -> Integer
+freqCount :: FreqEntry -> Int
 freqCount (FreqEntry _ n) = n
 
 -- Count occurrences of each element
-frequencies :: [Integer] -> [FreqEntry]
+frequencies :: [Int] -> [FreqEntry]
 frequencies [] = []
 frequencies (x:xs) =
     let cnt = 1 + length (filter (== x) xs)
@@ -28,7 +28,7 @@ insertByFreq e (f:fs)
     | freqCount e >= freqCount f = e : f : fs
     | otherwise                  = f : insertByFreq e fs
 
-mostCommon :: [Integer] -> Maybe Integer
+mostCommon :: [Int] -> Maybe Int
 mostCommon [] = Nothing
 mostCommon xs = Just (freqValue (head (sortByFreqDesc (frequencies xs))))
 

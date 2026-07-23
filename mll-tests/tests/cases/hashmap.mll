@@ -4,7 +4,7 @@ fromMaybe :: a -> Maybe a -> a
 fromMaybe def Nothing = def
 fromMaybe _ (Just x) = x
 
-pairsEq :: [(String, Integer)] -> [(String, Integer)] -> Bool
+pairsEq :: [(String, Int)] -> [(String, Int)] -> Bool
 pairsEq [] [] = True
 pairsEq ((k1, v1) : rest1) ((k2, v2) : rest2) = k1 == k2 && v1 == v2 && pairsEq rest1 rest2
 pairsEq _ _ = False

@@ -10,15 +10,15 @@
 -- infixl 1: >>=
 -- infix  4: ==, /=, <, >, <=, >=
 
-listIndex :: [a] -> Integer -> a
+listIndex :: [a] -> Int -> a
 listIndex (x:_)  0 = x
 listIndex (_:xs) n = listIndex xs (n - 1)
 listIndex []     _ = error "index out of bounds"
 
-double :: Integer -> Integer
+double :: Int -> Int
 double x = x * 2
 
-addOne :: Integer -> Integer
+addOne :: Int -> Int
 addOne x = x + 1
 
 applyF :: (a -> b) -> a -> b

@@ -1,16 +1,16 @@
 -- GHC cgrun021: Higher-order functions
 -- Tests function composition, application, and passing functions
 
-apply :: (Integer -> Integer) -> Integer -> Integer
+apply :: (Int -> Int) -> Int -> Int
 apply f x = f x
 
-compose :: (Integer -> Integer) -> (Integer -> Integer) -> Integer -> Integer
+compose :: (Int -> Int) -> (Int -> Int) -> Int -> Int
 compose f g x = f (g x)
 
-twice :: (Integer -> Integer) -> Integer -> Integer
+twice :: (Int -> Int) -> Int -> Int
 twice f = compose f f
 
-thrice :: (Integer -> Integer) -> Integer -> Integer
+thrice :: (Int -> Int) -> Int -> Int
 thrice f = compose f (compose f f)
 
 main :: IO ()

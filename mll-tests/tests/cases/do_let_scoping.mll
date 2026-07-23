@@ -61,17 +61,17 @@ main = do
     assert (step3 == 256) "power chain"
 
     -- Test 9: bind scoping - bound var visible in subsequent lets
-    v <- pure (42 :: Integer)
+    v <- pure (42 :: Int)
     let w = v + 8
     assert (w == 50) "bind then let"
 
     -- Test 10: bind shadowing - rebinding via <- shadows previous let
     let q = 10
-    q <- pure (20 :: Integer)
+    q <- pure (20 :: Int)
     assert (q == 20) "bind shadows let"
 
     -- Test 11: let sees previous bind
-    r1 <- pure (5 :: Integer)
+    r1 <- pure (5 :: Int)
     r2 <- pure (r1 * 2)
     let r3 = r1 + r2
     assert (r3 == 15) "let sees binds"
@@ -83,7 +83,7 @@ main = do
 
     -- Test 13: bind between IO actions preserves scope
     putStrLn "scope check"
-    p <- pure (77 :: Integer)
+    p <- pure (77 :: Int)
     putStrLn "scope check 2"
     let p2 = p + 3
     assert (p2 == 80) "bind across IO"

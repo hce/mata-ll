@@ -1,6 +1,6 @@
 -- GHC-style test: <$> operator in various contexts
 
-neg :: Integer -> Integer
+neg :: Int -> Int
 neg x = 0 - x
 
 main :: IO ()

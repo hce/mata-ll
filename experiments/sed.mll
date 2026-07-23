@@ -43,7 +43,7 @@ import LString (strByte, strLen, strSub, strChar)
 
 -- === Data model ============================================================
 
-data Addr  = ALine Integer | ALast | ARegex RE | ANone
+data Addr  = ALine Int | ALast | ARegex RE | ANone
 data Flags = Flags Bool Bool          -- global?, printOnSub?
 data Cmd   = Subst RE String Flags | CPrint | CDelete
 data Command = Command Addr Cmd
@@ -64,7 +64,7 @@ data Step = Deleted | Continue String
 parseScript :: String -> Either String [Command]
 parseScript s = parseCmds s 1 (strLen s)
 
-parseCmds :: String -> Integer -> Integer -> Either String [Command]
+parseCmds :: String -> Int -> Int -> Either String [Command]
 parseCmds s i len =
   let j = skipSep s i len
   in if j > len
@@ -76,7 +76,7 @@ parseCmds s i len =
                                 Right rest -> Right (cmd : rest)
 
 -- Skip inter-command separators.
-skipSep :: String -> Integer -> Integer -> Integer
+skipSep :: String -> Int -> Int -> Int
 skipSep s i len =
   if i > len then i
   else let b = strByte s i
@@ -84,7 +84,7 @@ skipSep s i len =
           then skipSep s (i + 1) len
           else i
 
-parseOne :: String -> Integer -> Integer -> Either String (Command, Integer)
+parseOne :: String -> Int -> Int -> Either String (Command, Int)
 parseOne s i len =
   case parseAddr s i len of
     Left err -> Left err
@@ -93,7 +93,7 @@ parseOne s i len =
                          Right (cmd, k)  -> Right (Command addr cmd, k)
 
 -- Optional address directly before the command character.
-parseAddr :: String -> Integer -> Integer -> Either String (Addr, Integer)
+parseAddr :: String -> Int -> Int -> Either String (Addr, Int)
 parseAddr s i len =
   if i > len then Right (ANone, i)
   else let b = strByte s i
@@ -109,7 +109,7 @@ parseAddr s i len =
                         Right re -> Right (ARegex re, j)
                else Right (ANone, i)
 
-readNum :: String -> Integer -> Integer -> Integer -> (Integer, Integer)
+readNum :: String -> Int -> Int -> Int -> (Int, Int)
 readNum s i len acc =
   if i > len then (acc, i)
   else let b = strByte s i
@@ -117,7 +117,7 @@ readNum s i len acc =
           then readNum s (i + 1) len (acc * 10 + (b - 48))
           else (acc, i)
 
-parseCmd :: String -> Integer -> Integer -> Either String (Cmd, Integer)
+parseCmd :: String -> Int -> Int -> Either String (Cmd, Int)
 parseCmd s i len =
   if i > len then Left "expected a command"
   else let b = strByte s i
@@ -127,7 +127,7 @@ parseCmd s i len =
           else Left ("unknown command: " <> strChar b)
 
 -- s<D>regex<D>replacement<D>flags   where <D> is the byte right after 's'.
-parseSubst :: String -> Integer -> Integer -> Either String (Cmd, Integer)
+parseSubst :: String -> Int -> Int -> Either String (Cmd, Int)
 parseSubst s i len =
   if i > len then Left "s command is missing its delimiter"
   else let d = strByte s i
@@ -140,7 +140,7 @@ parseSubst s i len =
                   Left err -> Left ("bad regex: " <> err)
                   Right re -> Right (Subst re repl fl, m)
 
-readFlags :: String -> Integer -> Integer -> Flags -> (Flags, Integer)
+readFlags :: String -> Int -> Int -> Flags -> (Flags, Int)
 readFlags s i len (Flags g p) =
   if i > len then (Flags g p, i)
   else let b = strByte s i
@@ -152,10 +152,10 @@ readFlags s i len (Flags g p) =
 -- index just past it. `\<D>` collapses to a literal delimiter byte (the
 -- backslash is dropped); every OTHER `\x` is preserved verbatim so that
 -- regex escapes (\d) and replacement escapes (\n, \&, \\) survive intact.
-readField :: String -> Integer -> Integer -> Integer -> Either String (String, Integer)
+readField :: String -> Int -> Int -> Int -> Either String (String, Int)
 readField s i len d = readFieldAcc s i len d ""
 
-readFieldAcc :: String -> Integer -> Integer -> Integer -> String -> Either String (String, Integer)
+readFieldAcc :: String -> Int -> Int -> Int -> String -> Either String (String, Int)
 readFieldAcc s i len d acc =
   if i > len then Left "unterminated field (missing delimiter)"
   else let b = strByte s i
@@ -175,7 +175,7 @@ readFieldAcc s i len d acc =
 expandRepl :: String -> String -> String
 expandRepl repl matched = expandReplAcc repl 1 (strLen repl) matched ""
 
-expandReplAcc :: String -> Integer -> Integer -> String -> String -> String
+expandReplAcc :: String -> Int -> Int -> String -> String -> String
 expandReplAcc repl i len matched acc =
   if i > len then acc
   else let b = strByte repl i
@@ -211,7 +211,7 @@ subst1 re repl s =
 gsubst :: RE -> String -> String -> (String, Bool)
 gsubst re repl s = gsubstGo re repl s 1 (strLen s) 0 "" False
 
-gsubstGo :: RE -> String -> String -> Integer -> Integer -> Integer -> String -> Bool -> (String, Bool)
+gsubstGo :: RE -> String -> String -> Int -> Int -> Int -> String -> Bool -> (String, Bool)
 gsubstGo re repl s pos len prevEnd acc changed =
   if pos > len + 1 then (acc, changed)
   else case findFrom re s pos len of
@@ -239,7 +239,7 @@ emitLine s = do
   putStr s
   putStr (strChar 10)   -- getLine stripped the newline; re-add exact byte
 
-addrMatch :: Addr -> String -> Integer -> Bool -> Bool
+addrMatch :: Addr -> String -> Int -> Bool -> Bool
 addrMatch ANone       _  _       _      = True
 addrMatch (ALine k)   _  lineNum _      = lineNum == k
 addrMatch ALast       _  _       isLast = isLast
@@ -256,7 +256,7 @@ runCmd (Subst re repl (Flags g p)) ps =
       when (changed && p) (emitLine ps')
       pure (Continue ps')
 
-applyOne :: Command -> String -> Integer -> Bool -> IO Step
+applyOne :: Command -> String -> Int -> Bool -> IO Step
 applyOne (Command addr cmd) ps lineNum isLast =
   if addrMatch addr ps lineNum isLast
   then runCmd cmd ps
@@ -264,7 +264,7 @@ applyOne (Command addr cmd) ps lineNum isLast =
 
 -- Run commands left-to-right; stop early on delete. Returns the final
 -- pattern space and whether the line was deleted.
-runCmds :: [Command] -> String -> Integer -> Bool -> IO (String, Bool)
+runCmds :: [Command] -> String -> Int -> Bool -> IO (String, Bool)
 runCmds [] ps _ _ = pure (ps, False)
 runCmds (c : cs) ps lineNum isLast = do
   step <- applyOne c ps lineNum isLast
@@ -272,7 +272,7 @@ runCmds (c : cs) ps lineNum isLast = do
     Deleted      -> pure (ps, True)
     Continue ps' -> runCmds cs ps' lineNum isLast
 
-processLine :: Bool -> [Command] -> Integer -> String -> Bool -> IO ()
+processLine :: Bool -> [Command] -> Int -> String -> Bool -> IO ()
 processLine noAuto cmds lineNum ps isLast = do
   (ps', deleted) <- runCmds cmds ps lineNum isLast
   when (not noAuto && not deleted) (emitLine ps')
@@ -288,7 +288,7 @@ runStream noAuto cmds = do
     Left _      -> pure ()
     Right first -> loop noAuto cmds 1 first
 
-loop :: Bool -> [Command] -> Integer -> String -> IO ()
+loop :: Bool -> [Command] -> Int -> String -> IO ()
 loop noAuto cmds lineNum cur = do
   r <- try getLine
   case r of

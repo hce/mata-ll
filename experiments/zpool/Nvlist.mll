@@ -17,28 +17,28 @@ module Nvlist
 
 import ZBytes (getU32BE, getU64BE)
 
-data NvValue = NvU64 Integer
+data NvValue = NvU64 Int
              | NvString String
              | NvList [(String, NvValue)]
              | NvListArray [[(String, NvValue)]]
              | NvBool
-             | NvUnknown Integer
+             | NvUnknown Int
     deriving (Show)
 
 -- DATA_TYPE_* values we decode
-tyBoolean :: Integer
+tyBoolean :: Int
 tyBoolean = 1
 
-tyUint64 :: Integer
+tyUint64 :: Int
 tyUint64 = 8
 
-tyString :: Integer
+tyString :: Int
 tyString = 9
 
-tyNvlist :: Integer
+tyNvlist :: Int
 tyNvlist = 19
 
-tyNvlistArray :: Integer
+tyNvlistArray :: Int
 tyNvlistArray = 20
 
 -- Parse a label config nvlist, including its 4-byte encoding header.
@@ -51,10 +51,10 @@ parseNvlist b =
 
 -- An nvlist body: version, flags, pairs. Returns the parsed pairs and the
 -- offset just past the terminator.
-parseNvl :: ByteString -> Integer -> ([(String, NvValue)], Integer)
+parseNvl :: ByteString -> Int -> ([(String, NvValue)], Int)
 parseNvl b off = parsePairs b (off + 8)
 
-parsePairs :: ByteString -> Integer -> ([(String, NvValue)], Integer)
+parsePairs :: ByteString -> Int -> ([(String, NvValue)], Int)
 parsePairs b off =
     let esz = getU32BE b off
         dsz = getU32BE b (off + 4)
@@ -70,7 +70,7 @@ parsePairs b off =
                restStep = parsePairs b (snd valStep)
            in ((name, fst valStep) : fst restStep, snd restStep)
 
-parseValue :: ByteString -> Integer -> Integer -> Integer -> Integer -> (NvValue, Integer)
+parseValue :: ByteString -> Int -> Int -> Int -> Int -> (NvValue, Int)
 parseValue b off typ nelem skipTo =
     if typ == tyUint64
     then (NvU64 (getU64BE b off), off + 8)
@@ -84,7 +84,7 @@ parseValue b off typ nelem skipTo =
     then (NvBool, skipTo)
     else (NvUnknown typ, skipTo)
 
-parseNvlArray :: ByteString -> Integer -> Integer -> ([[(String, NvValue)]], Integer)
+parseNvlArray :: ByteString -> Int -> Int -> ([[(String, NvValue)]], Int)
 parseNvlArray _ off 0 = ([], off)
 parseNvlArray b off k =
     let s = parseNvl b off
@@ -92,7 +92,7 @@ parseNvlArray b off k =
     in (fst s : fst rest, snd rest)
 
 -- XDR string: uint32 byte length, bytes, padded to a multiple of 4.
-xdrString :: ByteString -> Integer -> (String, Integer)
+xdrString :: ByteString -> Int -> (String, Int)
 xdrString b off =
     let n = getU32BE b off
         padded = div (n + 3) 4 * 4
@@ -110,7 +110,7 @@ nvString ps name = case nvLookup ps name of
     Just (NvString s) -> s
     _ -> error ("nvlist: missing string entry " <> name)
 
-nvU64 :: [(String, NvValue)] -> String -> Integer
+nvU64 :: [(String, NvValue)] -> String -> Int
 nvU64 ps name = case nvLookup ps name of
     Just (NvU64 v) -> v
     _ -> error ("nvlist: missing uint64 entry " <> name)

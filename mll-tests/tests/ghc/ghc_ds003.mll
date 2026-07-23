@@ -1,10 +1,10 @@
 -- GHC ds003: Nested case expressions
 -- Tests case inside case, case in function body
 
-data Expr = Num Integer | Add Expr Expr | If Expr Expr Expr | IsZero Expr
+data Expr = Num Int | Add Expr Expr | If Expr Expr Expr | IsZero Expr
     deriving (Show, Eq)
 
-eval :: Expr -> Integer
+eval :: Expr -> Int
 eval expr = case expr of
     Num n -> n
     Add a b -> eval a + eval b
@@ -16,7 +16,7 @@ eval expr = case expr of
         _ -> 0
 
 -- Quadrant classification
-classify :: Integer -> Integer -> String
+classify :: Int -> Int -> String
 classify x y
     | x > 0 && y > 0 = "both positive"
     | x < 0 && y < 0 = "both negative"

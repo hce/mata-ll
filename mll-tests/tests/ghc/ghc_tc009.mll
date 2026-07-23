@@ -12,7 +12,7 @@ data Task = Task
     deriving (Show, Eq)
 
 -- Uses both Eq and Ord on Priority
-rankTask :: Task -> Integer
+rankTask :: Task -> Int
 rankTask t
     | taskDone t        = 0
     | taskPriority t == High   = 3

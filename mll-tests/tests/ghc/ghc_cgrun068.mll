@@ -1,27 +1,27 @@
 -- GHC cgrun068: Conway's Game of Life step function
 
-nth :: Integer -> [a] -> a
+nth :: Int -> [a] -> a
 nth 0 (x:_) = x
 nth n (_:xs) = nth (n - 1) xs
 nth _ [] = error "index"
 
-getCell :: [[Integer]] -> Integer -> Integer -> Integer
+getCell :: [[Int]] -> Int -> Int -> Int
 getCell grid r c =
     let rows = length grid
         cols = if rows == 0 then 0 else length (head grid)
     in if r < 0 || r >= rows || c < 0 || c >= cols then 0 else nth c (nth r grid)
 
-neighbours :: [[Integer]] -> Integer -> Integer -> Integer
+neighbours :: [[Int]] -> Int -> Int -> Int
 neighbours grid r c =
     foldl (+) 0 [getCell grid (r + dr) (c + dc) | dr <- [-1, 0, 1], dc <- [-1, 0, 1], not (dr == 0 && dc == 0)]
 
-nextCell :: [[Integer]] -> Integer -> Integer -> Integer
+nextCell :: [[Int]] -> Int -> Int -> Int
 nextCell grid r c =
     let n = neighbours grid r c
         alive = getCell grid r c == 1
     in if alive then (if n == 2 || n == 3 then 1 else 0) else (if n == 3 then 1 else 0)
 
-step :: [[Integer]] -> [[Integer]]
+step :: [[Int]] -> [[Int]]
 step grid =
     let rows = length grid
         cols = if rows == 0 then 0 else length (head grid)

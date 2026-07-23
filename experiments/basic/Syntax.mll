@@ -18,5 +18,5 @@ data PItem = PVal Expr | PSemi | PComma
 --   SIf cond thenB elseB       (elseB [] = no ELSE)
 --   SFor var from to step       SNext vars  ([] = bare NEXT)
 --   SDim name dims
-data Stmt = SLet String [Expr] Expr | SPrint [PItem] | SInput String [(String, [Expr])] | SIf Expr [Stmt] [Stmt] | SGoto Integer | SGosub Integer | SReturn | SFor String Expr Expr Expr | SNext [String] | SDim [(String, [Expr])] | SEnd | SStop | SRem
+data Stmt = SLet String [Expr] Expr | SPrint [PItem] | SInput String [(String, [Expr])] | SIf Expr [Stmt] [Stmt] | SGoto Int | SGosub Int | SReturn | SFor String Expr Expr Expr | SNext [String] | SDim [(String, [Expr])] | SEnd | SStop | SRem
   deriving (Show)

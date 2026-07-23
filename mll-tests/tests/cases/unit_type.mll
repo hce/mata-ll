@@ -4,7 +4,7 @@
 -- leaking through Maybe's show as "Just Nothing".
 
 -- () as a case pattern (bare)
-unitCase :: () -> Integer
+unitCase :: () -> Int
 unitCase u = case u of
   () -> 42
 
@@ -13,20 +13,20 @@ unitClause :: () -> String
 unitClause () = "matched"
 
 -- () inside a constructor pattern
-fromMaybeUnit :: Maybe () -> Integer
+fromMaybeUnit :: Maybe () -> Int
 fromMaybeUnit x = case x of
   Just () -> 1
   Nothing -> 0
 
 -- () nested two deep: Just Nothing / Just (Just ()) must stay distinct
-nested :: Maybe (Maybe ()) -> Integer
+nested :: Maybe (Maybe ()) -> Int
 nested m = case m of
   Just (Just ()) -> 2
   Just Nothing -> 1
   Nothing -> 0
 
 -- () as an ADT field, with derived Show and Eq
-data E = L () | R Integer deriving (Show, Eq)
+data E = L () | R Int deriving (Show, Eq)
 
 pick :: E -> String
 pick e = case e of
@@ -41,7 +41,7 @@ main = do
   assert (show (Just (Just ())) == "Just (Just ())") "show nested Just ()"
   assert (show (Nothing :: Maybe ()) == "Nothing") "show Nothing at Maybe ()"
   assert (show [(), ()] == "[(),()]") "show list of units"
-  assert (show (1 :: Integer, ()) == "(1,())") "show tuple with unit"
+  assert (show (1 :: Int, ()) == "(1,())") "show tuple with unit"
   assert (show (L ()) == "L ()") "derived Show with unit field"
   -- Eq/Ord ()
   assert (() == ()) "unit equals itself"

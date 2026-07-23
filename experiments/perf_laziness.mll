@@ -7,64 +7,64 @@
 --
 -- Run: mll examples/perf_laziness.mll && lua examples/perf_laziness.lua
 
-clockRaw :: Integer -> LuaIO "os.clock" Number
+clockRaw :: Int -> LuaIO "os.clock" Number
 
 clock :: IO Number
 clock = clockRaw 0
 
 -- Tight accumulator loop — args are cheap (arithmetic), not thunked.
-sumStrict :: Integer -> Integer
+sumStrict :: Int -> Int
 sumStrict n = go 0 0
     where
         go acc i
             | i > n     = acc
             | otherwise = go (acc + i) (i + 1)
 
-buildList :: Integer -> [Integer]
+buildList :: Int -> [Int]
 buildList n = go n []
     where
         go 0 acc = acc
         go i acc = go (i - 1) (i : acc)
 
-sumList :: [Integer] -> Integer
+sumList :: [Int] -> Int
 sumList xs = foldl (+) 0 xs
 
-fibs :: [Integer]
+fibs :: [Int]
 fibs = 0 : 1 : zipWith (+) fibs (tail fibs)
 
-nats :: [Integer]
+nats :: [Int]
 nats = 1 : map (+1) nats
 
-deepPipeline :: [Integer] -> Integer
+deepPipeline :: [Int] -> Int
 deepPipeline xs = foldl (+) 0 (filter (\x -> x > 100) (map (\x -> x + 1) (filter (\x -> x > 10) (map (*3) (map (*2) xs)))))
 
-expensiveId :: Integer -> Integer
+expensiveId :: Int -> Int
 expensiveId n = sumStrict n
 
 -- Non-strict wins: unused arg is not evaluated.
-conditionalUse :: Bool -> Integer -> Integer
+conditionalUse :: Bool -> Int -> Int
 conditionalUse True _ = 42
 conditionalUse False x = x
 
-sharedBinding :: Integer -> Integer
+sharedBinding :: Int -> Int
 sharedBinding n = let expensive = sumStrict n in expensive + expensive
 
-deadBinding :: Integer -> Integer
+deadBinding :: Int -> Int
 deadBinding n = let unused = sumStrict n in 42
 
-data Triple = MkTriple Integer Integer Integer
+data Triple = MkTriple Int Int Int
 
-sumTripleField :: Triple -> Integer
+sumTripleField :: Triple -> Int
 sumTripleField (MkTriple a b c) = a + b + c
 
-buildTriples :: Integer -> Integer
+buildTriples :: Int -> Int
 buildTriples n = go 0 0
     where
         go acc i
             | i >= n    = acc
             | otherwise = go (acc + sumTripleField (MkTriple i (i+1) (i+2))) (i + 1)
 
-fib :: Integer -> Integer
+fib :: Int -> Int
 fib 0 = 0
 fib 1 = 1
 fib n = fib (n - 1) + fib (n - 2)

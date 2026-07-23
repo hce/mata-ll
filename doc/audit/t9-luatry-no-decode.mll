@@ -1,5 +1,5 @@
 module Main where
-tryList :: Integer -> LuaTry "try_list" (Either String [Integer])
+tryList :: Int -> LuaTry "try_list" (Either String [Int])
 export run :: IO ()
 run = do
   r <- tryList 0

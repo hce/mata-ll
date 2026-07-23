@@ -2,14 +2,14 @@
 -- Type synonyms in signatures and expressions
 
 type Name    = String
-type Age     = Integer
+type Age     = Int
 type Score   = Number
-type Roster  = [(String, Integer)]
+type Roster  = [(String, Int)]
 type Mapping = [(String, Number)]
 
 data Student = Student
     { studentName  :: String
-    , studentAge   :: Integer
+    , studentAge   :: Int
     , studentScore :: Number
     }
     deriving (Show, Eq)

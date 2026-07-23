@@ -3,7 +3,7 @@
 -- into the function and the recursive call is a direct Lua tail call, so
 -- a million steps run in constant stack.
 
-countdown :: Integer -> Integer -> Integer
+countdown :: Int -> Int -> Int
 countdown n acc =
     case n of
         0 -> acc

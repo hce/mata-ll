@@ -4,13 +4,13 @@
 import Data.List (drop, replicate)
 
 -- Sum a list using a mutable accumulator
-sumST :: [Integer] -> Integer
+sumST :: [Int] -> Int
 sumST xs = runST (do
     acc <- newSTArrayFromList [0]
     sumGo acc xs
     readSTArray acc 0)
 
-sumGo :: STArray s -> [Integer] -> ST s ()
+sumGo :: STArray s -> [Int] -> ST s ()
 sumGo acc [] = return ()
 sumGo acc (x:rest) = do
     cur <- readSTArray acc 0
@@ -18,14 +18,14 @@ sumGo acc (x:rest) = do
     sumGo acc rest
 
 -- Reverse an array in place
-reverseArray :: [Integer] -> [Integer]
+reverseArray :: [Int] -> [Int]
 reverseArray xs = runST (do
     arr <- newSTArrayFromList xs
     let n = length xs
     revLoop arr 0 (n - 1)
     stArrayToList arr)
 
-revLoop :: STArray s -> Integer -> Integer -> ST s ()
+revLoop :: STArray s -> Int -> Int -> ST s ()
 revLoop arr lo hi
   | lo >= hi  = return ()
   | otherwise = do
@@ -36,13 +36,13 @@ revLoop arr lo hi
         revLoop arr (lo + 1) (hi - 1)
 
 -- Build a histogram of values 0..9
-histogram :: [Integer] -> [Integer]
+histogram :: [Int] -> [Int]
 histogram xs = runST (do
     bins <- newSTArrayFromList (replicate 10 0)
     countAll bins xs
     stArrayToList bins)
 
-countAll :: STArray s -> [Integer] -> ST s ()
+countAll :: STArray s -> [Int] -> ST s ()
 countAll bins [] = return ()
 countAll bins (x:rest) = do
     cur <- readSTArray bins x
@@ -50,7 +50,7 @@ countAll bins (x:rest) = do
     countAll bins rest
 
 -- Prefix sums (scan) using mutable state
-prefixSums :: [Integer] -> [Integer]
+prefixSums :: [Int] -> [Int]
 prefixSums xs = runST (do
     let n = length xs
     src <- newSTArrayFromList xs
@@ -59,7 +59,7 @@ prefixSums xs = runST (do
     scanGo src dst acc n 0
     stArrayToList dst)
 
-scanGo :: STArray s -> STArray s -> STArray s -> Integer -> Integer -> ST s ()
+scanGo :: STArray s -> STArray s -> STArray s -> Int -> Int -> ST s ()
 scanGo src dst acc n i
   | i >= n    = return ()
   | otherwise = do

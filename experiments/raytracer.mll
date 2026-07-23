@@ -15,12 +15,12 @@
 -- plus sentinel pixels (the center pixel sees the red sphere; a corner is
 -- background). A broken result -> error -> the program (and test) fails.
 
--- Lua FFI: math + an Integer->Number coercion (tonumber is ~identity at
+-- Lua FFI: math + an Int->Number coercion (tonumber is ~identity at
 -- runtime since both are Lua numbers; the type just changes).
 sqrtN   :: Number -> LuaPure "math.sqrt" Number
 absN    :: Number -> LuaPure "math.abs" Number
-floorN  :: Number -> LuaPure "math.floor" Integer
-intToNum :: Integer -> LuaPure "tonumber" Number
+floorN  :: Number -> LuaPure "math.floor" Int
+intToNum :: Int -> LuaPure "tonumber" Number
 
 neg :: Number -> Number
 neg x = 0.0 - x
@@ -118,16 +118,16 @@ shade (Hit t p n col) =
 
 -- ── camera ───────────────────────────────────────────────────────────────
 
-width :: Integer
+width :: Int
 width = 80
 
-height :: Integer
+height :: Int
 height = 60
 
 aspect :: Number
 aspect = intToNum width / intToNum height
 
-primaryRay :: Integer -> Integer -> Ray
+primaryRay :: Int -> Int -> Ray
 primaryRay px py =
   let u  = (intToNum px + 0.5) / intToNum width
       v  = (intToNum py + 0.5) / intToNum height
@@ -135,7 +135,7 @@ primaryRay px py =
       sy = 1.0 - 2.0 * v
   in Ray (Vec3 0.0 0.0 0.0) (vnorm (Vec3 sx sy (neg 1.0)))
 
-colorAt :: Integer -> Integer -> Vec3
+colorAt :: Int -> Int -> Vec3
 colorAt px py = shade (nearestHit scene (primaryRay px py))
 
 -- ── quantization / output ────────────────────────────────────────────────
@@ -143,7 +143,7 @@ colorAt px py = shade (nearestHit scene (primaryRay px py))
 clamp01 :: Number -> Number
 clamp01 c = if c < 0.0 then 0.0 else if c > 1.0 then 1.0 else c
 
-quant :: Number -> Integer
+quant :: Number -> Int
 quant c = floorN (clamp01 c * 255.0)
 
 emitPixels :: [Vec3] -> IO ()

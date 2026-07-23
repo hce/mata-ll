@@ -5,15 +5,15 @@ class Named a where
     name :: a -> String
 
 class Scored a where
-    score :: a -> Integer
+    score :: a -> Int
 
 class Ranked a where
     rank :: a -> String
 
-data Player = Player String Integer
+data Player = Player String Int
     deriving (Show, Eq)
 
-data Team = Team String Integer
+data Team = Team String Int
     deriving (Show, Eq)
 
 instance Named Player where
@@ -38,7 +38,7 @@ instance Ranked Team where
 getName :: Named a => a -> String
 getName x = name x
 
-getScore :: Scored a => a -> Integer
+getScore :: Scored a => a -> Int
 getScore x = score x
 
 getRank :: Ranked a => a -> String
@@ -56,7 +56,7 @@ findByName n (x:xs)
     | otherwise     = findByName n xs
 
 -- Total score of ranked items (uses only Scored)
-totalScore :: Scored a => [a] -> Integer
+totalScore :: Scored a => [a] -> Int
 totalScore []     = 0
 totalScore (x:xs) = score x + totalScore xs
 

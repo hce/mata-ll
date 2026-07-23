@@ -13,7 +13,7 @@ data Triple a = MkTriple a a a
     deriving (Show, Eq, Functor)
 
 -- Phantom type parameter (no constructor mentions it)
-data Phantom a = MkPhantom Integer
+data Phantom a = MkPhantom Int
     deriving (Show, Eq, Functor)
 
 -- Multi-param type (Functor on last param only)

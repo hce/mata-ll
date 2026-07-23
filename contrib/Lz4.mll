@@ -26,7 +26,7 @@ import ZBytes (getU32BE)
 -- Decompress the ZFS framing: 4-byte big-endian compressed length, then the
 -- raw LZ4 block, padded to the physical block size. `dlen` is the expected
 -- decompressed (logical) size.
-zfsLz4Decompress :: ByteString -> Integer -> ByteString
+zfsLz4Decompress :: ByteString -> Int -> ByteString
 zfsLz4Decompress payload dlen =
     let total = bsLength payload
         clen = getU32BE payload 0
@@ -36,7 +36,7 @@ zfsLz4Decompress payload dlen =
        else lz4Decompress (bsSub payload 4 clen) dlen
 
 -- Decompress a raw LZ4 block to exactly `dlen` bytes (errors otherwise).
-lz4Decompress :: ByteString -> Integer -> ByteString
+lz4Decompress :: ByteString -> Int -> ByteString
 lz4Decompress src dlen = go 0 bsEmpty []
   where
     n = bsLength src

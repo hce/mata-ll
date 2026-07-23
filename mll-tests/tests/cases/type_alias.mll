@@ -3,9 +3,9 @@
 -- so data constructors using aliases unify with their expansions.
 -- (Bug: data types were registered before aliases, so GF stayed opaque)
 
-type Pair = (Integer, Integer)
-type IntList = [Integer]
-type GF = [Integer]
+type Pair = (Int, Int)
+type IntList = [Int]
+type GF = [Int]
 
 -- Type alias in a data constructor
 data Point = Point GF GF
@@ -15,24 +15,24 @@ addPair :: Pair -> Pair -> Pair
 addPair (a1, a2) (b1, b2) = (a1 + b1, a2 + b2)
 
 -- Mixing alias and expansion in signatures
-fromList :: [Integer] -> IntList
+fromList :: [Int] -> IntList
 fromList xs = xs
 
 -- Data constructor with alias, used with expansion
-mkPoint :: [Integer] -> [Integer] -> Point
+mkPoint :: [Int] -> [Int] -> Point
 mkPoint x y = Point x y
 
 -- Pattern match on data with alias fields, return expansion
-getX :: Point -> [Integer]
+getX :: Point -> [Int]
 getX (Point x _) = x
 
 -- Chain: alias -> data -> function -> expansion
-processGF :: GF -> Integer
+processGF :: GF -> Int
 processGF xs = case xs of
     (a:_) -> a
     _     -> 0
 
-wrapAndUnwrap :: [Integer] -> Integer
+wrapAndUnwrap :: [Int] -> Int
 wrapAndUnwrap xs =
     let p = mkPoint xs [0]
     in processGF (getX p)

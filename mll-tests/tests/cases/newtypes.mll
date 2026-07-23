@@ -1,9 +1,9 @@
-newtype Age = Integer
+newtype Age = Int
 
-mkAge :: Integer -> Age
+mkAge :: Int -> Age
 mkAge x = Age x
 
-getAge :: Age -> Integer
+getAge :: Age -> Int
 getAge (Age x) = x
 
 main :: IO ()

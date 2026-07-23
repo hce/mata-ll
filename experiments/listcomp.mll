@@ -5,14 +5,14 @@
 -- keeps pulling elements forever). `take 12` is enough to cover every
 -- Fibonacci number below 42.
 
-fibs :: [Integer]
+fibs :: [Int]
 fibs = 1 : 1 : zipWith (+) fibs (tail fibs)
 
 -- doubles of the Fibonacci numbers below 42
-result :: [Integer]
+result :: [Int]
 result = [x * 2 | x <- take 12 fibs, x < 42]
 
-eqInts :: [Integer] -> [Integer] -> Bool
+eqInts :: [Int] -> [Int] -> Bool
 eqInts []     []     = True
 eqInts (x:xs) (y:ys) = x == y && eqInts xs ys
 eqInts _      _      = False

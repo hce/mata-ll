@@ -12,7 +12,7 @@ instance MyShow Fruit where
     myShow Banana = "Banana"
     myShow Cherry = "Cherry"
 
-instance MyShow Integer where
+instance MyShow Int where
     myShow n
         | n < 0     = "neg"
         | n == 0    = "zero"
@@ -30,8 +30,8 @@ main = do
     -- Concrete instance selection
     assert (myShow Apple  == "Apple")  "fruit apple"
     assert (myShow Banana == "Banana") "fruit banana"
-    assert (myShow (42 :: Integer) == "pos")  "int pos"
-    assert (myShow (0  :: Integer) == "zero") "int zero"
+    assert (myShow (42 :: Int) == "pos")  "int pos"
+    assert (myShow (0  :: Int) == "zero") "int zero"
     assert (myShow True  == "yes") "bool true"
     assert (myShow False == "no")  "bool false"
 

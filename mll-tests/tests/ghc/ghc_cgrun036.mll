@@ -2,18 +2,18 @@
 -- Tests higher-order functions with continuations
 
 -- CPS factorial
-factCPS :: Integer -> (Integer -> a) -> a
+factCPS :: Int -> (Int -> a) -> a
 factCPS 0 k = k 1
 factCPS n k = factCPS (n - 1) (\r -> k (n * r))
 
 -- CPS fibonacci
-fibCPS :: Integer -> (Integer -> a) -> a
+fibCPS :: Int -> (Int -> a) -> a
 fibCPS 0 k = k 0
 fibCPS 1 k = k 1
 fibCPS n k = fibCPS (n - 1) (\a -> fibCPS (n - 2) (\b -> k (a + b)))
 
 -- CPS list sum
-sumCPS :: [Integer] -> (Integer -> a) -> a
+sumCPS :: [Int] -> (Int -> a) -> a
 sumCPS [] k     = k 0
 sumCPS (x:xs) k = sumCPS xs (\s -> k (x + s))
 
@@ -28,7 +28,7 @@ main = do
     assert (fibCPS 10 id == 55) "cps fib 10"
 
     assert (sumCPS [1, 2, 3, 4, 5] id == 15) "cps sum"
-    assert (sumCPS ([] :: [Integer]) id == 0) "cps sum empty"
+    assert (sumCPS ([] :: [Int]) id == 0) "cps sum empty"
 
     -- CPS with non-identity continuation
     assert (factCPS 5 (* 2) == 240) "cps fact cont"

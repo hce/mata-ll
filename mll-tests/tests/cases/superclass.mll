@@ -2,7 +2,7 @@ class Eq a where
     (==) :: a -> a -> Bool
 
 class Eq a => Ord a where
-    compare :: a -> a -> Integer
+    compare :: a -> a -> Int
 
 data Prio = Low | High
     deriving Eq

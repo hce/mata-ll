@@ -8,7 +8,7 @@ colorName c = case c of
     Green -> "green"
     Blue  -> "blue"
 
-applyTwice :: (Integer -> Integer) -> Integer -> Integer
+applyTwice :: (Int -> Int) -> Int -> Int
 applyTwice f x = f (f x)
 
 main :: IO ()
@@ -41,5 +41,5 @@ main = do
 
     putStrLn "."
 
-fibs :: [Integer]
+fibs :: [Int]
 fibs = 1:1:zipWith (+) fibs (tail fibs)

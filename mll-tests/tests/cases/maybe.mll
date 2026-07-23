@@ -2,7 +2,7 @@ fromMaybe :: a -> Maybe a -> a
 fromMaybe def Nothing = def
 fromMaybe _ (Just x) = x
 
-nothingInt :: Maybe Integer
+nothingInt :: Maybe Int
 nothingInt = Nothing
 
 main :: IO ()

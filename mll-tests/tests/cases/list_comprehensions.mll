@@ -18,7 +18,7 @@ main = do
     assert ([x * y | x <- [1, 2, 3], y <- [1, 2, 3], x /= y] == [2, 3, 2, 6, 3, 6]) "nested guard"
 
     -- Empty source
-    assert ([x * 2 | x <- ([] :: [Integer])] == []) "empty source"
+    assert ([x * 2 | x <- ([] :: [Int])] == []) "empty source"
 
     -- All filtered out
     assert ([x | x <- [1, 2, 3], x > 10] == []) "all filtered"

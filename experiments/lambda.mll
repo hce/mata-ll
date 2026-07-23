@@ -3,24 +3,24 @@
 -- Target: the laziness/thunk-forcing machinery (where most compiler bugs have
 -- clustered). It is almost entirely a recursive Term ADT reduced lazily --
 -- substitution, index shifting, normal-order reduction -- plus Maybe plumbing,
--- Integer arithmetic (including negative shifts), deep recursion, and
+-- Int arithmetic (including negative shifts), deep recursion, and
 -- deriving Eq on a recursive type.
 --
 -- de Bruijn indices avoid variable capture: TVar n refers to the n-th
 -- enclosing binder (0 = innermost). Oracle: reduce closed terms (identity,
 -- boolean not, Church arithmetic) and assert the normal form structurally.
 
-data Term = TVar Integer | TLam Term | TApp Term Term
+data Term = TVar Int | TLam Term | TApp Term Term
   deriving Eq
 
 -- Shift free indices (>= cutoff c) by d.
-shift :: Integer -> Integer -> Term -> Term
+shift :: Int -> Int -> Term -> Term
 shift d c (TVar n)   = if n >= c then TVar (n + d) else TVar n
 shift d c (TLam t)   = TLam (shift d (c + 1) t)
 shift d c (TApp f a) = TApp (shift d c f) (shift d c a)
 
 -- Substitute term s for index j.
-subst :: Integer -> Term -> Term -> Term
+subst :: Int -> Term -> Term -> Term
 subst j s (TVar n)   = if n == j then s else TVar n
 subst j s (TLam t)   = TLam (subst (j + 1) (shift 1 0 s) t)
 subst j s (TApp f a) = TApp (subst j s f) (subst j s a)
@@ -45,7 +45,7 @@ step (TLam t) =
 step (TVar _) = Nothing
 
 -- Reduce to normal form (fuel-bounded; some terms have no normal form).
-normalize :: Integer -> Term -> Term
+normalize :: Int -> Term -> Term
 normalize 0    t = t
 normalize fuel t =
   case step t of
@@ -75,11 +75,11 @@ tAnd :: Term
 tAnd = TLam (TLam (TApp (TApp (TVar 1) (TVar 0)) (TVar 1)))
 
 -- Church numeral n = \f.\x. f^n x
-churchBody :: Integer -> Term
+churchBody :: Int -> Term
 churchBody 0 = TVar 0
 churchBody n = TApp (TVar 1) (churchBody (n - 1))
 
-church :: Integer -> Term
+church :: Int -> Term
 church n = TLam (TLam (churchBody n))
 
 -- \n.\f.\x. f (n f x)

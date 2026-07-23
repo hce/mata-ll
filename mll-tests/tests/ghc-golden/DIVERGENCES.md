@@ -44,8 +44,8 @@ Not output divergences, but measured GHC-acceptance differences the twin
 generation had to account for (details and per-case reasons in
 `regenerate-ghc-goldens.sh`; the shim notes in `MllShim.hs`):
 
-* `newtype Age = Integer` (implicit constructor named after the type) is
-  mata-ll-only sugar; GHC requires `newtype Age = Age Integer`.
+* `newtype Age = Int` (implicit constructor named after the type) is
+  mata-ll-only sugar; GHC requires `newtype Age = Age Int`.
 * Linear types: mata-ll counts an unrestricted use of a `%1`-bound scalar
   (e.g. `useOnce (Token n) = n * 2`) as the single consumption; GHC's
   `-XLinearTypes` rejects it (GHC-18872).

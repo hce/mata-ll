@@ -10,7 +10,7 @@ main = do
     -- Basic range
     assert ([1..5] == [1, 2, 3, 4, 5]) "range 1..5"
     assert ([0..0] == [0]) "range singleton"
-    assert ([3..1] == ([] :: [Integer])) "range empty descending"
+    assert ([3..1] == ([] :: [Int])) "range empty descending"
 
     -- Step range
     assert ([1,3..9]  == [1, 3, 5, 7, 9]) "step odd"
@@ -21,7 +21,7 @@ main = do
     -- Infinite range via take
     let inf = [1..]
     assert (take 5 inf == [1, 2, 3, 4, 5]) "take from infinite"
-    assert (take 0 inf == ([] :: [Integer])) "take 0 from infinite"
+    assert (take 0 inf == ([] :: [Int])) "take 0 from infinite"
 
     -- Infinite step range via take
     let odds = [1,3..]

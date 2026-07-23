@@ -1,7 +1,7 @@
 -- GHC cgrun011: Fibonacci with accumulator
--- Tests tail recursion and Integer arithmetic
+-- Tests tail recursion and Int arithmetic
 
-fib :: Integer -> Integer
+fib :: Int -> Int
 fib n = go n 0 1
   where
     go 0 a _ = a

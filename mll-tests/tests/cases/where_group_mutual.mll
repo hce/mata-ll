@@ -5,7 +5,7 @@
 -- (non_strict, list_element_laziness, tuple_field_laziness) guard the
 -- other direction: nothing here may become MORE eager.
 
-interleave :: [Integer] -> [Integer] -> [Integer]
+interleave :: [Int] -> [Int] -> [Int]
 interleave xs ys = go xs ys
   where
     go [] bs = bs
@@ -14,7 +14,7 @@ interleave xs ys = go xs ys
     swap (b:bs) as = b : go as bs
 
 -- A value binding named like a function stays a thunk and stays forced.
-lazyVal :: Integer -> Integer
+lazyVal :: Int -> Int
 lazyVal n = v + 1
   where v = n * 2
 

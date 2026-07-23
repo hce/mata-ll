@@ -7,15 +7,15 @@
 -- parsing from the already-parsed lhs (parse-once), making it O(n).
 -- 40-deep here compiles instantly post-fix and stays within test budget.
 
-inc :: Integer -> Integer
+inc :: Int -> Int
 inc n = n + 1
 
 data Nat = Z | S Nat
-natDepth :: Nat -> Integer
+natDepth :: Nat -> Int
 natDepth Z = 0
 natDepth (S n) = 1 + natDepth n
 
-deepApp :: Integer
+deepApp :: Int
 deepApp = inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc (inc 0)))))))))))))))))))))))))))))))))))))))
 
 deepCon :: Nat

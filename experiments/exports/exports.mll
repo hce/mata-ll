@@ -1,7 +1,7 @@
-export foo :: Integer
+export foo :: Int
 foo = 123
 
-export bar :: Integer -> Integer
+export bar :: Int -> Int
 bar = (+ foo)
 
 export run :: IO ()

@@ -5,16 +5,16 @@ data Json = JNull | JBool Bool | JNum Number | JStr String | JArr [Json] | JObj 
     deriving (Eq)
 
 -- Parse result
-data JResult = JOk Json Integer | JErr String
+data JResult = JOk Json Int | JErr String
 
 -- Internal result for strings (avoids wrapping in Json)
-data SResult = SOk String Integer | SErr String
+data SResult = SOk String Int | SErr String
 
 -- Internal result for arrays
-data AResult = AOk [Json] Integer | AErr String
+data AResult = AOk [Json] Int | AErr String
 
 -- Internal result for object pairs
-data OResult = OOk [(String, Json)] Integer | OErr String
+data OResult = OOk [(String, Json)] Int | OErr String
 
 -- ================================================================
 -- Public API
@@ -23,7 +23,7 @@ data OResult = OOk [(String, Json)] Integer | OErr String
 parseJSON :: String -> Either String Json
 parseJSON s = parseTop s (strLen s)
 
-parseTop :: String -> Integer -> Either String Json
+parseTop :: String -> Int -> Either String Json
 parseTop s len = case skipWS s 1 len of
     pos -> case parseValue s pos len of
         JErr e -> Left e
@@ -66,7 +66,7 @@ decodeJSONWith dec s = case parseJSON s of
 -- Typeclasses
 --
 -- The primitive codecs live in the toJSON*/fromJSON* combinators below
--- rather than in `instance ToJSON Integer`-style declarations: mata-ll
+-- rather than in `instance ToJSON Int`-style declarations: mata-ll
 -- rejects an instance declared in an imported module as an orphan (only the
 -- main module's own classes/types count as local), so a stdlib module cannot
 -- carry instances for builtin types. Write instances for your own data types
@@ -93,19 +93,19 @@ jTypeName (JStr _) = "a string"
 jTypeName (JArr _) = "an array"
 jTypeName (JObj _) = "an object"
 
-toJSONInteger :: Integer -> Json
-toJSONInteger n = JNum (intToNum n)
+toJSONInt :: Int -> Json
+toJSONInt n = JNum (intToNum n)
 
 -- Decode a number that must be integral. A non-integral number (3.5) and a
--- number outside the 64-bit Integer range are both rejected with a clear error.
-fromJSONInteger :: Json -> Either String Integer
-fromJSONInteger (JNum n) = numToInteger n
-fromJSONInteger j = Left ("expected an integer, but found " <> jTypeName j)
+-- number outside the 64-bit Int range are both rejected with a clear error.
+fromJSONInt :: Json -> Either String Int
+fromJSONInt (JNum n) = numToInteger n
+fromJSONInt j = Left ("expected an integer, but found " <> jTypeName j)
 
 -- A number with Lua's integer subtype is exact and in range by construction
 -- (the parser only produces one for in-range integer syntax). Floats go
 -- through the integrality and range checks.
-numToInteger :: Number -> Either String Integer
+numToInteger :: Number -> Either String Int
 numToInteger n = if numMathType n == "integer"
     then Right (numFloor n)
     else numToIntegerFloat n
@@ -120,13 +120,13 @@ numToInteger n = if numMathType n == "integer"
 -- -9223372036854775808.0, which is rejected as out of range; GHC's aeson
 -- accepts it because it parses numbers exactly (Scientific), which a Lua
 -- double cannot reproduce.
-numToIntegerFloat :: Number -> Either String Integer
+numToIntegerFloat :: Number -> Either String Int
 numToIntegerFloat n = case numModf n of
     (_, frac) -> if frac /= 0.0
         then Left ("expected an integer, but found the non-integral number " <> encodeNum n)
         else if n > -9223372036854775808.0 && n < 9223372036854775808.0
             then Right (numFloor n)
-            else Left ("the number " <> encodeNum n <> " is outside the 64-bit Integer range")
+            else Left ("the number " <> encodeNum n <> " is outside the 64-bit Int range")
 
 toJSONNumber :: Number -> Json
 toJSONNumber n = JNum n
@@ -156,7 +156,7 @@ fromJSONList :: (Json -> Either String a) -> Json -> Either String [a]
 fromJSONList dec (JArr xs) = decodeElems dec xs 0
 fromJSONList _ j = Left ("expected an array, but found " <> jTypeName j)
 
-decodeElems :: (Json -> Either String a) -> [Json] -> Integer -> Either String [a]
+decodeElems :: (Json -> Either String a) -> [Json] -> Int -> Either String [a]
 decodeElems _ [] _ = Right []
 decodeElems dec (x:xs) i = case dec x of
     Left e -> Left ("at array index " <> show i <> ": " <> e)
@@ -232,16 +232,16 @@ jContext ctx (Left e) = Left ("while decoding " <> ctx <> ": " <> e)
 -- `deriving (ToJSON)` / `deriving (FromJSON)` generate a codec over these.
 -- The convention (mirroring aeson's defaultOptions where mata-ll can):
 --   * a single-constructor record maps to an object keyed by the field
---     names:                  data P = P { x :: Integer }   ⇔  {"x":1}
+--     names:                  data P = P { x :: Int }   ⇔  {"x":1}
 --   * a single positional constructor maps to its argument itself
 --     (one field) or an array of its arguments (several fields):
---                             data W = W Integer            ⇔  7
---                             data V = V Integer String     ⇔  [7,"a"]
+--                             data W = W Int            ⇔  7
+--                             data V = V Int String     ⇔  [7,"a"]
 --   * a multi-constructor type is tagged: either the bare constructor
 --     name as a string (nullary constructors only), or an object with a
 --     "tag" field — record fields inline in the same object, positional
 --     arguments under "contents":
---                             data S = A | B Integer | C { n :: Integer }
+--                             data S = A | B Int | C { n :: Int }
 --                               ⇔  "A"  or  {"tag":"A"}
 --                               ⇔  {"tag":"B","contents":7}
 --                               ⇔  {"tag":"C","n":3}
@@ -277,14 +277,14 @@ fromJSONValue j = Right j
 -- The n-th element (0-based) of a list of Json values. Total: out of range
 -- yields JNull, but derived decoders only index after jExpectArrN has
 -- checked the arity.
-jNth :: Integer -> [Json] -> Json
+jNth :: Int -> [Json] -> Json
 jNth _ [] = JNull
 jNth 0 (x:_) = x
 jNth n (_:xs) = jNth (n - 1) xs
 
 -- Expect the positional arguments of constructor `con` as an array of
 -- exactly n elements.
-jExpectArrN :: String -> Integer -> Json -> Either String [Json]
+jExpectArrN :: String -> Int -> Json -> Either String [Json]
 jExpectArrN con n j = case jExpectArr j of
     Left e -> Left ("in the arguments of constructor '" <> con <> "': " <> e)
     Right xs -> if length xs == n
@@ -292,7 +292,7 @@ jExpectArrN con n j = case jExpectArr j of
         else Left ("constructor '" <> con <> "' takes " <> show n <> " arguments, but the array has " <> show (length xs))
 
 -- Decode argument #i (1-based, for messages) of constructor `con`.
-jArgWith :: (Json -> Either String a) -> String -> Integer -> Json -> Either String a
+jArgWith :: (Json -> Either String a) -> String -> Int -> Json -> Either String a
 jArgWith dec con i j = case dec j of
     Left e -> Left ("in argument " <> show i <> " of constructor '" <> con <> "': " <> e)
     Right x -> Right x
@@ -313,10 +313,10 @@ jTagNeedsObject con = Left ("the constructor '" <> con <> "' has fields, so a ba
 -- Value parser
 -- ================================================================
 
-parseValue :: String -> Integer -> Integer -> JResult
+parseValue :: String -> Int -> Int -> JResult
 parseValue s pos len = if pos > len then JErr "Unexpected end of input" else dispatchValue s pos len (strByte s pos)
 
-dispatchValue :: String -> Integer -> Integer -> Integer -> JResult
+dispatchValue :: String -> Int -> Int -> Int -> JResult
 dispatchValue s pos len 110 = parseNull s pos len
 dispatchValue s pos len 116 = parseTrue s pos len
 dispatchValue s pos len 102 = parseFalse s pos len
@@ -330,13 +330,13 @@ dispatchValue s pos len c = if c >= 48 && c <= 57 then parseNumber s pos len els
 -- Null, true, false
 -- ================================================================
 
-parseNull :: String -> Integer -> Integer -> JResult
+parseNull :: String -> Int -> Int -> JResult
 parseNull s pos len = if pos + 3 <= len && strSub s pos (pos + 3) == "null" then JOk JNull (skipWS s (pos + 4) len) else JErr "Expected 'null'"
 
-parseTrue :: String -> Integer -> Integer -> JResult
+parseTrue :: String -> Int -> Int -> JResult
 parseTrue s pos len = if pos + 3 <= len && strSub s pos (pos + 3) == "true" then JOk (JBool True) (skipWS s (pos + 4) len) else JErr "Expected 'true'"
 
-parseFalse :: String -> Integer -> Integer -> JResult
+parseFalse :: String -> Int -> Int -> JResult
 parseFalse s pos len = if pos + 4 <= len && strSub s pos (pos + 4) == "false" then JOk (JBool False) (skipWS s (pos + 5) len) else JErr "Expected 'false'"
 
 -- ================================================================
@@ -345,53 +345,53 @@ parseFalse s pos len = if pos + 4 <= len && strSub s pos (pos + 4) == "false" th
 -- Follows the JSON grammar exactly: -?int frac? exp?, where int has no
 -- leading zeros, and frac/exp require at least one digit. Enforcing the
 -- grammar here guarantees the matched text is always a valid Lua numeral,
--- so toNumber can never return garbage. Integer-syntax numbers parse to
--- Lua's 64-bit integer subtype (exact for the full Integer range) and
+-- so toNumber can never return garbage. Int-syntax numbers parse to
+-- Lua's 64-bit integer subtype (exact for the full Int range) and
 -- float syntax parses to a double, so no information is lost that a later
--- integrality check (fromJSONInteger) would need.
+-- integrality check (fromJSONInt) would need.
 -- ================================================================
 
-parseNumber :: String -> Integer -> Integer -> JResult
+parseNumber :: String -> Int -> Int -> JResult
 parseNumber s pos len = if strByte s pos == 45 then numIntStart s (pos + 1) len pos else numIntStart s pos len pos
 
-numIntStart :: String -> Integer -> Integer -> Integer -> JResult
+numIntStart :: String -> Int -> Int -> Int -> JResult
 numIntStart s pos len start = if pos > len then JErr ("Invalid number at position " <> show start <> ": expected a digit") else numIntByte s pos len start (strByte s pos)
 
-numIntByte :: String -> Integer -> Integer -> Integer -> Integer -> JResult
+numIntByte :: String -> Int -> Int -> Int -> Int -> JResult
 numIntByte s pos len start 48 = numAfterInt s (pos + 1) len start
 numIntByte s pos len start c = if c >= 49 && c <= 57 then numDigits s (pos + 1) len start else JErr ("Invalid number at position " <> show start <> ": expected a digit")
 
-numDigits :: String -> Integer -> Integer -> Integer -> JResult
+numDigits :: String -> Int -> Int -> Int -> JResult
 numDigits s pos len start = if pos <= len && isDigitByte (strByte s pos) then numDigits s (pos + 1) len start else numAfterInt s pos len start
 
-numAfterInt :: String -> Integer -> Integer -> Integer -> JResult
+numAfterInt :: String -> Int -> Int -> Int -> JResult
 numAfterInt s pos len start = if pos > len then numFinish s start pos else numAfterIntByte s pos len start (strByte s pos)
 
-numAfterIntByte :: String -> Integer -> Integer -> Integer -> Integer -> JResult
+numAfterIntByte :: String -> Int -> Int -> Int -> Int -> JResult
 numAfterIntByte s pos len start 46 = numFracStart s (pos + 1) len start
 numAfterIntByte s pos len start 101 = numExpSign s (pos + 1) len start
 numAfterIntByte s pos len start 69 = numExpSign s (pos + 1) len start
 numAfterIntByte s pos len start c = if isDigitByte c then JErr ("Invalid number at position " <> show start <> ": JSON does not allow leading zeros") else numFinish s start pos
 
-numFracStart :: String -> Integer -> Integer -> Integer -> JResult
+numFracStart :: String -> Int -> Int -> Int -> JResult
 numFracStart s pos len start = if pos <= len && isDigitByte (strByte s pos) then numFracDigits s (pos + 1) len start else JErr ("Invalid number at position " <> show start <> ": at least one digit is required after the decimal point")
 
-numFracDigits :: String -> Integer -> Integer -> Integer -> JResult
+numFracDigits :: String -> Int -> Int -> Int -> JResult
 numFracDigits s pos len start = if pos <= len && isDigitByte (strByte s pos) then numFracDigits s (pos + 1) len start else numAfterFrac s pos len start
 
-numAfterFrac :: String -> Integer -> Integer -> Integer -> JResult
+numAfterFrac :: String -> Int -> Int -> Int -> JResult
 numAfterFrac s pos len start = if pos <= len && (strByte s pos == 101 || strByte s pos == 69) then numExpSign s (pos + 1) len start else numFinish s start pos
 
-numExpSign :: String -> Integer -> Integer -> Integer -> JResult
+numExpSign :: String -> Int -> Int -> Int -> JResult
 numExpSign s pos len start = if pos <= len && (strByte s pos == 43 || strByte s pos == 45) then numExpStart s (pos + 1) len start else numExpStart s pos len start
 
-numExpStart :: String -> Integer -> Integer -> Integer -> JResult
+numExpStart :: String -> Int -> Int -> Int -> JResult
 numExpStart s pos len start = if pos <= len && isDigitByte (strByte s pos) then numExpDigits s (pos + 1) len start else JErr ("Invalid number at position " <> show start <> ": at least one digit is required in the exponent")
 
-numExpDigits :: String -> Integer -> Integer -> Integer -> JResult
+numExpDigits :: String -> Int -> Int -> Int -> JResult
 numExpDigits s pos len start = if pos <= len && isDigitByte (strByte s pos) then numExpDigits s (pos + 1) len start else numFinish s start pos
 
-numFinish :: String -> Integer -> Integer -> JResult
+numFinish :: String -> Int -> Int -> JResult
 numFinish s start pos = JOk (JNum (numExact (strSub s start (pos - 1)))) (skipWS s pos (strLen s))
 
 -- Convert matched number text to a Lua number, with one special case: the
@@ -406,7 +406,7 @@ numExact t = if t == "-9223372036854775808"
     then intToNum (0 - 9223372036854775807 - 1)
     else toNumber t
 
-isDigitByte :: Integer -> Bool
+isDigitByte :: Int -> Bool
 isDigitByte c = c >= 48 && c <= 57
 
 toNumber :: String -> LuaPure "tonumber" Number
@@ -421,27 +421,27 @@ toNumber :: String -> LuaPure "tonumber" Number
 -- control characters are rejected, as the JSON grammar requires.
 -- ================================================================
 
-parseStringVal :: String -> Integer -> Integer -> JResult
+parseStringVal :: String -> Int -> Int -> JResult
 parseStringVal s pos len = case parseStr s (pos + 1) len of
     SErr e -> JErr e
     SOk str pos2 -> JOk (JStr str) pos2
 
-parseStr :: String -> Integer -> Integer -> SResult
+parseStr :: String -> Int -> Int -> SResult
 parseStr s pos len = scanStr s len pos pos ""
 
-scanStr :: String -> Integer -> Integer -> Integer -> String -> SResult
+scanStr :: String -> Int -> Int -> Int -> String -> SResult
 scanStr s len chunkStart pos acc = if pos > len then SErr "Unterminated string" else scanStrByte s len chunkStart pos acc (strByte s pos)
 
-scanStrByte :: String -> Integer -> Integer -> Integer -> String -> Integer -> SResult
+scanStrByte :: String -> Int -> Int -> Int -> String -> Int -> SResult
 scanStrByte s len chunkStart pos acc 34 = SOk (acc <> strSub s chunkStart (pos - 1)) (skipWS s (pos + 1) len)
 scanStrByte s len chunkStart pos acc 92 = scanEsc s len (pos + 1) (acc <> strSub s chunkStart (pos - 1))
 scanStrByte s len chunkStart pos acc c = if c < 32 then SErr ("Control character (byte " <> show c <> ") at position " <> show pos <> ": control characters must be escaped inside a JSON string") else scanStr s len chunkStart (pos + 1) acc
 
 -- pos is the character after the backslash.
-scanEsc :: String -> Integer -> Integer -> String -> SResult
+scanEsc :: String -> Int -> Int -> String -> SResult
 scanEsc s len pos acc = if pos > len then SErr "Unterminated escape sequence" else scanEscByte s len pos acc (strByte s pos)
 
-scanEscByte :: String -> Integer -> Integer -> String -> Integer -> SResult
+scanEscByte :: String -> Int -> Int -> String -> Int -> SResult
 scanEscByte s len pos acc 34 = scanStr s len (pos + 1) (pos + 1) (acc <> strChar 34)
 scanEscByte s len pos acc 92 = scanStr s len (pos + 1) (pos + 1) (acc <> strChar 92)
 scanEscByte s len pos acc 47 = scanStr s len (pos + 1) (pos + 1) (acc <> strChar 47)
@@ -454,10 +454,10 @@ scanEscByte s len pos acc 117 = scanU s len pos acc
 scanEscByte s len pos acc _ = SErr ("Invalid escape sequence '\\" <> strSub s pos pos <> "' at position " <> show pos)
 
 -- pos is at the 'u'; the four hex digits are pos+1..pos+4.
-scanU :: String -> Integer -> Integer -> String -> SResult
+scanU :: String -> Int -> Int -> String -> SResult
 scanU s len pos acc = if pos + 4 > len then SErr ("Truncated \\u escape at position " <> show pos <> ": four hex digits are required") else scanUCode s len pos acc (readHex4 s (pos + 1))
 
-scanUCode :: String -> Integer -> Integer -> String -> Integer -> SResult
+scanUCode :: String -> Int -> Int -> String -> Int -> SResult
 scanUCode s len pos acc cp = if cp < 0
     then SErr ("Invalid \\u escape at position " <> show pos <> ": four hex digits are required")
     else if cp >= 55296 && cp <= 56319
@@ -468,31 +468,31 @@ scanUCode s len pos acc cp = if cp < 0
 
 -- A high surrogate must be followed by \uXXXX with a low surrogate; together
 -- they encode one code point above U+FFFF. The low escape spans pos+5..pos+10.
-scanUPair :: String -> Integer -> Integer -> String -> Integer -> SResult
+scanUPair :: String -> Int -> Int -> String -> Int -> SResult
 scanUPair s len pos acc hi = if pos + 10 > len || strByte s (pos + 5) /= 92 || strByte s (pos + 6) /= 117
     then loneHighErr pos
     else scanUPairLow s len pos acc hi (readHex4 s (pos + 7))
 
-scanUPairLow :: String -> Integer -> Integer -> String -> Integer -> Integer -> SResult
+scanUPairLow :: String -> Int -> Int -> String -> Int -> Int -> SResult
 scanUPairLow s len pos acc hi lo = if lo >= 56320 && lo <= 57343
     then scanStr s len (pos + 11) (pos + 11) (acc <> utf8Encode (65536 + (hi - 55296) * 1024 + (lo - 56320)))
     else loneHighErr pos
 
-loneHighErr :: Integer -> SResult
+loneHighErr :: Int -> SResult
 loneHighErr pos = SErr ("Unpaired high surrogate \\u escape at position " <> show pos <> ": JSON encodes characters above U+FFFF as a surrogate pair, so a high surrogate (\\uD800-\\uDBFF) must be followed immediately by a low surrogate (\\uDC00-\\uDFFF)")
 
 -- Parse four hex digits starting at pos; -1 if any digit is invalid.
-readHex4 :: String -> Integer -> Integer
+readHex4 :: String -> Int -> Int
 readHex4 s pos = combineHex (hexVal (strByte s pos)) (hexVal (strByte s (pos + 1))) (hexVal (strByte s (pos + 2))) (hexVal (strByte s (pos + 3)))
 
-combineHex :: Integer -> Integer -> Integer -> Integer -> Integer
+combineHex :: Int -> Int -> Int -> Int -> Int
 combineHex a b c d = if a < 0 || b < 0 || c < 0 || d < 0 then -1 else ((a * 16 + b) * 16 + c) * 16 + d
 
-hexVal :: Integer -> Integer
+hexVal :: Int -> Int
 hexVal c = if c >= 48 && c <= 57 then c - 48 else if c >= 97 && c <= 102 then c - 87 else if c >= 65 && c <= 70 then c - 55 else -1
 
 -- Encode a Unicode code point as UTF-8 bytes.
-utf8Encode :: Integer -> String
+utf8Encode :: Int -> String
 utf8Encode cp = if cp < 128
     then strChar cp
     else if cp < 2048
@@ -505,51 +505,51 @@ utf8Encode cp = if cp < 128
 -- Arrays
 -- ================================================================
 
-parseArray :: String -> Integer -> Integer -> JResult
+parseArray :: String -> Int -> Int -> JResult
 parseArray s pos len = parseArrayStart s (skipWS s (pos + 1) len) len
 
-parseArrayStart :: String -> Integer -> Integer -> JResult
+parseArrayStart :: String -> Int -> Int -> JResult
 parseArrayStart s pos len = if pos > len then JErr "Unterminated array" else if strByte s pos == 93 then JOk (JArr []) (skipWS s (pos + 1) len) else parseArrayElems s pos len []
 
-parseArrayElems :: String -> Integer -> Integer -> [Json] -> JResult
+parseArrayElems :: String -> Int -> Int -> [Json] -> JResult
 parseArrayElems s pos len acc = case parseValue s pos len of
     JErr e -> JErr e
     JOk val pos2 -> parseArrayNext s pos2 len (val : acc)
 
-parseArrayNext :: String -> Integer -> Integer -> [Json] -> JResult
+parseArrayNext :: String -> Int -> Int -> [Json] -> JResult
 parseArrayNext s pos len acc = if pos > len then JErr "Unterminated array" else if strByte s pos == 93 then JOk (JArr (reverse acc)) (skipWS s (pos + 1) len) else if strByte s pos == 44 then parseArrayElems s (skipWS s (pos + 1) len) len acc else JErr ("Expected ',' or ']' at position " <> show pos)
 
 -- ================================================================
 -- Objects
 -- ================================================================
 
-parseObject :: String -> Integer -> Integer -> JResult
+parseObject :: String -> Int -> Int -> JResult
 parseObject s pos len = parseObjStart s (skipWS s (pos + 1) len) len
 
-parseObjStart :: String -> Integer -> Integer -> JResult
+parseObjStart :: String -> Int -> Int -> JResult
 parseObjStart s pos len = if pos > len then JErr "Unterminated object" else if strByte s pos == 125 then JOk (JObj []) (skipWS s (pos + 1) len) else parseObjPairs s pos len []
 
-parseObjPairs :: String -> Integer -> Integer -> [(String, Json)] -> JResult
+parseObjPairs :: String -> Int -> Int -> [(String, Json)] -> JResult
 parseObjPairs s pos len acc = if pos > len || strByte s pos /= 34 then JErr ("Expected string key at position " <> show pos) else case parseStr s (pos + 1) len of
     SErr e -> JErr e
     SOk key pos2 -> parseObjColon s key pos2 len acc
 
-parseObjColon :: String -> String -> Integer -> Integer -> [(String, Json)] -> JResult
+parseObjColon :: String -> String -> Int -> Int -> [(String, Json)] -> JResult
 parseObjColon s key pos len acc = if pos > len || strByte s pos /= 58 then JErr ("Expected ':' at position " <> show pos) else case parseValue s (skipWS s (pos + 1) len) len of
     JErr e -> JErr e
     JOk val pos2 -> parseObjNext s pos2 len ((key, val) : acc)
 
-parseObjNext :: String -> Integer -> Integer -> [(String, Json)] -> JResult
+parseObjNext :: String -> Int -> Int -> [(String, Json)] -> JResult
 parseObjNext s pos len acc = if pos > len then JErr "Unterminated object" else if strByte s pos == 125 then JOk (JObj (reverse acc)) (skipWS s (pos + 1) len) else if strByte s pos == 44 then parseObjPairs s (skipWS s (pos + 1) len) len acc else JErr ("Expected ',' or '}' at position " <> show pos)
 
 -- ================================================================
 -- Whitespace
 -- ================================================================
 
-skipWS :: String -> Integer -> Integer -> Integer
+skipWS :: String -> Int -> Int -> Int
 skipWS s pos len = if pos > len then pos else skipWSByte s pos len (strByte s pos)
 
-skipWSByte :: String -> Integer -> Integer -> Integer -> Integer
+skipWSByte :: String -> Int -> Int -> Int -> Int
 skipWSByte s pos len 32 = skipWS s (pos + 1) len
 skipWSByte s pos len 9 = skipWS s (pos + 1) len
 skipWSByte s pos len 10 = skipWS s (pos + 1) len
@@ -594,15 +594,15 @@ encodeFloat17 n s = if toNumber s == n then s else numFormat "%.17g" n
 encodeStr :: String -> String
 encodeStr s = strChar 34 <> escStr s 1 1 (strLen s) "" <> strChar 34
 
-escStr :: String -> Integer -> Integer -> Integer -> String -> String
+escStr :: String -> Int -> Int -> Int -> String -> String
 escStr s chunkStart pos len acc = if pos > len then acc <> strSub s chunkStart (pos - 1) else escStrByte s chunkStart pos len acc (strByte s pos)
 
-escStrByte :: String -> Integer -> Integer -> Integer -> String -> Integer -> String
+escStrByte :: String -> Int -> Int -> Int -> String -> Int -> String
 escStrByte s chunkStart pos len acc c = if c == 34 || c == 92 || c < 32
     then escStr s (pos + 1) (pos + 1) len (acc <> strSub s chunkStart (pos - 1) <> escChar c)
     else escStr s chunkStart (pos + 1) len acc
 
-escChar :: Integer -> String
+escChar :: Int -> String
 escChar 34 = strChar 92 <> strChar 34
 escChar 92 = strChar 92 <> strChar 92
 escChar 8 = "\\b"
@@ -612,14 +612,14 @@ escChar 13 = "\\r"
 escChar 9 = "\\t"
 escChar c = "\\u00" <> hexDigitChar (c `div` 16) <> hexDigitChar (c `mod` 16)
 
-hexDigitChar :: Integer -> String
+hexDigitChar :: Int -> String
 hexDigitChar d = if d < 10 then strChar (48 + d) else strChar (87 + d)
 
 -- Local FFI bindings for the codecs (kept local to avoid polluting the
 -- merged namespace with an LMath import).
-intToNum :: Integer -> LuaPure "tonumber" Number
+intToNum :: Int -> LuaPure "tonumber" Number
 numModf :: Number -> LuaPure "math.modf" (Number, Number)
-numFloor :: Number -> LuaPure "math.floor" Integer
+numFloor :: Number -> LuaPure "math.floor" Int
 numFormat :: String -> Number -> LuaPure "string.format" String
 -- __mll_math_type is the runtime's portability shim around math.type: native
 -- on Lua 5.3+, and on interpreters without an integer subtype (LuaJIT,
@@ -632,8 +632,9 @@ numHuge :: LuaPure "math.huge" Number
 -- (Lua 5.3+). Where it is False (LuaJIT), numbers are doubles only, so
 -- integers beyond 2^53 are not exactly representable and the strict 64-bit
 -- range checks in numToIntegerFloat correctly reject the int64 boundaries.
--- note: GHC's Integer is arbitrary-precision, so this platform distinction
--- has no GHC counterpart; use it to gate exactness expectations beyond 2^53.
+-- note: GHC's Int is a true 64-bit integer on every platform, so this Lua
+-- interpreter distinction has no GHC counterpart; use it to gate exactness
+-- expectations beyond 2^53 (the LuaJIT double-only host limitation).
 hasIntegerSubtype :: Bool
 hasIntegerSubtype = numMathType (intToNum 1) == "integer"
 
@@ -646,7 +647,7 @@ jLookup _ (JObj []) = Nothing
 jLookup k (JObj ((fk, fv) : rest)) = if k == fk then Just fv else jLookup k (JObj rest)
 jLookup _ _ = Nothing
 
-jIndex :: Integer -> Json -> Maybe Json
+jIndex :: Int -> Json -> Maybe Json
 jIndex _ (JArr []) = Nothing
 jIndex 0 (JArr (x:_)) = Just x
 jIndex n (JArr (_:xs)) = jIndex (n - 1) (JArr xs)

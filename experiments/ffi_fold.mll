@@ -21,26 +21,26 @@
 -- `db.fold(query, cb, init)` global (rows are modelled as plain integers here).
 
 -- Pure fold: the callback computes the next state with no side effects.
-foldRows :: String -> (Integer -> acc -> acc) -> acc -> LuaPure "db.fold" acc
+foldRows :: String -> (Int -> acc -> acc) -> acc -> LuaPure "db.fold" acc
 
 -- Effectful fold: the callback may perform I/O per row. It returns `LuaIO s acc`;
 -- the compiler runs that action and threads the resulting state.
-foldRowsIO :: String -> (Integer -> acc -> LuaIO s acc) -> acc -> LuaIO "db.fold" acc
+foldRowsIO :: String -> (Int -> acc -> LuaIO s acc) -> acc -> LuaIO "db.fold" acc
 
 -- Sum a column.
-total :: Integer
+total :: Int
 total = foldRows "SELECT n FROM t" (\n acc -> acc + n) 0
 
--- Accumulate sum and count together. The (Integer, Integer) state is opaque to
+-- Accumulate sum and count together. The (Int, Int) state is opaque to
 -- the Lua host and handed back to us unchanged on every row -- no marshalling,
 -- so the tuple is never flattened.
-summary :: (Integer, Integer)
+summary :: (Int, Int)
 summary = foldRows "SELECT n FROM t"
     (\n acc -> case acc of (s, c) -> (s + n, c + 1))
     (0, 0)
 
 -- An effectful fold step that logs each row as it is processed.
-logStep :: Integer -> Integer -> LuaIO s Integer
+logStep :: Int -> Int -> LuaIO s Int
 logStep n acc = do
     liftIO (putStrLn ("row: " <> show n))
     pure (acc + n)

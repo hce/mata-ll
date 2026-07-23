@@ -1,5 +1,5 @@
 //! Regression tests for the Prelude builtin `exit :: ExitValue -> IO ()`
-//! (SPEC "Standalone MATA-LL": `data ExitValue = Normal | Err Integer`).
+//! (SPEC "Standalone MATA-LL": `data ExitValue = Normal | Err Int`).
 //!
 //! Before the fix, `exit Normal` / `exit (Err 3)` typechecked but the
 //! emitted Lua referenced an undefined global `exit` and crashed at
@@ -68,7 +68,7 @@ fn exit_err_exits_with_given_code() {
     );
 }
 
-/// LOS provides a separate Integer-taking FFI `exit` (LuaIO "os.exit");
+/// LOS provides a separate Int-taking FFI `exit` (LuaIO "os.exit");
 /// wiring the Prelude ExitValue `exit` must not break it.
 #[test]
 fn los_integer_exit_still_works() {
