@@ -14,6 +14,9 @@ readme = "README.md"
 keywords = ["haskell", "lua", "compiler", "transpiler", "cli"]
 categories = ["compilers", "command-line-utilities"]
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [[bin]]
 name = "mll"
 path = "src/main.rs"

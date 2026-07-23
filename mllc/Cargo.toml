@@ -11,4 +11,7 @@ readme = "README.md"
 keywords = ["haskell", "lua", "compiler", "transpiler", "functional"]
 categories = ["compilers"]
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
