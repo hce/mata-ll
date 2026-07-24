@@ -1,6 +1,6 @@
-/// Test harness: discovers all .mll files in tests/cases/,
-/// compiles each with mllc, runs the result via mlua,
-/// and reports success/failure.
+//! Test harness: discovers all .mll files in tests/cases/,
+//! compiles each with mllc, runs the result via mlua,
+//! and reports success/failure.
 
 use std::path::Path;
 
@@ -3149,7 +3149,7 @@ fn examples_compile() {
     for entry in std::fs::read_dir(examples_dir).expect("Cannot read experiments/") {
         let entry = entry.unwrap();
         let path = entry.path();
-        if path.extension().map_or(true, |e| e != "mll") {
+        if path.extension().is_none_or(|e| e != "mll") {
             continue;
         }
         let stem = path.file_stem().unwrap().to_str().unwrap();
@@ -3181,7 +3181,7 @@ fn examples_curated_compile() {
     let mut failures = Vec::new();
     for entry in std::fs::read_dir(examples_dir).expect("Cannot read examples/") {
         let path = entry.unwrap().path();
-        if path.extension().map_or(true, |e| e != "mll") {
+        if path.extension().is_none_or(|e| e != "mll") {
             continue;
         }
         let stem = path.file_stem().unwrap().to_str().unwrap();

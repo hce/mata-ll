@@ -87,7 +87,7 @@ fn gen_expr(r: &mut Rng, depth: usize, out: &mut String) {
         }
         // Lambda.
         5 => {
-            out.push_str("\\");
+            out.push('\\');
             out.push_str(r.pick(VARS));
             out.push_str(" -> ");
             gen_expr(r, depth - 1, out);
@@ -283,7 +283,7 @@ fn gen_deep(r: &mut Rng) -> String {
         2 => format!(
             "main :: IO ()\nmain = print (({}1{}) 0)\n",
             "\\x -> ".repeat(d),
-            " ".to_string()
+            " "
         ),
         // Long flat infix chain (right-spine handling must be iterative).
         3 => {
