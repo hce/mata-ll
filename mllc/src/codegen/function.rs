@@ -89,7 +89,7 @@ impl CodeGen {
                     // cons cell whose TAIL self-reference `expr_lazy_ast` defers
                     // into a thunk. The cell itself is a concrete value, so the
                     // deferred self-reference reads it after assignment.
-                    let rhs = self.expr_lazy_ast(&clauses[0].body, &func.name);
+                    let rhs = self.expr_lazy_ast(&clauses[0].body);
                     stmts.push(Stmt::Assign(lua_name.clone(), rhs));
                     is_concrete = true;
                 } else {

@@ -313,8 +313,7 @@ fn paren_redundant(inner: &Expr, ctx: Ctx) -> bool {
 /// Shed every redundant paren layer at this slot, then normalize the
 /// children of whatever remains.
 fn normalize_expr(slot: &mut Expr, ctx: Ctx) {
-    loop {
-        let Expr::Paren(inner) = slot else { break };
+    while let Expr::Paren(inner) = slot {
         if !paren_redundant(inner, ctx) {
             break;
         }
@@ -997,7 +996,7 @@ fn whnf_by_construction(e: &Expr) -> bool {
 }
 
 /// Entry per function scope.
-fn force_whnf_block(stmts: &mut Vec<Stmt>) {
+fn force_whnf_block(stmts: &mut [Stmt]) {
     let mut facts = ScopeFacts::default();
     collect_facts_block(stmts, &mut facts);
     let active = std::collections::HashSet::new();
@@ -1067,11 +1066,10 @@ fn force_whnf_scope(
                     active.insert(names[0].clone());
                 }
             }
-            Stmt::Assign(lhs, rhs) if is_plain_ident(lhs) => {
-                if whnf_by_construction(rhs) && whnf_binding_qualifies(facts, lhs, true) {
+            Stmt::Assign(lhs, rhs) if is_plain_ident(lhs)
+                && whnf_by_construction(rhs) && whnf_binding_qualifies(facts, lhs, true) => {
                     active.insert(lhs.clone());
                 }
-            }
             _ => {}
         }
     }

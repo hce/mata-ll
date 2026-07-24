@@ -1350,7 +1350,7 @@ impl<'a> UsageCk<'a> {
             .filter(|b| rhs_usages.iter().any(|u| u.contains_key(&b.name)))
             .map(|b| b.name.as_str())
             .collect();
-        for (b, mut u_rhs) in binds.iter().zip(rhs_usages.into_iter()) {
+        for (b, mut u_rhs) in binds.iter().zip(rhs_usages) {
             // Group names inside a right-hand side served the taint/recursion
             // analysis; they must not leak past the group.
             for other in binds {

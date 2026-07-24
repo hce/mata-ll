@@ -1158,8 +1158,8 @@ impl CodeGen {
             let n: usize = parts[0].parse().unwrap();
             let eq_fns: Vec<&str> = parts[1].split(',').collect();
             let mut acc: Option<Expr> = None;
-            for i in 0..n {
-                let eq_ref = self.lua_ref(eq_fns[i]);
+            for (i, eq_fn) in eq_fns.iter().enumerate().take(n) {
+                let eq_ref = self.lua_ref(eq_fn);
                 // Indexing base: the tuple cell must be WHNF, but a
                 // concrete variable / already-forcing emission needs
                 // no extra wrapper (see forced_prefix_ast).
@@ -1435,7 +1435,7 @@ impl CodeGen {
         }
     }
 
-    pub(super) fn expr_lazy_ast(&mut self, expr: &TExpr, self_name: &str) -> Expr {
+    pub(super) fn expr_lazy_ast(&mut self, expr: &TExpr) -> Expr {
         // Check for infix cons: x : rest
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
             && op == ":" {
@@ -1444,7 +1444,7 @@ impl CodeGen {
                 // (`xs = error "boom" : xs`) is suspended, not run at
                 // construction. Same rule as the other three `:` sites.
                 let head = self.arg_ast(lhs, false);
-                let tail = self.expr_lazy_ast(rhs, self_name);
+                let tail = self.expr_lazy_ast(rhs);
                 return Expr::call_named("__mll_lazy_cons", vec![head, Expr::inline_fn0(tail)]);
             }
         // Check for App(App(Con(":"), head), tail)
@@ -1453,7 +1453,7 @@ impl CodeGen {
                 && let TExprKind::Con(name) = &con.kind
                     && name == ":" {
                         let head_e = self.arg_ast(head, false);
-                        let tail_e = self.expr_lazy_ast(tail, self_name);
+                        let tail_e = self.expr_lazy_ast(tail);
                         return Expr::call_named(
                             "__mll_lazy_cons",
                             vec![head_e, Expr::inline_fn0(tail_e)],

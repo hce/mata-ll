@@ -415,11 +415,10 @@ fn collect_baseline_redefinitions(
                     spans.entry(name).or_insert(c.span);
                 }
             }
-            ast::Decl::TypeSig { name, .. } | ast::Decl::ExportSig { name, .. } => {
-                if seen.insert(name) {
+            ast::Decl::TypeSig { name, .. } | ast::Decl::ExportSig { name, .. }
+                if seen.insert(name) => {
                     order.push(name);
                 }
-            }
             _ => {}
         }
     }

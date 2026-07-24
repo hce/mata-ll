@@ -200,6 +200,7 @@ impl CodeGen {
     ///   - App of a resolved primitive eq/ord/concat method (2 args): inlined
     ///     as a native Lua operator over forced operands (see the expr_ast
     ///     App arm and primitive_method_lua_op).
+    ///
     /// Everything else (general calls, if/case/let IIFEs, SpecCalls) may
     /// legitimately yield a thunk and reports false.
     pub(super) fn expr_yields_whnf(&self, expr: &TExpr) -> bool {
@@ -339,7 +340,7 @@ impl CodeGen {
     ///     then *requires* the value be suspended, so it is thunked (or passed
     ///     as an already-suspended reference) and forced only if the callee
     ///     actually demands it. This is what makes
-    ///         g _ = 42 ;  g (error "boom")   ==>  42
+    ///     `g _ = 42 ;  g (error "boom")   ==>  42`
     ///     rather than raising "boom": `g` never forces its argument, so the
     ///     `error` thunk is never run.
     ///

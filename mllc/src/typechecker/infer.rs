@@ -410,7 +410,7 @@ impl Checker {
             self.collect_required_var_constraints(class, &rty, &mut reduced);
             for (rc, rv) in reduced {
                 let e = groups.entry(rv).or_insert(VarInfo { classes: Vec::new(), full: Vec::new() });
-                if !e.classes.iter().any(|c| *c == rc) { e.classes.push(rc); }
+                if !e.classes.contains(&rc) { e.classes.push(rc); }
             }
         }
 
@@ -1615,14 +1615,9 @@ impl Checker {
         // Count argument types from the function type
         let mut arg_types = Vec::new();
         let mut current = ty.clone();
-        loop {
-            match current {
-                Ty::Arrow(a, b, _) => {
-                    arg_types.push(*a);
-                    current = *b;
-                }
-                _ => break,
-            }
+        while let Ty::Arrow(a, b, _) = current {
+            arg_types.push(*a);
+            current = *b;
         }
         let ret_ty = current;
 

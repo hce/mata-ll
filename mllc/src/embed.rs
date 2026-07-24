@@ -1,30 +1,30 @@
-/// Source embedding: carry the original .mll source inside the emitted Lua
-/// so the .lua file can later be recompiled without the .mll being present
-/// (`mll --recompile file.lua`).
-///
-/// Two forms, both placed at the very top of the emitted file (before the
-/// runtime prelude), so the genuine markers always precede any user-derived
-/// content — extraction takes the *earliest* marker and therefore cannot be
-/// fooled by marker-lookalike text inside the embedded source or inside
-/// generated string literals:
-///
-///   Comments (`--embed-source comments`):
-///     --[==[ MLL-EMBEDDED-SOURCE-BEGIN
-///     <source, verbatim>
-///     MLL-EMBEDDED-SOURCE-END ]==]
-///
-///   Variable (`--embed-source var`):
-///     local __SOURCE_CODE = [==[
-///     <source, verbatim>]==]
-///     ...
-///     return { __SOURCE_CODE = __SOURCE_CODE, ... }   -- module exports
-///
-/// Robustness: both forms use Lua long brackets whose level (the number of
-/// `=` signs) is chosen so the closing sequence `]=…=]` does not occur in the
-/// source, so no source text can terminate the block early. The variable
-/// form exploits Lua's rule that a newline immediately after the opening
-/// long bracket is skipped: at runtime `__SOURCE_CODE` is exactly the source
-/// text. Extraction is textual (this module), byte-exact in both forms.
+//! Source embedding: carry the original .mll source inside the emitted Lua
+//! so the .lua file can later be recompiled without the .mll being present
+//! (`mll --recompile file.lua`).
+//!
+//! Two forms, both placed at the very top of the emitted file (before the
+//! runtime prelude), so the genuine markers always precede any user-derived
+//! content — extraction takes the *earliest* marker and therefore cannot be
+//! fooled by marker-lookalike text inside the embedded source or inside
+//! generated string literals:
+//!
+//!   Comments (`--embed-source comments`):
+//!     --[==[ MLL-EMBEDDED-SOURCE-BEGIN
+//!     <source, verbatim>
+//!     MLL-EMBEDDED-SOURCE-END ]==]
+//!
+//!   Variable (`--embed-source var`):
+//!     local __SOURCE_CODE = [==[
+//!     <source, verbatim>]==]
+//!     ...
+//!     return { __SOURCE_CODE = __SOURCE_CODE, ... }   -- module exports
+//!
+//! Robustness: both forms use Lua long brackets whose level (the number of
+//! `=` signs) is chosen so the closing sequence `]=…=]` does not occur in the
+//! source, so no source text can terminate the block early. The variable
+//! form exploits Lua's rule that a newline immediately after the opening
+//! long bracket is skipped: at runtime `__SOURCE_CODE` is exactly the source
+//! text. Extraction is textual (this module), byte-exact in both forms.
 
 /// How to embed the original source into the emitted Lua.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

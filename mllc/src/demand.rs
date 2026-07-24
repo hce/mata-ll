@@ -122,6 +122,7 @@ const PRIMITIVE_BINOP_METHODS: &[&str] = &[
 ///   * `show_Unit` is omitted entirely: it returns "()" without forcing.
 ///   * `foldr`/`foldl` are omitted: their seed argument is forced only on the
 ///     empty-structure path, and the accumulator must stay lazy.
+///
 /// `map`/`filter`/`zipWith` force their FUNCTION argument too (`f = __force(f)`
 /// runs before the nil check), so that position is strict as well.
 const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
@@ -1333,6 +1334,7 @@ fn map_meet(a: &DemandMap, b: &DemandMap) -> DemandMap {
 
 /// Structured demand rows for every analyzed function, plus the
 /// whole-program deep-result set. See the section comment above.
+#[derive(Default)]
 pub struct Rows {
     /// name → per-parameter demand when the function runs and its result
     /// is demanded to WHNF. `None` = parameter stays lazy.
@@ -1351,17 +1353,6 @@ pub struct Rows {
     arity: HashMap<String, usize>,
 }
 
-impl Default for Rows {
-    fn default() -> Self {
-        Rows {
-            run: HashMap::new(),
-            deep: HashMap::new(),
-            deep_result: HashSet::new(),
-            result_deep: HashMap::new(),
-            arity: HashMap::new(),
-        }
-    }
-}
 
 impl Rows {
     /// The result demand codegen must assume for `name`'s own body: the
@@ -1455,14 +1446,17 @@ pub struct LocalRows {
     result_deep: Demand,
 }
 
+/// Records every fully-applied call-head visit: Var-node address →
+/// `(callee, joined result demand, fully applied)`.
+type CallSites = HashMap<usize, (String, Demand, bool)>;
+
 /// Everything the structured walker needs to look up.
 struct RowCx<'a> {
     rows: &'a Rows,
     locals: &'a HashMap<String, LocalRows>,
     inlined: &'a dyn Fn(&str) -> bool,
-    /// When present, records every fully-applied call-head visit:
-    /// Var-node address → (callee, joined result demand, fully applied).
-    sites: Option<&'a std::cell::RefCell<HashMap<usize, (String, Demand, bool)>>>,
+    /// When present, records every fully-applied call-head visit.
+    sites: Option<&'a std::cell::RefCell<CallSites>>,
 }
 
 impl<'a> RowCx<'a> {

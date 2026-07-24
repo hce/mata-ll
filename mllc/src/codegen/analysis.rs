@@ -111,8 +111,8 @@ impl CodeGen {
                                 // whenever the callee assumes a value one was
                                 // passed. Any other argument may be thunked by
                                 // arg_ast, so mark the position thunked here.
-                                if !(Self::is_cheap_with(arg, &|_| false)
-                                    && !Self::contains_trapping_op(arg))
+                                if !Self::is_cheap_with(arg, &|_| false)
+                                    || Self::contains_trapping_op(arg)
                                 {
                                     thunked[i] = true;
                                 }

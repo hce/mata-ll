@@ -90,6 +90,9 @@ impl LocalDecl {
     }
 }
 
+/// LuaDict data types keyed by type name: `(type_vars, [(field_name, field_ty)])`.
+type LuaDictTypeFields = std::collections::HashMap<String, (Vec<String>, Vec<(String, Ty)>)>;
+
 /// Tracks constructor info for code generation.
 struct CodeGen {
     /// Current `expr_ast` recursion depth, bounded by
@@ -133,7 +136,7 @@ struct CodeGen {
     /// LuaDict data types keyed by *type* name: (type_vars, [(field_name,
     /// field_ty)]). Used to build type-directed decoders for values that cross
     /// the Lua FFI boundary (see ffi_decode_desc).
-    luadict_type_fields: std::collections::HashMap<String, (Vec<String>, Vec<(String, Ty)>)>,
+    luadict_type_fields: LuaDictTypeFields,
     /// LuaDict *enum* constructors (an all-nullary sum type deriving LuaDict):
     /// TIR constructor name -> the Lua string tag it becomes at runtime (the
     /// `as "tag"` rename when present, the constructor name otherwise). Presence
@@ -332,7 +335,6 @@ impl CodeGen {
     /// Create a sub-CodeGen that shares this generator's lookup tables but
     /// whose state changes are discarded (used for guard conditions — see
     /// `guard_cond_ast` in pattern.rs).
-
     fn new_sub(&self) -> CodeGen {
         let mut sub = CodeGen::new();
         sub.constructors = self.constructors.clone();

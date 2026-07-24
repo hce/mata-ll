@@ -252,6 +252,7 @@ fn flatten_expr(e: TExpr, binds: &mut Vec<TLocalDef>, ctr: &mut usize) -> TExpr 
 ///     eagerly is identical to inlining it; or
 ///   * the binding will be *thunked* by codegen (`!is_cheap`), so it stays lazy
 ///     and is forced exactly at its single reference — again identical.
+///
 /// A non-strict position whose binding would be emitted eagerly (`is_cheap`) is
 /// left inline, so short-circuited `&&`/`||` operands and other lazy positions
 /// keep their non-strict semantics.

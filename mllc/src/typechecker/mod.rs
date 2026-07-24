@@ -778,14 +778,9 @@ impl Checker {
         // Collect the head and args from nested App: F a b -> (F, [a, b])
         let mut args = Vec::new();
         let mut head = ty;
-        loop {
-            match head {
-                Type::App(f, a) => {
-                    args.push(a.as_ref());
-                    head = f.as_ref();
-                }
-                _ => break,
-            }
+        while let Type::App(f, a) = head {
+            args.push(a.as_ref());
+            head = f.as_ref();
         }
         args.reverse();
 
@@ -868,11 +863,9 @@ impl Checker {
     fn try_expand_type_alias(&mut self, ty: &Type) -> Option<Ty> {
         let mut args = Vec::new();
         let mut head = ty;
-        loop {
-            match head {
-                Type::App(f, a) => { args.push(a.as_ref()); head = f.as_ref(); }
-                _ => break,
-            }
+        while let Type::App(f, a) = head {
+            args.push(a.as_ref());
+            head = f.as_ref();
         }
         args.reverse();
         let alias_name = match head {
@@ -1110,6 +1103,7 @@ impl Checker {
     ///     marshaller treats its re-entry);
     ///   - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;
     ///   - `IO a` / `LuaIO _ a` in EXPORT (result) position iff `a` is allowed.
+    ///
     /// Everything else is rejected: a bare type variable (no runtime rep for a
     /// polymorphic value), a region-scoped `ST`/`STArray`/`STRef` handle, `IO`/
     /// `LuaIO` in IMPORT (argument) position, and any unknown constructor.
@@ -3536,11 +3530,8 @@ impl Checker {
                     // declared context is visible (the resolved type has the
                     // context stripped). Peel a leading forall/parens first.
                     let mut ctx_ty = ty;
-                    loop {
-                        match ctx_ty {
-                            Type::Forall { inner, .. } | Type::Paren(inner) => ctx_ty = inner,
-                            _ => break,
-                        }
+                    while let Type::Forall { inner, .. } | Type::Paren(inner) = ctx_ty {
+                        ctx_ty = inner;
                     }
                     if let Type::Constrained { constraints, .. } = ctx_ty
                         && !constraints.is_empty()

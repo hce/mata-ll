@@ -32,7 +32,9 @@ impl CodeGen {
     /// - SpecCall __mll_io: → emit Lua call directly
     /// - SpecCall for ST primitives → emit operation directly
     /// - pure/return → emit the value
+    ///
     /// Falls back to __force(expr)() for unknown actions.
+    ///
     /// Whether performing `action` yields a value already in WHNF (a forced
     /// value) rather than a possibly-suspended thunk. A `<-`-bound variable is
     /// marked `concrete` (read force-free downstream) only when this holds.
