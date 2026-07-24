@@ -5,6 +5,9 @@ edition = "2024"
 description = "Integration test suite for mata-ll (not published)."
 publish = false
 
+[lints.rust]
+unsafe_code = "forbid"
+
 [dependencies]
 mllc = { path = "../mllc" }
 mlua = { version = "0.12", features = ["lua54", "vendored"] }
