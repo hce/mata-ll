@@ -195,7 +195,7 @@ impl Checker {
 
             let str_ty = Ty::Con("String".into());
             let lit = |s: &str| TExpr::new(
-                TExprKind::Lit(TLiteral::Str(s.into())),
+                TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())),
                 Ty::Con("String".into()),
             );
             let concat = |lhs: TExpr, rhs: TExpr| TExpr::new(
@@ -783,7 +783,7 @@ impl Checker {
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
-                            format!("toEnum: index out of range for {}", type_name)
+                            format!("toEnum: index out of range for {}", type_name).into_bytes()
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
@@ -822,7 +822,7 @@ impl Checker {
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
-                            format!("succ: already at maxBound for {}", type_name)
+                            format!("succ: already at maxBound for {}", type_name).into_bytes()
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
@@ -861,7 +861,7 @@ impl Checker {
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
-                            format!("pred: already at minBound for {}", type_name)
+                            format!("pred: already at minBound for {}", type_name).into_bytes()
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
@@ -1536,7 +1536,7 @@ impl Checker {
     }
 
     pub(super) fn jx_str(s: &str) -> TExpr {
-        TExpr::new(TExprKind::Lit(TLiteral::Str(s.to_string())), Ty::Con("String".into()))
+        TExpr::new(TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())), Ty::Con("String".into()))
     }
 
     pub(super) fn jx_int(i: i64) -> TExpr {

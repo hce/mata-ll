@@ -41,19 +41,26 @@ pub(super) fn lua_bare_key_ok(name: &str) -> bool {
 /// emitted with all three digits (`\000`, not `\0`): Lua greedily reads up to
 /// three digits after `\`, so a short escape followed by a literal digit
 /// character would silently change the string's value.
-pub(super) fn lua_quoted_string(s: &str) -> String {
+/// Emit a Lua string literal for a mata-ll `String`, which is a raw byte
+/// array (see HASKDIFF.md "Strings and ByteStrings"). Each byte is emitted
+/// so the resulting Lua string has EXACTLY those bytes: printable ASCII goes
+/// through verbatim, control bytes and the high half (128..=255) use Lua's
+/// `\ddd` decimal byte escape. This is what keeps `\181` in source a single
+/// byte 181 in the output — matching the byte-wise `show` side.
+pub(super) fn lua_quoted_string(s: &[u8]) -> String {
     let mut out = String::from("\"");
-    for c in s.chars() {
-        match c {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\\' => out.push_str("\\\\"),
-            '"' => out.push_str("\\\""),
-            c if (c as u32) < 0x20 || c == '\u{7f}' => {
-                out.push_str(&format!("\\{:03}", c as u32));
-            }
-            _ => out.push(c),
+    for &b in s {
+        match b {
+            b'\n' => out.push_str("\\n"),
+            b'\r' => out.push_str("\\r"),
+            b'\t' => out.push_str("\\t"),
+            b'\\' => out.push_str("\\\\"),
+            b'"' => out.push_str("\\\""),
+            0x20..=0x7e => out.push(b as char),
+            // Control bytes and the high half escape as a fixed-width `\ddd`
+            // decimal byte escape — the historical format for control bytes,
+            // and unambiguous next to a following digit.
+            _ => out.push_str(&format!("\\{:03}", b)),
         }
     }
     out.push('"');
@@ -83,7 +90,7 @@ pub(super) fn lua_number_literal(n: f64) -> String {
 /// A bracketed Lua string-literal table key: `["na\"me"]`. Always valid —
 /// the key text is escaped by the canonical `lua_quoted_string`.
 pub(super) fn lua_key_string(name: &str) -> String {
-    format!("[{}]", lua_quoted_string(name))
+    format!("[{}]", lua_quoted_string(name.as_bytes()))
 }
 
 /// Suffix that reads a LuaDict field from a table value: `.name` or `["name"]`.

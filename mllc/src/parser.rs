@@ -75,6 +75,22 @@ impl Parser {
         tok
     }
 
+    /// Decode a string-literal token used in a SYMBOL position (an FFI Lua
+    /// name, a type-level Symbol, a JSON/field rename key, a constructor
+    /// rename). These are identifiers/text, so a byte sequence that is not
+    /// valid UTF-8 (which a `\181`-style escape can now produce) is rejected
+    /// rather than passed through as a lossy name. The value string literal
+    /// keeps its raw bytes.
+    fn strlit_as_symbol(&self, bytes: Vec<u8>, context: &str) -> PResult<String> {
+        String::from_utf8(bytes).map_err(|_| {
+            self.err_here(format!(
+                "String literal used as {} contains non-UTF-8 bytes (e.g. a \
+                 numeric escape above \\127); a {} must be text",
+                context, context
+            ))
+        })
+    }
+
     /// A parse diagnostic pointing at the current token. The span renders
     /// inline as ` at line:col`, exactly the parser's historical format.
     fn err_here(&self, msg: String) -> Box<Diagnostic> {
@@ -416,7 +432,7 @@ impl Parser {
                 let external_key = if matches!(self.peek(), Token::Ident(s) if s == "as") {
                     self.advance();
                     match self.peek().clone() {
-                        Token::StrLit(s) => { self.advance(); Some(s) }
+                        Token::StrLit(s) => { self.advance(); Some(self.strlit_as_symbol(s, "a field rename key")?) }
                         _ => {
                             return Err(self.err_here(format!(
                                 "Expected a string literal after 'as' in field '{}' (e.g. `{} as \"key\" :: T`), found {:?}",
@@ -490,7 +506,7 @@ impl Parser {
         match self.peek().clone() {
             Token::StrLit(s) => {
                 self.advance();
-                Ok(Some(s))
+                Ok(Some(self.strlit_as_symbol(s, "a constructor rename name")?))
             }
             other => Err(self.err_here(format!(
                 "Expected a string literal after 'as' in constructor '{}' (e.g. `{} as \"name\"`), found {:?}",
@@ -1234,7 +1250,7 @@ impl Parser {
                 }
                 // Build nested if/else from guards
                 let body = guards.into_iter().rev().fold(
-                    Expr::App(Box::new(Expr::Var("error".into())), Box::new(Expr::Lit(Literal::Str("non-exhaustive guards".into())))),
+                    Expr::App(Box::new(Expr::Var("error".into())), Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec())))),
                     |else_branch, (cond, val)| Expr::If {
                         cond: Box::new(cond),
                         then_branch: Box::new(val),
@@ -1473,7 +1489,7 @@ impl Parser {
     /// at the declaration, gives one early error that covers every FFI form.
     fn parse_ffi_lua_name(&mut self, kw: &str) -> PResult<String> {
         let lua_name = match self.peek().clone() {
-            Token::StrLit(s) => { self.advance(); s }
+            Token::StrLit(s) => { self.advance(); self.strlit_as_symbol(s, "an FFI Lua name")? }
             _ => return Err(self.err_here(format!("{} expects a string literal", kw))),
         };
         if let Err(why) = validate_ffi_callee(&lua_name) {
@@ -1669,7 +1685,8 @@ impl Parser {
             Token::StrLit(s) => {
                 // Type-level string literal (Symbol kind)
                 self.advance();
-                Ok(Type::Con(format!("\"{}\"", s)))
+                let sym = self.strlit_as_symbol(s, "a type-level Symbol")?;
+                Ok(Type::Con(format!("\"{}\"", sym)))
             }
             _ => {
                 Err(self.err_here(format!("Expected type, found {:?}", self.peek())))
@@ -2257,7 +2274,7 @@ impl Parser {
             Token::StrLit(s) => {
                 self.advance();
                 Ok(Expr::Lit(Literal::Str(s)))
-            }
+            } // s: Vec<u8>, the decoded bytes of the literal
             Token::Ident(name) => {
                 self.advance();
                 Ok(Expr::Var(name))
@@ -2957,7 +2974,7 @@ impl Parser {
                                 guards: vec![],
                                 body: Expr::App(
                                     Box::new(Expr::Var("error".into())),
-                                    Box::new(Expr::Lit(Literal::Str("non-exhaustive lambda pattern".into()))),
+                                    Box::new(Expr::Lit(Literal::Str(b"non-exhaustive lambda pattern".to_vec()))),
                                 ),
                             });
                             return Ok(Expr::Lambda {
@@ -3307,7 +3324,8 @@ fn is_comparison_op(op: &str) -> bool {
 /// Estimate the source length of a token for adjacency checks.
 fn token_len(tok: &Token) -> usize {
     match tok {
-        Token::Ident(s) | Token::UpperIdent(s) | Token::StrLit(s) => s.len(),
+        Token::Ident(s) | Token::UpperIdent(s) => s.len(),
+        Token::StrLit(s) => s.len(),
         Token::Operator(s) => s.len(),
         Token::IntLit(n) => format!("{}", n).len(),
         Token::NumLit(n) => format!("{}", n).len(),

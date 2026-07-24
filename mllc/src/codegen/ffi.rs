@@ -226,7 +226,7 @@ impl CodeGen {
                     let fs: Vec<String> = fields.iter().map(|(fname, fty)| {
                         let fty = subst_tyvars(fty, &smap);
                         let d = child(self, &fty, stack);
-                        format!("{{n={},d={}}}", lua_quoted_string(fname), d)
+                        format!("{{n={},d={}}}", lua_quoted_string(fname.as_bytes()), d)
                     }).collect();
                     stack.pop();
                     Some(format!("{{k=\"record\",fs={{{}}}}}", fs.join(",")))
@@ -464,7 +464,7 @@ impl CodeGen {
                             );
                             converts |= c;
                             any |= d != "false";
-                            fs.push(format!("{{n={},d={}}}", lua_quoted_string(fname), d));
+                            fs.push(format!("{{n={},d={}}}", lua_quoted_string(fname.as_bytes()), d));
                         }
                         stack.pop();
                         // If every field is opaque there is nothing to convert

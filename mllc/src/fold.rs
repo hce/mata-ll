@@ -199,7 +199,9 @@ fn try_fold_infix(op: &str, lhs: &TExpr, rhs: &TExpr, ty: &Ty) -> Option<TExpr> 
         }
         // String <> String
         (Some(TLiteral::Str(a)), Some(TLiteral::Str(b))) if op == "<>" => {
-            Some(TExpr::new(TExprKind::Lit(TLiteral::Str(format!("{}{}", a, b))), ty.clone()))
+            let mut joined = a.clone();
+            joined.extend_from_slice(b);
+            Some(TExpr::new(TExprKind::Lit(TLiteral::Str(joined)), ty.clone()))
         }
         // Bool && Bool, Bool || Bool, Bool == Bool
         (Some(TLiteral::Bool(a)), Some(TLiteral::Bool(b))) => {

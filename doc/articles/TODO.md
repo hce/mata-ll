@@ -39,17 +39,6 @@ MATA-LL TODO
       collapses), or maintain the env's free-variable set incrementally.
       Needs its own change with the perf benchmarks re-run.
 
-- [ ] **Lexer string escapes are a GHC subset.** The input side accepts only
-      `\n \t \r \\ \" \0`; GHC also has `\a \b \f \v`, numeric escapes
-      (`\181`), named control escapes (`\SOH` … `\US`, `\DEL`), and the `\&`
-      empty escape. Worse than missing: mata-ll's `\0` is not maximal-munch,
-      so GHC source `"\05"` means `['\5']` but mata-ll reads `['\0','5']` — a
-      silent wrong value, not a rejection. The `show` side is full GHC parity
-      (byte-verified against GHC's `showLitString`); this is the remaining
-      input-syntax gap. Fix is lexer-only: maximal-munch numeric escapes,
-      the named/shorthand tables (they already exist in the show runtime),
-      and `\&` as a zero-width separator.
-
 - [ ] **No scientific-notation literals.** `1.0e-2` lexes as the application
       `1.0 e - 2` and fails with "Unbound variable: e". GHC accepts
       `1.0e-2`, `1e5`, `2.5E+3` (integer literals with an exponent are
@@ -76,6 +65,41 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Lexer string escapes are now full GHC `read`-side parity (was the
+      last input-syntax gap).** The lexer accepted only `\n \t \r \\ \" \0`
+      and — worse than the missing escapes — `\0` was not maximal-munch, so
+      GHC source `"\05"` silently decoded to `['\0','5']` instead of `['\5']`.
+      The decoder (`lex_string_escape` in `mllc/src/lexer.rs`) now matches the
+      Haskell 2010 Report §2.6: the shorthand control escapes `\a`(7) `\b`(8)
+      `\f`(12) `\v`(11) alongside the existing ones; decimal, octal (`\o37`)
+      and hex (`\xff`) numeric escapes with MAXIMAL MUNCH (so `"\05"` is one
+      byte 5); the full named-control table `\NUL`..`\US` plus `\SP`(32) and
+      `\DEL`(127), longest-match so `\SOH` wins over `\SO`+`H`; the `\&`
+      zero-width separator (`"\137\&0"` is two bytes, `"\SO\&H"` disambiguates
+      the name) and the `\<whitespace>\` string gap (newlines allowed). The
+      Rust-side `CTRL_ESCAPE_NAMES` table is the input mirror of
+      `__mll_ctrl_names` in `codegen/runtime.lua` — kept identical byte-for-byte
+      so `read . show == id` through both halves. The deliberate deviation
+      forced by mata-ll's byte-string model (String is the Lua string, a byte
+      array — HASKDIFF.md "Strings and ByteStrings", so a character is one byte
+      0..=255): a numeric escape above 255 (which GHC accepts up to `\1114111`
+      as a Unicode code point) has no single-byte representation and is a LOUD
+      lexer error carrying a `note:` explaining why, never a silent wrong
+      value. Implementation surface: string literals now lex to a byte
+      sequence, so `Token::StrLit`, `Literal::Str` and `TLiteral::Str` carry
+      `Vec<u8>`; `lua_quoted_string` emits each byte exactly (printable ASCII
+      verbatim, everything else as `\ddd`), keeping generated `.lua`
+      byte-identical for all existing programs (no example or case has a
+      non-ASCII byte in a string literal — the corpus's high bytes are all in
+      comments). Symbol-position string literals (FFI Lua names, type-level
+      Symbols, JSON/field renames, constructor renames) decode back through
+      `Parser::strlit_as_symbol`, which rejects non-UTF-8 bytes rather than
+      pass a lossy name. Tests: `string_escapes.mll` (every new escape,
+      maximal munch, `\&`, string gaps, and `read . show == id` for the byte
+      escapes, all asserted against the Report's byte values since GHC cannot
+      run locally) and `string_escape_above_byte_range_is_rejected` (the
+      out-of-range `\256` rejection with its note) in `run_mll.rs`.
 
 - [x] **Renamed `Integer` → `Int` — the type is 64-bit and wrapping, and
       its name now says so.** Decided 2026-07-22, done in the same batch;

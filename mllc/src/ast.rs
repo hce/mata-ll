@@ -298,7 +298,11 @@ pub enum DoStmt {
 pub enum Literal {
     Integer(i64),
     Number(f64),
-    Str(String),
+    /// A string literal as its decoded BYTE sequence (mata-ll's `String` is
+    /// the Lua string — a byte array; see HASKDIFF.md "Strings and
+    /// ByteStrings"). ASCII-only string literals constructed inside the
+    /// compiler use `b"...".to_vec()` / `.into_bytes()`.
+    Str(Vec<u8>),
     Bool(bool),
     Unit,
 }

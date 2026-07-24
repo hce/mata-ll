@@ -29,7 +29,7 @@ impl CodeGen {
     fn non_exhaustive_stmt() -> Stmt {
         Stmt::Expr(Expr::call_named(
             "error",
-            vec![Expr::lit(lua_quoted_string("Non-exhaustive patterns"))],
+            vec![Expr::lit(lua_quoted_string(b"Non-exhaustive patterns"))],
         ))
     }
 
@@ -398,7 +398,7 @@ impl CodeGen {
                     conditions.push(Expr::binop(
                         "==",
                         scrutinee.clone(),
-                        Expr::lit(lua_quoted_string(str_tag)),
+                        Expr::lit(lua_quoted_string(str_tag.as_bytes())),
                     ));
                 } else if let Some((tag, total, is_enum)) = self.constructor_info(name) {
                     if is_enum {

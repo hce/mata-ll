@@ -1416,11 +1416,11 @@ impl Monomorphizer {
         let str_ty = Ty::Con("String".to_string());
 
         let mut parts: Vec<TExpr> = vec![
-            TExpr::new(TExprKind::Lit(TLiteral::Str("(".to_string())), str_ty.clone()),
+            TExpr::new(TExprKind::Lit(TLiteral::Str(b"(".to_vec())), str_ty.clone()),
         ];
         for (i, show_fn) in elem_show_names.iter().enumerate() {
             if i > 0 {
-                parts.push(TExpr::new(TExprKind::Lit(TLiteral::Str(",".to_string())), str_ty.clone()));
+                parts.push(TExpr::new(TExprKind::Lit(TLiteral::Str(b",".to_vec())), str_ty.clone()));
             }
             // show_Elem(t[i+1]) — represented as App(Var(show_fn), SpecCall to access field)
             let field_access = TExpr::new(
@@ -1440,7 +1440,7 @@ impl Monomorphizer {
             );
             parts.push(show_call);
         }
-        parts.push(TExpr::new(TExprKind::Lit(TLiteral::Str(")".to_string())), str_ty.clone()));
+        parts.push(TExpr::new(TExprKind::Lit(TLiteral::Str(b")".to_vec())), str_ty.clone()));
 
         // Chain with ++
         let body = parts.into_iter().reduce(|acc, part| {

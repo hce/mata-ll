@@ -1013,6 +1013,12 @@ ghc_test!(ghc_regr020, "ghc_regr020.mll");
 
 // Library module tests (need lib/ search path)
 mll_lib_test!(lib_lstring, "lib_lstring.mll");
+// GHC-parity string escape decoding on the lexer side: shorthand \a \b \f \v,
+// decimal/octal/hex numeric escapes with maximal munch (the \05-is-one-byte
+// fix), named control escapes (\SOH..\US, \SP, \DEL), the \& empty separator,
+// and string gaps — asserted against the byte values GHC would produce, plus
+// read . show == id for the byte escapes.
+mll_lib_test!(string_escapes, "string_escapes.mll");
 mll_lib_test!(error_forces_message, "error_forces_message.mll");
 mll_lib_test!(lib_lbit, "lib_lbit.mll");
 mll_lib_test!(lbit_64bit_boundary, "lbit_64bit_boundary.mll");
@@ -1040,6 +1046,41 @@ mll_lib_test!(ffi_constructed_values, "ffi_constructed_values.mll");
 mll_lib_test!(lib_liolinear, "lib_liolinear.mll");
 
 // Compile-error tests: these SHOULD fail to compile
+
+// A numeric string escape above 255 has no single-byte representation in
+// mata-ll's byte-oriented String (HASKDIFF.md, "Strings and ByteStrings"), so
+// it is a LOUD lexer error rather than a silent wrong value. GHC accepts up to
+// \1114111 because its String is [Char]; this is the one place the byte-string
+// model forces a documented deviation, and it must carry the explanatory note.
+#[test]
+fn string_escape_above_byte_range_is_rejected() {
+    let source = r#"
+main :: IO ()
+main = putStrLn "\256"
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("out of range") && msg.contains("\\256"),
+                "Expected an out-of-range numeric-escape error naming the escape, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("note:") && msg.contains("byte array"),
+                "The error must carry the byte-string note explaining the deviation, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("HASKDIFF.md"),
+                "The note must point at HASKDIFF.md, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("Expected a numeric escape \\256 to be rejected as out of byte range"),
+    }
+}
+
 #[test]
 fn fromjson_derive_requires_json_import() {
     // deriving (FromJSON) without `import JSON`: the class and the decoder

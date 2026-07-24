@@ -5,7 +5,14 @@ pub enum Token {
     // Literals
     IntLit(i64),
     NumLit(f64),
-    StrLit(String),
+    /// A string literal, stored as its decoded BYTE sequence. mata-ll's
+    /// `String` is the Lua string — a byte array with no encoding awareness
+    /// (see HASKDIFF.md "Strings and ByteStrings") — so a source literal is
+    /// lexed to bytes: a non-ASCII source character contributes its UTF-8
+    /// bytes, and a numeric escape (`\181`) contributes exactly one byte.
+    /// This is what keeps the input side round-trip-consistent with the
+    /// `show` side, which reads and escapes per byte.
+    StrLit(Vec<u8>),
 
     // Identifiers and operators
     Ident(String),      // lowercase start: variable, function
@@ -73,7 +80,7 @@ impl fmt::Display for Token {
         match self {
             Token::IntLit(n) => write!(f, "{}", n),
             Token::NumLit(n) => write!(f, "{}", n),
-            Token::StrLit(s) => write!(f, "\"{}\"", s),
+            Token::StrLit(s) => write!(f, "\"{}\"", String::from_utf8_lossy(s)),
             Token::Ident(s) => write!(f, "{}", s),
             Token::UpperIdent(s) => write!(f, "{}", s),
             Token::Operator(s) => write!(f, "{}", s),
@@ -211,25 +218,13 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
         if ch == '"' {
             pos += 1;
             col += 1;
-            let mut s = String::new();
+            let mut bytes: Vec<u8> = Vec::new();
             while pos < chars.len() && chars[pos] != '"' {
-                if chars[pos] == '\\' && pos + 1 < chars.len() {
-                    pos += 1;
-                    col += 1;
-                    match chars[pos] {
-                        'n' => s.push('\n'),
-                        't' => s.push('\t'),
-                        'r' => s.push('\r'),
-                        '\\' => s.push('\\'),
-                        '"' => s.push('"'),
-                        '0' => s.push('\0'),
-                        other => {
-                            return Err(format!(
-                                "Unknown escape sequence '\\{}' at {}:{}",
-                                other, line, col
-                            ));
-                        }
-                    }
+                if chars[pos] == '\\' {
+                    // Escape. `pos` is on the backslash; `lex_string_escape`
+                    // advances it past the whole escape and pushes 0..n bytes
+                    // (n == 0 for `\&` and for a string gap).
+                    lex_string_escape(&chars, &mut pos, &mut col, &mut line, &mut bytes)?;
                 } else {
                     if chars[pos] == '\n' {
                         return Err(format!(
@@ -237,10 +232,13 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                             tok_line, tok_col
                         ));
                     }
-                    s.push(chars[pos]);
+                    // A source character contributes its UTF-8 bytes: mata-ll
+                    // strings are byte arrays, so `μ` is the two bytes 0xC2 0xB5.
+                    let mut buf = [0u8; 4];
+                    bytes.extend_from_slice(chars[pos].encode_utf8(&mut buf).as_bytes());
+                    pos += 1;
+                    col += 1;
                 }
-                pos += 1;
-                col += 1;
             }
             if pos >= chars.len() {
                 return Err(format!(
@@ -251,7 +249,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
             pos += 1; // closing quote
             col += 1;
             tokens.push(Located {
-                token: Token::StrLit(s),
+                token: Token::StrLit(bytes),
                 line: tok_line,
                 col: tok_col,
             });
@@ -452,4 +450,216 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
 fn is_operator_char(c: char) -> bool {
     matches!(c, '!' | '#' | '$' | '%' | '&' | '*' | '+' | '.' | '/' |
                 '<' | '=' | '>' | '?' | '@' | '^' | '|' | '-' | '~' | ':')
+}
+
+/// GHC's named ASCII control escapes, indexed so that entry `i` decodes to
+/// byte `i`. This is the input-side mirror of `__mll_ctrl_names` in
+/// codegen/runtime.lua (the `show`/`showLitString` side): the two tables are
+/// kept identical byte-for-byte so a string round-trips (`read . show == id`)
+/// through both halves. `\SP` (32) and `\DEL` (127) are handled separately
+/// because they fall outside this 0..=31 run.
+const CTRL_ESCAPE_NAMES: [&str; 32] = [
+    "NUL", "SOH", "STX", "ETX", "EOT", "ENQ", "ACK", "BEL", "BS", "HT", "LF",
+    "VT", "FF", "CR", "SO", "SI", "DLE", "DC1", "DC2", "DC3", "DC4", "NAK",
+    "SYN", "ETB", "CAN", "EM", "SUB", "ESC", "FS", "GS", "RS", "US",
+];
+
+/// Decode a single string escape. On entry `*pos` indexes the backslash; on
+/// return it indexes the first character AFTER the whole escape. Zero, one, or
+/// more bytes are appended to `out` (`\&` and a string gap append nothing;
+/// every other escape appends one byte). Follows GHC's lexical syntax
+/// (Haskell 2010 Report §2.6) with maximal munch on numeric escapes and on the
+/// named-control table, deviating only where mata-ll's byte-string model forces
+/// it (see the range check below).
+fn lex_string_escape(
+    chars: &[char],
+    pos: &mut usize,
+    col: &mut usize,
+    line: &mut usize,
+    out: &mut Vec<u8>,
+) -> Result<(), String> {
+    // Position of the backslash, for error messages.
+    let (esc_line, esc_col) = (*line, *col);
+    *pos += 1; // consume backslash
+    *col += 1;
+    if *pos >= chars.len() {
+        return Err(format!(
+            "Unterminated escape sequence at {}:{}",
+            esc_line, esc_col
+        ));
+    }
+    let c = chars[*pos];
+
+    // Single-character shorthand escapes (GHC's `charesc`), plus `\&`.
+    let simple: Option<i32> = match c {
+        'a' => Some(7),
+        'b' => Some(8),
+        'f' => Some(12),
+        'n' => Some(10),
+        'r' => Some(13),
+        't' => Some(9),
+        'v' => Some(11),
+        '\\' => Some(92),
+        '"' => Some(34),
+        '\'' => Some(39),
+        '&' => Some(-1), // \& : the empty escape, contributes no byte
+        _ => None,
+    };
+    if let Some(v) = simple {
+        *pos += 1;
+        *col += 1;
+        if v >= 0 {
+            out.push(v as u8);
+        }
+        return Ok(());
+    }
+
+    // String gap: backslash, run of whitespace (newlines allowed), backslash.
+    // The whole run — including the closing backslash — produces nothing.
+    if c.is_whitespace() {
+        while *pos < chars.len() && chars[*pos].is_whitespace() {
+            if chars[*pos] == '\n' {
+                *line += 1;
+                *col = 1;
+            } else {
+                *col += 1;
+            }
+            *pos += 1;
+        }
+        if *pos >= chars.len() || chars[*pos] != '\\' {
+            return Err(format!(
+                "Malformed string gap at {}:{}: a `\\<whitespace>` gap must be \
+                 closed by a second `\\`",
+                esc_line, esc_col
+            ));
+        }
+        *pos += 1; // closing backslash
+        *col += 1;
+        return Ok(());
+    }
+
+    // `\^X` control escapes: \^@ = 0, \^A..\^Z = 1..26, \^[ \^\ \^] \^^ \^_ = 27..31.
+    if c == '^' {
+        *pos += 1;
+        *col += 1;
+        if *pos >= chars.len() {
+            return Err(format!(
+                "Unterminated `\\^` control escape at {}:{}",
+                esc_line, esc_col
+            ));
+        }
+        let cc = chars[*pos];
+        let code = match cc {
+            '@'..='_' => (cc as u32) - ('@' as u32), // '@'=64 -> 0 ... '_'=95 -> 31
+            _ => {
+                return Err(format!(
+                    "Invalid `\\^` control escape `\\^{}` at {}:{}: expected a \
+                     character in the range `@`..`_`",
+                    cc, esc_line, esc_col
+                ));
+            }
+        };
+        *pos += 1;
+        *col += 1;
+        out.push(code as u8);
+        return Ok(());
+    }
+
+    // Numeric escapes with MAXIMAL MUNCH.
+    //   \<decimal+>   e.g. \181, \5   (\05 is one byte 5, NOT \0 then '5')
+    //   \o<octal+>    e.g. \o37
+    //   \x<hex+>      e.g. \xff
+    // GHC uses `o`/`x` (lowercase only) as radix markers; `\O`/`\X` are not
+    // octal/hex escapes.
+    let radix: u32 = match c {
+        'o' => 8,
+        'x' => 16,
+        d if d.is_ascii_digit() => 10,
+        _ => 0,
+    };
+    if radix != 0 {
+        // For `\o`/`\x`, step past the marker; the digits start after it.
+        if radix != 10 {
+            *pos += 1;
+            *col += 1;
+        }
+        let digit_start = *pos;
+        while *pos < chars.len() && chars[*pos].is_digit(radix) {
+            *pos += 1;
+            *col += 1;
+        }
+        if *pos == digit_start {
+            return Err(format!(
+                "Malformed numeric escape at {}:{}: `\\{}` must be followed by \
+                 at least one {} digit",
+                esc_line,
+                esc_col,
+                c,
+                match radix { 8 => "octal", 16 => "hexadecimal", _ => "decimal" },
+            ));
+        }
+        let digits: String = chars[digit_start..*pos].iter().collect();
+        // The escape as written, for error messages (`\o37`, `\181`).
+        let shown = if radix == 10 { digits.clone() } else { format!("{}{}", c, digits) };
+        let value = u32::from_str_radix(&digits, radix).map_err(|_| {
+            format!(
+                "Numeric escape `\\{}` at {}:{} overflows",
+                shown, esc_line, esc_col
+            )
+        })?;
+        // mata-ll strings are byte arrays (HASKDIFF.md "Strings and
+        // ByteStrings"): a character is a single byte 0..=255 (this is exactly
+        // what `strByte`/`strChar` and the byte-wise `show` operate on). GHC's
+        // upper bound is 0x10FFFF (a Unicode code point), but a value above 255
+        // cannot be represented as one byte here, so it is a LOUD lexer error
+        // rather than a silent wrong value. This is the one place mata-ll's
+        // byte-string model forces a deviation from GHC's char-string model.
+        if value > 255 {
+            return Err(format!(
+                "Numeric escape `\\{}` at {}:{} is out of range for a mata-ll \
+                 String.\n  note: a mata-ll String is a byte array (the Lua \
+                 string), not a sequence of Unicode Char; a character is a \
+                 single byte 0..=255. GHC accepts up to \\1114111 because its \
+                 String is [Char], but that value has no single-byte \
+                 representation here. Encode the code point as its UTF-8 \
+                 bytes if you need it (see HASKDIFF.md, \"Strings and \
+                 ByteStrings\").",
+                shown, esc_line, esc_col
+            ));
+        }
+        out.push(value as u8);
+        return Ok(());
+    }
+
+    // Named ASCII control escapes, MAXIMAL MUNCH over the table. `\SOH` must
+    // win over `\SO` + `H`; `\&` is how the writer disambiguates (`show` emits
+    // `"\SO\&H"`), so we take the longest matching name.
+    let rest: String = chars[*pos..].iter().collect();
+    let mut best: Option<(usize, u8)> = None; // (name length, byte)
+    for (i, name) in CTRL_ESCAPE_NAMES.iter().enumerate() {
+        if rest.starts_with(name)
+            && best.map(|(len, _)| name.len() > len).unwrap_or(true)
+        {
+            best = Some((name.len(), i as u8));
+        }
+    }
+    // `\SP` (space, 32) and `\DEL` (127) are named too but sit outside the
+    // 0..=31 control run.
+    if rest.starts_with("SP") && best.map(|(len, _)| 2 > len).unwrap_or(true) {
+        best = Some((2, 32));
+    }
+    if rest.starts_with("DEL") && best.map(|(len, _)| 3 > len).unwrap_or(true) {
+        best = Some((3, 127));
+    }
+    if let Some((len, byte)) = best {
+        *pos += len;
+        *col += len;
+        out.push(byte);
+        return Ok(());
+    }
+
+    Err(format!(
+        "Unknown escape sequence `\\{}` at {}:{}",
+        c, esc_line, esc_col
+    ))
 }

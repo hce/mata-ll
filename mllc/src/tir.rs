@@ -467,7 +467,8 @@ pub enum TPattern {
 pub enum TLiteral {
     Integer(i64),
     Number(f64),
-    Str(String),
+    /// A string literal as its decoded BYTE sequence — see `Literal::Str`.
+    Str(Vec<u8>),
     Bool(bool),
     Unit,
 }
