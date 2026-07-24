@@ -1363,10 +1363,12 @@ impl Diagnostic {
         match &self.kind {
             DiagnosticKind::Mismatch(a, b) | DiagnosticKind::RigidMismatch(a, b)
                 if is_string_list_mismatch(a, b) =>
-                Some("in mata-ll String is not a list of characters — it is an opaque \
-                      type that does not unify with [a]. A String cannot be passed where \
-                      a list is expected, and list functions (++, map, length, …) do not \
-                      accept it."),
+                Some("in mata-ll String is opaque — it is the Lua string (a byte array), \
+                      NOT [Char] — so it does not unify with [a], and list operations \
+                      (++, map, length, intercalate, …) do not accept it. To join Strings \
+                      use the Semigroup operator (<>): `\"a\" <> \"b\"`; to join a list of \
+                      Strings, fold it with <> or use mconcat (there is no ++/intercalate \
+                      for String). See HASKDIFF.md, \"Strings and ByteStrings\"."),
             DiagnosticKind::NoInstance { class, ty }
                 if class == "Ord" && matches!(ty, Ty::Tuple(_) | Ty::List(_) | Ty::App(_, _)) =>
                 Some("mata-ll has no Ord instance for tuples, lists, or Maybe; compare their \

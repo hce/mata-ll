@@ -1081,6 +1081,45 @@ main = putStrLn "\256"
     }
 }
 
+// A `[a]`-vs-`String` unification failure (e.g. `"a" ++ "b"`) is a
+// completeness gap, not a soundness violation — mata-ll's String is opaque,
+// not [Char] (decided 2026-07-22; see HASKDIFF.md, "Strings and ByteStrings").
+// The rejection must be maximally informative: it must say String is not
+// [Char], point at <> for concatenation, and cite HASKDIFF.md.
+#[test]
+fn string_vs_list_mismatch_note_explains_the_design() {
+    let source = r#"
+main :: IO ()
+main = putStrLn ("a" ++ "b")
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("Cannot unify") && msg.contains("String"),
+                "Expected a String/list unification error, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("note:") && msg.contains("opaque") && msg.contains("[Char]"),
+                "The note must say String is opaque, not [Char], got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("<>"),
+                "The note must point at <> for concatenation, got: {}",
+                msg
+            );
+            assert!(
+                msg.contains("HASKDIFF.md"),
+                "The note must cite HASKDIFF.md, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("Expected `\"a\" ++ \"b\"` to be rejected (String is not a list)"),
+    }
+}
+
 #[test]
 fn fromjson_derive_requires_json_import() {
     // deriving (FromJSON) without `import JSON`: the class and the decoder
@@ -6873,10 +6912,14 @@ main = print (length "hello")
     );
     assert!(e.contains("[a]"), "var should prettify to [a], got: {e}");
     assert!(!e.contains("_i"), "internal `_i` var names must not leak, got: {e}");
-    assert!(e.contains("not a list of characters"), "missing String/list note, got: {e}");
-    // The note must NOT prescribe string ops here: line is `trie "..."`, a list
-    // is wanted — there is nothing to concatenate or show.
-    assert!(!e.contains("concatenat"), "note must not suggest concatenation, got: {e}");
+    // The String/list note must explain the opaque-String design: not [Char],
+    // list ops don't apply, and <> is how you concatenate Strings. (Updated
+    // 2026-07-24: the note now prescribes <> per the error-message convention;
+    // see the TODO "String-vs-list type errors should explain the design".)
+    assert!(e.contains("opaque") && e.contains("[Char]"),
+        "missing opaque-String note, got: {e}");
+    assert!(e.contains("<>") && e.contains("HASKDIFF.md"),
+        "note must point at <> and HASKDIFF.md, got: {e}");
 
     // `<>` on a list should point the user at `++`.
     let e = compile_err(

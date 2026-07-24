@@ -3,17 +3,6 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **`String`-vs-list type errors should explain the design.** String
-      stays opaque — decided 2026-07-22: the `[Char]` fiction would buy
-      neither speed nor expressiveness, and `[Char]` itself remains
-      usable as an ordinary list type. `++` on a String failing is a
-      completeness gap, not a soundness violation (see HASKDIFF.md, "Why
-      GHC parity"), so the remaining work is making the rejection
-      maximally informative per the error-message convention:
-      `Cannot unify '[a]' with 'String'` should carry a `note:` saying
-      mata-ll's String is not `[Char]`, that `<>` concatenates, and
-      pointing at HASKDIFF.md. Error-path-only change.
-
 - [ ] **Document the user-facing evaluation-strategy contract.**
       HASKDIFF.md has no section on evaluation. DESIGN.md describes the
       machinery (memoizing thunks by default, cheapness and demand
@@ -100,6 +89,28 @@ MATA-LL TODO
       escapes, all asserted against the Report's byte values since GHC cannot
       run locally) and `string_escape_above_byte_range_is_rejected` (the
       out-of-range `\256` rejection with its note) in `run_mll.rs`.
+
+- [x] **`String`-vs-list type errors now explain the opaque-String design.**
+      String stays opaque — decided 2026-07-22: the `[Char]` fiction would buy
+      neither speed nor expressiveness, and `[Char]` itself remains usable as
+      an ordinary list type. `++` on a String failing is a completeness gap,
+      not a soundness violation (HASKDIFF.md, "Why GHC parity"), so the work
+      was purely to make the rejection maximally informative per the
+      error-message convention. The `Mismatch`/`RigidMismatch` hint for a
+      `[a]`-vs-`String` unification (both directions, via the existing
+      `is_string_list_mismatch` gate in `mllc/src/types.rs`) now states that
+      String is opaque — the Lua string (a byte array), NOT `[Char]` — that
+      list operations (`++`, `map`, `length`, `intercalate`) do not apply, that
+      `<>` concatenates Strings and a list of Strings folds with `<>` /
+      `mconcat`, and points at HASKDIFF.md ("Strings and ByteStrings").
+      Error-path only: nothing that typechecked before changes, and the note
+      fires specifically for the `[a]`-vs-`String` shape, not for unrelated
+      unify failures. The pre-existing `type_errors_are_explained_not_cryptic`
+      assertion that the note must NOT prescribe string ops was superseded by
+      this deliberate change and updated in lockstep. Test:
+      `string_vs_list_mismatch_note_explains_the_design` in `run_mll.rs`
+      (asserts the opaque/`[Char]`, `<>`, and HASKDIFF.md content on
+      `"a" ++ "b"`).
 
 - [x] **Renamed `Integer` → `Int` — the type is 64-bit and wrapping, and
       its name now says so.** Decided 2026-07-22, done in the same batch;
