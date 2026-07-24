@@ -2555,7 +2555,7 @@ main = do
     let captured = lua.create_table().unwrap();
     lua.globals().set("__captured", captured.clone()).unwrap();
     let print_fn = lua
-        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
             let line = s.to_str()?.to_string();
             let t: mlua::Table = lua.globals().get("__captured")?;
             let n = t.raw_len();
@@ -6482,7 +6482,7 @@ fn prelude_foldable_generic_allows_monomorphic_redefinition() {
     let captured = lua.create_table().unwrap();
     lua.globals().set("__captured", captured.clone()).unwrap();
     let print_fn = lua
-        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
             let line = s.to_str()?.to_string();
             let t: mlua::Table = lua.globals().get("__captured")?;
             let n = t.raw_len();
@@ -7189,7 +7189,7 @@ main = do
     let captured = lua.create_table().unwrap();
     lua.globals().set("__captured", captured.clone()).unwrap();
     let print_fn = lua
-        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
             let line = s.to_str()?.to_string();
             let t: mlua::Table = lua.globals().get("__captured")?;
             let n = t.raw_len();
@@ -7346,7 +7346,7 @@ main = do
     let captured = lua.create_table().unwrap();
     lua.globals().set("__captured", captured.clone()).unwrap();
     let print_fn = lua
-        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
             let line = s.to_str()?.to_string();
             let t: mlua::Table = lua.globals().get("__captured")?;
             let n = t.raw_len();
@@ -7396,7 +7396,7 @@ main = do
     let captured = lua.create_table().unwrap();
     lua.globals().set("__captured", captured.clone()).unwrap();
     let print_fn = lua
-        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
             let line = s.to_str()?.to_string();
             let t: mlua::Table = lua.globals().get("__captured")?;
             let n = t.raw_len();
@@ -7434,7 +7434,7 @@ fn run_capturing_lines(source: &str, name: &str) -> Vec<String> {
     let captured = lua.create_table().unwrap();
     lua.globals().set("__captured", captured.clone()).unwrap();
     let print_fn = lua
-        .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
             let line = s.to_str()?.to_string();
             let t: mlua::Table = lua.globals().get("__captured")?;
             let n = t.raw_len();
@@ -9380,7 +9380,7 @@ main = do
         let captured = lua.create_table().unwrap();
         lua.globals().set("__captured", captured.clone()).unwrap();
         let print_fn = lua
-            .create_function(|lua, s: mlua::String| -> mlua::Result<()> {
+            .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
                 let t: mlua::Table = lua.globals().get("__captured")?;
                 let n = t.raw_len();
                 t.raw_set(n + 1, s.to_str()?.to_string())?;
