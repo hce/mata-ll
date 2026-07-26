@@ -3890,6 +3890,14 @@ fn extract_ffi_info(ty: &Type) -> Option<(String, FfiKind)> {
         Type::LuaCatch { lua_name, .. } => Some((lua_name.clone(), FfiKind::Catch)),
         Type::LuaIOCatch { lua_name, .. } => Some((lua_name.clone(), FfiKind::IOCatch)),
         Type::Paren(inner) => extract_ffi_info(inner),
+        // Peel a class-constraint context (`LuaDict b => … -> LuaIO …`) and a
+        // rank-N `forall`, exactly as `ast_type_to_ty` does: the FFI form that
+        // makes this a body-less import sits at the tail of the arrow chain,
+        // under any qualifier. Without this a constrained FFI import (its
+        // constraint bounds a marshalled argument, e.g. `LuaDict b => … [b] …`)
+        // is not recognised and is rejected as a signature with no definition.
+        Type::Constrained { ty, .. } => extract_ffi_info(ty),
+        Type::Forall { inner, .. } => extract_ffi_info(inner),
         _ => None,
     }
 }

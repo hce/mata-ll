@@ -2762,6 +2762,33 @@ main = print (sqrtNum 4.0)
 }
 
 #[test]
+fn constrained_ffi_signature_without_body_accepted() {
+    // A body-less FFI import may carry a class-constraint context (the
+    // constraint bounds a marshalled argument — here `LuaDict b` guarantees the
+    // rows the callback folds are marshallable). The FFI-import detector must
+    // peel that context (and any forall) to find the trailing `LuaIO`/`LuaPure`
+    // form; otherwise the constrained signature is misread as an ordinary
+    // signature with no accompanying definition. Regression: `extract_ffi_info`
+    // previously stopped at `Type::Constrained` and returned None.
+    let source = r#"
+newtype Db = Db LuaUserData
+
+data Row = Row { rId as "id" :: Int, rName as "name" :: String }
+    deriving (LuaDict, Show)
+
+dbQuery :: LuaDict b => Db -> (a -> [b] -> a) -> a -> String -> [b] -> LuaIO ":query_array" a
+
+main :: IO ()
+main = pure ()
+"#;
+    match mllc::compile(source, Path::new("."), &[]) {
+        Ok(_) => {}
+        Err(e) => panic!(
+            "constrained body-less FFI import should compile, got error: {}", e),
+    }
+}
+
+#[test]
 fn orphan_instance_rejected() {
     // Show and Int are both defined in the prelude, not locally.
     // Defining an instance for them here is an orphan instance.

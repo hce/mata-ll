@@ -367,6 +367,13 @@ API of the `mllc` library crate.)
   mismatched case/`if` branch reports at that branch. Errors that surface only
   when reconciling a whole binding against its uses, and deferred class-instance
   errors ("No instance for …"), still fall back to the clause head.
+- **A constrained FFI import is no longer rejected as undefined.** A body-less
+  FFI signature carrying a class context — e.g.
+  `dbQuery :: LuaDict b => Db -> (a -> [b] -> a) -> … -> LuaIO ":query_array" a`,
+  where the constraint bounds a marshalled argument — was misread as an ordinary
+  signature with no accompanying definition, because the FFI-import detector
+  stopped at the `=>` qualifier. It now peels the context (and any `forall`) to
+  find the trailing `LuaIO`/`LuaPure`/… form, matching type reduction.
 - **Prefix minus follows GHC's grammar.** Prefix minus now has the fixity
   of binary subtraction (`infixl 6`), with GHC's exact consequences:
   `a + -b`, `a - -b`, `a * -b`, and ``a `div` -b`` are parse errors (the
