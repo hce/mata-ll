@@ -1182,7 +1182,7 @@ impl Parser {
                 self.advance();
                 let condition = self.parse_expr()?;
                 self.expect(&Token::Eq)?;
-                let body = self.parse_expr()?;
+                let body = self.parse_stmt_expr()?;
                 guards.push(Guard { condition, body });
                 self.skip_newlines_and_indent();
             }
@@ -1260,7 +1260,7 @@ impl Parser {
                 binds.push(LocalDef { name, patterns, body });
             } else {
                 self.expect(&Token::Eq)?;
-                let body = self.parse_expr()?;
+                let body = self.parse_stmt_expr()?;
                 binds.push(LocalDef { name, patterns, body });
             }
         }
@@ -1695,6 +1695,20 @@ impl Parser {
     }
 
     // --- Expression parsing ---
+
+    /// Parse a statement-boundary expression — a do-statement, a let/where
+    /// binding body, a case-branch or guard body — and wrap it in an
+    /// `Expr::Spanned` marker carrying the line it starts on. The marker is
+    /// transparent to every later pass but lets the type checker report an
+    /// error against the offending statement's line rather than the clause
+    /// head. Skips leading layout first so the span is the real first token.
+    fn parse_stmt_expr(&mut self) -> PResult<Expr> {
+        self.skip_newlines_and_indent();
+        let loc = self.peek_loc();
+        let span = Span::new(loc.line, loc.col);
+        let e = self.parse_expr()?;
+        Ok(Expr::Spanned(span, Box::new(e)))
+    }
 
     fn parse_expr(&mut self) -> PResult<Expr> {
         // Skip leading indent/newlines to find the actual expression start
@@ -2622,10 +2636,10 @@ impl Parser {
                 let cond = self.parse_expr()?;
                 self.skip_newlines_and_indent();
                 self.expect(&Token::Then)?;
-                let then_branch = self.parse_expr()?;
+                let then_branch = self.parse_stmt_expr()?;
                 self.skip_newlines_and_indent();
                 self.expect(&Token::Else)?;
-                let else_branch = self.parse_expr()?;
+                let else_branch = self.parse_stmt_expr()?;
                 Ok(Expr::If {
                     cond: Box::new(cond),
                     then_branch: Box::new(then_branch),
@@ -2646,7 +2660,7 @@ impl Parser {
                         if self.at(&Token::RightBrace) { break; }
                         let pattern = self.parse_pattern()?;
                         self.expect(&Token::Arrow)?;
-                        let body = self.parse_expr()?;
+                        let body = self.parse_stmt_expr()?;
                         branches.push(CaseBranch { pattern, guards: vec![], body });
                         if self.at(&Token::Semicolon) { self.advance(); } else { break; }
                     }
@@ -2689,7 +2703,7 @@ impl Parser {
                             self.advance();
                             let condition = self.parse_expr()?;
                             self.expect(&Token::Arrow)?;
-                            let body = self.parse_expr()?;
+                            let body = self.parse_stmt_expr()?;
                             guards.push(Guard { condition, body });
                             self.skip_newlines_and_indent();
                         }
@@ -2700,7 +2714,7 @@ impl Parser {
                         });
                     } else {
                         self.expect(&Token::Arrow)?;
-                        let body = self.parse_expr()?;
+                        let body = self.parse_stmt_expr()?;
                         branches.push(CaseBranch {
                             pattern,
                             guards: vec![],
@@ -2776,7 +2790,7 @@ impl Parser {
                         patterns.push(self.parse_pattern_atom()?);
                     }
                     self.expect(&Token::Eq)?;
-                    let mut body = self.parse_expr()?;
+                    let mut body = self.parse_stmt_expr()?;
                     // Desugar a function binding `let f x y = e` into a value
                     // binding of a lambda `f = \x y -> e`, matching do-`let`.
                     // This keeps the whole `let` group a uniform value-binding
@@ -2909,7 +2923,7 @@ impl Parser {
                         if let Ok(pat) = self.parse_pattern_atom()
                             && matches!(pat, Pattern::Tuple(_)) && self.at(&Token::Bind) {
                                 self.advance();
-                                let expr = self.parse_expr()?;
+                                let expr = self.parse_stmt_expr()?;
                                 stmts.push(DoStmt::PatternBind { pattern: pat, expr });
                                 continue;
                             }
@@ -2923,7 +2937,7 @@ impl Parser {
                         self.advance();
                         if self.at(&Token::Bind) {
                             self.advance();
-                            let expr = self.parse_expr()?;
+                            let expr = self.parse_stmt_expr()?;
                             stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
                             continue;
                         }
@@ -2936,7 +2950,7 @@ impl Parser {
                         self.advance();
                         if self.at(&Token::Bind) {
                             self.advance();
-                            let expr = self.parse_expr()?;
+                            let expr = self.parse_stmt_expr()?;
                             stmts.push(DoStmt::Bind { name, expr });
                             continue;
                         }
@@ -2944,7 +2958,7 @@ impl Parser {
                     }
 
                     // Bare expression
-                    let expr = self.parse_expr()?;
+                    let expr = self.parse_stmt_expr()?;
                     stmts.push(DoStmt::Expr(expr));
                 }
 

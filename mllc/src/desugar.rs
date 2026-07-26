@@ -118,6 +118,9 @@ fn desugar_expr(expr: Expr) -> Expr {
             }).collect(),
             body: Box::new(desugar_expr(*body)),
         },
+        // Transparent location marker: desugar the inner expression and keep
+        // the wrapper so the checker can still locate errors by statement.
+        Expr::Spanned(sp, e) => Expr::Spanned(sp, Box::new(desugar_expr(*e))),
         Expr::Negate(e) => Expr::Negate(Box::new(desugar_expr(*e))),
         Expr::Paren(e) => Expr::Paren(Box::new(desugar_expr(*e))),
         Expr::Ascription(e, ty) => Expr::Ascription(Box::new(desugar_expr(*e)), ty),

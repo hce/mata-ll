@@ -597,6 +597,7 @@ impl Qual<'_> {
             },
             Expr::Paren(x) => Expr::Paren(Box::new(self.expr(x, bound))),
             Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| self.expr(x, bound)).collect()),
+            Expr::Spanned(sp, inner) => Expr::Spanned(*sp, Box::new(self.expr(inner, bound))),
         }
     }
 
@@ -792,6 +793,7 @@ fn rewrite_uses_expr(e: Expr, aliases: &HashSet<String>) -> Expr {
         },
         Expr::Paren(x) => Expr::Paren(Box::new(rewrite_uses_expr(*x, aliases))),
         Expr::Tuple(xs) => Expr::Tuple(xs.into_iter().map(|x| rewrite_uses_expr(x, aliases)).collect()),
+        Expr::Spanned(sp, inner) => Expr::Spanned(sp, Box::new(rewrite_uses_expr(*inner, aliases))),
         other => other,
     };
     // `App(Var field, Con alias)` with a known alias is a qualified reference.
@@ -969,6 +971,7 @@ fn refs_in_expr(e: &Expr, out: &mut HashSet<String>) {
                 refs_in_expr(x, out);
             }
         }
+        Expr::Spanned(_, inner) => refs_in_expr(inner, out),
     }
 }
 

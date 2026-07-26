@@ -267,6 +267,28 @@ pub enum Expr {
     OpFunc(String),
     /// Tuple expression: `(1, "hello", True)`
     Tuple(Vec<Expr>),
+    /// A transparent source-location marker wrapping a statement-boundary
+    /// expression (a do-statement, a let/where binding body, a case-branch or
+    /// guard body). It carries no semantics — every pass treats `Spanned(_, e)`
+    /// exactly as `e` — but lets the type checker attribute an error to the
+    /// offending statement's line instead of the enclosing clause head. The
+    /// wrapper is erased when the checker lowers to typed IR, so it never
+    /// reaches desugaring's output types or codegen. Introduced by the parser
+    /// at statement boundaries and survives `do`-desugaring (which is why it
+    /// lives on the expression, not on the statement nodes that desugar away).
+    Spanned(Span, Box<Expr>),
+}
+
+impl Expr {
+    /// Peel any `Spanned` markers to reach the underlying expression, for the
+    /// occasional structural inspection that must see the real node shape.
+    pub fn unspanned(&self) -> &Expr {
+        let mut e = self;
+        while let Expr::Spanned(_, inner) = e {
+            e = inner;
+        }
+        e
+    }
 }
 
 #[derive(Debug, Clone)]

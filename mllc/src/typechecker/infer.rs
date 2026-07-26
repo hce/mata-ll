@@ -184,7 +184,12 @@ impl Checker {
                 }
                 Err(e) => {
                     self.wanted.truncate(wanted_before);
-                    self.push_error_span(e, clause_ctx, clause.span);
+                    // Locate the error at the offending statement captured while
+                    // checking the body, falling back to the clause head for a
+                    // shape error that crossed no statement marker (e.g. an
+                    // argument-pattern mismatch).
+                    let span = self.error_span.take().unwrap_or(clause.span);
+                    self.push_error_span(e, clause_ctx, span);
                 }
             }
         }
@@ -449,6 +454,11 @@ impl Checker {
     }
 
     pub(super) fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, ctx: &str) -> Result<(TClause, Subst), DiagnosticKind> {
+        // Start each clause with no captured statement span: any error raised
+        // while checking this clause records the offending statement's span via
+        // the `Spanned` markers, which the caller uses to locate the diagnostic
+        // instead of the clause head.
+        self.error_span = None;
         let mut local_env = self.env.clone();
         let mut remaining_ty = fun_ty.clone();
         let mut subst = Subst::empty();
@@ -921,8 +931,33 @@ impl Checker {
         ))
     }
 
+    /// Latch a statement-boundary expression's span as the error location, for
+    /// a failure that surfaces at a PARENT unification (reconciling a branch's
+    /// type against the case/if result) rather than inside the branch's own
+    /// inference — where the `Spanned` arm's latch would already have fired.
+    /// No-op unless `e` is a `Spanned` marker and no inner statement has claimed
+    /// the location first.
+    fn latch_stmt_span(&mut self, e: &Expr) {
+        if self.error_span.is_none()
+            && let Expr::Spanned(sp, _) = e {
+            self.error_span = Some(*sp);
+        }
+    }
+
     fn infer_expr_inner(&mut self, expr: &Expr, env: &TypeEnv) -> Result<(TExpr, Ty, Subst), DiagnosticKind> {
         match expr {
+            // A transparent statement-boundary marker: infer the inner
+            // expression and, if it fails, latch this statement's span as the
+            // error location — but only if a deeper (inner) statement has not
+            // already claimed it, so the innermost failing statement wins. The
+            // marker is erased: the inner expression's typed IR is returned.
+            Expr::Spanned(span, inner) => {
+                let r = self.infer_expr(inner, env);
+                if r.is_err() && self.error_span.is_none() {
+                    self.error_span = Some(*span);
+                }
+                r
+            }
             Expr::Var(name) => {
                 if self.enforce_hidden && self.hidden_names.contains(name) {
                     return Err(DiagnosticKind::Other(
@@ -1141,7 +1176,10 @@ impl Checker {
                 let (tt, then_ty, s2) = self.infer_expr(then_branch, &env2)?;
                 let env3 = env2.apply_subst(&s2);
                 let (te, else_ty, s3) = self.infer_expr(else_branch, &env3)?;
-                let s4 = self.unify(&then_ty.apply_subst(&s3), &else_ty)?;
+                // then/else agree cleanly on their own; a mismatch reconciling
+                // them belongs at the else branch, not the clause head.
+                let s4 = self.unify(&then_ty.apply_subst(&s3), &else_ty)
+                    .inspect_err(|_| self.latch_stmt_span(else_branch))?;
                 let final_ty = then_ty.apply_subst(&s3).apply_subst(&s4);
                 Ok((
                     TExpr::new(TExprKind::If {
@@ -1180,7 +1218,8 @@ impl Checker {
                             let genv2 = branch_env.apply_subst(&subst);
                             let (tgbody, gbody_ty, gbs) = self.infer_expr(&guard.body, &genv2)?;
                             subst = subst.compose(&gbs);
-                            let gu = self.unify(&result_ty.apply_subst(&subst), &gbody_ty)?;
+                            let gu = self.unify(&result_ty.apply_subst(&subst), &gbody_ty)
+                                .inspect_err(|_| self.latch_stmt_span(&guard.body))?;
                             subst = subst.compose(&gu);
                             tguards.push(TGuard { condition: tcond, body: tgbody });
                         }
@@ -1188,7 +1227,11 @@ impl Checker {
 
                     let (tb, body_ty, body_subst) = self.infer_expr(&branch.body, &branch_env)?;
                     subst = subst.compose(&body_subst);
-                    let s = self.unify(&result_ty.apply_subst(&subst), &body_ty)?;
+                    // The branch body inferred cleanly; a mismatch here is the
+                    // branch's type disagreeing with the case result, so locate
+                    // it at this branch, not the clause head.
+                    let s = self.unify(&result_ty.apply_subst(&subst), &body_ty)
+                        .inspect_err(|_| self.latch_stmt_span(&branch.body))?;
                     subst = subst.compose(&s);
                     // The case's result outlives the branch, so an unpacked
                     // existential's skolem must not appear in it (e.g.

@@ -6796,6 +6796,50 @@ fn compile_err(source: &str) -> String {
     }
 }
 
+#[test]
+fn type_error_locates_the_offending_statement() {
+    // A type error must point at the statement/binding line that carries it,
+    // not the clause head. The checker attributes errors via `Expr::Spanned`
+    // markers placed at statement boundaries (let/where bindings, do-statements,
+    // case-branch and guard bodies, if-branches). Before this, every error in a
+    // multi-line body was reported at the function's first line.
+
+    // let-binding body: the error is on the `c = ...` line, not `compute x =`.
+    let e = compile_err(
+        "compute :: Int -> Int\n\
+         compute x =\n\
+         \x20   let a = x + 1\n\
+         \x20       c = a <> \"oops\"\n\
+         \x20   in c\n");
+    assert!(e.contains("at 4:"), "let-binding error points at the binding line (4): {e}");
+
+    // case-branch reconciliation: the error is on the offending branch line.
+    let e = compile_err(
+        "f :: Int -> String\n\
+         f n = case n of\n\
+         \x20   0 -> \"zero\"\n\
+         \x20   _ -> n\n");
+    assert!(e.contains("at 4:"), "case-branch error points at the branch line (4): {e}");
+
+    // do-statement: a unification error inside a statement is on its own line.
+    let e = compile_err(
+        "main :: IO ()\n\
+         main = do\n\
+         \x20   putStrLn \"ok\"\n\
+         \x20   putStrLn (length \"x\")\n");
+    assert!(e.contains("at 4:"), "do-statement error points at the statement line (4): {e}");
+
+    // if-branch reconciliation: the error is on a branch line, not the head.
+    let e = compile_err(
+        "g :: Int -> Int\n\
+         g x =\n\
+         \x20   if x > 0\n\
+         \x20       then \"pos\"\n\
+         \x20       else x\n");
+    assert!(e.contains("at 4:") || e.contains("at 5:"),
+        "if-branch error points at a branch line (4 or 5): {e}");
+}
+
 /// The Haskell precedence-parsing rule: a chain of same-precedence operators
 /// is rejected when any of them is non-associative. GHC rejects every one of
 /// these programs the same way.

@@ -356,6 +356,17 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Type errors point at the offending statement, not the clause head.**
+  Previously every type error in a multi-line body was reported at the
+  function's first line, because the expression AST carried no source spans
+  below the clause. The parser now marks statement boundaries — let/where
+  binding bodies, do-statements, case-branch and guard bodies, and `if`
+  branches — with a transparent `Expr::Spanned` marker (erased when lowering to
+  typed IR), and the checker attributes an error to the innermost such marker it
+  was inside. So `c = a <> "oops"` in a `let` reports at the `c` line, and a
+  mismatched case/`if` branch reports at that branch. Errors that surface only
+  when reconciling a whole binding against its uses, and deferred class-instance
+  errors ("No instance for …"), still fall back to the clause head.
 - **Prefix minus follows GHC's grammar.** Prefix minus now has the fixity
   of binary subtraction (`infixl 6`), with GHC's exact consequences:
   `a + -b`, `a - -b`, `a * -b`, and ``a `div` -b`` are parse errors (the

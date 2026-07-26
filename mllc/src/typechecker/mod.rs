@@ -181,7 +181,7 @@ fn export_ffi_note(culprit: &Ty, dir: FfiDir) -> String {
         // user ADT) reached here has real constructors but no designed FFI
         // shape — it would cross only as its internal `{tag, fields…}` table,
         // which the host cannot interpret. Say so and point at the fixes.
-        _ if matches!(head, Some(_)) =>
+        _ if head.is_some() =>
             "this type has real constructors but no FFI representation: it would \
              cross only as mata-ll's internal `{tag, ...}` tagged table, which has \
              no meaning to a Lua host. To carry structured data, use a `LuaDict` \
@@ -270,6 +270,15 @@ pub struct Checker {
     /// literal becomes a cons chain, one level per element), so the parser's
     /// own depth guard does not bound this walk — it needs its own.
     pub(super) expr_depth: usize,
+    /// Span of the innermost statement-boundary expression (an `Expr::Spanned`
+    /// marker: a do-statement, let/where binding body, case-branch or guard
+    /// body) whose checking failed. Set as the error propagates OUT through the
+    /// `Spanned` arm of `infer_expr_inner`; the deepest marker records its span
+    /// first and outer ones leave it (set-if-`None`), so a diagnostic lands on
+    /// the offending statement's line, not the clause head. A clause-level
+    /// handler `take()`s it, falling back to the clause span when no statement
+    /// marker was crossed. Reset per clause in `check_clause`.
+    pub(super) error_span: Option<crate::ast::Span>,
     /// Current recursion depth of `ast_type_to_ty`, bounded by
     /// `crate::MAX_NESTING_DEPTH`. Type-alias and type-family expansion can
     /// deepen a type far beyond its written form (and a self-referential
@@ -493,6 +502,7 @@ impl Checker {
     pub fn new() -> Self {
         let mut checker = Checker {
             expr_depth: 0,
+            error_span: None,
             type_depth: 0,
             alias_fuel: 0,
             alias_reported: false,
