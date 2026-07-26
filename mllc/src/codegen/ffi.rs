@@ -241,6 +241,13 @@ impl CodeGen {
                     // Record` / nested maps marshal recursively.
                     let vdesc = child(self, args[1], stack);
                     Some(format!("{{k=\"hashmap\",v={}}}", vdesc))
+                } else if head == Some("Any") {
+                    // Any is UNTAGGED for the host: the dynamic ADT's payload —
+                    // the scalar at field [2] of `{tag, payload}` — is handed over
+                    // bare (AnyNull is `{5}`, so its absent payload is nil). Always
+                    // Some, the dual of the result decoder's `any` arm; marshalling
+                    // an Any cannot fail, so no `t`/`w`.
+                    Some("{k=\"any\"}".into())
                 } else {
                     None
                 }
@@ -482,6 +489,17 @@ impl CodeGen {
                             ),
                             converts,
                         ))
+                    }
+                    // Any: a host scalar crossing in is TAGGED into the dynamic
+                    // ADT — a Lua string becomes `AnyString`, an integer-valued
+                    // number `AnyInt`, a non-integer number `AnyNumber`, a
+                    // boolean `AnyBool`, and nil `AnyNull`. Always emit the
+                    // descriptor so the tagging happens; a value that is neither a
+                    // scalar nor nil (a table/function/userdata) fails at runtime,
+                    // localized by `w`, since `Any` models only scalar Lua values.
+                    Some("Any") if args.is_empty() => {
+                        let t = ty.to_string();
+                        Some((format!("{{k=\"any\",t={:?}{}}}", t, wlua), true))
                     }
                     // Scalars, opaque type variables, functions, IO, etc.: the raw
                     // host value already matches the mata-ll representation. Bare

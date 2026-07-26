@@ -731,6 +731,7 @@ mll_test!(multiline_list, "multiline_list.mll");
 mll_test!(nested_calls, "nested_calls.mll");
 mll_test!(seq_when_putstr, "seq_when_putstr.mll");
 mll_test!(any_type, "any_type.mll");
+mll_test!(any_ffi_marshal, "any_ffi_marshal.mll");
 mll_test!(bytestring, "bytestring.mll");
 mll_test!(operator_fixity, "operator_fixity.mll");
 mll_test!(fixity_import, "fixity_import.mll");
@@ -4408,13 +4409,11 @@ main = pure ()
 
 #[test]
 fn ffi_export_maybe_either() {
+    // `Maybe a` has a designed FFI shape (nil ↔ Nothing) and is ACCEPTED.
     let source = r#"
 export safeDiv :: Int -> Int -> Maybe Int
 safeDiv _ 0 = Nothing
 safeDiv x y = Just (x `div` y)
-
-export classify :: Int -> Either String Int
-classify n = if n < 0 then Left "negative" else Right n
 
 main :: IO ()
 main = pure ()
@@ -4429,19 +4428,18 @@ main = pure ()
     let result: Option<i64> = safe_div.call((10, 0)).unwrap();
     assert_eq!(result, None, "safeDiv 10 0 == Nothing");
 
-    // Either: Left {1, msg}, Right {2, val}
-    let classify: mlua::Function = module.get("classify").unwrap();
-    let result: Vec<mlua::Value> = classify.call(5).unwrap();
-    assert_eq!(result.len(), 2);
-    // Right tag = 2
-    if let mlua::Value::Integer(tag) = result[0] {
-        assert_eq!(tag, 2, "classify 5 is Right (tag 2)");
-    }
-
-    let result: Vec<mlua::Value> = classify.call(-3).unwrap();
-    if let mlua::Value::Integer(tag) = result[0] {
-        assert_eq!(tag, 1, "classify (-3) is Left (tag 1)");
-    }
+    // Bare `Either` is a plain two-constructor ADT: outside a LuaTry/LuaIOCatch
+    // result (where the pcall wrapper builds and interprets its tags) it has no
+    // designed FFI shape — it would leak only as mata-ll's internal
+    // `{tag, payload}` table — so an export using it directly is REJECTED. (Use
+    // Maybe, a LuaDict record, or a scalar/list encoding instead.)
+    let e = compile_err(
+        "export classify :: Int -> Either String Int\n\
+         classify n = if n < 0 then Left \"negative\" else Right n\n\
+         main :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'classify'") && e.contains("the result") && e.contains("Either"),
+        "bare Either in an export result is rejected: {e}");
+    assert!(e.contains("tagged table"), "note explains the leak: {e}");
 }
 
 #[test]
@@ -4531,36 +4529,28 @@ main = pure ()
 
 #[test]
 fn ffi_export_adt() {
-    let source = r#"
-data Color = Red | Green | Blue
+    // A plain user `data` ADT has NO defined FFI shape: it would cross only as
+    // mata-ll's internal `{tag, fields...}` table, which has no meaning to a
+    // Lua host. So it is REJECTED at the boundary in BOTH directions — as an
+    // argument (colorCode :: Color -> Int) and as a result
+    // (mkRed :: Int -> Color). (To carry an enum across, derive LuaDict on
+    // an all-nullary sum so its constructors cross as name strings; to carry a
+    // record, use a LuaDict record; a newtype crosses transparently.)
+    let e = compile_err(
+        "data Color = Red | Green | Blue\n\
+         export colorCode :: Color -> Int\ncolorCode _ = 1\n\
+         main :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'colorCode'") && e.contains("argument 1") && e.contains("Color"),
+        "plain ADT rejected as an export argument: {e}");
+    assert!(e.contains("internal") && e.contains("tagged table") && e.contains("LuaDict"),
+        "note explains the tagged-table leak and points at the fixes: {e}");
 
-export colorCode :: Color -> Int
-colorCode Red = 1
-colorCode Green = 2
-colorCode Blue = 3
-
-export mkRed :: Int -> Color
-mkRed _ = Red
-
-export mkGreen :: Int -> Color
-mkGreen _ = Green
-
-main :: IO ()
-main = pure ()
-"#;
-    let (_lua, module) = compile_ffi_module(source);
-
-    // Pass enum value through: create on MLL side, inspect on MLL side
-    let mk_red: mlua::Function = module.get("mkRed").unwrap();
-    let color_code: mlua::Function = module.get("colorCode").unwrap();
-    let red_val: mlua::Value = mk_red.call(0).unwrap();
-    let result: i64 = color_code.call(red_val).unwrap();
-    assert_eq!(result, 1, "colorCode Red == 1");
-
-    let mk_green: mlua::Function = module.get("mkGreen").unwrap();
-    let green_val: mlua::Value = mk_green.call(0).unwrap();
-    let result: i64 = color_code.call(green_val).unwrap();
-    assert_eq!(result, 2, "colorCode Green == 2");
+    let e = compile_err(
+        "data Color = Red | Green | Blue\n\
+         export mkRed :: Int -> Color\nmkRed _ = Red\n\
+         main :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("Export 'mkRed'") && e.contains("the result") && e.contains("Color"),
+        "plain ADT rejected as an export result: {e}");
 }
 
 #[test]
@@ -4921,14 +4911,16 @@ fn ffi_export_rejects_unmarshallable_types() {
 
 #[test]
 fn ffi_export_deep_nesting_allowed() {
-    // Deep, fully-marshallable nesting (tuple / list / Maybe / Either) is
-    // accepted AND round-trips — WITHOUT a nested callback (a function is only
-    // marshallable as a direct top-level export argument; see the reject test).
+    // Deep, fully-marshallable nesting of the DESIGNED container types (tuple /
+    // list / Maybe) is accepted AND round-trips — WITHOUT a nested callback (a
+    // function is only marshallable as a direct top-level export argument; see
+    // the reject test) and WITHOUT a bare `Either` (a plain ADT that would leak
+    // as a tagged table; only a LuaTry/LuaIOCatch Either has a designed shape).
     // A second export exercises the SUPPORTED callback shape.
     let source = r#"
-export deep :: (Maybe [Int], Bool) -> [Either String Int]
+export deep :: (Maybe [Int], Bool) -> [Maybe (Int, String)]
 deep (m, b) = case m of
-    Just xs -> map (\x -> if b then Right x else Left "neg") xs
+    Just xs -> map (\x -> if b then Just (x, "pos") else Nothing) xs
     Nothing -> []
 
 export cbSum :: forall s. (Int -> LuaIO s [Int]) -> LuaIO s Int
@@ -4941,26 +4933,31 @@ main = pure ()
 "#;
     let (lua, module) = compile_ffi_module(source);
 
-    // A tuple of (Maybe of a list) and a Bool, returning a list of Eithers,
-    // round-trips: `Right x` / `Left "neg"` cross with their tags. (Payloads are
-    // the already-forced list elements — a computed `Right (x*2)` would leave
-    // the payload a thunk, the pre-existing opaque-ADT-in-a-list limit noted in
-    // CAVEATS, unrelated to this check.)
+    // A tuple of (Maybe of a list) and a Bool, returning a list of
+    // `Maybe (Int, String)`, round-trips: `Just (x, "pos")` crosses as a
+    // positional table (nil for Nothing), each inner tuple a positional table.
     let deep: mlua::Function = module.get("deep").unwrap();
     let arg = lua.create_table().unwrap();
     arg.push(lua.create_sequence_from([5, 6]).unwrap()).unwrap(); // Just [5,6]
     arg.push(true).unwrap();
-    let out: mlua::Table = deep.call(arg).expect("deep tuple/list/Maybe/Either marshals");
+    let out: mlua::Table = deep.call(arg).expect("deep tuple/list/Maybe marshals");
     let e1: mlua::Table = out.get(1).unwrap();
-    assert_eq!(e1.get::<i64>(1).unwrap(), 2, "first is Right (tag 2)");
-    assert_eq!(e1.get::<i64>(2).unwrap(), 5, "Right payload = 5");
+    assert_eq!(e1.get::<i64>(1).unwrap(), 5, "first Just tuple: value = 5");
+    assert_eq!(e1.get::<String>(2).unwrap(), "pos", "first Just tuple: tag = pos");
+    let e2: mlua::Table = out.get(2).unwrap();
+    assert_eq!(e2.get::<i64>(1).unwrap(), 6, "second Just tuple: value = 6");
+    // Nothing at the TOP of the argument's Maybe: the empty-list branch. The
+    // tuple is a positional table; a `nil` at index 1 (Nothing) is set
+    // explicitly by index so the Bool at index 2 keeps its slot.
     let arg2 = lua.create_table().unwrap();
-    arg2.push(lua.create_sequence_from([9]).unwrap()).unwrap();
-    arg2.push(false).unwrap();
-    let out2: mlua::Table = deep.call(arg2).unwrap();
-    let e2: mlua::Table = out2.get(1).unwrap();
-    assert_eq!(e2.get::<i64>(1).unwrap(), 1, "is Left (tag 1)");
-    assert_eq!(e2.get::<String>(2).unwrap(), "neg", "Left payload");
+    arg2.set(2, true).unwrap(); // index 1 (the Maybe) stays nil = Nothing
+    let out2: mlua::Value = deep.call(arg2).unwrap();
+    let empty = match out2 {
+        mlua::Value::Nil => true,
+        mlua::Value::Table(t) => t.raw_len() == 0,
+        other => panic!("unexpected result for the empty-list branch: {other:?}"),
+    };
+    assert!(empty, "Nothing argument ⇒ empty result list");
 
     // The SUPPORTED callback shape — a top-level `(A -> LuaIO s R)` argument —
     // stays accepted (the module loaded) and runs: the host callback yields a
@@ -4972,6 +4969,115 @@ main = pure ()
     }).unwrap();
     let r: i64 = cb_sum.call(cb).expect("top-level callback still works");
     assert_eq!(r, 6, "cbSum: sum (f 3) = 1+2+3");
+}
+
+#[test]
+fn ffi_import_rejects_unmarshallable_types() {
+    // FFI IMPORTS (LuaPure/LuaIO/LuaTry/… declarations that call INTO Lua) are
+    // validated symmetrically to exports: an argument crosses OUT to the host,
+    // the result crosses back IN. A plain user `data` ADT has no FFI shape (it
+    // would leak as an internal tagged table), so it is rejected in BOTH.
+
+    // ADT in an import ARGUMENT position (crosses OUT to the host).
+    let e = compile_err(
+        "data Color = Red | Green | Blue\n\
+         paint :: Color -> LuaIO \"paint\" ()\n\
+         main :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("FFI import 'paint'") && e.contains("argument 1") && e.contains("Color"),
+        "plain ADT rejected as an FFI import argument: {e}");
+    assert!(e.contains("tagged table") && e.contains("LuaDict"),
+        "import note explains the leak and the fixes: {e}");
+
+    // ADT in an import RESULT position (crosses IN from the host).
+    let e = compile_err(
+        "data Color = Red | Green | Blue\n\
+         mkColor :: Int -> LuaIO \"mk_color\" Color\n\
+         main :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("FFI import 'mkColor'") && e.contains("the result") && e.contains("Color"),
+        "plain ADT rejected as an FFI import result: {e}");
+
+    // Bare `Either` in a plain (non-LuaTry) import result is also a plain ADT.
+    let e = compile_err(
+        "lookupIt :: String -> LuaIO \"lookup\" (Either String Int)\n\
+         main :: IO ()\nmain = pure ()\n");
+    assert!(e.contains("FFI import 'lookupIt'") && e.contains("the result") && e.contains("Either"),
+        "bare Either in a plain LuaIO import result is rejected: {e}");
+}
+
+#[test]
+fn ffi_marshallable_types_accepted() {
+    // The full designed allowlist compiles cleanly across the FFI boundary:
+    // scalars, [a], tuples, HashMap, Maybe, Any, a LuaDict record, and — the
+    // critical one — a newtype over a marshallable type (the FileHandle shape).
+    let source = r#"
+data Cfg = Cfg { cWidth :: Int, cName :: String } deriving (Eq, LuaDict)
+
+newtype Handle = Handle LuaUserData
+
+-- FFI IMPORTS covering the allowlist: an argument crosses OUT, the result IN.
+-- (Body-less FFI declarations; they are validated by validate_ffi_import_types.)
+impScalar :: Int -> LuaPure "tostring" String
+impList   :: [Int] -> LuaPure "table.unpack" Int
+impMaybe  :: Maybe Int -> LuaPure "identity" (Maybe Int)
+impRecord :: Cfg -> LuaPure "rawlen" Int
+impHandle :: Handle -> LuaIO ":close" Handle
+impTry    :: String -> LuaTry "io.open" (Either String Handle)
+
+-- Exports covering the allowlist in argument and result positions.
+export sc :: Int -> Int
+sc n = n + 1
+
+export lst :: [Int] -> [Int]
+lst xs = xs
+
+export tup :: (Int, String) -> (String, Int)
+tup (n, s) = (s, n)
+
+export hm :: HashMap String Int -> Int
+hm m = hmSize m
+
+export mb :: Maybe Int -> Maybe Int
+mb x = x
+
+export dyn :: Any -> Any
+dyn x = x
+
+export rec :: Cfg -> Int
+rec c = cWidth c
+
+-- A newtype over LuaUserData crosses transparently (the FileHandle pattern):
+-- both as an argument and a result.
+export passHandle :: Handle -> Handle
+passHandle h = h
+
+main :: IO ()
+main = pure ()
+"#;
+    // Compiling at all proves the validator ACCEPTS every one of these types in
+    // both directions. (Any's runtime conversion is the codegen agent's domain;
+    // here we only assert the boundary check does not REJECT `Any`.)
+    let (_lua, module) = compile_ffi_module(source);
+    for name in ["sc", "lst", "tup", "hm", "mb", "dyn", "rec", "passHandle"] {
+        let _f: mlua::Function = module.get(name)
+            .unwrap_or_else(|_| panic!("export '{name}' must be present"));
+    }
+    // A scalar round-trips to confirm the module is live.
+    let sc: mlua::Function = module.get("sc").unwrap();
+    let r: i64 = sc.call(41).unwrap();
+    assert_eq!(r, 42, "scalar export still works");
+
+    // The newtype-over-LuaUserData export is a transparent wrapper: the handle
+    // crosses unchanged. mlua exposes a real userdata as the Lua-standard
+    // io.stdout file handle, so round-trip that and confirm identity is
+    // preserved (proving no `{tag, ...}` wrapper was interposed).
+    let pass_handle: mlua::Function = module.get("passHandle").unwrap();
+    _lua.load("HANDLE = io.stdout").exec().unwrap();
+    let handle: mlua::Value = _lua.globals().get("HANDLE").unwrap();
+    assert!(matches!(handle, mlua::Value::UserData(_)),
+        "io.stdout is a userdata handle");
+    let back: mlua::Value = pass_handle.call(handle.clone()).unwrap();
+    assert!(matches!(back, mlua::Value::UserData(_)),
+        "newtype over LuaUserData passes the handle through untouched");
 }
 
 // --- Outgoing FFI callbacks (mata-ll -> Lua): the fold / threaded-state pattern.

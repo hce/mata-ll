@@ -311,17 +311,34 @@ when this happens rather than writing the empty shell silently. Such
 library modules are meant to be *imported* by another `.mll` module
 (the compilation root), not compiled on their own.
 
-## An export's types must be marshallable, or it is rejected
+## FFI types must have a designed marshalling shape, or they are rejected
 
-`export` signatures may only use types the FFI marshaller can move
-across the Lua boundary — see the SPEC's "Boundaries" section for the
-full allowed set. The compiler rejects, at compile time, an export whose
-argument or result (recursing through tuples/lists/`Maybe`/records)
-uses a type with no marshalling:
+Anything that touches the Lua boundary — an `export`, and equally an FFI
+IMPORT (`LuaPure`/`LuaIO`/`LuaTry`/`LuaIOCatch`, which calls INTO Lua) —
+may only use types with DEFINED marshalling behavior: a shape the host
+is meant to see, not an internal representation that happens to be a
+table. See the SPEC's "Boundaries" section for the full allowed set. The
+compiler rejects, at compile time, an argument or result (recursing
+through tuples/lists/`Maybe`/records) that uses a type with no designed
+FFI shape:
 
+  - a plain user or prelude `data` ADT — a multi-constructor and/or
+    multi-field type, including `Either` (outside a `LuaTry`/`LuaIOCatch`
+    result), `Ordering`, and `ExitValue`. It would cross only as
+    MATA-LL's internal `{tag, fields…}` table, which has no meaning to a
+    Lua host, so it is rejected EVEN WHEN its fields would each marshal.
+    To carry structured data, use a `LuaDict` record (a name-keyed
+    table); for a dynamic scalar, use `Any`; or encode the value as a
+    scalar or a list. A NEWTYPE over a marshallable type crosses
+    transparently (the value IS its field), so it is accepted — this is
+    what keeps `newtype FileHandle = FileHandle LuaUserData` and the
+    whole `LIO` file API crossing;
   - a bare polymorphic type variable (`export id :: a -> a`) — Lua has
-    no representation for a polymorphic value, so give the export a
-    concrete type (GHC's FFI rejects polymorphic foreign exports too);
+    no representation for a polymorphic value, so give it a concrete type
+    (GHC's FFI rejects polymorphic foreign exports too). The one designed
+    exception is the threaded STATE of a polymorphic outgoing-callback
+    FFI (the fold pattern), which round-trips opaquely and is checked
+    separately;
   - a class-constrained type (`export f :: Num a => a -> a`) — a
     typeclass dictionary cannot cross the boundary;
   - a region-scoped `ST`/`STArray`/`STRef` handle — it must not outlive
@@ -338,17 +355,11 @@ uses a type with no marshalling:
     handed to Lua opaque and leak, so it is refused rather than
     silently miscompiled.
 
-The error names the export binder, the offending sub-type, the position
-(argument N or the result), and the crossing direction. This is a pure
+The error names the binder, the offending sub-type, the position
+(argument N or the result), and the crossing direction. This is a
 tightening: it turns what used to compile into a silently-wrong
-`__mll_to_lua`/opaque conversion at the boundary into a clear rejection.
-
-One inherent, pre-existing marshalling limit remains for a value that IS
-accepted: an opaque ADT (one with no marshal descriptor, e.g. `Either`)
-is deep-forced correctly when it is the WHOLE result, but when it is
-nested inside a list its payload is only shallow-forced, so a thunked
-payload can leak. Prefer a descriptor-carrying container (`Maybe`, a
-`LuaDict` record) when a structured value must survive nesting.
+`__mll_to_lua`/opaque conversion at the boundary — a raw tagged table
+the host cannot interpret — into a clear rejection.
 
 ## Type families reduce, but non-injectively and with a termination bound
 

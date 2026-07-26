@@ -239,8 +239,9 @@ end
 -- error messages, and `dir` flips the message wording for host-supplied
 -- arguments (see __mll_ffi_mismatch). Converts Lua arrays into cons lists,
 -- validates HashMap key types, rebuilds LuaDict records field-by-field,
--- recurses through Maybe/tuples, and checks scalar leaves (`chk`) inside
--- structures. Every shape mismatch — a scalar where a list/record was
+-- recurses through Maybe/tuples, tags a host scalar into the dynamic `Any`
+-- ADT (`any`), and checks scalar leaves (`chk`) inside structures. Every
+-- shape mismatch — a scalar where a list/record was
 -- declared, a record field that is missing or of the wrong type — fails here,
 -- localized, instead of surfacing as an arbitrary Lua error (nil index,
 -- arithmetic on nil) deep in user code. Records/tuples with `rb=false` are
@@ -368,6 +369,31 @@ local function __mll_ffi_decode(desc, v, root, dir)
             if f.d then __mll_ffi_decode(f.d, v[f.n], root, dir) end
         end
         return v
+    elseif k == "any" then
+        -- A host scalar -> the dynamic `Any` ADT, tagged so mata-ll code can
+        -- pattern-match it. The tags are the constructor order in Prelude.mll:
+        -- AnyString {1}, AnyInt {2}, AnyNumber {3}, AnyBool {4}, AnyNull {5}.
+        -- nil (an absent value) is AnyNull; a number splits on its subtype so a
+        -- whole number is AnyInt and a fractional/NaN/inf one is AnyNumber
+        -- (the same probe __mll_math_type uses: native math.type on Lua 5.3+, a
+        -- `% 1 == 0` fallback on double-only LuaJIT / 5.1-5.2).
+        if v == nil then return {5} end
+        local t = type(v)
+        if t == "string" then return {1, v}
+        elseif t == "number" then
+            local isint
+            if math.type ~= nil then
+                isint = math.type(v) == "integer"
+            else
+                isint = v % 1 == 0
+            end
+            if isint then return {2, v} else return {3, v} end
+        elseif t == "boolean" then return {4, v}
+        else
+            __mll_ffi_mismatch(desc, v, root,
+                "a value crossing as 'Any' must be a Lua string, number, boolean, " ..
+                "or nil — 'Any' models only scalar Lua values, not a " .. t, dir)
+        end
     end
     return v
 end
@@ -410,6 +436,9 @@ end
 --                      __mll_opt_tail), rebuilding a fresh wrapper around the
 --                      marshalled payload, so e.g. a list inside a Just still
 --                      becomes an array.
+--   {k="any"}          the dynamic `Any` ADT UNWRAPPED to the bare scalar the
+--                      host reads: the payload at field [2] (AnyNull's absent
+--                      [2] is nil), the inverse of the decoder's `any` tagging.
 local function __mll_arg_marshal(v, d)
     v = __force(v)
     if d.k == "list" then
@@ -482,6 +511,14 @@ local function __mll_arg_marshal(v, d)
             return setmetatable({p}, __just_mt)
         end
         return v
+    elseif d.k == "any" then
+        -- The dynamic `Any` ADT UNWRAPPED to the bare scalar the host reads:
+        -- the payload lives at field [2] for AnyString/AnyInt/AnyNumber/
+        -- AnyBool ({tag, payload}), and AnyNull is `{5}` whose absent [2] is nil.
+        -- Uniform across all five, so one `__force(v[2])` yields exactly the
+        -- plain string/number/boolean/nil — the inverse of the decoder's `any`
+        -- tagging. (`v` is already forced; the payload field is still lazy.)
+        return __force(v[2])
     end
     return v
 end

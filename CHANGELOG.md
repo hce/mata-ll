@@ -76,6 +76,25 @@ API of the `mllc` library crate.)
   `DIVERGENCES.md` carries no pinned runtime divergences; the nineteen
   formerly divergent cases are ordinary GHC-goldened oracle cases now.
 
+- **Breaking: only types with a DESIGNED FFI shape may cross the boundary, in
+  both directions.** The marshallability check previously accepted "any data
+  type iff every field marshals", so a plain user ADT — and prelude `Either`
+  (outside `LuaTry`/`LuaIOCatch`), `Ordering`, and `ExitValue` — crossed as
+  MATA-LL's internal `{tag, fields…}` table, a shape with no meaning to a Lua
+  host. Such a type is now REJECTED at compile time even when its fields would
+  each marshal. The allowed set is the designed shapes: scalars, `()`,
+  `LuaUserData`, `[a]`, tuples, `HashMap`, `Maybe a`, `Any`, a `LuaDict` record,
+  a NEWTYPE over a marshallable type (transparent — the value IS its field, so
+  `newtype FileHandle = FileHandle LuaUserData` and the whole `LIO` file API
+  keep crossing), and `Either String a` as a `LuaTry`/`LuaIOCatch` result (the
+  `pcall` wrapper builds its tags). The check is now also SYMMETRIC: FFI imports
+  (`LuaPure`/`LuaIO`/`LuaTry`/`LuaIOCatch`, which call into Lua) are validated
+  like exports — arguments cross out, the result comes in, outgoing callbacks
+  are checked with directions swapped, and the polymorphic threaded-state fold
+  variable stays allowed. The error names the culprit sub-type, the position and
+  the direction, with a `note:` explaining the tagged-table leak and pointing at
+  a `LuaDict` record / `Any` / a scalar-or-list encoding. To carry a plain ADT
+  across, wrap its data in a `LuaDict` record or a newtype.
 - **Breaking: `LuaIterator`'s result must now be written as an explicit
   list.** `LuaIterator "string.gmatch" [String]` names the result list
   directly; the old bare-element shorthand (`LuaIterator "string.gmatch"
@@ -131,6 +150,19 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **`Any` converts to and from plain Lua scalars at the FFI boundary.** The
+  dynamic `Any` type (`AnyString`/`AnyInt`/`AnyNumber`/`AnyBool`/`AnyNull`)
+  no longer crosses the boundary as its raw constructor table. A host scalar
+  coming IN is tagged by its Lua type — a string becomes `AnyString`, an
+  integer-valued number `AnyInt`, a fractional number `AnyNumber`, a boolean
+  `AnyBool`, and `nil` `AnyNull`; an `Any` going OUT is untagged to its bare
+  scalar (`AnyNull` becomes `nil`), so the host only ever sees a plain
+  string/number/boolean/nil. The conversion descends into containers like every
+  other marshalled type, so `[Any]`, `(Int, Any)`, and a record/`HashMap` with
+  an `Any` field round-trip through the host unchanged. A value that is neither a
+  scalar nor `nil` (a table, function, or userdata) cannot cross as `Any` and
+  fails at the boundary with a localized error, since `Any` models only scalar
+  Lua values.
 - **Parser fuzzing.** A deterministic, fully offline fuzz pass
   (`mll-tests/tests/parser_fuzz.rs`) generates random-but-structured .mll
   modules — operator chains over randomly declared fixities, backtick

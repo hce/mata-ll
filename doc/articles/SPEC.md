@@ -123,7 +123,16 @@ defines:
     data Any = AnyString String | AnyInt Int
              | AnyNumber Number | AnyBool Bool | AnyNull
 
-Though this should rarely be used.
+`Any` converts to and from a plain Lua scalar at the FFI boundary, so a
+host that has no static type for a value can hand it over — and read it
+back — without ever seeing the tagged ADT. A host scalar crossing IN is
+tagged by its Lua type (a string becomes `AnyString`, an integer-valued
+number `AnyInt`, a fractional number `AnyNumber`, a boolean `AnyBool`,
+and `nil` `AnyNull`); an `Any` crossing OUT is untagged back to its bare
+scalar (`AnyNull` becomes `nil`). A value that is neither a scalar nor
+`nil` — a table, function, or userdata — cannot cross as `Any` and fails
+at the boundary with a localized error, since `Any` models only scalar
+Lua values.
 
 ## GADTs
 
@@ -582,7 +591,10 @@ depth.** Those containers are:
 - a **`Maybe`** reached through this structural descent is *unwrapped* — `Just x`
   becomes the bare `x` (recursively marshalled, so `Just [1,2,3]` is a real
   array and `Just "s"` a native string), `Nothing` becomes `nil` (an absent
-  field), matching `__mll_to_lua`.
+  field), matching `__mll_to_lua`;
+- an **`Any`** is *untagged* — the dynamic ADT's scalar payload is handed over
+  bare (`AnyNull` becomes `nil`); the decoder tags a host scalar back the same
+  way, so an `Any` round-trips through the host unchanged.
 
 An **opaque** argument — a polymorphic type variable, `LuaUserData`, a function, or
 a plain (non-`LuaDict`) ADT — is left raw with only a shallow force (the decoder
@@ -862,24 +874,50 @@ edge, a lazy or infinite structure cannot cross the strict Lua boundary
 the import side turns a Lua iterator INTO a lazy list, but the export
 side cannot hand an infinite list back out.
 
-An export's signature is checked at compile time: every type that
-crosses the boundary must be one the marshaller can move correctly, or
-the export is rejected. An export's ARGUMENTS cross Lua→MATA-LL (they
-must be *importable*) and its RESULT crosses MATA-LL→Lua (it must be
-*exportable*). The allowed *value* set, in both directions and
+The signature of anything that touches the boundary — an `export`, and
+equally an FFI IMPORT (`LuaPure`/`LuaIO`/`LuaTry`/`LuaIOCatch`, which
+calls INTO Lua) — is checked at compile time: every type that crosses
+must have DEFINED marshalling behavior — a shape the host is meant to
+see — or the declaration is rejected. Direction is symmetric: an
+export's ARGUMENTS cross Lua→MATA-LL (they must be *importable*) and its
+RESULT crosses MATA-LL→Lua (it must be *exportable*); an import is the
+mirror — its arguments cross MATA-LL→Lua and its result comes back
+Lua→MATA-LL. The allowed *value* set, in both directions and
 recursively, is:
 
   - scalars — `Int`, `Number`, `Bool`, `String`, `ByteString` (and
     the FFI aliases `Int`/`Double`/`Float`/`Char`) — and `()`;
   - the opaque `LuaUserData` interop handle;
-  - `[a]`, tuples, and any data type — `Maybe`, `Either`, `Ordering`,
-    `Any`, a user ADT/newtype, or a `LuaDict` record — each iff every
-    constructor field is allowed in the same direction (a value ADT
-    crosses as its tagged deep-forced representation; a recursive type
-    is permitted and crosses opaquely);
+  - `[a]` iff `a` is allowed; tuples iff every element is allowed;
   - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;
+  - `Maybe a` iff `a` is allowed — the designed optional shape (`nil` ↔
+    `Nothing`);
+  - `Any` — the dynamic boundary type (its runtime conversion is defined
+    by the code generator);
+  - a `LuaDict` record iff every declared field is allowed — it crosses
+    as a name-keyed table;
+  - a NEWTYPE iff its single underlying field is allowed — a newtype is
+    transparent (the value IS its field, with no wrapper), so it
+    inherits the field's representation; this is how
+    `newtype FileHandle = FileHandle LuaUserData` and the whole `LIO`
+    file API cross. A recursive newtype/record re-entry crosses opaquely;
+  - `Either String a` as the result of a `LuaTry`/`LuaIOCatch` import
+    only — there the `pcall` wrapper BUILDS and interprets the
+    `Left`/`Right` tags, so this is a designed shape and only the inner
+    `a` is checked;
   - `IO a` / `LuaIO s a` as an export RESULT (an action export) iff `a`
     is exportable.
+
+A plain user or prelude `data` type with real constructors — a
+multi-constructor and/or multi-field ADT, including `Either` (outside a
+`LuaTry`/`LuaIOCatch` result), `Ordering`, and `ExitValue` — is
+REJECTED even when its fields would each marshal. It has no designed FFI
+shape: it would cross only as MATA-LL's internal `{tag, fields…}` table,
+which has no meaning to a Lua host. To carry structured data across the
+boundary, use a `LuaDict` record (a name-keyed table); for a dynamic
+scalar, use `Any`; or encode the value as a scalar or a list. A newtype
+over a marshallable type crosses transparently; a plain `data` type does
+not.
 
 A function (a callback) is marshallable in exactly ONE position: as a
 DIRECT top-level argument of the export. There the callback's own
@@ -894,12 +932,17 @@ is exactly the shape the code generator fully marshals; every other
 arrow position would be passed to Lua opaque and leak.
 
 Rejected — a compile-time error naming the binder, the position and the
-direction — is anything else: a bare polymorphic type variable (Lua has
-no representation for a polymorphic value), a class-constrained type (a
-dictionary cannot cross), a region-scoped `ST`/`STArray`/`STRef` handle,
-an `IO`/`LuaIO` action in ARGUMENT position (a Lua caller cannot supply
-an action; only a top-level callback returning `LuaIO` may carry an
-effect inward), and a function in any non-top-level-argument position.
+direction — is anything else: a plain `data` ADT with no designed shape
+(above), a bare polymorphic type variable (Lua has no representation for
+a polymorphic value), a class-constrained type (a dictionary cannot
+cross), a region-scoped `ST`/`STArray`/`STRef` handle, an `IO`/`LuaIO`
+action in ARGUMENT position (a Lua caller cannot supply an action; only
+a top-level callback returning `LuaIO` may carry an effect inward), and
+a function in any non-top-level-argument position. The one designed
+exception to the type-variable rule is the threaded STATE of a
+polymorphic outgoing-callback FFI (the fold pattern): a single shared
+variable that round-trips through Lua opaquely, whose soundness is
+enforced separately.
 
 When MATA-LL is intended to run standalone, the compiler appends an
 entry-point stub to the emitted `.lua` file itself (a single

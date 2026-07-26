@@ -217,6 +217,25 @@ MATA-LL TODO
       types, before codegen. No previously valid export regresses (the whole
       `ffi_export_*` family still compiles and passes).
 
+- [x] **FFI marshallability tightened to DESIGNED shapes + import-side check.**
+      The whitelist above accepted "any data type iff every field marshals",
+      which let a plain user ADT (and prelude `Either`/`Ordering`/`ExitValue`)
+      cross as MATA-LL's internal `{tag, fields…}` table — a shape with no
+      host-facing meaning. `ffi_marshallable` now dispatches on DEFINED
+      behavior: scalars/`()`/`LuaUserData`, `[a]`/tuples/`HashMap`, `Maybe a`
+      (nil ↔ Nothing), `Any` (by name), a `LuaDict` record (name-keyed table),
+      and a NEWTYPE (transparent — recurse its single field, keeping
+      `FileHandle`/`LIO` alive). A plain `data` ADT is REJECTED even when its
+      fields marshal; `Either` is allowed only as a `LuaTry`/`LuaIOCatch` result
+      (peeled). Validation is now SYMMETRIC: FFI imports
+      (`LuaPure`/`LuaIO`/`LuaTry`/`LuaIOCatch`) get the mirror check
+      (`validate_ffi_import_types`) — arguments cross out (Export), the result
+      comes in (Import), outgoing callbacks are validated with directions
+      swapped, and the threaded-state fold variable stays whitelisted (its
+      soundness is `validate_ffi_callbacks`'s job). Diagnostics name the culprit,
+      position and direction, with a `note:` explaining the tagged-table leak and
+      pointing at `LuaDict`/`Any`/a scalar-or-list encoding.
+
 - [x] **FFI value/constant exports.** `export foo :: Integer` (with `foo = 123`)
       now marshals the FORCED value directly to Lua (`exports.foo = 123`), by the
       same result contract a function's return value uses (records → keyed

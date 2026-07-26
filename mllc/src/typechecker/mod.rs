@@ -177,10 +177,23 @@ fn export_ffi_note(culprit: &Ty, dir: FfiDir) -> String {
         _ if matches!(head, Some("ST") | Some("STArray") | Some("STRef")) =>
             "an ST handle is region-scoped (it must not outlive its runST) and has \
              no Lua representation.".to_string(),
+        // A plain user/prelude `data` type (Either/Ordering/ExitValue or a
+        // user ADT) reached here has real constructors but no designed FFI
+        // shape — it would cross only as its internal `{tag, fields…}` table,
+        // which the host cannot interpret. Say so and point at the fixes.
+        _ if matches!(head, Some(_)) =>
+            "this type has real constructors but no FFI representation: it would \
+             cross only as mata-ll's internal `{tag, ...}` tagged table, which has \
+             no meaning to a Lua host. To carry structured data, use a `LuaDict` \
+             record (a name-keyed table); for a dynamic scalar, use `Any`; or \
+             encode the value as a scalar or a list. A newtype over a marshallable \
+             type crosses transparently; a plain `data` type does not."
+                .to_string(),
         _ =>
-            "only scalars, (), lists, tuples, Maybe/Either, HashMap, records/ADTs of \
-             marshallable fields, and a top-level callback may cross the FFI \
-             boundary.".to_string(),
+            "only scalars, (), lists, tuples, Maybe, HashMap, LuaDict records, \
+             newtypes over marshallable types, Any, and a top-level callback may \
+             cross the FFI boundary. Either crosses only as a LuaTry/LuaIOCatch \
+             result.".to_string(),
     }
 }
 
@@ -312,6 +325,15 @@ pub struct Checker {
     /// Type names that derive `LuaDict` (validated in `derive_luadict`): their
     /// constructor emits a name-keyed Lua table rather than a positional one.
     luadict_types: HashSet<String>,
+    /// Type names declared with `newtype` (registered by `register_newtype`).
+    /// A newtype is transparent — codegen represents the value AS its single
+    /// underlying field with no wrapper — so it is FFI-marshallable exactly when
+    /// that field is, unlike a `data` type of identical shape (which would only
+    /// cross as an internal tagged table). The FFI boundary check
+    /// (`ffi_marshallable`) needs this to tell the two apart precisely, since a
+    /// newtype and a single-constructor-single-field `data` are otherwise
+    /// indistinguishable in `constructors`.
+    newtype_types: HashSet<String>,
     /// User-defined type families: name -> equations (AST form). Reduced
     /// eagerly on CONCRETE arguments during `ast_type_to_ty`.
     type_families: HashMap<String, Vec<TypeFamilyEq>>,
@@ -486,6 +508,7 @@ impl Checker {
             checked_instance_heads: HashSet::new(),
             record_fields: HashMap::new(),
             luadict_types: HashSet::new(),
+            newtype_types: HashSet::new(),
             type_families: HashMap::new(),
             ty_families: TyFamilies::new(),
             tf_lowering: false,
@@ -1093,18 +1116,35 @@ impl Checker {
     /// first offending sub-type (and the direction it was reached in) so the
     /// diagnostic can name the exact culprit.
     ///
-    /// The allowed set is exactly what the marshaller round-trips CORRECTLY:
-    ///   - scalars (Int/Int/Number/Double/Float/String/Char/ByteString/Bool),
+    /// A type may cross ONLY if it has DEFINED marshalling behavior — a shape
+    /// the host is meant to see, not an internal representation that happens to
+    /// be a table. The allowed set:
+    ///   - scalars (Int/Number/Double/Float/String/Char/ByteString/Bool),
     ///     `()`, and the opaque `LuaUserData` interop handle;
-    ///   - `[a]`, tuples, and any data type — `Maybe`/`Either`/`Ordering`/`Any`/
-    ///     a user ADT/newtype/LuaDict record — each iff every constructor field
-    ///     is allowed in the SAME direction (deep-force round-trips these; a
-    ///     recursive type is cycle-guarded and passes as opaque, exactly as the
-    ///     marshaller treats its re-entry);
+    ///   - `[a]` iff `a` allowed; tuples iff every element allowed;
     ///   - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;
+    ///   - `Maybe a` iff `a` allowed (designed: nil ↔ Nothing);
+    ///   - `Any` — the dynamic boundary type, allowed by name (its runtime
+    ///     conversion is defined by codegen);
+    ///   - a `LuaDict` record iff every declared field is allowed (designed: a
+    ///     name-keyed table);
+    ///   - a NEWTYPE iff its single underlying field is allowed — a newtype is
+    ///     transparent (codegen represents the value AS the field, no wrapper),
+    ///     so it inherits the field's representation (this is what keeps
+    ///     `newtype FileHandle = FileHandle LuaUserData` and the whole `LIO`
+    ///     file API crossing);
     ///   - `IO a` / `LuaIO _ a` in EXPORT (result) position iff `a` is allowed.
     ///
-    /// Everything else is rejected: a bare type variable (no runtime rep for a
+    /// A recursive newtype/record re-entry is cycle-guarded and passes as opaque.
+    ///
+    /// Everything else is REJECTED. In particular a plain user `data` type with
+    /// real constructors — a multi-constructor and/or multi-field ADT — is
+    /// refused EVEN WHEN its fields would each marshal, because it would cross
+    /// only as its internal `{tag, fields…}` table, which has no host-facing
+    /// meaning. This is where prelude ADTs `Either`/`Ordering`/`ExitValue` land
+    /// when used outside their one designed context (the `Either String a` of a
+    /// `LuaTry`/`LuaIOCatch` result is peeled and validated by its caller, not
+    /// here). Also rejected: a bare type variable (no runtime rep for a
     /// polymorphic value), a region-scoped `ST`/`STArray`/`STRef` handle, `IO`/
     /// `LuaIO` in IMPORT (argument) position, and any unknown constructor.
     ///
@@ -1118,20 +1158,37 @@ impl Checker {
     fn ffi_marshallable(&self, ty: &Ty, dir: FfiDir, visited: &mut Vec<String>)
         -> Result<(), (Ty, FfiDir)>
     {
+        self.ffi_marshallable_allowing(ty, dir, &[], visited)
+    }
+
+    /// As `ffi_marshallable`, but a bare type variable in `opaque` is accepted
+    /// rather than rejected. This is the ONE designed exception: the threaded
+    /// STATE of a polymorphic outgoing-callback FFI (the fold pattern) crosses
+    /// Lua opaquely, and `validate_ffi_callbacks` already enforces that it is a
+    /// single shared variable threaded soundly through the callback's
+    /// accumulator, the callback's result, an FFI argument, and the FFI return.
+    /// So when validating such an import, those state variables are whitelisted;
+    /// every OTHER type variable (and every other position) is checked as usual.
+    /// Exports and non-stateful imports pass an empty `opaque`.
+    fn ffi_marshallable_allowing(&self, ty: &Ty, dir: FfiDir, opaque: &[TyVar], visited: &mut Vec<String>)
+        -> Result<(), (Ty, FfiDir)>
+    {
         match ty {
-            Ty::Forall(_, inner) => self.ffi_marshallable(inner, dir, visited),
+            Ty::Forall(_, inner) => self.ffi_marshallable_allowing(inner, dir, opaque, visited),
             Ty::Unit => Ok(()),
             Ty::Con(n) if ffi_scalar_name(n) || n == "LuaUserData" => Ok(()),
+            // A whitelisted opaque state variable (see the doc above) round-trips.
+            Ty::Var(v) if opaque.contains(v) => Ok(()),
             Ty::Var(_) | Ty::Skolem(..) | Ty::Promoted(_) => Err((ty.clone(), dir)),
-            Ty::List(a) => self.ffi_marshallable(a, dir, visited),
+            Ty::List(a) => self.ffi_marshallable_allowing(a, dir, opaque, visited),
             Ty::Tuple(es) => {
-                for e in es { self.ffi_marshallable(e, dir, visited)?; }
+                for e in es { self.ffi_marshallable_allowing(e, dir, opaque, visited)?; }
                 Ok(())
             }
             // An action can be a RESULT (the export performs it and marshals the
             // yielded value) but never an ARGUMENT — Lua has nothing to hand in.
             Ty::IO(a) | Ty::LuaIO(_, a) => match dir {
-                FfiDir::Export => self.ffi_marshallable(a, FfiDir::Export, visited),
+                FfiDir::Export => self.ffi_marshallable_allowing(a, FfiDir::Export, opaque, visited),
                 FfiDir::Import => Err((ty.clone(), dir)),
             },
             // A function reached in any recursive position (nested in a
@@ -1148,18 +1205,48 @@ impl Checker {
                         if !matches!(args[0], Ty::Con(n) if ffi_scalar_name(n)) {
                             return Err((ty.clone(), dir));
                         }
-                        self.ffi_marshallable(args[1], dir, visited)
+                        self.ffi_marshallable_allowing(args[1], dir, opaque, visited)
                     }
+                    // `Maybe a` has a designed shape at the boundary — `nil` for
+                    // Nothing, the marshalled payload for `Just` — so it crosses
+                    // iff its type argument crosses in the same direction.
+                    Some("Maybe") if args.len() == 1 => {
+                        self.ffi_marshallable_allowing(args[0], dir, opaque, visited)
+                    }
+                    // `Any` is the dynamic FFI boundary type: it has a defined
+                    // runtime conversion (supplied by codegen), so it crosses in
+                    // both directions regardless of what value it wraps.
+                    Some("Any") => Ok(()),
                     Some(name) => {
-                        // A recursive type re-entered: the marshaller treats the
+                        // A recursive type re-entered (a newtype/record whose
+                        // field mentions itself): the marshaller treats the
                         // re-entry as opaque and it round-trips, so accept and stop.
                         if visited.iter().any(|v| v == name) {
                             return Ok(());
                         }
-                        // A data type: check every constructor's field types with
-                        // the type arguments substituted for the type parameters.
+                        // Only types with a DEFINED marshalling shape may cross.
+                        // Dispatch on the designed representation, not on "does
+                        // every field happen to marshal":
+                        //   - a newtype is transparent (codegen represents the
+                        //     value AS its single field with no wrapper), so it
+                        //     crosses iff that field crosses;
+                        //   - a LuaDict record crosses as a name-keyed table, so
+                        //     it crosses iff every declared field crosses;
+                        //   - any other user `data` type — a plain ADT with real
+                        //     constructors — would cross only as its internal
+                        //     `{tag, fields…}` table, an implementation detail
+                        //     with no host-facing meaning, so it is REJECTED even
+                        //     when its fields would each marshal. (This is where
+                        //     `Either`/`Ordering`/`ExitValue` land outside their
+                        //     designed contexts — a plain ADT is a plain ADT.)
                         // No constructors ⇒ an abstract/handle constructor (ST,
-                        // STArray, STRef, …) with no marshalling ⇒ reject.
+                        // STArray, STRef, an unknown type, …) with no marshalling
+                        // ⇒ reject.
+                        let is_newtype = self.newtype_types.contains(name);
+                        let is_luadict = self.luadict_types.contains(name);
+                        if !is_newtype && !is_luadict {
+                            return Err((ty.clone(), dir));
+                        }
                         let cons: Vec<ConInfo> = self.constructors.values()
                             .filter(|c| c.type_name == name)
                             .cloned()
@@ -1176,7 +1263,7 @@ impl Checker {
                             let sub = Subst::from_map(smap);
                             for fty in &con.field_types {
                                 let fty = fty.apply_subst(&sub);
-                                if let Err(e) = self.ffi_marshallable(&fty, dir, visited) {
+                                if let Err(e) = self.ffi_marshallable_allowing(&fty, dir, opaque, visited) {
                                     visited.pop();
                                     return Err(e);
                                 }
@@ -1257,6 +1344,145 @@ impl Checker {
                 name, position, whole, dir_phrase, culprit, nested
             )),
             format!("export declaration of '{}'", name),
+        );
+        let note = export_ffi_note(&culprit, dir);
+        if let Some(diag) = self.errors.last_mut() {
+            diag.notes.push(note);
+        }
+    }
+
+    /// Validate the signature of an FFI IMPORT — a `LuaPure`/`LuaIO`/`LuaTry`/
+    /// `LuaIOCatch` (or `LuaCatch`/`LuaIterator`) declaration mata-ll calls INTO
+    /// Lua with. This is the mirror of `validate_export_types`: an import
+    /// `f :: A1 -> … -> An -> R` marshals each `Ai` OUT to Lua (mata-ll→Lua, the
+    /// EXPORT direction) and decodes `R` back IN (Lua→mata-ll, the IMPORT
+    /// direction), so the arguments and the result are checked in the OPPOSITE
+    /// directions to an export. `ty` is the FINAL resolved type (the `LuaIO`/…
+    /// wrappers already reduced to `IO`/the raw result), `ffi_kind` says which
+    /// FFI form it is so the `Try`/`IOCatch` `Either String _` layer is peeled
+    /// exactly as codegen's `ffi_catch_decode_desc` does.
+    ///
+    /// A function-typed argument is an OUTGOING CALLBACK (mata-ll passes it to
+    /// the host, which calls it): its own arguments come IN from Lua (Import) and
+    /// its result goes back OUT (Export) — the exact dual of an export-argument
+    /// callback — so it is validated with the directions swapped.
+    fn validate_ffi_import_types(&mut self, name: &str, ffi_kind: FfiKind, ty: &Ty) {
+        let mut t = ty;
+        while let Ty::Forall(_, inner) = t { t = inner; }
+        let (arg_tys, res) = t.peel_arrows();
+
+        // The threaded-state fold pattern (see `validate_ffi_callbacks`): a
+        // polymorphic outgoing callback threads an OPAQUE state variable that
+        // round-trips through Lua untouched. `validate_ffi_callbacks` already
+        // enforces the soundness of that variable (one shared variable across
+        // the callback's accumulator/result and the FFI's initial-state
+        // argument/return), so here we whitelist those variables and let every
+        // OTHER type still be structurally checked. A callback whose value
+        // variables are empty is concrete and contributes none.
+        let mut opaque: Vec<TyVar> = Vec::new();
+        for cb in arg_tys.iter().filter(|t| matches!(t, Ty::Arrow(..))) {
+            for v in callback_value_vars(cb) {
+                if !opaque.contains(&v) { opaque.push(v); }
+            }
+        }
+
+        for (i, a) in arg_tys.iter().enumerate() {
+            let pos = format!("argument {}", i + 1);
+            if matches!(a, Ty::Arrow(..)) {
+                self.validate_ffi_import_callback(name, &pos, a, &opaque);
+            } else if let Err((culprit, cdir)) =
+                self.ffi_marshallable_allowing(a, FfiDir::Export, &opaque, &mut Vec::new())
+            {
+                self.push_import_ffi_error(name, &pos, a, &culprit, cdir);
+            }
+        }
+
+        // The result crosses IN from Lua. For a plain Pure/IO import that is the
+        // whole result (its `IO` peeled here, so a bare `IO a` result validates
+        // `a`); for a Try/IOCatch import the `pcall` wrapper builds the
+        // `Either String _` tags itself, so only the inner payload is decoded —
+        // peel `IO`/`Either String` exactly like `ffi_catch_decode_desc`.
+        let payload = match ffi_kind {
+            FfiKind::Try | FfiKind::Catch | FfiKind::IOCatch => {
+                let inner = match res {
+                    Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+                    other => other,
+                };
+                let (head, args) = decompose_ty_app(inner);
+                match head {
+                    Some("Either") if args.len() == 2 => args[1],
+                    // Not the expected `Either String a` shape: validate the
+                    // whole inner result rather than silently skipping it.
+                    _ => inner,
+                }
+            }
+            // A plain IO/LuaIO result: decode the yielded value.
+            _ => match res {
+                Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+                other => other,
+            },
+        };
+        if let Err((culprit, cdir)) =
+            self.ffi_marshallable_allowing(payload, FfiDir::Import, &opaque, &mut Vec::new())
+        {
+            self.push_import_ffi_error(name, "the result", payload, &culprit, cdir);
+        }
+    }
+
+    /// Validate an OUTGOING callback argument of an FFI import: mata-ll hands
+    /// this function to the host, which invokes it, so its arguments arrive IN
+    /// from Lua (Import) and its result is sent back OUT (Export) — the mirror
+    /// of `validate_top_level_callback`. A callback nested one level deeper (a
+    /// callback that itself takes a callback) is passed opaque by codegen, so it
+    /// is rejected. `opaque` is the threaded-state whitelist (see the caller).
+    fn validate_ffi_import_callback(&mut self, name: &str, position: &str, cb_ty: &Ty, opaque: &[TyVar]) {
+        let (cb_args, cb_ret) = cb_ty.peel_arrows();
+        for a in &cb_args {
+            let cb_pos = format!("{} (a callback argument)", position);
+            if matches!(a, Ty::Arrow(..)) {
+                self.push_import_ffi_error(name, &cb_pos, cb_ty, a, FfiDir::Import);
+            } else if let Err((culprit, cdir)) =
+                self.ffi_marshallable_allowing(a, FfiDir::Import, opaque, &mut Vec::new())
+            {
+                self.push_import_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
+            }
+        }
+        // The callback's result goes back OUT to the host; unwrap its effect.
+        let payload = match cb_ret {
+            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
+            other => other,
+        };
+        if let Err((culprit, cdir)) =
+            self.ffi_marshallable_allowing(payload, FfiDir::Export, opaque, &mut Vec::new())
+        {
+            let cb_pos = format!("{} (the callback result)", position);
+            self.push_import_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
+        }
+    }
+
+    /// The import-boundary analogue of `push_export_ffi_error`: same shape and
+    /// same `note:` guidance, phrased for an FFI import (a Lua call) rather than
+    /// an export.
+    fn push_import_ffi_error(&mut self, name: &str, position: &str, whole: &Ty, culprit: &Ty, dir: FfiDir) {
+        let dir_phrase = match dir {
+            FfiDir::Import => "cross into mata-ll from Lua (the host's return value)",
+            FfiDir::Export => "cross out to Lua from mata-ll (an argument to the host)",
+        };
+        let (whole, culprit) = {
+            let pair = friendly_export_tys(&[whole, culprit]);
+            (pair[0].clone(), pair[1].clone())
+        };
+        let nested = if whole == culprit {
+            String::new()
+        } else {
+            format!(" (inside '{}')", whole)
+        };
+        self.push_error_ctx(
+            DiagnosticKind::Other(format!(
+                "FFI import '{}': {} has type '{}', which cannot {} — the type '{}'{} has no FFI marshalling.",
+                name, position, whole, dir_phrase, culprit, nested
+            )),
+            format!("FFI declaration of '{}'", name),
         );
         let note = export_ffi_note(&culprit, dir);
         if let Some(diag) = self.errors.last_mut() {
@@ -2885,6 +3111,11 @@ impl Checker {
     /// that is the identity function at runtime.
     fn register_newtype(&mut self, name: &str, type_vars: &[String], inner: &Type) {
         self.register_kind(name, type_vars.len());
+        // Record that this name is a newtype (a transparent, zero-cost wrapper)
+        // so the FFI boundary check can distinguish it from a same-shaped `data`
+        // type: a newtype crosses AS its single field, a `data` type would only
+        // cross as an internal tagged table.
+        self.newtype_types.insert(name.to_string());
         let tvars: Vec<TyVar> = type_vars.iter()
             .map(|n| TyVar { name: n.clone(), id: u32::MAX })
             .collect();
@@ -3443,6 +3674,10 @@ impl Checker {
             if !defined_fns.contains(name)
                 && let Some(ty) = sigs.get(name) {
                     self.validate_ffi_callbacks(name, ty);
+                    // Reject any import argument/result whose type has no defined
+                    // FFI marshalling (the import mirror of validate_export_types:
+                    // a plain `data` ADT would leak as an internal tagged table).
+                    self.validate_ffi_import_types(name, *ffi_kind, ty);
                     let ffi_fn = self.generate_ffi_function(name, lua_name, *ffi_kind, ty);
                     functions.push(ffi_fn);
                     // Register in env
