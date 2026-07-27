@@ -81,3 +81,18 @@ main = do
             , 3 ] == [1, 2, 3]) "multi-line list literal"
     assert ([ 1
             .. 4 ] == [1, 2, 3, 4]) "multi-line range"
+
+    -- let qualifier: binds visible in the body and later qualifiers
+    assert ([ y | x <- [1, 2, 3, 4, 5], let y = x * x, even y ] == [4, 16]) "let qualifier"
+
+    -- chained let qualifiers, a later one referencing an earlier binding
+    assert ([ z | x <- [1, 2, 3], let y = x + 1, let z = y * 10, z > 10 ] == [20, 30, 40]) "chained let qualifiers"
+
+    -- multi-line let qualifier with two layout-separated bindings
+    let ml =
+          [ a + b
+          | x <- [1, 2, 3]
+          , let a = x * 2
+                b = x * 3
+          ]
+    assert (ml == [5, 10, 15]) "multi-line let qualifier, multiple bindings"

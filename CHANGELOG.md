@@ -150,6 +150,18 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **`let` qualifiers in list comprehensions.** `[ y | x <- xs, let y = f x,
+  p y ]` now parses: the `let` binds are visible in the comprehension body and
+  every later qualifier, desugaring to `let binds in <rest>` exactly as GHC
+  specifies. Bindings use the full let-binding grammar — simple, function
+  (`let g a = ...`), and tuple-pattern binds, multiple layout-separated
+  bindings in one `let`, and mutual recursion — because the qualifier shares the
+  same `parse_let_binds` routine as a `let`-expression (extracted so the two
+  cannot drift). Multi-line qualifiers work too (the bar/comma/`]` layout change
+  above). Previously any `let` qualifier failed, parsed as a guard expression
+  that then demanded `in` (`Expected In, found ...`). Covered by single-line,
+  multi-line, chained, and multiple-binding cases in `list_comprehensions.mll`,
+  pinned against GHC by the differential oracle.
 - **List brackets are layout-insensitive: comprehensions, list literals, and
   ranges may span multiple lines.** A comprehension bar, a range `..`, a
   separating comma, or the closing `]` can now sit on a continuation line, so

@@ -13,6 +13,8 @@ type PResult<T> = Result<T, Box<Diagnostic>>;
 enum ListCompQual {
     Generator { pattern: Pattern, expr: Expr },
     Guard(Expr),
+    /// `let decls` — binds for the body and every later qualifier.
+    Let(Vec<LocalDef>),
 }
 
 /// The infix operator whose right-hand side is currently being parsed.
@@ -1987,10 +1989,109 @@ impl Parser {
     /// to distinguish from function composition `f . g`.
     /// Parse list comprehension qualifiers: x <- xs, pred, y <- ys, ...
     /// Supports pattern-matching generators: Ok x <- rs, (a, b) <- pairs, ...
+    /// Parse the binding group after `let` — the `let` keyword already
+    /// consumed — up to but NOT consuming the following `in` (a let-expression)
+    /// or `,`/`]` (a list-comprehension `let` qualifier). Bindings are
+    /// layout-separated exactly as in a let-expression: simple `x = e`,
+    /// function `f x = e` (desugared to `x = \... -> e`), and tuple-pattern
+    /// `(a, b) = e` binds, all in one mutually recursive group. Shared by the
+    /// let-expression atom and the comprehension qualifier so they bind
+    /// identically.
+    fn parse_let_binds(&mut self) -> PResult<Vec<LocalDef>> {
+        self.skip_newlines_and_indent();
+        let mut binds = Vec::new();
+        let let_indent = self.current_indent;
+        let saved_block = self.block_indent;
+        self.block_indent = self.peek_loc().col.saturating_sub(1);
+        // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
+        let mut fresh_counter = 0usize;
+
+        loop {
+            self.skip_newlines_and_indent();
+            if self.at_eof() || self.current_indent < let_indent {
+                break;
+            }
+            if self.at(&Token::In) {
+                break;
+            }
+            // Tuple pattern: let (a, b) = expr. Desugared into the
+            // SAME recursive binding group as one fresh binding for
+            // the scrutinee plus one lazy SELECTOR binding per
+            // pattern variable (`a = case __tup of (a, b) -> a`), so
+            // — as in Haskell — the pattern's variables are in scope
+            // for the right-hand side itself, for sibling bindings,
+            // and the match happens lazily on first demand (never
+            // eagerly, the way wrapping the body in a case would).
+            if matches!(self.peek(), Token::LeftParen) {
+                let pat = self.parse_pattern_atom()?;
+                if matches!(pat, Pattern::Tuple(_)) {
+                    self.expect(&Token::Eq)?;
+                    let rhs = self.parse_expr()?;
+                    let fresh = format!("__tup_{}", fresh_counter);
+                    fresh_counter += 1;
+                    binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
+                    for v in crate::ast::pattern_var_names(&pat) {
+                        binds.push(LocalDef {
+                            name: v.clone(),
+                            patterns: vec![],
+                            body: Expr::Case {
+                                scrutinee: Box::new(Expr::Var(fresh.clone())),
+                                branches: vec![CaseBranch {
+                                    pattern: pat.clone(),
+                                    guards: vec![],
+                                    body: Expr::Var(v),
+                                }],
+                            },
+                        });
+                    }
+                    continue;
+                }
+                return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
+            }
+            if !matches!(self.peek(), Token::Ident(_)) {
+                break;
+            }
+            let name = self.expect_ident()?;
+            let mut patterns = Vec::new();
+            while self.is_pattern_start() {
+                patterns.push(self.parse_pattern_atom()?);
+            }
+            self.expect(&Token::Eq)?;
+            let mut body = self.parse_stmt_expr()?;
+            // Desugar a function binding `let f x y = e` into a value
+            // binding of a lambda `f = \x y -> e`, matching do-`let`.
+            // This keeps the whole `let` group a uniform value-binding
+            // group so it is inferred and generated as one mutually
+            // recursive scope (patterns on let-binds are otherwise not
+            // handled by the let pipeline).
+            if !patterns.is_empty() {
+                body = Expr::Lambda {
+                    params: Self::lambda_param_names(patterns),
+                    body: Box::new(body),
+                };
+            }
+            binds.push(LocalDef { name, patterns: vec![], body });
+        }
+
+        self.skip_newlines_and_indent();
+        self.block_indent = saved_block;
+        Ok(binds)
+    }
+
     fn parse_list_comprehension_quals(&mut self) -> PResult<Vec<ListCompQual>> {
         let mut quals = Vec::new();
         loop {
             self.skip_newlines_and_indent();
+            // `let decls` qualifier: bindings visible in the body and every
+            // later qualifier. Desugars to `let decls in <rest>`.
+            if self.at(&Token::Let) {
+                self.advance();
+                let binds = self.parse_let_binds()?;
+                quals.push(ListCompQual::Let(binds));
+                self.skip_newlines_and_indent();
+                if self.at(&Token::Comma) { self.advance(); continue; }
+                break;
+            }
             // Try generator: pattern <- expr
             let save = self.pos;
             let save_indent = self.current_indent;
@@ -2090,6 +2191,14 @@ impl Parser {
                     cond: Box::new(pred.clone()),
                     then_branch: Box::new(rest),
                     else_branch: Box::new(Expr::Con("[]".to_string())),
+                }
+            }
+            ListCompQual::Let(binds) => {
+                // let decls in [body | rest] — bindings scope over the rest.
+                let rest = self.desugar_list_comprehension(body, &quals[1..], counter);
+                Expr::Let {
+                    binds: binds.clone(),
+                    body: Box::new(rest),
                 }
             }
         }
@@ -2749,83 +2858,7 @@ impl Parser {
             }
             Token::Let => {
                 self.advance();
-                self.skip_newlines_and_indent();
-                let mut binds = Vec::new();
-                let let_indent = self.current_indent;
-                let saved_block = self.block_indent;
-                self.block_indent = self.peek_loc().col.saturating_sub(1);
-                // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
-                let mut fresh_counter = 0usize;
-
-                loop {
-                    self.skip_newlines_and_indent();
-                    if self.at_eof() || self.current_indent < let_indent {
-                        break;
-                    }
-                    if self.at(&Token::In) {
-                        break;
-                    }
-                    // Tuple pattern: let (a, b) = expr. Desugared into the
-                    // SAME recursive binding group as one fresh binding for
-                    // the scrutinee plus one lazy SELECTOR binding per
-                    // pattern variable (`a = case __tup of (a, b) -> a`), so
-                    // — as in Haskell — the pattern's variables are in scope
-                    // for the right-hand side itself, for sibling bindings,
-                    // and the match happens lazily on first demand (never
-                    // eagerly, the way wrapping the body in a case would).
-                    if matches!(self.peek(), Token::LeftParen) {
-                        let pat = self.parse_pattern_atom()?;
-                        if matches!(pat, Pattern::Tuple(_)) {
-                            self.expect(&Token::Eq)?;
-                            let rhs = self.parse_expr()?;
-                            let fresh = format!("__tup_{}", fresh_counter);
-                            fresh_counter += 1;
-                            binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
-                            for v in crate::ast::pattern_var_names(&pat) {
-                                binds.push(LocalDef {
-                                    name: v.clone(),
-                                    patterns: vec![],
-                                    body: Expr::Case {
-                                        scrutinee: Box::new(Expr::Var(fresh.clone())),
-                                        branches: vec![CaseBranch {
-                                            pattern: pat.clone(),
-                                            guards: vec![],
-                                            body: Expr::Var(v),
-                                        }],
-                                    },
-                                });
-                            }
-                            continue;
-                        }
-                        return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
-                    }
-                    if !matches!(self.peek(), Token::Ident(_)) {
-                        break;
-                    }
-                    let name = self.expect_ident()?;
-                    let mut patterns = Vec::new();
-                    while self.is_pattern_start() {
-                        patterns.push(self.parse_pattern_atom()?);
-                    }
-                    self.expect(&Token::Eq)?;
-                    let mut body = self.parse_stmt_expr()?;
-                    // Desugar a function binding `let f x y = e` into a value
-                    // binding of a lambda `f = \x y -> e`, matching do-`let`.
-                    // This keeps the whole `let` group a uniform value-binding
-                    // group so it is inferred and generated as one mutually
-                    // recursive scope (patterns on let-binds are otherwise not
-                    // handled by the let pipeline).
-                    if !patterns.is_empty() {
-                        body = Expr::Lambda {
-                            params: Self::lambda_param_names(patterns),
-                            body: Box::new(body),
-                        };
-                    }
-                    binds.push(LocalDef { name, patterns: vec![], body });
-                }
-
-                self.skip_newlines_and_indent();
-                self.block_indent = saved_block;
+                let binds = self.parse_let_binds()?;
                 self.expect(&Token::In)?;
                 self.skip_newlines_and_indent();
                 let body = self.parse_expr()?;
