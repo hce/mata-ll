@@ -1,5 +1,17 @@
 # Why the `.umx` decode is much slower than the `.it`
 
+**Status (2026-07-27): the full-song `.umx` decode is retired as a benchmark**
+(and `bisect-perf.sh` with it). It was redundant signal: as the analysis below
+shows, the `.umx` exercises the same code paths as the `.it` — it just renders
+~4× the audio and adds JIT-cold per-pattern cost that plain Lua does not even
+exhibit — so it detected nothing the `.it` run doesn't. The `.it` decode and
+the CI perf gate (`mll-tests/perf-test.sh`, 0.5× realtime on the generated
+`benchmark.it`) remain the speed benchmark. The module files themselves are
+copyrighted and must never be committed: `.gitignore` blocks the formats
+repo-wide and CI fails if any such file is ever tracked (`benchmark.it`, our
+own generated fixture, is the sole exception). The analysis below is kept as
+the record of why the `.umx` numbers looked alarming and weren't.
+
 Follow-up to `PERF-REGRESSION.md`. That document benchmarks
 `HongKong_Music.it`. The bisect script (`bisect-perf.sh`) and casual runs use
 `HongKong_Music.umx`, which is far slower (≈1400s under plain Lua 5.5, ≈624s
@@ -95,9 +107,10 @@ and (per the GC-off test above) not GC pauses either.
 claimed ~11 GB where the OS showed ~150 MB resident. Trust OS RSS, not that
 counter, when GC is off.
 
-## Practical note for `bisect-perf.sh`
+## Practical note for `bisect-perf.sh` (script since deleted)
 
-The script runs plain `lua` on the `.umx` with a 600s "BAD" threshold. With Lua
-5.5 that combination now always reports BAD (≈1400s); even under LuaJIT the
-`.umx` is ≈624s, just over the line. To use it for bisection, switch the
-interpreter to `luajit` and/or raise the threshold, or point it at the `.it`.
+The script ran plain `lua` on the `.umx` with a 600s "BAD" threshold. With Lua
+5.5 that combination always reported BAD (≈1400s) on expected behavior; even
+under LuaJIT the `.umx` was ≈624s, just over the line. It was deleted along
+with the `.umx` benchmark itself (see the status note at the top). For future
+bisection, use the `.it` input as `PERF-REGRESSION.md` does.
