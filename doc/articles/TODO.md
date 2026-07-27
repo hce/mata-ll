@@ -32,14 +32,13 @@ MATA-LL TODO
       collapses), or maintain the env's free-variable set incrementally.
       Needs its own change with the perf benchmarks re-run.
 
-- [ ] **Right-section operand precedence is more permissive than GHC.**
-      Prefix minus in right sections now rejects per GHC (`(+ -2)`), but the
-      general rule is not enforced: `(== a || b)` is accepted where GHC
-      requires the section operand to parse at the operator's right binding
-      power (it reads it as `(== (a || b))` — wrong grouping, not just lax
-      acceptance). Enforcing it changes acceptance of existing programs, so
-      it needs a deliberate pass with a clear error message and a corpus
-      check, same shape as the prefix-minus change.
+- [ ] **`::` ascription inside a right-section operand is accepted; GHC
+      parse-errors.** Found 2026-07-27 during the section-precedence work:
+      mata-ll accepts `(+ 1 :: Int)` where GHC rejects the `::` in that
+      grammar position. Accept-only (no wrong grouping), separate grammar
+      production from the operand-precedence rule. Low priority; closing it
+      is an acceptance change, so it wants the same corpus-checked shape as
+      the precedence fix.
 
 - [ ] **Type-erased generic `show` cannot split Integer/Double on LuaJIT.**
       LuaJIT has no `math.type`, so the last-resort runtime-dispatch `show`
@@ -51,6 +50,31 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Section operand precedence now matches GHC exactly — both
+      directions.** A section operand that is an infix expression (or prefix
+      minus, `infixl 6`) must bind tighter than the section operator; the one
+      legal equal-precedence shape is a chain in the section's own direction
+      (infixl operand in a left section, infixr in a right). `(== a || b)` —
+      previously ACCEPTED with the wrong grouping `(== (a || b))` — now
+      rejects with an error stating the rule, both fixities, why the intended
+      meaning is not what the expression would group as, and a `note:` giving
+      the parenthesized fix. Enforced at parse time in
+      `check_section_operand` (parser.rs), which is correct there because a
+      pre-parse scan seeds declared `infixl`/`infixr`/`infix` fixities.
+      Alongside: `continue_infix` now stops before an operator directly
+      followed by `)`, which COMPLETES left sections with compound operands —
+      `(2 * 3 +)` previously failed to parse at all (GHC accepts it) — and
+      `(-1 <>)`-style forms mata-ll over-rejected are accepted. Every
+      accept/reject decision verified against real GHC 9.14.1 (23 probes);
+      rejection is now identical to GHC on every shape, no deviation note
+      needed. Corpus check: all 415 .mll files, zero acceptance changes.
+      Tests: `section_operand_precedence_matches_ghc` (8 rejection shapes
+      incl. declared-fixity, 9 accepted) plus oracle-pinned additions to
+      `operator_sections.mll` and `operator_fixity.mll` (regen 280 pinned,
+      0 failed). One adjacent accept-only deviation found and logged as the
+      open `::`-ascription item above. Suite 943/0; proprietary acceptance
+      passes. 2026-07-27.
 
 - [x] **The user-facing evaluation-strategy contract is documented.**
       HASKDIFF.md now carries "Evaluation: call-by-need, with proof-gated
