@@ -73,3 +73,12 @@ main = do
 
     let g = (100 |+|)
     assert (g 42 == 142) "custom op section left"
+
+    -- Declared fixities drive the section-operand precedence rule
+    -- (Haskell 2010 §3.5) exactly like the builtin ones: the operand must
+    -- bind tighter than the section operator, or chain with it at equal
+    -- precedence in the section's own direction.
+    assert ((<| 2 <| []) 1 == [1, 2]) "right section, declared infixr chain"
+    assert ((<+> 2 |*| 3) 1 == 8) "right section, tighter declared operand"
+    assert ((1 <+> 2 <+>) 3 == 8) "left section, declared infixl chain"
+    assert ((2 |*| 3 |+|) 1 == 7) "left section, tighter declared operand"

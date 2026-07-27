@@ -64,6 +64,27 @@ API of the `mllc` library crate.)
   `mll`, `mll-tests`, and `mll-repl` now set `unsafe_code = "forbid"` — the
   crates contained no unsafe code, and `forbid` (not `deny`) locks that in as
   a verifiable guarantee that a stray `#[allow]` cannot reopen.
+- **Breaking: sections enforce GHC's operand-precedence rule (Haskell 2010
+  §3.5).** A section operand that is itself an infix expression must bind
+  tighter than the section operator; previously mata-ll accepted `(== a || b)`
+  and read it as `(== (a || b))` — a grouping GHC rejects outright, because
+  the section's expansion `x == a || b` groups as `(x == a) || b`. Both
+  directions now reject exactly as GHC does — `(== a || b)`, `(a + b *)`,
+  `(+ a + b)`, `(a ++ b ++)`, `(-a *)`, and the backtick forms — with declared
+  fixities participating and prefix minus counting as an infixl 6 operand.
+  The error states the rule, both fixities, the meaning the section cannot
+  have, and how the unparenthesized expansion groups, with a note showing the
+  parenthesized operand that keeps the intended meaning. The legal
+  same-precedence chains work — and left sections with compound operands,
+  which previously failed to parse at all (`(2 * 3 +)` died with `Expected
+  expression, found RightParen`), now parse: an infixl operand chains in a
+  left section (`(2 + 3 +)`), an infixr operand in a right section
+  (`(++ a ++ b)`), and a negated operand joins an infixl 6 left section
+  (`(-1 +)`, and `(-1 <>)`-style forms that were previously rejected).
+  Verified accept/reject-identical against GHC 9.14.1 on every shape;
+  corpus-checked — no existing program changes acceptance. Covered by
+  `section_operand_precedence_matches_ghc` plus GHC-goldened cases in
+  `operator_sections.mll` and `operator_fixity.mll`.
 
 ### Added
 

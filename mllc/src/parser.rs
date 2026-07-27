@@ -1817,6 +1817,17 @@ impl Parser {
                     break; // '..' is range syntax, not an infix operator
                 }
                 Token::Operator(ref op) => {
+                    // An operator directly followed by ')' is a left-section
+                    // tail (`(a * b +)`): it belongs to the enclosing
+                    // parenthesised-expression path, which builds the section
+                    // and checks its operand against the section-operand
+                    // precedence rule. Never consume it as an infix operator —
+                    // there is no expression after it to parse.
+                    if self.pos + 1 < self.tokens.len()
+                        && self.tokens[self.pos + 1].token == Token::RightParen
+                    {
+                        break;
+                    }
                     let (assoc, prec) = self.operator_fixity(op);
                     if lhs_is_negation && prec >= 6 && !(prec == 6 && assoc == Assoc::Left) {
                         return Err(self.prefix_minus_lhs_err(op, assoc, prec));
@@ -1842,6 +1853,13 @@ impl Parser {
                     self.advance();
                     let func = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
+                    // A backtick operator directly followed by ')' is a
+                    // left-section tail (``(a * b `div`)``) — same stop as
+                    // the symbolic-operator arm above.
+                    if self.at(&Token::RightParen) {
+                        self.pos = save;
+                        break;
+                    }
                     let (assoc, prec) = self.operator_fixity(&func);
                     if lhs_is_negation && prec >= 6 && !(prec == 6 && assoc == Assoc::Left) {
                         return Err(self.prefix_minus_lhs_err(&func, assoc, prec));
@@ -1941,6 +1959,116 @@ impl Parser {
             "parenthesize one side: '(-a) {e} b' or '-(a {e} b)'"
         ));
         Box::new(diag)
+    }
+
+    /// Enforce the section-operand precedence rule (Haskell 2010 §3.5, the
+    /// check GHC runs on every section): a section operand that is itself an
+    /// infix expression must bind tighter than the section operator, because
+    /// a section may only mean what its expansion means — `(== a || b)`
+    /// would have to be `\x -> x == (a || b)`, but `x == a || b` groups as
+    /// `(x == a) || b`, so the section is rejected rather than silently
+    /// regrouped. One same-precedence shape is well-defined and stays legal:
+    /// a chain that groups in the section's own direction — an infixl
+    /// operand in a left section (`(a + b +)` is `\x -> (a + b) + x`) and an
+    /// infixr operand in a right section (`(++ a ++ b)` is
+    /// `\x -> x ++ (a ++ b)`). Prefix minus counts as an infixl 6 operand,
+    /// exactly as in GHC. `direction` is `Assoc::Left` for a left section
+    /// `(e op)` and `Assoc::Right` for a right section `(op e)`; `span` is
+    /// the section operator's position.
+    fn check_section_operand(
+        &self,
+        op: &str,
+        op_assoc: Assoc,
+        op_prec: u8,
+        direction: Assoc,
+        operand: &Expr,
+        span: Span,
+    ) -> PResult<()> {
+        let (arg_assoc, arg_prec, negation, top_op) = match operand {
+            Expr::InfixApp { op: top, .. } => {
+                let (a, p) = self.operator_fixity(top);
+                (a, p, false, top.clone())
+            }
+            Expr::Negate(_) => (Assoc::Left, 6, true, "-".to_string()),
+            _ => return Ok(()),
+        };
+        if op_prec < arg_prec || (op_prec == arg_prec && direction == arg_assoc) {
+            return Ok(());
+        }
+
+        // Build the schematic pieces of the message from the operators as
+        // written: the operand shape, the section as the user wrote it, the
+        // expansion it would have to mean, and how the unparenthesized
+        // expansion groups (if it groups at all).
+        let d = op_display(op);
+        let e = op_in_expr(op);
+        let kw = assoc_keyword(op_assoc);
+        let side = if direction == Assoc::Left { "left" } else { "right" };
+        let rel = if arg_prec < op_prec { "looser than" } else { "at the same precedence as" };
+        let top_desc = if negation {
+            "prefix minus (which binds like binary '-', infixl 6)".to_string()
+        } else {
+            format!(
+                "{} ({} {arg_prec})",
+                op_display(&top_op),
+                assoc_keyword(arg_assoc)
+            )
+        };
+        let operand_src = if negation {
+            "-a".to_string()
+        } else {
+            format!("a {} b", op_in_expr(&top_op))
+        };
+        let (section_src, expansion, bare) = match direction {
+            Assoc::Left => (
+                format!("({operand_src} {e})"),
+                format!("\\x -> ({operand_src}) {e} x"),
+                format!("{operand_src} {e} x"),
+            ),
+            _ => (
+                format!("({e} {operand_src})"),
+                format!("\\x -> x {e} ({operand_src})"),
+                format!("x {e} {operand_src}"),
+            ),
+        };
+        // The unparenthesized expansion groups with the section operator
+        // applied first when the operand's operator binds looser; at equal
+        // precedence it only groups when both operators chain in the same
+        // (other) direction. A rejected negation operand binds looser than
+        // the section operator, and negation of the rest is the grouping.
+        let regrouped = if negation {
+            match direction {
+                Assoc::Left => Some(format!("-(a {e} x)")),
+                _ => None,
+            }
+        } else {
+            let e2 = op_in_expr(&top_op);
+            let groups = arg_prec < op_prec
+                || (arg_assoc == op_assoc && arg_assoc != Assoc::None);
+            groups.then(|| match direction {
+                Assoc::Left => format!("a {e2} (b {e} x)"),
+                _ => format!("(x {e} a) {e2} b"),
+            })
+        };
+        let grouping = match regrouped {
+            Some(g) => format!("'{bare}' groups as '{g}'"),
+            None => format!("'{bare}' has no defined grouping"),
+        };
+        let msg = format!(
+            "The operand of a {side} section must bind tighter than the \
+             section operator, but {top_desc} binds {rel} {d} \
+             ({kw} {op_prec}): '{section_src}' cannot mean '{expansion}', \
+             because {grouping}"
+        );
+        let mut diag = Diagnostic::parse_at(msg, span);
+        let fix = match direction {
+            Assoc::Left => format!("(({operand_src}) {e})"),
+            _ => format!("({e} ({operand_src}))"),
+        };
+        diag.notes.push(format!(
+            "parenthesize the operand to get that meaning: '{fix}'"
+        ));
+        Err(Box::new(diag))
     }
 
     fn parse_expr_app(&mut self) -> PResult<Expr> {
@@ -2490,6 +2618,10 @@ impl Parser {
                     let bare_op = self.pos + 1 < self.tokens.len()
                         && self.tokens[self.pos + 1].token == Token::RightParen;
                     if op != "-" || bare_op {
+                        let op_span = {
+                            let l = self.peek_loc();
+                            Span::new(l.line, l.col)
+                        };
                         self.advance(); // consume operator
                         if self.at(&Token::RightParen) {
                             // (op) — operator as function
@@ -2509,6 +2641,9 @@ impl Parser {
                             return Err(self.prefix_minus_rhs_err(&par));
                         }
                         let rhs = self.parse_expr()?;
+                        self.check_section_operand(
+                            &op, assoc, prec, Assoc::Right, &rhs, op_span,
+                        )?;
                         self.expect(&Token::RightParen)?;
                         return Ok(Expr::Lambda {
                             params: vec!["_sec".into()],
@@ -2523,6 +2658,10 @@ impl Parser {
 
                 // (`name` expr) — backtick right section: \x -> x `name` expr
                 if self.at(&Token::Backtick) {
+                    let op_span = {
+                        let l = self.peek_loc();
+                        Span::new(l.line, l.col)
+                    };
                     self.advance();
                     let name = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
@@ -2542,6 +2681,9 @@ impl Parser {
                         return Err(self.prefix_minus_rhs_err(&par));
                     }
                     let rhs = self.parse_expr()?;
+                    self.check_section_operand(
+                        &name, assoc, prec, Assoc::Right, &rhs, op_span,
+                    )?;
                     self.expect(&Token::RightParen)?;
                     return Ok(Expr::Lambda {
                         params: vec!["_sec".into()],
@@ -2579,11 +2721,29 @@ impl Parser {
                 // operator-section check above).
                 let lhs = self.parse_expr_prefix(None)?;
 
-                // (expr op) — left section: \x -> expr op x
+                // Finish the infix expression from the parse we already have
+                // (no re-parse). `continue_infix` stops in front of an
+                // operator directly followed by ')', so a left-section tail
+                // — with a simple operand (`(a +)`) or a full infix one
+                // (`(a * b +)`) — is still unconsumed here.
+                let mut expr = self.continue_infix(lhs, 0, None)?;
+
+                // (expr op) — left section: \x -> expr op x. The operand
+                // must satisfy the section-operand precedence rule
+                // (`check_section_operand`): `(a * b +)` is legal,
+                // `(a + b *)` is not.
                 if let Token::Operator(op) = self.peek().clone() {
                     let after_op = self.pos + 1;
                     if after_op < self.tokens.len()
                         && self.tokens[after_op].token == Token::RightParen {
+                            let (op_assoc, op_prec) = self.operator_fixity(&op);
+                            let op_span = {
+                                let l = self.peek_loc();
+                                Span::new(l.line, l.col)
+                            };
+                            self.check_section_operand(
+                                &op, op_assoc, op_prec, Assoc::Left, &expr, op_span,
+                            )?;
                             self.advance(); // consume operator
                             self.advance(); // consume )
                             self.expr_min_indent = saved_expr_min_indent;
@@ -2591,7 +2751,7 @@ impl Parser {
                                 params: vec!["_sec".into()],
                                 body: Box::new(Expr::InfixApp {
                                     op,
-                                    lhs: Box::new(lhs),
+                                    lhs: Box::new(expr),
                                     rhs: Box::new(Expr::Var("_sec".into())),
                                 }),
                             });
@@ -2607,26 +2767,32 @@ impl Parser {
                                 && after_bt + 2 < self.tokens.len()
                                 && self.tokens[after_bt + 2].token == Token::RightParen
                             {
+                                let op_span = {
+                                    let l = self.peek_loc();
+                                    Span::new(l.line, l.col)
+                                };
                                 self.advance(); // consume first backtick
                                 let name = self.expect_ident()?;
                                 self.advance(); // consume second backtick
+                                let (op_assoc, op_prec) = self.operator_fixity(&name);
+                                self.check_section_operand(
+                                    &name, op_assoc, op_prec, Assoc::Left, &expr, op_span,
+                                )?;
                                 self.advance(); // consume )
                                 self.expr_min_indent = saved_expr_min_indent;
                                 return Ok(Expr::Lambda {
                                     params: vec!["_sec".into()],
                                     body: Box::new(Expr::InfixApp {
                                         op: name,
-                                        lhs: Box::new(lhs),
+                                        lhs: Box::new(expr),
                                         rhs: Box::new(Expr::Var("_sec".into())),
                                     }),
                                 });
                             }
                 }
 
-                // Not a section — finish the infix expression from the parse we
-                // already have (no re-parse). This mirrors `parse_expr`:
-                // continue infix, restore `expr_min_indent`, then `::` ascription.
-                let mut expr = self.continue_infix(lhs, 0, None)?;
+                // Not a section — this mirrors `parse_expr`:
+                // restore `expr_min_indent`, then `::` ascription.
                 self.expr_min_indent = saved_expr_min_indent;
                 // Inside explicit ( ) newlines are insignificant: `::`, a tuple
                 // comma, or the closing `)` may sit on a continuation line.

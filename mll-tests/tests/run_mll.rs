@@ -6999,6 +6999,101 @@ fn prefix_minus_matches_ghc_impl() {
     }
 }
 
+/// Sections follow GHC's operand-precedence rule (Haskell 2010 §3.5): a
+/// section operand that is itself an infix expression must bind tighter
+/// than the section operator — `(== a || b)` is rejected (it cannot mean
+/// `\x -> x == (a || b)`, because `x == a || b` groups as `(x == a) || b`),
+/// while `(+ a * b)` stays legal. At equal precedence only a chain in the
+/// section's own direction is legal: an infixl operand in a left section
+/// (`(2 + 3 +)`), an infixr operand in a right section (`(++ a ++ b)`).
+/// Prefix minus counts as an infixl 6 operand and declared fixities
+/// participate, both as in GHC. GHC 9.14.1 accepts/rejects every one of
+/// these programs identically; the accepted groupings run against real GHC
+/// via the operator_sections and operator_fixity golden cases.
+#[test]
+fn section_operand_precedence_matches_ghc() {
+    on_compiler_stack(section_operand_precedence_impl)
+}
+
+fn section_operand_precedence_impl() {
+    // Rejected: the operand's top operator binds looser than the section
+    // operator, or refuses to chain with it at equal precedence.
+    for (src, needles) in [
+        // The canonical shape: `(== a || b)` cannot mean `\x -> x == (a || b)`.
+        (
+            "main :: IO ()\nmain = print (filter (== True || False) [True])\n",
+            &["'||' (infixr 2)", "'==' (infix 4)", "(== (a || b))"][..],
+        ),
+        // Left section with a looser operand.
+        (
+            "main :: IO ()\nmain = print ((2 + 3 *) 4)\n",
+            &["'+' (infixl 6)", "'*' (infixl 7)", "((a + b) *)"][..],
+        ),
+        // Equal precedence, wrong direction: infixl in a right section...
+        (
+            "main :: IO ()\nmain = print ((+ 2 + 3) 1)\n",
+            &["'+' (infixl 6)", "(+ (a + b))"][..],
+        ),
+        // ...infixr in a left section...
+        (
+            "main :: IO ()\nmain = print (([1] ++ [2] ++) [0])\n",
+            &["'++' (infixr 5)", "((a ++ b) ++)"][..],
+        ),
+        // ...and non-associative, which never chains with itself.
+        (
+            "main :: IO ()\nmain = print ((== 1 == True) 2)\n",
+            &["no defined grouping", "(== (a == b))"][..],
+        ),
+        // Backtick operators follow the same rule.
+        (
+            "main :: IO ()\nmain = print ((`div` 1 + 2) 9)\n",
+            &["`div` (infixl 7)", "'+' (infixl 6)"][..],
+        ),
+        // Prefix minus counts as an infixl 6 operand, as in GHC.
+        (
+            "main :: IO ()\nmain = print ((-1 *) 2)\n",
+            &["prefix minus", "'*' (infixl 7)", "((-a) *)"][..],
+        ),
+        // A declared fixity participates: infixl 2 .|. under infix 4 ==.
+        (
+            "infixl 2 .|.\n(.|.) :: Bool -> Bool -> Bool\na .|. b = a || b\n\
+             main :: IO ()\nmain = print (filter (== True .|. False) [True])\n",
+            &["'.|.' (infixl 2)", "'==' (infix 4)", "(== (a .|. b))"][..],
+        ),
+    ] {
+        let e = compile_err(src);
+        assert!(
+            e.contains("must bind tighter than the section operator"),
+            "{src}: got: {e}"
+        );
+        for n in needles {
+            assert!(e.contains(n), "{src}: expected {n:?} in: {e}");
+        }
+        assert!(e.contains("parenthesize the operand"), "{src}: got: {e}");
+    }
+
+    // Accepted: tighter operands, same-direction equal-precedence chains,
+    // the parenthesized forms of the rejections, and a declared infixr at
+    // the section operator's own precedence.
+    for src in [
+        "main :: IO ()\nmain = print (filter (== (True || False)) [True])\n",
+        "main :: IO ()\nmain = print (map (+ 2 * 3) [1])\n",
+        "main :: IO ()\nmain = print ((2 * 3 +) 1)\n",
+        "main :: IO ()\nmain = print ((2 + 3 +) 1)\n",
+        "main :: IO ()\nmain = print ((++ [1] ++ [2]) [0])\n",
+        "main :: IO ()\nmain = print ((: [1] ++ [2]) 0)\n",
+        "main :: IO ()\nmain = print ((2 * 3 `div`) 2)\n",
+        "main :: IO ()\nmain = print ((-1 +) 3)\n",
+        "infixr 7 .*.\n(.*.) :: Int -> Int -> Int\na .*. b = a * b\n\
+         main :: IO ()\nmain = print ((.*. 2 .*. 3) 1)\n",
+    ] {
+        assert!(
+            mllc::compile(src, Path::new("."), &[]).is_ok(),
+            "should compile:\n{src}"
+        );
+    }
+}
+
 /// The other half of the precedence-parsing rule: same precedence but
 /// opposite associativities defines no grouping either.
 #[test]
