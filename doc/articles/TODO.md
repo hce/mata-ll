@@ -83,6 +83,29 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **Exported empty-list results now cross to the Lua host as `{}`, not
+      `nil`.** mata-ll represents `[]` as `nil` internally, and the export
+      edge let the representation leak: a top-level `[a]` function result or
+      `[a]` value export crossed as `nil` while the same empty list crossed
+      as `{}` at every other edge — FFI call arguments at every nesting
+      depth, callback results, and even one level deeper in the export's own
+      result (`Just []` already marshalled to `{}`). The type-directed
+      descriptor has been able to tell `[]` from `Nothing` since export
+      results gained it; the fix deletes the two blanket
+      `if __result == nil then return nil end` short-circuits
+      (codegen/module.rs, function-export and value-export emission) that
+      predated it, letting `__mll_arg_marshal` decide: `{k="list",..}`
+      rebuilds `nil` into a fresh `{}` a host can `ipairs` without a nil
+      check; `{k="maybe",..}` passes `Nothing` through as `nil`;
+      record/hashmap descriptors keep their own nil guards. Contract change,
+      updated deliberately: `ffi_export_string_lists` and
+      `export_results_marshal_type_directed` now pin the empty table, the
+      new `ffi_export_empty_list_is_table_nothing_is_nil` pins the
+      `[]`-vs-`Just []`-vs-`Nothing` trio plus the value-export path, and
+      the usermanual FFI note teaches the new rule (it taught the asymmetry
+      as a rule before). Breaking CHANGELOG entry written. Suite 946/0;
+      proprietary acceptance passes. 2026-07-27.
+
 - [x] **Call-site inliner no longer duplicates argument work — sharing
       restored to GHC's rule.** A non-trivial argument is now substituted
       only for a parameter the body emits at most once; multiply-used
