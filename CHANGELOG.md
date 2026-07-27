@@ -29,6 +29,153 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Changed
+
+- **Breaking: only types with a DESIGNED FFI shape may cross the boundary, in
+  both directions.** The marshallability check previously accepted "any data
+  type iff every field marshals", so a plain user ADT — and prelude `Either`
+  (outside `LuaTry`/`LuaIOCatch`), `Ordering`, and `ExitValue` — crossed as
+  mata-ll's internal `{tag, fields…}` table, a shape with no meaning to a Lua
+  host. Such a type is now REJECTED at compile time even when its fields would
+  each marshal. The allowed set is the designed shapes: scalars, `()`,
+  `LuaUserData`, `[a]`, tuples, `HashMap`, `Maybe a`, `Any`, a `LuaDict` record,
+  a NEWTYPE over a marshallable type (transparent — the value IS its field, so
+  `newtype FileHandle = FileHandle LuaUserData` and the whole `LIO` file API
+  keep crossing), and `Either String a` as a `LuaTry`/`LuaIOCatch` result (the
+  `pcall` wrapper builds its tags). The check is now also SYMMETRIC: FFI imports
+  (`LuaPure`/`LuaIO`/`LuaTry`/`LuaIOCatch`, which call into Lua) are validated
+  like exports — arguments cross out, the result comes in, outgoing callbacks
+  are checked with directions swapped, and the polymorphic threaded-state fold
+  variable stays allowed. The error names the culprit sub-type, the position and
+  the direction, with a `note:` explaining the tagged-table leak and pointing at
+  a `LuaDict` record / `Any` / a scalar-or-list encoding. To carry a plain ADT
+  across, wrap its data in a `LuaDict` record or a newtype.
+- **`[a]`-vs-`String` type errors now explain the opaque-String design.**
+  mata-ll's `String` is deliberately opaque — it IS the Lua string, a byte
+  array, not `[Char]` — so list operations (`++`, `map`, `length`,
+  `intercalate`) do not apply to it. The mismatch error for that shape (both
+  directions) previously stated the two types and stopped; it now says why:
+  that `String` is not a list by design, that `<>` concatenates `String`s and a
+  list of `String`s folds with `<>`/`mconcat`, and it points at HASKDIFF.md
+  ("Strings and ByteStrings") for the rationale. Error-path only: nothing that
+  typechecked before changes, and the note fires specifically for the
+  `[a]`-vs-`String` shape.
+- **All published and internal Rust crates forbid `unsafe` code.** `mllc`,
+  `mll`, `mll-tests`, and `mll-repl` now set `unsafe_code = "forbid"` — the
+  crates contained no unsafe code, and `forbid` (not `deny`) locks that in as
+  a verifiable guarantee that a stray `#[allow]` cannot reopen.
+
+### Added
+
+- **`schema2mll`, a JSON Schema → mata-ll type generator.** A standalone
+  utility written in pure mata-ll (`utilities/schema2mll.mll`): it reads a
+  JSON Schema on stdin and emits a data type deriving `FromJSON`/`ToJSON` on
+  stdout. Objects map to records, non-required fields to `Maybe`, arrays to
+  lists, nested objects to their own named records, `$ref`/`definitions`/
+  `$defs` to named types, and free-form objects to the `Json` passthrough.
+  Field labels are the JSON keys verbatim, so the derived codecs round-trip.
+  The reverse direction (schema from type) is deferred to the planned Generics
+  substrate rather than added as a one-off native derive.
+- **Full GHC `read`-side string-escape parity — the last input-syntax gap.**
+  The lexer accepted only `\n \t \r \\ \" \0`; string literals now decode the
+  whole Haskell 2010 §2.6 escape grammar: the shorthand control escapes `\a`
+  `\b` `\f` `\v` alongside the existing ones; decimal, octal (`\o37`), and hex
+  (`\xff`) numeric escapes with maximal munch; the full named-control table
+  `\NUL`..`\US` plus `\SP` and `\DEL`, longest-match so `\SOH` wins over `\SO`
+  followed by `H`; the `\&` zero-width separator (`"\137\&0"` is two bytes,
+  `"\SO\&H"` disambiguates the name); and the `\<whitespace>\` string gap,
+  newlines included. The decoder's control-name table is kept byte-for-byte
+  identical to the runtime's show-side table, so `read . show == id` holds
+  through both halves. This also corrects a silent misdecode: `\0` was not
+  maximal-munch, so GHC source `"\05"` (one character, code 5) decoded to the
+  two characters `['\0','5']` — a wrong value, not a rejection. One deliberate,
+  documented deviation, forced by mata-ll's byte-string model (`String` is the
+  Lua string, a byte array — HASKDIFF.md, "Strings and ByteStrings"): a numeric
+  escape above 255, which GHC accepts up to `\1114111` as a Unicode code point,
+  has no single-byte representation and is a hard lexer error carrying a
+  `note:` explaining why — never a silent wrong value. Generated Lua stays
+  byte-identical for all existing programs. Covered by `string_escapes.mll`
+  (every new escape, maximal munch, `\&`, string gaps, and the `read . show`
+  round-trip, asserted against the Report's byte values) and the out-of-range
+  rejection test.
+- **Scientific-notation numeric literals.** `1.0e-2`, `1e5`, `2.5E+3`, and
+  `6.022e23` now lex as float literals (Haskell 2010 §2.5: `(e|E) [+|-]
+  decimal`, lowercase or uppercase `e`, optional sign, ≥1 digit). As in GHC a
+  bare-mantissa exponent like `1e5` is `Fractional` — a float, not an `Int` —
+  and types through the existing `NumLit` path (defaulting to `Number`).
+  Maximal munch requires an exponent digit, so `1e` still lexes as `1` then the
+  identifier `e`, and `1..3` stays a range. Previously `1.0e-2` lexed as the
+  application `1.0 e - 2` (`Unbound variable: e`); the asymmetry that `show`
+  emitted exponent notation (`1.2345678e7`) the lexer could not read back is
+  closed — `read . show` now round-trips on such values. Covered in
+  `num_polymorphic.mll`, pinned against GHC by the differential oracle.
+- **`let` qualifiers in list comprehensions.** `[ y | x <- xs, let y = f x,
+  p y ]` now parses: the `let` binds are visible in the comprehension body and
+  every later qualifier, desugaring to `let binds in <rest>` exactly as GHC
+  specifies. Bindings use the full let-binding grammar — simple, function
+  (`let g a = ...`), and tuple-pattern binds, multiple layout-separated
+  bindings in one `let`, and mutual recursion — because the qualifier shares the
+  same `parse_let_binds` routine as a `let`-expression (extracted so the two
+  cannot drift). Multi-line qualifiers work too (the bar/comma/`]` layout change
+  below). Previously any `let` qualifier failed, parsed as a guard expression
+  that then demanded `in` (`Expected In, found ...`). Covered by single-line,
+  multi-line, chained, and multiple-binding cases in `list_comprehensions.mll`,
+  pinned against GHC by the differential oracle.
+- **List brackets are layout-insensitive: comprehensions, list literals, and
+  ranges may span multiple lines.** A comprehension bar, a range `..`, a
+  separating comma, or the closing `]` can now sit on a continuation line, so
+  the GHC-idiomatic multi-line form parses:
+  `[ (x, y)` / `| x <- xs` / `, y <- ys` / `, x < y` / `]`. Previously any
+  newline before the `|` (or before a qualifier's comma, or the closing `]`)
+  aborted with `Expected RightBracket, found Pipe`, forcing the whole
+  comprehension onto one line. Inside `[ ]` newlines and indentation are now
+  uniformly insignificant, matching how the parser already treated commas in a
+  multi-line list literal. Accept-only change: nothing that parsed before parses
+  differently. Covered by multi-line cases in `list_comprehensions.mll`, pinned
+  against GHC by the differential oracle.
+- **Parenthesized `( )` expressions are layout-insensitive too.** The closing
+  `)`, a tuple comma, or a `::` ascription may sit on a continuation line, so
+  `( a` / `+ b` / `)`, a multi-line tuple, and `( e` / `:: T )` all parse. The
+  interior was already layout-free after the `(`; `continue_infix` stops at the
+  newline, so the close-side decisions (`)`, comma, `::`) now skip newlines and
+  indentation the same way. Previously a newline before the close aborted with
+  `Expected RightParen`. Accept-only change; covered by multi-line cases in
+  `tuples.mll`, pinned against GHC by the differential oracle.
+- **`Any` converts to and from plain Lua scalars at the FFI boundary.** The
+  dynamic `Any` type (`AnyString`/`AnyInt`/`AnyNumber`/`AnyBool`/`AnyNull`)
+  no longer crosses the boundary as its raw constructor table. A host scalar
+  coming IN is tagged by its Lua type — a string becomes `AnyString`, an
+  integer-valued number `AnyInt`, a fractional number `AnyNumber`, a boolean
+  `AnyBool`, and `nil` `AnyNull`; an `Any` going OUT is untagged to its bare
+  scalar (`AnyNull` becomes `nil`), so the host only ever sees a plain
+  string/number/boolean/nil. The conversion descends into containers like every
+  other marshalled type, so `[Any]`, `(Int, Any)`, and a record/`HashMap` with
+  an `Any` field round-trip through the host unchanged. A value that is neither a
+  scalar nor `nil` (a table, function, or userdata) cannot cross as `Any` and
+  fails at the boundary with a localized error, since `Any` models only scalar
+  Lua values.
+
+### Fixed
+
+- **Type errors point at the offending statement, not the clause head.**
+  Previously every type error in a multi-line body was reported at the
+  function's first line, because the expression AST carried no source spans
+  below the clause. The parser now marks statement boundaries — let/where
+  binding bodies, do-statements, case-branch and guard bodies, and `if`
+  branches — with a transparent `Expr::Spanned` marker (erased when lowering to
+  typed IR), and the checker attributes an error to the innermost such marker it
+  was inside. So `c = a <> "oops"` in a `let` reports at the `c` line, and a
+  mismatched case/`if` branch reports at that branch. Errors that surface only
+  when reconciling a whole binding against its uses, and deferred class-instance
+  errors ("No instance for …"), still fall back to the clause head.
+- **A constrained FFI import is no longer rejected as undefined.** A body-less
+  FFI signature carrying a class context — e.g.
+  `dbQuery :: LuaDict b => Db -> (a -> [b] -> a) -> … -> LuaIO ":query_array" a`,
+  where the constraint bounds a marshalled argument — was misread as an ordinary
+  signature with no accompanying definition, because the FFI-import detector
+  stopped at the `=>` qualifier. It now peels the context (and any `forall`) to
+  find the trailing `LuaIO`/`LuaPure`/… form, matching type reduction.
+
 ## [0.1.5] - 2026-07-23
 
 ### Changed
@@ -76,25 +223,6 @@ API of the `mllc` library crate.)
   `DIVERGENCES.md` carries no pinned runtime divergences; the nineteen
   formerly divergent cases are ordinary GHC-goldened oracle cases now.
 
-- **Breaking: only types with a DESIGNED FFI shape may cross the boundary, in
-  both directions.** The marshallability check previously accepted "any data
-  type iff every field marshals", so a plain user ADT — and prelude `Either`
-  (outside `LuaTry`/`LuaIOCatch`), `Ordering`, and `ExitValue` — crossed as
-  MATA-LL's internal `{tag, fields…}` table, a shape with no meaning to a Lua
-  host. Such a type is now REJECTED at compile time even when its fields would
-  each marshal. The allowed set is the designed shapes: scalars, `()`,
-  `LuaUserData`, `[a]`, tuples, `HashMap`, `Maybe a`, `Any`, a `LuaDict` record,
-  a NEWTYPE over a marshallable type (transparent — the value IS its field, so
-  `newtype FileHandle = FileHandle LuaUserData` and the whole `LIO` file API
-  keep crossing), and `Either String a` as a `LuaTry`/`LuaIOCatch` result (the
-  `pcall` wrapper builds its tags). The check is now also SYMMETRIC: FFI imports
-  (`LuaPure`/`LuaIO`/`LuaTry`/`LuaIOCatch`, which call into Lua) are validated
-  like exports — arguments cross out, the result comes in, outgoing callbacks
-  are checked with directions swapped, and the polymorphic threaded-state fold
-  variable stays allowed. The error names the culprit sub-type, the position and
-  the direction, with a `note:` explaining the tagged-table leak and pointing at
-  a `LuaDict` record / `Any` / a scalar-or-list encoding. To carry a plain ADT
-  across, wrap its data in a `LuaDict` record or a newtype.
 - **Breaking: `LuaIterator`'s result must now be written as an explicit
   list.** `LuaIterator "string.gmatch" [String]` names the result list
   directly; the old bare-element shorthand (`LuaIterator "string.gmatch"
@@ -150,62 +278,6 @@ API of the `mllc` library crate.)
 
 ### Added
 
-- **Scientific-notation numeric literals.** `1.0e-2`, `1e5`, `2.5E+3`, and
-  `6.022e23` now lex as float literals (Haskell 2010 §2.5: `(e|E) [+|-]
-  decimal`, lowercase or uppercase `e`, optional sign, ≥1 digit). As in GHC a
-  bare-mantissa exponent like `1e5` is `Fractional` — a float, not an `Int` —
-  and types through the existing `NumLit` path (defaulting to `Number`).
-  Maximal munch requires an exponent digit, so `1e` still lexes as `1` then the
-  identifier `e`, and `1..3` stays a range. Previously `1.0e-2` lexed as the
-  application `1.0 e - 2` (`Unbound variable: e`); the asymmetry that `show`
-  emitted exponent notation (`1.2345678e7`) the lexer could not read back is
-  closed — `read . show` now round-trips on such values. Covered in
-  `num_polymorphic.mll`, pinned against GHC by the differential oracle.
-- **`let` qualifiers in list comprehensions.** `[ y | x <- xs, let y = f x,
-  p y ]` now parses: the `let` binds are visible in the comprehension body and
-  every later qualifier, desugaring to `let binds in <rest>` exactly as GHC
-  specifies. Bindings use the full let-binding grammar — simple, function
-  (`let g a = ...`), and tuple-pattern binds, multiple layout-separated
-  bindings in one `let`, and mutual recursion — because the qualifier shares the
-  same `parse_let_binds` routine as a `let`-expression (extracted so the two
-  cannot drift). Multi-line qualifiers work too (the bar/comma/`]` layout change
-  above). Previously any `let` qualifier failed, parsed as a guard expression
-  that then demanded `in` (`Expected In, found ...`). Covered by single-line,
-  multi-line, chained, and multiple-binding cases in `list_comprehensions.mll`,
-  pinned against GHC by the differential oracle.
-- **List brackets are layout-insensitive: comprehensions, list literals, and
-  ranges may span multiple lines.** A comprehension bar, a range `..`, a
-  separating comma, or the closing `]` can now sit on a continuation line, so
-  the GHC-idiomatic multi-line form parses:
-  `[ (x, y)` / `| x <- xs` / `, y <- ys` / `, x < y` / `]`. Previously any
-  newline before the `|` (or before a qualifier's comma, or the closing `]`)
-  aborted with `Expected RightBracket, found Pipe`, forcing the whole
-  comprehension onto one line. Inside `[ ]` newlines and indentation are now
-  uniformly insignificant, matching how the parser already treated commas in a
-  multi-line list literal. Accept-only change: nothing that parsed before parses
-  differently. Covered by multi-line cases in `list_comprehensions.mll`, pinned
-  against GHC by the differential oracle.
-- **Parenthesized `( )` expressions are layout-insensitive too.** The closing
-  `)`, a tuple comma, or a `::` ascription may sit on a continuation line, so
-  `( a` / `+ b` / `)`, a multi-line tuple, and `( e` / `:: T )` all parse. The
-  interior was already layout-free after the `(`; `continue_infix` stops at the
-  newline, so the close-side decisions (`)`, comma, `::`) now skip newlines and
-  indentation the same way. Previously a newline before the close aborted with
-  `Expected RightParen`. Accept-only change; covered by multi-line cases in
-  `tuples.mll`, pinned against GHC by the differential oracle.
-- **`Any` converts to and from plain Lua scalars at the FFI boundary.** The
-  dynamic `Any` type (`AnyString`/`AnyInt`/`AnyNumber`/`AnyBool`/`AnyNull`)
-  no longer crosses the boundary as its raw constructor table. A host scalar
-  coming IN is tagged by its Lua type — a string becomes `AnyString`, an
-  integer-valued number `AnyInt`, a fractional number `AnyNumber`, a boolean
-  `AnyBool`, and `nil` `AnyNull`; an `Any` going OUT is untagged to its bare
-  scalar (`AnyNull` becomes `nil`), so the host only ever sees a plain
-  string/number/boolean/nil. The conversion descends into containers like every
-  other marshalled type, so `[Any]`, `(Int, Any)`, and a record/`HashMap` with
-  an `Any` field round-trip through the host unchanged. A value that is neither a
-  scalar nor `nil` (a table, function, or userdata) cannot cross as `Any` and
-  fails at the boundary with a localized error, since `Any` models only scalar
-  Lua values.
 - **Parser fuzzing.** A deterministic, fully offline fuzz pass
   (`mll-tests/tests/parser_fuzz.rs`) generates random-but-structured .mll
   modules — operator chains over randomly declared fixities, backtick
@@ -399,24 +471,6 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
-- **Type errors point at the offending statement, not the clause head.**
-  Previously every type error in a multi-line body was reported at the
-  function's first line, because the expression AST carried no source spans
-  below the clause. The parser now marks statement boundaries — let/where
-  binding bodies, do-statements, case-branch and guard bodies, and `if`
-  branches — with a transparent `Expr::Spanned` marker (erased when lowering to
-  typed IR), and the checker attributes an error to the innermost such marker it
-  was inside. So `c = a <> "oops"` in a `let` reports at the `c` line, and a
-  mismatched case/`if` branch reports at that branch. Errors that surface only
-  when reconciling a whole binding against its uses, and deferred class-instance
-  errors ("No instance for …"), still fall back to the clause head.
-- **A constrained FFI import is no longer rejected as undefined.** A body-less
-  FFI signature carrying a class context — e.g.
-  `dbQuery :: LuaDict b => Db -> (a -> [b] -> a) -> … -> LuaIO ":query_array" a`,
-  where the constraint bounds a marshalled argument — was misread as an ordinary
-  signature with no accompanying definition, because the FFI-import detector
-  stopped at the `=>` qualifier. It now peels the context (and any `forall`) to
-  find the trailing `LuaIO`/`LuaPure`/… form, matching type reduction.
 - **Prefix minus follows GHC's grammar.** Prefix minus now has the fixity
   of binary subtraction (`infixl 6`), with GHC's exact consequences:
   `a + -b`, `a - -b`, `a * -b`, and ``a `div` -b`` are parse errors (the
