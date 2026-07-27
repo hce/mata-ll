@@ -28,13 +28,6 @@ MATA-LL TODO
       collapses), or maintain the env's free-variable set incrementally.
       Needs its own change with the perf benchmarks re-run.
 
-- [ ] **No scientific-notation literals.** `1.0e-2` lexes as the application
-      `1.0 e - 2` and fails with "Unbound variable: e". GHC accepts
-      `1.0e-2`, `1e5`, `2.5E+3` (integer literals with an exponent are
-      Fractional). Ironic asymmetry: `show` now PRODUCES GHC's exponent
-      notation (`1.2345678e7`) but the lexer cannot read it back, so show
-      output is not round-trippable as source. Lexer + literal-typing change.
-
 - [ ] **Right-section operand precedence is more permissive than GHC.**
       Prefix minus in right sections now rejects per GHC (`(+ -2)`), but the
       general rule is not enforced: `(== a || b)` is accepted where GHC
@@ -54,6 +47,18 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Scientific-notation numeric literals.** `1.0e-2`, `1e5`, `2.5E+3`,
+      `6.022e23` now lex as float literals (Haskell 2010 §2.5: `(e|E) [+|-]
+      decimal`, lower/upper `e`, optional sign, ≥1 digit). A bare-mantissa
+      exponent like `1e5` is `Fractional` — a float, not an `Int` — and types
+      through the existing `NumLit` path (defaulting to `Number`), so it was
+      lexer-only. Maximal munch requires an exponent digit, so `1e` still lexes
+      as `1` then `e` and `1..3` stays a range. Previously `1.0e-2` lexed as the
+      application `1.0 e - 2` (`Unbound variable: e`); the asymmetry that `show`
+      emitted exponent notation the lexer could not read back is closed —
+      `read . show` round-trips. Cases in `num_polymorphic.mll`, pinned against
+      real GHC via the differential oracle. Commit `3397e29`.
 
 - [x] **`let` qualifiers in list comprehensions.** `[ y | x <- xs, let y = f x,
       p y ]` now parses — the `let` binds are visible in the body and every
