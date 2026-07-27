@@ -55,6 +55,34 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **List brackets are layout-insensitive: multi-line comprehensions,
+      literals, and ranges parse.** Inside `[ ]` the parser only skipped
+      newlines/indents before a list literal's commas, so a comprehension bar,
+      a range `..`, a qualifier's comma, or the closing `]` on a continuation
+      line aborted with `Expected RightBracket, found Pipe` — forcing every
+      comprehension onto one line. The head-expr parse returned with a `Newline`
+      current, `self.at(&Token::Pipe)` was false, and the literal path then hit
+      `|` where it wanted `]`. Fixed by skipping newlines/indents uniformly at
+      every bracket-interior decision point (`parser.rs`), so the GHC-idiomatic
+      multi-line form works. Accept-only: nothing that parsed before parses
+      differently. Multi-line cases added to `list_comprehensions.mll` and
+      pinned against real GHC via the differential oracle (golden regenerated
+      with runghc 9.14.1). Parenthesized `( )` expressions still need the
+      closing paren's line to carry preceding content — a separate construct.
+      Commit `616d808`.
+
+- [x] **GHC golden regeneration runs clean again (0 failures).** Three cases
+      broke `regenerate-ghc-goldens.sh` so goldens could not be re-pinned:
+      `any_ffi_marshal` and `string_escapes` (added without exclusion entries;
+      both import Lua-FFI surfaces GHC cannot express) are now excluded like the
+      other FFI cases, and `num_user_instance` — whose golden predated the
+      `Integer`->`Int` rename that made its `fromInteger :: Integer -> a` twin a
+      compile-time type error against `Z5`'s `Int` field — is excluded as a
+      deliberate divergence (same category as the `linear_*` cases),
+      deregistered from `GHC_ORACLE_CASES`, and its stale golden removed. Still
+      exercised by `mll_test!(num_user_instance)`. Regen: 280 pinned, 48
+      excluded, 0 failed; all other goldens byte-identical. Commit `150a107`.
+
 - [x] **FFI boundary now converts `Any` to/from plain Lua scalars, and
       undefined-behavior types are rejected at the boundary.** `Any`'s purpose
       is dynamic Lua interop, but nothing marshalled it: the descriptor path
