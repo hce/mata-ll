@@ -227,9 +227,9 @@ functions). See CAVEATS.
 Haskell infers types for top-level bindings. mata-ll requires explicit
 type signatures on every top-level definition:
 
-    -- Haskell: fine without a signature
-    -- mata-ll: this won't compile without the line below
     double :: Int -> Int
+    -- Haskell: the line below compiles fine without the signature above
+    -- mata-ll: the line below does not compile without the signature above
     double x = x * 2
 
 ## Import renaming requires `qualified`
