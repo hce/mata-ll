@@ -45,6 +45,7 @@ excluded_reason() {
     case "$1" in
         # -- FFI / Lua-runtime surfaces: not expressible under GHC ------------
         cases/any_type)                  echo "builtin Any (Lua dynamic value carrier)";;
+        cases/any_ffi_marshal)           echo "LuaPure FFI declarations marshalling the builtin Any";;
         cases/bytestring)                echo "ByteString builtins (Lua byte strings)";;
         cases/bytestring_u64_sign_bit)   echo "ByteString + Lua 64-bit wrap-around semantics";;
         cases/constructor_as_rename)     echo "'as \"name\"' constructor-rename syntax (JSON FFI, not Haskell)";;
@@ -76,6 +77,7 @@ excluded_reason() {
         cases/poly_recursion_user_class) echo "contains a LuaPure FFI declaration";;
         cases/purehashmap)               echo "LuaPure hash FFI";;
         cases/readline)                  echo "LIO.readLine (Lua io FFI)";;
+        cases/string_escapes)            echo "imports LString (Lua string FFI)";;
         cases/export_module)             echo "'export' keyword (Lua module export)";;
         cases/lib_data_map)              echo "mata-ll Data.Map API (values/mapPairs/...) is its own library, not containers";;
         ghc/ghc_regr005)                 echo "HashMap builtins (Lua tables)";;
@@ -87,6 +89,11 @@ excluded_reason() {
         # a use as the one consumption. The twins are compile-time rejected.
         cases/linear_affine_basic)       echo "GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar";;
         cases/linear_mult_poly)          echo "GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar";;
+        # mata-ll has no Integer, so `fromInteger :: Int -> a`; GHC's is
+        # `Integer -> a`, which cannot feed Z5's Int field — the twin is a
+        # compile-time type error, so this case is outside the oracle's domain
+        # (still exercised by mll_test!(num_user_instance)).
+        cases/num_user_instance)         echo "GHC's fromInteger :: Integer -> a can't feed Z5's Int field (mata-ll has no Integer)";;
 
         # -- mata-ll-only grammar / name shadowing ----------------------------
         cases/newtypes)                  echo "'newtype Age = Int' implicit-constructor sugar is not Haskell";;

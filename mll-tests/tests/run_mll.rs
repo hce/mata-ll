@@ -9933,7 +9933,6 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_non_exhaustive_live, "cases", "non_exhaustive_live.mll"),
         (ghc_oracle_non_strict, "cases", "non_strict.mll"),
         (ghc_oracle_num_polymorphic, "cases", "num_polymorphic.mll"),
-        (ghc_oracle_num_user_instance, "cases", "num_user_instance.mll"),
         (ghc_oracle_operator_fixity, "cases", "operator_fixity.mll"),
         (ghc_oracle_operator_sections, "cases", "operator_sections.mll"),
         (ghc_oracle_operators, "cases", "operators.mll"),
