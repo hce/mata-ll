@@ -2519,10 +2519,16 @@ impl Parser {
                 // continue infix, restore `expr_min_indent`, then `::` ascription.
                 let mut expr = self.continue_infix(lhs, 0, None)?;
                 self.expr_min_indent = saved_expr_min_indent;
+                // Inside explicit ( ) newlines are insignificant: `::`, a tuple
+                // comma, or the closing `)` may sit on a continuation line.
+                // continue_infix stops at the newline, so skip it before each
+                // of those decisions.
+                self.skip_newlines_and_indent();
                 if self.at(&Token::DblColon) {
                     self.advance();
                     let ty = self.parse_type()?;
                     expr = Expr::Ascription(Box::new(expr), ty);
+                    self.skip_newlines_and_indent();
                 }
                 if self.at(&Token::Comma) {
                     // Tuple expression: (a, b, ...)
@@ -2530,6 +2536,7 @@ impl Parser {
                     while self.at(&Token::Comma) {
                         self.advance();
                         elems.push(self.parse_expr()?);
+                        self.skip_newlines_and_indent();
                     }
                     self.expect(&Token::RightParen)?;
                     Ok(Expr::Tuple(elems))

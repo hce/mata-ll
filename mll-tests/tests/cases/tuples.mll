@@ -42,3 +42,25 @@ main = do
     assert (fst (head pairs) == 1) "tuple in list"
     assert (snd (head pairs) == "a") "tuple in list snd"
     assert (length pairs == 3) "tuple list length"
+
+    -- Multi-line layout inside ( ): closing paren on a continuation line
+    let ml =
+          ( 40
+          + 2
+          )
+    assert (ml == 42) "multi-line parenthesized expression"
+
+    -- Multi-line tuple, commas and close on their own lines
+    let mt =
+          ( 1
+          , 2
+          , 3
+          )
+    assert (triple mt == 6) "multi-line tuple literal"
+
+    -- Ascription split across a line break inside ( )
+    let asc =
+          ( 40 + 2
+            :: Int
+          )
+    assert (asc == 42) "multi-line ascription"

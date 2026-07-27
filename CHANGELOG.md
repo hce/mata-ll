@@ -161,9 +161,15 @@ API of the `mllc` library crate.)
   uniformly insignificant, matching how the parser already treated commas in a
   multi-line list literal. Accept-only change: nothing that parsed before parses
   differently. Covered by multi-line cases in `list_comprehensions.mll`, pinned
-  against GHC by the differential oracle. (Parenthesized `( )` expressions still
-  require the closing paren's line to carry preceding content — a separate
-  construct, unchanged here.)
+  against GHC by the differential oracle.
+- **Parenthesized `( )` expressions are layout-insensitive too.** The closing
+  `)`, a tuple comma, or a `::` ascription may sit on a continuation line, so
+  `( a` / `+ b` / `)`, a multi-line tuple, and `( e` / `:: T )` all parse. The
+  interior was already layout-free after the `(`; `continue_infix` stops at the
+  newline, so the close-side decisions (`)`, comma, `::`) now skip newlines and
+  indentation the same way. Previously a newline before the close aborted with
+  `Expected RightParen`. Accept-only change; covered by multi-line cases in
+  `tuples.mll`, pinned against GHC by the differential oracle.
 - **`Any` converts to and from plain Lua scalars at the FFI boundary.** The
   dynamic `Any` type (`AnyString`/`AnyInt`/`AnyNumber`/`AnyBool`/`AnyNull`)
   no longer crosses the boundary as its raw constructor table. A host scalar
