@@ -249,9 +249,29 @@ impl CodeGen {
         }) && !Self::contains_trapping_op(expr)
     }
 
-    /// Check if an expression contains a function call where the function
-    /// is NOT a known top-level/prelude name. Such calls could be to
-    /// arbitrary function parameters and may be expensive.
+    /// Whether a call-site argument is trivial to EMIT more than once: its
+    /// duplicated emission duplicates no work. This is what admits an
+    /// argument into a multiply-occurring (or under-lambda) parameter of an
+    /// inlined body — the same work-free test GHC's inliner applies before
+    /// substituting at several occurrences. Qualifying shapes:
+    /// - a literal;
+    /// - a variable — its emission is a name read or `__force(name)`, and
+    ///   thunks memoize (runtime.lua `__force`), so a second force returns
+    ///   the cached value;
+    /// - a bare constructor or operator function — a value reference;
+    /// - parens/negation over any of those (one duplicated Lua `-`).
+    /// Anything else (calls, operators over non-trivial operands, tuples —
+    /// each emission allocates) is declined; the call site then falls back
+    /// to the ordinary call, which shares the argument by construction.
+    pub(super) fn is_trivial_arg(expr: &TExpr) -> bool {
+        match &expr.kind {
+            TExprKind::Lit(_) | TExprKind::Var(_) | TExprKind::Con(_)
+            | TExprKind::OpFunc(_) => true,
+            TExprKind::Paren(e) | TExprKind::Negate(e) => Self::is_trivial_arg(e),
+            _ => false,
+        }
+    }
+
     /// Check if an expression is a constructor application (Con applied to args)
     pub(super) fn is_con_app(expr: &TExpr) -> bool {
         match &expr.kind {

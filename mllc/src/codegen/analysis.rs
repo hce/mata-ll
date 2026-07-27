@@ -7,11 +7,13 @@
 //! never judged always-cheap. `find_inline_candidates` selects small pure
 //! functions (single clause, simple patterns, no guards, no where bindings,
 //! cheap body, not self-recursive, no constructor applications) for
-//! call-site inlining by inline.rs.
+//! call-site inlining by inline.rs, recording per-parameter occurrence
+//! counts so the call site can refuse substitutions that would duplicate
+//! argument work.
 
 use crate::tir::*;
 use super::CodeGen;
-use super::util::{expr_references_name};
+use super::util::{count_name_occurrences, expr_references_name};
 
 impl CodeGen {
     /// Whole-program call-site analysis. For each function, determine which
@@ -231,7 +233,18 @@ impl CodeGen {
             let params: Vec<String> = clause.patterns.iter().map(|p| {
                 if let TPattern::Var(name, _) = p { name.clone() } else { unreachable!() }
             }).collect();
-            self.inline_fns.insert(func.name.clone(), (params, clause.body.clone()));
+            // Per-parameter emission counts (work-duplication measure): the
+            // call-site gate in expr.rs substitutes a non-trivial argument
+            // only for a parameter whose count is at most one — substituting
+            // it at two occurrences (`sq x = x * x` applied to `nfib 30`)
+            // would emit and EVALUATE the argument twice, a sharing loss
+            // GHC's inliner never allows. Recording the counts here (once
+            // per candidate) instead of re-walking the body per call site.
+            let occ_counts: Vec<usize> = params
+                .iter()
+                .map(|p| count_name_occurrences(&clause.body, p))
+                .collect();
+            self.inline_fns.insert(func.name.clone(), (params, clause.body.clone(), occ_counts));
         }
     }
 

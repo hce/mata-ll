@@ -162,6 +162,54 @@ main = do
     }
 }
 
+/// Call-site inlining must not duplicate argument work (sharing loss vs
+/// GHC). `sq x = x * x` is an inline candidate; substitution re-emits the
+/// argument at every occurrence of `x`, so a non-trivial argument (a call)
+/// may only be substituted where the parameter occurs at most once —
+/// otherwise the site falls back to the ordinary call and the argument is
+/// evaluated exactly once. Distinctive literals mark each argument: the
+/// literal's occurrence count in the emitted Lua IS the number of times
+/// the argument was emitted.
+#[test]
+fn inlining_preserves_argument_sharing() {
+    let source = r#"
+sq :: Int -> Int
+sq x = x * x
+
+probe :: Int -> Int
+probe n = n + 1
+
+main :: IO ()
+main = do
+  let y = 6
+  putStrLn (show (sq (probe 90001)))
+  putStrLn (show (sq y))
+  putStrLn (show (probe (probe 80002)))
+"#;
+    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    // The non-trivial argument to the multiply-using `sq` is emitted ONCE
+    // (before the fix: twice — `probe(90001) * probe(90001)`).
+    assert_eq!(
+        lua.matches("90001").count(),
+        1,
+        "argument to sq must be emitted exactly once (sharing): {lua}"
+    );
+    // The trivial-argument call still inlines: `sq y` becomes `y * y`.
+    assert!(
+        lua.contains("y * y"),
+        "sq of a variable must still inline to y * y: {lua}"
+    );
+    // A once-used parameter (`probe n = n + 1`) still admits a non-trivial
+    // argument, and that argument is emitted once.
+    assert_eq!(
+        lua.matches("80002").count(),
+        1,
+        "argument to probe must be emitted exactly once: {lua}"
+    );
+}
+
 /// Paren normalization (codegen/opt.rs): the emitted corpus must be free of
 /// the redundant-paren shapes the pass eliminates. The one with semantic
 /// weight is the paren-wrapped call in return position — `return (f(x))` is
@@ -886,6 +934,7 @@ mll_test!(getline, "getline.mll");
 mll_test!(readline, "readline.mll");
 mll_test!(even_odd, "even_odd.mll");
 mll_test!(even_odd_64bit, "even_odd_64bit.mll");
+mll_test!(inline_sharing, "inline_sharing.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

@@ -4,7 +4,9 @@
 //! arguments, `con_name` reads a nullary type constructor, `subst_tyvars`
 //! specialises field types, `count_arrows` counts top-level arrows (the
 //! arity of the N-ary calling convention). TIR side: `expr_references_name`
-//! finds uses of a name, and `expr_evaluates_global_ref` decides whether a
+//! finds uses of a name, `count_name_occurrences` weighs how often an
+//! inlined body would re-emit a substituted argument (the inliner's
+//! work-duplication measure), and `expr_evaluates_global_ref` decides whether a
 //! top-level value binding would read another binding's slot eagerly at
 //! module-load time — such a binding must be thunked so the read happens
 //! after every slot is assigned.
@@ -134,6 +136,97 @@ pub(super) fn expr_references_name(expr: &TExpr, name: &str) -> bool {
         }
         TExprKind::OutgoingCallback { callee, .. } => expr_references_name(callee, name),
         TExprKind::FfiMaybeArg { value } => expr_references_name(value, name),
+    }
+}
+
+/// How many times an inlined body would EMIT (and so evaluate) an argument
+/// substituted for `name` — the inliner's work-duplication measure, not a
+/// plain syntactic count:
+///
+/// - `if`/`case` alternatives are exclusive at runtime, so alternatives
+///   contribute the MAXIMUM of their counts, not the sum (GHC's occurrence
+///   analyser makes the same one-branch allowance);
+/// - an occurrence under a lambda counts double: the lambda may be called
+///   any number of times, so a non-trivial argument substituted there is
+///   re-evaluated per call even when it occurs just once syntactically
+///   (GHC only inlines into a lambda when the argument is work-free);
+/// - a lambda whose own parameter rebinds `name` shadows it — inner
+///   occurrences are the lambda's parameter, never substituted (mirrors
+///   the `inner_subst.remove` in expr_subst_ast's Lambda arm);
+/// - `let` is counted as a plain sum without modelling its shadowing:
+///   over-counting only declines an inline, never mis-emits (and is_cheap
+///   keeps `let`/`case` out of inline-candidate bodies anyway).
+pub(super) fn count_name_occurrences(expr: &TExpr, name: &str) -> usize {
+    match &expr.kind {
+        TExprKind::Var(n) => usize::from(n == name),
+        TExprKind::Con(_) | TExprKind::Lit(_) | TExprKind::OpFunc(_)
+        | TExprKind::DictAccess { .. } => 0,
+        TExprKind::App(f, a) => {
+            count_name_occurrences(f, name) + count_name_occurrences(a, name)
+        }
+        TExprKind::InfixApp { lhs, rhs, .. } => {
+            count_name_occurrences(lhs, name) + count_name_occurrences(rhs, name)
+        }
+        TExprKind::Negate(e) | TExprKind::Paren(e) => count_name_occurrences(e, name),
+        TExprKind::Lambda { params, body } => {
+            if params.iter().any(|(p, _)| p == name) {
+                0
+            } else {
+                2 * count_name_occurrences(body, name)
+            }
+        }
+        TExprKind::If { cond, then_branch, else_branch } => {
+            count_name_occurrences(cond, name)
+                + count_name_occurrences(then_branch, name)
+                    .max(count_name_occurrences(else_branch, name))
+        }
+        TExprKind::Case { scrutinee, branches } => {
+            count_name_occurrences(scrutinee, name)
+                + branches
+                    .iter()
+                    .map(|b| {
+                        b.guards
+                            .iter()
+                            .map(|g| {
+                                count_name_occurrences(&g.condition, name)
+                                    + count_name_occurrences(&g.body, name)
+                            })
+                            .sum::<usize>()
+                            + count_name_occurrences(&b.body, name)
+                    })
+                    .max()
+                    .unwrap_or(0)
+        }
+        TExprKind::Let { binds, body } => {
+            binds
+                .iter()
+                .map(|b| count_name_occurrences(&b.body, name))
+                .sum::<usize>()
+                + count_name_occurrences(body, name)
+        }
+        TExprKind::SpecCall { args, .. } => {
+            args.iter().map(|a| count_name_occurrences(a, name)).sum()
+        }
+        TExprKind::Tuple(elems) => {
+            elems.iter().map(|e| count_name_occurrences(e, name)).sum()
+        }
+        TExprKind::DictMethod { dict, .. } => count_name_occurrences(dict, name),
+        TExprKind::DictCall { dict_args, value_args, .. } => {
+            dict_args
+                .iter()
+                .chain(value_args.iter())
+                .map(|a| count_name_occurrences(a, name))
+                .sum()
+        }
+        TExprKind::RecordUpdate { record, updates, .. } => {
+            count_name_occurrences(record, name)
+                + updates
+                    .iter()
+                    .map(|(_, _, e)| count_name_occurrences(e, name))
+                    .sum::<usize>()
+        }
+        TExprKind::OutgoingCallback { callee, .. } => count_name_occurrences(callee, name),
+        TExprKind::FfiMaybeArg { value } => count_name_occurrences(value, name),
     }
 }
 

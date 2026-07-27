@@ -178,6 +178,23 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **The call-site inliner no longer duplicates argument work.** Inlining a
+  small helper substitutes the call-site argument expression into the
+  helper's body — and previously did so at EVERY occurrence of the
+  parameter, so `sq x = x * x` applied to `nfib 30` emitted and evaluated
+  the call twice (measured 2× wall time). Pure code, so values and ⊥ were
+  unaffected, but GHC's inliner never loses sharing this way, and the
+  "shares like GHC" contract (HASKDIFF.md) had this corner open. The
+  inliner now applies GHC's rule: an argument may be substituted at
+  several occurrences (or under a lambda, which can run it per call) only
+  when re-emitting it duplicates no work — a literal, or a variable, whose
+  second force returns the memoized thunk value. A non-trivial argument is
+  substituted only where its parameter is emitted at most once, counting
+  `if`/`case` alternatives at their maximum since only one branch runs;
+  any other call site falls back to the ordinary call, which evaluates (or
+  thunks) the argument exactly once. Trivial-argument sites — the hot
+  paths the inliner exists for, including the whole tracker decode — emit
+  byte-identically to before.
 - **Type errors point at the offending statement, not the clause head.**
   Previously every type error in a multi-line body was reported at the
   function's first line, because the expression AST carried no source spans

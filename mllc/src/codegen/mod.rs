@@ -117,8 +117,13 @@ struct CodeGen {
     /// If true, the param never needs __force at entry.
     params_always_cheap: std::collections::HashMap<String, Vec<bool>>,
     /// Small pure functions eligible for inlining at call sites.
-    /// Maps function name to (param_names, body).
-    inline_fns: std::collections::HashMap<String, (Vec<String>, TExpr)>,
+    /// Maps function name to (param_names, body, per-param occurrence counts).
+    /// The counts are count_name_occurrences over the body: a parameter that
+    /// would re-emit its argument more than once (or under a lambda) only
+    /// admits trivial arguments at the call site — substituting anything
+    /// else there would duplicate work GHC's inliner never duplicates
+    /// (see the inline gate in expr.rs).
+    inline_fns: std::collections::HashMap<String, (Vec<String>, TExpr, Vec<usize>)>,
     /// Names that are top-level or prelude definitions (not local params/binds).
     /// Used to distinguish known-safe function calls from potentially expensive
     /// calls to unknown function parameters in non-strict contexts.

@@ -237,10 +237,21 @@ impl CodeGen {
                     }
 
 
-                // Inline small pure functions at call site
+                // Inline small pure functions at call site. Substitution
+                // re-emits each argument at every occurrence of its
+                // parameter, so an argument whose evaluation costs anything
+                // is admitted only where the parameter is emitted at most
+                // once (occ_counts, see find_inline_candidates) — otherwise
+                // `sq x = x * x` at `sq (nfib 30)` would run the call twice,
+                // a sharing loss GHC's inliner never allows. A declined
+                // site falls through to the ordinary call below, which
+                // evaluates (or thunks) the argument exactly once.
                 if let TExprKind::Var(name) = &f.kind
-                    && let Some((params, body)) = self.inline_fns.get(name).cloned()
-                        && args.len() == params.len() {
+                    && let Some((params, body, occ_counts)) = self.inline_fns.get(name)
+                        && args.len() == params.len()
+                        && args.iter().zip(occ_counts.iter())
+                            .all(|(a, &n)| n <= 1 || Self::is_trivial_arg(a)) {
+                            let (params, body) = (params.clone(), body.clone());
                             let mut subst = std::collections::HashMap::new();
                             for (param, arg) in params.iter().zip(args.iter()) {
                                 subst.insert(param.clone(), *arg);
