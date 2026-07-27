@@ -55,6 +55,17 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **Parenthesized `( )` expressions are layout-insensitive too.** The
+      interior of `( )` was already layout-free (the leading skip after the open
+      paren), but `continue_infix` stops at a newline, so the close-side
+      decisions did not: a newline before the closing `)`, a tuple comma, or a
+      `::` ascription aborted with `Expected RightParen`. Skip newlines/indents
+      before each (`parser.rs`), so `( a` / `+ b` / `)`, multi-line tuples, and
+      `( e` / `:: T )` all parse — the same principle as the bracket fix.
+      Accept-only. Multi-line cases added to `tuples.mll` and pinned against real
+      GHC via the differential oracle (only `tuples.stdout` changed; other
+      goldens byte-identical under runghc 9.14.1). Commit `13c0932`.
+
 - [x] **List brackets are layout-insensitive: multi-line comprehensions,
       literals, and ranges parse.** Inside `[ ]` the parser only skipped
       newlines/indents before a list literal's commas, so a comprehension bar,
