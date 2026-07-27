@@ -150,6 +150,17 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **Scientific-notation numeric literals.** `1.0e-2`, `1e5`, `2.5E+3`, and
+  `6.022e23` now lex as float literals (Haskell 2010 §2.5: `(e|E) [+|-]
+  decimal`, lowercase or uppercase `e`, optional sign, ≥1 digit). As in GHC a
+  bare-mantissa exponent like `1e5` is `Fractional` — a float, not an `Int` —
+  and types through the existing `NumLit` path (defaulting to `Number`).
+  Maximal munch requires an exponent digit, so `1e` still lexes as `1` then the
+  identifier `e`, and `1..3` stays a range. Previously `1.0e-2` lexed as the
+  application `1.0 e - 2` (`Unbound variable: e`); the asymmetry that `show`
+  emitted exponent notation (`1.2345678e7`) the lexer could not read back is
+  closed — `read . show` now round-trips on such values. Covered in
+  `num_polymorphic.mll`, pinned against GHC by the differential oracle.
 - **`let` qualifiers in list comprehensions.** `[ y | x <- xs, let y = f x,
   p y ]` now parses: the `let` binds are visible in the comprehension body and
   every later qualifier, desugaring to `let binds in <rest>` exactly as GHC

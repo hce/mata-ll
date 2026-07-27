@@ -39,4 +39,12 @@ main = do
     assert (show (2 * 3 + 1) == "7") "default expr to Int"
     -- A literal forced into a Number context defaults to Number there.
     assert (approx (1 + 0.5) 1.5) "int literal used at Number"
+    -- Scientific-notation literals (Haskell 2010 exponents).
+    assert (approx 1.0e-2 0.01) "exponent: fractional mantissa, negative exp"
+    assert (approx 1e5 100000.0) "exponent: bare mantissa is Fractional"
+    assert (approx 2.5E+3 2500.0) "exponent: uppercase E, explicit + sign"
+    assert (approx 6.022e23 (602.2 * 1e21)) "exponent: large magnitude"
+    -- `show` now emits exponent notation that the lexer reads back (round-trip).
+    assert (show (1.2345678e7 :: Number) == "1.2345678e7") "exponent: show emits e-notation"
+    assert ((1.2345678e7 :: Number) == read (show (1.2345678e7 :: Number))) "exponent: read . show = id"
     putStrLn "num_polymorphic ok"

@@ -263,14 +263,43 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 pos += 1;
                 col += 1;
             }
-            if pos < chars.len() && chars[pos] == '.' && pos + 1 < chars.len() && chars[pos + 1].is_ascii_digit() {
+            let mut is_float = false;
+            // Fractional part: `.` digit+ . A dot NOT followed by a digit is
+            // not part of the number (so `1..3` stays a range and `x.field`
+            // an accessor).
+            if pos + 1 < chars.len() && chars[pos] == '.' && chars[pos + 1].is_ascii_digit() {
+                is_float = true;
                 pos += 1; // skip dot
                 col += 1;
                 while pos < chars.len() && chars[pos].is_ascii_digit() {
                     pos += 1;
                     col += 1;
                 }
-                let s: String = chars[start..pos].iter().collect();
+            }
+            // Exponent: (e|E) [+|-] digit+ (Haskell 2010 §2.5). Maximal munch
+            // needs at least one exponent digit; otherwise the `e` begins an
+            // identifier (`1e` lexes as `1` then `e`). A bare-mantissa exponent
+            // (`1e5`) is Fractional in Haskell, so it is a float literal too.
+            if pos < chars.len() && (chars[pos] == 'e' || chars[pos] == 'E') {
+                let mut look = pos + 1;
+                if look < chars.len() && (chars[look] == '+' || chars[look] == '-') {
+                    look += 1;
+                }
+                if look < chars.len() && chars[look].is_ascii_digit() {
+                    is_float = true;
+                    // Consume `e`, the optional sign, then the exponent digits.
+                    while pos < look {
+                        pos += 1;
+                        col += 1;
+                    }
+                    while pos < chars.len() && chars[pos].is_ascii_digit() {
+                        pos += 1;
+                        col += 1;
+                    }
+                }
+            }
+            let s: String = chars[start..pos].iter().collect();
+            if is_float {
                 let n: f64 = s.parse().map_err(|e| format!("Invalid number '{}': {}", s, e))?;
                 tokens.push(Located {
                     token: Token::NumLit(n),
@@ -278,7 +307,6 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                     col: tok_col,
                 });
             } else {
-                let s: String = chars[start..pos].iter().collect();
                 // Only ASCII digits were consumed, so the sole way `parse` fails
                 // is overflow past `maxBound :: Int` (i64::MAX). mata-ll's `Int`
                 // is 64-bit and wrapping (GHC's `Int` semantics); there is no
