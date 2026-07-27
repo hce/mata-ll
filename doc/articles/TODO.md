@@ -3,22 +3,6 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Call-site inliner duplicates argument work — sharing loss vs GHC.**
-      Found 2026-07-27 while verifying the evaluation-strategy doc:
-      `find_inline_candidates` (`codegen/analysis.rs`) admits any
-      single-clause cheap-body helper without checking how often a
-      parameter occurs in the body, and `expr_subst_ast`
-      (`codegen/inline.rs`) substitutes the call-site expression at every
-      occurrence — so `sq x = x * x` applied to `nfib 30` emits the call
-      twice and evaluates it twice (measured 2×). Not a semantic
-      deviation (pure code, ⊥ raises identically), but GHC's inliner
-      never loses sharing this way (it substitutes only once-used or
-      trivial arguments). Until fixed, HASKDIFF.md's "shares like GHC"
-      has this corner. Candidate fix: restrict inline candidates to
-      bodies whose parameters occur at most once, or let-bind
-      multiply-used arguments at the call site. Needs the perf corpus
-      re-run (the inliner exists for the hot paths).
-
 - [ ] **Quadratic typechecking of long do-blocks.** Found by the parser
       fuzzer's deep probes: each do-`let` binding calls `generalize`, which
       recomputes `TypeEnv::free_vars` by walking EVERY scheme in the
@@ -50,6 +34,32 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Call-site inliner no longer duplicates argument work — sharing
+      restored to GHC's rule.** A non-trivial argument is now substituted
+      only for a parameter the body emits at most once; multiply-used
+      parameters accept only trivial arguments (literal, variable — `__force`
+      memoizes, so re-forcing duplicates nothing — bare constructor/operator
+      ref, parens/negation thereof); every other site falls back to the
+      ordinary call, which evaluates or thunks the argument exactly once.
+      Occurrence counting (`count_name_occurrences`, codegen/util.rs) measures
+      work duplication, not syntax: `if`/`case` alternatives contribute their
+      maximum (one branch runs, GHC's one-branch allowance), an occurrence
+      under a lambda counts double (the lambda may run per call), lambda
+      parameters shadow. Call-site let-binding was considered and rejected:
+      preserving laziness for a possibly-undemanded parameter needs a
+      memoized thunk plus closure — exactly what the ordinary call already
+      emits. Hot paths verified untouched: the tracker's emitted Lua is
+      byte-identical pre/post (the gate never fires there), decode output
+      identical across six A/B runs, perf gate 1.7× realtime. Corpus: 217 of
+      218 outputs byte-identical; the one change is the new
+      `inline_sharing.mll` case itself, whose diff is exactly the intended
+      shape (`sq (sumTo 10)` was `sumTo(10) * sumTo(10)`, now one call).
+      Tests: `inlining_preserves_argument_sharing` (marker literal appears
+      exactly once in emitted Lua; asserted to count 2 under the pre-fix
+      compiler) plus runtime cases in `inline_sharing.mll`. Suite 945/0;
+      proprietary acceptance passes. Closes the one corner HASKDIFF.md's
+      "shares like GHC" carried. 2026-07-27.
 
 - [x] **Section operand precedence now matches GHC exactly — both
       directions.** A section operand that is an infix expression (or prefix
