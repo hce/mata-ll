@@ -1321,14 +1321,13 @@ tables, \texttt{Just x} is unwrapped to the bare \texttt{x} and
 \texttt{Nothing} becomes \texttt{nil}.
 
 \begin{note}
-Lua's \texttt{nil} carries less structure than mata-ll values, and an
-exported result inherits its limits: an empty list crosses to the host
-as \texttt{nil}, the same value as \texttt{Nothing} --- and because
+Lua's \texttt{nil} carries less structure than mata-ll values.  An
+empty list crosses to the host as an empty table at every edge ---
+exported results included --- so a host can \texttt{ipairs} a list
+result without a nil check; the declared type is what distinguishes
+it from \texttt{Nothing}, which crosses as \texttt{nil}.  And because
 \texttt{nil} cannot nest, \texttt{Just Nothing} flattens to
 \texttt{nil} and \texttt{Just (Just x)} to \texttt{x} at the boundary.
-Declare an FFI \emph{argument} as \texttt{[a]} and an empty list
-reaches the host as an empty table instead; only exported
-\emph{results} collapse it to \texttt{nil}.
 \end{note}
 
 An export need not be a function.  A plain value --- a scalar, tuple,

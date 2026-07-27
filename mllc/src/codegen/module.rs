@@ -420,9 +420,9 @@ impl CodeGen {
                     )];
                     match res_marshal {
                         Some(desc) => {
-                            // Same contract as a function result: an empty MLL
-                            // list / Nothing is nil at the Lua boundary.
-                            body.push(Stmt::Raw("if __result == nil then return nil end".into()));
+                            // Same contract as a function result: the descriptor
+                            // decides what a nil representation means — an empty
+                            // list becomes a fresh {}, Nothing stays nil.
                             body.push(Stmt::Return(Expr::call_named(
                                 "__mll_arg_marshal",
                                 vec![Expr::name("__result"), Expr::raw(desc)],
@@ -559,18 +559,15 @@ impl CodeGen {
                 });
                 match res_marshal {
                     Some(desc) => {
-                        // An empty MLL list (and Nothing) is nil at the Lua
-                        // boundary — the documented export contract — so keep
-                        // the top-level nil short-circuit the legacy deep-force
-                        // conversion had. (At the FFI *argument* edge an empty
-                        // list is a fresh {} so hosts can ipairs it; the export
-                        // result contract predates that and is pinned by
-                        // ffi_export_string_lists.)
-                        body.push(Stmt::Assign(
-                            "__result".into(),
-                            Expr::force(Expr::name("__result")),
-                        ));
-                        body.push(Stmt::Raw("if __result == nil then return nil end".into()));
+                        // The descriptor decides what a nil representation means
+                        // at the boundary: an empty list becomes a fresh {} (the
+                        // same conversion the FFI *argument* edge performs, so
+                        // hosts can ipairs a list result without a nil check),
+                        // Nothing stays nil, and a nil-guarded record/hashmap
+                        // stays nil. There must be NO blanket top-level nil
+                        // short-circuit here — it would collapse an empty list
+                        // result to nil while the same list one level deeper
+                        // (a `Just []`, a record field) marshals to {}.
                         body.push(Stmt::Return(Expr::call_named(
                             "__mll_arg_marshal",
                             vec![Expr::name("__result"), Expr::raw(desc)],

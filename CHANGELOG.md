@@ -31,6 +31,19 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Breaking: an exported result of list type now hands a Lua host an empty
+  table for the empty list, not `nil`.** mata-ll represents `[]` as `nil`
+  internally, and the export edge used to let that representation leak: a
+  top-level `[a]` result (or `[a]` value export) crossed as `nil` — even
+  though the same empty list crossed as `{}` everywhere else (FFI call
+  arguments at every nesting depth, callback results, and even one level
+  deeper in the export's own result, e.g. a `Just []`). The declared export
+  type has distinguished `[]` from `Nothing` since results became
+  type-directed; the boundary now uses it: `[]` is a fresh `{}` a host can
+  `ipairs` without a nil check, and `Nothing` stays `nil`. A host that
+  nil-checked a list result to detect emptiness must switch to `#t == 0`
+  (`next(t) == nil`).
+
 - **Breaking: only types with a DESIGNED FFI shape may cross the boundary, in
   both directions.** The marshallability check previously accepted "any data
   type iff every field marshals", so a plain user ADT — and prelude `Either`

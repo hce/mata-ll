@@ -4469,8 +4469,8 @@ main = pure ()
     assert_eq!(result, vec![1, 2, 3, 4, 5], "range 5");
 
     let result: mlua::Value = range.call(0).unwrap();
-    assert!(result.is_nil() || matches!(&result, mlua::Value::Table(t) if t.len().unwrap() == 0),
-            "range 0 is empty (nil or empty table)");
+    assert!(matches!(&result, mlua::Value::Table(t) if t.len().unwrap() == 0),
+            "range 0 is an empty table");
 
     // List → List (map)
     let squares: mlua::Function = module.get("squares").unwrap();
@@ -4792,10 +4792,62 @@ main = pure ()
     let result: Vec<String> = filter_long.call((3, vec!["hi", "hello", "hey", "world"])).unwrap();
     assert_eq!(result, vec!["hello", "world"], "filterLong 3 keeps strings longer than 3");
 
-    // An empty MLL list is nil at the Lua boundary (same contract as Nothing):
-    // __mll_to_lua only builds an array from a non-empty cons chain.
+    // An empty MLL list crosses to the host as an empty table, matching the
+    // FFI argument edge (hosts can ipairs a list result without a nil check).
+    // The type descriptor distinguishes it from Nothing, which stays nil.
     let result: mlua::Value = filter_long.call((10, vec!["short", "tiny"])).unwrap();
-    assert!(result.is_nil(), "filterLong 10 filters everything out (empty list exports as nil)");
+    let table = result
+        .as_table()
+        .expect("empty list result must be a table, not nil");
+    assert_eq!(table.raw_len(), 0, "filterLong 10 filters everything out (empty list exports as a table)");
+}
+
+#[test]
+fn ffi_export_empty_list_is_table_nothing_is_nil() {
+    // mata-ll represents both [] and Nothing as nil internally; the declared
+    // export type is what tells them apart at the boundary. A list result
+    // marshals the empty case to a fresh {} — matching the FFI argument edge,
+    // so hosts can ipairs any list result without a nil check — while a Maybe
+    // result keeps Nothing as nil. Before this contract change the export
+    // edge collapsed a top-level [] to nil even though the same empty list
+    // one level deeper (a Just []) already marshalled to {}.
+    let source = r#"
+export emptyList :: Int -> [Int]
+emptyList n = filter (\k -> k > n) [1, 2, 3]
+
+export justEmpty :: Int -> Maybe [Int]
+justEmpty n = n `seq` Just []
+
+export nothingAtAll :: Int -> Maybe [Int]
+nothingAtAll n = n `seq` Nothing
+
+export emptyValue :: [Int]
+emptyValue = []
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    let empty_list: mlua::Function = module.get("emptyList").unwrap();
+    let v: mlua::Value = empty_list.call(10).unwrap();
+    let t = v.as_table().expect("[] result must be a table, not nil");
+    assert_eq!(t.raw_len(), 0, "[] result is an empty table");
+
+    let just_empty: mlua::Function = module.get("justEmpty").unwrap();
+    let v: mlua::Value = just_empty.call(1).unwrap();
+    let t = v.as_table().expect("Just [] result must be a table, not nil");
+    assert_eq!(t.raw_len(), 0, "Just [] unwraps to an empty table");
+
+    let nothing_at_all: mlua::Function = module.get("nothingAtAll").unwrap();
+    let v: mlua::Value = nothing_at_all.call(1).unwrap();
+    assert!(v.is_nil(), "Nothing stays nil");
+
+    // A VALUE export of an empty list follows the same contract as a
+    // function result (the n_args == 0 non-action emission path).
+    let v: mlua::Value = module.get("emptyValue").unwrap();
+    let t = v.as_table().expect("[] value export must be a table, not nil");
+    assert_eq!(t.raw_len(), 0, "[] value export is an empty table");
 }
 
 #[test]
@@ -5553,10 +5605,11 @@ main = pure ()
         "position 2 is Nothing (a hole), not a shifted element");
     assert_eq!(t.get::<i64>(3).unwrap(), 3, "position 3 is Just 3");
 
-    // The documented export contract stays: an empty list is nil.
+    // An empty list result is an empty table, matching the FFI argument edge.
     let empty_out: mlua::Function = module.get("emptyOut").unwrap();
     let v: mlua::Value = empty_out.call(3).unwrap();
-    assert!(v.is_nil(), "empty exported list is still nil at the boundary");
+    let t = v.as_table().expect("empty list result must be a table, not nil");
+    assert_eq!(t.raw_len(), 0, "empty exported list is an empty table");
 }
 
 #[test]
