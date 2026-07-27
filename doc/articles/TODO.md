@@ -3,6 +3,54 @@ MATA-LL TODO
 
 ## Planned — top priority
 
+- [ ] **Lua-AST optimization layer: annotations + a transformer engine with
+      an annotation-write monopoly.** Agreed 2026-07-27. The design, in full:
+
+      *Annotations* on `lua::Expr`/`lua::Stmt` carry OPERATIONAL facts the
+      generator already proves and currently discards at emission — NOT
+      source types (post-monomorphization `Ty` has no backend consumer and
+      would couple the AST to the typechecker). Vocabulary: a small shape
+      lattice (WHNF / thunk / closure / constructor-shape / unknown) plus
+      effect bits (pure, may-trap, may-allocate). The lattice is MONOTONE:
+      facts only weaken toward unknown, never invert.
+
+      *Engine*: passes have NO write access to annotations. They request
+      rewrites; the engine applies them and assigns result stamps only by an
+      explicit justification the rule declares — inherit-from-named-source,
+      meet-of-sources, or unknown (the default). Beyond declared
+      justifications: invalidate to unknown and RECOMPUTE via the annotation
+      analysis afterward (the LLVM model; at mata-ll's whole-program sizes
+      recomputation is free — do not build stamp-preservation logic twice).
+      So a buggy pass can destroy information but cannot assert a false
+      claim; the trusted base narrows from N passes to one engine plus one
+      analysis. Known limit, accepted: the guarantee holds over the closed
+      rewrite vocabulary — extending the vocabulary carries an engine-side
+      proof obligation (relocated bug surface, not eliminated).
+
+      *Two pass tiers.* Rewrite-rule tier (local, shape-driven): (1)
+      redundant-paren cleanup — first, it de-noises every later diff; (2)
+      `__force`-collapse peephole — the FIRST annotation consumer (WHNF +
+      pure stamps enter with it, not before: unread claims rot), and it is
+      differential-testable against the existing generation-time
+      `gen_forced` machinery — same corpus, byte-identical expected, any
+      diff is a bug in one of the two. Structured tier (hand-written
+      whole-function transforms, global side conditions, same annotation
+      API): (3) self-tail-call → loop conversion (interpreter dispatch win;
+      loops trace better than recursion under LuaJIT) — the only pass with
+      a plausible measurable benchmark win, do it after (1); (4)
+      loop-invariant / capture-free closure hoisting (syntactic backstop
+      for the FNEW JIT-killer class). Liveness-based local-slot reuse as a
+      later candidate.
+
+      *Verification*: `verify.rs` gains a stamp-refutation check over the
+      final tree in test builds (e.g. no `__force` around a WHNF-stamped
+      node); every pass individually toggleable; corpus byte-diff per pass
+      (empty or reviewed); tracker decode as the semantic + perf canary;
+      `codegen_is_deterministic` stays green. Bytecode generation was
+      considered and dropped 2026-07-27 (format unstable by design,
+      hardened hosts load text-only; `mlua`-based precompile covers the
+      load-time case if ever wanted).
+
 - [ ] **Quadratic typechecking of long do-blocks.** Found by the parser
       fuzzer's deep probes: each do-`let` binding calls `generalize`, which
       recomputes `TypeEnv::free_vars` by walking EVERY scheme in the
