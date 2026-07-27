@@ -57,3 +57,27 @@ main = do
     let xs = [Right 10, Left "x", Right 20]
     let ys = [Right 1, Right 2, Left "y"]
     assert ([a + b | Right a <- xs, Right b <- ys] == [11, 12, 21, 22]) "multi pattern gen"
+
+    -- Multi-line layout: head, bar, and each qualifier on its own line
+    let ml =
+          [ (a, b)
+          | a <- [1, 2, 3]
+          , b <- [1, 2, 3]
+          , a < b
+          ]
+    assert (ml == [(1, 2), (1, 3), (2, 3)]) "multi-line comprehension"
+
+    -- Multi-line generator + guard, closing bracket dedented past the body
+    let sq =
+          [ x * x
+          | x <- [1 .. 5]
+          , even x
+          ]
+    assert (sq == [4, 16]) "multi-line generator + guard"
+
+    -- Multi-line plain list literal and multi-line range
+    assert ([ 1
+            , 2
+            , 3 ] == [1, 2, 3]) "multi-line list literal"
+    assert ([ 1
+            .. 4 ] == [1, 2, 3, 4]) "multi-line range"

@@ -2000,6 +2000,7 @@ impl Parser {
                         self.advance();
                         let expr = self.parse_expr()?;
                         quals.push(ListCompQual::Generator { pattern: pat, expr });
+                        self.skip_newlines_and_indent();
                         if self.at(&Token::Comma) { self.advance(); continue; }
                         break;
                     }
@@ -2010,6 +2011,7 @@ impl Parser {
             // Guard expression
             let expr = self.parse_expr()?;
             quals.push(ListCompQual::Guard(expr));
+            self.skip_newlines_and_indent();
             if self.at(&Token::Comma) { self.advance(); continue; }
             break;
         }
@@ -2544,16 +2546,22 @@ impl Parser {
                     return Ok(Expr::Con("[]".to_string()));
                 }
                 let first = self.parse_expr()?;
+                // Inside brackets newlines/indents are insignificant, so a
+                // comprehension bar, range `..`, comma or closing `]` may sit
+                // on a continuation line.
+                self.skip_newlines_and_indent();
                 // Check for list comprehension: [expr | qualifiers]
                 if self.at(&Token::Pipe) {
                     self.advance();
                     let quals = self.parse_list_comprehension_quals()?;
+                    self.skip_newlines_and_indent();
                     self.expect(&Token::RightBracket)?;
                     return Ok(self.desugar_list_comprehension(first, &quals, &mut 0));
                 }
                 // Check for range syntax: [x..], [x..y], [x,y..], [x,y..z]
                 if self.at(&Token::Operator("..".to_string())) {
                     self.advance();
+                    self.skip_newlines_and_indent();
                     if self.at(&Token::RightBracket) {
                         // [x..] → enumFrom x
                         self.advance();
@@ -2564,6 +2572,7 @@ impl Parser {
                     }
                     // [x..y] → enumFromTo x y
                     let end = self.parse_expr()?;
+                    self.skip_newlines_and_indent();
                     self.expect(&Token::RightBracket)?;
                     return Ok(Expr::App(
                         Box::new(Expr::App(
@@ -2583,6 +2592,7 @@ impl Parser {
                     // Check for [x,y..] or [x,y..z]
                     if self.at(&Token::Operator("..".to_string())) {
                         self.advance();
+                        self.skip_newlines_and_indent();
                         if self.at(&Token::RightBracket) {
                             // [x,y..] → enumFromThen x y
                             self.advance();
@@ -2596,6 +2606,7 @@ impl Parser {
                         }
                         // [x,y..z] → enumFromThenTo x y z
                         let end = self.parse_expr()?;
+                        self.skip_newlines_and_indent();
                         self.expect(&Token::RightBracket)?;
                         return Ok(Expr::App(
                             Box::new(Expr::App(

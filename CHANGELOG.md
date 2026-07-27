@@ -150,6 +150,20 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **List brackets are layout-insensitive: comprehensions, list literals, and
+  ranges may span multiple lines.** A comprehension bar, a range `..`, a
+  separating comma, or the closing `]` can now sit on a continuation line, so
+  the GHC-idiomatic multi-line form parses:
+  `[ (x, y)` / `| x <- xs` / `, y <- ys` / `, x < y` / `]`. Previously any
+  newline before the `|` (or before a qualifier's comma, or the closing `]`)
+  aborted with `Expected RightBracket, found Pipe`, forcing the whole
+  comprehension onto one line. Inside `[ ]` newlines and indentation are now
+  uniformly insignificant, matching how the parser already treated commas in a
+  multi-line list literal. Accept-only change: nothing that parsed before parses
+  differently. Covered by multi-line cases in `list_comprehensions.mll`, pinned
+  against GHC by the differential oracle. (Parenthesized `( )` expressions still
+  require the closing paren's line to carry preceding content — a separate
+  construct, unchanged here.)
 - **`Any` converts to and from plain Lua scalars at the FFI boundary.** The
   dynamic `Any` type (`AnyString`/`AnyInt`/`AnyNumber`/`AnyBool`/`AnyNull`)
   no longer crosses the boundary as its raw constructor table. A host scalar
