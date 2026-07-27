@@ -65,19 +65,6 @@ MATA-LL TODO
       hardened hosts load text-only; `mlua`-based precompile covers the
       load-time case if ever wanted).
 
-- [ ] **Quadratic typechecking of long do-blocks.** Found by the parser
-      fuzzer's deep probes: each do-`let` binding calls `generalize`, which
-      recomputes `TypeEnv::free_vars` by walking EVERY scheme in the
-      environment (the whole Prelude plus all previous bindings) with
-      `Vec::contains` de-duplication — O(statements × env) overall.
-      Measured (debug): 500 lets 1.0 s, 1000 → 3.0 s, 2000 → 11.8 s,
-      3000 → 29.6 s; `sample` shows the time in `infer_expr` →
-      `TyVar::eq`/`slice_contains`. Compilation is correct, just
-      superlinear. Candidate fix: cache per-scheme free variables at
-      `Scheme` construction (top-level schemes are closed, so the env scan
-      collapses), or maintain the env's free-variable set incrementally.
-      Needs its own change with the perf benchmarks re-run.
-
 - [ ] **`::` ascription inside a right-section operand is accepted; GHC
       parse-errors.** Found 2026-07-27 during the section-precedence work:
       mata-ll accepts `(+ 1 :: Int)` where GHC rejects the `::` in that
@@ -96,6 +83,40 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Compiling long do-blocks is now linear in their length.** Found by
+      the parser fuzzer's deep probes; every do-`let` statement re-walked
+      state proportional to everything before it, in five stacked places,
+      each now indexed or incremental: (1) `TypeEnv` caches per-binding
+      free-variable footprints at insert (`EnvEntry`, typechecker/mod.rs)
+      with aggregate multisets and stale-tolerant reverse indexes, so
+      `generalize` asks O(1) membership questions and `apply_subst_mut`
+      rewrites only affected bindings — cached in the env, not in `Scheme`,
+      because the env owns its entries while `Scheme` has dozens of literal
+      construction sites and a public-field mutation site; (2) the
+      accumulated substitution composes through reverse indexes
+      (`AccSubst`, types.rs) touching only images the incoming substitution
+      can change, result identical to `compose`; (3) variable-variable
+      unification binds the YOUNGER fresh flexible var to the older
+      (types.rs `unify_inner`) so a chained representative (a do-block's
+      shared `Num` var) stays put instead of re-pointing every accumulated
+      image per statement — either direction is an MGU, compile-time only,
+      user-written vars keep the old behavior; (4) the nested-`let` spine
+      infers iteratively with one threaded env and one `AccSubst`
+      (infer.rs `infer_let_group`); (5) the demand analyzer computes all
+      let-to-case suffix seeds in one backward pass (`let_spine_maps`,
+      demand.rs) via the same extracted `let_group_close` the recursive
+      walk uses, with a direct-computation fallback on cache miss.
+      Measured (release, chained 2000/3000-let): 3.79 s / 7.33 s before →
+      0.06 s / 0.08 s after, verified against a HEAD-built baseline; real
+      programs: tracker compile 0.39→0.06 s, zpool 0.64→0.13 s. Corpus
+      A/B (272 files): 271 byte-identical; the one deviation is a single
+      zpr.lua line where a provably-`Int` `show` monomorphizes to
+      `show_Int` (stable representatives let monomorphization see the
+      type) — same rendered output, strictly more precise. Suite 946/0;
+      proprietary acceptance passes; CHANGELOG Fixed entry. Known mild
+      tail at 12000 chained lets (0.60 s, allocation traffic), noted and
+      not chased. 2026-07-27.
 
 - [x] **Exported empty-list results now cross to the Lua host as `{}`, not
       `nil`.** mata-ll represents `[]` as `nil` internally, and the export
