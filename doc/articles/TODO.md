@@ -3,17 +3,21 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Document the user-facing evaluation-strategy contract.**
-      HASKDIFF.md has no section on evaluation. DESIGN.md describes the
-      machinery (memoizing thunks by default, cheapness and demand
-      analysis for eagerness) and SPEC.md states the "bottom is never
-      evaluated eagerly" contract, but the user-facing question — which
-      GHC laziness idioms hold (sharing, infinite structures,
-      knot-tying), which don't, and where the eagerness optimizations
-      are observable — is answered nowhere. Agreed 2026-07-22 that this
-      must be documented; the substantive discussion of the deviation
-      surface is deferred, so this entry is: have that discussion, then
-      write the HASKDIFF.md section from its outcome.
+- [ ] **Call-site inliner duplicates argument work — sharing loss vs GHC.**
+      Found 2026-07-27 while verifying the evaluation-strategy doc:
+      `find_inline_candidates` (`codegen/analysis.rs`) admits any
+      single-clause cheap-body helper without checking how often a
+      parameter occurs in the body, and `expr_subst_ast`
+      (`codegen/inline.rs`) substitutes the call-site expression at every
+      occurrence — so `sq x = x * x` applied to `nfib 30` emits the call
+      twice and evaluates it twice (measured 2×). Not a semantic
+      deviation (pure code, ⊥ raises identically), but GHC's inliner
+      never loses sharing this way (it substitutes only once-used or
+      trivial arguments). Until fixed, HASKDIFF.md's "shares like GHC"
+      has this corner. Candidate fix: restrict inline candidates to
+      bodies whose parameters occur at most once, or let-bind
+      multiply-used arguments at the call site. Needs the perf corpus
+      re-run (the inliner exists for the hot paths).
 
 - [ ] **Quadratic typechecking of long do-blocks.** Found by the parser
       fuzzer's deep probes: each do-`let` binding calls `generalize`, which
@@ -47,6 +51,23 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **The user-facing evaluation-strategy contract is documented.**
+      HASKDIFF.md now carries "Evaluation: call-by-need, with proof-gated
+      eagerness": memoizing thunks and CAFs (sharing verified by timing),
+      which positions suspend vs force (WHNF only), the verified idiom
+      list (ignored arguments, infinite structures, knot-tying `fibs`
+      at `!! 85`, lazy trapping `div` bindings), the eagerness contract
+      (demand-analysis or totality proof; unobservable in results,
+      observable only in time/heap/stack), bottom-and-`try` with the
+      `seq` idiom, strict-accumulator idioms (`foldl` leaks / `foldl'`
+      fixes, the tracker's ``x `seq` return x`` case), the Lua
+      fixed-stack failure mode on ~10^6-deep thunk chains (GHC grows its
+      stack; Lua crashes sooner — the leak is the bug in both), and the
+      linear-types zero-use lazy-`let` cross-reference. Every claim was
+      confirmed by a compiled probe before being written. One
+      undocumented sharing loss surfaced during verification and is
+      logged as the open inliner item above. 2026-07-27.
 
 - [x] **Scientific-notation numeric literals.** `1.0e-2`, `1e5`, `2.5E+3`,
       `6.022e23` now lex as float literals (Haskell 2010 §2.5: `(e|E) [+|-]
