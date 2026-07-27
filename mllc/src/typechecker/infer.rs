@@ -258,10 +258,13 @@ impl Checker {
         // constraint over one of these must be discharged by the declared
         // context) versus variables determined by a local binder.
         let type_vars = final_ty.free_vars();
-        let mut determined = type_vars.clone();
+        // A set, not a Vec: with one binder per statement (a long do-block of
+        // `let`s), the membership probes below are per-wanted-constraint ×
+        // per-binder, and Vec::contains made that quadratic.
+        let mut determined: HashSet<TyVar> = type_vars.iter().cloned().collect();
         for bt in &self.binder_types {
             for v in bt.apply_subst(&overall_subst).free_vars() {
-                if !determined.contains(&v) { determined.push(v); }
+                determined.insert(v);
             }
         }
         for (class, cty) in std::mem::take(&mut self.wanted) {
@@ -420,7 +423,14 @@ impl Checker {
         }
 
         let sig_vars = fresh_ty.apply_subst(subst).free_vars();
-        let mut out = Subst::empty();
+        // Accumulate the chosen defaults as a plain map. Each candidate
+        // variable is a distinct map key and every image is a ground default
+        // type (`Int`/`Number`), so folding candidates in with `merge` (as
+        // this used to) can never rewrite or conflict with an earlier
+        // binding — but it re-walked the whole accumulated substitution per
+        // candidate, which was quadratic in the number of defaulted
+        // literals. Direct insertion builds the identical substitution.
+        let mut out: HashMap<TyVar, Ty> = HashMap::new();
         for (v, info) in &groups {
             // A variable that survives in the binding's own type is genuinely
             // polymorphic — the caller (or its declared context) discharges it.
@@ -434,14 +444,14 @@ impl Checker {
             // original constraint on the variable has an instance.
             for cand in &["Int", "Number"] {
                 let ct = Ty::Con((*cand).to_string());
-                let sub = Subst::singleton(v.clone(), ct);
+                let sub = Subst::singleton(v.clone(), ct.clone());
                 if info.full.iter().all(|(class, fty)| self.has_instance(class, &fty.apply_subst(&sub))) {
-                    out = out.merge(&sub);
+                    out.insert(v.clone(), ct);
                     break;
                 }
             }
         }
-        out
+        Subst::from_map(out)
     }
 
     fn is_numeric_class(c: &str) -> bool {
@@ -517,12 +527,12 @@ impl Checker {
                 // uses instantiate independently and one side's resolution is lost
                 // when the substitutions compose, leaving a type variable — and any
                 // class constraint on it — spuriously unresolved.
-                let cond_env = local_env.apply_subst(&subst);
+                let cond_env = local_env.applied(&subst);
                 let (tcond, cond_ty, s1) = self.infer_expr(&guard.condition, &cond_env)?;
                 let s2 = self.unify(&cond_ty.apply_subst(&s1), &Ty::Con("Bool".into()))?;
                 let combined = s1.compose(&s2);
                 subst = subst.compose(&combined);
-                let body_env = local_env.apply_subst(&subst);
+                let body_env = local_env.applied(&subst);
                 let ret = expected_ret.apply_subst(&subst);
                 let (tbody_g, body_s) = self.check_expr_typed(&guard.body, &ret, &body_env)?;
                 subst = subst.compose(&body_s);
@@ -530,7 +540,7 @@ impl Checker {
             }
             tbody = TExpr::new(TExprKind::Var("undefined".into()), expected_ret);
         } else {
-            let body_env = local_env.apply_subst(&subst);
+            let body_env = local_env.applied(&subst);
             let ret = expected_ret.apply_subst(&subst);
             let (tb, body_s) = self.check_expr_typed(&clause.body, &ret, &body_env)?;
             subst = subst.compose(&body_s);
@@ -716,35 +726,64 @@ impl Checker {
     /// accumulated substitution. Only value bindings (no parameters) are
     /// supported, matching the rest of the `let` pipeline; bindings with
     /// parameters are inferred as-is and will surface the same errors as before.
+    ///
+    /// The environment is taken BY VALUE and threaded in place: a long
+    /// do-block calls this once per `let` statement, and rebuilding the whole
+    /// environment (clone + substitute every scheme in scope) each time made
+    /// typechecking quadratic in the number of statements. The caller's
+    /// invariant — the incoming environment is already substituted up to the
+    /// incoming `subst` (every path composes a substitution into `subst` and
+    /// applies it to the live environment at the same time) — lets this
+    /// function apply only the NEW substitutions it produces.
     pub(super) fn infer_let_group(
         &mut self,
         binds: &[LocalDef],
-        env: &TypeEnv,
-        mut subst: Subst,
-    ) -> Result<(Vec<TLocalDef>, TypeEnv, Subst), DiagnosticKind> {
+        mut env: TypeEnv,
+        mut subst: AccSubst,
+    ) -> Result<(Vec<TLocalDef>, TypeEnv, AccSubst), DiagnosticKind> {
         // Pre-register fresh monomorphic vars for the whole group so bindings
-        // can see themselves and each other during inference.
-        let mut rec_env = env.clone();
+        // can see themselves and each other during inference. A shadowed outer
+        // scheme is saved so it can come back for the generalization step —
+        // generalization is over the OUTER environment, which still contains
+        // it.
         let mut fresh_tys: Vec<Ty> = Vec::with_capacity(binds.len());
+        let mut shadowed: Vec<Option<Scheme>> = Vec::with_capacity(binds.len());
         for bind in binds {
             let fv = self.fresh_var("_let");
             fresh_tys.push(fv.clone());
             // A let binder's type is determined by its body/uses; record it so a
             // class constraint over its variable is not flagged as ambiguous.
             self.binder_types.push(fv.clone());
-            rec_env.insert(bind.name.clone(), Scheme::mono(fv));
+            shadowed.push(env.remove(&bind.name));
+            env.insert(bind.name.clone(), Scheme::mono(fv));
         }
 
         // Infer each body in the recursive environment and unify its type with
-        // the pre-registered variable.
+        // the pre-registered variable, keeping the environment substituted as
+        // bindings resolve (`apply_subst_mut` touches only affected schemes).
         let mut tbinds = Vec::new();
         for (i, bind) in binds.iter().enumerate() {
-            let env_i = rec_env.apply_subst(&subst);
-            let (te, bind_ty, s) = self.infer_expr(&bind.body, &env_i)?;
-            subst = subst.compose(&s);
+            let (te, bind_ty, s) = self.infer_expr(&bind.body, &env)?;
+            subst.compose_with(&s);
+            env.apply_subst_mut(&s);
             let us = self.unify(&fresh_tys[i].apply_subst(&subst), &bind_ty.apply_subst(&subst))?;
-            subst = subst.compose(&us);
+            subst.compose_with(&us);
+            env.apply_subst_mut(&us);
             tbinds.push(TLocalDef { name: bind.name.clone(), patterns: vec![], body: te });
+        }
+
+        // Take the group's monomorphic pre-registrations back out, restoring
+        // any shadowed outer schemes: generalization must see exactly the
+        // outer environment. A restored scheme sat outside the environment
+        // while the group was inferred, so it catches up on the accumulated
+        // substitution here (applying the already-seen prefix again is a
+        // no-op: applications resolve variables fully, so they are
+        // idempotent).
+        for (bind, old) in binds.iter().zip(shadowed) {
+            env.remove(&bind.name);
+            if let Some(old_scheme) = old {
+                env.insert(bind.name.clone(), old_scheme.apply_subst(&subst));
+            }
         }
 
         // Generalize each binding over the outer environment (excluding the
@@ -760,19 +799,31 @@ impl Checker {
         // constraints meet at the enclosing binding's defaulting step. This also
         // brings `let` into line with mata-ll's already-monomorphic `where`
         // bindings, and matches GHC's monomorphism restriction.
-        let outer_env = env.apply_subst(&subst);
-        let constrained_vars: Vec<TyVar> = self.wanted.iter()
-            .flat_map(|(_, cty)| cty.apply_subst(&subst).free_vars())
-            .collect();
-        let mut out_env = outer_env.clone();
-        for (i, bind) in binds.iter().enumerate() {
-            let bind_ty = fresh_tys[i].apply_subst(&subst);
-            let mut scheme = self.generalize(&outer_env, &bind_ty);
-            scheme.vars.retain(|v| !constrained_vars.contains(v));
-            out_env.insert(bind.name.clone(), scheme);
+        //
+        // Whether a candidate variable is constraint-bound is checked lazily
+        // per candidate, scanning the wanted constraints newest-first — a
+        // do-`let`'s pending constraint (its literal's `Num`) is the one just
+        // emitted, so the common case stops after a step or two instead of
+        // materializing every wanted constraint's variables each time.
+        let is_constrained = |checker: &Self, v: &TyVar| {
+            checker.wanted.iter().rev()
+                .any(|(_, cty)| cty.apply_subst(&subst).free_vars().contains(v))
+        };
+        // Generalize ALL binds against the outer environment BEFORE inserting
+        // any of the new schemes: a sibling's scheme is not part of the outer
+        // environment and must not influence what a binding may quantify.
+        let mut schemes: Vec<Scheme> = Vec::with_capacity(binds.len());
+        for fresh in &fresh_tys {
+            let bind_ty = fresh.apply_subst(&subst);
+            let mut scheme = self.generalize(&env, &bind_ty);
+            scheme.vars.retain(|v| !is_constrained(self, v));
+            schemes.push(scheme);
+        }
+        for (bind, scheme) in binds.iter().zip(schemes) {
+            env.insert(bind.name.clone(), scheme);
         }
 
-        Ok((tbinds, out_env, subst))
+        Ok((tbinds, env, subst))
     }
 
     /// Reject a type that mentions an existential skolem minted after
@@ -1041,7 +1092,7 @@ impl Checker {
             }
             Expr::App(func, arg) => {
                 let (tf, func_ty, s1) = self.infer_expr(func, env)?;
-                let env2 = env.apply_subst(&s1);
+                let env2 = env.applied(&s1);
                 let (ta, arg_ty, s2) = self.infer_expr(arg, &env2)?;
                 let ret_ty = self.fresh_var("_r");
                 let func_ty = func_ty.apply_subst(&s2);
@@ -1172,9 +1223,9 @@ impl Checker {
                 let (tc, cond_ty, s1) = self.infer_expr(cond, env)?;
                 let sb = self.unify(&cond_ty, &Ty::Con("Bool".into()))?;
                 let s1 = s1.compose(&sb);
-                let env2 = env.apply_subst(&s1);
+                let env2 = env.applied(&s1);
                 let (tt, then_ty, s2) = self.infer_expr(then_branch, &env2)?;
-                let env3 = env2.apply_subst(&s2);
+                let env3 = env2.applied(&s2);
                 let (te, else_ty, s3) = self.infer_expr(else_branch, &env3)?;
                 // then/else agree cleanly on their own; a mismatch reconciling
                 // them belongs at the else branch, not the clause head.
@@ -1211,11 +1262,11 @@ impl Checker {
                     let mut tguards = Vec::new();
                     if !branch.guards.is_empty() {
                         for guard in &branch.guards {
-                            let genv = branch_env.apply_subst(&subst);
+                            let genv = branch_env.applied(&subst);
                             let (tcond, cond_ty, gs1) = self.infer_expr(&guard.condition, &genv)?;
                             let gs2 = self.unify(&cond_ty.apply_subst(&gs1), &Ty::Con("Bool".into()))?;
                             subst = subst.compose(&gs1).compose(&gs2);
-                            let genv2 = branch_env.apply_subst(&subst);
+                            let genv2 = branch_env.applied(&subst);
                             let (tgbody, gbody_ty, gbs) = self.infer_expr(&guard.body, &genv2)?;
                             subst = subst.compose(&gbs);
                             let gu = self.unify(&result_ty.apply_subst(&subst), &gbody_ty)
@@ -1265,14 +1316,41 @@ impl Checker {
                     final_ty, subst,
                 ))
             }
-            Expr::Let { binds, body } => {
-                let (tbinds, body_env, subst) =
-                    self.infer_let_group(binds, env, Subst::empty())?;
-                let (tbody, body_ty, s) = self.infer_expr(body, &body_env)?;
-                Ok((
-                    TExpr::new(TExprKind::Let { binds: tbinds, body: Box::new(tbody) }, body_ty.clone()),
-                    body_ty, subst.compose(&s),
-                ))
+            Expr::Let { .. } => {
+                // Process the whole spine of directly nested `let`s
+                // ITERATIVELY, threading one owned environment and one
+                // accumulated substitution along it. A do-block whose
+                // statements are all `let`s desugars to one nested `Expr::Let`
+                // per statement; recursing per level cloned the environment
+                // and re-composed the inner substitution at every step, which
+                // made such blocks quadratic to typecheck (and burned nesting
+                // depth linearly). This mirrors `infer_bind_chain`'s iterative
+                // handling of `>>=` chains, including how it threads the
+                // accumulated substitution through `infer_let_group`.
+                let mut env_acc = env.clone();
+                let mut subst = AccSubst::new();
+                let mut tgroups: Vec<Vec<TLocalDef>> = Vec::new();
+                let mut cur: &Expr = expr;
+                while let Expr::Let { binds, body } = cur {
+                    let (tbinds, new_env, new_subst) =
+                        self.infer_let_group(binds, env_acc, subst)?;
+                    env_acc = new_env;
+                    subst = new_subst;
+                    tgroups.push(tbinds);
+                    cur = body;
+                }
+                let (tbody, body_ty, s) = self.infer_expr(cur, &env_acc)?;
+                subst.compose_with(&s);
+                // Rebuild the nested TIR lets bottom-up; every level of the
+                // spine has the innermost body's type.
+                let mut te = tbody;
+                for tbinds in tgroups.into_iter().rev() {
+                    te = TExpr::new(
+                        TExprKind::Let { binds: tbinds, body: Box::new(te) },
+                        body_ty.clone(),
+                    );
+                }
+                Ok((te, body_ty, subst.into_subst()))
             }
             Expr::Do(_) => unreachable!("Do should be desugared to >>= before type checking"),
             Expr::Paren(inner) => {
@@ -1390,7 +1468,7 @@ impl Checker {
                             "Field '{}' of constructor '{}' has an existential type and cannot be record-updated: the type the new value must have was erased when the record was packed, so there is nothing to check the new value against. Rebuild the value with '{}' instead",
                             field_name, con, con)));
                     }
-                    let env2 = env.apply_subst(&subst);
+                    let env2 = env.applied(&subst);
                     let (te, _ty, s) = self.infer_expr(field_expr, &env2)?;
                     subst = subst.compose(&s);
                     typed_updates.push((field_name.clone(), field_idx, te));
@@ -1408,7 +1486,7 @@ impl Checker {
                 let mut elem_types = Vec::new();
                 let mut subst = Subst::empty();
                 for e in elems {
-                    let env2 = env.apply_subst(&subst);
+                    let env2 = env.applied(&subst);
                     let (te, ty, s) = self.infer_expr(e, &env2)?;
                     subst = subst.compose(&s);
                     elem_types.push(ty);
@@ -1479,9 +1557,12 @@ impl Checker {
             }
         }
 
-        // Process each statement iteratively
+        // Process each statement iteratively. The substitution accumulates
+        // once per statement, so it uses the indexed accumulator (AccSubst):
+        // composing through the plain representation re-walks the whole
+        // accumulated map each step, which is quadratic over a long chain.
         let mut local_env = env.clone();
-        let mut subst = Subst::empty();
+        let mut subst = AccSubst::new();
         // Collect typed results to reconstruct bottom-up
         struct TypedBind {
             op: String,
@@ -1511,13 +1592,13 @@ impl Checker {
                     };
                     // Infer op type
                     let (_top, op_ty, s_op) = self.infer_expr(&op_expr, &local_env)?;
-                    subst = subst.compose(&s_op);
-                    local_env = local_env.apply_subst(&s_op);
+                    subst.compose_with(&s_op);
+                    local_env.apply_subst_mut(&s_op);
 
                     // Infer lhs type
                     let (tlhs, lhs_ty, s_lhs) = self.infer_expr(lhs, &local_env)?;
-                    subst = subst.compose(&s_lhs);
-                    local_env = local_env.apply_subst(&s_lhs);
+                    subst.compose_with(&s_lhs);
+                    local_env.apply_subst_mut(&s_lhs);
 
                     // Unify: op_ty ~ lhs_ty -> (param_ty -> result_ty) -> result_ty
                     let param_ty = self.fresh_var("_bp");
@@ -1528,8 +1609,8 @@ impl Checker {
                         result_ty.clone(),
                     ));
                     let s_unify = self.unify(&op_ty, &expected_op)?;
-                    subst = subst.compose(&s_unify);
-                    local_env = local_env.apply_subst(&s_unify);
+                    subst.compose_with(&s_unify);
+                    local_env.apply_subst_mut(&s_unify);
                     let bound_ty = param_ty.apply_subst(&s_unify);
 
                     // Bind parameter
@@ -1547,7 +1628,7 @@ impl Checker {
                 }
                 BindStmt::Let { binds } => {
                     let (tbinds, new_env, new_subst) =
-                        self.infer_let_group(binds, &local_env, subst)?;
+                        self.infer_let_group(binds, local_env, subst)?;
                     subst = new_subst;
                     local_env = new_env;
                     typed_stmts.push(TypedStmt::Let(tbinds));
@@ -1557,7 +1638,7 @@ impl Checker {
 
         // Type-check the terminal expression
         let (te_terminal, terminal_ty, s_term) = self.infer_expr(current, &local_env)?;
-        subst = subst.compose(&s_term);
+        subst.compose_with(&s_term);
 
         // Backward pass: unify each bind's result type with the type of its
         // continuation (the rest of the chain). For `lhs >>= \p -> rest` the
@@ -1575,7 +1656,7 @@ impl Checker {
             if let TypedStmt::Bind(tb) = tstmt {
                 let rt = tb.result_ty.apply_subst(&subst);
                 let s = self.unify(&rt, &cont_ty.apply_subst(&subst))?;
-                subst = subst.compose(&s);
+                subst.compose_with(&s);
                 cont_ty = rt.apply_subst(&s);
             }
         }
@@ -1624,7 +1705,7 @@ impl Checker {
             }
         }
 
-        Ok((result_te, result_ty, subst))
+        Ok((result_te, result_ty, subst.into_subst()))
     }
 
     // Depth-guard wrapper; see `infer_expr`. Bidirectional checking recurses

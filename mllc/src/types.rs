@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// A typeclass constraint on a type variable, e.g. Show a
@@ -296,6 +296,62 @@ impl Ty {
         }
     }
 
+    /// Collect the ids of EVERY multiplicity variable on this type's arrows —
+    /// flexible (`Mult::Var`) and rigid (`Mult::Rigid`) alike. This is the
+    /// "could a substitution's multiplicity bindings rewrite this type?"
+    /// footprint: `apply_subst` resolves both kinds through `resolve_mult`, so
+    /// both belong in the cache the environment uses to skip untouched
+    /// schemes (`TypeEnv`). Contrast `collect_rigid_mults`, which answers the
+    /// narrower generalization question.
+    pub fn collect_mult_ids(&self, out: &mut Vec<u32>) {
+        match self {
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) | Ty::Var(_) => {}
+            Ty::Arrow(a, b, m) => {
+                if let Mult::Var(id) | Mult::Rigid(id) = m
+                    && !out.contains(id) {
+                        out.push(*id);
+                    }
+                a.collect_mult_ids(out);
+                b.collect_mult_ids(out);
+            }
+            Ty::App(a, b) => {
+                a.collect_mult_ids(out);
+                b.collect_mult_ids(out);
+            }
+            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) =>
+                a.collect_mult_ids(out),
+            Ty::Tuple(elems) => for e in elems { e.collect_mult_ids(out); },
+        }
+    }
+
+    /// Conservative "could `subst` change this type at all?" test: true when
+    /// the type mentions any variable, LuaIO scope, or arrow multiplicity in
+    /// the substitution's domain. Used to skip the clone-heavy `apply_subst`
+    /// when it would be an identity — false here GUARANTEES identity, while
+    /// a true may still be an identity (e.g. a `Forall` shadowing the bound
+    /// variable), which merely falls back to the full application.
+    pub fn mentions_subst(&self, subst: &Subst) -> bool {
+        if subst.map.is_empty() && subst.mults.is_empty() {
+            return false;
+        }
+        match self {
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => false,
+            Ty::Var(v) => subst.map.contains_key(v),
+            Ty::Arrow(a, b, m) => {
+                (matches!(m, Mult::Var(id) | Mult::Rigid(id) if subst.mults.contains_key(id)))
+                    || a.mentions_subst(subst) || b.mentions_subst(subst)
+            }
+            Ty::App(a, b) => a.mentions_subst(subst) || b.mentions_subst(subst),
+            Ty::List(a) | Ty::IO(a) => a.mentions_subst(subst),
+            Ty::LuaIO(s, a) => subst.map.contains_key(s) || a.mentions_subst(subst),
+            // Conservative: the bound variable shadows a binding of the same
+            // name, but treating that rare case as "mentioned" only costs a
+            // redundant full application (which restricts correctly).
+            Ty::Forall(v, inner) => subst.map.contains_key(v) || inner.mentions_subst(subst),
+            Ty::Tuple(elems) => elems.iter().any(|e| e.mentions_subst(subst)),
+        }
+    }
+
     /// Apply a substitution to this type
     pub fn apply_subst(&self, subst: &Subst) -> Ty {
         match self {
@@ -487,10 +543,33 @@ impl fmt::Display for InstHead {
 }
 
 /// Type variable identifier
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Eq)]
 pub struct TyVar {
     pub name: String,
     pub id: u32,
+}
+
+/// Identity is (name, id), as the old derives had it — but compare the id
+/// first (a fresh variable's id is unique, so almost every inequality is
+/// decided by one integer compare) and hash only the id plus a two-byte
+/// digest of the name instead of siphashing the whole string. Type variables
+/// key the checker's hottest maps (substitutions, environment footprints);
+/// full string hashing was a measurable share of typechecking long
+/// functions. Equal variables have equal ids and names, so they hash equal;
+/// user-written variables (which all share `id: u32::MAX`) stay spread by
+/// the name digest.
+impl PartialEq for TyVar {
+    fn eq(&self, other: &TyVar) -> bool {
+        self.id == other.id && self.name == other.name
+    }
+}
+
+impl std::hash::Hash for TyVar {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        state.write_u32(self.id);
+        state.write_u8(self.name.len() as u8);
+        state.write_u8(self.name.as_bytes().first().copied().unwrap_or(0));
+    }
 }
 
 impl fmt::Display for TyVar {
@@ -523,18 +602,28 @@ impl Scheme {
     }
 
     pub fn apply_subst(&self, subst: &Subst) -> Scheme {
-        // Don't substitute bound variables
-        let mut restricted = subst.clone();
-        for v in &self.vars {
-            restricted.remove(v);
-        }
-        for id in &self.mult_vars {
-            restricted.remove_mult(*id);
-        }
+        // Don't substitute bound variables. Cloning the whole substitution
+        // just to restrict it is expensive when the substitution is large
+        // (it deep-clones every image), so only do it when the substitution
+        // actually binds one of this scheme's bound variables.
+        let needs_restrict = self.vars.iter().any(|v| subst.map.contains_key(v))
+            || self.mult_vars.iter().any(|id| subst.mults.contains_key(id));
+        let ty = if needs_restrict {
+            let mut restricted = subst.clone();
+            for v in &self.vars {
+                restricted.remove(v);
+            }
+            for id in &self.mult_vars {
+                restricted.remove_mult(*id);
+            }
+            self.ty.apply_subst(&restricted)
+        } else {
+            self.ty.apply_subst(subst)
+        };
         Scheme {
             vars: self.vars.clone(),
             mult_vars: self.mult_vars.clone(),
-            ty: self.ty.apply_subst(&restricted),
+            ty,
         }
     }
 
@@ -668,6 +757,58 @@ impl Subst {
         Subst { map: result, mults }
     }
 
+    /// In-place `compose`: exactly `*self = self.compose(other)`, without
+    /// rebuilding the map. `compose` clones every entry of `self` (key and
+    /// image) to apply `other` to the images; on the accumulate-in-a-loop
+    /// pattern (`subst = subst.compose(&s)` once per do-statement) that walk
+    /// makes a long function quadratic in its length. Here an image is
+    /// rewritten only when it actually mentions `other`'s domain
+    /// (`Ty::mentions_subst`); an untouched image — the overwhelming case,
+    /// since `other` binds this step's fresh variables — is left alone, and
+    /// no keys are recloned. The resulting map is identical to `compose`'s:
+    /// images stay flattened, so variable chains stay short.
+    pub fn compose_with(&mut self, other: &Subst) {
+        if other.map.is_empty() && other.mults.is_empty() {
+            return;
+        }
+        for v in self.map.values_mut() {
+            if v.mentions_subst(other) {
+                *v = v.apply_subst(other);
+            }
+        }
+        for (k, v) in &other.map {
+            self.map.entry(k.clone()).or_insert_with(|| v.clone());
+        }
+        if !other.mults.is_empty() {
+            for m in self.mults.values_mut() {
+                *m = other.resolve_mult(*m);
+            }
+        }
+        for (k, v) in &other.mults {
+            self.mults.entry(*k).or_insert(*v);
+        }
+    }
+
+    /// Does this substitution bind the given type variable?
+    pub fn binds_var(&self, v: &TyVar) -> bool {
+        self.map.contains_key(v)
+    }
+
+    /// Does this substitution bind the given multiplicity variable id?
+    pub fn binds_mult(&self, id: u32) -> bool {
+        self.mults.contains_key(&id)
+    }
+
+    /// The type variables this substitution binds.
+    pub fn ty_domain(&self) -> impl Iterator<Item = &TyVar> {
+        self.map.keys()
+    }
+
+    /// The multiplicity-variable ids this substitution binds.
+    pub fn mult_domain(&self) -> impl Iterator<Item = u32> + '_ {
+        self.mults.keys().copied()
+    }
+
     /// Merge two INDEPENDENT substitutions (e.g. from two clauses of the same
     /// function, each checked against the same signature). Plain `compose`
     /// keeps `self`'s binding when both bind the same variable and silently
@@ -697,6 +838,155 @@ impl Subst {
             }
         }
         result
+    }
+}
+
+/// A substitution that ACCUMULATES over a long sequence of composition steps
+/// (one per do-block statement), with a reverse index over its images so each
+/// step no longer walks the whole map.
+///
+/// `Subst::compose` (and the in-place `compose_with`) must rewrite every
+/// stored image through the incoming substitution to keep images flattened —
+/// an O(accumulated size) walk per step, which made typechecking a long
+/// do-block quadratic in its length even after the walk stopped allocating.
+/// Here each index maps a variable to the entry keys whose images might
+/// mention it, so a step rewrites exactly the images the incoming
+/// substitution can change (usually none: it binds the step's fresh
+/// variables) and the composed result is IDENTICAL to `Subst::compose`'s —
+/// images stay flattened, chains stay short.
+///
+/// Index entries are stale-tolerant: a rewritten image keeps its old index
+/// entries (they are re-checked with `mentions_subst` and skipped when they
+/// no longer apply, each at most once, since processing an incoming variable
+/// consumes its index bucket).
+#[derive(Debug, Clone)]
+pub struct AccSubst {
+    subst: Subst,
+    /// type variable -> keys of `subst.map` whose image may mention it
+    /// (free type variables and LuaIO scopes).
+    var_index: HashMap<TyVar, Vec<TyVar>>,
+    /// multiplicity id -> keys of `subst.map` whose image may carry it on an
+    /// arrow (flexible or rigid: `apply_subst` resolves both).
+    mult_index: HashMap<u32, Vec<TyVar>>,
+    /// multiplicity id -> keys of `subst.mults` whose VALUE may reference it.
+    mult_val_index: HashMap<u32, Vec<u32>>,
+}
+
+impl std::ops::Deref for AccSubst {
+    type Target = Subst;
+    fn deref(&self) -> &Subst { &self.subst }
+}
+
+impl Default for AccSubst {
+    fn default() -> Self { Self::new() }
+}
+
+impl AccSubst {
+    pub fn new() -> AccSubst {
+        AccSubst {
+            subst: Subst::empty(),
+            var_index: HashMap::new(),
+            mult_index: HashMap::new(),
+            mult_val_index: HashMap::new(),
+        }
+    }
+
+    /// The plain substitution, for handing the accumulated result onward.
+    pub fn into_subst(self) -> Subst {
+        self.subst
+    }
+
+    /// Record where image `img` (stored under key `k`) must be revisited: at
+    /// every type variable it mentions and every arrow multiplicity it
+    /// carries. A `Forall`-bound variable needs no entry — `apply_subst`
+    /// restricts it away, so a binding of it cannot rewrite the image — and
+    /// `free_vars` already excludes it.
+    fn index_image(&mut self, k: &TyVar, img: &Ty) {
+        for v in img.free_vars() {
+            self.var_index.entry(v).or_default().push(k.clone());
+        }
+        let mut mults = Vec::new();
+        img.collect_mult_ids(&mut mults);
+        for id in mults {
+            self.mult_index.entry(id).or_default().push(k.clone());
+        }
+    }
+
+    fn index_mult_value(&mut self, k: u32, m: Mult) {
+        if let Mult::Var(id) | Mult::Rigid(id) = m {
+            self.mult_val_index.entry(id).or_default().push(k);
+        }
+    }
+
+    /// `self = other ∘ self`, exactly as `Subst::compose` computes it, but
+    /// touching only the entries `other` can affect (found via the indexes)
+    /// instead of walking the whole accumulated map.
+    pub fn compose_with(&mut self, other: &Subst) {
+        if other.map.is_empty() && other.mults.is_empty() {
+            return;
+        }
+        // Images that may mention other's domain: consume the index buckets
+        // of every incoming variable. A key can sit in several buckets, so
+        // dedup before rewriting.
+        let mut cand: Vec<TyVar> = Vec::new();
+        for w in other.map.keys() {
+            if let Some(ks) = self.var_index.remove(w) {
+                cand.extend(ks);
+            }
+        }
+        for id in other.mults.keys() {
+            if let Some(ks) = self.mult_index.remove(id) {
+                cand.extend(ks);
+            }
+        }
+        if !cand.is_empty() {
+            let mut seen: HashSet<TyVar> = HashSet::with_capacity(cand.len());
+            for k in cand {
+                if !seen.insert(k.clone()) {
+                    continue;
+                }
+                let Some(img) = self.subst.map.get(&k) else { continue };
+                if !img.mentions_subst(other) {
+                    continue; // stale index entry; drops here, checked once
+                }
+                let new_img = img.apply_subst(other);
+                self.index_image(&k, &new_img);
+                self.subst.map.insert(k, new_img);
+            }
+        }
+        // Multiplicity values that may reference other's domain.
+        let mut mcand: Vec<u32> = Vec::new();
+        for id in other.mults.keys() {
+            if let Some(ks) = self.mult_val_index.remove(id) {
+                mcand.extend(ks);
+            }
+        }
+        if !mcand.is_empty() {
+            mcand.sort_unstable();
+            mcand.dedup();
+            for k in mcand {
+                if let Some(m) = self.subst.mults.get(&k).copied() {
+                    let resolved = other.resolve_mult(m);
+                    self.index_mult_value(k, resolved);
+                    self.subst.mults.insert(k, resolved);
+                }
+            }
+        }
+        // Adopt other's bindings for anything self leaves unbound (compose
+        // keeps self's binding on conflict). Adopted images are stored AS IS,
+        // exactly as `compose` stores them.
+        for (k, v) in &other.map {
+            if !self.subst.map.contains_key(k) {
+                self.index_image(k, v);
+                self.subst.map.insert(k.clone(), v.clone());
+            }
+        }
+        for (k, v) in &other.mults {
+            if !self.subst.mults.contains_key(k) {
+                self.index_mult_value(*k, *v);
+                self.subst.mults.insert(*k, *v);
+            }
+        }
     }
 }
 
@@ -1064,6 +1354,27 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
         (Ty::Con(a), Ty::Con(b)) if a == b => Ok(Subst::empty()),
         (Ty::Promoted(a), Ty::Promoted(b)) if a == b => Ok(Subst::empty()),
         (Ty::Unit, Ty::Unit) => Ok(Subst::empty()),
+
+        // Two FRESH flexible variables (user-written variables carry
+        // `id: u32::MAX` and keep the old left-binds-first behavior below):
+        // either binding direction is a most general unifier, so bind the
+        // YOUNGER (higher id) to the older. Direction matters for compile
+        // time, not meaning: inference threads one variable through a long
+        // chain of statements (e.g. the shared `Num` variable of a do-block
+        // full of numeric `let`s), and binding old := new moves that chain's
+        // representative every statement — re-pointing every accumulated
+        // substitution image that mentions it, which is quadratic in program
+        // length. Binding new := old keeps the representative stable, so
+        // each statement touches only its own bindings.
+        (Ty::Var(v), Ty::Var(w))
+            if v != w && v.id != u32::MAX && w.id != u32::MAX =>
+        {
+            if v.id > w.id {
+                Ok(Subst::singleton(v.clone(), Ty::Var(w.clone())))
+            } else {
+                Ok(Subst::singleton(w.clone(), Ty::Var(v.clone())))
+            }
+        }
 
         (Ty::Var(v), t) | (t, Ty::Var(v)) => {
             if t == &Ty::Var(v.clone()) {

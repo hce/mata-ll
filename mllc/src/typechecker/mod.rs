@@ -29,10 +29,81 @@ mod usage;
 /// which no hand-written type approaches; that is the safety margin.
 const ALIAS_EXPAND_FUEL: u32 = 30_000;
 
-/// Type environment: maps names to type schemes
+/// One environment binding: the scheme plus its cached free-variable
+/// footprint, computed once when the scheme enters the environment. The
+/// caches exist so the environment-wide questions the checker asks per
+/// statement — "is this variable free somewhere in the environment?"
+/// (generalization) and "can this substitution change anything here?"
+/// (`apply_subst`) — never have to re-walk every scheme's type. They cannot
+/// go stale: the environment owns its entries (lookups hand out `&Scheme`),
+/// so a scheme only ever changes by being re-inserted or rewritten by
+/// `apply_subst`, both of which recompute the caches.
+#[derive(Debug, Clone)]
+struct EnvEntry {
+    scheme: Scheme,
+    /// Type variables free in the scheme (`ty`'s free vars minus the
+    /// quantified `vars`).
+    free_tvs: Vec<TyVar>,
+    /// Rigid multiplicity ids free in the scheme (on `ty` but not
+    /// quantified in `mult_vars`) — what `generalize` must not capture.
+    free_rigids: Vec<u32>,
+    /// EVERY unquantified multiplicity id on `ty`, flexible and rigid: the
+    /// full set through which a substitution's multiplicity bindings could
+    /// rewrite the scheme (`apply_subst` resolves flexible ids too).
+    mult_ids: Vec<u32>,
+}
+
+impl EnvEntry {
+    fn new(scheme: Scheme) -> EnvEntry {
+        let free_tvs = scheme.free_vars();
+        let mut all_rigids = Vec::new();
+        scheme.ty.collect_rigid_mults(&mut all_rigids);
+        let free_rigids: Vec<u32> = all_rigids.into_iter()
+            .filter(|id| !scheme.mult_vars.contains(id))
+            .collect();
+        let mut all_mults = Vec::new();
+        scheme.ty.collect_mult_ids(&mut all_mults);
+        let mult_ids: Vec<u32> = all_mults.into_iter()
+            .filter(|id| !scheme.mult_vars.contains(id))
+            .collect();
+        EnvEntry { scheme, free_tvs, free_rigids, mult_ids }
+    }
+
+    /// Can `subst` change this scheme? False guarantees `apply_subst` is the
+    /// identity on it: quantified variables are restricted away by
+    /// `Scheme::apply_subst`, so only the cached free footprint matters.
+    fn affected_by(&self, subst: &Subst) -> bool {
+        self.free_tvs.iter().any(|v| subst.binds_var(v))
+            || self.mult_ids.iter().any(|id| subst.binds_mult(*id))
+    }
+}
+
+/// Type environment: maps names to type schemes.
+///
+/// Alongside the bindings it maintains three MULTISETS (var → number of
+/// entries whose cache mentions it) aggregating the per-entry caches. They
+/// make `generalize`'s environment questions O(1) per variable and let a
+/// substitution that touches nothing in the environment be recognized
+/// without visiting any binding — previously each do-`let` re-walked every
+/// scheme in scope (the whole Prelude plus all previous bindings), making
+/// long do-blocks quadratic to typecheck. Counts (not sets) because two
+/// entries can share a free variable and removing one must not forget the
+/// other's claim.
 #[derive(Debug, Clone)]
 pub struct TypeEnv {
-    bindings: HashMap<String, Scheme>,
+    bindings: HashMap<String, EnvEntry>,
+    fv_counts: HashMap<TyVar, u32>,
+    rigid_counts: HashMap<u32, u32>,
+    mult_id_counts: HashMap<u32, u32>,
+    /// Reverse indexes: variable → names of bindings whose cached footprint
+    /// may mention it. STALE-TOLERANT: a rewritten/removed binding keeps its
+    /// old index entries; `apply_subst_mut` re-checks each candidate against
+    /// the live entry and a stale one simply drops (its bucket is consumed).
+    /// These let a substitution rewrite exactly the bindings it affects
+    /// instead of scanning the whole environment — the last Θ(env)-per-
+    /// statement walk in the long-do-block shape.
+    fv_index: HashMap<TyVar, Vec<String>>,
+    mult_id_index: HashMap<u32, Vec<String>>,
 }
 
 impl Default for TypeEnv {
@@ -41,58 +112,184 @@ impl Default for TypeEnv {
     }
 }
 
+fn count_add<K: std::hash::Hash + Eq + Clone>(counts: &mut HashMap<K, u32>, key: &K) {
+    *counts.entry(key.clone()).or_insert(0) += 1;
+}
+
+fn count_sub<K: std::hash::Hash + Eq>(counts: &mut HashMap<K, u32>, key: &K) {
+    if let Some(n) = counts.get_mut(key) {
+        if *n <= 1 {
+            counts.remove(key);
+        } else {
+            *n -= 1;
+        }
+    }
+}
+
+/// Add/remove one entry's cached footprint to/from the aggregate multisets.
+/// Free functions (not methods) so callers can hold a mutable borrow of the
+/// bindings map at the same time.
+fn count_entry(
+    entry: &EnvEntry,
+    fv_counts: &mut HashMap<TyVar, u32>,
+    rigid_counts: &mut HashMap<u32, u32>,
+    mult_id_counts: &mut HashMap<u32, u32>,
+) {
+    for v in &entry.free_tvs { count_add(fv_counts, v); }
+    for id in &entry.free_rigids { count_add(rigid_counts, id); }
+    for id in &entry.mult_ids { count_add(mult_id_counts, id); }
+}
+
+fn uncount_entry(
+    entry: &EnvEntry,
+    fv_counts: &mut HashMap<TyVar, u32>,
+    rigid_counts: &mut HashMap<u32, u32>,
+    mult_id_counts: &mut HashMap<u32, u32>,
+) {
+    for v in &entry.free_tvs { count_sub(fv_counts, v); }
+    for id in &entry.free_rigids { count_sub(rigid_counts, id); }
+    for id in &entry.mult_ids { count_sub(mult_id_counts, id); }
+}
+
 impl TypeEnv {
     pub fn new() -> Self {
-        TypeEnv { bindings: HashMap::new() }
+        TypeEnv {
+            bindings: HashMap::new(),
+            fv_counts: HashMap::new(),
+            rigid_counts: HashMap::new(),
+            mult_id_counts: HashMap::new(),
+            fv_index: HashMap::new(),
+            mult_id_index: HashMap::new(),
+        }
+    }
+
+    /// Register `name` in the reverse indexes under every variable of
+    /// `entry`'s footprint. (Old index entries for a replaced binding are
+    /// left behind — see the stale-tolerance note on the fields.)
+    fn index_entry(
+        entry: &EnvEntry,
+        name: &str,
+        fv_index: &mut HashMap<TyVar, Vec<String>>,
+        mult_id_index: &mut HashMap<u32, Vec<String>>,
+    ) {
+        for v in &entry.free_tvs {
+            fv_index.entry(v.clone()).or_default().push(name.to_string());
+        }
+        for id in &entry.mult_ids {
+            mult_id_index.entry(*id).or_default().push(name.to_string());
+        }
     }
 
     pub fn insert(&mut self, name: String, scheme: Scheme) {
-        self.bindings.insert(name, scheme);
+        let entry = EnvEntry::new(scheme);
+        count_entry(&entry, &mut self.fv_counts, &mut self.rigid_counts, &mut self.mult_id_counts);
+        Self::index_entry(&entry, &name, &mut self.fv_index, &mut self.mult_id_index);
+        if let Some(old) = self.bindings.insert(name, entry) {
+            uncount_entry(&old, &mut self.fv_counts, &mut self.rigid_counts, &mut self.mult_id_counts);
+        }
+    }
+
+    /// Remove a binding, returning its scheme (used to take a `let` group's
+    /// monomorphic pre-registrations back out before generalization).
+    pub fn remove(&mut self, name: &str) -> Option<Scheme> {
+        let entry = self.bindings.remove(name)?;
+        uncount_entry(&entry, &mut self.fv_counts, &mut self.rigid_counts, &mut self.mult_id_counts);
+        Some(entry.scheme)
     }
 
     pub fn size(&self) -> usize { self.bindings.len() }
 
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
-        self.bindings.get(name)
+        self.bindings.get(name).map(|e| &e.scheme)
+    }
+
+    /// Is the variable free in (some scheme of) this environment? O(1); the
+    /// membership `generalize` needs.
+    pub fn is_free_var(&self, v: &TyVar) -> bool {
+        self.fv_counts.contains_key(v)
+    }
+
+    /// Is the rigid multiplicity id free in this environment? The
+    /// multiplicity counterpart of `is_free_var`, consulted by `generalize`
+    /// so an inner binding never captures an enclosing signature's `%m`.
+    pub fn has_free_rigid_mult(&self, id: u32) -> bool {
+        self.rigid_counts.contains_key(&id)
+    }
+
+    /// Can `subst` change anything in this environment? Checked against the
+    /// aggregate multisets, so a substitution over variables the environment
+    /// never mentions (the common case: a step's fresh variables) is
+    /// recognized in O(|subst|) without visiting any binding.
+    pub fn affected_by(&self, subst: &Subst) -> bool {
+        subst.ty_domain().any(|v| self.fv_counts.contains_key(v))
+            || subst.mult_domain().any(|id| self.mult_id_counts.contains_key(&id))
+    }
+
+    /// `self` after `subst`, borrowing unchanged: when the substitution
+    /// cannot touch the environment this is `self` itself — no clone, no
+    /// walk. The hot inference paths (one call per application node) go
+    /// through here.
+    pub fn applied<'a>(&'a self, subst: &Subst) -> std::borrow::Cow<'a, TypeEnv> {
+        if self.affected_by(subst) {
+            std::borrow::Cow::Owned(self.apply_subst(subst))
+        } else {
+            std::borrow::Cow::Borrowed(self)
+        }
     }
 
     pub fn apply_subst(&self, subst: &Subst) -> TypeEnv {
-        TypeEnv {
-            bindings: self.bindings.iter()
-                .map(|(k, v)| (k.clone(), v.apply_subst(subst)))
-                .collect(),
+        let mut out = TypeEnv::new();
+        for (k, entry) in &self.bindings {
+            let new_entry = if entry.affected_by(subst) {
+                EnvEntry::new(entry.scheme.apply_subst(subst))
+            } else {
+                entry.clone()
+            };
+            count_entry(&new_entry, &mut out.fv_counts, &mut out.rigid_counts, &mut out.mult_id_counts);
+            Self::index_entry(&new_entry, k, &mut out.fv_index, &mut out.mult_id_index);
+            out.bindings.insert(k.clone(), new_entry);
         }
+        out
     }
 
-    pub fn free_vars(&self) -> Vec<TyVar> {
-        let mut vars = Vec::new();
-        for scheme in self.bindings.values() {
-            for v in scheme.free_vars() {
-                if !vars.contains(&v) {
-                    vars.push(v);
-                }
+    /// Apply `subst` in place, rewriting ONLY the entries it can affect —
+    /// found through the reverse indexes, so nothing else is even visited.
+    /// When the aggregate check says the whole environment is untouched,
+    /// this is O(|subst|). Same result as `apply_subst`, without rebuilding
+    /// the map.
+    pub fn apply_subst_mut(&mut self, subst: &Subst) {
+        if !self.affected_by(subst) {
+            return;
+        }
+        // Candidate bindings: consume the index buckets of every variable
+        // the substitution binds. A name can sit in several buckets (and
+        // stale duplicates exist by design), so dedup before rewriting.
+        let mut cand: Vec<String> = Vec::new();
+        for v in subst.ty_domain() {
+            if let Some(names) = self.fv_index.remove(v) {
+                cand.extend(names);
             }
         }
-        vars
-    }
-
-    /// The rigid multiplicity variables free in this environment: every
-    /// `Mult::Rigid` id on a scheme's type that the scheme does not itself
-    /// quantify. The multiplicity counterpart of `free_vars`, consulted by
-    /// `generalize` so an inner binding never captures an enclosing
-    /// signature's `%m`.
-    pub fn free_rigid_mults(&self) -> Vec<u32> {
-        let mut ids = Vec::new();
-        for scheme in self.bindings.values() {
-            let mut ty_ids = Vec::new();
-            scheme.ty.collect_rigid_mults(&mut ty_ids);
-            for id in ty_ids {
-                if !scheme.mult_vars.contains(&id) && !ids.contains(&id) {
-                    ids.push(id);
-                }
+        for id in subst.mult_domain() {
+            if let Some(names) = self.mult_id_index.remove(&id) {
+                cand.extend(names);
             }
         }
-        ids
+        let mut seen: HashSet<String> = HashSet::with_capacity(cand.len());
+        for name in cand {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let TypeEnv { bindings, fv_counts, rigid_counts, mult_id_counts, fv_index, mult_id_index } = self;
+            let Some(entry) = bindings.get_mut(&name) else { continue };
+            if !entry.affected_by(subst) {
+                continue; // stale index entry; dropped with its bucket
+            }
+            uncount_entry(entry, fv_counts, rigid_counts, mult_id_counts);
+            *entry = EnvEntry::new(entry.scheme.apply_subst(subst));
+            count_entry(entry, fv_counts, rigid_counts, mult_id_counts);
+            Self::index_entry(entry, &name, fv_index, mult_id_index);
+        }
     }
 }
 
@@ -604,9 +801,12 @@ impl Checker {
 
 
     fn generalize(&self, env: &TypeEnv, ty: &Ty) -> Scheme {
-        let env_vars = env.free_vars();
+        // Environment membership is answered by the environment's aggregate
+        // free-variable multisets (O(1) per variable) rather than by
+        // re-walking every scheme in scope, which made long do-blocks
+        // quadratic to typecheck.
         let vars: Vec<TyVar> = ty.free_vars().into_iter()
-            .filter(|v| !env_vars.contains(v))
+            .filter(|v| !env.is_free_var(v))
             .collect();
         // Multiplicity polymorphism: quantify the RIGID multiplicity
         // variables (a signature's `%m`), except those an enclosing binder's
@@ -615,11 +815,10 @@ impl Checker {
         // could re-instantiate it and claim a multiplicity the value does not
         // have. Flexible `Mult::Var`s are deliberately NOT quantified (see
         // `Scheme::mult_vars`).
-        let env_mults = env.free_rigid_mults();
         let mut ty_mults = Vec::new();
         ty.collect_rigid_mults(&mut ty_mults);
         let mult_vars: Vec<u32> = ty_mults.into_iter()
-            .filter(|id| !env_mults.contains(id))
+            .filter(|id| !env.has_free_rigid_mult(*id))
             .collect();
         Scheme { vars, mult_vars, ty: ty.clone() }
     }

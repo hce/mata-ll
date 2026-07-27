@@ -1698,35 +1698,7 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
 
         TExprKind::Let { binds, body } => {
             let mut m = demand_expr(cx, body, rd, run_pos);
-            // Pull in the demands of demanded value bindings, re-walking a
-            // binding when its own demand deepens. Terminates: demands only
-            // deepen and the lattice is finite for finite programs.
-            let mut walked: HashMap<&str, Demand> = HashMap::new();
-            loop {
-                let mut changed = false;
-                for b in binds {
-                    if !b.patterns.is_empty() {
-                        continue; // local function definitions — no row here
-                    }
-                    if let Some(d) = m.get(&b.name).cloned() {
-                        let redo = match walked.get(b.name.as_str()) {
-                            Some(prev) => !prev.subsumes(&d),
-                            None => true,
-                        };
-                        if redo {
-                            walked.insert(b.name.as_str(), d.clone());
-                            map_join(&mut m, demand_expr(cx, &b.body, &d, false));
-                            changed = true;
-                        }
-                    }
-                }
-                if !changed {
-                    break;
-                }
-            }
-            for b in binds {
-                m.remove(&b.name);
-            }
+            let_group_close(cx, binds, &mut m);
             m
         }
 
@@ -2103,6 +2075,88 @@ pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds
         }
     }
     locals
+}
+
+/// Close a `let` group's demand map over its own bindings: pull in the
+/// demands of demanded value bindings, re-walking a binding when its own
+/// demand deepens, then drop the group's names (they are bound here, not
+/// free). Terminates: demands only deepen and the lattice is finite for
+/// finite programs. Shared by `demand_expr`'s `Let` arm and by
+/// `let_spine_maps`, which must reproduce that arm exactly.
+fn let_group_close(cx: &RowCx, binds: &[TLocalDef], m: &mut DemandMap) {
+    let mut walked: HashMap<&str, Demand> = HashMap::new();
+    loop {
+        let mut changed = false;
+        for b in binds {
+            if !b.patterns.is_empty() {
+                continue; // local function definitions — no row here
+            }
+            if let Some(d) = m.get(&b.name).cloned() {
+                let redo = match walked.get(b.name.as_str()) {
+                    Some(prev) => !prev.subsumes(&d),
+                    None => true,
+                };
+                if redo {
+                    walked.insert(b.name.as_str(), d.clone());
+                    map_join(m, demand_expr(cx, &b.body, &d, false));
+                    changed = true;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    for b in binds {
+        m.remove(&b.name);
+    }
+}
+
+/// The demand maps of every suffix of a nested-`let` spine, in ONE backward
+/// pass: for each node `e` on the spine (each nested `Let` and the final
+/// non-`let` terminal), the returned map holds `e`'s address →
+/// `demanded_map(e, …, rd)`, computed exactly as the per-node call would.
+///
+/// Purpose: the action-chain emitter needs, per `let` statement, the demand
+/// map of the REST of the chain (its seed for let-to-case eagerization).
+/// Calling `demanded_map` on the remaining suffix at every statement re-walks
+/// the tail each time — quadratic over a long do-block of `let`s. One
+/// backward pass gives all the suffix maps: the spine's demand flows from
+/// the terminal back through each group via the same `let_group_close` the
+/// recursive walk uses, so each returned map is identical to what the
+/// per-node call computes.
+///
+/// Returns `None` when `expr` is not a `Let` (no spine to precompute).
+pub fn let_spine_maps(
+    expr: &TExpr,
+    rows: &Rows,
+    locals: &HashMap<String, LocalRows>,
+    inlined: &dyn Fn(&str) -> bool,
+    rd: &Demand,
+) -> Option<HashMap<usize, DemandMap>> {
+    if !matches!(expr.kind, TExprKind::Let { .. }) {
+        return None;
+    }
+    let cx = RowCx { rows, locals, inlined, sites: None };
+    // Collect the spine top-down.
+    let mut spine: Vec<&TExpr> = Vec::new();
+    let mut cur = expr;
+    while let TExprKind::Let { body, .. } = &cur.kind {
+        spine.push(cur);
+        cur = body;
+    }
+    let terminal = cur;
+    let mut maps: HashMap<usize, DemandMap> = HashMap::with_capacity(spine.len() + 1);
+    // Backward pass: the terminal's map, then each enclosing group's.
+    let mut m = demand_expr(&cx, terminal, rd, true);
+    maps.insert(terminal as *const TExpr as usize, m.clone());
+    for node in spine.iter().rev() {
+        if let TExprKind::Let { binds, .. } = &node.kind {
+            let_group_close(&cx, binds, &mut m);
+        }
+        maps.insert(*node as *const TExpr as usize, m.clone());
+    }
+    Some(maps)
 }
 
 /// Public entry point for codegen: the demand map of `expr` evaluated with

@@ -444,6 +444,15 @@ impl CodeGen {
         let mut stmts: Vec<Stmt> = Vec::new();
         let mut expr = expr;
         let mut inside_action = inside_action;
+        // Suffix demand maps for the current nested-`let` spine, computed in
+        // one backward pass when the chain enters a run of `let` statements
+        // (see demand::let_spine_maps). Without this every `let` statement
+        // re-walked the whole remaining chain for its eagerization seed —
+        // quadratic over a long do-block of `let`s. Keyed by node address,
+        // and only valid for the result demand it was computed under, which
+        // the `Let` arm checks before use.
+        let mut spine_maps: Option<(crate::demand::Demand,
+            std::collections::HashMap<usize, crate::demand::DemandMap>)> = None;
         loop {
             match &expr.kind {
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
@@ -546,16 +555,41 @@ impl CodeGen {
                     // The chain terminal carries the current function's result
                     // demand, so a binding that is only forced THROUGH the
                     // result (a tuple field every caller scrutinizes) counts.
-                    let demanded = self.demanded_bindings(
-                        binds,
-                        crate::demand::demanded_map(
-                            body,
+                    // Seed = the demand map of the rest of the chain. Served
+                    // from the precomputed spine maps when possible; falling
+                    // back to the direct (suffix-walking) computation when
+                    // the cache does not cover this node or was computed
+                    // under a different result demand. Both produce the same
+                    // map — the cache is purely a cost saving.
+                    let body_key = body.as_ref() as *const TExpr as usize;
+                    let mut seed: Option<crate::demand::DemandMap> =
+                        match &spine_maps {
+                            Some((rd, maps)) if *rd == self.cur_result_demand =>
+                                maps.get(&body_key).cloned(),
+                            _ => None,
+                        };
+                    if seed.is_none()
+                        && let Some(maps) = crate::demand::let_spine_maps(
+                            expr,
                             &self.demand_info.rows,
                             &self.local_demand_rows,
                             &|n| self.inline_fns.contains_key(n),
                             &self.cur_result_demand,
-                        ),
-                    );
+                        ) {
+                            // The spine starts at `expr` (a Let), so `body`
+                            // is always covered.
+                            seed = maps.get(&body_key).cloned();
+                            spine_maps =
+                                Some((self.cur_result_demand.clone(), maps));
+                        }
+                    let seed = seed.unwrap_or_else(|| crate::demand::demanded_map(
+                        body,
+                        &self.demand_info.rows,
+                        &self.local_demand_rows,
+                        &|n| self.inline_fns.contains_key(n),
+                        &self.cur_result_demand,
+                    ));
+                    let demanded = self.demanded_bindings(binds, seed);
                     for (i, bind) in binds.iter().enumerate() {
                         let bname = sanitize_name(&bind.name);
                         let lval = self.local_lvalue(&bname);

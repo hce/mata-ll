@@ -191,6 +191,33 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Compiling a long do-block now scales linearly in its length, not
+  quadratically.** Found by the parser fuzzer's deep probes: every do-`let`
+  statement re-walked state proportional to everything before it — the
+  whole type environment (each generalization re-collected every scheme's
+  free variables; each substitution step re-cloned every binding), the
+  accumulated substitution (each composition re-walked the whole map, and
+  the unifier moved a chained type's representative every statement,
+  re-pointing every image), and the remaining statements (the demand
+  analyzer re-walked the rest of the chain per `let` for its eagerization
+  seed). Each walk is now indexed or incremental: the environment caches
+  per-scheme free-variable footprints with aggregate counts and reverse
+  indexes, substitutions accumulate through a reverse-indexed composer,
+  variable-variable unification binds the younger variable (keeping
+  representatives stable), the nested-`let` spine is inferred iteratively,
+  and the demand analyzer computes all suffix seeds in one backward pass.
+  Measured on do-blocks of 500/1000/2000/3000 chained `let`s (debug
+  build): 2.0 s / 6.0 s / 20.6 s / 43.6 s before, 0.10 s / 0.14 s /
+  0.24 s / 0.36 s after; release build 0.48 s / 1.19 s / 3.65 s / 7.61 s
+  before, 0.03 s / 0.04 s / 0.06 s / 0.10 s after. Real programs compile
+  4–6× faster (tracker 0.39 s → 0.06 s, the zpool reader 0.64 s →
+  0.13 s, Ed25519 0.51 s → 0.07 s, release). Emitted Lua is
+  byte-identical across the corpus, except one `show` call site in the
+  zpool reader that now resolves to the exact type-directed `show_Int`
+  instead of the last-resort runtime-dispatch `show` — the stable
+  representative lets monomorphization see the `Int` it previously lost;
+  same output at runtime.
+
 - **The call-site inliner no longer duplicates argument work.** Inlining a
   small helper substitutes the call-site argument expression into the
   helper's body — and previously did so at EVERY occurrence of the
