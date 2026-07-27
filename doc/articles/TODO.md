@@ -55,6 +55,19 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **`let` qualifiers in list comprehensions.** `[ y | x <- xs, let y = f x,
+      p y ]` now parses — the `let` binds are visible in the body and every
+      later qualifier, desugaring to `let binds in <rest>` as GHC specifies.
+      Previously any `let` qualifier failed (single-line too): it was read as a
+      guard expression, so `parse_expr` hit `let` and demanded `in`
+      (`Expected In, found ...`). The let-binding-group loop was extracted from
+      the let-expression atom into a shared `parse_let_binds` helper, so a
+      comprehension `let` binds identically — simple, function, and
+      tuple-pattern binds, multiple layout-separated bindings, mutual recursion;
+      single- and multi-line both work. Cases (single-line, multi-line, chained,
+      multiple bindings) in `list_comprehensions.mll`, pinned against real GHC
+      via the differential oracle. Commit `6205764`.
+
 - [x] **Parenthesized `( )` expressions are layout-insensitive too.** The
       interior of `( )` was already layout-free (the leading skip after the open
       paren), but `continue_infix` stops at a newline, so the close-side
