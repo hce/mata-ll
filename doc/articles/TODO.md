@@ -27,20 +27,34 @@ MATA-LL TODO
       rewrite vocabulary — extending the vocabulary carries an engine-side
       proof obligation (relocated bug surface, not eliminated).
 
+      *Existing substrate* (predates this design; codegen/opt.rs,
+      2026-07-22, commits 88eb307/f181c6c/d18fa92/7a151e4): four passes
+      already run unconditionally on every compile — redundant-paren
+      normalization (context-aware: Grouped/Delim/DelimLast/Prefix,
+      truncation-preserving, restores proper tail calls in thunk bodies),
+      dead-branch cleanup, IIFE flattening, and force-of-known-WHNF-locals.
+      The design's original step (1), paren cleanup, is therefore DONE;
+      its accepted conservative residue: no precedence-based shedding
+      inside binop operands (no precedence table by design), and the
+      single-return callee whitelist misses data constructors and compiled
+      top-level functions (their calls keep parens in multi-value
+      positions). The force-of-WHNF-locals pass is the local-only
+      precursor the annotation-driven peephole below subsumes. opt.rs has
+      no per-pass toggles yet — that requirement belongs to the engine.
+
       *Two pass tiers.* Rewrite-rule tier (local, shape-driven): (1)
-      redundant-paren cleanup — first, it de-noises every later diff; (2)
       `__force`-collapse peephole — the FIRST annotation consumer (WHNF +
       pure stamps enter with it, not before: unread claims rot), and it is
       differential-testable against the existing generation-time
       `gen_forced` machinery — same corpus, byte-identical expected, any
       diff is a bug in one of the two. Structured tier (hand-written
       whole-function transforms, global side conditions, same annotation
-      API): (3) self-tail-call → loop conversion (interpreter dispatch win;
+      API): (2) self-tail-call → loop conversion (interpreter dispatch win;
       loops trace better than recursion under LuaJIT) — the only pass with
-      a plausible measurable benchmark win, do it after (1); (4)
-      loop-invariant / capture-free closure hoisting (syntactic backstop
-      for the FNEW JIT-killer class). Liveness-based local-slot reuse as a
-      later candidate.
+      a plausible measurable benchmark win; (3) loop-invariant /
+      capture-free closure hoisting (syntactic backstop for the FNEW
+      JIT-killer class). Liveness-based local-slot reuse as a later
+      candidate.
 
       *Verification*: `verify.rs` gains a stamp-refutation check over the
       final tree in test builds (e.g. no `__force` around a WHNF-stamped
