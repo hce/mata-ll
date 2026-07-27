@@ -55,6 +55,46 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **FFI boundary now converts `Any` to/from plain Lua scalars, and
+      undefined-behavior types are rejected at the boundary.** `Any`'s purpose
+      is dynamic Lua interop, but nothing marshalled it: the descriptor path
+      passed the ADT layout through untouched. `Any` now decodes at the
+      boundary — Lua nil/string/number/boolean map to `AnyNull`/`AnyString`/
+      `AnyInt`|`AnyNumber`/`AnyBool` (the number split is the standard
+      `math.type=="integer"` test with a `% 1 == 0` fallback for LuaJIT), and
+      marshals back by forcing the carried payload — via a new `k="any"` arm in
+      both `__mll_ffi_decode` and `__mll_arg_marshal` (`codegen/runtime.lua`)
+      emitted from `ffi_decode_desc_inner`/`ffi_arg_marshal_desc`
+      (`codegen/ffi.rs`). Alongside, `ffi_marshallable` (`typechecker/mod.rs`)
+      was tightened from a permissive default to a designed-behavior allowlist:
+      scalars, Unit, LuaUserData, List, Tuple, HashMap, Maybe, Any, LuaDict
+      records and transparent newtypes pass; plain ADTs (including Either
+      outside `LuaTry`, Ordering, ExitValue) are now a loud error at the import
+      site rather than silently emitting a table the host cannot read. Import
+      signatures are validated by `validate_ffi_import_types` /
+      `validate_ffi_import_callback`. Commit `495fe35`.
+
+- [x] **Type errors now locate the offending statement, not the clause head.**
+      Every type error pointed at the first line of the enclosing function
+      definition regardless of which statement failed. A transparent
+      `Expr::Spanned(Span, Box<Expr>)` wrapper (`ast.rs`), applied by
+      `parse_stmt_expr` at do-statements, let/where bodies, case branches, guard
+      bodies and if branches (`parser.rs`), carries the source position through
+      desugar and module rewriting into typecheck; `infer.rs` latches the span
+      of the innermost failing marker into `Checker::error_span` and reports
+      there. The wrapper is erased at TIR lowering, so codegen is untouched.
+      Remaining fallback-to-head cases (documented in the changelog): errors
+      that surface only when reconciling a binding against its uses, and
+      deferred "No instance" class errors. Commit `3d91016`.
+
+- [x] **Constrained FFI imports now compile.** A signature like
+      `dbQuery :: LuaDict b => CryptLiteDb -> ... -> LuaIO ":query_array" a`
+      was rejected with a spurious "accompanying definition is lacking" —
+      `extract_ffi_info` (`typechecker/mod.rs`) did not see through
+      `Type::Constrained`/`Type::Forall` wrappers to find the `LuaIO` marker, so
+      the import looked like an ordinary undefined binding. It now recurses
+      through both wrappers. Commit `161bce9`.
+
 - [x] **Lexer string escapes are now full GHC `read`-side parity (was the
       last input-syntax gap).** The lexer accepted only `\n \t \r \\ \" \0`
       and — worse than the missing escapes — `\0` was not maximal-munch, so
