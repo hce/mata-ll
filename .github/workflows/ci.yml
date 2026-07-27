@@ -15,6 +15,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: No copyrighted tracker modules or rendered audio in the tree
+        run: |
+          bad=$(git ls-files -- '*.it' '*.umx' '*.mod' '*.xm' '*.s3m' '*.wav' '*.raw' \
+                | grep -v '^mll-tests/tests/benchmark\.it$' || true)
+          if [ -n "$bad" ]; then
+            echo "These files must never be committed (only the generated benchmark.it is allowed):"
+            echo "$bad"
+            exit 1
+          fi
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
