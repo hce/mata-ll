@@ -176,19 +176,19 @@ built it alone.
 
 ## Contributing
 
-If you are using and/or testing the mata-ll compiler: Thank you! I
-really appreciated it if you sent a quick note letting me know that
-you're using the compiler and for what purpose.
+If you are using and/or testing the mata-ll compiler: Thank you! If
+you feel like it, you can send me a quick note via e-mail letting me
+know that you're using it and what you are doing with it.
 
-If you find bugs, feel free to open an issue on github.
+If you find bugs, do feel free to open an issue on github.
 
-To discuss feature and architecture ideas, please send e-mail to me
-directly (see git logs for e-mail address)
+To discuss features and architecture ideas, please send an e-mail to
+me directly (see git logs for e-mail address)
 
 Please do not send in pull requests. If you would like something
 changed, let's talk about it first.
 
-Notwithstanding the above, by making a contribution, you agree to
+Notwithstanding the above: By making a contribution, you agree to
 license fully your contribution under the MIT License, the same
 license that covers this project, and you acknowledge that you fully
 own the copyright to your contribution and have the authority to
