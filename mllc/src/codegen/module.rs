@@ -107,11 +107,20 @@ impl CodeGen {
 
         // All Prelude runtime names are plain local functions — never thunks.
         // Seed concrete_vars so references skip __force throughout user code.
+        // `undefined` must NOT be seeded: the runtime binds it to a THUNK
+        // (`local undefined = __thunk(...)`), and concreteness here feeds
+        // is_cheap_to_force / pure_value_bare_is_safe — seeding it claimed
+        // forcing `undefined` is a harmless no-op, so `pure undefined`
+        // escaped BARE and the consumer's `__mll_run` forced it, raising
+        // where GHC binds the bottom unforced (`r <- g 0` with
+        // `g n = ... pure undefined ...` must not raise until r is
+        // demanded; runghc-confirmed, pinned as case_pure_bottom /
+        // if_pure_bottom).
         for name in &[
             "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
             "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_tail", "__mll_run_st", "__mll_perform",
             "__mll_ffi_decode",
-            "not_", "engage", "liftIO", "show", "error_", "max", "min", "undefined",
+            "not_", "engage", "liftIO", "show", "error_", "max", "min",
             "pure", "return_", "Just",
             "show_Int", "show_Number", "show_String", "show_Bool",
             "show_List_", "show_Maybe", "show_ByteString", "show_HashMap",

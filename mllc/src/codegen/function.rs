@@ -73,7 +73,19 @@ impl CodeGen {
                 let header = self.fn_decl(&lua_name, "");
                 let demanded = self.clause_demanded(&clauses[0]);
                 let mut body = self.where_binds_stmts(&clauses[0], demanded);
+                // Direct-perform: the emitted function's body IS the action,
+                // so a tail self-reference may return bare (see
+                // direct_perform_self / action_run_ast). Only for genuine
+                // IO/LuaIO — the Ty::Forall CAF wrapper this arm also emits
+                // is a deferred value, not a performing action.
+                let saved_dp = self.direct_perform_self.take();
+                if matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _))
+                    && func.dict_params.is_empty()
+                {
+                    self.direct_perform_self = Some((func.name.clone(), 0));
+                }
                 body.extend(self.bind_chain_block(&clauses[0].body, true).0);
+                self.direct_perform_self = saved_dp;
                 stmts.push(Stmt::Function { header, body: Block(body) });
                 is_concrete = true;
             } else if expr_references_name(&clauses[0].body, &func.name) {
@@ -233,7 +245,19 @@ impl CodeGen {
                     // IO-returning function: flatten bind chains, performing
                     // sub-actions directly. The function itself acts as the action
                     // closure — callers use the action runners to invoke it.
+                    // Direct-perform: a saturated tail call to this function
+                    // performs and forwards its own runner-normalized result,
+                    // so it may return bare — Lua's tail-call form (see
+                    // direct_perform_self / action_run_ast). Dict-taking
+                    // functions are declined: their call spine carries
+                    // dictionary arguments this saturation count cannot see.
+                    let saved_dp = self.direct_perform_self.take();
+                    if func.dict_params.is_empty() {
+                        self.direct_perform_self =
+                            Some((func.name.clone(), clause.patterns.len()));
+                    }
                     body.extend(self.bind_chain_block(&clause.body, true).0);
+                    self.direct_perform_self = saved_dp;
                 } else {
                     // Pure function: use the plain bind-chain builder for the
                     // body so If/>>=/>> flatten into statements instead of IIFEs

@@ -300,10 +300,72 @@ impl CodeGen {
                 Expr::call_named(fused, cargs)
             }
             _ => {
+                // Direct-perform self tail: inside the body of a
+                // direct-perform IO function (see function_stmts), a
+                // saturated call to the function itself PERFORMS and returns
+                // a result that — by the enclosing function's own contract —
+                // needs exactly one consumer application. Forwarding it bare
+                // preserves that count (the one-root-application invariant;
+                // see the __mll_run contract comment in the runtime), and
+                // `return self(...)` is the exact syntactic form Lua's
+                // tail-call elimination reclaims the frame for: deep
+                // self-recursion runs in constant stack with no runner
+                // re-application forcing a `pure` payload on unwind. A
+                // statement-position self call (result discarded) drops the
+                // runner for the same reason — the forwarding application
+                // was the identity on every value the callee can return.
+                // Builders (multi-clause IO functions, the two-level shape)
+                // never set the flag and keep their runner, which performs.
+                if tail && self.is_direct_perform_self_call(expr) {
+                    let e = self.expr_ast(expr);
+                    match e {
+                        Expr::Call(..) => return e,
+                        // Arity-0 self reference: the emission is the bare
+                        // function reference — the call is spelled here.
+                        e if matches!(&self.direct_perform_self, Some((_, 0))) => {
+                            return Expr::call(e, vec![]);
+                        }
+                        // Any other emitted shape: keep the runner (it
+                        // handles every action form).
+                        e => return Expr::call_named(runner, vec![e]),
+                    }
+                }
                 // General IO/ST action: the runner handles both direct
                 // values and action closures (function or value).
                 let e = self.expr_ast(expr);
                 Expr::call_named(runner, vec![e])
+            }
+        }
+    }
+
+    /// Whether `expr` is a SATURATED call to the direct-perform function
+    /// currently being emitted (see `direct_perform_self` in function_stmts):
+    /// an application spine (grouping parens transparent) whose head is a
+    /// `Var` spelling the function's own un-shadowed name, applied to exactly
+    /// its parameter count. Shadowing check: a local binding of the same name
+    /// is a first-class value whose emission arm this claim knows nothing
+    /// about. Partial applications (a closure value, not a perform) and
+    /// SpecCall spines (a specialized copy is a different emitted function)
+    /// report false and keep the runner.
+    fn is_direct_perform_self_call(&self, expr: &TExpr) -> bool {
+        let Some((self_name, arity)) = &self.direct_perform_self else {
+            return false;
+        };
+        let mut nargs = 0usize;
+        let mut f = expr;
+        loop {
+            match &f.kind {
+                TExprKind::Paren(inner) => f = inner.as_ref(),
+                TExprKind::App(inner_f, _) => {
+                    nargs += 1;
+                    f = inner_f.as_ref();
+                }
+                TExprKind::Var(n) => {
+                    return n == self_name
+                        && nargs == *arity
+                        && !self.local_vars.contains(&sanitize_name(n));
+                }
+                _ => return false,
             }
         }
     }
@@ -659,6 +721,49 @@ impl CodeGen {
                         elseifs: vec![],
                         else_b: Some(else_b),
                     });
+                }
+                TExprKind::Case { scrutinee, branches } => {
+                    // Flatten the case terminal at statement level, exactly
+                    // like the If arm above: each branch takes its own tail
+                    // decision through bind_chain_block (via the shared
+                    // pattern-match emitter's `tails` mode), so an action
+                    // branch's terminal `pure e` goes through pure_action_ast
+                    // — the box convention, a fixpoint of both runners —
+                    // instead of becoming the first-class pure-suspension
+                    // closure inside a dispatch IIFE handed to
+                    // `__mll_run_tail`, whose extra application forced a
+                    // thunk payload GHC never forces. Guard-bearing branches
+                    // route through the guarded builder with the same tails.
+                    let saved_locals = self.local_vars.clone();
+                    let saved_concrete = self.concrete_vars.clone();
+                    let (pre, decl) = self.declare_local_parts("_s");
+                    if let Some(s) = pre {
+                        stmts.push(s);
+                    }
+                    let scrut_e = self.forced_ast(scrutinee);
+                    stmts.push(decl.stmt(scrut_e));
+                    // The scrutinee local is forced above: mark it concrete so
+                    // match_scrutinee does not re-force it per clause.
+                    let sref = self.lua_ref("_s");
+                    self.concrete_vars.insert(sref.clone());
+                    let clauses: Vec<TClause> = branches
+                        .iter()
+                        .map(|b| TClause {
+                            span: None,
+                            patterns: vec![b.pattern.clone()],
+                            guards: b.guards.clone(),
+                            body: b.body.clone(),
+                            where_binds: vec![],
+                        })
+                        .collect();
+                    let b = self.pattern_match_block_tails(
+                        &[sref],
+                        &clauses,
+                        Some(inside_action),
+                    );
+                    stmts.extend(b.0);
+                    self.local_vars = saved_locals;
+                    self.concrete_vars = saved_concrete;
                 }
                 _ => {
                     // Tail position: strip transparent parens so a wrapped call

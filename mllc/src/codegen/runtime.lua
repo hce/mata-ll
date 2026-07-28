@@ -674,6 +674,23 @@ end
 -- it reaches the one consuming site at the chain's root — every such site
 -- (`__mll_run` itself, try_/catch_, __mll_run_st, the export and callback
 -- wrappers) applies exactly one unbox to a closure-call result.
+--
+-- ONE ROOT APPLICATION. A direct-perform function's result needs EXACTLY ONE
+-- consumer application: at most one pending closure-call, then at most one
+-- unbox — which is precisely what every consuming site (__mll_run,
+-- __mll_perform, try_/catch_, the export and callback wrappers) applies to
+-- a call result. The emitted terminal forms close the invariant
+-- inductively: a value / FFI / fused-intrinsic terminal IS the result (no
+-- pending work beyond the unbox's no-op); a `pure e` terminal is the bare
+-- value or its one `__mll_pure` box (gen_pure_action); a
+-- `return __mll_run_tail(a)` terminal leaves at most the one box the
+-- forwarding arms preserve; and a bare `return self(...)` tail forwards the
+-- callee's result unchanged — the callee's single pending application
+-- simply becomes the caller's. That last form is why a direct-perform self
+-- tail carries NO runner: wrapping it in `__mll_run_tail` would be a SECOND
+-- application, whose `__force` is exactly the pure-payload forcing GHC
+-- never performs, and whose argument position pins one stack frame per
+-- recursion level where the bare form is a Lua tail call.
 local function __mll_run(action)
     -- A pure action (`pure e`/`return e` that escaped its defining function)
     -- already carries its result — hand it back UNFORCED. This is the only way

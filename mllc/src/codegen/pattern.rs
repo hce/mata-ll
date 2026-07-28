@@ -2,7 +2,7 @@
 //!
 //! `pattern_match_block` compiles guard-free clauses into one `Stmt::If`
 //! chain (with the non-exhaustive error after it); any guard-bearing match
-//! is dispatched to `pattern_match_guarded_block`, which emits each clause
+//! is dispatched to `pattern_match_guarded_block_tails`, which emits each clause
 //! as an independent block (`Stmt::If` for a refutable pattern, `Stmt::Do`
 //! for an irrefutable one) so a clause whose pattern matches but whose
 //! guards all fail simply falls through to the next clause — Haskell
@@ -64,7 +64,38 @@ impl CodeGen {
         e
     }
 
+    /// The statements that produce a clause/guard RESULT.
+    ///
+    /// `tails: None` is the classic emission — one `return` through
+    /// `tail_ast` in value position (no action performing; a do-block body
+    /// becomes a first-class action closure the caller's runner performs —
+    /// the two-level shape multi-clause IO functions keep).
+    ///
+    /// `Some(inside_action)` builds the result through `bind_chain_block`
+    /// instead: used by the flattened `case` terminal (the Case arm in
+    /// bind_chain_block), where each branch takes its own tail decision — a
+    /// terminal `pure e` goes through `pure_action_ast` (the box
+    /// convention), a nested do/if/case flattens further, and a saturated
+    /// self call may return bare (see action_run_ast).
+    fn match_tail_stmts(&mut self, body: &TExpr, tails: Option<bool>) -> Vec<Stmt> {
+        match tails {
+            Some(inside_action) => self.bind_chain_block(body, inside_action).0,
+            None => vec![Stmt::Return(self.tail_ast(body, false))],
+        }
+    }
+
     pub(super) fn pattern_match_block(&mut self, params: &[String], clauses: &[TClause]) -> Block {
+        self.pattern_match_block_tails(params, clauses, None)
+    }
+
+    /// `tails` selects how clause/guard results are built — see
+    /// `match_tail_stmts`.
+    pub(super) fn pattern_match_block_tails(
+        &mut self,
+        params: &[String],
+        clauses: &[TClause],
+        tails: Option<bool>,
+    ) -> Block {
         // Clauses with guards need fallthrough semantics (a clause whose pattern
         // matches but whose guards all fail must drop to the next clause). The
         // if/elseif chain below cannot express that across a pattern boundary, so
@@ -72,7 +103,7 @@ impl CodeGen {
         // The dispatch is total, so the chain below handles only guard-free
         // clauses.
         if clauses.iter().any(|c| !c.guards.is_empty()) {
-            return self.pattern_match_guarded_block(params, clauses);
+            return self.pattern_match_guarded_block_tails(params, clauses, tails);
         }
         // When the clauses cover every constructor of the scrutinized type,
         // the last clause's condition is implied by every earlier one failing:
@@ -114,7 +145,7 @@ impl CodeGen {
                 // string emitter, the clause scope is NOT restored on this
                 // early exit (the enclosing function restores its own scope).
                 let mut bs = self.clause_intro_stmts(clause, &bindings);
-                bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
+                bs.extend(self.match_tail_stmts(&clause.body, tails));
                 if i > 0 {
                     else_b = Some(Block(bs));
                 } else {
@@ -126,7 +157,7 @@ impl CodeGen {
 
             let cond = Expr::and_chain(conditions);
             let mut bs = self.clause_intro_stmts(clause, &bindings);
-            bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
+            bs.extend(self.match_tail_stmts(&clause.body, tails));
             if chain.is_none() {
                 chain = Some((cond, Block(bs)));
             } else if exhaustive && i == clauses.len() - 1 {
@@ -175,7 +206,14 @@ impl CodeGen {
     /// is exactly Haskell's semantics. (The flat if/elseif chain cannot do this:
     /// once a pattern's `then` arm is entered there is no way back to the next
     /// `elseif`.)
-    pub(super) fn pattern_match_guarded_block(&mut self, params: &[String], clauses: &[TClause]) -> Block {
+    /// `tails` selects how clause/guard results are built — see
+    /// `match_tail_stmts`.
+    pub(super) fn pattern_match_guarded_block_tails(
+        &mut self,
+        params: &[String],
+        clauses: &[TClause],
+        tails: Option<bool>,
+    ) -> Block {
         let mut stmts = Vec::new();
         for clause in clauses {
             // A clause's where-scope rows (installed by where_binds_stmts)
@@ -190,13 +228,13 @@ impl CodeGen {
             }
             let mut bs = self.clause_intro_stmts(clause, &bindings);
             if clause.guards.is_empty() {
-                bs.push(Stmt::Return(self.tail_ast(&clause.body, false)));
+                bs.extend(self.match_tail_stmts(&clause.body, tails));
             } else {
                 let mut gchain: Option<(Expr, Block)> = None;
                 let mut gelseifs: Vec<(Expr, Block)> = Vec::new();
                 for guard in &clause.guards {
                     let cond = self.guard_cond_ast(&guard.condition);
-                    let body = Block(vec![Stmt::Return(self.tail_ast(&guard.body, false))]);
+                    let body = Block(self.match_tail_stmts(&guard.body, tails));
                     if gchain.is_none() {
                         gchain = Some((cond, body));
                     } else {

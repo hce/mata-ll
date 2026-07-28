@@ -184,17 +184,27 @@ impl CodeGen {
                 // return/pure wrap their argument in an IO action closure whose
                 // performed value is the argument, left UNFORCED per the
                 // eagerness contract: running `return ⊥` must not raise until
-                // something demands the value. arg_ast(strict=false) suspends a
-                // possibly-⊥ argument in a thunk and keeps a provably-total one
-                // eager, so `return 0` still yields a bare `0` while
-                // `return (error "x")` yields an inert thunk. This is the
-                // first-class / higher-order path (e.g. `fmap f (return e)`,
+                // something demands the value. This is the first-class /
+                // higher-order path (e.g. `fmap f (return e)`,
                 // `mapM (\x -> return (g x)) xs`); the do-block bind chain
-                // flattens its own returns through action_run_ast, which suspends
-                // the same way.
+                // flattens its own returns through action_run_ast. The payload
+                // takes the SAME escape decision as an escaping terminal
+                // (pure_action_ast): a provably-safe value stays bare (so
+                // `return 0` yields `function() return 0 end`), anything a
+                // runner could wrongly force or call — a suspended ⊥, a
+                // function-typed value — is wrapped in `__mll_pure`, which
+                // every consuming site strips with exactly one unbox. Left
+                // bare, a thunk payload deviated from GHC whenever the closure
+                // reached a FORWARDING runner (`return __mll_run_tail(<this
+                // closure>)` after inlining, e.g. `g n = id (pure undefined)`
+                // — a direct-perform tail): the forwarder returned the raw
+                // thunk and the consumer's `__mll_run` forced it, raising
+                // where GHC binds the bottom unforced (runghc-confirmed).
+                // Boxed, the box rides the tail chain to the one consuming
+                // unbox and the payload stays untouched.
                 if let TExprKind::Var(name) = &func.kind
                     && (name == "return" || name == "pure") {
-                        let payload = self.arg_ast(arg, false);
+                        let payload = self.pure_action_ast(arg);
                         return Expr::paren(Expr::inline_fn0(payload));
                     }
 

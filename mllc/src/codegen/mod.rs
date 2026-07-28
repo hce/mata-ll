@@ -198,6 +198,17 @@ struct CodeGen {
     /// first-class action closures, value-position lets) must reset it to
     /// `Head` around the nested generation.
     cur_result_demand: crate::demand::Demand,
+    /// Set while emitting the body of a DIRECT-PERFORM IO function — the
+    /// single-clause simple-pattern IO arm and the nullary IO-value arm of
+    /// function_stmts, where the emitted Lua function's body IS the action —
+    /// to the function's source name and saturating argument count. A tail
+    /// terminal that is a saturated call to this name returns bare
+    /// (`return self(...)`, Lua's tail-call form) instead of riding the
+    /// forwarding runner's argument position; see action_run_ast /
+    /// is_direct_perform_self_call. `None` everywhere else: multi-clause and
+    /// ST emissions build actions their caller's runner performs — a bare
+    /// self call there would return an unperformed value.
+    direct_perform_self: Option<(String, usize)>,
     /// Source embedding in `EmbedMode::Var`: the emitted file starts with a
     /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
     /// return table must export it — even when there are no other exports.
@@ -233,6 +244,7 @@ impl CodeGen {
             local_strict_params: std::collections::HashMap::new(),
             local_demand_rows: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
+            direct_perform_self: None,
             embed_var_export: false,
         }
     }
@@ -377,7 +389,14 @@ impl CodeGen {
 /// Generate the Lua module. `Err` carries the codegen depth-guard
 /// diagnostic (see `CodeGen::expr_ast`) — the only error this pass can
 /// produce; everything else was rejected by earlier passes.
-pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> Result<String, String> {
+/// `opt_disable`: explicit optimization-pass skip list (comma-separated,
+/// the `MLL_OPT_DISABLE` vocabulary); `None` reads the environment
+/// variable — see `CompileOptions::disable_opt_passes`.
+pub fn generate(
+    module: &TModule,
+    embed_source: Option<(EmbedMode, &str)>,
+    opt_disable: Option<&str>,
+) -> Result<String, String> {
     let mut cg = CodeGen::new();
     cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
     cg.demand_info = crate::demand::analyze(module);
@@ -388,7 +407,7 @@ pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> Re
     if let Some(msg) = cg.depth_error {
         return Err(msg);
     }
-    opt::run(&mut stmts);
+    opt::run(&mut stmts, opt_disable);
     let mut body = String::new();
     lua::Block(stmts).render(0, &mut body);
     let prelude = ondemand_prelude(&body);
