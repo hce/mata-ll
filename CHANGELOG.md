@@ -31,6 +31,20 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Generated Lua sheds provably redundant `__force` calls.** The code
+  generator now carries operational annotations (value shape and effect
+  facts) on the emitted Lua tree, and a peephole collapses `__force(e)`
+  to `e` wherever `e` is proven already-evaluated — forces of literals
+  substituted by the inliner, of aliases of already-forced locals, of
+  fresh table constructors, and of cons cells in discard position.
+  Behavior is identical; the redundant runtime calls simply disappear.
+  The annotation engine (codegen/annot.rs) holds an annotation-write
+  monopoly — passes request rewrites and justify result stamps — and a
+  stamp-refutation check re-derives every annotation from scratch in
+  test builds. Optimization passes are individually disableable via
+  `MLL_OPT_DISABLE=parens,dead,iife,force` (diagnostic use only;
+  defaults unchanged).
+
 - **Breaking: an exported result of list type now hands a Lua host an empty
   table for the empty list, not `nil`.** mata-ll represents `[]` as `nil`
   internally, and the export edge used to let that representation leak: a

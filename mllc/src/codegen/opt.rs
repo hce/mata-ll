@@ -40,16 +40,6 @@
 //! in final position splices into its parent: nothing follows, so its
 //! locals leak nowhere observable.
 
-//! Pass 4 — force of known-WHNF locals. A safety net under the emitter's
-//! `concrete_vars` tracking: a single-assignment local whose one
-//! value-producing site is WHNF by construction (a function/table literal,
-//! a literal token, a cons cell, a `__force` result — including the
-//! `p = __force(p)` entry rebind) never holds a thunk, so a later
-//! `__force(name)` is the identity and rewrites to `name`. Closure capture
-//! is safe — the local never holds a thunk regardless of when the closure
-//! runs — but a name mentioned in any Raw text, bound more than once, or
-//! shadowed by a nested parameter is left alone.
-//!
 //! Pass 3 — IIFE flattening. The expression walk emits `case`/`let`/`if`
 //! in value position as immediately-invoked function literals; in return
 //! position and in straight-line value bindings the closure allocation
@@ -65,14 +55,111 @@
 //! the enclosing function's local count would approach Lua's 200-local
 //! limit, which the emitter's own `_v` spill decided before this pass ran.
 
+//! Pass 4 — the `__force`-collapse peephole, run through the annotation
+//! engine (annot.rs): `__force(e)` where the analysis stamps `e` WHNF
+//! rewrites to `e` (justification: inherit from `e`; `__force` is the
+//! identity on a non-thunk, and `e` is still evaluated once, in place).
+//! This subsumes the former force-of-known-WHNF-locals pass: the analysis
+//! derives the same single-assignment name facts (same qualification, same
+//! Raw poisoning, same shadowing rules — see annot.rs) and additionally
+//! stamps forces of non-name WHNF expressions, so the dedicated pass was
+//! deleted (2026-07-27; corpus-verified byte-identical output).
+//!
+//! Per-pass toggles: `MLL_OPT_DISABLE` (read per `run` call) is a
+//! comma-separated list of pass names to skip — `parens`, `dead`, `iife`,
+//! `force`. A debugging aid for isolating a pass's effect; unset (the
+//! default) runs everything, and an unrecognized name warns on stderr so a
+//! typo cannot silently disable nothing.
+
+use super::annot;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
+
+/// Which passes to skip; see the module comment.
+#[derive(Default)]
+pub(super) struct Disable {
+    parens: bool,
+    dead: bool,
+    iife: bool,
+    force: bool,
+}
+
+impl Disable {
+    fn from_env() -> Disable {
+        let mut d = Disable::default();
+        let Ok(list) = std::env::var("MLL_OPT_DISABLE") else {
+            return d;
+        };
+        for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+            match name {
+                "parens" => d.parens = true,
+                "dead" => d.dead = true,
+                "iife" => d.iife = true,
+                "force" => d.force = true,
+                other => eprintln!(
+                    "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
+                     (known: parens, dead, iife, force)",
+                    other
+                ),
+            }
+        }
+        d
+    }
+}
 
 /// Run all passes over the module body.
 pub(super) fn run(stmts: &mut Vec<Stmt>) {
-    normalize_parens_block(stmts);
-    dead_branch_block(stmts);
-    flatten_iife_block(stmts);
-    force_whnf_block(stmts);
+    run_with(stmts, &Disable::from_env());
+}
+
+/// Run the enabled passes; returns the annotation engine of the
+/// force-collapse pass when it ran (its stamps feed the test-build
+/// refutation in `run_refuted`).
+fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> Option<annot::Engine> {
+    if !d.parens {
+        normalize_parens_block(stmts);
+    }
+    if !d.dead {
+        dead_branch_block(stmts);
+    }
+    if !d.iife {
+        flatten_iife_block(stmts);
+    }
+    if !d.force {
+        Some(annot::Engine::run_pass(stmts, &mut ForceCollapse))
+    } else {
+        None
+    }
+}
+
+/// Test-build entry (see verify::check_stamps): run the passes exactly as
+/// `run` would, then refute the carried stamps against a fresh analysis of
+/// the final tree. Empty means clean.
+pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
+    match run_with(stmts, &Disable::from_env()) {
+        Some(engine) => engine.refute(stmts, true),
+        // With the force pass disabled there are no carried stamps and no
+        // collapse obligation; a fresh analysis refuting itself checks
+        // nothing.
+        None => Vec::new(),
+    }
+}
+
+/// The `__force`-collapse peephole (see the module comment): `__force(e)`
+/// with a WHNF-stamped `e` becomes `e`, inheriting `e`'s stamps.
+struct ForceCollapse;
+
+impl annot::ExprPass for ForceCollapse {
+    fn request(&mut self, e: &Expr, stamps: &annot::StampView<'_>) -> Option<annot::Request> {
+        let Expr::Call(f, args) = e else { return None };
+        if !matches!(f.as_ref(), Expr::Name(n) if n == "__force") || args.len() != 1 {
+            return None;
+        }
+        if stamps.child(1)?.stamp().is_whnf() {
+            Some(annot::Request::ReplaceWithChild(1))
+        } else {
+            None
+        }
+    }
 }
 
 fn is_true_lit(e: &Expr) -> bool {
@@ -249,7 +336,7 @@ enum Ctx {
 /// helpers (all single-return except the excluded forwarders), the show
 /// family, and compiled-function slots. Everything else — host FFI names
 /// in particular — may multi-return.
-fn single_return_callee(f: &Expr) -> bool {
+pub(super) fn single_return_callee(f: &Expr) -> bool {
     match f {
         Expr::Name(n) => {
             n == "__force"
@@ -444,7 +531,7 @@ fn normalize_parens_stmt(stmt: &mut Stmt, ret_ctx: Ctx) {
 /// Identifier-shaped tokens of rendered Lua text. Conservative by design:
 /// rendering includes `Raw` content, so an identifier hidden in a Raw
 /// fragment is seen and blocks a splice like any other.
-fn token_set(text: &str, out: &mut std::collections::HashSet<String>) {
+pub(super) fn token_set(text: &str, out: &mut std::collections::HashSet<String>) {
     let mut cur = String::new();
     for c in text.chars().chain(std::iter::once(' ')) {
         if c.is_ascii_alphanumeric() || c == '_' {
@@ -832,309 +919,52 @@ fn try_splice_value(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> bool
     true
 }
 
-// ---- Pass 4: force of known-WHNF locals ----
 
-/// Per-function-scope facts for the force pass, collected over the whole
-/// scope subtree (nested function literals included, because their params
-/// and locals shadow, and their bodies may capture this scope's names).
-#[derive(Default)]
-struct ScopeFacts {
-    /// name -> number of binding sites: `local` names, assignment lvalues
-    /// (plain identifiers), `AssignIf` lvalues, tokens of `Function`
-    /// headers (covers both the declared name and its parameter names),
-    /// and nested function-literal parameters.
-    binds: std::collections::HashMap<String, usize>,
-    /// name -> number of assignment sites (subset of binds).
-    assigns: std::collections::HashMap<String, usize>,
-    /// Names mentioned inside any Raw text in the scope: poisoned — the
-    /// pass cannot see what the Raw does with them.
-    raw_mentions: std::collections::HashSet<String>,
-}
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-impl ScopeFacts {
-    fn bind(&mut self, n: &str) {
-        *self.binds.entry(n.to_string()).or_insert(0) += 1;
+    #[test]
+    fn force_collapse_toggle() {
+        let make = || vec![Stmt::Return(Expr::force(Expr::lit("42")))];
+        let mut on = make();
+        run_with(&mut on, &Disable::default());
+        assert!(matches!(&on[0], Stmt::Return(Expr::Lit(s)) if s == "42"));
+        let mut off = make();
+        run_with(&mut off, &Disable { force: true, ..Disable::default() });
+        assert!(
+            matches!(&off[0], Stmt::Return(Expr::Call(..))),
+            "disabled peephole must leave __force in place"
+        );
     }
-    fn assign(&mut self, n: &str) {
-        self.bind(n);
-        *self.assigns.entry(n.to_string()).or_insert(0) += 1;
-    }
-    fn raw(&mut self, text: &str) {
-        token_set(text, &mut self.raw_mentions);
-    }
-}
 
-fn is_plain_ident(s: &str) -> bool {
-    !s.is_empty()
-        && !s.starts_with(|c: char| c.is_ascii_digit())
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
+    /// The former force-of-WHNF-locals shape: a single-assignment local
+    /// bound to a WHNF producer collapses its later forces.
+    #[test]
+    fn force_collapse_subsumes_whnf_locals() {
+        let mut stmts = vec![
+            Stmt::Local(vec!["x".into()], Some(Expr::force(Expr::name("y")))),
+            Stmt::Return(Expr::force(Expr::name("x"))),
+        ];
+        run_with(&mut stmts, &Disable::default());
+        assert!(matches!(&stmts[1], Stmt::Return(Expr::Name(n)) if n == "x"));
+    }
 
-fn collect_facts_block(stmts: &[Stmt], f: &mut ScopeFacts) {
-    for s in stmts {
-        collect_facts_stmt(s, f);
+    /// A force the analysis cannot justify stays.
+    #[test]
+    fn force_of_unknown_stays() {
+        let mut stmts = vec![Stmt::Return(Expr::force(Expr::call_named("f", vec![])))];
+        run_with(&mut stmts, &Disable::default());
+        assert!(matches!(&stmts[0], Stmt::Return(Expr::Call(..))));
     }
-}
 
-fn collect_facts_stmt(s: &Stmt, f: &mut ScopeFacts) {
-    match s {
-        Stmt::Raw(t) => f.raw(t),
-        Stmt::Local(names, init) => {
-            for n in names {
-                f.bind(n);
-            }
-            if let Some(e) = init {
-                collect_facts_expr(e, f);
-            }
-        }
-        Stmt::Assign(lhs, e) => {
-            if is_plain_ident(lhs) {
-                f.assign(lhs);
-            }
-            collect_facts_expr(e, f);
-        }
-        Stmt::AssignIf { lhs, cond, then_e, else_e } => {
-            if is_plain_ident(lhs) {
-                f.assign(lhs);
-            }
-            collect_facts_expr(cond, f);
-            collect_facts_expr(then_e, f);
-            collect_facts_expr(else_e, f);
-        }
-        Stmt::Return(e) | Stmt::Expr(e) => collect_facts_expr(e, f),
-        Stmt::If { cond, then_b, elseifs, else_b } => {
-            collect_facts_expr(cond, f);
-            collect_facts_block(&then_b.0, f);
-            for (c, b) in elseifs {
-                collect_facts_expr(c, f);
-                collect_facts_block(&b.0, f);
-            }
-            if let Some(b) = else_b {
-                collect_facts_block(&b.0, f);
-            }
-        }
-        Stmt::Do(b) => collect_facts_block(&b.0, f),
-        Stmt::Function { header, body } => {
-            // The header's tokens include the declared name and every
-            // parameter name — each is a binding site.
-            let mut toks = std::collections::HashSet::new();
-            token_set(header, &mut toks);
-            for t in toks {
-                f.bind(&t);
-            }
-            collect_facts_block(&body.0, f);
-        }
-        Stmt::ReturnTable(entries) => {
-            for (_, e) in entries {
-                collect_facts_expr(e, f);
-            }
-        }
-    }
-}
-
-fn collect_facts_expr(e: &Expr, f: &mut ScopeFacts) {
-    match e {
-        Expr::Name(_) | Expr::Lit(_) => {}
-        Expr::Raw(t) => f.raw(t),
-        Expr::Paren(e) | Expr::Neg(e) => collect_facts_expr(e, f),
-        Expr::Call(c, args) => {
-            collect_facts_expr(c, f);
-            for a in args {
-                collect_facts_expr(a, f);
-            }
-        }
-        Expr::Method(recv, _, args) => {
-            collect_facts_expr(recv, f);
-            for a in args {
-                collect_facts_expr(a, f);
-            }
-        }
-        Expr::Index(base, _) => collect_facts_expr(base, f),
-        Expr::Binop(_, l, r) => {
-            collect_facts_expr(l, f);
-            collect_facts_expr(r, f);
-        }
-        Expr::Table(items) | Expr::TableSpaced(items) => {
-            for item in items {
-                match item {
-                    Item::Pos(e) | Item::KV(_, e) => collect_facts_expr(e, f),
-                }
-            }
-        }
-        Expr::Func(params, body) => {
-            for p in params {
-                f.bind(p);
-            }
-            collect_facts_block(body_stmts_ref_fb(body), f);
-        }
-    }
-}
-
-fn body_stmts_ref_fb(body: &FuncBody) -> &Vec<Stmt> {
-    match body {
-        FuncBody::Inline(s) => s,
-        FuncBody::Block(Block(s)) => s,
-    }
-}
-
-/// An emission that yields WHNF by construction: a function or table
-/// literal, a rendered literal token, a cons cell, or a `__force` result
-/// (which includes the `p = __force(p)` entry rebind).
-fn whnf_by_construction(e: &Expr) -> bool {
-    let mut e = e;
-    while let Expr::Paren(inner) = e {
-        e = inner;
-    }
-    match e {
-        Expr::Func(..) | Expr::Lit(_) | Expr::Table(_) | Expr::TableSpaced(_) => true,
-        Expr::Call(f, _) => matches!(
-            f.as_ref(),
-            Expr::Name(n) if n == "__force" || n == "__mll_cons" || n == "__mll_lazy_cons"
-        ),
-        _ => false,
-    }
-}
-
-/// Entry per function scope.
-fn force_whnf_block(stmts: &mut [Stmt]) {
-    let mut facts = ScopeFacts::default();
-    collect_facts_block(stmts, &mut facts);
-    let active = std::collections::HashSet::new();
-    force_whnf_scope(stmts, &facts, &active);
-}
-
-/// A name qualifies once its single value-producing site has run: a sole
-/// `local n = <whnf>` (one binding site), or a sole assignment `n = <whnf>`
-/// whose one OTHER binding site is the parameter/forward declaration it
-/// rebinds (two binding sites, one assignment).
-fn whnf_binding_qualifies(facts: &ScopeFacts, n: &str, is_assign: bool) -> bool {
-    if facts.raw_mentions.contains(n) {
-        return false;
-    }
-    let binds = facts.binds.get(n).copied().unwrap_or(0);
-    let assigns = facts.assigns.get(n).copied().unwrap_or(0);
-    if is_assign {
-        binds == 2 && assigns == 1
-    } else {
-        binds == 1 && assigns == 0
-    }
-}
-
-fn force_whnf_scope(
-    stmts: &mut [Stmt],
-    facts: &ScopeFacts,
-    active: &std::collections::HashSet<String>,
-) {
-    let mut active = active.clone();
-    for s in stmts.iter_mut() {
-        // Rewrite uses with the actives established by PRECEDING statements,
-        // then consider this statement's own binding.
-        match s {
-            Stmt::Raw(_) => {}
-            Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
-                rewrite_forces_expr(e, facts, &active)
-            }
-            Stmt::Local(_, None) => {}
-            Stmt::AssignIf { cond, then_e, else_e, .. } => {
-                rewrite_forces_expr(cond, facts, &active);
-                rewrite_forces_expr(then_e, facts, &active);
-                rewrite_forces_expr(else_e, facts, &active);
-            }
-            Stmt::If { cond, then_b, elseifs, else_b } => {
-                rewrite_forces_expr(cond, facts, &active);
-                force_whnf_scope(&mut then_b.0, facts, &active);
-                for (c, b) in elseifs.iter_mut() {
-                    rewrite_forces_expr(c, facts, &active);
-                    force_whnf_scope(&mut b.0, facts, &active);
-                }
-                if let Some(b) = else_b.as_mut() {
-                    force_whnf_scope(&mut b.0, facts, &active);
-                }
-            }
-            Stmt::Do(b) => force_whnf_scope(&mut b.0, facts, &active),
-            // A named nested function is its own scope.
-            Stmt::Function { body, .. } => force_whnf_block(&mut body.0),
-            Stmt::ReturnTable(entries) => {
-                for (_, e) in entries {
-                    rewrite_forces_expr(e, facts, &active);
-                }
-            }
-        }
-        match s {
-            Stmt::Local(names, Some(rhs)) if names.len() == 1 => {
-                if whnf_by_construction(rhs) && whnf_binding_qualifies(facts, &names[0], false) {
-                    active.insert(names[0].clone());
-                }
-            }
-            Stmt::Assign(lhs, rhs) if is_plain_ident(lhs)
-                && whnf_by_construction(rhs) && whnf_binding_qualifies(facts, lhs, true) => {
-                    active.insert(lhs.clone());
-                }
-            _ => {}
-        }
-    }
-}
-
-/// Replace `__force(n)` by `n` for active names. Descends into nested
-/// function literals — closure capture is safe: the single-assignment local
-/// never holds a thunk regardless of when the closure runs — but drops any
-/// active name shadowed by the literal's parameters first.
-fn rewrite_forces_expr(
-    e: &mut Expr,
-    facts: &ScopeFacts,
-    active: &std::collections::HashSet<String>,
-) {
-    if let Expr::Call(f, args) = e
-        && matches!(f.as_ref(), Expr::Name(n) if n == "__force")
-        && args.len() == 1
-        && let Expr::Name(n) = &args[0]
-        && active.contains(n)
-    {
-        *e = Expr::Name(n.clone());
-        return;
-    }
-    match e {
-        Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
-        Expr::Paren(e) | Expr::Neg(e) => rewrite_forces_expr(e, facts, active),
-        Expr::Call(f, args) => {
-            rewrite_forces_expr(f, facts, active);
-            for a in args {
-                rewrite_forces_expr(a, facts, active);
-            }
-        }
-        Expr::Method(recv, _, args) => {
-            rewrite_forces_expr(recv, facts, active);
-            for a in args {
-                rewrite_forces_expr(a, facts, active);
-            }
-        }
-        Expr::Index(base, _) => rewrite_forces_expr(base, facts, active),
-        Expr::Binop(_, l, r) => {
-            rewrite_forces_expr(l, facts, active);
-            rewrite_forces_expr(r, facts, active);
-        }
-        Expr::Table(items) | Expr::TableSpaced(items) => {
-            for item in items {
-                match item {
-                    Item::Pos(e) | Item::KV(_, e) => rewrite_forces_expr(e, facts, active),
-                }
-            }
-        }
-        Expr::Func(params, body) => {
-            // Uses inside the literal see this scope's actives minus its
-            // own parameters; the literal's BODY statements still belong
-            // to a fresh scope for new bindings, which force_whnf_block
-            // handles when the walk reaches it via flatten/facts — here we
-            // only rewrite captured uses.
-            let mut inner = active.clone();
-            for p in params {
-                inner.remove(p);
-            }
-            let stmts: &mut Vec<Stmt> = match body {
-                FuncBody::Inline(s) => s,
-                FuncBody::Block(Block(s)) => s,
-            };
-            force_whnf_scope(stmts, facts, &inner);
-        }
+    /// run_refuted on a clean pipeline reports nothing.
+    #[test]
+    fn refutation_clean_after_passes() {
+        let mut stmts = vec![
+            Stmt::Local(vec!["x".into()], Some(Expr::force(Expr::name("y")))),
+            Stmt::Return(Expr::force(Expr::name("x"))),
+        ];
+        assert!(run_refuted(&mut stmts).is_empty());
     }
 }

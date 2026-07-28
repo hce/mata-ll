@@ -54,6 +54,21 @@ pub fn check(module: &TModule, _class_methods: &HashSet<String>) -> Vec<String> 
     v.violations
 }
 
+/// Stamp refutation over the emitted Lua tree — the output-side twin of
+/// [`check`], active in test builds only (wired through
+/// `compile_with_stamp_refutation` in lib.rs; production compiles never pay
+/// for it). Re-runs codegen's module-body build and optimization passes,
+/// then recomputes the annotation analysis fresh over the final tree and
+/// reports (1) any stamp the engine carries that is stronger than the fresh
+/// analysis proves — a justification overclaim — and (2) any remaining
+/// `__force(e)` where the fresh analysis stamps `e` WHNF-and-pure — a
+/// collapse the peephole owed. Each violation names the node's rendered
+/// text. The check itself lives beside the Lua AST it walks
+/// (`codegen::annot::Engine::refute`); this is its crate-facing entry.
+pub fn check_stamps(module: &TModule) -> Vec<String> {
+    crate::codegen::stamp_violations(module)
+}
+
 struct Verifier {
     erased: HashSet<&'static str>,
     violations: Vec<String>,

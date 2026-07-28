@@ -54,6 +54,7 @@ use crate::types::Ty;
 
 mod action;
 mod analysis;
+mod annot;
 mod expr;
 mod ffi;
 mod function;
@@ -400,4 +401,20 @@ pub fn generate(module: &TModule, embed_source: Option<(EmbedMode, &str)>) -> Re
     out.push('\n');
     out.push_str(&body);
     Ok(out)
+}
+
+/// Test-only support behind `verify::check_stamps`: rebuild the module body,
+/// run the optimization passes exactly as `generate` would, and return the
+/// stamp-refutation violations (see `annot::Engine::refute`). Regenerates
+/// rather than threading a flag through `generate` — the extra codegen run
+/// only happens on the test entry.
+pub(crate) fn stamp_violations(module: &TModule) -> Vec<String> {
+    let mut cg = CodeGen::new();
+    cg.demand_info = crate::demand::analyze(module);
+    let mut stmts = cg.module_stmts(module);
+    if cg.depth_error.is_some() {
+        // `generate` reports this as its own diagnostic; nothing to refute.
+        return Vec::new();
+    }
+    opt::run_refuted(&mut stmts)
 }

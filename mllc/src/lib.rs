@@ -138,6 +138,30 @@ pub fn compile_with_options(
     lib_paths: &[&Path],
     options: &CompileOptions,
 ) -> Result<CompileResult, CompileError> {
+    compile_impl(source, source_dir, lib_paths, options, false)
+}
+
+/// Test-suite twin of [`compile`]: additionally runs the emitted-Lua stamp
+/// refutation after the optimization passes (see `verify::check_stamps`) and
+/// fails with `CompileError::Internal` on any violation. The test harnesses
+/// compile through this so every corpus program exercises the check;
+/// production callers use [`compile`] / [`compile_with_options`] and never
+/// pay for it.
+pub fn compile_with_stamp_refutation(
+    source: &str,
+    source_dir: &Path,
+    lib_paths: &[&Path],
+) -> Result<CompileResult, CompileError> {
+    compile_impl(source, source_dir, lib_paths, &CompileOptions::default(), true)
+}
+
+fn compile_impl(
+    source: &str,
+    source_dir: &Path,
+    lib_paths: &[&Path],
+    options: &CompileOptions,
+    stamp_check: bool,
+) -> Result<CompileResult, CompileError> {
     // Lex
     let tokens = lexer::lex(source).map_err(CompileError::Lex)?;
 
@@ -290,6 +314,15 @@ pub fn compile_with_options(
     let mut warnings = Vec::new();
     if !mono_module.has_main && mono_module.exports.is_empty() {
         warnings.push(no_host_surface_warning(header_exports.as_deref()));
+    }
+
+    // Test-build stamp refutation (see verify::check_stamps): a violation is
+    // a compiler bug, reported like the monomorphization invariant above.
+    if stamp_check {
+        let violations = verify::check_stamps(&mono_module);
+        if !violations.is_empty() {
+            return Err(CompileError::Internal(violations));
+        }
     }
 
     // Generate Lua. The only error codegen can produce is its depth-guard

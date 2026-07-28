@@ -17,7 +17,10 @@ fn run_mll_file(path: &Path) {
                 .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
 
             let source_dir = path.parent().unwrap_or(Path::new("."));
-            let lua_code = match mllc::compile(&source, source_dir, &[]) {
+            // The stamp-refutation twin of mllc::compile: same output, plus
+            // the emitted-Lua annotation check every corpus program should
+            // exercise (see verify::check_stamps).
+            let lua_code = match mllc::compile_with_stamp_refutation(&source, source_dir, &[]) {
                 Ok(r) => r.lua_code,
                 Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
             };
