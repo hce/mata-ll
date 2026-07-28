@@ -118,7 +118,9 @@ impl annot::StructuredPass for TailLoop {
 }
 
 /// The self-name a header binds, in the spelling body calls use.
-enum SelfName {
+/// Shared with the IO self-loop pass (ioloop.rs), which converts the same
+/// three header spellings.
+pub(super) enum SelfName {
     /// `local function f(…)` — bound by the header itself.
     LocalFn(String),
     /// `f = function(…)` — a forward-declared local assigned here.
@@ -140,7 +142,7 @@ impl SelfName {
 /// Only the three spellings verified against corpus output are accepted;
 /// any other shape (varargs, `_v[i]` spill targets, unexpected trailing
 /// text) returns `None` and the function is skipped.
-fn parse_header(header: &str) -> Option<(SelfName, Vec<String>)> {
+pub(super) fn parse_header(header: &str) -> Option<(SelfName, Vec<String>)> {
     let (name, params_text) = if let Some(rest) = header.strip_prefix("local function ") {
         let open = rest.find('(')?;
         let n = &rest[..open];
@@ -179,7 +181,7 @@ fn parse_header(header: &str) -> Option<(SelfName, Vec<String>)> {
 }
 
 /// The self-identity gate (see the module comment).
-fn self_qualifies(
+pub(super) fn self_qualifies(
     name: &SelfName,
     view: &ScopeView<'_>,
     locals_in_scope: &HashSet<String>,
@@ -213,7 +215,7 @@ fn self_call_args<'a>(e: &'a Expr, name: &SelfName) -> Option<&'a Vec<Expr>> {
     if is_self_ref(f, name) { Some(args) } else { None }
 }
 
-fn is_self_ref(f: &Expr, name: &SelfName) -> bool {
+pub(super) fn is_self_ref(f: &Expr, name: &SelfName) -> bool {
     match f {
         Expr::Name(s) => s == name.spelling(),
         // Defensive: the `__mll_fn[i]` spelling as an Index node (the
@@ -345,7 +347,7 @@ fn single_return_stmt(s: &Stmt, name: &SelfName) -> bool {
 /// Any parameter mention the scoped rename cannot handle blocks the whole
 /// conversion (see the module comment). Field positions (index suffixes,
 /// method names, table keys) are never variable references and are ignored.
-fn rename_blocked(stmts: &[Stmt], params: &HashSet<String>) -> bool {
+pub(super) fn rename_blocked(stmts: &[Stmt], params: &HashSet<String>) -> bool {
     stmts.iter().any(|s| blocked_stmt(s, params))
 }
 
@@ -431,7 +433,7 @@ fn func_body(b: &FuncBody) -> &Vec<Stmt> {
 /// Rename every variable occurrence of a mapped name, narrowing the map at
 /// shadowing binders. Only runs after `rename_blocked` cleared the body, so
 /// every remaining mention is a plain variable occurrence.
-fn rename_block(stmts: &mut [Stmt], map: &HashMap<String, String>) {
+pub(super) fn rename_block(stmts: &mut [Stmt], map: &HashMap<String, String>) {
     // Cloned per block: a `local` shadows only for the REST of its own
     // block, and sub-blocks must not leak their shadowing back out.
     let mut map = map.clone();
@@ -545,17 +547,22 @@ fn rename_expr(e: &mut Expr, map: &HashMap<String, String>) {
 
 // ---- Fresh names ----
 
-/// Per-iteration copy names: `_w0.._wn`, with underscores appended to the
-/// prefix until none collides with any identifier token of the rendered
-/// function (Raw text included — rendering covers it).
-fn fresh_names(header: &str, body: &[Stmt], n: usize) -> Vec<String> {
+/// Every identifier token of the rendered function (Raw text included —
+/// rendering covers it), for fresh-name selection. Shared with ioloop.rs.
+pub(super) fn used_tokens(header: &str, body: &[Stmt]) -> HashSet<String> {
     let mut text = String::from(header);
     for s in body {
         s.render_line(0, &mut text);
     }
     let mut used = HashSet::new();
     opt::token_set(&text, &mut used);
-    let mut prefix = String::from("_w");
+    used
+}
+
+/// `prefix`+`0..n`, with underscores appended to the prefix until none of
+/// the candidates collides with a used token. Shared with ioloop.rs.
+pub(super) fn fresh_with_prefix(used: &HashSet<String>, prefix: &str, n: usize) -> Vec<String> {
+    let mut prefix = String::from(prefix);
     loop {
         let cand: Vec<String> = (0..n).map(|i| format!("{}{}", prefix, i)).collect();
         if cand.iter().all(|c| !used.contains(c)) {
@@ -563,6 +570,11 @@ fn fresh_names(header: &str, body: &[Stmt], n: usize) -> Vec<String> {
         }
         prefix.push('_');
     }
+}
+
+/// Per-iteration copy names for this function: `_w0.._wn`.
+fn fresh_names(header: &str, body: &[Stmt], n: usize) -> Vec<String> {
+    fresh_with_prefix(&used_tokens(header, body), "_w", n)
 }
 
 // ---- The conversion ----

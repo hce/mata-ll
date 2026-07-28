@@ -75,13 +75,24 @@
 //! stamp, so the engine handed to the refutation must be the one recomputed
 //! over the final tree — `run_with` swaps engines when the pass rewrites.
 //!
+//! Pass 6 — IO self-loop conversion (ioloop.rs), the structured tier's
+//! second pass: an IO/ST function in the two-level shape (build-time
+//! dispatch returning per-branch action closures) whose branch closures
+//! tail-recurse through `return __mll_run_tail(<self>(…))` becomes a
+//! dispatch skeleton returning ONE closure that runs the whole self-loop as
+//! a `while true` — no per-iteration closure allocation, no runner
+//! dispatch. It runs after tailloop for the same recompute-on-rewrite
+//! reasons, and because tailloop-converted pure helpers may sit inside the
+//! bodies it splices.
+//!
 //! Per-pass toggles: `MLL_OPT_DISABLE` (read per `run` call) is a
 //! comma-separated list of pass names to skip — `parens`, `dead`, `iife`,
-//! `force`, `tailloop`. A debugging aid for isolating a pass's effect; unset
-//! (the default) runs everything, and an unrecognized name warns on stderr
-//! so a typo cannot silently disable nothing.
+//! `force`, `tailloop`, `ioloop`. A debugging aid for isolating a pass's
+//! effect; unset (the default) runs everything, and an unrecognized name
+//! warns on stderr so a typo cannot silently disable nothing.
 
 use super::annot;
+use super::ioloop;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::tailloop;
 
@@ -93,6 +104,7 @@ pub(super) struct Disable {
     iife: bool,
     force: bool,
     tailloop: bool,
+    ioloop: bool,
 }
 
 impl Disable {
@@ -108,9 +120,10 @@ impl Disable {
                 "iife" => d.iife = true,
                 "force" => d.force = true,
                 "tailloop" => d.tailloop = true,
+                "ioloop" => d.ioloop = true,
                 other => eprintln!(
                     "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
-                     (known: parens, dead, iife, force, tailloop)",
+                     (known: parens, dead, iife, force, tailloop, ioloop)",
                     other
                 ),
             }
@@ -150,6 +163,14 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
         // replaces the force pass's; when it rewrites nothing the earlier
         // engine still mirrors the tree.
         if let Some(fresh) = annot::Engine::run_structured(stmts, &mut tailloop::TailLoop) {
+            engine = Some(fresh);
+        }
+    }
+    if !d.ioloop {
+        // Structured tier, pass 6 (see the module comment). Same engine
+        // discipline as tailloop: a rewrite invalidates everything, so the
+        // recomputed engine replaces whichever one came before.
+        if let Some(fresh) = annot::Engine::run_structured(stmts, &mut ioloop::IoLoop) {
             engine = Some(fresh);
         }
     }
@@ -1018,6 +1039,52 @@ mod tests {
         let mut stmts = vec![Stmt::Return(Expr::force(Expr::call_named("f", vec![])))];
         run_with(&mut stmts, &Disable::default());
         assert!(matches!(&stmts[0], Stmt::Return(Expr::Call(..))));
+    }
+
+    /// The ioloop toggle: disabled leaves the two-level shape (dispatch
+    /// returning branch action closures); enabled (the default) converts
+    /// it and the refutation stays clean.
+    #[test]
+    fn ioloop_toggle() {
+        let make = || {
+            vec![
+                Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
+                Stmt::Function {
+                    header: "__mll_fn[1] = function(n)".into(),
+                    body: Block(vec![Stmt::If {
+                        cond: Expr::name("n"),
+                        then_b: Block(vec![Stmt::Return(Expr::Func(
+                            vec![],
+                            FuncBody::Block(Block(vec![Stmt::Return(Expr::lit("nil"))])),
+                        ))]),
+                        elseifs: vec![],
+                        else_b: Some(Block(vec![Stmt::Return(Expr::Func(
+                            vec![],
+                            FuncBody::Block(Block(vec![Stmt::Return(Expr::call_named(
+                                "__mll_run_tail",
+                                vec![Expr::call_named("__mll_fn[1]", vec![Expr::lit("1")])],
+                            ))])),
+                        ))])),
+                    }]),
+                },
+            ]
+        };
+        let mut on = make();
+        let (engine, _) = run_with(&mut on, &Disable::default());
+        let Stmt::Function { body, .. } = &on[1] else { panic!("shape") };
+        assert!(
+            matches!(&body.0[0], Stmt::Local(names, _) if names == &vec!["_lp".to_string()]),
+            "enabled pass must convert"
+        );
+        assert!(engine.expect("engine").refute(&on, true).is_empty());
+
+        let mut off = make();
+        run_with(&mut off, &Disable { ioloop: true, ..Disable::default() });
+        let Stmt::Function { body, .. } = &off[1] else { panic!("shape") };
+        assert!(
+            matches!(&body.0[0], Stmt::If { .. }),
+            "disabled pass must leave the two-level shape"
+        );
     }
 
     /// The tailloop toggle: disabled leaves the recursive call; enabled

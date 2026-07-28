@@ -59,6 +59,7 @@ mod expr;
 mod ffi;
 mod function;
 mod inline;
+mod ioloop;
 mod lua;
 mod module;
 mod names;

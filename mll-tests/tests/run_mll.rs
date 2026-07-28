@@ -743,6 +743,11 @@ mll_test!(tco_case_let, "tco_case_let.mll");
 mll_test!(tailloop_deep, "tailloop_deep.mll");
 mll_test!(tailloop_capture, "tailloop_capture.mll");
 mll_test!(tailloop_swap, "tailloop_swap.mll");
+mll_test!(ioloop_deep, "ioloop_deep.mll");
+mll_test!(ioloop_capture, "ioloop_capture.mll");
+mll_test!(ioloop_mixed, "ioloop_mixed.mll");
+mll_test!(ioloop_box, "ioloop_box.mll");
+mll_test!(ioloop_seq_parity, "ioloop_seq_parity.mll");
 mll_test!(seq_forms, "seq_forms.mll");
 mll_test!(self_referential_caf, "self_referential_caf.mll");
 mll_test!(lazy_take_zip, "lazy_take_zip.mll");
@@ -10098,6 +10103,11 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_instance_context_paren, "cases", "instance_context_paren.mll"),
         (ghc_oracle_instance_context_superclass, "cases", "instance_context_superclass.mll"),
         (ghc_oracle_instance_forward_ref, "cases", "instance_forward_ref.mll"),
+        (ghc_oracle_ioloop_box, "cases", "ioloop_box.mll"),
+        (ghc_oracle_ioloop_capture, "cases", "ioloop_capture.mll"),
+        (ghc_oracle_ioloop_deep, "cases", "ioloop_deep.mll"),
+        (ghc_oracle_ioloop_mixed, "cases", "ioloop_mixed.mll"),
+        (ghc_oracle_ioloop_seq_parity, "cases", "ioloop_seq_parity.mll"),
         (ghc_oracle_integral_semantics, "cases", "integral_semantics.mll"),
         (ghc_oracle_io_actions, "cases", "io_actions.mll"),
         (ghc_oracle_kinds_hkt, "cases", "kinds_hkt.mll"),
