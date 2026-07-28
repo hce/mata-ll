@@ -103,7 +103,9 @@
 //! `force`, `tailloop`, `ioloop`, `performloop`. A debugging aid for
 //! isolating a pass's effect; unset (the default) runs everything, and an
 //! unrecognized name warns on stderr so a typo cannot silently disable
-//! nothing.
+//! nothing. `CompileOptions::disable_opt_passes` carries the same list
+//! per-compile (it overrides the environment variable when set), so a test
+//! can pin unoptimized emission without mutating process-global state.
 
 use super::annot;
 use super::ioloop;
@@ -124,10 +126,22 @@ pub(super) struct Disable {
 }
 
 impl Disable {
-    fn from_env() -> Disable {
+    /// Parse a skip list. `spec: Some(list)` uses the explicit list (the
+    /// `CompileOptions::disable_opt_passes` path — per-compile, immune to
+    /// process-global state); `None` falls back to the `MLL_OPT_DISABLE`
+    /// environment variable. Same comma-separated vocabulary either way.
+    fn from_spec(spec: Option<&str>) -> Disable {
         let mut d = Disable::default();
-        let Ok(list) = std::env::var("MLL_OPT_DISABLE") else {
-            return d;
+        let env;
+        let list = match spec {
+            Some(s) => s,
+            None => match std::env::var("MLL_OPT_DISABLE") {
+                Ok(v) => {
+                    env = v;
+                    &env
+                }
+                Err(_) => return d,
+            },
         };
         for name in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
             match name {
@@ -150,9 +164,10 @@ impl Disable {
     }
 }
 
-/// Run all passes over the module body.
-pub(super) fn run(stmts: &mut Vec<Stmt>) {
-    let _ = run_with(stmts, &Disable::from_env());
+/// Run all passes over the module body. `opt_disable`: see
+/// `Disable::from_spec`.
+pub(super) fn run(stmts: &mut Vec<Stmt>, opt_disable: Option<&str>) {
+    let _ = run_with(stmts, &Disable::from_spec(opt_disable));
 }
 
 /// Run the enabled passes; returns the annotation engine whose mirror is
@@ -209,7 +224,7 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
 /// `run` would, then refute the carried stamps against a fresh analysis of
 /// the final tree. Empty means clean.
 pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
-    match run_with(stmts, &Disable::from_env()) {
+    match run_with(stmts, &Disable::from_spec(None)) {
         (Some(engine), force_ran) => engine.refute(stmts, force_ran),
         // With every engine-run pass disabled there are no carried stamps
         // and no collapse obligation; a fresh analysis refuting itself

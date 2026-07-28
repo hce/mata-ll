@@ -161,6 +161,8 @@ fn run_compiler(cli: Cli) {
     let options = mllc::CompileOptions {
         embed_source,
         source_name: Some(filename.clone()),
+        // The CLI keeps the environment-variable path for pass disabling.
+        disable_opt_passes: None,
     };
     let result = match mllc::compile_with_options(&source, source_dir, &lib_paths, &options) {
         Ok(r) => r,

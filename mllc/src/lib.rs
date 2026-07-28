@@ -74,6 +74,14 @@ pub struct CompileOptions {
     /// `at foo.mll:1:1` — used where the distinction from Prelude-internal
     /// line numbers matters. `None` keeps the bare `at line:col` rendering.
     pub source_name: Option<String>,
+    /// Comma-separated Lua-AST optimization passes to skip — the same
+    /// vocabulary as the `MLL_OPT_DISABLE` environment variable (see
+    /// codegen/opt.rs). `None` (the default) reads the environment variable;
+    /// an explicit value makes THIS compile's pass set independent of
+    /// process-global state, which is what lets the test suite pin
+    /// unoptimized emission (e.g. the raw tail-call depth case) without
+    /// racing concurrently compiling tests.
+    pub disable_opt_passes: Option<String>,
 }
 
 /// Compile error. Parse and type errors carry structured [`types::Diagnostic`]s
@@ -333,7 +341,12 @@ fn compile_impl(
     // backstop (see CodeGen::gen_expr) — a user-input limit, reported like
     // the equivalent parser/typechecker diagnostics.
     let embed = options.embed_source.map(|mode| (mode, source));
-    let lua_code = codegen::generate(&mono_module, embed).map_err(|msg| {
+    let lua_code = codegen::generate(
+        &mono_module,
+        embed,
+        options.disable_opt_passes.as_deref(),
+    )
+    .map_err(|msg| {
         CompileError::Type(vec![types::Diagnostic::new(
             types::DiagnosticKind::Other(msg),
         )])
