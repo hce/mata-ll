@@ -22,7 +22,7 @@
 //! the function before. The win is one interpreter dispatch (and, under
 //! LuaJIT, a loop that traces where a tail-recursive call would not).
 //!
-//! Correctness decisions, each load-carrying:
+//! Correctness decisions:
 //!
 //! * SIMULTANEITY — the update is ONE multiple assignment: Lua evaluates the
 //!   entire RHS list before assigning any lvalue, so an update like the
