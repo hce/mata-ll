@@ -3,26 +3,28 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Lua-AST optimization layer, structured-pass tier.** The layer's
-      foundation is COMPLETE (see Completed: annotation layer, transformer
-      engine with annotation-write monopoly, `__force`-collapse peephole,
-      stamp refutation, per-pass toggles — codegen/annot.rs). What remains
-      is the structured tier: hand-written whole-function transforms with
-      global side conditions, on the same annotation/justification API:
-      (1) self-tail-call → loop conversion (interpreter dispatch win; loops
-      trace better than recursion under LuaJIT) — the only pass with a
-      plausible measurable benchmark win; (2) loop-invariant / capture-free
-      closure hoisting (syntactic backstop for the FNEW JIT-killer class).
-      Liveness-based local-slot reuse as a later candidate. Per-pass
-      verification discipline stays: corpus byte-diff (empty or reviewed),
-      tracker decode as the semantic + perf canary,
-      `codegen_is_deterministic` green, stamp refutation over the final
-      tree. Note the engine's known limit, accepted at design time: the
-      no-stale-annotations guarantee holds over the closed rewrite
-      vocabulary — a structured pass that needs a new rewrite form carries
-      an engine-side proof obligation (relocated bug surface, not
-      eliminated). Bytecode generation was considered and dropped
-      2026-07-27 (format unstable by design, hardened hosts load
+- [ ] **Lua-AST optimization layer, structured-pass tier (remaining).**
+      The foundation AND the first structured pass are COMPLETE (see
+      Completed: annotation layer + engine + `__force`-collapse peephole;
+      self-tail-call → loop conversion with the StructuredPass engine
+      extension). Remaining, on the same annotation/justification API:
+      (1) loop-invariant / capture-free closure hoisting (syntactic
+      backstop for the FNEW JIT-killer class). Later candidates:
+      liveness-based local-slot reuse; IO self-loops — the tail-call pass
+      leaves `return __mll_run_tail(<self>(…))` untouched (the self-call
+      is not in callee tail position), which is exactly the tracker's hot
+      shape, so converting the IO run-loop form is where the next
+      measurable win would come from. Per-pass verification discipline
+      stays: corpus byte-diff (empty or reviewed), tracker decode as the
+      semantic + perf canary, `codegen_is_deterministic` green, stamp
+      refutation over the final tree. The engine's known limit, accepted
+      at design time: the no-stale-annotations guarantee holds over the
+      closed rewrite vocabulary — a structured pass that needs a new
+      rewrite form carries an engine-side proof obligation (relocated bug
+      surface, not eliminated); the tail-call pass paid it (WhileTrue /
+      MultiAssign / ReturnNone / Goto / Label entered the vocabulary with
+      engine-owned validation). Bytecode generation was considered and
+      dropped 2026-07-27 (format unstable by design, hardened hosts load
       text-only; `mlua`-based precompile covers the load-time case if
       ever wanted).
 
@@ -55,6 +57,50 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Self-tail-call → loop conversion — the first structured-tier pass**
+      (codegen/tailloop.rs, new; StructuredPass engine extension in
+      annot.rs; five real AST nodes added to lua.rs: WhileTrue, MultiAssign,
+      ReturnNone, Goto, Label — real nodes, not Raw, so the stamp
+      refutation stays meaningful inside converted functions). Shape:
+      `while true do local _w0 = p0; …; <body, params renamed to w's>; end`
+      with each tail self-call becoming ONE simultaneous multiple
+      assignment to the parameters. The per-iteration `w` copies are
+      emitted unconditionally: Lua creates fresh locals per loop-body
+      execution, so closures and thunks capture their own iteration's
+      locals — exactly recursion's fresh-parameter semantics — for one
+      register move per parameter per iteration, and no closure-escape
+      analysis that would have to be sound against Raw. Simultaneity: the
+      multi-assign RHS reads only `w`s, so no read-after-write pair exists
+      even in principle. Continue mechanism: fall-through when the body
+      diverges (227 of 233 corpus conversions); `goto continue` with the
+      label in end-of-block position otherwise (6) — goto is available on
+      all targets (Lua 5.4/5.5/LuaJIT per CI matrix and README; 5.1 is not
+      a target). Conversion gates: self-identity proven by module-wide
+      single-store census for `__mll_fn` slots and binding-scope-subtree
+      single-assignment + lexical visibility for named functions (the
+      where-group `go` reuse makes literal module-wide uniqueness wrong
+      for names — 54 conversions would have been forfeited for nothing);
+      single-return proof for the callee; varargs, `_v`-spill headers,
+      Raw mentions of self or any parameter, composite lvalues all block.
+      Engine guarantees carried over: the pass returns a tree and never
+      sees stamps (write monopoly; applied rewrite = invalidate +
+      recompute), and the engine validates every rewritten body against
+      the extended grammar (MultiAssign holes, bare return block-last,
+      goto only to the innermost while's end label) — an invalid rewrite
+      is declined whole. Corpus: 233 functions converted across 82 files
+      (179 slot-form, 54 assigned-form), every diff verified mechanically
+      by a reverse-transformer (un-convert B, byte-compare to A: 0
+      mismatches), all outputs pass luac -p and LuaJIT compilation, all
+      82 diffed files executed A-vs-B identical. Perf: recursion
+      microbench 3.4× faster under LuaJIT (95→28 ms; independently
+      replicated 0.08→0.01 s), ~4–5% under PUC 5.5; tracker canary
+      unchanged (its hot loops are IO self-loops through __mll_run_tail —
+      recorded as the next candidate). Suite 981/0 (965 + 16); GHC oracle
+      281/281 unchanged; lua-compat 5.5 and LuaJIT green; 10⁶-deep
+      recursion cases green on mlua/5.5/LuaJIT; stamp refutation green
+      over converted output; determinism green; proprietary acceptance
+      passes. 2026-07-28.
 
 - [x] **Lua-AST optimization layer, foundation: annotation layer, transformer
       engine with an annotation-write monopoly, and the `__force`-collapse
