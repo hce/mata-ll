@@ -773,6 +773,40 @@ mll_test!(ioloop_seq_parity, "ioloop_seq_parity.mll");
 mll_test!(performloop_deep, "performloop_deep.mll");
 mll_test!(performloop_dispatch, "performloop_dispatch.mll");
 mll_test!(performloop_pure_bottom, "performloop_pure_bottom.mll");
+mll_test!(case_pure_bottom, "case_pure_bottom.mll");
+mll_test!(if_pure_bottom, "if_pure_bottom.mll");
+mll_test!(first_class_pure_bottom, "first_class_pure_bottom.mll");
+mll_test!(perform_bare_tco_deep, "perform_bare_tco_deep.mll");
+
+/// Raw tail-call elimination alone must carry a deep direct-perform
+/// self-recursion: compile perform_bare_tco_deep.mll with every loop pass
+/// disabled — via `CompileOptions::disable_opt_passes`, which is
+/// per-compile and cannot race concurrently compiling tests the way
+/// mutating `MLL_OPT_DISABLE` would — and run the 2e6-deep
+/// bare-name-terminal case. This pins the bare `return self(...)`
+/// direct-perform self-tail emission (action.rs) independently of the
+/// tailloop conversion the normal build applies.
+#[test]
+fn perform_bare_tco_deep_unoptimized() {
+    on_compiler_stack(|| {
+        let path = Path::new("tests/cases/perform_bare_tco_deep.mll");
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
+        let opts = mllc::CompileOptions {
+            disable_opt_passes: Some("tailloop,ioloop,performloop".into()),
+            ..Default::default()
+        };
+        let lua_code =
+            mllc::compile_with_options(&source, Path::new("tests/cases"), &[], &opts)
+                .expect("perform_bare_tco_deep compiles")
+                .lua_code;
+        let lua = mlua::Lua::new();
+        lua.load(&lua_code)
+            .set_name("perform_bare_tco_deep (loop passes disabled)")
+            .exec()
+            .expect("2e6-deep bare-TCO run in constant stack");
+    });
+}
 mll_test!(seq_forms, "seq_forms.mll");
 mll_test!(self_referential_caf, "self_referential_caf.mll");
 mll_test!(lazy_take_zip, "lazy_take_zip.mll");
@@ -10073,6 +10107,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_bind_first_class, "cases", "bind_first_class.mll"),
         (ghc_oracle_case_guards, "cases", "case_guards.mll"),
         (ghc_oracle_case_in_do_let, "cases", "case_in_do_let.mll"),
+        (ghc_oracle_case_pure_bottom, "cases", "case_pure_bottom.mll"),
         (ghc_oracle_clause_local_scope, "cases", "clause_local_scope.mll"),
         (ghc_oracle_compose_non_strict, "cases", "compose_non_strict.mll"),
         (ghc_oracle_curried_lambda_arity, "cases", "curried_lambda_arity.mll"),
@@ -10110,6 +10145,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_existential_constraints, "cases", "existential_constraints.mll"),
         (ghc_oracle_existentials, "cases", "existentials.mll"),
         (ghc_oracle_feature_interactions, "cases", "feature_interactions.mll"),
+        (ghc_oracle_first_class_pure_bottom, "cases", "first_class_pure_bottom.mll"),
         (ghc_oracle_fixity_import, "cases", "fixity_import.mll"),
         (ghc_oracle_fizzbuzz, "cases", "fizzbuzz.mll"),
         (ghc_oracle_fmap_pure_bind_chain, "cases", "fmap_pure_bind_chain.mll"),
@@ -10121,6 +10157,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_guards, "cases", "guards.mll"),
         (ghc_oracle_haskell_compat, "cases", "haskell_compat.mll"),
         (ghc_oracle_higher_order, "cases", "higher_order.mll"),
+        (ghc_oracle_if_pure_bottom, "cases", "if_pure_bottom.mll"),
         (ghc_oracle_import_hiding, "cases", "import_hiding.mll"),
         (ghc_oracle_infix_def, "cases", "infix_def.mll"),
         (ghc_oracle_instance_context, "cases", "instance_context.mll"),
@@ -10176,6 +10213,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_operators, "cases", "operators.mll"),
         (ghc_oracle_pair_ord_fields, "cases", "pair_ord_fields.mll"),
         (ghc_oracle_pattern_matching, "cases", "pattern_matching.mll"),
+        (ghc_oracle_perform_bare_tco_deep, "cases", "perform_bare_tco_deep.mll"),
         (ghc_oracle_performloop_deep, "cases", "performloop_deep.mll"),
         (ghc_oracle_performloop_dispatch, "cases", "performloop_dispatch.mll"),
         (ghc_oracle_performloop_pure_bottom, "cases", "performloop_pure_bottom.mll"),
