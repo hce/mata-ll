@@ -43,17 +43,6 @@ MATA-LL TODO
       text-only; `mlua`-based precompile covers the load-time case if
       ever wanted).
 
-- [ ] **Eta-expanded callees carry a grouping `__force` that is really a
-      paren.** Found by the peephole's engine declining the collapse:
-      function.rs:205 emits `__force(<function literal>)(args)` where the
-      `__force` doubles as the prefixexp grouping Lua requires — the
-      literal is provably WHNF, but collapsing would emit the ungrammatical
-      `function…end(args)`, so the engine (correctly) declines and the
-      runtime call stays (e.g. nat_hkt.lua:847). The fix is
-      generation-side: emit `Paren` grouping instead of the `__force`
-      wrapper at that site, removing a runtime call per eta-expanded
-      callee. Deliberate small change with its own corpus diff review.
-
 - [ ] **`::` ascription inside a right-section operand is accepted; GHC
       parse-errors.** Found 2026-07-27 during the section-precedence work:
       mata-ll accepts `(+ 1 :: Int)` where GHC rejects the `::` in that
@@ -72,6 +61,36 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Eta-expanded callees no longer carry a grouping `__force` that is
+      really a paren** (codegen/function.rs eta-expansion callee). Found
+      by the peephole's engine declining the collapse: the site emitted
+      `__force(<function literal>)(_eta…)` where the `__force` doubled as
+      the prefixexp grouping Lua requires — the literal is WHNF by
+      construction, but collapsing would emit the ungrammatical
+      `function…end(args)`, so the engine (correctly) declined and the
+      runtime call stayed (nat_hkt.lua:847). Generation-side fix: the
+      site now matches the EMITTED Lua expression — a bare `Func` gets
+      `Paren` grouping, a `Paren(Func)` (the closure a partial
+      application builds; the call-argument paren cleanup had been
+      dropping its own parens inside the `__force`, which is why the
+      force was carrying the grouping) is used as-is, everything else
+      keeps the force (the callee must be a function value, not a
+      thunk). The peephole's decline logic is untouched — it was right.
+      Bonus the plan didn't predict: with the callee now `(function…)
+      (_eta…)`, the existing immediate-call beta-reduction collapses the
+      whole application to `local <param> = _eta…; <body>` — the closure
+      allocation AND the call disappear, not just the `__force`. The
+      TExpr-level twin sites (expr.rs / inline.rs lambda eta-expansion)
+      already guarded via `expr_yields_whnf`/`callee_ast`; this was the
+      one unconditional site. Corpus 428 files: 24 diffs, every hunk the
+      same reviewed shape, zero `__force(function` left corpus-wide;
+      nat_hkt runs byte-identical, 17 diffed programs A/B byte-identical
+      stdout. Tracker canary: compile byte-identical, decode
+      byte-identical (8 336 640 bytes). Suite 1030/0 debug and release;
+      GHC oracle 292 pinned / 48 excluded / 0 failed; determinism +
+      stamp refutation green; clippy adds zero warnings; proprietary
+      acceptance passes. 2026-07-28.
 
 - [x] **Direct-perform IO self-recursion converts to a loop — structured-
       tier pass 7, the ~1e6-depth stack-overflow fix** (codegen/

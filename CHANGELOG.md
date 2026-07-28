@@ -31,6 +31,19 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Eta-expanded point-free definitions shed a runtime `__force` call —
+  and usually the closure behind it.** A definition like `f = foldr g z`
+  (fewer clause parameters than the type has arrows) compiled to
+  `return __force(<closure>)(_eta0)`: the `__force` was a no-op on the
+  already-evaluated closure, kept only because its call parentheses
+  provided the grouping Lua's grammar demands before `(args)`. The
+  emission now writes the grouping parens directly, and the existing
+  immediate-call collapse then inlines the application — the body
+  becomes `local _pa0 = _eta0; return foldr(g, z, _pa0)`, dropping one
+  runtime call plus one closure allocation per invocation of each
+  eta-expanded function. Behavior is byte-identical on every affected
+  program; 24 of 428 corpus files change, all in exactly this shape.
+
 - **Self-recursive IO functions compile to loops.** The IO emission
   builds an action closure per recursive step (`countdown n = do …;
   countdown (n - 1)` allocated a fresh closure, two calls and a runner

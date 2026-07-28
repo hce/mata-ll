@@ -201,8 +201,24 @@ impl CodeGen {
                 let demanded = self.clause_demanded(clause);
                 body.extend(self.where_binds_stmts(clause, demanded));
                 if eta_count > 0 {
-                    // Eta-expand: apply extra params to the body
-                    let callee = Expr::force(self.expr_ast(&clause.body));
+                    // Eta-expand: apply extra params to the body. When the
+                    // emission is a function literal (a lambda, or the
+                    // parenthesized closure a partial application builds), it
+                    // is WHNF by construction — a __force wrapper would be a
+                    // no-op the peephole cannot collapse, because the callee
+                    // position needs the grouping the force call happens to
+                    // provide (Lua cannot call a bare `function … end`).
+                    // Emit the paren grouping directly instead. Every other
+                    // shape keeps the force: the callee must be a function
+                    // value, not a thunk.
+                    let body_e = self.expr_ast(&clause.body);
+                    let callee = match body_e {
+                        Expr::Func(ps, b) => Expr::paren(Expr::Func(ps, b)),
+                        Expr::Paren(inner) if matches!(inner.as_ref(), Expr::Func(..)) => {
+                            Expr::Paren(inner)
+                        }
+                        e => Expr::force(e),
+                    };
                     body.push(Stmt::Return(Expr::call(
                         callee,
                         eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
