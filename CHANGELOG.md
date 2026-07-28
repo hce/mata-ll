@@ -232,6 +232,23 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Every compiler front-end now runs `compile` on the calibrated 2 GiB
+  stack.** The compiler's nesting-depth limit is calibrated against
+  `mllc::COMPILER_STACK_SIZE` — every caller of `mllc::compile` must
+  provide a thread of that size, and the depth guard then turns any
+  too-deep input into a clean diagnostic instead of a crash. The REPL's
+  `:lua` command and its startup baseline compiled on the calling thread
+  instead, so a deeply nested `:lua` input could abort the whole REPL
+  session where `mll` itself compiles the same program fine; both now go
+  through a calibrated helper. The test harness had the same gap in ~180
+  direct `mllc::compile` call sites (the CI debug build overflowed on an
+  8-line example whose inference frames grew with the do-block indexing
+  work above); every harness compile is now routed through one wrapper on
+  the calibrated stack. The stack-size documentation carries fresh
+  measurements: a debug build burns ~70 KB of stack per inference level,
+  and the deepest expression spine the limit admits compiles with at
+  least a 4× margin.
+
 - **Compiling a long do-block now scales linearly in its length, not
   quadratically.** Found by the parser fuzzer's deep probes: every do-`let`
   statement re-walked state proportional to everything before it — the

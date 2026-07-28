@@ -1,6 +1,30 @@
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
+/// `mllc::compile` on a thread with the compiler's calibrated stack. The
+/// nesting-depth limit is calibrated against `mllc::COMPILER_STACK_SIZE`
+/// (see there): every compile in this front-end must run on such a thread,
+/// or input the mll CLI handles could overflow here.
+fn compile_on_compiler_stack(
+    source: &str,
+    lib_paths: &[String],
+) -> Result<mllc::CompileResult, mllc::CompileError> {
+    std::thread::scope(|s| {
+        match std::thread::Builder::new()
+            .stack_size(mllc::COMPILER_STACK_SIZE)
+            .spawn_scoped(s, || {
+                let lib_refs: Vec<&Path> = lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
+                mllc::compile(source, Path::new("."), &lib_refs)
+            })
+            .expect("Failed to spawn compiler thread")
+            .join()
+        {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    })
+}
+
 /// Accumulated REPL state: declarations collected so far.
 struct ReplState {
     /// Top-level declarations accumulated so far (data types, functions, instances, etc.)
@@ -16,8 +40,7 @@ impl ReplState {
         // Compile a bare program to find where the main slot definition starts.
         // Everything before that line is prelude/runtime boilerplate.
         let baseline_source = "main :: IO ()\nmain = pure ()\n";
-        let lib_refs: Vec<&Path> = lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
-        let baseline_main_line = match mllc::compile(baseline_source, Path::new("."), &lib_refs) {
+        let baseline_main_line = match compile_on_compiler_stack(baseline_source, &lib_paths) {
             Ok(r) => find_main_slot_line(&r.lua_code),
             Err(_) => 0,
         };
@@ -55,23 +78,11 @@ impl ReplState {
             build_source(&self.decls, Some(trimmed))
         };
 
-        // Compile
-        let lib_refs: Vec<&Path> = self.lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
-        // The compiler's nesting-depth limit is calibrated against this
-        // stack size (see mllc::COMPILER_STACK_SIZE) — a smaller stack could
-        // overflow on input the mll CLI handles.
-        let result = std::thread::Builder::new()
-            .stack_size(mllc::COMPILER_STACK_SIZE)
-            .spawn({
-                let source = source.clone();
-                let lib_refs: Vec<std::path::PathBuf> = lib_refs.iter().map(|p| p.to_path_buf()).collect();
-                move || {
-                    let lib_refs: Vec<&Path> = lib_refs.iter().map(|p| p.as_path()).collect();
-                    mllc::compile(&source, Path::new("."), &lib_refs)
-                }
-            })
-            .unwrap()
-            .join();
+        // Compile. Caught rather than resumed: a compiler panic must not
+        // take the REPL session down with it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            compile_on_compiler_stack(&source, &self.lib_paths)
+        }));
 
         let compile_result = match result {
             Ok(Ok(r)) => r,
@@ -274,8 +285,7 @@ fn find_main_slot_line(lua_code: &str) -> usize {
 }
 
 fn show_lua(source: &str, lib_paths: &[String], baseline_main_line: usize) {
-    let lib_refs: Vec<&Path> = lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
-    match mllc::compile(source, Path::new("."), &lib_refs) {
+    match compile_on_compiler_stack(source, lib_paths) {
         Ok(r) => {
             // Skip the runtime+prelude, show from where user code starts.
             // Also strip the entry point boilerplate at the end.

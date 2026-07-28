@@ -25,12 +25,16 @@ pub use embed::EmbedMode;
 /// recursion, and every pass must be able to reach the depth limit — and
 /// report a clean "nested too deeply" diagnostic — without exhausting the
 /// stack. The heaviest frames are the typechecker's expression inference on
-/// an operator spine (`1+1+1+…`), measured at roughly 170 KB per nesting
-/// level in a debug build; the reservation is virtual memory on a single
-/// thread, so a generous size costs nothing until pages are actually touched.
-/// Empirically (debug build, arm64 macOS): the `+`-spine overflows this stack
-/// between 12,000 and 13,000 levels, so MAX_NESTING_DEPTH = 6,000 leaves a
-/// 2x margin.
+/// an operator spine (`1+1+1+…`); a debug build burns roughly 70 KB of stack
+/// per inference level, so an 8-line program like examples/primes_check.mll
+/// (a ~28-level spine) already exceeds a default 2 MB thread. The
+/// reservation is virtual memory on a single thread, so a generous size
+/// costs nothing until pages are actually touched.
+/// Empirically (debug build, arm64 macOS, 2026-07-28, guard lifted): a
+/// `+`-spine of 8,000 terms (~3 inference levels per term) still compiles
+/// on this stack and overflow occurs before 10,000 terms, while
+/// MAX_NESTING_DEPTH = 6,000 admits spines only up to ~2,000 terms — at
+/// least a 4x margin.
 /// Every front-end that calls `compile` (the mll CLI, the REPL, the test
 /// harness) must run it on a thread of this size.
 pub const COMPILER_STACK_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GiB

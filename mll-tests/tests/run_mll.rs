@@ -38,20 +38,42 @@ fn run_mll_file(path: &Path) {
     }
 }
 
-/// Run a test body on a thread with the compiler's calibrated stack.
-/// Any test that calls `mllc::compile` on nontrivial input must go through
-/// this (or `run_mll_file`): the nesting-depth limit assumes
+/// Run `f` on a thread with the compiler's calibrated stack and hand its
+/// value back; a panic in `f` resumes on the caller. Scoped, so `f` may
+/// borrow from the enclosing test.
+fn with_compiler_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| {
+        match std::thread::Builder::new()
+            .stack_size(mllc::COMPILER_STACK_SIZE)
+            .spawn_scoped(s, f)
+            .expect("Failed to spawn compiler thread")
+            .join()
+        {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    })
+}
+
+/// `mllc::compile`, on the compiler's calibrated stack. EVERY compile in this
+/// harness must run on such a stack (via this, `run_mll_file`, or
+/// `on_compiler_stack`): the nesting-depth limit assumes
 /// `mllc::COMPILER_STACK_SIZE`, and libtest worker threads are far smaller —
-/// corpus cases like stress_long_do_200 overflow them in debug builds.
+/// in a debug build even the ~30-level inference spine of the 8-line
+/// examples/primes_check.mll overflows them.
+fn compile(
+    source: &str,
+    dir: &Path,
+    libs: &[&Path],
+) -> Result<mllc::CompileResult, mllc::CompileError> {
+    with_compiler_stack(|| mllc::compile(source, dir, libs))
+}
+
+/// Run a whole test body on the calibrated stack: for tests that do more
+/// around the compile (deep own recursion, `compile_with_options`) or call
+/// `compile` in a tight loop where one spawn should cover all of them.
 fn on_compiler_stack(f: impl FnOnce() + Send + 'static) {
-    let result = std::thread::Builder::new()
-        .stack_size(mllc::COMPILER_STACK_SIZE)
-        .spawn(f)
-        .unwrap()
-        .join();
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
+    with_compiler_stack(f)
 }
 
 macro_rules! mll_test {
@@ -103,11 +125,11 @@ main = do
   putStrLn (show (hmSize m))
 "#;
     let dir = Path::new("tests/cases");
-    let first = mllc::compile(source, dir, &[])
+    let first = compile(source, dir, &[])
         .expect("compile should succeed")
         .lua_code;
     for i in 1..8 {
-        let again = mllc::compile(source, dir, &[])
+        let again = compile(source, dir, &[])
             .expect("compile should succeed")
             .lua_code;
         assert!(
@@ -142,7 +164,7 @@ main = do
   putStrLn (show (frac 3.0 4.0))
   putStrLn (show (flr 17 5))
 "#;
-    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+    let lua = compile(source, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
 
@@ -189,7 +211,7 @@ main = do
   putStrLn (show (sq y))
   putStrLn (show (probe (probe 80002)))
 "#;
-    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+    let lua = compile(source, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
     // The non-trivial argument to the multiply-using `sq` is emitted ONCE
@@ -235,7 +257,7 @@ fn emitted_parens_are_normalized_impl() {
             continue;
         }
         let source = std::fs::read_to_string(&path).expect("read case");
-        let lua = match mllc::compile(&source, dir, &[&lib_path]) {
+        let lua = match compile(&source, dir, &[&lib_path]) {
             Ok(r) => r.lua_code,
             // A case that needs CLI-only setup is not this test's business.
             Err(_) => continue,
@@ -281,7 +303,7 @@ fn emitted_parens_are_normalized_impl() {
     let ffi_source = "modf1 :: Number -> LuaPure \"math.modf\" Number\n\
                       main :: IO ()\n\
                       main = assert (modf1 3.75 == 3.0) \"t\"\n";
-    let lua = mllc::compile(ffi_source, dir, &[])
+    let lua = compile(ffi_source, dir, &[])
         .expect("ffi probe must compile")
         .lua_code;
     assert!(
@@ -302,7 +324,7 @@ fn where_group_calls_not_forced() {
 fn where_group_calls_not_forced_impl() {
     let source = std::fs::read_to_string("tests/cases/where_group_mutual.mll")
         .expect("read where_group_mutual.mll");
-    let lua = mllc::compile(&source, Path::new("tests/cases"), &[])
+    let lua = compile(&source, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
     for forbidden in ["__force(go)", "__force(swap)"] {
@@ -340,8 +362,8 @@ fn constructor_dce_unused_data_adds_nothing() {
         base
     );
     let dir = Path::new("tests/cases");
-    let a = mllc::compile(base, dir, &[]).expect("base must compile").lua_code;
-    let b = mllc::compile(&with_dead, dir, &[])
+    let a = compile(base, dir, &[]).expect("base must compile").lua_code;
+    let b = compile(&with_dead, dir, &[])
         .expect("dead-data program must compile")
         .lua_code;
     assert!(
@@ -379,7 +401,7 @@ fn constructor_dce_keeps_metadata_for_flow_through_types() {
                   \x20 } deriving (LuaDict)\n\
                   export readPort :: Config -> Int\n\
                   readPort c = port c\n";
-    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+    let lua = compile(source, Path::new("tests/cases"), &[])
         .expect("flow-through program must compile")
         .lua_code;
     // The accessor keeps the LuaDict keyed layout (metadata survived)...
@@ -424,7 +446,7 @@ g x = let y = error "boom"
 main :: IO ()
 main = putStrLn (show (f 10 + g False))
 "#;
-    let lua = mllc::compile(source, Path::new("tests/cases"), &[])
+    let lua = compile(source, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
     // n is bound to a literal: strict assignment, no thunk.
@@ -461,7 +483,7 @@ fn exit_builtin_resolves_to_runtime_helper() {
         "main :: IO ()\nmain = exit Normal\n",
         "main :: IO ()\nmain = exit (Err 3)\n",
     ] {
-        let lua = mllc::compile(src, Path::new("tests/cases"), &[])
+        let lua = compile(src, Path::new("tests/cases"), &[])
             .expect("compile should succeed")
             .lua_code;
         assert!(
@@ -498,7 +520,7 @@ fn exit_builtin_resolves_to_runtime_helper() {
 fn compiled_module_carries_mllc_provenance() {
     // A plain program (has main, no exports): stamps present as locals.
     let prog = "main :: IO ()\nmain = putStrLn \"hi\"\n";
-    let lua = mllc::compile(prog, Path::new("tests/cases"), &[])
+    let lua = compile(prog, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
 
@@ -524,7 +546,7 @@ fn compiled_module_carries_mllc_provenance() {
     // An exporting module surfaces the stamps as module properties, so a Lua
     // host can read them from the required table.
     let module = "export answer :: Int\nanswer :: Int\nanswer = 42\n";
-    let lua = mllc::compile(module, Path::new("tests/cases"), &[])
+    let lua = compile(module, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
     assert!(
@@ -551,7 +573,7 @@ fn header_only_root_module_warns_instead_of_silent_empty_output() {
     let src = "module C (addup) where\n\n\
                addup :: Int -> Int -> Int\n\
                addup a b = a + b\n";
-    let result = mllc::compile(src, Path::new("tests/cases"), &[])
+    let result = compile(src, Path::new("tests/cases"), &[])
         .expect("a header-form library must still compile");
 
     // Documented semantics: the header list creates no host surface.
@@ -602,7 +624,7 @@ fn header_only_root_module_warns_instead_of_silent_empty_output() {
 #[test]
 fn bare_library_root_warns_with_generic_guidance() {
     let src = "addup :: Int -> Int -> Int\naddup a b = a + b\n";
-    let result = mllc::compile(src, Path::new("tests/cases"), &[])
+    let result = compile(src, Path::new("tests/cases"), &[])
         .expect("compile should succeed");
     assert_eq!(result.warnings.len(), 1);
     let rendered = format!("{}", result.warnings[0]);
@@ -619,13 +641,13 @@ fn bare_library_root_warns_with_generic_guidance() {
 fn modules_with_a_host_surface_do_not_warn() {
     // Program root.
     let prog = "main :: IO ()\nmain = putStrLn \"hi\"\n";
-    let result = mllc::compile(prog, Path::new("tests/cases"), &[])
+    let result = compile(prog, Path::new("tests/cases"), &[])
         .expect("compile should succeed");
     assert!(result.warnings.is_empty(), "program with main must not warn");
 
     // `export`-keyword module root.
     let module = "export answer :: Int\nanswer :: Int\nanswer = 42\n";
-    let result = mllc::compile(module, Path::new("tests/cases"), &[])
+    let result = compile(module, Path::new("tests/cases"), &[])
         .expect("compile should succeed");
     assert!(result.warnings.is_empty(), "exporting module must not warn");
     assert_eq!(result.exports, vec!["answer".to_string()]);
@@ -635,7 +657,7 @@ fn modules_with_a_host_surface_do_not_warn() {
     let importer = "import ExportHelper\n\n\
                     main :: IO ()\n\
                     main = putStrLn (show (publicFn 4))\n";
-    let result = mllc::compile(importer, Path::new("tests/cases"), &[])
+    let result = compile(importer, Path::new("tests/cases"), &[])
         .expect("compile should succeed");
     assert!(
         result.warnings.is_empty(),
@@ -660,7 +682,7 @@ fn run_mll_file_with_lib(path: &Path) {
                 .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
 
             let source_dir = path.parent().unwrap_or(Path::new("."));
-            let lua_code = match mllc::compile(&source, source_dir, &[&lib_path]) {
+            let lua_code = match compile(&source, source_dir, &[&lib_path]) {
                 Ok(r) => r.lua_code,
                 Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
             };
@@ -1119,7 +1141,7 @@ fn string_escape_above_byte_range_is_rejected() {
 main :: IO ()
 main = putStrLn "\256"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -1153,7 +1175,7 @@ fn string_vs_list_mismatch_note_explains_the_design() {
 main :: IO ()
 main = putStrLn ("a" ++ "b")
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -1192,7 +1214,7 @@ data P = P { x :: Int } deriving (FromJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'FromJSON'"),
@@ -1215,7 +1237,7 @@ data H = H { hop :: Int -> Int } deriving (FromJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'FromJSON' for 'H'"),
@@ -1241,7 +1263,7 @@ data Box a = Box a deriving (FromJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'FromJSON' for 'Box'"),
@@ -1266,7 +1288,7 @@ data Holder = Holder { inner :: Plain } deriving (FromJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'FromJSON' for 'Holder'"),
@@ -1289,7 +1311,7 @@ data T = A { tag :: String } | B deriving (FromJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'FromJSON' for 'T'") && msg.contains("tag"),
@@ -1310,7 +1332,7 @@ data P = P { x :: Int } deriving (ToJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'ToJSON'"),
@@ -1333,7 +1355,7 @@ data H = H { hop :: Int -> Int } deriving (ToJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'ToJSON' for 'H'"),
@@ -1358,7 +1380,7 @@ data Holder = Holder { inner :: Plain } deriving (ToJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'ToJSON' for 'Holder'"),
@@ -1384,7 +1406,7 @@ data Box a = Box a deriving (ToJSON)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'ToJSON' for 'Box'"),
@@ -1410,7 +1432,7 @@ data B = Ok String | Worse
 main :: IO ()
 main = putStrLn "should not compile"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Duplicate data constructor 'Ok'"),
@@ -1435,7 +1457,7 @@ newtype Wrap = Int
 main :: IO ()
 main = putStrLn "should not compile"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Duplicate data constructor 'Wrap'"),
@@ -1457,7 +1479,7 @@ data Foo = Err Int | Other
 main :: IO ()
 main = exit (Err 1)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify") && msg.contains("ExitValue") && msg.contains("Foo"),
@@ -1494,7 +1516,7 @@ main :: IO ()
 main = print (vhead VNil)
 "#
     );
-    match mllc::compile(&source, Path::new("."), &[]) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify") && msg.contains("''S") && msg.contains("''Z'"),
@@ -1525,7 +1547,7 @@ main :: IO ()
 main = print (vlen (vtail VNil))
 "#
     );
-    match mllc::compile(&source, Path::new("."), &[]) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify") && msg.contains("''S") && msg.contains("''Z'"),
@@ -1550,7 +1572,7 @@ main :: IO ()
 main = putStrLn "should not compile"
 "#
     );
-    match mllc::compile(&source, Path::new("."), &[]) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify") && msg.contains("''S 'Z'") && msg.contains("''Z'"),
@@ -1577,7 +1599,7 @@ main :: IO ()
 main = putStrLn "should not compile"
 "#
     );
-    match mllc::compile(&source, Path::new("."), &[]) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify") && msg.contains("''Z'") && msg.contains("''S 'Z'"),
@@ -1606,7 +1628,7 @@ data D = D {{ a as "k" :: Int, b as "k" :: Int }}
 main :: IO ()
 main = pure ()
 "#, class);
-        match mllc::compile(&source, Path::new("."), &[lib]) {
+        match compile(&source, Path::new("."), &[lib]) {
             Err(e) => {
                 let msg = format!("{}", e);
                 assert!(msg.contains(&format!("Cannot derive '{}' for 'D'", class))
@@ -1631,7 +1653,7 @@ data D = D {{ a as "" :: Int }}
 main :: IO ()
 main = pure ()
 "#, class);
-        match mllc::compile(&source, Path::new("."), &[lib]) {
+        match compile(&source, Path::new("."), &[lib]) {
             Err(e) => {
                 let msg = format!("{}", e);
                 assert!(msg.contains(&format!("Cannot derive '{}' for 'D'", class))
@@ -1659,7 +1681,7 @@ data T = A {{ kind as "tag" :: String }} | B
 main :: IO ()
 main = pure ()
 "#, class);
-        match mllc::compile(&source, Path::new("."), &[lib]) {
+        match compile(&source, Path::new("."), &[lib]) {
             Err(e) => {
                 let msg = format!("{}", e);
                 assert!(msg.contains(&format!("Cannot derive '{}' for 'T'", class))
@@ -1692,7 +1714,7 @@ main = do
     assert (encodeToJSON (A "z") == "{\"tag\":\"A\",\"kind\":\"z\"}") "renamed-away tag field encodes"
     assert (rt (A "z")) "renamed-away tag field round-trips"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+    let lua_code = compile(source, Path::new("."), &[lib])
         .expect("a `tag` field renamed to another JSON key should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -1715,7 +1737,7 @@ data D = A as "x" | B as "x"
 main :: IO ()
 main = pure ()
 "#, class);
-        match mllc::compile(&source, Path::new("."), &[lib]) {
+        match compile(&source, Path::new("."), &[lib]) {
             Err(e) => {
                 let msg = format!("{}", e);
                 assert!(msg.contains(&format!("Cannot derive '{}' for 'D'", class))
@@ -1741,7 +1763,7 @@ data D = A as "B" | B
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'FromJSON' for 'D'")
@@ -1764,7 +1786,7 @@ data D = A as "" | B
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'ToJSON' for 'D'") && msg.contains("empty string"),
@@ -1790,7 +1812,7 @@ data Foo = Foo as "foo"
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Constructor 'Foo' of 'Foo' is renamed with `as \"foo\"`")
@@ -1821,7 +1843,7 @@ data Foo = Foo as "foo"
 main :: IO ()
 main = putStrLn (encodeToJSON Foo)
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+    let lua_code = compile(source, Path::new("."), &[lib])
         .expect("a renamed nullary constructor must compile and be nullary")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -1843,7 +1865,7 @@ data W = W Int as "w"
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'ToJSON' for 'W'")
@@ -1865,7 +1887,7 @@ data Foo = Foo as 5
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Expected a string literal after 'as' in constructor 'Foo'"),
@@ -1898,7 +1920,7 @@ encAcct a = encodeToJSON a
 main :: IO ()
 main = pure ()
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+    let lua_code = compile(source, Path::new("."), &[lib])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -1954,7 +1976,7 @@ below a b = a < b
 main :: IO ()
 main = pure ()
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[lib])
+    let lua_code = compile(source, Path::new("."), &[lib])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -2003,7 +2025,7 @@ data D = User | Other as "User" deriving (LuaDict)
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'LuaDict' for 'D'")
@@ -2023,7 +2045,7 @@ data D = A as "" | B deriving (LuaDict)
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot derive 'LuaDict' for 'D'")
@@ -2049,7 +2071,7 @@ main = case (decodeJSON "1" :: Either String Q) of
     Left e -> putStrLn e
     Right _ -> putStrLn "ok"
 "#;
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("No instance") && msg.contains("FromJSON") && msg.contains("Q"),
@@ -2081,7 +2103,7 @@ main = do
     putStrLn (cname [1, 2, 3])
     putStrLn (cname (Just True))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Ok(r) => {
             assert!(r.lua_code.contains("list") && r.lua_code.contains("maybe"),
                 "instance bodies should be present in the output");
@@ -2147,7 +2169,7 @@ instance Show a => Show (Tree a) where
 main :: IO ()
 main = putStrLn (show (Leaf MkBlob))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("No instance for 'Show (Tree Blob)'"),
@@ -2176,7 +2198,7 @@ instance Show b => Show (Tree a) where
 main :: IO ()
 main = putStrLn (show (Leaf 1))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("does not appear in the instance head"),
@@ -2195,7 +2217,7 @@ data Foo = Foo
 main :: IO ()
 main = putStrLn (show (Foo == Foo))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("No instance"), "Expected 'No instance' error, got: {}", msg);
@@ -2211,7 +2233,7 @@ fn unqualified_conflicting_import_rejected() {
     // qualified import — not a baffling unification error.
     let lib = Path::new("../lib");
     let source = "import Data.Map\nmain :: IO ()\nmain = putStrLn \"hi\"\n";
-    match mllc::compile(source, Path::new("."), &[lib]) {
+    match compile(source, Path::new("."), &[lib]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("unqualified") && msg.contains("import qualified"),
@@ -2222,7 +2244,7 @@ fn unqualified_conflicting_import_rejected() {
     }
     // The qualified form must still compile.
     let ok = "import qualified Data.Map as M\nmain :: IO ()\nmain = putStrLn (show (M.size M.empty))\n";
-    assert!(mllc::compile(ok, Path::new("."), &[lib]).is_ok(),
+    assert!(compile(ok, Path::new("."), &[lib]).is_ok(),
         "qualified Data.Map import should compile");
 }
 
@@ -2234,7 +2256,7 @@ data Secret = Secret Int
 main :: IO ()
 main = putStrLn (show (Secret 42))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("No instance"), "Expected 'No instance' error, got: {}", msg);
@@ -2256,7 +2278,7 @@ data Foo = Foo { a :: String, b :: Boolean } deriving (Show)
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Unknown type 'Boolean'"),
@@ -2281,7 +2303,7 @@ f x = 1
 main :: IO ()
 main = putStrLn "hi"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Unknown type 'Boolean'"),
@@ -2307,7 +2329,7 @@ data Foo = Foo { a :: String, b :: Baz } deriving (Show)
 main :: IO ()
 main = putStrLn (show (Foo { a = "x", b = Baz 1 }))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("No instance"),
@@ -2329,7 +2351,7 @@ fn ambiguous_show_nothing_rejected() {
 main :: IO ()
 main = putStrLn (show Nothing)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Ambiguous type"),
@@ -2347,7 +2369,7 @@ fn ambiguous_show_nothing_in_larger_expr_rejected() {
 main :: IO ()
 main = print $ show 3 <> "hi" <> show Nothing
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Ambiguous type"),
@@ -2379,7 +2401,7 @@ run = case (decodeJSON "{}" :: Either String Foo) of
         Right r -> print r
         Left e  -> error $ "oops " <> e <> " (" <> badMap <> ")"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify 'HashMap String String' with 'String'"),
@@ -2411,7 +2433,7 @@ run = putStrLn msg
             Right r -> show r
             Left e  -> "oops " <> e <> True
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify 'String' with 'Bool'"),
@@ -2435,7 +2457,7 @@ main :: IO ()
 main = putStrLn msg
   where msg = show Nothing
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Ambiguous type"),
@@ -2460,7 +2482,7 @@ f n = putStrLn (n <> "x")
 main :: IO ()
 main = f 1
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify 'Int' with 'String'"),
@@ -2485,7 +2507,7 @@ main = do
     putStrLn (show (Nothing :: Maybe Int))
     putStrLn (show (Just (5 :: Int)))
 "#;
-    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+    assert!(compile(source, Path::new("."), &[]).is_ok(),
         "show at concrete types should compile");
 }
 
@@ -2504,7 +2526,7 @@ main = do
     putStrLn (f (Nothing :: Maybe Int))
     putStrLn (f (42 :: Int))
 "#;
-    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+    assert!(compile(source, Path::new("."), &[]).is_ok(),
         "polymorphic Show-constrained function should compile");
 }
 
@@ -2523,7 +2545,7 @@ main :: IO ()
 main = putStrLn x
   where x = True && "hello"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Type error"),
@@ -2550,7 +2572,7 @@ main :: IO ()
 main = putStrLn x
   where x = True
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify") && msg.contains("where-binding 'x'"),
@@ -2573,7 +2595,7 @@ main :: IO ()
 main = putStrLn (go True)
   where go n = n && "oops"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("where-binding 'go'"),
@@ -2593,7 +2615,7 @@ main :: IO ()
 main = putStrLn (f True)
   where f (Just x) = x
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("where-binding 'f'"),
@@ -2617,7 +2639,7 @@ main = putStrLn (x <> y)
   where x = True && "a"
         y = notInScope 3
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("where-binding 'x'"),
@@ -2661,7 +2683,7 @@ main = do
   putStrLn (classify 50)
   putStrLn (classify 500)
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("valid where bindings must still compile").lua_code;
     let lua = mlua::Lua::new();
     lua.load(&lua_code).set_name("valid_where").exec()
@@ -2687,7 +2709,7 @@ main = do
     putStrLn (f ([] :: [Int]))
     putStrLn (f (Nothing :: Maybe Int))
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
 
@@ -2726,7 +2748,7 @@ poly x = show x
 main :: IO ()
 main = putStrLn (poly (5 :: Int))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("No instance for 'Show a'") && msg.contains("Add it to the context"),
@@ -2746,7 +2768,7 @@ same x y = x == y
 main :: IO ()
 main = putStrLn (show (same (1 :: Int) 2))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("No instance for 'Eq a'"),
@@ -2766,7 +2788,7 @@ f = show
 main :: IO ()
 main = putStrLn (f (5 :: Int))
 "#;
-    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+    assert!(compile(source, Path::new("."), &[]).is_ok(),
         "a declared `Show a =>` context should be accepted");
 }
 
@@ -2781,7 +2803,7 @@ same x y = x == y
 main :: IO ()
 main = putStrLn (show (same (1 :: Int) 2))
 "#;
-    assert!(mllc::compile(source, Path::new("."), &[]).is_ok(),
+    assert!(compile(source, Path::new("."), &[]).is_ok(),
         "an Ord context should satisfy a wanted Eq constraint via the superclass");
 }
 
@@ -2795,7 +2817,7 @@ foo :: Int
 main :: IO ()
 main = print foo
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("no accompanying definition"),
@@ -2815,7 +2837,7 @@ sqrtNum :: Number -> LuaPure "math.sqrt" Number
 main :: IO ()
 main = print (sqrtNum 4.0)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Ok(_) => {}
         Err(e) => panic!("FFI signature without body should compile, got error: {}", e),
     }
@@ -2841,7 +2863,7 @@ dbQuery :: LuaDict b => Db -> (a -> [b] -> a) -> a -> String -> [b] -> LuaIO ":q
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Ok(_) => {}
         Err(e) => panic!(
             "constrained body-less FFI import should compile, got error: {}", e),
@@ -2859,7 +2881,7 @@ instance Show Int where
 main :: IO ()
 main = putStrLn "ok"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Orphan instance"), "Expected 'Orphan instance' error, got: {}", msg);
@@ -2879,7 +2901,7 @@ main :: IO ()
 main = putStrLn (show (privateFn 5))
 "#;
     let cases_dir = Path::new("tests/cases");
-    match mllc::compile(source, cases_dir, &[]) {
+    match compile(source, cases_dir, &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("not exported"), "Expected 'not exported' error, got: {}", msg);
@@ -2897,7 +2919,7 @@ main :: IO ()
 main = putStrLn (show (publicFn 5))
 "#;
     let cases_dir = Path::new("tests/cases");
-    match mllc::compile(source, cases_dir, &[]) {
+    match compile(source, cases_dir, &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("not exported"), "Expected 'not exported' error, got: {}", msg);
@@ -2917,7 +2939,7 @@ f x = x
 main :: IO ()
 main = print (f "hello")
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Cannot unify"), "Expected 'Cannot unify' error, got: {}", msg);
@@ -2932,7 +2954,7 @@ fn undefined_variable_rejected() {
 main :: IO ()
 main = print noSuchThing
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Unbound variable"), "Expected 'Unbound variable' error, got: {}", msg);
@@ -2953,7 +2975,7 @@ f x = "hello"
 main :: IO ()
 main = print (f 1)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -2973,7 +2995,7 @@ fn wrong_arity_rejected() {
 main :: IO ()
 main = print (not True False)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -2997,7 +3019,7 @@ describeRed Red = "red"
 main :: IO ()
 main = putStrLn (describeRed Red)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("Non-exhaustive"), "Expected 'Non-exhaustive' error, got: {}", msg);
@@ -3022,7 +3044,7 @@ instance Show Foo where
 main :: IO ()
 main = putStrLn (show Foo)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3048,7 +3070,7 @@ instance Show Foo where
 main :: IO ()
 main = putStrLn (show Foo)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3071,7 +3093,7 @@ data Foo = Foo
 main :: IO ()
 main = putStrLn "ok"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3093,7 +3115,7 @@ type Loop = [Loop]
 main :: IO ()
 main = putStrLn "ok"
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(_) => { /* any error is acceptable */ }
         // Known gap: recursive type aliases may not be detected
         Ok(_) => { /* known gap: recursive type alias not rejected */ }
@@ -3110,7 +3132,7 @@ fn unknown_type_rejected() {
 main :: IO ()
 main = print (NoSuchCtor 42)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3136,7 +3158,7 @@ fst2 (Pair x) = x
 main :: IO ()
 main = print (fst2 (Pair 1 2))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3159,7 +3181,7 @@ answer = "forty-two"
 main :: IO ()
 main = print answer
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3183,7 +3205,7 @@ f x
 main :: IO ()
 main = print (f 5)
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3209,7 +3231,7 @@ useFoo (MkThing n) = n
 main :: IO ()
 main = print (useFoo (MkThing 42))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3235,7 +3257,7 @@ instance Show Wrapper where
 main :: IO ()
 main = putStrLn (show (Wrapper 42))
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3257,7 +3279,7 @@ main = do
     assert (x == 10) "bind return"
     putStrLn "ok"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3280,7 +3302,7 @@ main = do
     let x = undefined :: Int
     print x
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("undefined should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3327,7 +3349,7 @@ fn examples_compile() {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
         let source_dir = path.parent().unwrap_or(Path::new("."));
-        match mllc::compile(&source, source_dir, &[lib_path]) {
+        match compile(&source, source_dir, &[lib_path]) {
             Ok(_) => {}
             Err(e) => failures.push(format!("{}: {}", stem, e)),
         }
@@ -3356,7 +3378,7 @@ fn examples_curated_compile() {
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
         let source_dir = path.parent().unwrap_or(Path::new("."));
-        if let Err(e) = mllc::compile(&source, source_dir, &[lib, contrib]) {
+        if let Err(e) = compile(&source, source_dir, &[lib, contrib]) {
             failures.push(format!("{}: {}", stem, e));
         }
     }
@@ -3384,7 +3406,7 @@ main = do
   print (unwrap (Box R 5))
   print (unwrap (Box B 5))
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("nullary constructor as pattern arg should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3410,7 +3432,7 @@ dot v = va v * vb v
 main :: IO ()
 main = print (dot (scaleV 2.0 (V 5.0 7.0)))
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3439,7 +3461,7 @@ size (N a b) = size a + size b
 main :: IO ()
 main = assert (size deep == 3) "function with first arg on next line"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("first arg on next line should parse")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3464,7 +3486,7 @@ main :: IO ()
 main = print total
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("shallow multi-line continuation should parse");
     let lua = mlua::Lua::new();
     lua.load(&lua_code.lua_code).set_name("shallow_cont").exec()
@@ -3523,7 +3545,7 @@ main = do
   assert (polyPair == (5, True)) "let-polymorphism preserved"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("recursive lazy where/let values should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3586,7 +3608,7 @@ main = do
   assert (applyTwice (makeAdder 3) 0 == 6) "higher-order lambda param is forced"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("lazy-argument program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3609,7 +3631,7 @@ main = do
   assert (dropWhile (\x -> x > 9) [1, 2, 3] == [1, 2, 3]) "dropWhile none"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("takeWhile/dropWhile program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3652,7 +3674,7 @@ main = do
   putStrLn "ffi list argument marshalling ok"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("ffi list-argument program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3725,7 +3747,7 @@ main = do
   putStrLn "ffi json-decoded string argument ok"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("ffi json-string program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3767,7 +3789,7 @@ main = do
     assert (at 1 xs == 1) "Just 1 stays at index 1"
     putStrLn "ok"
 "#;
-    let lua_code = mllc::compile(src, Path::new("."), &[])
+    let lua_code = compile(src, Path::new("."), &[])
         .expect("compile should succeed").lua_code;
     let lua = mlua::Lua::new();
     lua.load("function at(i, arr) return arr[i] or -1 end")
@@ -3787,7 +3809,7 @@ fn growing_type_family_is_bounded() {
         .stack_size(mllc::COMPILER_STACK_SIZE)
         .spawn(|| {
             let src = "type family Grow x where\n  Grow x = Grow (Maybe x)\nf :: Grow Int -> Int\nf _ = 0\nmain :: IO ()\nmain = putStrLn \"x\"\n";
-            match mllc::compile(src, Path::new("."), &[]) {
+            match compile(src, Path::new("."), &[]) {
                 Err(e) => assert!(
                     format!("{}", e).contains("did not terminate"),
                     "expected a type-family divergence error, got: {}", e),
@@ -3834,7 +3856,7 @@ main = do
   putStrLn "ffi maybe-field marshalling ok"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("ffi maybe-field program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3895,7 +3917,7 @@ main = do
   putStrLn "ffi hashmap-structured-values ok"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("ffi hashmap program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -3981,7 +4003,7 @@ main = do
   putStrLn "ffi arg-marshal round-trip parity ok"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("ffi parity program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4046,7 +4068,7 @@ main =
       putStrLn "ffi json-constructed record ok"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("json-constructed record program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4116,7 +4138,7 @@ main = do
   assert (fLet == 42) "let var shadows prelude fn"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("shadowing program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4151,7 +4173,7 @@ main = do
   assert (take 3 (fst (span (\x -> x < 100) [1 ..])) == [1, 2, 3]) "span lazy prefix"
 "#;
     let lib_path = Path::new("../lib");
-    let lua_code = mllc::compile(source, Path::new("."), &[lib_path])
+    let lua_code = compile(source, Path::new("."), &[lib_path])
         .expect("prelude list helpers should compile without import")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4176,7 +4198,7 @@ main = do
   assert (show ((1 :: Int), ([] :: [Int])) == "(1,[])") "tuple with empty list element"
   assert (show ((Just (1 :: Int)), (Nothing :: Maybe Int)) == "(Just 1,Nothing)") "tuple of Maybe elements"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4204,7 +4226,7 @@ main :: IO ()
 main = case mkPair 3 of
          Pair (a, b) -> assert (a + b == 7) "nested pattern forces thunked field"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4238,7 +4260,7 @@ sumList :: [Int] -> Int
 sumList [] = 0
 sumList (x:xs) = x + sumList xs
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("first-class accessors should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4290,7 +4312,7 @@ fn example_lambda_reduction() {
 
 /// Helper: compile MLL source and return a Lua module table
 fn compile_ffi_module(source: &str) -> (mlua::Lua, mlua::Table) {
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("FFI module should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -4312,7 +4334,7 @@ gm :: String -> String -> LuaIterator "string.gmatch" String
 main :: IO ()
 main = mapM_ putStrLn (gm "a b" "%w+")
 "#;
-    match mllc::compile(source, Path::new("."), &[Path::new("../lib")]) {
+    match compile(source, Path::new("."), &[Path::new("../lib")]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("LuaIterator requires the result to be written as an explicit"),
@@ -4349,7 +4371,7 @@ main = do
     assert (map sum (take 2 arrs) == [3, 7]) "each yielded array decoded to a cons list"
     putStrLn "ok"
 "#;
-    let lua_code = mllc::compile(src, Path::new("."), &[])
+    let lua_code = compile(src, Path::new("."), &[])
         .expect("compile should succeed")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -5772,7 +5794,7 @@ type family Mix a where
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -5803,7 +5825,7 @@ type family Bad a where
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -5834,7 +5856,7 @@ bad (Wrap n) = n
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -5874,7 +5896,7 @@ bad = FFalse
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -5902,7 +5924,7 @@ data F a = F (a -> Int) deriving (Functor)
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -5927,7 +5949,7 @@ data W a = W (Either a Int) deriving (Functor)
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -5944,7 +5966,7 @@ main = pure ()
 #[test]
 fn prelude_is_emitted_on_demand() {
     // A trivial program must not carry runtime helpers it never references.
-    let trivial = mllc::compile("main :: IO ()\nmain = putStrLn \"hi\"\n", Path::new("."), &[])
+    let trivial = compile("main :: IO ()\nmain = putStrLn \"hi\"\n", Path::new("."), &[])
         .expect("trivial should compile")
         .lua_code;
     assert!(!trivial.contains("show_HashMap"), "unused hashmap show must be shaken out");
@@ -5953,7 +5975,7 @@ fn prelude_is_emitted_on_demand() {
 
     // But a program that uses a feature must still carry its runtime, or it
     // would break at runtime — reachability, not blanket removal.
-    let uses_list_show = mllc::compile("main :: IO ()\nmain = print [1, 2, 3 :: Int]\n", Path::new("."), &[])
+    let uses_list_show = compile("main :: IO ()\nmain = print [1, 2, 3 :: Int]\n", Path::new("."), &[])
         .expect("list-show program should compile")
         .lua_code;
     assert!(uses_list_show.contains("__mll_show_list"), "list show must be present when used");
@@ -5966,7 +5988,7 @@ fn prelude_is_emitted_on_demand() {
 #[test]
 fn dead_code_is_eliminated() {
     let fn_count = |src: &str| -> usize {
-        mllc::compile(src, Path::new("."), &[])
+        compile(src, Path::new("."), &[])
             .expect("should compile")
             .lua_code
             .matches("= function").count()
@@ -5994,7 +6016,7 @@ fn dead_code_is_eliminated() {
 // so exec() fails and the test fails (never passes vacuously).
 fn assert_mll(stmts: &str) {
     let src = format!("main :: IO ()\nmain = do\n{stmts}\n");
-    let lua = mllc::compile(&src, Path::new("."), &[])
+    let lua = compile(&src, Path::new("."), &[])
         .unwrap_or_else(|e| panic!("compile failed:\n{e}"))
         .lua_code;
     let l = mlua::Lua::new();
@@ -6083,7 +6105,7 @@ main = do
     let fns = map (\n -> \x -> x + n) [1, 5, 10]
     assert (applyAll fns 42 == [43, 47, 52]) "higher-order curried"
 "#;
-    let lua = mllc::compile(src, Path::new("."), &[]).expect("compile").lua_code;
+    let lua = compile(src, Path::new("."), &[]).expect("compile").lua_code;
     let l = mlua::Lua::new();
     l.load(&lua).set_name("ho_curried").exec().expect("higher-order curried lambda should work");
 }
@@ -6239,7 +6261,7 @@ fn higher_kinded_class_variable_inferred_from_constraint() {
     // And the well-kinded spelling still compiles.
     let src = "f :: Foldable t => t Int -> Int\nf t = sum t\nmain :: IO ()\nmain = print (f [1, 2, 3])\n";
     assert!(
-        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        compile(src, Path::new("."), &[]).is_ok(),
         "well-kinded Foldable signature should compile"
     );
 }
@@ -6268,7 +6290,7 @@ fn kind_class_var_from_superclass_declared_after_is_order_independent() {
     // `Type -> Type` type (Box) is accepted.
     let after = "class Super t => Sub t where\n    marker :: Int\n\nclass Super t where\n    op :: t Int -> Int\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
     assert!(
-        mllc::compile(after, Path::new("."), &[]).is_ok(),
+        compile(after, Path::new("."), &[]).is_ok(),
         "subclass kind must be inferred from a superclass declared LATER (was order-dependent)"
     );
 
@@ -6276,7 +6298,7 @@ fn kind_class_var_from_superclass_declared_after_is_order_independent() {
     // always worked; it must keep working, and both orders must agree.
     let before = "class Super t where\n    op :: t Int -> Int\n\nclass Super t => Sub t where\n    marker :: Int\n\ndata Box a = Box a\n\ninstance Super Box where\n    op (Box n) = n\n\ninstance Sub Box where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n";
     assert!(
-        mllc::compile(before, Path::new("."), &[]).is_ok(),
+        compile(before, Path::new("."), &[]).is_ok(),
         "control: superclass-first ordering must still compile"
     );
 }
@@ -6410,7 +6432,7 @@ fn mappend_on_lists_still_works_after_move() {
     // the source `instance Monoid [a]` (whose body is `xs ++ ys`).
     let src = "main :: IO ()\nmain = putStrLn (show (mappend [1, 2] [3, 4]))\n";
     assert!(
-        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        compile(src, Path::new("."), &[]).is_ok(),
         "mappend on lists must still compile after the instance move"
     );
 }
@@ -6430,7 +6452,7 @@ fn mempty_ambiguity_preserved_after_move() {
         "main :: IO ()\nmain = putStrLn (show (mempty :: [Int]))\n",
     ] {
         assert!(
-            mllc::compile(src, Path::new("."), &[]).is_ok(),
+            compile(src, Path::new("."), &[]).is_ok(),
             "determined mempty should resolve:\n{src}"
         );
     }
@@ -6474,7 +6496,7 @@ fn source_class_method_resolves_when_determined() {
         "class Greet a where\n    greet :: a -> String\ndata Foo = Foo\ninstance Greet Foo where\n    greet _ = \"hi\"\nmain :: IO ()\nmain = putStrLn (greet Foo)\n",
     ] {
         assert!(
-            mllc::compile(src, Path::new("."), &[]).is_ok(),
+            compile(src, Path::new("."), &[]).is_ok(),
             "a determined class-method use must resolve, not be reported ambiguous:\n{src}"
         );
     }
@@ -6500,7 +6522,7 @@ fn non_structural_instance_on_maybe_is_recognized() {
     // list branch, and wrongly reported "No instance").
     let src = "class C a where\n    cname :: a -> String\ninstance C [a] where\n    cname _ = \"list\"\ninstance C (Maybe a) where\n    cname _ = \"maybe\"\nmain :: IO ()\nmain = do\n    putStrLn (cname [1, 2, 3])\n    putStrLn (cname (Just True))\n";
     assert!(
-        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        compile(src, Path::new("."), &[]).is_ok(),
         "instance C (Maybe a) must be recognized"
     );
 }
@@ -6531,7 +6553,7 @@ fn type_family_concrete_reduction_still_works() {
     // AST-to-Ty conversion) must not regress now that the unifier also
     // reduces symbolically.
     let src = "type family Id x where\n    Id x = x\nf :: Id Int -> Int\nf n = n + 1\nmain :: IO ()\nmain = putStrLn (show (f 41))\n";
-    let lua = mllc::compile(src, Path::new("."), &[])
+    let lua = compile(src, Path::new("."), &[])
         .expect("concrete type-family reduction should compile")
         .lua_code;
     let l = mlua::Lua::new();
@@ -6696,7 +6718,7 @@ main :: IO ()\n\
 main = print (vlen v2)\n"
     );
     assert!(
-        mllc::compile(&src, Path::new("."), &[]).is_ok(),
+        compile(&src, Path::new("."), &[]).is_ok(),
         "a well-kinded Nat index must compile"
     );
 }
@@ -6707,7 +6729,7 @@ fn promoted_type_still_usable_as_a_value_type() {
     // `S (S Z)` is still a runtime value of type `Nat`. (Type/kind duality.)
     let src = "data Nat = Z | S Nat\ntoInt :: Nat -> Int\ntoInt Z = 0\ntoInt (S n) = 1 + toInt n\nmain :: IO ()\nmain = print (toInt (S (S Z)))\n";
     assert!(
-        mllc::compile(src, Path::new("."), &[]).is_ok(),
+        compile(src, Path::new("."), &[]).is_ok(),
         "a promoted data type must still work as a value type"
     );
 }
@@ -6729,7 +6751,7 @@ fn promoted_kind_non_gadt_phantom_tag_rejected_but_gadt_pins_it() {
     // The GADT form pins the index's kind and is accepted.
     let gadt = "data Color = Red | Blue\ndata Tagged a where\n    MkTagged :: Int -> Tagged 'Red\nf :: Tagged 'Red -> Int\nf (MkTagged n) = n\nmain :: IO ()\nmain = print (f (MkTagged 7))\n";
     assert!(
-        mllc::compile(gadt, Path::new("."), &[]).is_ok(),
+        compile(gadt, Path::new("."), &[]).is_ok(),
         "a GADT that pins a promoted index must compile"
     );
 }
@@ -6801,7 +6823,7 @@ fn prelude_foldable_generic_allows_monomorphic_redefinition() {
     // user's definition is the one that runs.
     let source =
         "sum :: [Int] -> Int\nsum xs = 999\n\nmain :: IO ()\nmain = putStrLn (show (sum [1, 2, 3]))\n";
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -6851,14 +6873,14 @@ fn prelude_benign_shadowing_still_compiles() {
     // a builtin that no Prelude code depends on (`head`) redefined at a
     // narrower type, GHC-shadow style — the user's definition wins…
     let src = "head :: [Int] -> Int\nhead xs = 0\n\nmain :: IO ()\nmain = print (head [1, 2, 3])\n";
-    let lua = mllc::compile(src, Path::new("."), &[]).expect("head shadow should compile").lua_code;
+    let lua = compile(src, Path::new("."), &[]).expect("head shadow should compile").lua_code;
     let l = mlua::Lua::new();
     l.load(&lua).set_name("head_shadow").exec().expect("head shadow should run");
 
     // …and a Prelude function redefined at a genuinely different (here
     // monomorphic) type, the pattern the FFI-export tests rely on.
     let src = "replicate :: Int -> Int -> [Int]\nreplicate 0 _ = []\nreplicate n x = x : replicate (n - 1) x\n\nmain :: IO ()\nmain = pure ()\n";
-    mllc::compile(src, Path::new("."), &[]).expect("monomorphic replicate should compile");
+    compile(src, Path::new("."), &[]).expect("monomorphic replicate should compile");
 }
 
 // A class constraint with no instance must be rejected at type-check time,
@@ -6925,12 +6947,12 @@ fn valid_show_constraints_still_compile() {
         "p :: Show a => a -> IO ()\np x = putStrLn (show x)\nmain :: IO ()\nmain = p (42 :: Int)\n",
         "main :: IO ()\nmain = print (Just (1 :: Int) == Just 1)\n",
     ] {
-        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+        assert!(compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
     }
 }
 
 fn compile_err(source: &str) -> String {
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
         Err(e) => e.to_string(),
     }
@@ -7026,7 +7048,7 @@ fn non_associative_chains_are_rejected_impl() {
         "main :: IO ()\nmain = print ((1 `elem` [1]) == True)\n",
         "main :: IO ()\nmain = print (((+1) <$> Just 1) == Just 2)\n",
     ] {
-        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+        assert!(compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
     }
 }
 
@@ -7108,7 +7130,7 @@ fn prefix_minus_matches_ghc_impl() {
         "main :: IO ()\nmain = print (map (\\x -> - x * 2) [1, 2])\n",
         "main :: IO ()\nmain = print ((-) 5 2)\n",
     ] {
-        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+        assert!(compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
     }
 }
 
@@ -7201,7 +7223,7 @@ fn section_operand_precedence_impl() {
          main :: IO ()\nmain = print ((.*. 2 .*. 3) 1)\n",
     ] {
         assert!(
-            mllc::compile(src, Path::new("."), &[]).is_ok(),
+            compile(src, Path::new("."), &[]).is_ok(),
             "should compile:\n{src}"
         );
     }
@@ -7227,7 +7249,7 @@ fn conflicting_associativities_impl() {
     // ...and both infixr.
     let ok_r = "infixr 6 <#>\n(<#>) :: String -> String -> String\na <#> b = a <> b\nmain :: IO ()\nmain = putStrLn (\"a\" <#> \"b\" <> \"c\")\n";
     for src in [ok_l, ok_r] {
-        assert!(mllc::compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+        assert!(compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
     }
 }
 
@@ -7240,7 +7262,7 @@ fn imported_infix_operator_is_non_associative_at_import_site() {
 
 fn imported_infix_non_associative_impl() {
     let src = "import FixityOps\nmain :: IO ()\nmain = print (1 ~=~ 2 ~=~ 3)\n";
-    let e = match mllc::compile(src, Path::new("tests/cases"), &[]) {
+    let e = match compile(src, Path::new("tests/cases"), &[]) {
         Ok(_) => panic!("expected compilation to fail, but it succeeded"),
         Err(e) => e.to_string(),
     };
@@ -7628,7 +7650,7 @@ main = do
     if strToInts "hello" == [104, 101, 108, 108, 111]
         then pure () else error "hello codes wrong"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[Path::new("../lib")])
+    let lua_code = compile(source, Path::new("."), &[Path::new("../lib")])
         .expect("strToInts program should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -7649,7 +7671,7 @@ main = do
     print ([[1, 2], []] :: [[Int]])
     print (Nothing :: Maybe Int)
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
 
@@ -7736,7 +7758,7 @@ main = do
         Just _  -> error "note should be Nothing when the host omits it"
     pure ()
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
 
@@ -7807,7 +7829,7 @@ main = do
     print (P Red Green)
     print (MkB (0 - 5))
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
 
@@ -7857,7 +7879,7 @@ main = do
     print [Just (1 :: Int), Nothing, Just 3]
     print (Just (Nothing :: Maybe Int))
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
 
@@ -7896,7 +7918,7 @@ main = do
 
 // Helper: compile + run, capturing `print`/`putStrLn` output lines.
 fn run_capturing_lines(source: &str, name: &str) -> Vec<String> {
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -8016,7 +8038,7 @@ export find :: Int -> Maybe Int
 find 0 = Nothing
 find n = Just (n * 10)
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -8055,14 +8077,14 @@ main = do
 
 fn compile_embedded(source: &str, mode: mllc::EmbedMode) -> String {
     let opts = mllc::CompileOptions { embed_source: Some(mode), ..Default::default() };
-    mllc::compile_with_options(source, Path::new("."), &[], &opts)
+    with_compiler_stack(|| mllc::compile_with_options(source, Path::new("."), &[], &opts))
         .expect("embedding compile should succeed")
         .lua_code
 }
 
 #[test]
 fn embed_comments_round_trip() {
-    let plain = mllc::compile(EMBED_FIXTURE, Path::new("."), &[])
+    let plain = compile(EMBED_FIXTURE, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     // Without embedding, no marker or source variable may leak into the output.
@@ -8083,7 +8105,7 @@ fn embed_comments_round_trip() {
     assert_eq!(extracted, EMBED_FIXTURE, "extraction must be byte-exact");
 
     // Recompiling the extracted source matches a direct compile exactly...
-    let recompiled = mllc::compile(&extracted, Path::new("."), &[])
+    let recompiled = compile(&extracted, Path::new("."), &[])
         .expect("extracted source should recompile")
         .lua_code;
     assert_eq!(recompiled, plain, "recompile must equal a direct compile");
@@ -8096,7 +8118,7 @@ fn embed_comments_round_trip() {
 
 #[test]
 fn embed_var_round_trip() {
-    let plain = mllc::compile(EMBED_FIXTURE, Path::new("."), &[])
+    let plain = compile(EMBED_FIXTURE, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     // The fixture's fake-marker string literal appears in the plain output
@@ -8128,7 +8150,7 @@ fn embed_var_round_trip() {
         .expect("embedded source should be found");
     assert_eq!(mode, mllc::EmbedMode::Var);
     assert_eq!(extracted, EMBED_FIXTURE, "extraction must be byte-exact");
-    let recompiled = mllc::compile(&extracted, Path::new("."), &[])
+    let recompiled = compile(&extracted, Path::new("."), &[])
         .expect("extracted source should recompile")
         .lua_code;
     assert_eq!(recompiled, plain, "recompile must equal a direct compile");
@@ -8189,7 +8211,7 @@ data T = A { x :: Int } | B { y :: Int }
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("LuaDict") && msg.contains("one constructor"),
@@ -8208,7 +8230,7 @@ data P = P Int Int
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("LuaDict") && msg.contains("positional"),
@@ -8282,7 +8304,7 @@ main = do
     expect (acctActive r == True) "decoded unrenamed key"
     pure ()
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
 
@@ -8360,7 +8382,7 @@ data D = D { a as "k" :: Int, b as "k" :: Int }
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("LuaDict") && msg.contains("both map to the Lua key"),
@@ -8381,7 +8403,7 @@ data D = D { a as "b" :: Int, b :: Int }
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("LuaDict") && msg.contains("both map to the Lua key"),
@@ -8405,7 +8427,7 @@ data D = D { a as "k" :: Int }
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("derives none of LuaDict, ToJSON or FromJSON"),
@@ -8427,7 +8449,7 @@ data D = D { a as "" :: Int }
 main :: IO ()
 main = pure ()
 "#;
-    match mllc::compile(source, Path::new("."), &[]) {
+    match compile(source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(msg.contains("LuaDict") && msg.contains("empty string"),
@@ -8439,7 +8461,7 @@ main = pure ()
 
 #[test]
 fn extract_from_plain_lua_rejected() {
-    let plain = mllc::compile(EMBED_FIXTURE, Path::new("."), &[])
+    let plain = compile(EMBED_FIXTURE, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
     match mllc::embed::extract_source(&plain) {
@@ -8471,7 +8493,7 @@ main = if f "a\"b\nc" == 1 && f "x" == 0
          then putStrLn "ok"
          else error "string pattern with escapes matched incorrectly"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("a string pattern containing a quote and a newline must compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -8494,7 +8516,7 @@ main = if field1 (Rec 5) == 5
          then putStrLn "ok"
          else error "field behind a control-character as-key read back wrong"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("an as-key containing \\n and \\t must compile")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -8567,7 +8589,7 @@ main = if floorN 3.7 == 3 && repS "ab" 2 == "abab"
          then putStrLn "ok"
          else error "dotted-path or method-form FFI produced a wrong result"
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("dotted-path and :method FFI targets must keep compiling")
         .lua_code;
     let lua = mlua::Lua::new();
@@ -8589,7 +8611,7 @@ readCfg :: Int -> LuaPure "cfg[\"main\"].stream:read" Int
 export doit :: IO ()
 doit = print (runFirst 1 + readCfg 2)
 "#;
-    mllc::compile(source, Path::new("."), &[])
+    compile(source, Path::new("."), &[])
         .expect("indexed-path and path:method FFI targets must pass validation");
 }
 
@@ -8606,7 +8628,7 @@ doit = print (runFirst 1 + readCfg 2)
 fn compile_on_compiler_stack(source: String) -> Result<mllc::CompileResult, mllc::CompileError> {
     std::thread::Builder::new()
         .stack_size(mllc::COMPILER_STACK_SIZE)
-        .spawn(move || mllc::compile(&source, Path::new("."), &[]))
+        .spawn(move || compile(&source, Path::new("."), &[]))
         .expect("failed to spawn compiler-sized thread")
         .join()
         .expect("the compiler must not crash on deeply nested input")
@@ -8789,7 +8811,7 @@ fn thousand_element_list_literal_still_compiles_and_runs() {
 
 /// Compile expecting a linearity rejection; return the rendered error.
 fn expect_linear_reject(src: &str) -> String {
-    match mllc::compile(src, Path::new("tests/cases"), &[]) {
+    match compile(src, Path::new("tests/cases"), &[]) {
         Ok(_) => panic!(
             "this program violates the %1 (exactly-once) discipline and \
              must NOT compile:\n{}",
@@ -8994,10 +9016,10 @@ fn linear_annotations_erase_to_identical_lua() {
          \x20\x20\x20 print n\n\
          \x20\x20\x20 shred t2\n";
     let without_mult = with_mult.replace("%1 ->", "->");
-    let a = mllc::compile(with_mult, Path::new("tests/cases"), &[])
+    let a = compile(with_mult, Path::new("tests/cases"), &[])
         .expect("the %1 program must compile")
         .lua_code;
-    let b = mllc::compile(&without_mult, Path::new("tests/cases"), &[])
+    let b = compile(&without_mult, Path::new("tests/cases"), &[])
         .expect("the plain-arrow program must compile")
         .lua_code;
     assert!(a == b, "%1 must erase: emitted Lua differs");
@@ -9262,10 +9284,10 @@ fn linear_mult_poly_erases_to_identical_lua() {
          main :: IO ()\n\
          main = print (go (Token 3))\n";
     let without_mult = with_mult.replace("%1 ->", "->").replace("%m ->", "->");
-    let a = mllc::compile(with_mult, Path::new("tests/cases"), &[])
+    let a = compile(with_mult, Path::new("tests/cases"), &[])
         .expect("the %m program must compile")
         .lua_code;
-    let b = mllc::compile(&without_mult, Path::new("tests/cases"), &[])
+    let b = compile(&without_mult, Path::new("tests/cases"), &[])
         .expect("the plain-arrow program must compile")
         .lua_code;
     assert!(a == b, "%m must erase: emitted Lua differs");
@@ -9729,10 +9751,10 @@ fn linear_exactly_once_erases_to_identical_lua() {
          \x20 print (caseBoth (Box (Token 4)) 1)\n\
          \x20 print (f (Token 37))\n";
     let without_mult = with_mult.replace("%1 ->", "->");
-    let a = mllc::compile(with_mult, Path::new("tests/cases"), &[])
+    let a = compile(with_mult, Path::new("tests/cases"), &[])
         .expect("the %1 program must compile")
         .lua_code;
-    let b = mllc::compile(&without_mult, Path::new("tests/cases"), &[])
+    let b = compile(&without_mult, Path::new("tests/cases"), &[])
         .expect("the plain-arrow program must compile")
         .lua_code;
     assert!(a == b, "%1 must erase: emitted Lua differs");
@@ -9751,7 +9773,7 @@ fn linear_exactly_once_erases_to_identical_lua() {
 /// can import LIOLinear.
 fn expect_linear_reject_with_lib(src: &str) -> String {
     let lib_path = Path::new("../lib");
-    match mllc::compile(src, Path::new("tests/cases"), &[lib_path]) {
+    match compile(src, Path::new("tests/cases"), &[lib_path]) {
         Ok(_) => panic!(
             "this program violates the %1 (exactly-once) discipline and \
              must NOT compile:\n{}",
@@ -9837,7 +9859,7 @@ main = do
     putStrLn "MAIN"
     putStrLn (show args)
 "#;
-    let lua_code = mllc::compile(source, Path::new("."), &[])
+    let lua_code = compile(source, Path::new("."), &[])
         .expect("should compile")
         .lua_code;
 
@@ -9938,7 +9960,7 @@ fn run_mll_capture_stdout(sub: &str, file: &str) -> Vec<u8> {
 
             let source_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
             let lib_path = Path::new("../lib").to_path_buf();
-            let lua_code = match mllc::compile(&source, &source_dir, &[&lib_path]) {
+            let lua_code = match compile(&source, &source_dir, &[&lib_path]) {
                 Ok(r) => r.lua_code,
                 Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
             };
