@@ -260,6 +260,7 @@ impl CodeGen {
     ///   the cached value;
     /// - a bare constructor or operator function — a value reference;
     /// - parens/negation over any of those (one duplicated Lua `-`).
+    ///
     /// Anything else (calls, operators over non-trivial operands, tuples —
     /// each emission allocates) is declined; the call site then falls back
     /// to the ordinary call, which shares the argument by construction.

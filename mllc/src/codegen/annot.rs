@@ -838,7 +838,7 @@ impl Engine {
     /// survives a structured rewrite), `None` when the tree is untouched —
     /// the caller's existing engine then still mirrors it.
     pub(super) fn run_structured(
-        stmts: &mut Vec<Stmt>,
+        stmts: &mut [Stmt],
         pass: &mut dyn StructuredPass,
     ) -> Option<Engine> {
         let slots = SlotStores::collect(stmts);
