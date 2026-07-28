@@ -176,8 +176,23 @@ built it alone.
 
 ## Contributing
 
-By submitting a pull request, you agree to license your contribution
-under the MIT License, the same license that covers this project.
+If you are using and/or testing the mata-ll compiler: Thank you! I
+really appreciated it if you sent a quick note letting me know that
+you're using the compiler and for what purpose.
+
+If you find bugs, feel free to open an issue on github.
+
+To discuss feature and architecture ideas, please send e-mail to me
+directly (see git logs for e-mail address)
+
+Please do not send in pull requests. If you would like something
+changed, let's talk about it first.
+
+Notwithstanding the above, by making a contribution, you agree to
+license fully your contribution under the MIT License, the same
+license that covers this project, and you acknowledge that you fully
+own the copyright to your contribution and have the authority to
+license it accordingly.
 
 ## Dependencies
 
