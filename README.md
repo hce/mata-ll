@@ -63,8 +63,10 @@ Specifically:
 * Target Lua 5.4 and LuaJIT; compile to Lua source for safe loading via mlua
 * Use non-strict evaluation; skip thunks only where that provably cannot
   change the result (bottom is never evaluated eagerly)
-* Require no separate runtime; use zero-cost abstractions
-* If zero-cost abstractions don't fully work, use library functions
+* Require no separately installed runtime: emitted files are
+  self-contained. Abstractions are zero-cost where the compiler can
+  prove them away; a small embedded runtime (laziness, IO) and
+  library functions cover the rest
 * Incorporate new type system research where possible and useful
 * Once a stable version is reached, stay backwards compatible
 * Have an easy interface to plain Lua
@@ -75,15 +77,14 @@ Specifically:
 
 ## What's the difference between a runtime and library functions?
 
-A runtime implements core functionality, while a library provides
-auxiliary functionality, still relying on the underlying architecture
-for core functionality.
-
-For example, you cannot implement green threads with a library on Lua,
-because Lua doesn't have green threads. You can, however, implement
-monads with a library on Lua, because Lua does have 1st class
-functions and closures (the core building blocks of monads), while it
-does not have monads.
+A library works within the semantics the language already has:
+monads need only first-class functions and closures, and Lua has
+both. A runtime provides semantics the language lacks, and needs
+the compiler's cooperation, because the emitted code must take a
+different shape: laziness needs thunks and forcing; green threads
+would need compilation to a state machine or inserted yield
+points. mata-ll's runtime is embedded in each emitted file --
+there is nothing to install separately.
 
 ## Why rust, not C
 
