@@ -31,6 +31,55 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Direct-perform IO recursion runs in constant stack and stops forcing
+  `pure` payloads on the way out — with no loop pass needed.** A
+  single-clause IO function's body IS its action ("direct-perform"), but
+  every action terminal used to funnel into
+  `return __mll_run_tail(...)`: a recursive call sat in the runner's
+  ARGUMENT position (one pinned Lua frame per level, stack overflow near
+  1e6 depth on shapes the loop passes declined), and each unwinding
+  frame re-applied the runner, whose `__force` evaluated a thunk `pure`
+  payload GHC never forces (`r <- f 0 undefined` raised where GHC binds
+  the bottom unforced). Two emission changes close both at the source:
+  `case` action terminals now flatten to statements exactly like `if`
+  (guards included), so each branch's `pure e` takes the pure-box
+  convention; and a saturated tail call to the function itself emits
+  bare — `return self(...)`, the exact form Lua's tail-call elimination
+  reclaims the frame for. A 2e6-deep run with every loop pass disabled
+  completes in constant stack on PUC Lua and LuaJIT (pinned). The
+  tailloop pass now claims these bare self-tails (same loops as before),
+  and the performloop pass converts nothing on new output — it stays as
+  a backstop. Non-exhaustive `case` expressions in flattened positions
+  now raise GHC's `Non-exhaustive patterns` error instead of silently
+  yielding `nil`.
+
+- **A first-class `pure e` protects an unsafe payload with the pure box.**
+  The higher-order emission (`fmap f (return e)`, an inlined
+  `id (pure undefined)`) built `function() return <payload> end` with the
+  payload always bare; when that closure reached a forwarding runner, the
+  raw payload thunk escaped to a consumer that forced it — raising where
+  GHC binds the bottom unforced (pinned: first_class_pure_bottom). The
+  payload now takes the same escape decision as an escaping `pure`
+  terminal: provably-safe values stay bare, anything a runner could
+  wrongly force or call crosses in a `__mll_pure` box stripped by exactly
+  one consuming unbox.
+
+- **`undefined` is no longer treated as an already-evaluated value.** The
+  module-level "these prelude names are plain functions, never thunks"
+  concreteness seed wrongly listed `undefined` — which the runtime binds
+  to a THUNK that raises when forced. The claim let `pure undefined`
+  escape bare (the consumer's runner then forced it, raising where GHC
+  9.14.1 prints the program's real output; pinned: case_pure_bottom,
+  if_pure_bottom) and let bindings read it force-free. `undefined` now
+  gets the ordinary lazy treatment: referenced freely, raising only when
+  demanded.
+
+- **`mllc::CompileOptions` gains `disable_opt_passes`** — the
+  `MLL_OPT_DISABLE` pass-skip list as a per-compile option (the
+  environment variable still works and is overridden when the option is
+  set). Lets embedders and the test suite pin unoptimized emission
+  without mutating process-global state.
+
 - **Eta-expanded point-free definitions shed a runtime `__force` call —
   and usually the closure behind it.** A definition like `f = foldr g z`
   (fewer clause parameters than the type has arrows) compiled to

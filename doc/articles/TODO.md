@@ -3,23 +3,30 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Direct-perform IO recursion the performloop pass DECLINES keeps
-      two pre-existing gaps: the frame-per-step depth limit and a
-      `pure`-payload forcing GHC does not do.** Found while building
-      pass 7: the unconverted shape re-applies `__mll_run_tail` once per
-      pinned frame on the way out, and the re-application forces a thunk
-      `pure` payload — `r <- f 1 undefined` (with `f 1 a = f 0 a;
-      f 0 a = pure a` behind a `case`) raised where GHC 9.14.1 binds the
-      bottom unforced (confirmed against runghc BEFORE pass 7 was
-      written; the prediction was exact). Every shape the pass converts
-      now matches GHC (pinned: performloop_pure_bottom) and runs in
-      constant stack; a shape its terminal vocabulary declines — a
-      bare-name or unknown-call terminal it cannot prove the runner
-      passes through unchanged, an action-builder hybrid — keeps both
-      the ~1e6 depth limit and the forcing. Closing the remainder wants
-      either stamp-backed terminal facts (the effect bits' first real
-      consumer) or a generation-side change to the direct-perform tail
-      emission.
+- [ ] **Direct-perform bare tails, stages 2–3: interprocedural
+      classification, then performloop retirement.** Stage 1 (2026-07-28,
+      see Completed) fixed the direct-perform tail emission at the
+      generation site: SELF tails are bare Lua tail calls and case
+      terminals flatten, so the frame-per-step depth limit and the
+      runner's `pure`-payload forcing are gone for self-recursion — with
+      no loop pass needed. What remains is interprocedural: a tail call
+      to a DIFFERENT direct-perform function (`f`↔`g` mutual recursion,
+      sed's fn142↔fn143) still rides `__mll_run_tail`'s argument
+      position, one pinned frame per crossing. Stage 2: a module-level
+      classification pre-pass that records which emitted functions are
+      direct-perform, so any saturated tail call to a KNOWN
+      direct-perform module-local callee — not just self — emits bare;
+      that closes mutual recursion. Stage 3: retire performloop after a
+      corpus sweep confirms zero conversions on stage-2 output (stage 1
+      already measures zero conversions corpus-wide; the pass stays as a
+      backstop until the sweep is repeated over stage 2, and its
+      hand-built-tree unit tests keep pinning the old shapes until the
+      pass itself is deleted). Also worth taking along: tailloop declines
+      a body whose pattern chain keeps the trailing
+      `error("Non-exhaustive patterns")` (coverage unproven — huffman's
+      3-arm list match, basic's fn200), leaving bare TCO instead of a
+      loop; teaching the chain builder or tailloop that shape recovers
+      the loop form for those functions.
 
 - [ ] **Lua-AST optimization layer, structured-pass tier (remaining).**
       The foundation AND all three loop passes are COMPLETE (see
@@ -61,6 +68,46 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Direct-perform IO tails, stage 1: case terminals flatten and
+      saturated self tails emit bare Lua tail calls** (2026-07-28;
+      codegen/action.rs, pattern.rs, function.rs, module.rs). The
+      single-clause direct-perform emission had one decision causing two
+      GHC deviations: every non-`pure` terminal funneled into
+      `return __mll_run_tail(e)`, so (a) a self call sat in the runner's
+      ARGUMENT position — one pinned frame per recursion level, ~1e6
+      depth limit — and (b) each unwinding frame re-applied the runner,
+      whose `__force` evaluated a thunk `pure` payload GHC never forces.
+      Now: `case` terminals flatten at statement level exactly like `if`
+      (via the pattern emitter's new `tails` mode, guards included), so
+      each branch's `pure e` goes through the box convention; and a
+      saturated tail call to SELF — known for free while emitting the
+      direct-perform arm — returns bare (`return self(...)`), the exact
+      form Lua's tail-call elimination reclaims, sound by the
+      one-root-application invariant now documented at the runtime's
+      runner contract. Two-level builders (multi-clause IO, ST) keep
+      their runner: for them it performs. En route the probes exposed a
+      third gate with the same symptom: the module-level concrete-vars
+      seed listed `undefined` — a runtime THUNK — among "plain local
+      functions", so `pure undefined` escaped BARE and the consumer
+      forced it; case-flattening alone did NOT close the non-recursive
+      probe until that seed entry was removed (the deviation existed in
+      the `if` spelling too, and both are fixed and pinned:
+      case_pure_bottom, if_pure_bottom). The post-flattening audit found
+      one remaining conduit for the first-class pure-suspension closure
+      (expr.rs's return/pure arm) into a forwarding-runner argument:
+      inlining (`g n = id (pure undefined)` — live, runghc-confirmed);
+      that closure's payload now takes the same pure_action_ast escape
+      decision, so an unsafe payload crosses boxed (pinned:
+      first_class_pure_bottom). Depth is pinned optimized and
+      raw (perform_bare_tco_deep at 2e6 with the loop passes disabled via
+      the new `CompileOptions::disable_opt_passes`, PUC 5.5 + LuaJIT);
+      performloop now converts NOTHING corpus-wide (tailloop claims the
+      flattened self-tails) and stays as a backstop with its unit tests
+      untouched until stage 3. Corpus swept: 389/408 files re-emitted
+      (346 comment-only), every hunk reviewed, A/B-executed
+      byte-identical except path/line/timing/randomness; goldens
+      re-pinned byte-identical; DIVERGENCES.md still empty.
 
 - [x] **Eta-expanded callees no longer carry a grouping `__force` that is
       really a paren** (codegen/function.rs eta-expansion callee). Found
