@@ -3,25 +3,33 @@ MATA-LL TODO
 
 ## Planned — top priority
 
+- [ ] **Direct-perform IO self-recursion overflows the stack at ~1e6
+      depth — pre-existing, found by the ioloop pass's gates.** A
+      single-clause IO function whose OUTER body tail is
+      `return __mll_run_tail(self(…))` with effects at call time (sed's
+      fn102, basic's REPL loop) recurses one Lua frame per step today and
+      overflows at 1e6 on both PUC 5.5 and LuaJIT (verified; the common
+      two-level shape is fine and constant-stack). The ioloop pass's
+      repeat-safe gate declines this shape by design. A follow-up
+      structured pass (tailloop mechanics plus a run-tail-idempotence
+      argument) would convert it to a loop and fix the overflow. This is
+      a correctness item, not just perf.
+
 - [ ] **Lua-AST optimization layer, structured-pass tier (remaining).**
-      The foundation AND the first structured pass are COMPLETE (see
-      Completed: annotation layer + engine + `__force`-collapse peephole;
-      self-tail-call → loop conversion with the StructuredPass engine
-      extension). Remaining, on the same annotation/justification API:
-      (1) loop-invariant / capture-free closure hoisting (syntactic
-      backstop for the FNEW JIT-killer class). Later candidates:
-      liveness-based local-slot reuse; IO self-loops — the tail-call pass
-      leaves `return __mll_run_tail(<self>(…))` untouched (the self-call
-      is not in callee tail position), which is exactly the tracker's hot
-      shape, so converting the IO run-loop form is where the next
-      measurable win would come from. Per-pass verification discipline
-      stays: corpus byte-diff (empty or reviewed), tracker decode as the
-      semantic + perf canary, `codegen_is_deterministic` green, stamp
-      refutation over the final tree. The engine's known limit, accepted
-      at design time: the no-stale-annotations guarantee holds over the
-      closed rewrite vocabulary — a structured pass that needs a new
-      rewrite form carries an engine-side proof obligation (relocated bug
-      surface, not eliminated); the tail-call pass paid it (WhileTrue /
+      The foundation AND both loop passes are COMPLETE (see Completed:
+      annotation layer + engine + `__force`-collapse peephole;
+      self-tail-call → loop; IO self-loop conversion). Remaining, on the
+      same annotation/justification API: (1) loop-invariant /
+      capture-free closure hoisting (syntactic backstop for the FNEW
+      JIT-killer class). Later candidate: liveness-based local-slot
+      reuse. Per-pass verification discipline stays: corpus byte-diff
+      (empty or reviewed), tracker decode as the semantic + perf canary,
+      `codegen_is_deterministic` green, stamp refutation over the final
+      tree. The engine's known limit, accepted at design time: the
+      no-stale-annotations guarantee holds over the closed rewrite
+      vocabulary — a structured pass that needs a new rewrite form
+      carries an engine-side proof obligation (relocated bug surface,
+      not eliminated); the tail-call pass paid it (WhileTrue /
       MultiAssign / ReturnNone / Goto / Label entered the vocabulary with
       engine-owned validation). Bytecode generation was considered and
       dropped 2026-07-27 (format unstable by design, hardened hosts load
@@ -57,6 +65,41 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **IO self-loop conversion — structured-tier pass 6, the tracker's
+      hot shape** (codegen/ioloop.rs, new; committed 5dc0312). The
+      two-level IO emission (build-time dispatch returning per-branch
+      action closures; closures end in `return __mll_run_tail(self(…))`)
+      paid one closure allocation (LuaJIT's FNEW trace-killer), two calls
+      and a runner dispatch per self-recursive step. Converted shape: one
+      `_lp` closure whose `while true` re-dispatches (params renamed to
+      per-iteration copies), splices the branch closure bodies, and turns
+      each tail self site into a simultaneous parameter update — followed
+      by the ORIGINAL body verbatim with only branch-closure returns
+      redirected to `_lp`, so every build-time force, pattern test and
+      raise is unchanged: `seq (f undefined) ()` raises at build before
+      and after, confirmed against GHC first and pinned as an executed
+      oracle case (ioloop_seq_parity). The first iteration's re-dispatch
+      repeats only pure, memoized work, enforced (not assumed) by a
+      repeat-safe vocabulary gate — names/literals/indexing/operators/
+      construction, idempotent cell-memoizers, pure allocators; Raw,
+      runner calls or unknown callees decline the conversion. Box
+      convention preserved verbatim (pinned by ioloop_box); effect order
+      identical; other-function tail forwards stay proper tail calls out
+      of the loop. Mechanical review is PERMANENT: a tree-level reverse
+      transformer runs as a debug_assert inside convert itself — every
+      debug/test compile un-converts and byte-compares every conversion
+      (corpus sweep: 0 mismatches / 275 files, 30 functions converted in
+      15). Perf: tracker full-song decode 107.0 → 75.9 s under LuaJIT
+      (1.41×, byte-identical output), perf canary 4.5× → 5.1× realtime
+      (PUC 5.5: 1.7× → 1.8×), IO countdown microbench ~1.5× (LuaJIT,
+      independently replicated 1.24 → 0.74 s). Suite 1004/0; GHC oracle
+      286/286 (281 baseline reproduced byte-identically under full
+      regeneration, 5 new); 2e6-deep IO recursion constant-stack on
+      mlua/5.5/LuaJIT both ways; refutation + determinism green;
+      proprietary acceptance passes. Finding recorded as a new open item:
+      the direct-perform recursion shape overflows today, pre-existing.
+      2026-07-28.
 
 - [x] **Self-tail-call → loop conversion — the first structured-tier pass**
       (codegen/tailloop.rs, new; StructuredPass engine extension in

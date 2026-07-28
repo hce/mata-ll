@@ -31,6 +31,20 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Self-recursive IO functions compile to loops.** The IO emission
+  builds an action closure per recursive step (`countdown n = do …;
+  countdown (n - 1)` allocated a fresh closure, two calls and a runner
+  dispatch each iteration); such functions now run their self-loop
+  inside one closure as a `while` loop. Build-time semantics are
+  unchanged — the pattern-match dispatch still runs when the action is
+  built, so `seq (f undefined) ()` raises exactly as GHC does (pinned
+  against real GHC) — as are effect order, laziness and sharing (fresh
+  per-iteration locals for captures). The tracker benchmark's full-song
+  decode drops from 107 s to 76 s under LuaJIT with byte-identical
+  output; a plain IO counting loop runs ~1.5× faster. Functions where
+  safety cannot be proven keep the call form; disable with
+  `MLL_OPT_DISABLE=ioloop` for diagnostics.
+
 - **Self-tail-recursive functions compile to loops.** A function whose
   recursive calls are self tail calls (`go (n - 1) b (a + b)` in result
   position) now emits a `while true` loop with one simultaneous
