@@ -31,6 +31,19 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Self-tail-recursive functions compile to loops.** A function whose
+  recursive calls are self tail calls (`go (n - 1) b (a + b)` in result
+  position) now emits a `while true` loop with one simultaneous
+  parameter update per tail call instead of a recursive call — Lua's
+  proper tail calls already kept the stack flat, but loops trace where
+  tail recursion does not: a recursion-heavy microbenchmark runs 3.4×
+  faster under LuaJIT (~4–5% under PUC Lua). Closures and thunks created
+  in the body capture fresh per-iteration locals, so sharing and
+  laziness behave exactly as under recursion. Functions where the
+  conversion cannot be proven safe (varargs, rebound names, FFI text
+  mentioning a parameter) keep the call form; disable with
+  `MLL_OPT_DISABLE=tailloop` for diagnostics.
+
 - **Generated Lua sheds provably redundant `__force` calls.** The code
   generator now carries operational annotations (value shape and effect
   facts) on the emitted Lua tree, and a peephole collapses `__force(e)`

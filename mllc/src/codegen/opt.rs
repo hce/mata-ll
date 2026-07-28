@@ -65,14 +65,25 @@
 //! stamps forces of non-name WHNF expressions, so the dedicated pass was
 //! deleted (2026-07-27; corpus-verified byte-identical output).
 //!
+//! Pass 5 — self-tail-call → loop conversion (tailloop.rs), the structured
+//! tier's first pass, run through the annotation engine's structured-pass
+//! form (annot.rs): a named function whose body ends in `return <self>(…)`
+//! (in statement-tree tail position) becomes a `while true` loop that
+//! updates its parameters with one simultaneous multiple assignment and
+//! iterates. It runs AFTER the expression passes: their normalizations feed
+//! it cleaner trees, and a structured rewrite invalidates every carried
+//! stamp, so the engine handed to the refutation must be the one recomputed
+//! over the final tree — `run_with` swaps engines when the pass rewrites.
+//!
 //! Per-pass toggles: `MLL_OPT_DISABLE` (read per `run` call) is a
 //! comma-separated list of pass names to skip — `parens`, `dead`, `iife`,
-//! `force`. A debugging aid for isolating a pass's effect; unset (the
-//! default) runs everything, and an unrecognized name warns on stderr so a
-//! typo cannot silently disable nothing.
+//! `force`, `tailloop`. A debugging aid for isolating a pass's effect; unset
+//! (the default) runs everything, and an unrecognized name warns on stderr
+//! so a typo cannot silently disable nothing.
 
 use super::annot;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
+use super::tailloop;
 
 /// Which passes to skip; see the module comment.
 #[derive(Default)]
@@ -81,6 +92,7 @@ pub(super) struct Disable {
     dead: bool,
     iife: bool,
     force: bool,
+    tailloop: bool,
 }
 
 impl Disable {
@@ -95,9 +107,10 @@ impl Disable {
                 "dead" => d.dead = true,
                 "iife" => d.iife = true,
                 "force" => d.force = true,
+                "tailloop" => d.tailloop = true,
                 other => eprintln!(
                     "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
-                     (known: parens, dead, iife, force)",
+                     (known: parens, dead, iife, force, tailloop)",
                     other
                 ),
             }
@@ -108,13 +121,14 @@ impl Disable {
 
 /// Run all passes over the module body.
 pub(super) fn run(stmts: &mut Vec<Stmt>) {
-    run_with(stmts, &Disable::from_env());
+    let _ = run_with(stmts, &Disable::from_env());
 }
 
-/// Run the enabled passes; returns the annotation engine of the
-/// force-collapse pass when it ran (its stamps feed the test-build
-/// refutation in `run_refuted`).
-fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> Option<annot::Engine> {
+/// Run the enabled passes; returns the annotation engine whose mirror is
+/// valid over the FINAL tree (the force-collapse engine, or the recomputed
+/// engine of a structured rewrite that came after it), plus whether the
+/// force pass ran — that decides the refutation's residual-force check.
+fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool) {
     if !d.parens {
         normalize_parens_block(stmts);
     }
@@ -124,11 +138,22 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> Option<annot::Engine> {
     if !d.iife {
         flatten_iife_block(stmts);
     }
-    if !d.force {
+    let mut engine = if !d.force {
         Some(annot::Engine::run_pass(stmts, &mut ForceCollapse))
     } else {
         None
+    };
+    if !d.tailloop {
+        // Structured tier, after the expression passes (see the module
+        // comment). A structured rewrite invalidates every stamp carried so
+        // far, so when the pass rewrites, its freshly recomputed engine
+        // replaces the force pass's; when it rewrites nothing the earlier
+        // engine still mirrors the tree.
+        if let Some(fresh) = annot::Engine::run_structured(stmts, &mut tailloop::TailLoop) {
+            engine = Some(fresh);
+        }
     }
+    (engine, !d.force)
 }
 
 /// Test-build entry (see verify::check_stamps): run the passes exactly as
@@ -136,11 +161,11 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> Option<annot::Engine> {
 /// the final tree. Empty means clean.
 pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
     match run_with(stmts, &Disable::from_env()) {
-        Some(engine) => engine.refute(stmts, true),
-        // With the force pass disabled there are no carried stamps and no
-        // collapse obligation; a fresh analysis refuting itself checks
-        // nothing.
-        None => Vec::new(),
+        (Some(engine), force_ran) => engine.refute(stmts, force_ran),
+        // With every engine-run pass disabled there are no carried stamps
+        // and no collapse obligation; a fresh analysis refuting itself
+        // checks nothing.
+        (None, _) => Vec::new(),
     }
 }
 
@@ -183,10 +208,14 @@ fn complement_conds(a: &Expr, b: &Expr) -> bool {
     swapped && render_str(l1) == render_str(l2) && render_str(r1) == render_str(r2)
 }
 
-/// Every path through the statement ends in `return` or a raised error.
-fn stmt_diverges(s: &Stmt) -> bool {
+/// Every path through the statement ends in `return` or a raised error —
+/// control cannot pass it and continue in the enclosing block.
+pub(super) fn stmt_diverges(s: &Stmt) -> bool {
     match s {
-        Stmt::Return(_) => true,
+        Stmt::Return(_) | Stmt::ReturnNone => true,
+        // The vocabulary has no `break`, so a `while true` body can only be
+        // left through `return` or a raise: control never passes the loop.
+        Stmt::WhileTrue(_) => true,
         Stmt::Expr(Expr::Call(f, _)) => matches!(f.as_ref(), Expr::Name(n) if n == "error"),
         Stmt::If { then_b, elseifs, else_b: Some(else_b), .. } => {
             block_diverges(then_b)
@@ -198,7 +227,7 @@ fn stmt_diverges(s: &Stmt) -> bool {
     }
 }
 
-fn block_diverges(b: &Block) -> bool {
+pub(super) fn block_diverges(b: &Block) -> bool {
     b.0.last().is_some_and(stmt_diverges)
 }
 
@@ -206,6 +235,14 @@ fn dead_branch_block(stmts: &mut Vec<Stmt>) {
     // Bottom-up: children first, then this block's own rewrites.
     for s in stmts.iter_mut() {
         dead_branch_stmt(s);
+    }
+    // Straight-line reasoning does not hold in a block with goto labels (a
+    // "dead" label may be a live jump target), so skip the block-level
+    // rewrites there. In the current pipeline this cannot fire — labels only
+    // exist after the tail-loop pass, which runs later — but the pass must
+    // stay correct under reordering.
+    if stmts.iter().any(|s| matches!(s, Stmt::Goto(_) | Stmt::Label(_))) {
+        return;
     }
     // (3) Drop statements after the first diverging one.
     if let Some(i) = stmts.iter().position(stmt_diverges)
@@ -262,13 +299,18 @@ fn dead_branch_stmt(stmt: &mut Stmt) {
         Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
             expr_bodies(e)
         }
-        Stmt::Local(_, None) => {}
+        Stmt::Local(_, None) | Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
+        Stmt::MultiAssign(_, exprs) => {
+            for e in exprs {
+                expr_bodies(e);
+            }
+        }
         Stmt::AssignIf { cond, then_e, else_e, .. } => {
             expr_bodies(cond);
             expr_bodies(then_e);
             expr_bodies(else_e);
         }
-        Stmt::Do(b) => dead_branch_block(&mut b.0),
+        Stmt::Do(b) | Stmt::WhileTrue(b) => dead_branch_block(&mut b.0),
         Stmt::Function { body, .. } => dead_branch_block(&mut body.0),
         Stmt::ReturnTable(entries) => {
             for (_, e) in entries {
@@ -516,7 +558,17 @@ fn normalize_parens_stmt(stmt: &mut Stmt, ret_ctx: Ctx) {
             normalize_expr(then_e, Ctx::Delim);
             normalize_expr(else_e, Ctx::Delim);
         }
-        Stmt::Do(b) => normalize_parens_block_ret(&mut b.0, ret_ctx),
+        // Multi-assignment: the last RHS spreads its values over the
+        // remaining lvalues (multi-value position), every other one
+        // truncates.
+        Stmt::MultiAssign(_, exprs) => {
+            let last = exprs.len().saturating_sub(1);
+            for (i, e) in exprs.iter_mut().enumerate() {
+                normalize_expr(e, if i == last { Ctx::DelimLast } else { Ctx::Delim });
+            }
+        }
+        Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
+        Stmt::Do(b) | Stmt::WhileTrue(b) => normalize_parens_block_ret(&mut b.0, ret_ctx),
         Stmt::Function { body, .. } => normalize_parens_block(&mut body.0),
         Stmt::ReturnTable(entries) => {
             for (_, e) in entries {
@@ -567,7 +619,7 @@ fn stmts_tokens(stmts: &[Stmt]) -> std::collections::HashSet<String> {
 /// included, nested function literals not — they are their own scope).
 /// Branch locals are summed, not maxed, so the count over-approximates
 /// "active at once" — declining a splice is always safe.
-fn count_locals(stmts: &[Stmt]) -> usize {
+pub(super) fn count_locals(stmts: &[Stmt]) -> usize {
     let mut n = 0;
     for s in stmts {
         match s {
@@ -586,7 +638,7 @@ fn count_locals(stmts: &[Stmt]) -> usize {
                     n += count_locals(&b.0);
                 }
             }
-            Stmt::Do(b) => n += count_locals(&b.0),
+            Stmt::Do(b) | Stmt::WhileTrue(b) => n += count_locals(&b.0),
             _ => {}
         }
     }
@@ -622,7 +674,7 @@ fn flatten_scope(stmts: &mut Vec<Stmt>, budget: &mut usize) {
                     flatten_scope(&mut b.0, budget);
                 }
             }
-            Stmt::Do(b) => flatten_scope(&mut b.0, budget),
+            Stmt::Do(b) | Stmt::WhileTrue(b) => flatten_scope(&mut b.0, budget),
             Stmt::Function { body, .. } => flatten_iife_block(&mut body.0),
             _ => {}
         }
@@ -672,8 +724,14 @@ fn stmt_expr_funcs(stmt: &mut Stmt) {
         }
     }
     match stmt {
-        Stmt::Raw(_) | Stmt::Local(_, None) => {}
+        Stmt::Raw(_) | Stmt::Local(_, None) | Stmt::ReturnNone | Stmt::Goto(_)
+        | Stmt::Label(_) => {}
         Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => expr(e),
+        Stmt::MultiAssign(_, exprs) => {
+            for e in exprs {
+                expr(e);
+            }
+        }
         Stmt::AssignIf { cond, then_e, else_e, .. } => {
             expr(cond);
             expr(then_e);
@@ -685,7 +743,7 @@ fn stmt_expr_funcs(stmt: &mut Stmt) {
                 expr(c);
             }
         }
-        Stmt::Do(_) | Stmt::Function { .. } => {}
+        Stmt::Do(_) | Stmt::WhileTrue(_) | Stmt::Function { .. } => {}
         Stmt::ReturnTable(entries) => {
             for (_, e) in entries {
                 expr(e);
@@ -764,6 +822,10 @@ fn try_splice_return(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> boo
 fn tail_rewrite_ok(s: &Stmt, strict: bool) -> bool {
     match s {
         Stmt::Return(_) => true,
+        // A bare return yields zero values — there is nothing to rewrite
+        // into an assignment, and treating it as tolerated fall-through
+        // would silently swallow the return.
+        Stmt::ReturnNone => false,
         Stmt::Expr(Expr::Call(f, _)) => matches!(f.as_ref(), Expr::Name(n) if n == "error"),
         Stmt::If { then_b, elseifs, else_b, .. } => {
             let arm = |b: &Block| match b.0.last() {
@@ -956,6 +1018,39 @@ mod tests {
         let mut stmts = vec![Stmt::Return(Expr::force(Expr::call_named("f", vec![])))];
         run_with(&mut stmts, &Disable::default());
         assert!(matches!(&stmts[0], Stmt::Return(Expr::Call(..))));
+    }
+
+    /// The tailloop toggle: disabled leaves the recursive call; enabled
+    /// (the default) converts it and the refutation stays clean.
+    #[test]
+    fn tailloop_toggle() {
+        let make = || {
+            vec![Stmt::Function {
+                header: "local function f(x)".into(),
+                body: Block(vec![Stmt::If {
+                    cond: Expr::name("x"),
+                    then_b: Block(vec![Stmt::Return(Expr::lit("0"))]),
+                    elseifs: vec![],
+                    else_b: Some(Block(vec![Stmt::Return(Expr::call_named(
+                        "f",
+                        vec![Expr::lit("1")],
+                    ))])),
+                }]),
+            }]
+        };
+        let mut on = make();
+        let (engine, _) = run_with(&mut on, &Disable::default());
+        let Stmt::Function { body, .. } = &on[0] else { panic!("shape") };
+        assert!(matches!(body.0[0], Stmt::WhileTrue(_)), "enabled pass must convert");
+        assert!(engine.expect("engine").refute(&on, true).is_empty());
+
+        let mut off = make();
+        run_with(&mut off, &Disable { tailloop: true, ..Disable::default() });
+        let Stmt::Function { body, .. } = &off[0] else { panic!("shape") };
+        assert!(
+            matches!(body.0[0], Stmt::If { .. }),
+            "disabled pass must leave the recursion"
+        );
     }
 
     /// run_refuted on a clean pipeline reports nothing.

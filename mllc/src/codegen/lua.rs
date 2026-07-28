@@ -119,6 +119,28 @@ pub(super) enum Stmt {
     /// `do … end` — an irrefutable clause's independent block in the
     /// guarded pattern-match layout.
     Do(Block),
+    /// `while true do … end`. Deliberately condition-less: the only loop this
+    /// codegen emits is the self-tail-call conversion's driver (opt.rs pass 5),
+    /// which exits through `return`/`error`, never through the condition.
+    /// There is no `break` in the vocabulary, so control cannot pass this
+    /// statement normally — `stmt_diverges` relies on that.
+    WhileTrue(Block),
+    /// `a, b = e1, e2` — simultaneous multiple assignment: Lua evaluates the
+    /// whole RHS list before assigning any lvalue, which is what makes it the
+    /// correct parameter-update form for the tail-call loop (a cascade of
+    /// single assignments would let a later RHS read an already-overwritten
+    /// name). The lvalues arrive rendered, like `Assign`'s.
+    MultiAssign(Vec<String>, Vec<Expr>),
+    /// Bare `return` (no operand — zero values, exactly what falling off a
+    /// function body yields). Lua only allows it as the last statement of a
+    /// block; the emitter wraps it as `do return end` where something follows.
+    ReturnNone,
+    /// `goto name`.
+    Goto(String),
+    /// `::name::`. Only emitted as the LAST statement of a loop body: Lua
+    /// forbids a goto from jumping into a local's scope, and only a label in
+    /// end-of-block position (followed by nothing) is exempt from that rule.
+    Label(String),
     /// A named function definition. The header arrives rendered up to and
     /// including the parameter list's closing paren — `local function f(a)`,
     /// `__mll_fn[3] = function(a)`, `go = function(a)` — because the spelling
@@ -347,6 +369,32 @@ impl Stmt {
                 block.render(ind + 1, out);
                 pad(ind, out);
                 out.push_str("end");
+            }
+            Stmt::WhileTrue(block) => {
+                out.push_str("while true do\n");
+                block.render(ind + 1, out);
+                pad(ind, out);
+                out.push_str("end");
+            }
+            Stmt::MultiAssign(lhs, exprs) => {
+                out.push_str(&lhs.join(", "));
+                out.push_str(" = ");
+                for (i, e) in exprs.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    e.render(ind, out);
+                }
+            }
+            Stmt::ReturnNone => out.push_str("return"),
+            Stmt::Goto(l) => {
+                out.push_str("goto ");
+                out.push_str(l);
+            }
+            Stmt::Label(l) => {
+                out.push_str("::");
+                out.push_str(l);
+                out.push_str("::");
             }
             Stmt::Function { header, body } => {
                 out.push_str(header);

@@ -429,7 +429,22 @@ fn collect_facts_stmt(s: &Stmt, f: &mut ScopeFacts) {
                 collect_facts_block(&b.0, f);
             }
         }
-        Stmt::Do(b) => collect_facts_block(&b.0, f),
+        Stmt::Do(b) | Stmt::WhileTrue(b) => collect_facts_block(&b.0, f),
+        // A multiple assignment assigns every plain-identifier lvalue — the
+        // tail-loop pass's parameter update is one more assignment site for
+        // each parameter, so any name-stamp qualification over those names
+        // correctly fails afterward.
+        Stmt::MultiAssign(lhs, exprs) => {
+            for l in lhs {
+                if is_plain_ident(l) {
+                    f.assign(l);
+                }
+            }
+            for e in exprs {
+                collect_facts_expr(e, f);
+            }
+        }
+        Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
         Stmt::Function { header, body } => {
             // The header's tokens include the declared name and every
             // parameter name — each is a binding site.
@@ -554,6 +569,526 @@ impl Engine {
             zip_refute(e, *hole, carried, fresh, check_residual_force, &mut v);
         }
         v
+    }
+}
+
+// ---- The structured tier ----
+//
+// A structured pass rewrites whole named-function bodies (`Stmt::Function`)
+// instead of single expression nodes. It extends the rewrite vocabulary, so
+// it carries the engine-side obligations the design recorded:
+//
+// * Write monopoly: the pass never sees or touches stamps at all. The engine
+//   treats any applied structured rewrite as invalidate-everything — no stamp
+//   from before the pass survives; the whole mirror is recomputed from the
+//   final tree (`Engine::analyze`), the same cheap answer `Replace` already
+//   uses. A pass that rewrites nothing leaves the tree untouched and the
+//   caller's existing engine valid.
+// * Grammatical validity: the engine validates every rewritten body against
+//   the structured vocabulary's own rules (`structured_valid`) before
+//   applying it — multi-assignment shapes, bare-return placement, and the
+//   goto/label discipline Lua imposes — and declines the whole rewrite
+//   otherwise. Nodes outside that vocabulary are moved verbatim from an
+//   already-valid tree into holes of the same class, so they need no
+//   re-check.
+
+/// A structured-tier pass: offered every named function definition
+/// (`Stmt::Function`), innermost scopes first, with read access to the
+/// binding facts of the scope the function's name is bound in.
+/// `locals_in_scope` holds the names `local`-declared in this scope and
+/// lexically visible at the definition site — the proof that an
+/// `X = function(…)` header assigns THAT local rather than reaching an
+/// enclosing scope or `_ENV` (the flat per-scope binding counts alone
+/// cannot tell a forward declaration from, say, a lambda parameter in some
+/// other sub-tree of the scope). Returning a block replaces the function's
+/// body — after the engine validates it.
+pub(super) trait StructuredPass {
+    fn request(
+        &mut self,
+        header: &str,
+        body: &Block,
+        view: &ScopeView<'_>,
+        locals_in_scope: &HashSet<String>,
+    ) -> Option<Block>;
+}
+
+/// Read-only binding facts for a structured pass: the enclosing scope's
+/// name-binding counts (the same `ScopeFacts` the analysis qualifies name
+/// stamps with) plus the module-wide `__mll_fn` slot-store census.
+pub(super) struct ScopeView<'a> {
+    facts: &'a ScopeFacts,
+    slots: &'a SlotStores,
+}
+
+impl ScopeView<'_> {
+    /// (binding sites, assignment sites) of `name` in the scope it is bound
+    /// in — collected over the whole scope subtree, nested functions
+    /// included, so any shadowing rebind anywhere disqualifies the name.
+    pub(super) fn binding_sites(&self, name: &str) -> (usize, usize) {
+        (
+            self.facts.binds.get(name).copied().unwrap_or(0),
+            self.facts.assigns.get(name).copied().unwrap_or(0),
+        )
+    }
+
+    /// `name` appears in Raw text somewhere in the scope: poisoned.
+    pub(super) fn raw_mentions(&self, name: &str) -> bool {
+        self.facts.raw_mentions.contains(name)
+    }
+
+    /// The slot reference (`__mll_fn[3]`) is stored to exactly once in the
+    /// whole module, the `__mll_fn` table itself is declared exactly once
+    /// and never reassigned, and no Raw text mentions the slot (a Raw
+    /// mention counts as a potential store).
+    pub(super) fn slot_single_store(&self, slot_ref: &str) -> bool {
+        !self.slots.poisoned
+            && self.slots.table_locals == 1
+            && self.slots.stores.get(slot_ref).copied() == Some(1)
+    }
+}
+
+/// Module-wide census of `__mll_fn[i]` stores. `local __mll_fn` declarations
+/// are counted separately (exactly one is the module layout's table init);
+/// any spelling the scan cannot attribute to a single slot poisons the whole
+/// census — a structured pass then converts nothing slot-named.
+#[derive(Default)]
+struct SlotStores {
+    stores: HashMap<String, usize>,
+    table_locals: usize,
+    poisoned: bool,
+}
+
+impl SlotStores {
+    fn collect(stmts: &[Stmt]) -> SlotStores {
+        let mut s = SlotStores::default();
+        slot_scan_block(stmts, &mut s);
+        s
+    }
+
+    fn store(&mut self, slot_ref: &str) {
+        *self.stores.entry(slot_ref.to_string()).or_insert(0) += 1;
+    }
+
+    /// Count every `__mll_fn` occurrence in raw text: a well-formed
+    /// `__mll_fn[<digits>]` counts as a potential store to that slot (the
+    /// scan cannot tell a store from a read, and either disqualifies the
+    /// slot for a structured pass); anything else poisons the census.
+    fn scan_raw(&mut self, text: &str) {
+        let bytes = text.as_bytes();
+        let needle = b"__mll_fn";
+        let mut i = 0;
+        while i + needle.len() <= bytes.len() {
+            if &bytes[i..i + needle.len()] == needle {
+                let ident_ch =
+                    |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+                let starts_ident = i > 0 && ident_ch(bytes[i - 1]);
+                let after = i + needle.len();
+                if !starts_ident {
+                    match parse_slot_suffix(&text[after..]) {
+                        Some((slot_ref, _len)) => {
+                            self.store(&format!("__mll_fn{}", slot_ref))
+                        }
+                        None => self.poisoned = true,
+                    }
+                }
+                i = after;
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+/// Parse a leading `[<digits>]` and return it with its length.
+fn parse_slot_suffix(s: &str) -> Option<(&str, usize)> {
+    let rest = s.strip_prefix('[')?;
+    let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
+    if digits == 0 {
+        return None;
+    }
+    if !rest[digits..].starts_with(']') {
+        return None;
+    }
+    Some((&s[..digits + 2], digits + 2))
+}
+
+/// `lhs` spells exactly `__mll_fn[<digits>]`.
+pub(super) fn is_slot_ref(lhs: &str) -> bool {
+    lhs.strip_prefix("__mll_fn")
+        .and_then(parse_slot_suffix)
+        .is_some_and(|(slot, len)| slot.len() == len && len == lhs.len() - "__mll_fn".len())
+}
+
+fn slot_scan_block(stmts: &[Stmt], s: &mut SlotStores) {
+    for st in stmts {
+        slot_scan_stmt(st, s);
+    }
+}
+
+fn slot_scan_lvalue(lhs: &str, s: &mut SlotStores) {
+    if lhs == "__mll_fn" {
+        s.poisoned = true;
+    } else if is_slot_ref(lhs) {
+        s.store(lhs);
+    } else if lhs.contains("__mll_fn") {
+        s.poisoned = true;
+    }
+}
+
+fn slot_scan_stmt(st: &Stmt, s: &mut SlotStores) {
+    match st {
+        Stmt::Raw(t) => s.scan_raw(t),
+        Stmt::Local(names, init) => {
+            if names.iter().any(|n| n == "__mll_fn") {
+                s.table_locals += 1;
+            }
+            if let Some(e) = init {
+                slot_scan_expr(e, s);
+            }
+        }
+        Stmt::Assign(lhs, e) => {
+            slot_scan_lvalue(lhs, s);
+            slot_scan_expr(e, s);
+        }
+        Stmt::MultiAssign(lhs, exprs) => {
+            for l in lhs {
+                slot_scan_lvalue(l, s);
+            }
+            for e in exprs {
+                slot_scan_expr(e, s);
+            }
+        }
+        Stmt::AssignIf { lhs, cond, then_e, else_e } => {
+            slot_scan_lvalue(lhs, s);
+            slot_scan_expr(cond, s);
+            slot_scan_expr(then_e, s);
+            slot_scan_expr(else_e, s);
+        }
+        Stmt::Return(e) | Stmt::Expr(e) => slot_scan_expr(e, s),
+        Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
+        Stmt::If { cond, then_b, elseifs, else_b } => {
+            slot_scan_expr(cond, s);
+            slot_scan_block(&then_b.0, s);
+            for (c, b) in elseifs {
+                slot_scan_expr(c, s);
+                slot_scan_block(&b.0, s);
+            }
+            if let Some(b) = else_b {
+                slot_scan_block(&b.0, s);
+            }
+        }
+        Stmt::Do(b) | Stmt::WhileTrue(b) => slot_scan_block(&b.0, s),
+        Stmt::Function { header, body } => {
+            // The only header spelling that stores to a slot is the
+            // `__mll_fn[i] = function(...)` form name resolution emits.
+            if let Some(rest) = header.strip_prefix("__mll_fn") {
+                match parse_slot_suffix(rest) {
+                    Some((slot, len)) if rest[len..].starts_with(" = function(") => {
+                        s.store(&format!("__mll_fn{}", slot))
+                    }
+                    _ => s.poisoned = true,
+                }
+            } else if header.contains("__mll_fn") {
+                s.poisoned = true;
+            }
+            slot_scan_block(&body.0, s);
+        }
+        Stmt::ReturnTable(entries) => {
+            for (_, e) in entries {
+                slot_scan_expr(e, s);
+            }
+        }
+    }
+}
+
+fn slot_scan_expr(e: &Expr, s: &mut SlotStores) {
+    match e {
+        // Reads (`__mll_fn[3]` as a name, `__mll_fn` as an index base) are
+        // not stores; only Raw text is scanned, because the scan cannot see
+        // what raw text does with a mention.
+        Expr::Name(_) | Expr::Lit(_) => {}
+        Expr::Raw(t) => s.scan_raw(t),
+        Expr::Paren(e) | Expr::Neg(e) => slot_scan_expr(e, s),
+        Expr::Call(f, args) | Expr::Method(f, _, args) => {
+            slot_scan_expr(f, s);
+            for a in args {
+                slot_scan_expr(a, s);
+            }
+        }
+        Expr::Index(base, _) => slot_scan_expr(base, s),
+        Expr::Binop(_, l, r) => {
+            slot_scan_expr(l, s);
+            slot_scan_expr(r, s);
+        }
+        Expr::Table(items) | Expr::TableSpaced(items) => {
+            for item in items {
+                match item {
+                    Item::Pos(e) | Item::KV(_, e) => slot_scan_expr(e, s),
+                }
+            }
+        }
+        Expr::Func(_, body) => slot_scan_block(func_body_stmts(body), s),
+    }
+}
+
+impl Engine {
+    /// Apply a structured pass to every named function definition in the
+    /// module. Returns `Some` with a freshly recomputed engine when anything
+    /// was rewritten (invalidate-everything: no stamp from before the pass
+    /// survives a structured rewrite), `None` when the tree is untouched —
+    /// the caller's existing engine then still mirrors it.
+    pub(super) fn run_structured(
+        stmts: &mut Vec<Stmt>,
+        pass: &mut dyn StructuredPass,
+    ) -> Option<Engine> {
+        let slots = SlotStores::collect(stmts);
+        let mut any = false;
+        structured_scope(stmts, &slots, pass, &mut any);
+        if any { Some(Engine::analyze(stmts)) } else { None }
+    }
+}
+
+/// One function scope (module top, a named function's body, or a function
+/// literal's body): convert nested scopes first — an enclosing conversion's
+/// parameter rename then walks already-final inner trees — then offer every
+/// function declared directly in this scope with this scope's binding facts.
+/// The facts stay valid across sibling conversions within the scope: a
+/// conversion renames only non-binding occurrences of its own parameters and
+/// introduces only fresh names, so no pre-existing name's binding count
+/// changes. (Its parameter update adds assignment sites for its parameter
+/// names — which only ever makes a later qualification question stricter.)
+fn structured_scope(
+    scope: &mut [Stmt],
+    slots: &SlotStores,
+    pass: &mut dyn StructuredPass,
+    any: &mut bool,
+) {
+    for s in scope.iter_mut() {
+        structured_descend_stmt(s, slots, pass, any);
+    }
+    let mut facts = ScopeFacts::default();
+    collect_facts_block(scope, &mut facts);
+    let view = ScopeView { facts: &facts, slots };
+    offer_block(scope, &view, pass, any, &HashSet::new());
+}
+
+/// Descend into nested function scopes (named bodies and literals) below
+/// this statement, without offering anything at this scope's level yet.
+fn structured_descend_stmt(
+    s: &mut Stmt,
+    slots: &SlotStores,
+    pass: &mut dyn StructuredPass,
+    any: &mut bool,
+) {
+    match s {
+        Stmt::Function { body, .. } => structured_scope(&mut body.0, slots, pass, any),
+        Stmt::If { cond, then_b, elseifs, else_b } => {
+            structured_descend_expr(cond, slots, pass, any);
+            for b in std::iter::once(&mut then_b.0)
+                .chain(elseifs.iter_mut().map(|(_, b)| &mut b.0))
+                .chain(else_b.iter_mut().map(|b| &mut b.0))
+            {
+                for s in b.iter_mut() {
+                    structured_descend_stmt(s, slots, pass, any);
+                }
+            }
+            for (c, _) in elseifs.iter_mut() {
+                structured_descend_expr(c, slots, pass, any);
+            }
+        }
+        Stmt::Do(b) | Stmt::WhileTrue(b) => {
+            for s in b.0.iter_mut() {
+                structured_descend_stmt(s, slots, pass, any);
+            }
+        }
+        Stmt::Raw(_) | Stmt::Local(_, None) | Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
+        Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
+            structured_descend_expr(e, slots, pass, any)
+        }
+        Stmt::MultiAssign(_, exprs) => {
+            for e in exprs {
+                structured_descend_expr(e, slots, pass, any);
+            }
+        }
+        Stmt::AssignIf { cond, then_e, else_e, .. } => {
+            structured_descend_expr(cond, slots, pass, any);
+            structured_descend_expr(then_e, slots, pass, any);
+            structured_descend_expr(else_e, slots, pass, any);
+        }
+        Stmt::ReturnTable(entries) => {
+            for (_, e) in entries {
+                structured_descend_expr(e, slots, pass, any);
+            }
+        }
+    }
+}
+
+fn structured_descend_expr(
+    e: &mut Expr,
+    slots: &SlotStores,
+    pass: &mut dyn StructuredPass,
+    any: &mut bool,
+) {
+    match e {
+        Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
+        Expr::Paren(e) | Expr::Neg(e) => structured_descend_expr(e, slots, pass, any),
+        Expr::Call(f, args) | Expr::Method(f, _, args) => {
+            structured_descend_expr(f, slots, pass, any);
+            for a in args {
+                structured_descend_expr(a, slots, pass, any);
+            }
+        }
+        Expr::Index(base, _) => structured_descend_expr(base, slots, pass, any),
+        Expr::Binop(_, l, r) => {
+            structured_descend_expr(l, slots, pass, any);
+            structured_descend_expr(r, slots, pass, any);
+        }
+        Expr::Table(items) | Expr::TableSpaced(items) => {
+            for item in items {
+                match item {
+                    Item::Pos(e) | Item::KV(_, e) => {
+                        structured_descend_expr(e, slots, pass, any)
+                    }
+                }
+            }
+        }
+        Expr::Func(_, body) => {
+            let stmts: &mut Vec<Stmt> = match body {
+                FuncBody::Inline(s) => s,
+                FuncBody::Block(Block(s)) => s,
+            };
+            structured_scope(stmts, slots, pass, any);
+        }
+    }
+}
+
+/// Offer every `Stmt::Function` declared in this scope (reachable through
+/// `If`/`Do`/`WhileTrue` blocks but not through nested function bodies —
+/// those were offered by their own scope walk). `locals` accumulates the
+/// `local`-declared names lexically visible so far; sub-blocks extend a
+/// clone, matching Lua's scoping.
+fn offer_block(
+    stmts: &mut [Stmt],
+    view: &ScopeView<'_>,
+    pass: &mut dyn StructuredPass,
+    any: &mut bool,
+    locals: &HashSet<String>,
+) {
+    let mut locals = locals.clone();
+    for s in stmts {
+        match s {
+            Stmt::Local(names, _) => locals.extend(names.iter().cloned()),
+            Stmt::Function { header, body } => {
+                if let Some(new_body) = pass.request(header, body, view, &locals)
+                    && structured_valid(&new_body.0)
+                {
+                    *body = new_body;
+                    *any = true;
+                }
+            }
+            Stmt::If { then_b, elseifs, else_b, .. } => {
+                for b in std::iter::once(&mut then_b.0)
+                    .chain(elseifs.iter_mut().map(|(_, b)| &mut b.0))
+                    .chain(else_b.iter_mut().map(|b| &mut b.0))
+                {
+                    offer_block(b, view, pass, any, &locals);
+                }
+            }
+            Stmt::Do(b) | Stmt::WhileTrue(b) => offer_block(&mut b.0, view, pass, any, &locals),
+            _ => {}
+        }
+    }
+}
+
+/// Grammatical validity of a structured rewrite (see the tier comment): the
+/// structured vocabulary's own placement rules, checked recursively.
+/// `loop_label` is the label ending the innermost enclosing `WhileTrue` body
+/// within the same function — the only thing a `goto` may target, because a
+/// label anywhere else would let the jump enter a local's scope (Lua only
+/// exempts labels in end-of-block position).
+fn structured_valid(stmts: &[Stmt]) -> bool {
+    valid_block(stmts, None)
+}
+
+fn valid_block(stmts: &[Stmt], loop_label: Option<&str>) -> bool {
+    let last = stmts.len().saturating_sub(1);
+    stmts.iter().enumerate().all(|(i, s)| match s {
+        // A bare return is only grammatical as the last statement of its
+        // block (Lua's retstat rule).
+        Stmt::ReturnNone => i == last,
+        Stmt::Goto(l) => loop_label == Some(l.as_str()),
+        // A label is only accepted where WhileTrue below consumed it; one
+        // anywhere else is out of vocabulary.
+        Stmt::Label(_) => false,
+        Stmt::MultiAssign(lhs, exprs) => {
+            !lhs.is_empty()
+                && !exprs.is_empty()
+                && lhs.iter().all(|l| is_plain_ident(l))
+                && exprs
+                    .iter()
+                    .enumerate()
+                    .all(|(j, e)| fits(e, arg_hole(j, exprs.len())))
+                && valid_exprs(s)
+        }
+        Stmt::WhileTrue(b) => match b.0.split_last() {
+            None => false,
+            Some((Stmt::Label(l), init)) => valid_block(init, Some(l)),
+            Some(_) => valid_block(&b.0, loop_label),
+        },
+        Stmt::If { then_b, elseifs, else_b, .. } => {
+            valid_block(&then_b.0, loop_label)
+                && elseifs.iter().all(|(_, b)| valid_block(&b.0, loop_label))
+                && else_b.as_ref().is_none_or(|b| valid_block(&b.0, loop_label))
+                && valid_exprs(s)
+        }
+        Stmt::Do(b) => valid_block(&b.0, loop_label),
+        // A nested function body is a fresh goto scope.
+        Stmt::Function { body, .. } => valid_block(&body.0, None),
+        _ => valid_exprs(s),
+    })
+}
+
+/// Function-literal bodies inside this statement's expressions are fresh
+/// goto scopes and must themselves be valid.
+fn valid_exprs(s: &Stmt) -> bool {
+    let mut slots = Vec::new();
+    stmt_slots_shallow(s, &mut slots);
+    slots.iter().all(|e| valid_expr(e))
+}
+
+fn stmt_slots_shallow<'a>(s: &'a Stmt, out: &mut Vec<&'a Expr>) {
+    match s {
+        Stmt::Raw(_)
+        | Stmt::Local(_, None)
+        | Stmt::ReturnNone
+        | Stmt::Goto(_)
+        | Stmt::Label(_)
+        | Stmt::Do(_)
+        | Stmt::WhileTrue(_)
+        | Stmt::Function { .. } => {}
+        Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
+            out.push(e)
+        }
+        Stmt::MultiAssign(_, exprs) => out.extend(exprs.iter()),
+        Stmt::AssignIf { cond, then_e, else_e, .. } => {
+            out.push(cond);
+            out.push(then_e);
+            out.push(else_e);
+        }
+        Stmt::If { cond, elseifs, .. } => {
+            out.push(cond);
+            for (c, _) in elseifs {
+                out.push(c);
+            }
+        }
+        Stmt::ReturnTable(entries) => out.extend(entries.iter().map(|(_, e)| e)),
+    }
+}
+
+fn valid_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Func(_, body) => valid_block(func_body_stmts(body), None),
+        _ => expr_children(e).iter().all(|(c, _)| valid_expr(c)),
     }
 }
 
@@ -690,11 +1225,23 @@ fn stmt_slots<'a>(s: &'a Stmt, out: &mut Vec<(&'a Expr, Hole)>) {
                 }
             }
         }
-        Stmt::Do(b) => {
+        Stmt::Do(b) | Stmt::WhileTrue(b) => {
             for s in &b.0 {
                 stmt_slots(s, out);
             }
         }
+        // Multi-assignment RHS: the last expression's values spread across
+        // the remaining lvalues, so it is the multi-value class; with as many
+        // expressions as lvalues the extra values are discarded, but the
+        // coarser class only declines rewrites, never mis-applies one (same
+        // note as thunk-body returns above).
+        Stmt::MultiAssign(_, exprs) => {
+            let n = exprs.len();
+            for (i, e) in exprs.iter().enumerate() {
+                out.push((e, arg_hole(i, n)));
+            }
+        }
+        Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
         Stmt::Function { body, .. } => {
             for s in &body.0 {
                 stmt_slots(s, out);
@@ -831,7 +1378,17 @@ impl Walker<'_> {
                     self.block(&mut b.0, facts, env, out);
                 }
             }
-            Stmt::Do(b) => self.block(&mut b.0, facts, env, out),
+            Stmt::Do(b) | Stmt::WhileTrue(b) => self.block(&mut b.0, facts, env, out),
+            Stmt::MultiAssign(_, exprs) => {
+                // No environment entries: a multi-assigned name has at least
+                // two binding sites by construction, so it never qualifies.
+                let n = exprs.len();
+                for (i, e) in exprs.iter_mut().enumerate() {
+                    let node = self.expr(e, facts, env, arg_hole(i, n));
+                    out.push(node);
+                }
+            }
+            Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
             Stmt::Function { body, .. } => {
                 let nodes = self.function_scope(&mut body.0);
                 out.extend(nodes);
@@ -1297,6 +1854,66 @@ mod tests {
         let v = engine.refute(&stmts, true);
         assert_eq!(v.len(), 1, "violations: {:?}", v);
         assert!(v[0].contains("overclaim") && v[0].contains("anything"), "{}", v[0]);
+    }
+
+    /// A structured pass cannot emit an invalid tree: the engine validates
+    /// the rewritten body against the structured vocabulary's placement
+    /// rules and declines the whole rewrite otherwise.
+    #[test]
+    fn structured_rewrite_validation() {
+        struct Rewrite(Vec<Stmt>);
+        impl StructuredPass for Rewrite {
+            fn request(
+                &mut self,
+                _h: &str,
+                _b: &Block,
+                _v: &ScopeView<'_>,
+                _l: &HashSet<String>,
+            ) -> Option<Block> {
+                Some(Block(self.0.clone()))
+            }
+        }
+        let module = || {
+            vec![Stmt::Function {
+                header: "local function f(x)".into(),
+                body: Block(vec![Stmt::Return(Expr::lit("1"))]),
+            }]
+        };
+
+        // A goto without its loop-ending label: declined, tree untouched.
+        let mut stmts = module();
+        let bad = vec![Stmt::WhileTrue(Block(vec![Stmt::Goto("continue".into())]))];
+        assert!(Engine::run_structured(&mut stmts, &mut Rewrite(bad)).is_none());
+        let Stmt::Function { body, .. } = &stmts[0] else { panic!("shape") };
+        assert!(matches!(body.0[0], Stmt::Return(_)), "declined rewrite must not apply");
+
+        // A bare return that is not last in its block: declined.
+        let mut stmts = module();
+        let bad = vec![Stmt::WhileTrue(Block(vec![
+            Stmt::ReturnNone,
+            Stmt::Expr(Expr::call_named("print", vec![])),
+        ]))];
+        assert!(Engine::run_structured(&mut stmts, &mut Rewrite(bad)).is_none());
+
+        // The designed shape passes validation and is applied; the returned
+        // engine's mirror aligns with the converted tree.
+        let mut stmts = module();
+        let good = vec![Stmt::WhileTrue(Block(vec![
+            Stmt::Local(vec!["_w0".into()], Some(Expr::name("x"))),
+            Stmt::If {
+                cond: Expr::name("_w0"),
+                then_b: Block(vec![Stmt::Return(Expr::lit("1"))]),
+                elseifs: vec![],
+                else_b: None,
+            },
+            Stmt::MultiAssign(vec!["x".into()], vec![Expr::lit("2")]),
+            Stmt::Goto("continue".into()),
+            Stmt::Do(Block(vec![Stmt::ReturnNone])),
+            Stmt::Label("continue".into()),
+        ]))];
+        let engine =
+            Engine::run_structured(&mut stmts, &mut Rewrite(good)).expect("valid rewrite applies");
+        assert!(engine.refute(&stmts, false).is_empty());
     }
 
     /// The mirror and the canonical enumeration stay aligned across every

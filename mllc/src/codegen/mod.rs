@@ -66,6 +66,7 @@ mod opt;
 mod pattern;
 mod runtime;
 mod strictness;
+mod tailloop;
 mod thunks;
 mod util;
 
