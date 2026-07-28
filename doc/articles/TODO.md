@@ -3,67 +3,39 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Lua-AST optimization layer: annotations + a transformer engine with
-      an annotation-write monopoly.** Agreed 2026-07-27. The design, in full:
+- [ ] **Lua-AST optimization layer, structured-pass tier.** The layer's
+      foundation is COMPLETE (see Completed: annotation layer, transformer
+      engine with annotation-write monopoly, `__force`-collapse peephole,
+      stamp refutation, per-pass toggles — codegen/annot.rs). What remains
+      is the structured tier: hand-written whole-function transforms with
+      global side conditions, on the same annotation/justification API:
+      (1) self-tail-call → loop conversion (interpreter dispatch win; loops
+      trace better than recursion under LuaJIT) — the only pass with a
+      plausible measurable benchmark win; (2) loop-invariant / capture-free
+      closure hoisting (syntactic backstop for the FNEW JIT-killer class).
+      Liveness-based local-slot reuse as a later candidate. Per-pass
+      verification discipline stays: corpus byte-diff (empty or reviewed),
+      tracker decode as the semantic + perf canary,
+      `codegen_is_deterministic` green, stamp refutation over the final
+      tree. Note the engine's known limit, accepted at design time: the
+      no-stale-annotations guarantee holds over the closed rewrite
+      vocabulary — a structured pass that needs a new rewrite form carries
+      an engine-side proof obligation (relocated bug surface, not
+      eliminated). Bytecode generation was considered and dropped
+      2026-07-27 (format unstable by design, hardened hosts load
+      text-only; `mlua`-based precompile covers the load-time case if
+      ever wanted).
 
-      *Annotations* on `lua::Expr`/`lua::Stmt` carry OPERATIONAL facts the
-      generator already proves and currently discards at emission — NOT
-      source types (post-monomorphization `Ty` has no backend consumer and
-      would couple the AST to the typechecker). Vocabulary: a small shape
-      lattice (WHNF / thunk / closure / constructor-shape / unknown) plus
-      effect bits (pure, may-trap, may-allocate). The lattice is MONOTONE:
-      facts only weaken toward unknown, never invert.
-
-      *Engine*: passes have NO write access to annotations. They request
-      rewrites; the engine applies them and assigns result stamps only by an
-      explicit justification the rule declares — inherit-from-named-source,
-      meet-of-sources, or unknown (the default). Beyond declared
-      justifications: invalidate to unknown and RECOMPUTE via the annotation
-      analysis afterward (the LLVM model; at mata-ll's whole-program sizes
-      recomputation is free — do not build stamp-preservation logic twice).
-      So a buggy pass can destroy information but cannot assert a false
-      claim; the trusted base narrows from N passes to one engine plus one
-      analysis. Known limit, accepted: the guarantee holds over the closed
-      rewrite vocabulary — extending the vocabulary carries an engine-side
-      proof obligation (relocated bug surface, not eliminated).
-
-      *Existing substrate* (predates this design; codegen/opt.rs,
-      2026-07-22, commits 88eb307/f181c6c/d18fa92/7a151e4): four passes
-      already run unconditionally on every compile — redundant-paren
-      normalization (context-aware: Grouped/Delim/DelimLast/Prefix,
-      truncation-preserving, restores proper tail calls in thunk bodies),
-      dead-branch cleanup, IIFE flattening, and force-of-known-WHNF-locals.
-      The design's original step (1), paren cleanup, is therefore DONE;
-      its accepted conservative residue: no precedence-based shedding
-      inside binop operands (no precedence table by design), and the
-      single-return callee whitelist misses data constructors and compiled
-      top-level functions (their calls keep parens in multi-value
-      positions). The force-of-WHNF-locals pass is the local-only
-      precursor the annotation-driven peephole below subsumes. opt.rs has
-      no per-pass toggles yet — that requirement belongs to the engine.
-
-      *Two pass tiers.* Rewrite-rule tier (local, shape-driven): (1)
-      `__force`-collapse peephole — the FIRST annotation consumer (WHNF +
-      pure stamps enter with it, not before: unread claims rot), and it is
-      differential-testable against the existing generation-time
-      `gen_forced` machinery — same corpus, byte-identical expected, any
-      diff is a bug in one of the two. Structured tier (hand-written
-      whole-function transforms, global side conditions, same annotation
-      API): (2) self-tail-call → loop conversion (interpreter dispatch win;
-      loops trace better than recursion under LuaJIT) — the only pass with
-      a plausible measurable benchmark win; (3) loop-invariant /
-      capture-free closure hoisting (syntactic backstop for the FNEW
-      JIT-killer class). Liveness-based local-slot reuse as a later
-      candidate.
-
-      *Verification*: `verify.rs` gains a stamp-refutation check over the
-      final tree in test builds (e.g. no `__force` around a WHNF-stamped
-      node); every pass individually toggleable; corpus byte-diff per pass
-      (empty or reviewed); tracker decode as the semantic + perf canary;
-      `codegen_is_deterministic` stays green. Bytecode generation was
-      considered and dropped 2026-07-27 (format unstable by design,
-      hardened hosts load text-only; `mlua`-based precompile covers the
-      load-time case if ever wanted).
+- [ ] **Eta-expanded callees carry a grouping `__force` that is really a
+      paren.** Found by the peephole's engine declining the collapse:
+      function.rs:205 emits `__force(<function literal>)(args)` where the
+      `__force` doubles as the prefixexp grouping Lua requires — the
+      literal is provably WHNF, but collapsing would emit the ungrammatical
+      `function…end(args)`, so the engine (correctly) declines and the
+      runtime call stays (e.g. nat_hkt.lua:847). The fix is
+      generation-side: emit `Paren` grouping instead of the `__force`
+      wrapper at that site, removing a runtime call per eta-expanded
+      callee. Deliberate small change with its own corpus diff review.
 
 - [ ] **`::` ascription inside a right-section operand is accepted; GHC
       parse-errors.** Found 2026-07-27 during the section-precedence work:
@@ -83,6 +55,52 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Lua-AST optimization layer, foundation: annotation layer, transformer
+      engine with an annotation-write monopoly, and the `__force`-collapse
+      peephole as its first consumer** (codegen/annot.rs, new, ~1300 lines;
+      design agreed 2026-07-27, recorded here before implementation).
+      *Stamps*: shape lattice (WHNF / Cons / Closure / Thunk / Unknown,
+      monotone — recomputation and rewriting only weaken) plus effect bits
+      (pure, may-trap, may-allocate). *Write monopoly, compiler-enforced*:
+      `Stamp`/`StampNode` fields are module-private with no public
+      constructors; passes implement `ExprPass::request` and see stamps only
+      through the read-only `StampView`, rewriting only by returning a
+      `Request` with a declared justification — `ReplaceWithChild(i)`
+      (inherit; sound by construction, the engine extracts the child
+      itself) or `Replace(e, MeetOfChildren|Unknown)`, after which the
+      engine invalidates and recomputes the whole mirror (no incremental
+      stamp preservation — a second preservation logic would be a second
+      trusted base). *Storage*: a mirror stamp tree in lockstep with the
+      Lua tree, identity positional over one canonical traversal — no keys
+      to dangle across rewrites. *One addition to the agreed design, found
+      by the first corpus run*: the engine owns grammatical validity — it
+      tracks every node's syntactic hole class (Stmt/Prefix/Grouped/Delim/
+      DelimLast, reusing the paren pass's taxonomy) and declines any
+      request whose replacement cannot stand in the hole, so a sloppy pass
+      cannot emit invalid Lua (the eta-expansion shape
+      `__force(<function literal>)(args)` uses the force AS its prefixexp
+      grouping; collapsing it would be ungrammatical). *Peephole*: the
+      entire pass is eleven lines — `__force(e)` → `e` where `e` is
+      WHNF-stamped, justification inherit. It subsumed the old
+      force-of-WHNF-locals pass (superset confirmed on the corpus: pass 4's
+      11 lines across 4 files all reproduced; pass deleted) and found 20
+      further provably redundant forces across 9 corpus files in four
+      classes, each argued and verified sound (alias-of-forced
+      transitivity, inliner-substituted literals under `__force`, fresh
+      table constructors, cons cells in discard position) — these are
+      generation-time misses the differential surfaced, not annotation
+      overclaims. *Verification*: stamp refutation wired through
+      `mllc::compile_with_stamp_refutation` → `verify::check_stamps` so
+      every corpus test recomputes the analysis fresh and refutes both
+      overclaims (carried stamp stronger than fresh) and residual forces
+      (collapse owed but not performed); per-pass toggles
+      (`MLL_OPT_DISABLE=parens,dead,iife,force`); suite 965/0 (946 + 19
+      added: lattice laws, write-monopoly, inherit/decline, refutation
+      positive/negative, mirror alignment, toggles, subsumption); tracker
+      canary byte-identical; determinism green; proprietary acceptance
+      passes; the 9 behavior-diffed files are executed suite cases.
+      2026-07-27.
 
 - [x] **Compiling long do-blocks is now linear in their length.** Found by
       the parser fuzzer's deep probes; every do-`let` statement re-walked
