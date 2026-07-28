@@ -3,22 +3,29 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Direct-perform IO self-recursion overflows the stack at ~1e6
-      depth — pre-existing, found by the ioloop pass's gates.** A
-      single-clause IO function whose OUTER body tail is
-      `return __mll_run_tail(self(…))` with effects at call time (sed's
-      fn102, basic's REPL loop) recurses one Lua frame per step today and
-      overflows at 1e6 on both PUC 5.5 and LuaJIT (verified; the common
-      two-level shape is fine and constant-stack). The ioloop pass's
-      repeat-safe gate declines this shape by design. A follow-up
-      structured pass (tailloop mechanics plus a run-tail-idempotence
-      argument) would convert it to a loop and fix the overflow. This is
-      a correctness item, not just perf.
+- [ ] **Direct-perform IO recursion the performloop pass DECLINES keeps
+      two pre-existing gaps: the frame-per-step depth limit and a
+      `pure`-payload forcing GHC does not do.** Found while building
+      pass 7: the unconverted shape re-applies `__mll_run_tail` once per
+      pinned frame on the way out, and the re-application forces a thunk
+      `pure` payload — `r <- f 1 undefined` (with `f 1 a = f 0 a;
+      f 0 a = pure a` behind a `case`) raised where GHC 9.14.1 binds the
+      bottom unforced (confirmed against runghc BEFORE pass 7 was
+      written; the prediction was exact). Every shape the pass converts
+      now matches GHC (pinned: performloop_pure_bottom) and runs in
+      constant stack; a shape its terminal vocabulary declines — a
+      bare-name or unknown-call terminal it cannot prove the runner
+      passes through unchanged, an action-builder hybrid — keeps both
+      the ~1e6 depth limit and the forcing. Closing the remainder wants
+      either stamp-backed terminal facts (the effect bits' first real
+      consumer) or a generation-side change to the direct-perform tail
+      emission.
 
 - [ ] **Lua-AST optimization layer, structured-pass tier (remaining).**
-      The foundation AND both loop passes are COMPLETE (see Completed:
-      annotation layer + engine + `__force`-collapse peephole;
-      self-tail-call → loop; IO self-loop conversion). Remaining, on the
+      The foundation AND all three loop passes are COMPLETE (see
+      Completed: annotation layer + engine + `__force`-collapse
+      peephole; self-tail-call → loop; IO self-loop conversion;
+      direct-perform IO self-loop conversion). Remaining, on the
       same annotation/justification API: (1) loop-invariant /
       capture-free closure hoisting (syntactic backstop for the FNEW
       JIT-killer class). Later candidate: liveness-based local-slot
@@ -65,6 +72,57 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Direct-perform IO self-recursion converts to a loop — structured-
+      tier pass 7, the ~1e6-depth stack-overflow fix** (codegen/
+      performloop.rs, new; `MLL_OPT_DISABLE=performloop`). The shape the
+      ioloop pass's repeat-safe gate declined BY DESIGN: an IO/ST
+      function that PERFORMS at call time and recurses through
+      `return __mll_run_tail(self(…))` — the self call sits in the
+      runner's ARGUMENT position, not a Lua tail call, so each step
+      pinned one frame (sed's line loop died at ~5e5 lines under PUC
+      5.5, verified). Two steps: NORMALIZE dissolves the emitter's
+      action-tail tree — dispatch IIFEs splice with their plain returns
+      given the pending runner application, action closures splice
+      verbatim, both only where control cannot fall out (diverging body
+      or function-tail position) — then tailloop mechanics loop the
+      direct shape (per-iteration `_w` copies, simultaneous multiple-
+      assignment update, always-goto continue). No repeat-safe gate:
+      iteration n runs exactly what call n ran, once. The run-tail-
+      idempotence argument carries the terminals: the original applied
+      `__mll_run_tail` once per unwind level, and on everything in the
+      runner's range (a box, or a bare non-thunk non-function value by
+      the box convention) a further application is the identity with no
+      effects — so the loop keeps each GENUINE application and drops the
+      identity re-applications, and a terminal is kept only when the
+      runner is provably the identity on it (a `__mll_run_tail(…)`
+      result, a literal/fresh-table/`__mll_pure` box, or a pure-
+      suspension closure `function() return e end`, whose identity-safe
+      payloads unwrap). Anything else declines whole — no new rewrite
+      vocabulary entered the engine (WhileTrue/MultiAssign/Goto/Label/
+      ReturnNone reused under the existing engine-owned validation).
+      Along the way the re-application deviation was found and fixed for
+      every converted shape: the unwind's extra runner applications
+      FORCED a thunk `pure` payload where GHC binds it unforced —
+      predicted, then confirmed against runghc 9.14.1, pinned as
+      performloop_pure_bottom (GHC-oracle); the declined-shape remainder
+      is the new open item above. Mechanical review permanent, ioloop's
+      pattern: a reverse transformer runs as a debug_assert inside
+      convert — every debug/test compile un-converts the loop step and
+      byte-compares against the normalized body. Corpus 428 files: 6
+      diffs, all reviewed and intended — sed's fn102 main loop, basic's
+      REPL (fn241) + RUN (fn200) loops, sokoban's game loop, the 3 new
+      cases; sed A/B on 1.5e6 stdin lines: unconverted overflows at
+      ~499 917, converted completes on PUC 5.5 and LuaJIT with
+      byte-identical output on the bounded diff; basic demo/arrays/REPL
+      and scripted sokoban byte-identical A/B. Direct repro constant-
+      stack at 2e6 and 1e7 on PUC 5.5 + LuaJIT (and 2e6 under mlua via
+      performloop_deep). Tracker canary: compile byte-identical, decode
+      byte-identical (8 336 640 bytes), 5.1× realtime LuaJIT, full song
+      66 s (was ~76). Suite 1030/0 debug and release; GHC oracle 292
+      pinned, 0 failed, all pre-existing goldens byte-identical (3 new);
+      determinism + stamp refutation green; clippy adds zero warnings;
+      proprietary acceptance passes. 2026-07-28.
 
 - [x] **IO self-loop conversion — structured-tier pass 6, the tracker's
       hot shape** (codegen/ioloop.rs, new; committed 5dc0312). The

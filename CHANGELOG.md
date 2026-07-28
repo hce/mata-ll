@@ -232,6 +232,27 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **Self-recursive IO functions that perform as they run no longer
+  overflow the Lua stack.** An IO function without pattern dispatch runs
+  its effects when called and recurses through the forwarding runner
+  (`loop n = do { …; loop (n - 1) }` behind an `if` or `case`); the self
+  call sat in the runner's argument position — not a Lua tail call — so
+  every step pinned one interpreter frame and the program crashed with
+  `stack overflow` at roughly a million iterations on PUC Lua and LuaJIT
+  both. sed-style line loops, REPLs and game loops are exactly this
+  shape. Such functions now compile to a `while` loop (one simultaneous
+  parameter update per recursive step, fresh per-iteration locals for
+  captures) and run in constant stack at any depth; effect order, effect
+  count and laziness are unchanged — each loop iteration runs exactly
+  what one call ran. The conversion also restores a piece of GHC parity
+  the recursive shape broke: the runner was re-applied once per pinned
+  frame on the way out, and the re-application forced a `pure` result's
+  thunk, so `r <- f 1 undefined` raised where GHC binds the bottom
+  unforced (pinned against real GHC). Functions where the conversion
+  cannot be proven safe keep the call form — and, with it, the old
+  depth limit; disable with `MLL_OPT_DISABLE=performloop` for
+  diagnostics.
+
 - **Every compiler front-end now runs `compile` on the calibrated 2 GiB
   stack.** The compiler's nesting-depth limit is calibrated against
   `mllc::COMPILER_STACK_SIZE` — every caller of `mllc::compile` must

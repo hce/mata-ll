@@ -770,6 +770,9 @@ mll_test!(ioloop_capture, "ioloop_capture.mll");
 mll_test!(ioloop_mixed, "ioloop_mixed.mll");
 mll_test!(ioloop_box, "ioloop_box.mll");
 mll_test!(ioloop_seq_parity, "ioloop_seq_parity.mll");
+mll_test!(performloop_deep, "performloop_deep.mll");
+mll_test!(performloop_dispatch, "performloop_dispatch.mll");
+mll_test!(performloop_pure_bottom, "performloop_pure_bottom.mll");
 mll_test!(seq_forms, "seq_forms.mll");
 mll_test!(self_referential_caf, "self_referential_caf.mll");
 mll_test!(lazy_take_zip, "lazy_take_zip.mll");
@@ -10173,6 +10176,9 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_operators, "cases", "operators.mll"),
         (ghc_oracle_pair_ord_fields, "cases", "pair_ord_fields.mll"),
         (ghc_oracle_pattern_matching, "cases", "pattern_matching.mll"),
+        (ghc_oracle_performloop_deep, "cases", "performloop_deep.mll"),
+        (ghc_oracle_performloop_dispatch, "cases", "performloop_dispatch.mll"),
+        (ghc_oracle_performloop_pure_bottom, "cases", "performloop_pure_bottom.mll"),
         (ghc_oracle_pointfree_caf, "cases", "pointfree_caf.mll"),
         (ghc_oracle_poly_recursion, "cases", "poly_recursion.mll"),
         (ghc_oracle_prefix_minus, "cases", "prefix_minus.mll"),

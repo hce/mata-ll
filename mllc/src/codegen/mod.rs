@@ -65,6 +65,7 @@ mod module;
 mod names;
 mod opt;
 mod pattern;
+mod performloop;
 mod runtime;
 mod strictness;
 mod tailloop;
