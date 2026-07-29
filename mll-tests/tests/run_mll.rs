@@ -7595,6 +7595,125 @@ main = putStrLn "no"
     );
 }
 
+/// A type SIGNATURE's universally-quantified variables must be SKOLEMIZED
+/// (treated as rigid) when checking the function body — exactly as GHC does.
+/// A signature that is MORE GENERAL than its implementation is unsound and
+/// must be rejected, not silently accepted by freshening the signature vars
+/// to flexible unification variables.
+///
+/// STATE OF THE COMPILER: these two probes currently FAIL (the programs still
+/// compile) because `freshen_sig_type_mapped` freshens signature variables to
+/// `Ty::Var` instead of `Ty::Skolem`. They are regression tests for the fix
+/// and are expected to pass only AFTER signature skolemization lands. The
+/// wording assertions mirror the existing rigid-mismatch message already
+/// produced for existential skolems (see `existential_unpacking_skolemizes`),
+/// kept loose enough to survive rewording.
+#[test]
+fn signature_vars_are_skolemized() {
+    // Case 1: `f :: a -> Int` / `f x = x` returns its argument (type `a`)
+    // where the signature promises `Int`. `a` is rigid, so it cannot be
+    // matched with `Int`. GHC: "Couldn't match expected type 'Int' with
+    // actual type 'a'" / "'a' is a rigid type variable bound by ...".
+    let e = compile_err(
+        r#"
+f :: a -> Int
+f x = x
+
+main :: IO ()
+main = print (f (5 :: Int))
+"#,
+    );
+    assert!(
+        e.contains("rigid"),
+        "the signature variable 'a' must be rigid (skolemized), got: {e}"
+    );
+    assert!(
+        e.contains('a') && e.contains("Int"),
+        "the error should mention the rigid variable 'a' and the promised 'Int', got: {e}"
+    );
+
+    // Case 2: `g :: Monad m => m ()` / `g = putStrLn "hi"`. The body is `IO ()`
+    // but the signature quantifies over an arbitrary `Monad m`; `m` is rigid,
+    // so pinning it to `IO` is rejected. GHC: no instance / rigid `m`.
+    let e = compile_err(
+        r#"
+g :: Monad m => m ()
+g = putStrLn "hi"
+
+main :: IO ()
+main = g
+"#,
+    );
+    assert!(
+        e.contains("rigid") || e.contains("No instance") || e.contains("instance"),
+        "the signature variable 'm' must be rigid: pinning it to IO must be \
+         rejected, got: {e}"
+    );
+}
+
+/// Controls for the signature-skolemization fix: legitimately-general
+/// signatures whose implementations honour them must KEEP compiling. If the
+/// fix over-rejects any of these it has regressed ordinary polymorphism.
+/// (Higher-rank / runST and existential/GADT controls live in the already
+/// registered rank2.mll, st_return.mll, existentials.mll and
+/// existential_constraints.mll cases.)
+#[test]
+fn skolemized_signatures_do_not_regress_valid_polymorphism() {
+    for (label, src) in [
+        // The identity function: the classic `a -> a`, body returns its arg.
+        (
+            "myid :: a -> a",
+            r#"
+myid :: a -> a
+myid x = x
+
+main :: IO ()
+main = print (myid (7 :: Int))
+"#,
+        ),
+        // Multi-variable / projection: `a -> b -> a`, returns the first arg.
+        (
+            "first :: a -> b -> a",
+            r#"
+first :: a -> b -> a
+first x _ = x
+
+main :: IO ()
+main = print (first (3 :: Int) "ignored")
+"#,
+        ),
+        // Return-type polymorphism used honestly: the result is produced at
+        // the fully polymorphic type (Nothing :: Maybe a).
+        (
+            "constNothing :: b -> Maybe a",
+            r#"
+constNothing :: b -> Maybe a
+constNothing _ = Nothing
+
+main :: IO ()
+main = print (constNothing (5 :: Int) :: Maybe Int)
+"#,
+        ),
+        // Constrained polymorphism: `Show a => a -> String`, the body only
+        // uses the declared class method.
+        (
+            "render :: Show a => a -> String",
+            r#"
+render :: Show a => a -> String
+render x = show x
+
+main :: IO ()
+main = putStrLn (render (42 :: Int))
+"#,
+        ),
+    ] {
+        assert!(
+            mllc::compile(src, Path::new("."), &[]).is_ok(),
+            "control `{label}` must still compile after signature skolemization"
+        );
+    }
+}
+
 /// Record syntax back doors: a field whose type is existential has no
 /// selector (the selector's result type would BE the hidden type, outside
 /// any match) and cannot be record-updated (nothing to check the new value
