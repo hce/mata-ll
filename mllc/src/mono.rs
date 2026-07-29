@@ -1005,7 +1005,26 @@ impl Monomorphizer {
                     rhs: Box::new(self.mono_expr(*rhs)),
                 }
             }
-            TExprKind::Negate(inner) => TExprKind::Negate(Box::new(self.mono_expr(*inner))),
+            TExprKind::Negate(inner) => {
+                // Prefix minus. Int/Number negate inline to Lua unary `-`; every
+                // other Num type (Integer, user instances) has no `__unm`, so it
+                // must dispatch to that instance's `negate` — same rule the
+                // InfixApp arm applies to `+ - *`.
+                let inner = self.mono_expr(*inner);
+                let prim = matches!(&ty, Ty::Con(c) if c == "Int" || c == "Number");
+                if !prim
+                    && let Some(head) = InstHead::of(&ty)
+                    && let Some(neg) = self.instance_methods.get(&("negate".to_string(), head)) {
+                    return TExpr {
+                        kind: TExprKind::App(
+                            Box::new(TExpr::new(TExprKind::Var(neg.clone()), Ty::Unit)),
+                            Box::new(inner),
+                        ),
+                        ty,
+                    };
+                }
+                TExprKind::Negate(Box::new(inner))
+            }
             TExprKind::Lambda { params, body } => {
                 let saved_locals: Vec<_> = params.iter()
                     .filter(|(name, _)| !self.locals.contains(name))
@@ -1085,14 +1104,15 @@ impl Monomorphizer {
                 },
             TExprKind::FfiMaybeArg { value } =>
                 TExprKind::FfiMaybeArg { value: Box::new(self.mono_expr(*value)) },
-            // Numeric-literal overloading. A polymorphic integer literal has type
-            // `Num a => a` (fractional: `Fractional a => a`). At a concrete
-            // Int/Number type the class `fromInteger`/`fromRational` is the
-            // identity, so the raw literal is emitted directly (byte-identical to
-            // the pre-overloading compiler). Only a USER numeric type needs the
-            // conversion materialised: wrap the literal in the instance's
-            // `fromInteger`/`fromRational` implementation, exactly as GHC's
-            // literal desugaring does.
+            // Numeric-literal overloading, GHC-faithful. A polymorphic integer
+            // literal is `fromInteger (n :: Integer)`; a fractional literal is
+            // `fromRational (n :: Number)`. At a concrete Int/Number type the
+            // conversion is the identity, so the raw literal is emitted directly
+            // (byte-identical to the pre-overloading compiler). Otherwise:
+            //   * target Integer  -> `fromInteger_Integer n`  (machine -> bignum)
+            //   * a USER Num type -> `fromInteger_T (fromInteger_Integer n)` —
+            //     the user's `fromInteger` receives an actual Integer, as in GHC.
+            // The fractional path is unchanged (fromRational takes a Number).
             TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_))) => {
                 let is_frac = matches!(lit, TLiteral::Number(_));
                 let class = if is_frac { "Fractional" } else { "Num" };
@@ -1100,12 +1120,27 @@ impl Monomorphizer {
                 let lit_src_ty = if is_frac { "Number" } else { "Int" };
                 match self.numeric_literal_conversion(class, method, &ty) {
                     Some(conv_fn) => {
-                        // App(Var(conv_fn), Lit) — the literal keeps its source
-                        // (Int/Number) type as the conversion's argument.
-                        let arg = TExpr::new(
+                        // The literal in its source (Int/Number) representation.
+                        let raw = TExpr::new(
                             TExprKind::Lit(lit),
                             Ty::Con(lit_src_ty.to_string()),
                         );
+                        // For a user Num type, first lift the machine literal to
+                        // an Integer so `fromInteger_T` is fed an Integer.
+                        let arg = if !is_frac && conv_fn != "fromInteger_Integer" {
+                            TExpr::new(
+                                TExprKind::App(
+                                    Box::new(TExpr::new(
+                                        TExprKind::Var("fromInteger_Integer".into()),
+                                        Ty::Unit,
+                                    )),
+                                    Box::new(raw),
+                                ),
+                                Ty::Con("Integer".into()),
+                            )
+                        } else {
+                            raw
+                        };
                         return TExpr {
                             kind: TExprKind::App(
                                 Box::new(TExpr::new(TExprKind::Var(conv_fn), Ty::Unit)),
@@ -1115,6 +1150,26 @@ impl Monomorphizer {
                         };
                     }
                     None => TExprKind::Lit(lit),
+                }
+            }
+            // A big (> i64) integer literal is already an Integer value (codegen
+            // emits `__int_from_decimal`). At Integer it is emitted bare; at any
+            // other Num type it is converted by that type's `fromInteger` (which
+            // for Int/Number narrows the bignum).
+            TExprKind::Lit(lit @ TLiteral::BigInteger(_)) => {
+                let raw = TExpr::new(TExprKind::Lit(lit), Ty::Con("Integer".into()));
+                match InstHead::of(&ty)
+                    .and_then(|h| self.instance_methods.get(&("fromInteger".to_string(), h))) {
+                    Some(conv) if conv != "fromInteger_Integer" => {
+                        return TExpr {
+                            kind: TExprKind::App(
+                                Box::new(TExpr::new(TExprKind::Var(conv.clone()), Ty::Unit)),
+                                Box::new(raw),
+                            ),
+                            ty,
+                        };
+                    }
+                    _ => return raw,
                 }
             }
             other => other,

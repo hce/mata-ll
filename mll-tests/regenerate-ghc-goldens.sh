@@ -144,20 +144,21 @@ rewrite_body() {
     '
 }
 
-# mata-ll is defined as GHC with an implicit `default (Int, Double)` and no
-# `Integer` in scope (see HASKDIFF.md, "Why GHC parity"): its integer is 64-bit
-# and wrapping (GHC's `Int`), so unannotated literals must default to `Int`, not
-# `Integer`, for GHC to stay the referee for defaulted arithmetic (overflow
-# included). We inject that declaration after the LAST import line — Haskell
-# requires every import to precede any top-level declaration, and a case body may
-# carry its own imports (Data.List, …), so it cannot go in the header block.
+# mata-ll now matches GHC's Haskell-2010 `default (Integer, Double)`: an
+# unannotated numeric literal defaults to arbitrary-precision `Integer`, with
+# `Int` reached only by annotation/unification (see HASKDIFF.md, "Why GHC
+# parity"). So the twin injects the SAME default, keeping GHC a faithful referee
+# for defaulted arithmetic (overflow included). We inject it after the LAST
+# import line — Haskell requires every import to precede any top-level
+# declaration, and a case body may carry its own imports (Data.List, …), so it
+# cannot go in the header block.
 inject_default() {
     awk '
         { lines[NR] = $0; if ($0 ~ /^import /) last_import = NR }
         END {
             for (i = 1; i <= NR; i++) {
                 print lines[i]
-                if (i == last_import) print "default (Int, Double)"
+                if (i == last_import) print "default (Integer, Double)"
             }
         }'
 }

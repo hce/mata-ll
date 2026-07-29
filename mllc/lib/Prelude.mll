@@ -378,6 +378,42 @@ enumFromThenToHelper_Int x step m =
     then if x > m then [] else x : enumFromThenToHelper_Int (x + step) step m
     else if x < m then [] else x : enumFromThenToHelper_Int (x + step) step m
 
+-- Enum instance for Integer (arbitrary precision). Mirrors Enum Int; the
+-- arithmetic and comparisons dispatch to the Integer runtime helpers, and the
+-- Int<->Integer conversions go through toInteger / fromInteger.
+succ_Integer :: Integer -> Integer
+succ_Integer n = n + 1
+
+pred_Integer :: Integer -> Integer
+pred_Integer n = n - 1
+
+toEnum_Integer :: Int -> Integer
+toEnum_Integer n = toInteger n
+
+fromEnum_Integer :: Integer -> Int
+fromEnum_Integer n = fromInteger n
+
+enumFrom_Integer :: Integer -> [Integer]
+enumFrom_Integer n = n : enumFrom_Integer (n + 1)
+
+enumFromThen_Integer :: Integer -> Integer -> [Integer]
+enumFromThen_Integer n m = enumFromThenHelper_Integer n (m - n)
+
+enumFromThenHelper_Integer :: Integer -> Integer -> [Integer]
+enumFromThenHelper_Integer x step = x : enumFromThenHelper_Integer (x + step) step
+
+enumFromTo_Integer :: Integer -> Integer -> [Integer]
+enumFromTo_Integer n m = if n > m then [] else n : enumFromTo_Integer (n + 1) m
+
+enumFromThenTo_Integer :: Integer -> Integer -> Integer -> [Integer]
+enumFromThenTo_Integer n next m = enumFromThenToHelper_Integer n (next - n) m
+
+enumFromThenToHelper_Integer :: Integer -> Integer -> Integer -> [Integer]
+enumFromThenToHelper_Integer x step m =
+    if step > 0
+    then if x > m then [] else x : enumFromThenToHelper_Integer (x + step) step m
+    else if x < m then [] else x : enumFromThenToHelper_Integer (x + step) step m
+
 -- Read instances
 read_Int :: String -> Int
 read_Int s = ffi_tonumber s

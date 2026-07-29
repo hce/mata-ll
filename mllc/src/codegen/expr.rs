@@ -1491,6 +1491,10 @@ impl CodeGen {
             // The hex spelling is defined to wrap to the integer subtype.
             TLiteral::Integer(i64::MIN) => Expr::lit("0x8000000000000000"),
             TLiteral::Integer(n) => Expr::lit(n.to_string()),
+            // A too-large-for-i64 literal: parse the decimal digits into a bignum
+            // at load. The string is digits (optionally a leading '-'), so it is
+            // safe to embed directly.
+            TLiteral::BigInteger(s) => Expr::lit(format!("__int_from_decimal(\"{s}\")")),
             // Emitted as a FLOAT literal ("10.0"/"1e20", never "10"): Lua
             // 5.3+ reads a bare integer spelling as a native integer, which
             // put wrapping 64-bit integer arithmetic behind Double-typed

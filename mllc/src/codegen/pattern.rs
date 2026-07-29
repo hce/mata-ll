@@ -406,22 +406,40 @@ impl CodeGen {
             TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.clone())); }
             TPattern::Wildcard => {}
             TPattern::LitPat(lit) => {
-                let s = match lit {
+                // An integer literal pattern is Num-polymorphic: the scrutinee
+                // may be a machine Int or a boxed Integer, so compare through the
+                // type-directed __mll_lit_eq. Other literals keep native `==`.
+                match lit {
                     // See literal_ast: i64::MIN has no decimal Lua spelling.
-                    TLiteral::Integer(i64::MIN) => "0x8000000000000000".to_string(),
-                    TLiteral::Integer(n) => format!("{}", n),
-                    // Float spelling, matching literal_ast (Lua compares
-                    // 10 == 10.0 numerically, but the emitted literal must
-                    // still denote the Double the pattern was written at).
-                    TLiteral::Number(n) => lua_number_literal(*n),
-                    // The canonical escaper: an unescaped quote or control
-                    // character in a string PATTERN would otherwise emit
-                    // unloadable Lua (`if _arg0 == "a"b" then`).
-                    TLiteral::Str(s) => lua_quoted_string(s),
-                    TLiteral::Bool(b) => if *b { "true".into() } else { "false".into() },
-                    TLiteral::Unit => "nil".into(),
-                };
-                conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit(s)));
+                    TLiteral::Integer(i64::MIN) => conditions.push(Expr::call_named(
+                        "__mll_lit_eq",
+                        vec![scrutinee.clone(), Expr::lit("0x8000000000000000")],
+                    )),
+                    TLiteral::Integer(n) => conditions.push(Expr::call_named(
+                        "__mll_lit_eq",
+                        vec![scrutinee.clone(), Expr::lit(n.to_string())],
+                    )),
+                    TLiteral::BigInteger(s) => conditions.push(Expr::call_named(
+                        "__mll_lit_eq",
+                        vec![scrutinee.clone(), Expr::lit(format!("__int_from_decimal(\"{s}\")"))],
+                    )),
+                    _ => {
+                        let s = match lit {
+                            // Float spelling, matching literal_ast (Lua compares
+                            // 10 == 10.0 numerically, but the emitted literal must
+                            // still denote the Double the pattern was written at).
+                            TLiteral::Number(n) => lua_number_literal(*n),
+                            // The canonical escaper: an unescaped quote or control
+                            // character in a string PATTERN would otherwise emit
+                            // unloadable Lua (`if _arg0 == "a"b" then`).
+                            TLiteral::Str(s) => lua_quoted_string(s),
+                            TLiteral::Bool(b) => if *b { "true".into() } else { "false".into() },
+                            TLiteral::Unit => "nil".into(),
+                            TLiteral::Integer(_) | TLiteral::BigInteger(_) => unreachable!(),
+                        };
+                        conditions.push(Expr::binop("==", scrutinee.clone(), Expr::lit(s)));
+                    }
+                }
             }
             TPattern::Constructor { name, args } => {
                 if self.is_newtype(name) {

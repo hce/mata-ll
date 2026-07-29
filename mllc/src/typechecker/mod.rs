@@ -1869,6 +1869,7 @@ impl Checker {
     fn literal_type(&self, lit: &Literal) -> Ty {
         match lit {
             Literal::Integer(_) => Ty::Con("Int".into()),
+            Literal::BigInteger(_) => Ty::Con("Integer".into()),
             Literal::Number(_) => Ty::Con("Number".into()),
             Literal::Str(_) => Ty::Con("String".into()),
             Literal::Bool(_) => Ty::Con("Bool".into()),
@@ -1879,6 +1880,7 @@ impl Checker {
     fn convert_literal(lit: &Literal) -> TLiteral {
         match lit {
             Literal::Integer(n) => TLiteral::Integer(*n),
+            Literal::BigInteger(s) => TLiteral::BigInteger(s.clone()),
             Literal::Number(n) => TLiteral::Number(*n),
             Literal::Str(s) => TLiteral::Str(s.clone()),
             Literal::Bool(b) => TLiteral::Bool(*b),
@@ -2589,7 +2591,7 @@ impl Checker {
             ty: read_ty,
         });
         // Read instances for base types
-        for type_name in &["Int", "Number", "Bool", "String"] {
+        for type_name in &["Int", "Integer", "Number", "Bool", "String"] {
             let mut method_fns = HashMap::new();
             method_fns.insert("read".to_string(), format!("read_{}", type_name));
             self.register_instance(InstanceInfo {
@@ -2622,7 +2624,7 @@ impl Checker {
         });
 
         // Eq instances for base types
-        for type_name in &["Int", "Number", "String", "Bool", "ByteString"] {
+        for type_name in &["Int", "Integer", "Number", "String", "Bool", "ByteString"] {
             let target = Ty::Con(type_name.to_string());
             let mangled = format!("eq_{}", type_name);
             let mut method_fns = HashMap::new();
@@ -2683,7 +2685,7 @@ impl Checker {
         }
 
         // Ord instances for base types
-        for type_name in &["Int", "Number", "String", "ByteString"] {
+        for type_name in &["Int", "Integer", "Number", "String", "ByteString"] {
             let target = Ty::Con(type_name.to_string());
             let mut method_fns = HashMap::new();
             for op in &["<", ">", "<=", ">="] {
@@ -2712,7 +2714,11 @@ impl Checker {
         {
             let bin = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
             let un = Ty::arrow(ta.clone(), ta.clone());
-            let from_integer_ty = Ty::arrow(Ty::Con("Int".into()), ta.clone());
+            // GHC-faithful: `fromInteger :: Integer -> a` — a numeric literal is
+            // an `Integer` that `fromInteger` lowers to the target Num type.
+            let from_integer_ty = Ty::arrow(Ty::Con("Integer".into()), ta.clone());
+            // `toInteger :: a -> Integer` (restored now that Integer exists).
+            let to_integer_ty = Ty::arrow(ta.clone(), Ty::Con("Integer".into()));
             // No Rational type in mata-ll: a fractional literal is a Number
             // (f64) at the source level, so `fromRational` takes that same
             // representation. Documented as the single numeric-tower deviation.
@@ -2770,11 +2776,7 @@ impl Checker {
                     ("mod".to_string(), bin.clone()),
                     ("quotRem".to_string(), to_pair.clone()),
                     ("divMod".to_string(), to_pair.clone()),
-                    // GHC's `toInteger :: a -> Integer` is deliberately absent:
-                    // mata-ll has no arbitrary-precision Integer, so a method
-                    // whose whole purpose is to escape to bignum cannot be
-                    // honoured. Using `toInteger` is rejected with a note
-                    // pointing at `Int` (see Diagnostic::hint).
+                    ("toInteger".to_string(), to_integer_ty.clone()),
                 ],
                 default_methods: HashMap::new(),
             });
@@ -2783,7 +2785,7 @@ impl Checker {
             // env from the arithmetic block above).
             let named: &[(&str, &Ty)] = &[
                 ("negate", &un), ("abs", &un), ("signum", &un),
-                ("fromInteger", &from_integer_ty),
+                ("fromInteger", &from_integer_ty), ("toInteger", &to_integer_ty),
                 ("recip", &un), ("fromRational", &from_rational_ty),
                 ("quotRem", &to_pair), ("divMod", &to_pair),
             ];
@@ -2800,7 +2802,7 @@ impl Checker {
                 ("fromInteger", "Num"),
                 ("/", "Fractional"), ("recip", "Fractional"), ("fromRational", "Fractional"),
                 ("quot", "Integral"), ("rem", "Integral"), ("div", "Integral"), ("mod", "Integral"),
-                ("quotRem", "Integral"), ("divMod", "Integral"),
+                ("quotRem", "Integral"), ("divMod", "Integral"), ("toInteger", "Integral"),
             ];
             for (method, class) in ncm {
                 self.method_constraints.insert(method.to_string(), vec![TyConstraint {
@@ -2854,14 +2856,60 @@ impl Checker {
                 method_fns: HashMap::new(),
                 context: None,
             });
-            // Integral Integer (Number is NOT Integral, as GHC)
+            // Integral Int (Number is NOT Integral, as GHC). Operators self-map
+            // (mono keeps them inline); toInteger lifts to a bignum.
             self.register_instance(InstanceInfo {
                 class_name: "Integral".to_string(),
                 target_type: Ty::Con("Int".to_string()),
                 method_fns: mk(&[("div", "div"), ("mod", "mod"), ("quot", "quot"), ("rem", "rem"),
-                    ("quotRem", "quotRem_Int"), ("divMod", "divMod_Int")]),
+                    ("quotRem", "quotRem_Int"), ("divMod", "divMod_Int"),
+                    ("toInteger", "toInteger_Int")]),
                 context: None,
             });
+
+            // ---- Arbitrary-precision Integer instances ----
+            // Unlike Int/Number, the operators do NOT self-map: every method
+            // routes to a bignum runtime helper (see codegen runtime.lua), so
+            // the monomorphizer materialises them as calls rather than inline
+            // Lua arithmetic.
+            self.register_instance(InstanceInfo {
+                class_name: "Num".to_string(),
+                target_type: Ty::Con("Integer".to_string()),
+                method_fns: mk(&[("+", "add_Integer"), ("-", "sub_Integer"), ("*", "mul_Integer"),
+                    ("negate", "negate_Integer"), ("abs", "abs_Integer"),
+                    ("signum", "signum_Integer"), ("fromInteger", "fromInteger_Integer")]),
+                context: None,
+            });
+            self.register_instance(InstanceInfo {
+                class_name: "Real".to_string(),
+                target_type: Ty::Con("Integer".to_string()),
+                method_fns: HashMap::new(),
+                context: None,
+            });
+            self.register_instance(InstanceInfo {
+                class_name: "Integral".to_string(),
+                target_type: Ty::Con("Integer".to_string()),
+                method_fns: mk(&[("div", "div_Integer"), ("mod", "mod_Integer"),
+                    ("quot", "quot_Integer"), ("rem", "rem_Integer"),
+                    ("quotRem", "quotRem_Integer"), ("divMod", "divMod_Integer"),
+                    ("toInteger", "toInteger_Integer")]),
+                context: None,
+            });
+            // Enum Integer: the helpers are mata-ll source in lib/Prelude.mll
+            // (like Enum Int), so they dispatch through the Integer instances.
+            {
+                let mut method_fns = HashMap::new();
+                for m in &["succ", "pred", "toEnum", "fromEnum",
+                           "enumFrom", "enumFromThen", "enumFromTo", "enumFromThenTo"] {
+                    method_fns.insert(m.to_string(), format!("{m}_Integer"));
+                }
+                self.register_instance(InstanceInfo {
+                    class_name: "Enum".to_string(),
+                    target_type: Ty::Con("Integer".to_string()),
+                    method_fns,
+                    context: None,
+                });
+            }
         }
 
         // The Semigroup and Monoid CLASS declarations are now ordinary source
@@ -2900,7 +2948,7 @@ impl Checker {
         // it, exactly as for the builtin `mempty` before.
 
         // Show instances for base types and parameterized types
-        for type_name in &["Int", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {
+        for type_name in &["Int", "Integer", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {
             let target = Ty::Con(type_name.to_string());
             let mangled = format!("show_{}", type_name);
             let mut method_fns = HashMap::new();
@@ -2956,7 +3004,7 @@ impl Checker {
         // the FFI boundary (e.g. lib/LIO.mll's FileHandle wraps one); it must
         // be registered here like every other builtin so that references to
         // it pass the unknown-type check.
-        for name in &["Int", "Number", "String", "Bool", "()", "ByteString", "LuaUserData"] {
+        for name in &["Int", "Integer", "Number", "String", "Bool", "()", "ByteString", "LuaUserData"] {
             self.kinds.insert(name.to_string(), Kind::Type);
         }
         // Type constructors: kind Type -> Type

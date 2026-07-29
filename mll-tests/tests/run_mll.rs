@@ -6455,7 +6455,8 @@ fn list_semigroup_operator_still_rejected_after_move() {
     let e = compile_err(
         "main :: IO ()\nmain = putStrLn (show ([1, 2] <> [3, 4]))\n",
     );
-    assert!(e.contains("No instance for '<>' on type '[Int]'"), "got: {e}");
+    // Unannotated list literals default to Integer (GHC `default (Integer, …)`).
+    assert!(e.contains("No instance for '<>' on type '[Integer]'"), "got: {e}");
     assert!(
         e.contains("lists are concatenated with ++"),
         "the ++ guidance note must still fire, got: {e}"
@@ -10312,6 +10313,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_compose_non_strict, "cases", "compose_non_strict.mll"),
         (ghc_oracle_curried_lambda_arity, "cases", "curried_lambda_arity.mll"),
         (ghc_oracle_data_types, "cases", "data_types.mll"),
+        (ghc_oracle_integer_bignum, "cases", "integer_bignum.mll"),
         (ghc_oracle_datakinds, "cases", "datakinds.mll"),
         (ghc_oracle_default_methods, "cases", "default_methods.mll"),
         (ghc_oracle_default_methods_ops, "cases", "default_methods_ops.mll"),

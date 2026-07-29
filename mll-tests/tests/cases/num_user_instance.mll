@@ -15,7 +15,9 @@ instance Num Z5 where
     abs m             = m
     signum (Z5 0)     = Z5 0
     signum _          = Z5 1
-    fromInteger n     = Z5 (n `mod` 5)
+    -- fromInteger :: Integer -> Z5 (GHC parity): narrow the Integer argument
+    -- to the newtype's Int field with the inner fromInteger.
+    fromInteger n     = Z5 (fromInteger (n `mod` 5))
 
 instance Eq Z5 where
     (==) (Z5 a) (Z5 b) = a == b

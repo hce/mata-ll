@@ -256,16 +256,19 @@ impl Checker {
             }).collect();
             self.fn_dict_constraints.insert(name.to_string(), renamed);
         }
-        // ---- Numeric defaulting (mata-ll's `default (Int, Number)`; GHC's
-        // Haskell-2010 rule is `default (Integer, Double)`, but mata-ll has no
-        // Integer, so `Int` is the first candidate) ----
+        // ---- Numeric defaulting (`default (Integer, Number)` — GHC's
+        // Haskell-2010 `default (Integer, Double)`, with Number standing in for
+        // Double). An unconstrained literal defaults to arbitrary-precision
+        // Integer, exactly as in GHC; `Int` is reached only by an explicit
+        // annotation or by unification, never by defaulting. ----
         // Resolve type variables that appear ONLY in the wanted constraints of
         // this binding (never in its signature type) and are constrained solely
         // by standard classes including at least one numeric class. Without this,
         // an in-expression literal like `show 5` would be reported ambiguous.
         // The chosen default (Int first, then Number for Double) is folded
         // into `overall_subst` BEFORE it is applied to the TIR clauses, so the
-        // literal nodes carry the concrete type codegen ultimately emits.
+        // literal nodes carry the concrete type codegen ultimately emits
+        // (Integer first, then Number for Double).
         {
             let default_subst = self.compute_numeric_defaults(&fresh_ty, &overall_subst);
             if !default_subst.is_type_empty() {
@@ -428,7 +431,7 @@ impl Checker {
     /// `C (f v)`), every such class is a *standard* class, at least one is a
     /// numeric class, and the variable does NOT appear in this binding's own
     /// (signature) type — i.e. it is ambiguous, resolvable only by defaulting.
-    /// For each candidate the default types are tried in order — `Int`,
+    /// For each candidate the default types are tried in order — `Integer`,
     /// then `Number` (GHC's `Double`) — and the first that satisfies every
     /// constraint on the variable is chosen. Returns the substitution to fold
     /// into `overall_subst`.
@@ -492,7 +495,7 @@ impl Checker {
             if !info.classes.iter().any(|c| Self::is_numeric_class(c)) { continue; }
             // Try the default types in order; pick the first for which EVERY
             // original constraint on the variable has an instance.
-            for cand in &["Int", "Number"] {
+            for cand in &["Integer", "Number"] {
                 let ct = Ty::Con((*cand).to_string());
                 let sub = Subst::singleton(v.clone(), ct.clone());
                 if info.full.iter().all(|(class, fty)| self.has_instance(class, &fty.apply_subst(&sub))) {
@@ -634,7 +637,16 @@ impl Checker {
                 // ambiguities on top of the real error. Drop them; they are
                 // re-checked for real once the reported error is fixed.
                 let wanted_before = self.wanted.len();
-                let (texpr, inferred_ty, s) = self.infer_expr(&ld.body, &local_env).unwrap_or_else(|e| {
+                // Infer against the env with the accumulated substitution applied,
+                // so a sibling where-binding already checked in this group (e.g.
+                // `f` in `add10 = f 10`) is seen at its RESOLVED type rather than
+                // its still-fresh pre-registered variable. Without this the use's
+                // unifications land on a stale variable and never propagate back to
+                // this binding's literals, leaving them unresolved for the
+                // monomorphizer to default (now to Integer) — the `let` group path
+                // already applies the substitution between bindings.
+                let cur_env = local_env.applied(&subst);
+                let (texpr, inferred_ty, s) = self.infer_expr(&ld.body, &cur_env).unwrap_or_else(|e| {
                     self.wanted.truncate(wanted_before);
                     self.push_error_span(
                         e,
@@ -651,7 +663,7 @@ impl Checker {
                 // a real type error that must be reported, not dropped (unless
                 // the body already failed above, where a second message about
                 // the Unit placeholder would only be noise).
-                if let Some(scheme) = local_env.lookup(&ld.name) {
+                if let Some(scheme) = cur_env.lookup(&ld.name) {
                     match self.unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
                         Ok(us) => subst = subst.compose(&us),
                         Err(e) => if !binding_errored {
@@ -669,8 +681,9 @@ impl Checker {
                     body: texpr,
                 });
             } else {
-                // Local function: where go acc [] = ...
-                let mut fn_env = local_env.clone();
+                // Local function: where go acc [] = ... — see the value-binding
+                // case above for why the running substitution is applied first.
+                let mut fn_env = local_env.applied(&subst).into_owned();
                 let mut param_tys = Vec::new();
                 let mut tpatterns = Vec::new();
                 let mut where_subst = Subst::empty();
@@ -938,9 +951,21 @@ impl Checker {
             }
             Pattern::Wildcard => Ok((TPattern::Wildcard, Subst::empty())),
             Pattern::LitPat(lit) => {
-                let lit_ty = self.literal_type(lit);
-                let s = self.unify(expected, &lit_ty)?;
-                Ok((TPattern::LitPat(Self::convert_literal(lit)), s))
+                match lit {
+                    // A numeric literal pattern is Num-polymorphic like the
+                    // expression literal: it matches at the scrutinee's numeric
+                    // type (Int, Integer, or a user Num), not a fixed Int. The
+                    // codegen compares it type-directed (see __mll_lit_eq).
+                    Literal::Integer(_) | Literal::BigInteger(_) => {
+                        self.wanted.push(("Num".to_string(), expected.clone()));
+                        Ok((TPattern::LitPat(Self::convert_literal(lit)), Subst::empty()))
+                    }
+                    _ => {
+                        let lit_ty = self.literal_type(lit);
+                        let s = self.unify(expected, &lit_ty)?;
+                        Ok((TPattern::LitPat(Self::convert_literal(lit)), s))
+                    }
+                }
             }
             Pattern::Constructor { name, args } => {
                 // Resolve the source name to its registered key (a local
@@ -1142,7 +1167,7 @@ impl Checker {
                 // erased in codegen; only a user Num type materialises the call
                 // (see the monomorphizer's Lit handling).
                 match lit {
-                    Literal::Integer(_) => {
+                    Literal::Integer(_) | Literal::BigInteger(_) => {
                         let ty = self.fresh_var("_lit");
                         if let Ty::Var(v) = &ty {
                             self.wanted.push(("Num".to_string(), Ty::Var(v.clone())));
@@ -1561,8 +1586,23 @@ impl Checker {
                             field_name, con, con)));
                     }
                     let env2 = env.applied(&subst);
-                    let (te, _ty, s) = self.infer_expr(field_expr, &env2)?;
+                    let (te, val_ty, s) = self.infer_expr(field_expr, &env2)?;
                     subst = subst.compose(&s);
+                    // Unify the new value against the field's DECLARED type (read
+                    // off the field selector `field :: Rec -> FieldTy`). Without
+                    // this the value is typed in isolation, so a numeric literal
+                    // update defaults on its own (now to Integer) instead of
+                    // taking the field type — record *construction* already gets
+                    // this by desugaring to a constructor application.
+                    if let Some(sel) = env.lookup(field_name) {
+                        let sel = sel.clone();
+                        if let Ty::Arrow(rec_arg, field_ty, _) = self.instantiate(&sel) {
+                            let s1 = self.unify(&rec_arg.apply_subst(&subst), &rec_ty.apply_subst(&subst))?;
+                            subst = subst.compose(&s1);
+                            let s2 = self.unify(&field_ty.apply_subst(&subst), &val_ty.apply_subst(&subst))?;
+                            subst = subst.compose(&s2);
+                        }
+                    }
                     typed_updates.push((field_name.clone(), field_idx, te));
                 }
 

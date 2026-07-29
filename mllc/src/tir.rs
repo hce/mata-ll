@@ -547,6 +547,9 @@ pub enum TPattern {
 #[derive(Debug, Clone)]
 pub enum TLiteral {
     Integer(i64),
+    /// A too-large-for-i64 integer literal (an `Integer`), kept as its decimal
+    /// string; codegen emits `__int_from_decimal`.
+    BigInteger(String),
     Number(f64),
     /// A string literal as its decoded BYTE sequence — see `Literal::Str`.
     Str(Vec<u8>),

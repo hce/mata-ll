@@ -603,10 +603,19 @@ impl CodeGen {
                     // are not in scope within their own initializer (see
                     // where_binds_stmts for the rationale).
                     {
+                        // Forward-declare each name in THIS group with a FRESH
+                        // local/slot — even one shadowing an outer binding. A
+                        // do-`let` is its own (recursive) scope, so a later
+                        // `let x = …` must not reuse the earlier `x`'s storage:
+                        // a lazy thunk that captured the earlier binding would
+                        // otherwise observe the rebind when forced (Int masked
+                        // this by evaluating trivial bindings eagerly; a boxed
+                        // Integer binding is a thunk and exposes it). `seen`
+                        // dedups only within one mutually-recursive group.
                         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
                         for bind in binds {
                             let bname = sanitize_name(&bind.name);
-                            if !self.local_vars.contains(&bname) && seen.insert(bname.clone()) {
+                            if seen.insert(bname.clone()) {
                                 stmts.extend(self.declare_local_fwd_stmts(&bname));
                             }
                         }

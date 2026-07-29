@@ -2463,6 +2463,7 @@ impl Parser {
             Token::Ident(_)
                 | Token::UpperIdent(_)
                 | Token::IntLit(_)
+                | Token::BigIntLit(_)
                 | Token::NumLit(_)
                 | Token::StrLit(_)
                 | Token::LeftParen
@@ -2473,7 +2474,8 @@ impl Parser {
         // Negative literal: -N where - is not preceded by an expression-ending token
         if let Token::Operator(op) = self.peek()
             && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
-                return matches!(self.tokens[self.pos + 1].token, Token::IntLit(_) | Token::NumLit(_));
+                return matches!(self.tokens[self.pos + 1].token,
+                    Token::IntLit(_) | Token::BigIntLit(_) | Token::NumLit(_));
             }
         false
     }
@@ -2484,7 +2486,7 @@ impl Parser {
         if self.pos == 0 { return true; }
         let prev = &self.tokens[self.pos - 1].token;
         !matches!(prev,
-            Token::IntLit(_) | Token::NumLit(_) | Token::StrLit(_)
+            Token::IntLit(_) | Token::BigIntLit(_) | Token::NumLit(_) | Token::StrLit(_)
             | Token::Ident(_) | Token::UpperIdent(_)
             | Token::RightParen | Token::RightBracket)
     }
@@ -2503,10 +2505,14 @@ impl Parser {
         // Negative literal: -N where - is not preceded by an expression-ending token
         if let Token::Operator(op) = self.peek()
             && op == "-" && self.pos + 1 < self.tokens.len() && self.is_neg_literal_context() {
-                match self.tokens[self.pos + 1].token {
+                match self.tokens[self.pos + 1].token.clone() {
                     Token::IntLit(n) => {
                         self.advance(); self.advance();
                         return Ok(Expr::Lit(Literal::Integer(-n)));
+                    }
+                    Token::BigIntLit(s) => {
+                        self.advance(); self.advance();
+                        return Ok(Expr::Lit(Literal::BigInteger(format!("-{s}"))));
                     }
                     Token::NumLit(n) => {
                         self.advance(); self.advance();
@@ -2519,6 +2525,10 @@ impl Parser {
             Token::IntLit(n) => {
                 self.advance();
                 Ok(Expr::Lit(Literal::Integer(n)))
+            }
+            Token::BigIntLit(s) => {
+                self.advance();
+                Ok(Expr::Lit(Literal::BigInteger(s)))
             }
             Token::NumLit(n) => {
                 self.advance();
@@ -3320,6 +3330,7 @@ impl Parser {
             Token::Ident(_)
                 | Token::Underscore
                 | Token::IntLit(_)
+                | Token::BigIntLit(_)
                 | Token::NumLit(_)
                 | Token::StrLit(_)
                 | Token::LeftParen
@@ -3353,10 +3364,14 @@ impl Parser {
         // Negative literal pattern: -N
         if let Token::Operator(op) = self.peek()
             && op == "-" && self.pos + 1 < self.tokens.len() {
-                match self.tokens[self.pos + 1].token {
+                match self.tokens[self.pos + 1].token.clone() {
                     Token::IntLit(n) => {
                         self.advance(); self.advance();
                         return Ok(Pattern::LitPat(Literal::Integer(-n)));
+                    }
+                    Token::BigIntLit(s) => {
+                        self.advance(); self.advance();
+                        return Ok(Pattern::LitPat(Literal::BigInteger(format!("-{s}"))));
                     }
                     Token::NumLit(n) => {
                         self.advance(); self.advance();
@@ -3377,6 +3392,10 @@ impl Parser {
             Token::IntLit(n) => {
                 self.advance();
                 Ok(Pattern::LitPat(Literal::Integer(n)))
+            }
+            Token::BigIntLit(s) => {
+                self.advance();
+                Ok(Pattern::LitPat(Literal::BigInteger(s)))
             }
             Token::NumLit(n) => {
                 self.advance();

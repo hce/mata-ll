@@ -4,6 +4,10 @@ use std::fmt;
 pub enum Token {
     // Literals
     IntLit(i64),
+    /// An integer literal too large for `i64` — kept as its decimal-digit
+    /// string. It can only be an `Integer` (arbitrary precision); the value is
+    /// parsed to a bignum at codegen (`__int_from_decimal`).
+    BigIntLit(String),
     NumLit(f64),
     /// A string literal, stored as its decoded BYTE sequence. mata-ll's
     /// `String` is the Lua string — a byte array with no encoding awareness
@@ -79,6 +83,7 @@ impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Token::IntLit(n) => write!(f, "{}", n),
+            Token::BigIntLit(s) => write!(f, "{}", s),
             Token::NumLit(n) => write!(f, "{}", n),
             Token::StrLit(s) => write!(f, "\"{}\"", String::from_utf8_lossy(s)),
             Token::Ident(s) => write!(f, "{}", s),
@@ -308,18 +313,15 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 });
             } else {
                 // Only ASCII digits were consumed, so the sole way `parse` fails
-                // is overflow past `maxBound :: Int` (i64::MAX). mata-ll's `Int`
-                // is 64-bit and wrapping (GHC's `Int` semantics); there is no
-                // arbitrary-precision `Integer`, so a literal that does not fit is
-                // a hard compile error rather than a silent wrap. GHC only warns
-                // here (-Woverflowed-literals); rejecting is stricter, which the
-                // GHC-parity criterion permits.
-                let n: i64 = s.parse().map_err(|_| format!(
-                    "integer literal '{}' does not fit in Int — it exceeds maxBound :: Int \
-                     (9223372036854775807). mata-ll has no arbitrary-precision Integer; \
-                     its Int is 64-bit and wrapping, like GHC's Int.", s))?;
+                // is overflow past `maxBound :: Int` (i64::MAX). Such a literal
+                // does not fit `Int`; it becomes a `BigIntLit` (an `Integer`),
+                // matching GHC where an integer literal is an `Integer`.
+                let token = match s.parse::<i64>() {
+                    Ok(n) => Token::IntLit(n),
+                    Err(_) => Token::BigIntLit(s.clone()),
+                };
                 tokens.push(Located {
-                    token: Token::IntLit(n),
+                    token,
                     line: tok_line,
                     col: tok_col,
                 });

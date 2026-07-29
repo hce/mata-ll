@@ -319,6 +319,9 @@ pub enum DoStmt {
 #[derive(Debug, Clone)]
 pub enum Literal {
     Integer(i64),
+    /// An integer literal too large for `i64`, kept as its decimal string. Only
+    /// an `Integer` (arbitrary precision); parsed to a bignum at codegen.
+    BigInteger(String),
     Number(f64),
     /// A string literal as its decoded BYTE sequence (mata-ll's `String` is
     /// the Lua string — a byte array; see HASKDIFF.md "Strings and
