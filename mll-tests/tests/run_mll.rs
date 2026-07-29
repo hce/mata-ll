@@ -7714,6 +7714,78 @@ main = putStrLn (render (42 :: Int))
     }
 }
 
+/// The checking/argument-side dual of `signature_vars_are_skolemized`. When a
+/// function declares a higher-rank parameter (`apply2 :: (forall a. a -> a) ->
+/// …`), the ARGUMENT must be polymorphic enough to be that `forall`. A lambda
+/// checked against it is inferred first and unified against a fresh skolem for
+/// `a`; any class constraint its body demands of `a` (`Num`, `Show`, …) is then
+/// a constraint on that skolem, which has no instance and no enclosing context
+/// to discharge it — so it must be rejected.
+///
+/// Before the fix the argument skolem was minted but NOT registered, so
+/// `has_instance` treated it as "defer to the caller" and silently accepted the
+/// residual constraint. `apply2 (\x -> x + 1)` compiled, and since `apply2`'s
+/// body applies its argument at both `Int` and `Bool` (`(f 1, f True)`), the
+/// generated Lua ran `True + 1` — "attempt to perform arithmetic on a boolean
+/// value". GHC rejects the program at compile time; so must we.
+#[test]
+fn higher_rank_argument_must_be_polymorphic_enough() {
+    // A `forall a. a -> a` parameter, applied inside at two distinct types so
+    // an under-polymorphic argument is a genuine runtime type confusion.
+    let hdr = "apply2 :: (forall a. a -> a) -> (Int, Bool)\n\
+               apply2 f = (f 1, f True)\n";
+
+    // REJECT 1: `\x -> x + 1` is `Num a => a -> a`, not `forall a. a -> a`.
+    let e = compile_err(&format!(
+        "{hdr}use :: (Int, Bool)\nuse = apply2 (\\x -> x + 1)\nmain :: IO ()\nmain = return ()\n"
+    ));
+    assert!(
+        e.contains("higher-rank argument"),
+        "the rejection must explain the argument is not polymorphic enough for the \
+         higher-rank parameter, got: {e}"
+    );
+    assert!(
+        e.contains("Num"),
+        "the residual `Num a` constraint on the sealed variable should be named, got: {e}"
+    );
+
+    // REJECT 2: `\x -> seq (show x) x` forces `Show a`, equally unsatisfiable.
+    let e = compile_err(&format!(
+        "{hdr}use :: (Int, Bool)\nuse = apply2 (\\x -> seq (show x) x)\nmain :: IO ()\nmain = return ()\n"
+    ));
+    assert!(
+        e.contains("higher-rank argument") && e.contains("Show"),
+        "a `Show a`-demanding lambda must be rejected against a `forall a. a -> a` \
+         parameter, got: {e}"
+    );
+
+    // REJECT 3: a monomorphic NAMED function (`Bool -> Bool`) is not the
+    // requested `forall a. a -> a` either — the skolem cannot unify with Bool.
+    let e = compile_err(&format!(
+        "{hdr}notF :: Bool -> Bool\nnotF b = b\nuse :: (Int, Bool)\nuse = apply2 notF\nmain :: IO ()\nmain = return ()\n"
+    ));
+    assert!(
+        e.contains("rigid") || e.contains("Cannot match"),
+        "a monomorphic `Bool -> Bool` must not satisfy `forall a. a -> a`, got: {e}"
+    );
+
+    // ACCEPT controls: genuinely-polymorphic arguments must KEEP compiling.
+    for (label, arg_defs, arg) in [
+        // The identity lambda IS `forall a. a -> a`.
+        ("id-lambda", "", "(\\x -> x)"),
+        // A named fully-polymorphic function.
+        ("poly-named", "myid :: a -> a\nmyid x = x\n", "myid"),
+    ] {
+        let src = format!(
+            "{hdr}{arg_defs}use :: (Int, Bool)\nuse = apply2 {arg}\nmain :: IO ()\nmain = return ()\n"
+        );
+        assert!(
+            mllc::compile(&src, Path::new("."), &[]).is_ok(),
+            "control `{label}` (a truly polymorphic argument) must still compile"
+        );
+    }
+}
+
 /// Record syntax back doors: a field whose type is existential has no
 /// selector (the selector's result type would BE the hidden type, outside
 /// any match) and cannot be record-updated (nothing to check the new value
