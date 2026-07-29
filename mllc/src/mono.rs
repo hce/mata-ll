@@ -999,6 +999,31 @@ impl Monomorphizer {
                         }
                     }
                 }
+                // A non-class-method operator that names a polymorphic function
+                // (e.g. the Prelude `(^)`): route it through application so it
+                // SPECIALIZES at the operand types. Left as an InfixApp it would
+                // call the generic copy, whose inner Num ops and literals stay
+                // polymorphic (inline `*`, a machine `1` for `x ^ 0`) — wrong at
+                // Integer. As an App, mono specializes the body so `*` becomes
+                // mul_Integer and `1` becomes fromInteger_Integer.
+                if !self.locals.contains(&op) && self.poly_fns.contains_key(&op) {
+                    let op_ty = Ty::fun(&[lhs.ty.clone(), rhs.ty.clone()], ty.clone());
+                    let partial_ty = Ty::fun(std::slice::from_ref(&rhs.ty), ty.clone());
+                    let app = TExpr {
+                        kind: TExprKind::App(
+                            Box::new(TExpr::new(
+                                TExprKind::App(
+                                    Box::new(TExpr::new(TExprKind::Var(op.clone()), op_ty)),
+                                    lhs,
+                                ),
+                                partial_ty,
+                            )),
+                            rhs,
+                        ),
+                        ty,
+                    };
+                    return self.mono_expr(app);
+                }
                 TExprKind::InfixApp {
                     op,
                     lhs: Box::new(self.mono_expr(*lhs)),

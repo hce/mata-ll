@@ -432,6 +432,20 @@ ffi_tonumber_float :: String -> LuaPure "tonumber" Number
 
 infixl 4 <$>
 infixl 4 <*>
+infixr 8 ^
+
+-- Exponentiation by squaring: `x ^ n` = x multiplied by itself n times, using
+-- the Num `*` (so it is exact at Integer). The exponent is an Int; a negative
+-- exponent is an error, as in GHC. `powAcc b k acc = acc * b^k`.
+(^) :: Num a => a -> Int -> a
+x ^ n =
+    if n < 0 then error "Negative exponent"
+    else powAcc x n 1
+
+powAcc :: Num a => a -> Int -> a -> a
+powAcc b k acc =
+    if k == 0 then acc
+    else powAcc (b * b) (k `div` 2) (if k `mod` 2 == 1 then acc * b else acc)
 
 -- Fixities of the named (backtick) operators, matching the GHC Prelude.
 -- div, mod, and seq are compiler builtins; their fixities live here so they

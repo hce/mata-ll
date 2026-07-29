@@ -227,7 +227,10 @@ pub(super) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
 }
 
 pub(super) fn is_builtin_op(op: &str) -> bool {
-    matches!(op, "+" | "-" | "*" | "/" | "%" | "^" | "==" | "/=" | "~="
+    // NOTE: `^` is deliberately NOT here — Lua's `^` is float power. It is a
+    // Prelude function ((^), exponentiation by squaring over `*`), emitted as a
+    // call like any user operator.
+    matches!(op, "+" | "-" | "*" | "/" | "%" | "==" | "/=" | "~="
         | "<" | ">" | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ".." | "$" | "."
         | "div" | "mod")
 }
