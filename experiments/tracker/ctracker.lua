@@ -55,7 +55,7 @@ local output, err, errno
 if arg[2] then
 	output, err, errno = io.open(arg[2], "w")
 else
-	output, err, errno = io.popen("sox -t raw -r 44100 -e signed -b 16 -c 2 -L - -d", "w")
+	output, err, errno = io.popen("pv -B 1M | sox -t raw -r 44100 -e signed -b 16 -c 2 -L - -d", "w")
 end
 
 if not output then

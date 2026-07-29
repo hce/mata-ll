@@ -2,6 +2,8 @@
 -- Decodes IT modules to raw 16-bit stereo PCM via callback
 -- All channel state lives in a single STArray across decode + mix
 
+import LIO
+
 -- Bitwise FFI
 bandB :: Int -> Int -> LuaPure "__mll_band" Int
 shrB :: Int -> Int -> LuaPure "__mll_shr" Int
@@ -410,7 +412,7 @@ processPattern mi st pOff nRows =
 
 -- ========== Playback Loop (LuaIO for output callback) ==========
 
-emitChunks :: (ByteString -> LuaIO s ()) -> [ByteString] -> LuaIO s ()
+emitChunks :: Monad m => (ByteString -> m ()) -> [ByteString] -> m ()
 emitChunks sw [] = return ()
 emitChunks sw (c:cs) = sw c >> emitChunks sw cs
 
@@ -421,16 +423,16 @@ findNextPos playedPositions maxPosition n
                         else Just n
     | otherwise       = Nothing
 
-handleEnd :: ModInfo -> (ByteString -> LuaIO s ()) -> [Int]
-    -> Bool -> [Int] -> LuaIO s ()
+handleEnd :: Monad m => ModInfo -> (ByteString -> m ()) -> [Int]
+    -> Bool -> [Int] -> m ()
 handleEnd mi sw st noLoop playedPositions
   | noLoop    = case findNextPos playedPositions mi.miOrdNum 0 of
         Nothing -> return ()
         Just newPos -> doOrders mi sw st newPos noLoop (newPos:playedPositions)
   | otherwise = return ()
 
-doOrders :: ModInfo -> (ByteString -> LuaIO s ()) -> [Int]
-    -> Int -> Bool -> [Int] -> LuaIO s ()
+doOrders :: ModInfo -> (ByteString -> m ()) -> [Int]
+    -> Int -> Bool -> [Int] -> m ()
 doOrders mi sw st idx noLoop playedPositions
   | idx >= mi.miOrdNum = return ()
   | pat == 254         = doOrders mi sw st (idx + 1) noLoop (idx:playedPositions)
@@ -458,7 +460,10 @@ findIMPM bs i
   | otherwise = findIMPM bs (i + 1)
 
 export play :: (ByteString -> LuaIO s ()) -> ByteString -> Bool -> LuaIO s ()
-play swallower fd noLoop =
+play swallower fd noLoop = play' swallower fd noLoop
+
+play' :: Monad m => (ByteString -> m ()) -> ByteString -> Bool -> m ()
+play' swallower fd noLoop =
     (liftIO $ putStrLn "Pure mata-ll Impulse Tracker decoder") >>
     let offset = findIMPM fd 0
         itData = if offset == 0 then fd else bsSub fd offset (bsLength fd - offset)
@@ -467,7 +472,35 @@ play swallower fd noLoop =
         mi     = ModInfo itData (hdrOrdNum itData) (hdrSpeed itData) (hdrTempo itData) numCh (hdrSmpNum itData)
     in doOrders mi swallower st 0 noLoop []
 
+expect :: String -> Either String a -> a
+expect _ (Right a)  = a
+expect err (Left a) = error $ err <> " " <> a
+
+printArgs :: IO ()
+printArgs =
+  putStrLn "Pure mata-ll impulse tracker player" >>
+  putStrLn "  USAGE: tracker.mll SONG [OUTFILE]"
+
+playSong :: String -> IO ()
+playSong song = do
+  fSong <- (expect $ "Unable to open " <> song <> ":") <$> fOpen song "rb"
+  song <- bsFromString <$> fRead fSong "a"
+  fOut <- expect "Cannot open sox" <$> pOpen "sox -t raw -r 44100 -e signed -b 16 -c 2 -L - -d" "w"
+  play' (fWrite fOut . bsToString) song False
+
+convertSong :: String -> String -> IO ()
+convertSong song out = do
+  fSong <- (expect $ "Unable to open " <> song <> ":") <$> fOpen song "rb"
+  song <- bsFromString <$> fRead fSong "a"
+  fOut <- expect "Cannot open output file:" <$> fOpen out "wb"
+  play' (fWrite fOut . bsToString) song False
+
 main :: IO ()
-main = putStrLn "ImpulseTracker player written in mata-ll (https://matall.org)" >>
-    putStrLn "This is a Lua/mata-ll interop via callbacks example; please" >>
-    putStrLn "Invoke via ctracker.lua from the same directory instead."
+main = do
+  myArgs <- getArgs
+  case myArgs of
+    []          -> printArgs
+    song:[]     -> playSong song
+    song:out:[] -> convertSong song out
+    _           -> printArgs
+
