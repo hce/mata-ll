@@ -423,10 +423,26 @@ pub struct ConInfo {
 pub(super) struct ExSkolemInfo {
     /// The source-level variable name (`a` in `forall a. …`).
     pub var: String,
-    /// The constructor whose pattern match introduced the skolem.
+    /// The constructor whose pattern match introduced the skolem (for an
+    /// existential), or a phrase naming the function signature (for a
+    /// signature skolem — see `origin`).
     pub con: String,
-    /// Class names the constructor's declared constraints guarantee for it.
+    /// Class names the declared context guarantees for it (a constructor's
+    /// existential context, or a function signature's `=>` context).
     pub givens: Vec<String>,
+    /// Where this skolem came from, governing the provenance note wording.
+    pub origin: SkolemOrigin,
+}
+
+/// Why a skolem constant was minted, for diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) enum SkolemOrigin {
+    /// An existential type variable erased when a constructor was packed.
+    Existential,
+    /// A universally-quantified variable of a function's own signature,
+    /// rigid while its body is checked. `fn_name` is the function being
+    /// checked.
+    Signature { fn_name: String },
 }
 
 /// Typeclass info
@@ -1263,6 +1279,75 @@ impl Checker {
         (inner.apply_subst(&Subst::from_map(map)), renames)
     }
 
+    /// Mint the rigid skolems used to check a function's clause BODIES against
+    /// its signature, so a body more general than the declared type is rejected
+    /// (`f :: a -> Int` / `f x = x` may not narrow `a` to `Int`).
+    ///
+    /// `fresh_ty` is the already-freshened signature (its universally-quantified
+    /// variables are fresh FLEXIBLE `Ty::Var`s). This mints one fresh rigid
+    /// skolem per such variable and returns:
+    ///   - `sig_skolems`: flexible signature variable → its skolem. `check_clause`
+    ///     substitutes these into the body's EXPECTED types AFTER pattern
+    ///     checking — but only for a variable a pattern did not already pin, so
+    ///     a GADT match that refines a signature variable to a concrete index
+    ///     (`s := 'Empty`) is untouched and the skolem never appears.
+    ///   - `demote`: skolem id → the flexible variable, applied once the body
+    ///     checks (`Ty::demote_skolems`) so every downstream pass and the caller-
+    ///     visible type see ordinary `Ty::Var`s. Kept as a plain map (not a
+    ///     `Subst` field) so the substitution carried on every hot inference
+    ///     frame stays small.
+    ///
+    /// Each skolem is registered in `existential_skolems` with the classes the
+    /// declared context guarantees for its variable, so `has_instance` and the
+    /// wanted-constraint discharge treat a `Monad m =>`-provided skolem as
+    /// satisfied while a bare, unconstrained signature skolem has no instance.
+    fn skolemize_sig_body_vars(
+        &mut self,
+        fresh_ty: &Ty,
+        declared_constraints: &[TyConstraint],
+    ) -> (HashMap<TyVar, Ty>, HashMap<u32, Ty>) {
+        // The declared context re-expressed over the FRESHENED variable names,
+        // so a class can be matched to the fresh variable that carries it. A
+        // constraint whose variable is not freshened (an instance-method
+        // signature, already alpha-renamed) matches by its own name.
+        let free: Vec<TyVar> = fresh_ty.free_vars();
+        let mut givens_for: HashMap<String, Vec<String>> = HashMap::new();
+        for c in declared_constraints {
+            // `c.type_var` here is the SOURCE name; the freshened variable keeps
+            // the source name as a prefix, so match by trimming the id suffix is
+            // fragile. Instead map by exact source name against the fresh var's
+            // name prefix below.
+            givens_for.entry(c.type_var.clone()).or_default().push(c.class_name.clone());
+        }
+        // Recover each fresh variable's SOURCE name. `freshen_sig_type_mapped`
+        // builds a fresh name as `<source_name><id>` via `fresh_tyvar`, so the
+        // source name is the fresh name with its trailing id digits removed.
+        let source_name = |fresh: &TyVar| -> String {
+            fresh.name.trim_end_matches(|ch: char| ch.is_ascii_digit()).to_string()
+        };
+
+        let fn_name = self.current_fn.clone().unwrap_or_else(|| "this binding".to_string());
+        let mut sig_skolems: HashMap<TyVar, Ty> = HashMap::new();
+        let mut demote: HashMap<u32, Ty> = HashMap::new();
+        for v in &free {
+            let sk_id = self.next_var;
+            self.next_var += 1;
+            // Name the skolem by the SOURCE variable (`a`, not the freshened
+            // `a1050`) so a rigidity diagnostic prints the name the user wrote.
+            let sname = source_name(v);
+            sig_skolems.insert(v.clone(), Ty::Skolem(sname.clone(), sk_id));
+            demote.insert(sk_id, Ty::Var(v.clone()));
+            let givens = givens_for.get(&sname).cloned().unwrap_or_default();
+            self.existential_skolems.insert(sk_id, ExSkolemInfo {
+                var: sname.clone(),
+                con: format!("the signature of '{}'", fn_name),
+                givens,
+                origin: SkolemOrigin::Signature { fn_name: fn_name.clone() },
+            });
+        }
+        (sig_skolems, demote)
+    }
+
     fn push_error_ctx(&mut self, kind: DiagnosticKind, ctx: String) {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
@@ -1728,6 +1813,23 @@ impl Checker {
         let mut notes = Vec::new();
         for (_, id) in sks {
             if let Some(info) = self.existential_skolems.get(&id) {
+                // A signature skolem: a universally-quantified variable of the
+                // function's OWN declared type, rigid while its body is checked.
+                // The caller picks its concrete type, so the body may not assume
+                // any particular one.
+                if let SkolemOrigin::Signature { fn_name } = &info.origin {
+                    let guaranteed = if info.givens.is_empty() {
+                        "the signature places no constraints on it, so the body cannot assume it supports any operation".to_string()
+                    } else {
+                        format!("the only thing the body may assume about it is the declared context ({})",
+                            info.givens.join(", "))
+                    };
+                    let note = format!(
+                        "'{}' is a rigid type variable from the signature of '{}': the caller chooses what concrete type it is, so inside '{}' it stands for some unknown type and cannot be matched with a specific one — {}",
+                        info.var, fn_name, fn_name, guaranteed);
+                    if !notes.contains(&note) { notes.push(note); }
+                    continue;
+                }
                 let guaranteed = if info.givens.is_empty() {
                     "the constructor declares no constraints for it, so nothing at all is known about it".to_string()
                 } else {

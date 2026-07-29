@@ -397,6 +397,32 @@ impl Ty {
         }
     }
 
+    /// Replace signature skolem constants by the types they demote to, keyed
+    /// by skolem id. Used ONCE per function, after its body has been checked
+    /// rigidly against the skolemized signature, to turn each signature skolem
+    /// back into the fresh flexible variable the caller-visible type and every
+    /// downstream pass expect. A skolem id not in the map is left rigid (an
+    /// existential skolem, which must never be demoted). Kept off the hot
+    /// `Subst` path so the substitution type carried on every inference frame
+    /// stays small.
+    pub fn demote_skolems(&self, demote: &HashMap<u32, Ty>) -> Ty {
+        match self {
+            Ty::Skolem(_, id) => match demote.get(id) {
+                Some(t) => t.clone(),
+                None => self.clone(),
+            },
+            Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Var(_) => self.clone(),
+            Ty::Arrow(a, b, m) =>
+                Ty::Arrow(Box::new(a.demote_skolems(demote)), Box::new(b.demote_skolems(demote)), *m),
+            Ty::App(a, b) => Ty::app(a.demote_skolems(demote), b.demote_skolems(demote)),
+            Ty::List(a) => Ty::list(a.demote_skolems(demote)),
+            Ty::IO(a) => Ty::io(a.demote_skolems(demote)),
+            Ty::LuaIO(s, a) => Ty::lua_io(s.clone(), a.demote_skolems(demote)),
+            Ty::Forall(v, inner) => Ty::Forall(v.clone(), Box::new(inner.demote_skolems(demote))),
+            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| e.demote_skolems(demote)).collect()),
+        }
+    }
+
     /// Check if a specific skolem occurs in this type (for escape check)
     pub fn contains_skolem(&self, name: &str, id: u32) -> bool {
         match self {
@@ -1129,6 +1155,13 @@ fn tf_maybe_unifiable(pat: &Ty, actual: &Ty, binds: &mut HashMap<String, Ty>, fa
         return true;
     }
     match (&a, &b) {
+        // A skolem is a rigid but UNKNOWN type — the caller chooses it. For
+        // apartness it behaves exactly like a variable: it could later turn out
+        // to be `'Z` (or anything), so it is never apart from a pattern, and a
+        // closed family applied to it must stay STUCK rather than fall through
+        // to a catch-all clause. (A concrete argument would have reduced an
+        // earlier clause; a skolem cannot, so the family is irreducible on it.)
+        (Ty::Skolem(..), _) | (_, Ty::Skolem(..)) => true,
         (Ty::Var(v), other) | (other, Ty::Var(v)) => {
             // Bind (no occurs check: an occurs failure would make them
             // apart, but claiming "maybe unifiable" only errs toward stuck).

@@ -7457,7 +7457,14 @@ main = putStrLn (show (coerce (MkBox "boom") + 1))
 /// shared-across-calls) type.
 #[test]
 fn existential_skolem_cannot_escape() {
-    // Direct escape through the return type.
+    // Direct escape through the return type. Here the return type is the
+    // function's own signature variable `a`, which is itself checked as a rigid
+    // skolem (a body may not be more general than its signature). Returning the
+    // existential's hidden value therefore fails as a mismatch between two rigid
+    // variables — the signature's `a` and the existential's `a` — which is
+    // exactly how GHC reports it ("Couldn't match expected type 'a' with actual
+    // type 'a1'"). Escape into a *concrete* return/case type still surfaces the
+    // dedicated existential-escape diagnostic (the two cases below).
     let e = compile_err(
         r#"
 data Foo = forall a. Foo a
@@ -7470,13 +7477,15 @@ main = putStrLn "no"
 "#,
     );
     assert!(
-        e.contains("Existential type variable 'a' escapes its scope"),
-        "return-type escape must be rejected, got: {e}"
+        e.contains("Cannot match 'a' with 'a'"),
+        "returning an existential as a signature variable must be rejected as a rigid mismatch, got: {e}"
     );
+    // Both provenance notes appear: `a` is the existential hidden by `Foo`, and
+    // `a` is also the signature's rigid variable.
     assert!(e.contains("hidden by constructor 'Foo'"), "got: {e}");
     assert!(
-        e.contains("repack it into the existential"),
-        "the note should suggest the legitimate uses, got: {e}"
+        e.contains("rigid type variable from the signature of 'unFoo'"),
+        "the signature-rigidity note must explain the second 'a', got: {e}"
     );
 
     // Escape through a case expression's result type.

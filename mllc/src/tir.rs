@@ -310,6 +310,57 @@ impl TExpr {
         };
         TExpr { kind, ty }
     }
+
+    /// In-place counterpart of `Ty::demote_skolems` for a whole expression
+    /// tree: rewrite this node's type and recurse into every child. App/cons
+    /// chains here are shallow (a comprehension's deep spine lives in the
+    /// bind-chain form, handled the same as any other child), so plain
+    /// recursion is bounded.
+    pub fn demote_skolems(&mut self, demote: &std::collections::HashMap<u32, Ty>) {
+        self.ty = self.ty.demote_skolems(demote);
+        match &mut self.kind {
+            TExprKind::App(f, a) => { f.demote_skolems(demote); a.demote_skolems(demote); }
+            TExprKind::Lambda { params, body } => {
+                for (_, t) in params.iter_mut() { *t = t.demote_skolems(demote); }
+                body.demote_skolems(demote);
+            }
+            TExprKind::InfixApp { lhs, rhs, .. } => { lhs.demote_skolems(demote); rhs.demote_skolems(demote); }
+            TExprKind::Negate(e) | TExprKind::Paren(e) => e.demote_skolems(demote),
+            TExprKind::If { cond, then_branch, else_branch } => {
+                cond.demote_skolems(demote); then_branch.demote_skolems(demote); else_branch.demote_skolems(demote);
+            }
+            TExprKind::Case { scrutinee, branches } => {
+                scrutinee.demote_skolems(demote);
+                for b in branches.iter_mut() {
+                    b.pattern.demote_skolems(demote);
+                    for g in b.guards.iter_mut() { g.condition.demote_skolems(demote); g.body.demote_skolems(demote); }
+                    b.body.demote_skolems(demote);
+                }
+            }
+            TExprKind::Let { binds, body } => {
+                for bind in binds.iter_mut() {
+                    for p in bind.patterns.iter_mut() { p.demote_skolems(demote); }
+                    bind.body.demote_skolems(demote);
+                }
+                body.demote_skolems(demote);
+            }
+            TExprKind::SpecCall { args, .. } => { for a in args.iter_mut() { a.demote_skolems(demote); } }
+            TExprKind::Tuple(elems) => { for e in elems.iter_mut() { e.demote_skolems(demote); } }
+            TExprKind::DictCall { dict_args, value_args, .. } => {
+                for a in dict_args.iter_mut() { a.demote_skolems(demote); }
+                for a in value_args.iter_mut() { a.demote_skolems(demote); }
+            }
+            TExprKind::RecordUpdate { record, updates, .. } => {
+                record.demote_skolems(demote);
+                for (_, _, e) in updates.iter_mut() { e.demote_skolems(demote); }
+            }
+            TExprKind::OutgoingCallback { callee, .. } => callee.demote_skolems(demote),
+            TExprKind::FfiMaybeArg { value } => value.demote_skolems(demote),
+            TExprKind::DictMethod { dict, .. } => dict.demote_skolems(demote),
+            // Var/Con/Lit/OpFunc/DictAccess and any other leaf: only `ty` above.
+            _ => {}
+        }
+    }
 }
 
 impl TPattern {
@@ -323,6 +374,18 @@ impl TPattern {
             TPattern::Paren(p) => TPattern::Paren(Box::new(p.apply_subst(subst))),
             TPattern::Tuple(ps) => TPattern::Tuple(ps.into_iter().map(|p| p.apply_subst(subst)).collect()),
             other => other, // Wildcard, LitPat
+        }
+    }
+
+    /// In-place skolem demotion for pattern type annotations (see
+    /// `Ty::demote_skolems`).
+    pub fn demote_skolems(&mut self, demote: &std::collections::HashMap<u32, Ty>) {
+        match self {
+            TPattern::Var(_, ty) => *ty = ty.demote_skolems(demote),
+            TPattern::Constructor { args, .. } => { for p in args.iter_mut() { p.demote_skolems(demote); } }
+            TPattern::Paren(p) => p.demote_skolems(demote),
+            TPattern::Tuple(ps) => { for p in ps.iter_mut() { p.demote_skolems(demote); } }
+            _ => {} // Wildcard, LitPat carry no type
         }
     }
 }
@@ -341,6 +404,24 @@ impl TClause {
                 name: b.name, patterns: b.patterns.into_iter().map(|p| p.apply_subst(subst)).collect(),
                 body: b.body.apply_subst(subst),
             }).collect(),
+        }
+    }
+
+    /// Demote every signature skolem in this clause's type annotations back to
+    /// its flexible variable (see `Ty::demote_skolems`). Applied once, after a
+    /// function's body has been checked rigidly, so the emitted TIR carries the
+    /// caller-visible flexible types the monomorphizer expects — not the rigid
+    /// skolems used only to reject an over-general body.
+    pub fn demote_skolems(&mut self, demote: &std::collections::HashMap<u32, Ty>) {
+        for p in &mut self.patterns { p.demote_skolems(demote); }
+        for g in &mut self.guards {
+            g.condition.demote_skolems(demote);
+            g.body.demote_skolems(demote);
+        }
+        self.body.demote_skolems(demote);
+        for b in &mut self.where_binds {
+            for p in &mut b.patterns { p.demote_skolems(demote); }
+            b.body.demote_skolems(demote);
         }
     }
 }

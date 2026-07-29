@@ -104,7 +104,27 @@ impl Checker {
         self.wanted.clear();
         self.binder_types.clear();
         self.pattern_skolems.clear();
+        // The caller-visible signature, with each universally-quantified
+        // variable renamed to a fresh FLEXIBLE unification variable. Patterns
+        // and every downstream pass work on this, exactly as before — crucially,
+        // a GADT constructor pattern may still refine a signature variable to a
+        // concrete type-index within a clause (`s := 'Empty`), which the flexible
+        // reading makes an ordinary local unification.
         let (fresh_ty, renames) = self.freshen_sig_type_mapped(declared_ty);
+        // For SOUNDNESS: while checking a clause BODY, any signature variable a
+        // pattern did NOT already pin is skolemized (made rigid) so the body
+        // cannot narrow it — that is what rejects a body more general than the
+        // signature (`f :: a -> Int` / `f x = x`). `sig_skolems` maps each fresh
+        // signature variable to its own rigid skolem, `demote` maps that skolem
+        // back once the body checks, and each skolem is registered with the
+        // classes the declared context provides so a `Monad m =>`-constrained
+        // variable is still discharged by the context while a bare one has no
+        // evidence. GADT refinement happens BEFORE this (at pattern time), so a
+        // refined variable is concrete by the time the body is checked and is
+        // never skolemized. See `skolemize_sig_body_vars` / `check_clause`.
+        let declared_constraints = self.fn_constraints.get(name).cloned().unwrap_or_default();
+        let (sig_skolems, demote) =
+            self.skolemize_sig_body_vars(&fresh_ty, &declared_constraints);
 
         // Re-express this function's declared constraints over the freshened
         // variable names, so a caller can match each constraint to the type it
@@ -166,7 +186,7 @@ impl Checker {
             // safe: the clause's own error is reported and fails compilation,
             // and once it is fixed the constraints are checked for real.
             let wanted_before = self.wanted.len();
-            match self.check_clause(clause, &fresh_ty, &clause_ctx) {
+            match self.check_clause(clause, &fresh_ty, &sig_skolems, &clause_ctx) {
                 Ok((tc, clause_subst)) => {
                     tclauses.push(tc);
                     // Merge, don't just compose: each clause is checked against
@@ -197,6 +217,21 @@ impl Checker {
         // (The function type and clauses are finalised below, after numeric
         // defaulting has had a chance to extend `overall_subst`.)
 
+        // The signature skolems are demoted back to their flexible variables at
+        // each consumption point below (`Ty::demote_skolems`), once the body has
+        // been checked rigidly against them: `final_ty` and the TIR clauses
+        // (after `overall_subst` is applied), and each wanted constraint (after
+        // resolving it through `overall_subst`, since a clause may have bound a
+        // fresh unification variable TO a skolem). Everything downstream then
+        // works on ordinary `Ty::Var`s, exactly as before the skolem check: a
+        // wanted left on a bare, unconstrained signature variable flows into the
+        // `MissingContextConstraint` path (asking for the missing `=>` context),
+        // while a body that FORCED a signature variable to a concrete type
+        // already failed at unification. Numeric defaulting reads `self.wanted`
+        // with skolems still present, which is correct — a skolem has no free
+        // variables and is never a defaulting candidate (a signature variable
+        // must not be defaulted).
+
         // Record this function's declared constraints over the FINAL type's
         // variable names. Clause checking may unify a freshened signature
         // variable with a fresh unification variable, and it is THAT
@@ -209,7 +244,10 @@ impl Checker {
                 .into_iter().map(|v| (v.name.clone(), v)).collect();
             let renamed: Vec<TyConstraint> = cs.into_iter().map(|c| {
                 let final_name = fresh_vars.get(&c.type_var)
-                    .map(|tv| Ty::Var(tv.clone()).apply_subst(&overall_subst))
+                    // Resolve through the clause substitution, then demote any
+                    // body skolem back to its flexible variable (a declared sig
+                    // variable resolves to its skolem, which is not a `Ty::Var`).
+                    .map(|tv| Ty::Var(tv.clone()).apply_subst(&overall_subst).demote_skolems(&demote))
                     .and_then(|t| if let Ty::Var(v) = t { Some(v.name) } else { None });
                 TyConstraint {
                     class_name: c.class_name,
@@ -234,9 +272,13 @@ impl Checker {
                 overall_subst = overall_subst.merge(&default_subst);
             }
         }
-        let final_ty = fresh_ty.apply_subst(&overall_subst);
+        let final_ty = fresh_ty.apply_subst(&overall_subst).demote_skolems(&demote);
         let tclauses: Vec<TClause> = tclauses.into_iter()
-            .map(|c| c.apply_subst(&overall_subst))
+            .map(|c| {
+                let mut c = c.apply_subst(&overall_subst);
+                if !demote.is_empty() { c.demote_skolems(&demote); }
+                c
+            })
             .collect();
 
         // Discharge wanted class constraints against the available instances.
@@ -263,12 +305,16 @@ impl Checker {
         // per-binder, and Vec::contains made that quadratic.
         let mut determined: HashSet<TyVar> = type_vars.iter().cloned().collect();
         for bt in &self.binder_types {
-            for v in bt.apply_subst(&overall_subst).free_vars() {
+            // Demote any body skolem back to its flexible variable first: a
+            // parameter bound at a signature-variable type resolves through
+            // `overall_subst` to that variable's skolem, whose `free_vars` are
+            // empty — without demotion it would drop from `determined`.
+            for v in bt.apply_subst(&overall_subst).demote_skolems(&demote).free_vars() {
                 determined.insert(v);
             }
         }
         for (class, cty) in std::mem::take(&mut self.wanted) {
-            let rty = cty.apply_subst(&overall_subst);
+            let rty = cty.apply_subst(&overall_subst).demote_skolems(&demote);
             if !self.has_instance(&class, &rty) {
                 // When the failure is an instance whose declared context is
                 // unsatisfied, say WHICH context constraint failed and at
@@ -313,6 +359,10 @@ impl Checker {
                     let provided = declared_cvars.iter().any(|(dc, dv)| {
                         self.class_satisfies(dc, &rc)
                             && Ty::Var(dv.clone()).apply_subst(&overall_subst)
+                                // The clause substitution may have bound this
+                                // declared variable to its body skolem; demote it
+                                // back so it matches the (already demoted) `v`.
+                                .demote_skolems(&demote)
                                 .free_vars().contains(&v)
                     });
                     if !provided {
@@ -463,7 +513,7 @@ impl Checker {
             || matches!(c, "Eq" | "Ord" | "Show" | "Read" | "Enum" | "Bounded")
     }
 
-    pub(super) fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, ctx: &str) -> Result<(TClause, Subst), DiagnosticKind> {
+    pub(super) fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, sig_skolems: &HashMap<TyVar, Ty>, ctx: &str) -> Result<(TClause, Subst), DiagnosticKind> {
         // Start each clause with no captured statement span: any error raised
         // while checking this clause records the offending statement's span via
         // the `Spanned` markers, which the caller uses to locate the diagnostic
@@ -490,6 +540,27 @@ impl Checker {
                 _ => return Err(DiagnosticKind::Other("Too many arguments".into())),
             }
         }
+
+        // Skolemize every signature variable the PATTERNS did not already pin,
+        // for the duration of the body check. A GADT constructor pattern may
+        // have refined a signature variable to a concrete type-index (`s :=
+        // 'Empty`), resolved through `subst`; that variable is now concrete and
+        // is left alone. Every still-free signature variable becomes its rigid
+        // skolem so the body cannot narrow it — the soundness check. The map is
+        // applied to the body's expected return type AND to the local
+        // environment (parameters bound at signature-variable types), so the
+        // body sees one consistent, rigid view; `check_function` demotes the
+        // skolems back afterwards.
+        let body_skolems: Subst = {
+            let mut map = HashMap::new();
+            for (v, sk) in sig_skolems {
+                if Ty::Var(v.clone()).apply_subst(&subst) == Ty::Var(v.clone()) {
+                    map.insert(v.clone(), sk.clone());
+                }
+            }
+            Subst::from_map(map)
+        };
+        subst = subst.compose(&body_skolems);
 
         let expected_ret = remaining_ty.apply_subst(&subst);
 
@@ -915,6 +986,7 @@ impl Checker {
                         var: tv.name.clone(),
                         con: name.clone(),
                         givens,
+                        origin: SkolemOrigin::Existential,
                     });
                 }
                 let tv_subst = Subst::from_map(tv_map);
