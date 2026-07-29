@@ -460,11 +460,12 @@ findIMPM bs i
   | otherwise = findIMPM bs (i + 1)
 
 export play :: (ByteString -> LuaIO s ()) -> ByteString -> Bool -> LuaIO s ()
-play swallower fd noLoop = play' swallower fd noLoop
+play swallower fd noLoop =
+    (liftIO $ putStrLn "Pure mata-ll Impulse Tracker decoder") >>
+    play' swallower fd noLoop
 
 play' :: Monad m => (ByteString -> m ()) -> ByteString -> Bool -> m ()
 play' swallower fd noLoop =
-    (liftIO $ putStrLn "Pure mata-ll Impulse Tracker decoder") >>
     let offset = findIMPM fd 0
         itData = if offset == 0 then fd else bsSub fd offset (bsLength fd - offset)
         numCh  = countActiveChans itData 0 0
