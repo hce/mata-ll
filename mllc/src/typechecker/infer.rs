@@ -1197,6 +1197,26 @@ impl Checker {
                             skolem_body = skolem_body.apply_subst(
                                 &Subst::singleton(var.clone(), sk),
                             );
+                            // Register the skolem with NO givens so a residual
+                            // class constraint on it (e.g. `Num a` from a
+                            // `\x -> x + 1` argument) is rejected as
+                            // unsatisfiable instead of silently deferred. An
+                            // UNREGISTERED skolem is treated as "defer to the
+                            // caller" (solve.rs `has_instance`), which is wrong
+                            // here: the argument is sealed as `forall a. …`, so
+                            // there is no enclosing context to ever discharge
+                            // the constraint — the value simply is not
+                            // polymorphic enough. `Ty::Forall` carries no
+                            // context, so a constrained higher-rank quantifier
+                            // (`forall a. Num a => a -> a`) cannot pass givens
+                            // here; that context is dropped upstream in
+                            // `ast_type_to_ty`.
+                            self.existential_skolems.insert(sk_id, ExSkolemInfo {
+                                var: var.name.clone(),
+                                con: "a higher-rank argument".to_string(),
+                                givens: vec![],
+                                origin: SkolemOrigin::Rank2Arg,
+                            });
                         }
                         // Directly check the argument against the skolemized param type
                         let s_arg = self.unify(&arg_ty, &skolem_body)?;

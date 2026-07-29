@@ -443,6 +443,11 @@ pub(super) enum SkolemOrigin {
     /// rigid while its body is checked. `fn_name` is the function being
     /// checked.
     Signature { fn_name: String },
+    /// A variable bound by a higher-rank argument type (`f :: (forall a. …) ->
+    /// …`), rigid while the *argument* is checked against it. The argument must
+    /// work for every `a`, so any class constraint its body demands of `a` is
+    /// unsatisfiable — the value is not polymorphic enough.
+    Rank2Arg,
 }
 
 /// Typeclass info
@@ -1827,6 +1832,13 @@ impl Checker {
                     let note = format!(
                         "'{}' is a rigid type variable from the signature of '{}': the caller chooses what concrete type it is, so inside '{}' it stands for some unknown type and cannot be matched with a specific one — {}",
                         info.var, fn_name, fn_name, guaranteed);
+                    if !notes.contains(&note) { notes.push(note); }
+                    continue;
+                }
+                if info.origin == SkolemOrigin::Rank2Arg {
+                    let note = format!(
+                        "'{}' is bound by a higher-rank argument type (forall {}. …): the value must work for EVERY type, so it cannot demand any class instance for '{}' — a lambda like `\\x -> x + 1` (needing `Num`) or one calling `show x` (needing `Show`) is not polymorphic enough. Pass a value that uses '{}' only as an opaque token.",
+                        info.var, info.var, info.var, info.var);
                     if !notes.contains(&note) { notes.push(note); }
                     continue;
                 }
