@@ -31,6 +31,8 @@ flushStdout :: LuaIO "io.flush" ()
 fOpen :: String -> String -> LuaTry "io.open" (Either String FileHandle)
 fClose :: FileHandle -> LuaIO ":close" ()
 
+pOpen :: String -> String -> LuaTry "io.popen" (Either String FileHandle)
+
 -- File methods (handle as first arg, colon-call in Lua)
 fRead :: FileHandle -> String -> LuaIO ":read" String
 
