@@ -213,6 +213,7 @@ until n = n > 100
 \toprule
 \textbf{Type} & \textbf{Lua type} & \textbf{Examples} \\
 \midrule
+\texttt{Integer} & bignum   & \texttt{42}, \texttt{-7}, \texttt{10\^{}30} \\
 \texttt{Int} & integer     & \texttt{42}, \texttt{-7}, \texttt{0} \\
 \texttt{Number}  & float       & \texttt{3.14}, \texttt{-0.5} \\
 \texttt{String}  & string      & \texttt{"hello\textbackslash n"} \\
@@ -220,6 +221,13 @@ until n = n > 100
 \texttt{ByteString} & string   & \texttt{bsFromString "hi"} \\
 \bottomrule
 \end{tabular}
+
+\begin{note}
+As in GHC, \texttt{Integer} is arbitrary precision and is the default for
+unannotated numeric literals, so defaulted integer arithmetic never
+silently overflows.  \texttt{Int} is the 64-bit machine word (overflow
+wraps); annotate a value \texttt{:: Int} to opt into it.
+\end{note}
 
 \begin{note}
 There is no \texttt{Char} type.  Strings are native Lua strings, not

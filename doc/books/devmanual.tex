@@ -302,6 +302,8 @@ Key design decisions:
 \toprule
 \textbf{MLL construct} & \textbf{Lua representation} \\
 \midrule
+\texttt{Int}, \texttt{Number}                & Native Lua integer / float \\
+\texttt{Integer} (arbitrary precision)  & Boxed base-\(2^{24}\) limb table \\
 Multi-constructor ADT \texttt{Con x y}  & \texttt{\{tag, x, y\}} \\
 Single-constructor, single-field        & Unwrapped (no table) \\
 Newtype                                 & Identity (zero-cost) \\
@@ -560,7 +562,9 @@ Key intentional differences:
   \item The numeric classes (\texttt{Num}/\texttt{Fractional}/\texttt{Real}/
         \texttt{Integral}) are present, but at concrete \texttt{Int}/
         \texttt{Number} the operator methods are erased to built-in Lua
-        operators (no dictionary); \texttt{fromRational} takes a \texttt{Number}
+        operators (no dictionary); \texttt{Integer} (arbitrary precision,
+        the numeric default) instead routes to bignum runtime helpers;
+        \texttt{fromRational} takes a \texttt{Number}
         and \texttt{Real} has no \texttt{toRational} (mata-ll has no
         \texttt{Rational}); \texttt{Floating}/\texttt{RealFrac} are not yet
         classes.

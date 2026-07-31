@@ -30,120 +30,31 @@ silent one is a defect.** One example on each side:
   acceptable, and kept deliberately.
 - An integer type wrapping at 64 bits under the arbitrary-precision name
   `Integer` would be a soundness violation — a GHC-valid program accepted
-  and computing a different value with no error. mata-ll avoids it by
-  naming the type honestly: the type is `Int` (64-bit, wrapping, exactly
-  GHC's `Int`), there is no `Integer`, and mata-ll is defined as GHC with
-  an implicit `default (Int, Number)` — so the literal-defaulting hole is
-  closed with Haskell's own mechanism rather than an invented rule. See
-  "Integers are fixed-width" below.
+  and computing a different value with no error. mata-ll closes the hole
+  the way GHC does: `Integer` is a real arbitrary-precision bignum and the
+  numeric default (implicit `default (Integer, Number)`, GHC's
+  `(Integer, Double)`), while `Int` is the 64-bit wrapping machine word.
+  Defaulted arithmetic therefore agrees with GHC, overflow included. See
+  "Integers: arbitrary-precision `Integer`, machine-word `Int`" below.
 
 The deliberate exception category is the FFI, where mata-ll is a Lua
 guest rather than a Haskell twin — e.g. `LBit` carries Lua bit
-semantics by design. Evaluation strategy (non-strict with eagerness
-optimizations) has its user-facing contract in the next section;
-the machinery is in DESIGN.md and the normative rule in SPEC.md.
+semantics by design.
 
-## Evaluation: call-by-need, with proof-gated eagerness
+## Deep thunk chains crash sooner (fixed Lua stack)
 
-mata-ll is non-strict, like GHC, and shares like GHC: function
-arguments and `let`/`where` bindings compile to *memoizing* thunks. A
-thunk is forced the first time its value is demanded; the result
-replaces the code, and every later demand reads the stored value. This
-is call-by-need, not call-by-name. Top-level value bindings are CAFs:
-one thunk for the whole program, evaluated at most once no matter how
-many functions read the binding. Verified both ways: forcing a
-let-bound `nfib 30` twice costs one evaluation (0.11 s, versus 0.22 s
-for writing the call twice), and a top-level `big = nfib 30` read from
-two places costs one. Sharing has no semantic observer in the language
-(there is no `unsafePerformIO`), so where it matters is time and heap
-— an accidentally re-evaluated value can only make a program slower,
-never wrong.
-
-**Which positions suspend, which force.** Suspended: function
-arguments, `let`/`where` bindings, cons heads, tuple fields,
-data-constructor fields, and the value inside `return`/`pure`. Forced:
-`case`/pattern-match scrutinees, `if` conditions, operands of
-arithmetic and comparison at concrete types, `seq`'s first argument,
-`show`/`==`/`compare`, and everything that crosses the FFI boundary
-(an export's result is deep-forced into plain Lua data). Forcing goes
-to WHNF only, as in GHC: `seq (1, error "boom") 7` is `7`.
-
-**The GHC laziness idioms hold.** Each of these is a verified run, not
-an inference:
-
-- *Ignored arguments*: `g _ = 42` gives `print (g (error "boom"))` →
-  `42`. Likewise through composition, list elements
-  (`length [error "boom"]` is `1`) and tuple fields
-  (`fst (1, error "boom")` is `1`).
-- *Infinite structures*: `take 5 [1 ..]`,
-  `take 10 (filter even [1 ..])`,
-  `takeWhile (< 100) (iterate (* 2) 1)` all terminate — the runtime
-  list primitives produce lazy cons cells.
-- *Knot-tying / value recursion*: `ones = 1 : ones`,
-  `nats = 0 : map (+1) nats`, and
-  `fibs = 0 : 1 : zipWith (+) fibs (tail fibs)` work at top level and
-  in `let`. `fibs !! 85` answers instantly with `259695496911122585`
-  (correct within `Int`) — linear, not exponential, which is itself
-  the proof that the shared cells are memoized.
-- *Bottom stays where you put it*: a bottom is raised only when
-  demanded. ``let x = 10 `div` b`` guarded by `if b == 0` returns the
-  guard's value at `b = 0` and never traps — `div`/`mod` count as
-  possibly-trapping, so such a binding is never evaluated early.
-
-**The eagerness contract.** The compiler emits many of those
-suspended positions eagerly — no thunk — but only under one of two
-proofs (SPEC.md "The eagerness contract" is normative): the consumer
-*forces the value on every path* where its own result is demanded
-(whole-program demand analysis, per tuple/constructor field and per
-list element), or the expression is *provably total* — literals,
-already-forced variables, constructors of such, non-trapping
-arithmetic. Bottom is never evaluated eagerly. The consequence for a
-user: **eagerness is not observable in program results** — not in
-values, not in which errors are raised, not in termination. What it
-changes is resources: a provably-total expression may be computed (or
-constant-folded) even when its consumer discards it — `g (1 + 2)`
-passes `3` outright, where `g (slow 25)` passes an unforced thunk —
-and a demand-proven binding costs no allocation where a conservative
-one costs a thunk. Time, heap, and where the stack is consumed are the
-whole observable surface; a program that runs out of one of those can
-tell the difference, as a GHC program can tell `-O0` from `-O2`'s
-strictness analysis.
-
-**Bottom and `try`.** Non-strictness is not error-swallowing, and it
-is not error-*catching* either. ``try (pure (1 `div` 0))`` returns
-`Right <thunk>` — the bottom escapes the `try` and raises wherever the
-value is finally demanded, as in GHC. To catch an error inside
-a pure value, force it inside the tried action:
-``try (1 `div` 0 `seq` pure ())`` is `Left …` (GHC would use
-`evaluate`). See CAVEATS.md "`try (pure e)` does not catch an error
-inside `e`".
-
-**The strictness idioms carry over, and you need them for the same
-programs.** A tail accumulator passed directly
-(`sumTo n acc = sumTo (n - 1) (acc + n)`) is proven strict by demand
-analysis: 10 million iterations run in constant stack with no thunk
-chain. ``acc `seq` go (n - 1) (acc + n)`` does the same by hand and
-keeps the tail call (`seq` works in every application form). What
-leaks in GHC leaks here: `foldl (+) 0 [1 .. n]` builds a chain of n
-thunks (the combiner is a function parameter, opaque to demand
-analysis); `foldl'` is the fix, as in GHC. The tracker hit the classic
-case in production: a per-tick result built lazily inside `return`
-retained the tick's entire intermediate structure (~200× heap), and
-the fix was the one a GHC program needs — ``x `seq` return x``
-(GHC: `return $!`) in the base case. GHC does not save that program
-with strictness analysis either; the demand proof would be
-interprocedural through a list.
-
-One quantitative difference in the failure mode: when a deep thunk
-chain *is* finally forced, GHC's RTS grows its stack and completes
-(slowly, at leaked-heap cost), while forcing here recurses on the Lua
-interpreter stack, which is fixed-size — a chain around 10^6 deep dies
-with a Lua `stack overflow` (10^5 completes). The leak is the bug in
-both systems; Lua turns it into a crash sooner.
-
-Laziness also feeds one linear-types rule: an unannotated `let` whose
-binding is never forced charges zero uses, because the thunk never
-runs — see the linear-types section.
+Evaluation is call-by-need, as in GHC — the laziness and strictness
+idioms behave identically, so this is not a section of differences (the
+contract is in SPEC.md, the machinery in DESIGN.md). The one user-visible
+difference is the failure mode of a space leak. A thunk is forced by
+recursing on the Lua interpreter stack, which is fixed-size, so a leaked
+deep thunk chain that GHC's growable RTS stack would force to completion
+(slowly, at leaked-heap cost) instead dies here with a Lua `stack
+overflow` once the chain is around 10^6 deep (10^5 completes). The leak is
+the same bug in both systems and takes the same fix — `foldl (+) 0 [1..n]`
+wants `foldl'`, a value built lazily inside `return` wants
+`` x `seq` return x `` (GHC's `return $!`) — but Lua turns it into a crash
+sooner rather than a slow completion.
 
 ## Strings and ByteStrings
 
@@ -177,26 +88,26 @@ represented as their integer code points. Use `strByte` to read a
 character code from a string and `strChar` to convert a code back to a
 single-character string.
 
-## Integers are fixed-width (`Int`, not `Integer`)
+## Integers: arbitrary-precision `Integer`, machine-word `Int`
 
-mata-ll's integer type is `Int`, exactly as in GHC: it maps to Lua's
-integer type — 64-bit signed on Lua 5.4+ and LuaJIT — and overflow wraps
-silently, which is precisely GHC's `Int` semantics. If you need big
-integers, you'll have to implement them yourself.
+mata-ll has GHC's two integer types. `Integer` is arbitrary precision and
+is the default for unannotated numeric literals, so a defaulted
+computation cannot silently overflow — exactly GHC's model. `Int` is the
+machine word: it maps to Lua's integer type (64-bit signed on Lua 5.4+ and
+LuaJIT) and overflow wraps silently, precisely GHC's `Int`. Annotate a
+value `:: Int` to opt into the fast wrapping word.
 
-There is deliberately **no `Integer`**. Haskell's `Integer` is arbitrary
-precision; naming a 64-bit wrapping type `Integer` would be a silent
-soundness deviation (see the criterion at the top of this document), so
-mata-ll rejects `Integer` in a type with a compile error and a `note:`
-pointing at `Int`. For the same reason `toInteger` — whose only purpose
-is to escape to arbitrary precision — does not exist, and an integer
-literal that exceeds `maxBound :: Int` is a hard compile error (GHC only
-warns, via `-Woverflowed-literals`; rejecting is stricter, which the
-parity criterion permits).
+Numeric defaulting is GHC's implicit `default (Integer, Number)` (`Number`
+is GHC's `Double`), so an unannotated literal used only in integer
+arithmetic becomes `Integer` and agrees with GHC bit for bit, overflow
+included. An integer literal larger than `maxBound :: Int` is an ordinary
+`Integer` literal (GHC needs no annotation for it either).
 
-Unannotated numeric literals default as under GHC with an implicit
-`default (Int, Number)` (`Number` is GHC's `Double`), so GHC stays the
-referee for defaulted arithmetic, overflow included.
+`Integer` arithmetic routes to bignum runtime helpers — portable
+base-2^24 limbs, exact on both Lua 5.3+ (native i64) and LuaJIT (doubles),
+with no boxing observable in the language. `Int` (and `Number`) arithmetic
+at a concrete type inlines to bare Lua operators. `fromInteger :: Integer
+-> a` and `toInteger :: Integral a => a -> Integer` both exist, as in GHC.
 
 `Number` maps to Lua's float type (double-precision IEEE 754).
 
@@ -205,22 +116,24 @@ referee for defaulted arithmetic, overflow included.
 The numeric hierarchy is present with GHC's signatures — `Num`
 (`+ - *`, `negate`, `abs`, `signum`, `fromInteger`), `Fractional`
 (`/`, `recip`, `fromRational`), `Real`, and `Integral` (`quot`, `rem`,
-`div`, `mod`, `quotRem`, `divMod`). `Int` is `Num`/
-`Real`/`Integral`; `Number` is `Num`/`Real`/`Fractional`. You can
+`div`, `mod`, `quotRem`, `divMod`, `toInteger`). `Int` and `Integer` are
+`Num`/`Real`/`Integral`; `Number` is `Num`/`Real`/`Fractional`. You can
 define `(+)` and the rest for your own types, and numeric literals are
 polymorphic (`Num a => a` / `Fractional a => a`) with GHC defaulting
-(`Int`, then `Number`). Arithmetic at a concrete `Int`/`Number`
-type still inlines to bare Lua operators — the classes are erased, not
-dictionary-dispatched.
+(`Integer`, then `Number`). Arithmetic at a concrete `Int`/`Number` type
+inlines to bare Lua operators — the classes are erased, not
+dictionary-dispatched; `Integer` arithmetic instead routes to bignum
+runtime helpers.
+
+The `(^)` operator (exponentiation by squaring over `Num`'s `*`, so it is
+exact at `Integer`) fixes its exponent to `Int`: GHC's is
+`(Num a, Integral b) => a -> b -> a`, mata-ll's is `Num a => a -> Int -> a`.
+A negative exponent is an error, as in GHC.
 
 Deliberate deviations. Because mata-ll has no `Rational` type,
 `fromRational` takes a `Number` argument rather than `Rational`, and
-`Real` has no `toRational` method. Because mata-ll has no
-arbitrary-precision `Integer`, `Integral` has no `toInteger` method (its
-result type would be the absent `Integer`; `fromInteger` stays, since
-its argument is just the literal type `Int`). `Floating` and `RealFrac`
-are not yet classes (their operations exist as `Number`-typed
-functions). See CAVEATS.
+`Real` has no `toRational` method. `Floating` and `RealFrac` are not yet
+classes (their operations exist as `Number`-typed functions). See CAVEATS.
 
 ## All top-level bindings require type signatures
 
@@ -344,17 +257,6 @@ type-checks and stays sound. Differences from GHC:
 - **A non-terminating family is rejected**, not run forever: reduction
   is fuel-bounded and reports "type family did not terminate". GHC has a
   reduction-depth limit too (`-freduction-depth`).
-
-## Monomorphization instead of dictionary passing
-
-mata-ll compiles polymorphic functions by specializing them for each
-concrete type they're used at (monomorphization), rather than passing
-typeclass dictionaries at runtime like GHC. This means:
-
-- No runtime cost for typeclass dispatch (specialized code is emitted)
-- Polymorphic recursion needs special handling (the compiler falls back
-  to dictionary passing when it detects it)
-- Code size can grow if a polymorphic function is used at many types
 
 ## The Prelude is a curated subset
 
