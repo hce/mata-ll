@@ -419,9 +419,11 @@ impl CodeGen {
                         "__mll_lit_eq",
                         vec![scrutinee.clone(), Expr::lit(n.to_string())],
                     )),
+                    // Hoisted to a `__mll_biglit[N]` CAF (see big_lit_ref): the
+                    // pattern's constant is parsed once, not on every match.
                     TLiteral::BigInteger(s) => conditions.push(Expr::call_named(
                         "__mll_lit_eq",
-                        vec![scrutinee.clone(), Expr::lit(format!("__int_from_decimal(\"{s}\")"))],
+                        vec![scrutinee.clone(), self.big_lit_ref(s)],
                     )),
                     _ => {
                         let s = match lit {

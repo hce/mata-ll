@@ -235,6 +235,59 @@ main = do
     );
 }
 
+/// Big-integer literals are hoisted to a single `__mll_biglit` CAF table
+/// (codegen/mod.rs BigLitPool): the decimal->bignum parse runs once at load,
+/// not on every evaluation. Before the fix a literal in a loop body re-parsed
+/// its decimal string every iteration, and two textual copies of one constant
+/// parsed twice. The occurrence count of `__int_from_decimal("<digits>")` in
+/// the emitted Lua IS the number of parses, so a distinct constant used many
+/// times must appear exactly once.
+#[test]
+fn big_integer_literals_are_hoisted() {
+    let source = r#"
+big :: Integer
+big = 340282366920938463463374607431768211456
+
+loop :: Int -> Integer -> Integer
+loop 0 acc = acc
+loop n acc = loop (n - 1) (acc + 123456789012345678901234567890)
+
+twice :: Integer
+twice = 123456789012345678901234567890 + 123456789012345678901234567890
+
+main :: IO ()
+main = print (loop 3 big + twice)
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    // The pool table is emitted and indexed from the body.
+    assert!(lua.contains("local __mll_biglit = {"), "biglit pool table missing: {lua}");
+    assert!(lua.contains("__mll_biglit["), "body must index the biglit pool: {lua}");
+    // Each distinct constant is parsed exactly once, despite the loop-body
+    // literal being used once per iteration and the `twice` constant appearing
+    // three times textually across the program.
+    assert_eq!(
+        lua.matches("__int_from_decimal(\"123456789012345678901234567890\")").count(),
+        1,
+        "the repeated/loop literal must be parsed once (hoisted): {lua}"
+    );
+    assert_eq!(
+        lua.matches("__int_from_decimal(\"340282366920938463463374607431768211456\")").count(),
+        1,
+        "the top-level literal must be parsed once (hoisted): {lua}"
+    );
+    // No inline decimal parse survives in the loop function body: the parse
+    // lives only in the pool table above.
+    let pool_start = lua.find("local __mll_biglit = {").unwrap();
+    let pool_end = lua[pool_start..].find("\n}\n").map(|i| pool_start + i).unwrap();
+    let after_pool = &lua[pool_end..];
+    assert!(
+        !after_pool.contains("__int_from_decimal(\""),
+        "no inline decimal-literal parse may survive past the pool: {after_pool}"
+    );
+}
+
 /// Paren normalization (codegen/opt.rs): the emitted corpus must be free of
 /// the redundant-paren shapes the pass eliminates. The one with semantic
 /// weight is the paren-wrapped call in return position — `return (f(x))` is

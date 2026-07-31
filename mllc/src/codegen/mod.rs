@@ -98,6 +98,19 @@ impl LocalDecl {
 type LuaDictTypeFields = std::collections::HashMap<String, (Vec<String>, Vec<(String, Ty)>)>;
 
 /// Tracks constructor info for code generation.
+/// Interned big-integer literals: the distinct decimal strings (each with its
+/// optional leading `-`) in first-occurrence order, deduped by `index`. Every
+/// occurrence — whether at top level or buried in a hot function body — is
+/// hoisted to one `__mll_biglit[N]` CAF, so the decimal->bignum parse runs once
+/// at module load rather than on every evaluation of the literal expression.
+/// Sound because an Integer value is immutable (every runtime op returns a
+/// fresh table), so all uses can share the single parsed instance.
+#[derive(Default)]
+struct BigLitPool {
+    order: Vec<String>,
+    index: std::collections::HashMap<String, usize>,
+}
+
 struct CodeGen {
     /// Current `expr_ast` recursion depth, bounded by
     /// `crate::MAX_NESTING_DEPTH`. Upstream passes (the parser's and the
@@ -213,6 +226,9 @@ struct CodeGen {
     /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
     /// return table must export it — even when there are no other exports.
     embed_var_export: bool,
+    /// Hoisted big-integer literals (see `BigLitPool`). Interior mutability
+    /// because `collect_pattern_conditions` interns while holding `&self`.
+    big_lits: std::cell::RefCell<BigLitPool>,
 }
 
 impl CodeGen {
@@ -246,7 +262,43 @@ impl CodeGen {
             cur_result_demand: crate::demand::Demand::Head,
             direct_perform_self: None,
             embed_var_export: false,
+            big_lits: std::cell::RefCell::new(BigLitPool::default()),
         }
+    }
+
+    /// Intern a big-integer literal (decimal string, optional leading `-`) and
+    /// return the Lua expression that reads its hoisted CAF slot. First
+    /// occurrence assigns the next 1-based index; repeats reuse it.
+    fn big_lit_ref(&self, s: &str) -> lua::Expr {
+        let mut pool = self.big_lits.borrow_mut();
+        let n = match pool.index.get(s) {
+            Some(&i) => i,
+            None => {
+                pool.order.push(s.to_string());
+                let i = pool.order.len();
+                pool.index.insert(s.to_string(), i);
+                i
+            }
+        };
+        lua::Expr::lit(format!("__mll_biglit[{n}]"))
+    }
+
+    /// The `local __mll_biglit = { ... }` table defining every hoisted literal,
+    /// or empty when the program has none. Emitted after the runtime prelude
+    /// (it calls `__int_from_decimal`) and before the body (which indexes it).
+    fn big_lit_defs(&self) -> String {
+        let pool = self.big_lits.borrow();
+        if pool.order.is_empty() {
+            return String::new();
+        }
+        let mut s = String::from("local __mll_biglit = {\n");
+        for lit in &pool.order {
+            // `lit` is digits with an optional leading sign — safe to embed
+            // directly, exactly as the pre-hoisting inline form did.
+            s.push_str(&format!("  __int_from_decimal(\"{lit}\"),\n"));
+        }
+        s.push_str("}\n");
+        s
     }
 
     fn is_newtype(&self, name: &str) -> bool {
@@ -410,7 +462,12 @@ pub fn generate(
     opt::run(&mut stmts, opt_disable);
     let mut body = String::new();
     lua::Block(stmts).render(0, &mut body);
-    let prelude = ondemand_prelude(&body);
+    // Hoisted big-integer literals (see BigLitPool): a `local __mll_biglit`
+    // table calling `__int_from_decimal`, sitting between the prelude and the
+    // body. The prelude scan is fed `big_lit_defs` too so `__int_from_decimal`
+    // stays selected even when every inline occurrence was replaced by an index.
+    let big_lit_defs = cg.big_lit_defs();
+    let prelude = ondemand_prelude(&format!("{big_lit_defs}{body}"));
     // The embedded-source block goes at the very top of the file: extraction
     // takes the earliest marker, so the genuine block must precede anything
     // user-derived, and placing it before the prelude also keeps the prelude
@@ -421,6 +478,7 @@ pub fn generate(
     };
     out.push_str(&prelude);
     out.push('\n');
+    out.push_str(&big_lit_defs);
     out.push_str(&body);
     Ok(out)
 }

@@ -86,7 +86,7 @@ impl CodeGen {
                     _ => Expr::name(self.lua_ref(&sanitize_name(name))),
                 }
             }
-            TExprKind::Lit(lit) => Self::literal_ast(lit),
+            TExprKind::Lit(lit) => self.literal_ast(lit),
             TExprKind::App(func, arg) => {
                 // Record field accessor: inline as direct table indexing.
                 // The field may hold a thunk (lazy construction), so force the
@@ -1484,17 +1484,17 @@ impl CodeGen {
         self.expr_ast(expr)
     }
 
-    pub(super) fn literal_ast(lit: &TLiteral) -> Expr {
+    pub(super) fn literal_ast(&self, lit: &TLiteral) -> Expr {
         match lit {
             // i64::MIN cannot be written in decimal: Lua parses the positive
             // magnitude first (overflowing to float) and negates the float.
             // The hex spelling is defined to wrap to the integer subtype.
             TLiteral::Integer(i64::MIN) => Expr::lit("0x8000000000000000"),
             TLiteral::Integer(n) => Expr::lit(n.to_string()),
-            // A too-large-for-i64 literal: parse the decimal digits into a bignum
-            // at load. The string is digits (optionally a leading '-'), so it is
-            // safe to embed directly.
-            TLiteral::BigInteger(s) => Expr::lit(format!("__int_from_decimal(\"{s}\")")),
+            // A too-large-for-i64 literal is hoisted to a `__mll_biglit[N]` CAF
+            // (see big_lit_ref) so the decimal->bignum parse runs once at load
+            // instead of on every evaluation of this expression.
+            TLiteral::BigInteger(s) => self.big_lit_ref(s),
             // Emitted as a FLOAT literal ("10.0"/"1e20", never "10"): Lua
             // 5.3+ reads a bare integer spelling as a native integer, which
             // put wrapping 64-bit integer arithmetic behind Double-typed
