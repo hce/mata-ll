@@ -1910,6 +1910,14 @@ impl Checker {
         TExpr::new(TExprKind::Var(name.to_string()), ty)
     }
 
+    pub(super) fn jx_str(s: &str) -> TExpr {
+        TExpr::new(TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())), Ty::Con("String".into()))
+    }
+
+    pub(super) fn jx_int(i: i64) -> TExpr {
+        TExpr::new(TExprKind::Lit(TLiteral::Integer(i)), Ty::Con("Int".into()))
+    }
+
     pub(super) fn jx_app(f: TExpr, arg: TExpr, ty: Ty) -> TExpr {
         TExpr::new(TExprKind::App(Box::new(f), Box::new(arg)), ty)
     }
@@ -1930,6 +1938,52 @@ impl Checker {
             e = Self::jx_app(e, a, next_ty);
         }
         e
+    }
+
+    /// `case scrut of { Left e -> Left e; Right ok -> ok_body }` — the
+    /// Either-plumbing every derived decode step threads through.
+    pub(super) fn jx_bind_either(scrut: TExpr, ok_name: &str, ok_ty: Ty, ok_body: TExpr, out_ty: Ty) -> TExpr {
+        let str_ty = Ty::Con("String".into());
+        let err_name = format!("{}e", ok_name);
+        let rethrow = Self::jx_app(
+            TExpr::new(TExprKind::Con("Left".into()), Ty::arrow(str_ty.clone(), out_ty.clone())),
+            Self::jx_var(&err_name, str_ty.clone()),
+            out_ty.clone(),
+        );
+        TExpr::new(TExprKind::Case {
+            scrutinee: Box::new(scrut),
+            branches: vec![
+                TCaseBranch {
+                    pattern: TPattern::Constructor {
+                        name: "Left".into(),
+                        args: vec![TPattern::Var(err_name, str_ty)],
+                    },
+                    guards: vec![],
+                    body: rethrow,
+                },
+                TCaseBranch {
+                    pattern: TPattern::Constructor {
+                        name: "Right".into(),
+                        args: vec![TPattern::Var(ok_name.to_string(), ok_ty)],
+                    },
+                    guards: vec![],
+                    body: ok_body,
+                },
+            ],
+        }, out_ty)
+    }
+
+    /// `Right (Con _f0 … _fN)`
+    pub(super) fn jx_ok_con(con_name: &str, field_tys: &[Ty], result_ty: &Ty, estr: &Ty) -> TExpr {
+        let mut built = TExpr::new(TExprKind::Con(con_name.to_string()), result_ty.clone());
+        for (i, fty) in field_tys.iter().enumerate() {
+            built = Self::jx_app(built, Self::jx_var(&format!("_f{}", i), fty.clone()), result_ty.clone());
+        }
+        Self::jx_app(
+            TExpr::new(TExprKind::Con("Right".into()), Ty::arrow(result_ty.clone(), estr.clone())),
+            built,
+            estr.clone(),
+        )
     }
 
     pub(super) fn fromjson_field_err(what: String, (reason, note): (String, String)) -> (String, String) {
@@ -1999,6 +2053,142 @@ impl Checker {
                 format!("the type '{}' cannot be decoded from JSON", other),
                 "derived FromJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a FromJSON instance.".to_string(),
             )),
+        }
+    }
+
+    /// Decode a record constructor's fields from the object in `_j`
+    /// (effective keys — the `as "key"` rename when present, the field name
+    /// otherwise — as JSON keys; Maybe fields optional via jOptFieldWith).
+    pub(super) fn fromjson_named_body(
+        &self,
+        con_name: &str,
+        fields: &[RecordField],
+        field_tys: &[Ty],
+        estr: &Ty,
+        result_ty: &Ty,
+    ) -> Result<TExpr, (String, String)> {
+        let json = Self::json_ty();
+        // The constructed value uses the registered key (a shadowing local
+        // constructor is mangled); every *string* below keeps the source name.
+        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
+        for i in (0..fields.len()).rev() {
+            let fty = &field_tys[i];
+            let fname = &fields[i].name;
+            // Derive-time errors name the Haskell field; runtime decode
+            // errors name the JSON key, because that is what the document
+            // actually contains.
+            let key = fields[i].effective_key();
+            let err_what = || format!("field '{}' of constructor '{}' cannot be decoded", fname, con_name);
+            let step = if let Some(inner) = Self::ty_maybe_inner(fty) {
+                // Maybe field: a missing key and an explicit null both → Nothing.
+                let dec = self.fromjson_field_decoder(inner)
+                    .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
+                Self::jx_call(
+                    "jOptFieldWith",
+                    vec![dec, Self::jx_str(key), Self::jx_var("_j", json.clone())],
+                    Self::estr_ty(fty),
+                )
+            } else {
+                let dec = self.fromjson_field_decoder(fty)
+                    .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
+                Self::jx_call(
+                    "jFieldWith",
+                    vec![dec, Self::jx_str(key), Self::jx_var("_j", json.clone())],
+                    Self::estr_ty(fty),
+                )
+            };
+            body = Self::jx_bind_either(step, &format!("_f{}", i), fty.clone(), body, estr.clone());
+        }
+        Ok(body)
+    }
+
+    /// Decode positional arguments, argument i taken from `elem_exprs[i]`,
+    /// finishing with `Right (Con _f0 …)`. `json_name` is the name runtime
+    /// decode errors use for the constructor — the effective TAG in a tagged
+    /// type (that is what the document contains), the source name in an
+    /// untagged one (where the two never differ: a rename on an untagged
+    /// constructor is rejected). Derive-time errors keep the source name.
+    pub(super) fn fromjson_positional_chain(
+        &self,
+        con_name: &str,
+        json_name: &str,
+        field_tys: &[Ty],
+        elem_exprs: Vec<TExpr>,
+        estr: &Ty,
+        result_ty: &Ty,
+    ) -> Result<TExpr, (String, String)> {
+        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
+        for i in (0..field_tys.len()).rev() {
+            let fty = &field_tys[i];
+            let dec = self.fromjson_field_decoder(fty).map_err(|e| Self::fromjson_field_err(
+                format!("argument {} of constructor '{}' cannot be decoded", i + 1, con_name), e))?;
+            let step = Self::jx_call(
+                "jArgWith",
+                vec![
+                    dec,
+                    Self::jx_str(json_name),
+                    Self::jx_int((i + 1) as i64),
+                    elem_exprs[i].clone(),
+                ],
+                Self::estr_ty(fty),
+            );
+            body = Self::jx_bind_either(step, &format!("_f{}", i), fty.clone(), body, estr.clone());
+        }
+        Ok(body)
+    }
+
+    /// Decode one constructor from the tagged object bound to `_j`:
+    /// record fields inline in the object, positional arguments under
+    /// "contents" (the value itself for one argument, an array for several),
+    /// nothing needed for a nullary constructor.
+    pub(super) fn fromjson_tagged_con_body(
+        &self,
+        con: &Constructor,
+        field_tys: &[Ty],
+        estr: &Ty,
+        result_ty: &Ty,
+    ) -> Result<TExpr, (String, String)> {
+        let json = Self::json_ty();
+        match &con.fields {
+            ConstructorFields::Named(fields) if !fields.is_empty() => {
+                self.fromjson_named_body(&con.name, fields, field_tys, estr, result_ty)
+            }
+            _ if field_tys.is_empty() => Ok(Self::jx_ok_con(self.resolve_con_name(&con.name), &[], result_ty, estr)),
+            _ => {
+                let contents = Self::jx_call(
+                    "jField",
+                    vec![Self::jx_str("contents"), Self::jx_var("_j", json.clone())],
+                    Self::estr_ty(&json),
+                );
+                let inner = if field_tys.len() == 1 {
+                    self.fromjson_positional_chain(
+                        &con.name, con.effective_tag(), field_tys,
+                        vec![Self::jx_var("_c", json.clone())],
+                        estr, result_ty,
+                    )?
+                } else {
+                    let arr_ty = Ty::list(json.clone());
+                    let elems: Vec<TExpr> = (0..field_tys.len()).map(|i| {
+                        Self::jx_call(
+                            "jNth",
+                            vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
+                            json.clone(),
+                        )
+                    }).collect();
+                    let chain = self.fromjson_positional_chain(&con.name, con.effective_tag(), field_tys, elems, estr, result_ty)?;
+                    let arrn = Self::jx_call(
+                        "jExpectArrN",
+                        vec![
+                            Self::jx_str(con.effective_tag()),
+                            Self::jx_int(field_tys.len() as i64),
+                            Self::jx_var("_c", json.clone()),
+                        ],
+                        Self::estr_ty(&arr_ty),
+                    );
+                    Self::jx_bind_either(arrn, "_xs", arr_ty, chain, estr.clone())
+                };
+                Ok(Self::jx_bind_either(contents, "_c", json, inner, estr.clone()))
+            }
         }
     }
 
@@ -2174,6 +2364,7 @@ impl Checker {
         let estr = Self::estr_ty(&result_ty);
         let json = Self::json_ty();
         let str_ty = Ty::Con("String".into());
+        let bool_ty = Ty::Con("Bool".into());
         let mangled = format!("fromJSON_{}", type_name);
 
         // Constructor field types as registered in pass 1.
@@ -2183,57 +2374,178 @@ impl Checker {
                 .unwrap_or_default()
         }).collect();
 
-        // Field-type validation. The decoder itself is the JSON module's
-        // GENERIC decoder over the Generic representation, whose leaves
-        // resolve through FromJSON instances at monomorphization time —
-        // where a missing instance would surface as an opaque unresolved-
-        // method error deep in the generic machinery. Validate every field
-        // here instead, with the same per-field derive-time messages the
-        // native decoder generator produced.
-        let mut failed = false;
-        for (con, ftys) in constructors.iter().zip(&con_field_tys) {
-            match &con.fields {
-                ConstructorFields::Named(fields) if !fields.is_empty() => {
-                    for (i, field) in fields.iter().enumerate() {
-                        if let Err(e) = self.fromjson_field_decoder(&ftys[i]) {
-                            let (reason, note) = Self::fromjson_field_err(
-                                format!("field '{}' of constructor '{}' cannot be decoded", field.name, con.name), e);
-                            reject(self, reason, &note);
-                            failed = true;
-                        }
-                    }
-                }
-                _ => {
-                    for (i, fty) in ftys.iter().enumerate() {
-                        if let Err(e) = self.fromjson_field_decoder(fty) {
-                            let (reason, note) = Self::fromjson_field_err(
-                                format!("argument {} of constructor '{}' cannot be decoded", i + 1, con.name), e);
-                            reject(self, reason, &note);
-                            failed = true;
-                        }
+        let body_inner: TExpr = if tagged {
+            // "'A', 'B' or 'C'" for the unknown-tag message — the effective
+            // tags (the `as "name"` rename when present): a runtime decode
+            // error names what the document must contain, and the document
+            // carries the external tag, not the source constructor name.
+            let names: Vec<String> = constructors.iter().map(|c| format!("'{}'", c.effective_tag())).collect();
+            let expected = match names.len() {
+                1 => names[0].clone(),
+                _ => format!("{} or {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
+            };
+
+            // Per-constructor decode bodies for the tagged-object form; report
+            // every unsupported field before bailing out.
+            let mut con_bodies: Vec<TExpr> = Vec::new();
+            let mut failed = false;
+            for (con, ftys) in constructors.iter().zip(&con_field_tys) {
+                match self.fromjson_tagged_con_body(con, ftys, &estr, &result_ty) {
+                    Ok(e) => con_bodies.push(e),
+                    Err((reason, note)) => {
+                        reject(self, reason, &note);
+                        failed = true;
                     }
                 }
             }
-        }
-        if failed { return vec![]; }
+            if failed { return vec![]; }
 
-        // The Generic substrate the decoder runs on (created here unless a
-        // sibling derive already did).
-        let mut out_fns = self.ensure_generic(type_name, type_vars, constructors);
+            // Bare-string form: only a nullary constructor may be a bare string.
+            let mut str_chain = Self::jx_call(
+                "jBadTag",
+                vec![Self::jx_str(&expected), Self::jx_var("_s", str_ty.clone())],
+                estr.clone(),
+            );
+            for (con, ftys) in constructors.iter().zip(&con_field_tys).rev() {
+                let then_branch = if ftys.is_empty() {
+                    // TIR construction uses the registered key; the compared
+                    // JSON tag strings are the effective tags (the `as
+                    // "name"` rename when present, the source name otherwise).
+                    Self::jx_ok_con(self.resolve_con_name(&con.name), &[], &result_ty, &estr)
+                } else {
+                    Self::jx_call("jTagNeedsObject", vec![Self::jx_str(con.effective_tag())], estr.clone())
+                };
+                str_chain = TExpr::new(TExprKind::If {
+                    cond: Box::new(TExpr::new(TExprKind::InfixApp {
+                        op: "==".into(),
+                        lhs: Box::new(Self::jx_var("_s", str_ty.clone())),
+                        rhs: Box::new(Self::jx_str(con.effective_tag())),
+                    }, bool_ty.clone())),
+                    then_branch: Box::new(then_branch),
+                    else_branch: Box::new(str_chain),
+                }, estr.clone());
+            }
 
-        // fromJSON_T _j = genericFromJSON _j — the generic decoder
-        // reproduces the whole native wire format and error surface
-        // (jContext tagging included, from its D1 instance).
-        let body = Self::jx_app(
-            Self::jx_var("genericFromJSON", Ty::arrow(json.clone(), estr.clone())),
-            Self::jx_var("_j", json.clone()),
+            // Tagged-object form: dispatch on the decoded "tag" field.
+            let mut tag_chain = Self::jx_call(
+                "jBadTag",
+                vec![Self::jx_str(&expected), Self::jx_var("_tag", str_ty.clone())],
+                estr.clone(),
+            );
+            for (con, con_body) in constructors.iter().zip(con_bodies).rev() {
+                tag_chain = TExpr::new(TExprKind::If {
+                    cond: Box::new(TExpr::new(TExprKind::InfixApp {
+                        op: "==".into(),
+                        lhs: Box::new(Self::jx_var("_tag", str_ty.clone())),
+                        rhs: Box::new(Self::jx_str(con.effective_tag())),
+                    }, bool_ty.clone())),
+                    then_branch: Box::new(con_body),
+                    else_branch: Box::new(tag_chain),
+                }, estr.clone());
+            }
+            let obj_body = Self::jx_bind_either(
+                Self::jx_call(
+                    "jFieldWith",
+                    vec![
+                        Self::jx_var("fromJSONString", Ty::arrow(json.clone(), Self::estr_ty(&str_ty))),
+                        Self::jx_str("tag"),
+                        Self::jx_var("_j", json.clone()),
+                    ],
+                    Self::estr_ty(&str_ty),
+                ),
+                "_tag", str_ty.clone(), tag_chain, estr.clone(),
+            );
+
+            TExpr::new(TExprKind::Case {
+                scrutinee: Box::new(Self::jx_var("_j", json.clone())),
+                branches: vec![
+                    TCaseBranch {
+                        pattern: TPattern::Constructor {
+                            name: "JStr".into(),
+                            args: vec![TPattern::Var("_s".into(), str_ty.clone())],
+                        },
+                        guards: vec![],
+                        body: str_chain,
+                    },
+                    TCaseBranch {
+                        pattern: TPattern::Constructor {
+                            name: "JObj".into(),
+                            args: vec![TPattern::Wildcard],
+                        },
+                        guards: vec![],
+                        body: obj_body,
+                    },
+                    TCaseBranch {
+                        pattern: TPattern::Wildcard,
+                        guards: vec![],
+                        body: Self::jx_call(
+                            "jExpectTagged",
+                            vec![Self::jx_var("_j", json.clone())],
+                            estr.clone(),
+                        ),
+                    },
+                ],
+            }, estr.clone())
+        } else {
+            // Single non-nullary constructor: untagged.
+            let con = &constructors[0];
+            let ftys = &con_field_tys[0];
+            let built = match &con.fields {
+                ConstructorFields::Named(fields) if !fields.is_empty() => {
+                    self.fromjson_named_body(&con.name, fields, ftys, &estr, &result_ty)
+                }
+                _ if ftys.len() == 1 => {
+                    self.fromjson_positional_chain(
+                        &con.name, &con.name, ftys,
+                        vec![Self::jx_var("_j", json.clone())],
+                        &estr, &result_ty,
+                    )
+                }
+                _ => {
+                    let arr_ty = Ty::list(json.clone());
+                    let elems: Vec<TExpr> = (0..ftys.len()).map(|i| {
+                        Self::jx_call(
+                            "jNth",
+                            vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
+                            json.clone(),
+                        )
+                    }).collect();
+                    self.fromjson_positional_chain(&con.name, &con.name, ftys, elems, &estr, &result_ty)
+                        .map(|chain| {
+                            let arrn = Self::jx_call(
+                                "jExpectArrN",
+                                vec![
+                                    Self::jx_str(&con.name),
+                                    Self::jx_int(ftys.len() as i64),
+                                    Self::jx_var("_j", json.clone()),
+                                ],
+                                Self::estr_ty(&arr_ty),
+                            );
+                            Self::jx_bind_either(arrn, "_xs", arr_ty, chain, estr.clone())
+                        })
+                }
+            };
+            match built {
+                Ok(e) => e,
+                Err((reason, note)) => {
+                    reject(self, reason, &note);
+                    return vec![];
+                }
+            }
+        };
+
+        // Tag every failure with the type being decoded.
+        let body = Self::jx_call(
+            "jContext",
+            vec![Self::jx_str(type_name), body_inner],
             estr.clone(),
         );
 
         // The class's defaulted fromJSONField, specialized to this type's
         // decoder. register_instance bypasses the default-method fill that
         // source instances get, so the derive must provide it itself — the
-        // generic decoder reads every record field through fromJSONField.
+        // generic decoder (genericFromJSON) reads every record field through
+        // fromJSONField, including fields of natively-derived types.
         let field_fn = format!("fromJSONField_{}", type_name);
         let dec_ty = Ty::arrow(json.clone(), estr.clone());
         let field_body = Self::jx_call(
@@ -2257,7 +2569,7 @@ impl Checker {
             context: None,
         });
 
-        out_fns.push(TFunction {
+        vec![TFunction {
             name: mangled,
             ty: Ty::arrow(json.clone(), estr.clone()),
             clauses: vec![TClause {
@@ -2270,8 +2582,8 @@ impl Checker {
             specialized: false,
             dict_params: vec![],
             derived_strict: false,
-        });
-        out_fns.push(TFunction {
+        },
+        TFunction {
             name: field_fn,
             ty: Ty::arrow(str_ty, Ty::arrow(json, estr.clone())),
             clauses: vec![TClause {
@@ -2287,11 +2599,51 @@ impl Checker {
             specialized: false,
             dict_params: vec![],
             derived_strict: false,
-        });
-        out_fns
+        }]
     }
 
     // --- ToJSON deriving ---
+
+    /// `("key", val)` — one pair of a JSON object, of type `(String, Json)`.
+    pub(super) fn jx_pair(key: &str, val: TExpr) -> TExpr {
+        let ty = Ty::Tuple(vec![Ty::Con("String".into()), Self::json_ty()]);
+        TExpr::new(TExprKind::Tuple(vec![Self::jx_str(key), val]), ty)
+    }
+
+    /// A literal cons list `e0 : e1 : … : []` of the given element type.
+    pub(super) fn jx_list(elems: Vec<TExpr>, elem_ty: Ty) -> TExpr {
+        let list_ty = Ty::list(elem_ty);
+        let mut out = TExpr::new(TExprKind::Con("[]".into()), list_ty.clone());
+        for e in elems.into_iter().rev() {
+            out = TExpr::new(TExprKind::InfixApp {
+                op: ":".into(),
+                lhs: Box::new(e),
+                rhs: Box::new(out),
+            }, list_ty.clone());
+        }
+        out
+    }
+
+    /// `JObj [pair0, pair1, …]`
+    pub(super) fn jx_obj(pairs: Vec<TExpr>) -> TExpr {
+        let pair_ty = Ty::Tuple(vec![Ty::Con("String".into()), Self::json_ty()]);
+        let list = Self::jx_list(pairs, pair_ty);
+        let con_ty = Ty::arrow(list.ty.clone(), Self::json_ty());
+        Self::jx_app(TExpr::new(TExprKind::Con("JObj".into()), con_ty), list, Self::json_ty())
+    }
+
+    /// `JStr "s"`
+    pub(super) fn jx_jstr(s: &str) -> TExpr {
+        let con_ty = Ty::arrow(Ty::Con("String".into()), Self::json_ty());
+        Self::jx_app(TExpr::new(TExprKind::Con("JStr".into()), con_ty), Self::jx_str(s), Self::json_ty())
+    }
+
+    /// `JArr [e0, e1, …]`
+    pub(super) fn jx_jarr(elems: Vec<TExpr>) -> TExpr {
+        let list = Self::jx_list(elems, Self::json_ty());
+        let con_ty = Ty::arrow(list.ty.clone(), Self::json_ty());
+        Self::jx_app(TExpr::new(TExprKind::Con("JArr".into()), con_ty), list, Self::json_ty())
+    }
 
     /// Build the encoder expression (of type `field_ty -> Json`) for one
     /// field of a ToJSON-derived constructor — the exact mirror of
@@ -2356,6 +2708,83 @@ impl Checker {
                 format!("the type '{}' cannot be encoded to JSON", other),
                 "derived ToJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a ToJSON instance.".to_string(),
             )),
+        }
+    }
+
+    /// Encode constructor argument #i: the resolved encoder applied to the
+    /// pattern variable `_x{i}` the clause binds it to.
+    pub(super) fn tojson_arg(&self, i: usize, fty: &Ty) -> Result<TExpr, (String, String)> {
+        let enc = self.tojson_field_encoder(fty)?;
+        Ok(Self::jx_app(enc, Self::jx_var(&format!("_x{}", i), fty.clone()), Self::json_ty()))
+    }
+
+    /// The `("key", encoded value)` pairs of a record constructor, keyed by
+    /// the fields' effective keys — the same keys `fromjson_named_body`
+    /// decodes, and the same shared external name LuaDict uses as the Lua
+    /// table key. A Maybe field encodes Nothing as null (via toJSONMaybe in
+    /// the field encoder); the decoder's jOptFieldWith reads null back as
+    /// Nothing, so the pair round-trips.
+    pub(super) fn tojson_named_pairs(
+        &self,
+        con_name: &str,
+        fields: &[RecordField],
+        field_tys: &[Ty],
+    ) -> Result<Vec<TExpr>, (String, String)> {
+        let mut pairs = Vec::new();
+        for (i, field) in fields.iter().enumerate() {
+            let val = self.tojson_arg(i, &field_tys[i]).map_err(|e| Self::fromjson_field_err(
+                format!("field '{}' of constructor '{}' cannot be encoded", field.name, con_name), e))?;
+            pairs.push(Self::jx_pair(field.effective_key(), val));
+        }
+        Ok(pairs)
+    }
+
+    /// Encode one constructor's value (its arguments are bound to `_x0` …):
+    /// - record fields → a JSON object keyed by the effective keys, with
+    ///   `"tag":"Con"` prepended in a tagged type;
+    /// - a nullary constructor → the bare string `"Con"` (only reachable
+    ///   tagged: a lone nullary constructor is tagged by definition);
+    /// - positional arguments → the encoded argument itself (one) or an
+    ///   array (several), under `"contents"` in a tagged type.
+    ///
+    /// Every emitted tag string is the constructor's effective tag (the
+    /// `as "name"` rename when present, the source name otherwise) — the
+    /// same string the derived decoder dispatches on. Derive-time error
+    /// messages keep the source name.
+    pub(super) fn tojson_con_body(
+        &self,
+        con: &Constructor,
+        field_tys: &[Ty],
+        tagged: bool,
+    ) -> Result<TExpr, (String, String)> {
+        match &con.fields {
+            ConstructorFields::Named(fields) if !fields.is_empty() => {
+                let mut pairs = self.tojson_named_pairs(&con.name, fields, field_tys)?;
+                if tagged {
+                    pairs.insert(0, Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())));
+                }
+                Ok(Self::jx_obj(pairs))
+            }
+            _ if field_tys.is_empty() => Ok(Self::jx_jstr(con.effective_tag())),
+            _ => {
+                let args: Vec<TExpr> = field_tys.iter().enumerate().map(|(i, fty)| {
+                    self.tojson_arg(i, fty).map_err(|e| Self::fromjson_field_err(
+                        format!("argument {} of constructor '{}' cannot be encoded", i + 1, con.name), e))
+                }).collect::<Result<_, _>>()?;
+                let contents = if field_tys.len() == 1 {
+                    args.into_iter().next().unwrap()
+                } else {
+                    Self::jx_jarr(args)
+                };
+                if tagged {
+                    Ok(Self::jx_obj(vec![
+                        Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())),
+                        Self::jx_pair("contents", contents),
+                    ]))
+                } else {
+                    Ok(contents)
+                }
+            }
         }
     }
 
@@ -2447,45 +2876,31 @@ impl Checker {
                 .unwrap_or_default()
         }).collect();
 
-        // Field-type validation. The encoder itself is the JSON module's
-        // GENERIC encoder over the Generic representation, whose leaves
-        // resolve through ToJSON instances at monomorphization time — where
-        // a missing instance would surface as an opaque unresolved-method
-        // error deep in the generic machinery. Validate every field here
-        // instead, with the same per-field derive-time messages the native
-        // encoder generator produced; report every unsupported field before
+        // One clause per constructor; report every unsupported field before
         // bailing out.
+        let mut clauses = Vec::new();
         let mut failed = false;
         for (con, ftys) in constructors.iter().zip(&con_field_tys) {
-            match &con.fields {
-                ConstructorFields::Named(fields) if !fields.is_empty() => {
-                    for (i, field) in fields.iter().enumerate() {
-                        if let Err(e) = self.tojson_field_encoder(&ftys[i]) {
-                            let (reason, note) = Self::fromjson_field_err(
-                                format!("field '{}' of constructor '{}' cannot be encoded", field.name, con.name), e);
-                            reject(self, reason, &note);
-                            failed = true;
-                        }
-                    }
+            match self.tojson_con_body(con, ftys, tagged) {
+                Ok(body) => {
+                    let args = ftys.iter().enumerate()
+                        .map(|(i, t)| TPattern::Var(format!("_x{}", i), t.clone()))
+                        .collect();
+                    clauses.push(TClause {
+                        span: None,
+                        patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args }],
+                        guards: vec![],
+                        body,
+                        where_binds: vec![],
+                    });
                 }
-                _ => {
-                    for (i, fty) in ftys.iter().enumerate() {
-                        if let Err(e) = self.tojson_field_encoder(fty) {
-                            let (reason, note) = Self::fromjson_field_err(
-                                format!("argument {} of constructor '{}' cannot be encoded", i + 1, con.name), e);
-                            reject(self, reason, &note);
-                            failed = true;
-                        }
-                    }
+                Err((reason, note)) => {
+                    reject(self, reason, &note);
+                    failed = true;
                 }
             }
         }
         if failed { return vec![]; }
-        let _ = tagged; // the generic encoder reads tagged-ness off the metadata
-
-        // The Generic substrate the encoder runs on (created here unless a
-        // sibling derive already did).
-        let mut out_fns = self.ensure_generic(type_name, type_vars, constructors);
 
         // Register the instance
         let mut method_fns = HashMap::new();
@@ -2497,27 +2912,13 @@ impl Checker {
             context: None,
         });
 
-        // toJSON_T _x = genericToJSON _x — the generic encoder reproduces
-        // the native wire format byte-for-byte.
-        let body = Self::jx_app(
-            Self::jx_var("genericToJSON", Ty::arrow(result_ty.clone(), json.clone())),
-            Self::jx_var("_x", result_ty.clone()),
-            json.clone(),
-        );
-        out_fns.push(TFunction {
+        vec![TFunction {
             name: mangled,
             ty: Ty::arrow(result_ty, json),
-            clauses: vec![TClause {
-                span: None,
-                patterns: vec![TPattern::Var("_x".into(), Ty::Con(type_name.to_string()))],
-                guards: vec![],
-                body,
-                where_binds: vec![],
-            }],
+            clauses,
             specialized: false,
             dict_params: vec![],
             derived_strict: false,
-        });
-        out_fns
+        }]
     }
 }

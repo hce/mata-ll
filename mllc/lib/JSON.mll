@@ -67,12 +67,13 @@ decodeJSONWith dec s = case parseJSON s of
 -- Typeclasses
 --
 -- The primitive codecs come in two forms: the toJSON*/fromJSON* combinators
--- below, and the `instance ToJSON Int`-style declarations further down that
--- wrap them, which the generic codec's leaves resolve against. (Orphan
+-- below, which the native `deriving (ToJSON/FromJSON)` codecs call
+-- directly, and the `instance ToJSON Int`-style declarations further down
+-- that wrap them, which the generic codecs' leaves resolve against. (Orphan
 -- checking is relaxed for library modules, so this stdlib module may carry
--- instances for builtin types.) `deriving (ToJSON/FromJSON)` derives the
--- Generic representation and runs genericToJSON/genericFromJSON over it;
--- hand-written instances for your own data types compose the combinators.
+-- instances for builtin types.) Write instances for your own data types in
+-- terms of the combinators, or `deriving (Generic)` and use
+-- genericToJSON/genericFromJSON.
 -- ================================================================
 
 class ToJSON a where
@@ -743,9 +744,9 @@ instance FromJSON a => FromJSON (Maybe a) where
 -- Generic ToJSON  (import Data.Generics)
 --
 -- `genericToJSON` encodes any `deriving (Generic)` type by walking its
--- representation; it is the encoder `deriving (ToJSON)` runs. The wire
--- format: a single-constructor record is an object keyed by field name; a
--- single positional constructor is its argument (or an array); a
+-- representation, reproducing the wire format of `deriving (ToJSON)`
+-- byte-for-byte: a single-constructor record is an object keyed by field
+-- name; a single positional constructor is its argument (or an array); a
 -- multi-constructor type is tagged (a nullary constructor is the bare name
 -- string, a fielded one an object with "tag"); `Maybe` fields encode
 -- Nothing as null. The record/sum/arity decisions are read from the derived
@@ -819,11 +820,12 @@ instance ToJSON c => GLeaf (K1 c) where
 -- Generic FromJSON  (import Data.Generics)
 --
 -- `genericFromJSON` decodes any `deriving (Generic)` type by walking its
--- representation TYPE; it is the decoder `deriving (FromJSON)` runs — the
--- exact mirror of genericToJSON, so encode/decode round-trips. Decoding
--- must pick instances before any rep value exists, so it navigates by
--- proxy (`gProxy` and the `p*` re-typers from Data.Generics) — the proxies
--- are never forced; only their types matter.
+-- representation TYPE, reproducing the wire format and the error messages
+-- of `deriving (FromJSON)` exactly (it calls the same combinators with the
+-- same strings) — the exact mirror of genericToJSON, so encode/decode
+-- round-trips. Decoding must pick instances before any rep value exists,
+-- so it navigates by proxy (`gProxy` and the `p*` re-typers from
+-- Data.Generics) — the proxies are never forced; only their types matter.
 -- ================================================================
 
 -- Either map, specialized to the decoder's error type.

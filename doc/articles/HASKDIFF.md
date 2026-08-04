@@ -217,14 +217,15 @@ the wrapper's head under mata-ll's head-keyed instance resolution);
 and `selName` reflect a constructor's / field's *effective* external
 name (the `as "…"` rename when present, the source name otherwise).
 
-The JSON codecs are built on this substrate: `deriving (ToJSON)` and
-`deriving (FromJSON)` derive the Generic representation implicitly and
-their instances run the JSON module's generic encoder/decoder
-(`genericToJSON :: (Generic a, GEncode (Rep a)) => a -> Json`,
-`genericFromJSON :: (Generic a, GDecode (Rep a)) => Json -> Either
-String a`), which are also usable directly. In GHC this is aeson's
-`genericToJSON`/`genericParseJSON`; the wire format mirrors aeson's
-defaultOptions where mata-ll can (see SPEC).
+The JSON module offers a generic encoder and decoder over this
+substrate — `genericToJSON :: (Generic a, GEncode (Rep a)) => a ->
+Json` and `genericFromJSON :: (Generic a, GDecode (Rep a)) => Json ->
+Either String a`, the analogue of aeson's `genericToJSON`/
+`genericParseJSON` — whose wire format and error messages agree with
+`deriving (ToJSON/FromJSON)` byte-for-byte. The derives keep their
+specialised native codecs (direct code, no representation values at
+runtime); the generic pair is the library-programmable alternative and
+the substrate's proof of fidelity.
 
 A performance note, not a semantic one: a polymorphic function is
 specialised at up to 16 distinct types; past that the monomorphiser

@@ -1,5 +1,5 @@
--- deriving (ToJSON): the derive runs the generic encoder over the Generic
--- representation as the exact mirror of deriving (FromJSON), so that
+-- deriving (ToJSON): the native derive generates an encoder over the JSON
+-- module's combinators as the exact mirror of deriving (FromJSON), so that
 -- fromJSON (parseJSON (encodeToJSON x)) == Right x round-trips. Covers:
 -- records, sum types (tagged objects and bare nullary strings), single
 -- positional constructors, nested user types, [a] and Maybe a fields

@@ -1,5 +1,5 @@
--- deriving (FromJSON): the derive runs the generic decoder over the Generic
--- representation, and return-nested dispatch resolves it through
+-- deriving (FromJSON): the native derive generates a decoder over the JSON
+-- module's combinators, and return-nested dispatch resolves it through
 -- `decodeJSON s :: Either String T` (fromJSON's class variable sits inside
 -- `Either String a`). Covers: records, sum types (tagged objects and bare
 -- nullary strings), single positional constructors, nested user types,

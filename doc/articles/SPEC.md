@@ -1564,23 +1564,24 @@ return the source names (a positional field's `selName` is `""`), which the
 carried polymorphically and discharged when a concrete call fixes `a` and
 `Rep a` reduces to that type's representation.
 
-The JSON codecs are built on this representation. `deriving (ToJSON)` /
-`deriving (FromJSON)` derive the Generic substrate implicitly (a sibling
-`deriving (Generic)` is detected and shared) and their instances run the
-`JSON` module's generic encoder and decoder,
+The `JSON` module ships a generic encoder and decoder over this
+representation,
 
     genericToJSON   :: (Generic a, GEncode (Rep a)) => a -> Json
     genericFromJSON :: (Generic a, GDecode (Rep a)) => Json -> Either String a
 
-which are ordinary library code walking the representation — the derived
-metadata (constructor names and tags, record-ness, arity, field keys)
-drives the wire format, and the compiler contributes no codec logic
-beyond the representation itself. Both functions are exported for direct
-use on any `deriving (Generic)` type. A single generic function is
-specialised once per type up to the monomorphiser's 16-specialisation
-guard; past it the generic machinery switches to dictionary passing —
-still correct at any number of types, at some runtime indirection cost
-(see HASKDIFF).
+ordinary library code walking the representation, whose wire format AND
+error messages match `deriving (ToJSON)` / `deriving (FromJSON)`
+byte-for-byte — the derived metadata (constructor names and tags,
+record-ness, arity, field keys) drives the output. They are the worked
+proof of the substrate and usable on any `deriving (Generic)` type. The
+derives themselves keep their specialised native codecs, which encode
+and decode directly without building representation values (the generic
+pair costs measurably more at runtime, chiefly under LuaJIT). A single
+generic function is specialised once per type up to the monomorphiser's
+16-specialisation guard; past it the generic machinery switches to
+dictionary passing — still correct at any number of types, at some
+runtime indirection cost (see HASKDIFF).
 
 Differences from Haskell's `GHC.Generics`: the module is `Data.Generics`
 (not `GHC.Generics`); the metadata wrappers are the three distinct
