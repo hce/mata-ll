@@ -80,6 +80,11 @@ pub enum Decl {
     /// Type family: `type family Element container where Element [a] = a`
     TypeFamily {
         name: String,
+        /// The header parameter names (`container`). Not matched against — the
+        /// equations do the matching — but their COUNT fixes the family's
+        /// arity/kind even when it has zero equations (an initially-empty
+        /// family the compiler later extends, like `Rep`).
+        params: Vec<String>,
         equations: Vec<TypeFamilyEq>,
     },
     /// Import: `import Data.Tree (depth, Tree(..))`

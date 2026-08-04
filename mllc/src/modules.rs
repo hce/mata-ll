@@ -461,8 +461,9 @@ impl Qual<'_> {
             Decl::TypeAlias { name, params, ty } => Decl::TypeAlias {
                 name: self.q(name), params: params.clone(), ty: self.ty(ty),
             },
-            Decl::TypeFamily { name, equations } => Decl::TypeFamily {
+            Decl::TypeFamily { name, params, equations } => Decl::TypeFamily {
                 name: self.q(name),
+                params: params.clone(),
                 equations: equations.iter().map(|eq| TypeFamilyEq {
                     args: eq.args.iter().map(|t| self.ty(t)).collect(),
                     result: self.ty(&eq.result),

@@ -1035,6 +1035,13 @@ impl TyFamilies {
     pub fn insert(&mut self, name: String, equations: Vec<(Vec<Ty>, Ty)>) {
         self.eqs.insert(name, equations);
     }
+    /// Append one equation to an existing family. Used by `deriving (Generic)`
+    /// to extend the compiler-managed `Rep` family with `Rep T = <rep>` — one
+    /// new clause per derive. The family's key count is unchanged, so the
+    /// lazy `build_ty_families` rebuild (keyed on count) never discards it.
+    pub fn add_equation(&mut self, name: &str, args: Vec<Ty>, result: Ty) {
+        self.eqs.entry(name.to_string()).or_default().push((args, result));
+    }
     pub fn is_empty(&self) -> bool {
         self.eqs.is_empty()
     }
@@ -1044,7 +1051,7 @@ impl TyFamilies {
     fn get(&self, name: &str) -> Option<&Vec<(Vec<Ty>, Ty)>> {
         self.eqs.get(name)
     }
-    fn contains(&self, name: &str) -> bool {
+    pub fn contains(&self, name: &str) -> bool {
         self.eqs.contains_key(name)
     }
 }
@@ -1431,7 +1438,37 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
         // binds it, with the ordinary occurs check).
         (a, b) if is_stuck_family_app(a, fams) || is_stuck_family_app(b, fams) => {
             if a == b {
-                Ok(Subst::empty())
+                return Ok(Subst::empty());
+            }
+            // Both sides the SAME family at the same arity: a unifier may bind
+            // a flexible metavariable in an argument position to make the two
+            // applications identical (`F α ~ F t ⟹ α := t`). That is the
+            // most-general unifier equating them, NOT an injectivity deduction
+            // — decomposing two DISTINCT rigid arguments still fails (`F a ~ F
+            // b` with skolems `a ≠ b` is rejected below), so we never conclude
+            // `a ~ b` from `F a ~ F b`. This is what lets `to (from x)` relate
+            // the freshly-instantiated `Rep α` of `to`'s argument to the `Rep
+            // a` that `from x` produced (the Generics `to . from` round-trip).
+            let (ha, aargs) = peel_app(a);
+            let (hb, bargs) = peel_app(b);
+            if let (Ty::Con(na), Ty::Con(nb)) = (ha, hb)
+                && na == nb && fams.contains(na) && aargs.len() == bargs.len()
+            {
+                // Try to equate argument-wise. This SUCCEEDS only by binding a
+                // flexible metavariable (`Rep α ~ Rep t ⟹ α := t`); if it would
+                // require equating two distinct rigids (`Plus n 'Z ~ Plus m 'Z`
+                // with skolems `n ≠ m`) an inner unification fails, and we
+                // report the family-level mismatch — never the inner one — so
+                // the diagnostic stays "cannot unify the two family
+                // applications" (non-injectivity), not "n vs m".
+                let mut s = Subst::empty();
+                for (ea, eb) in aargs.iter().zip(bargs.iter()) {
+                    match unify_tf(&ea.apply_subst(&s), &eb.apply_subst(&s), fams) {
+                        Ok(si) => s = s.compose(&si),
+                        Err(_) => return Err(DiagnosticKind::Mismatch(a.clone(), b.clone())),
+                    }
+                }
+                Ok(s)
             } else {
                 Err(DiagnosticKind::Mismatch(a.clone(), b.clone()))
             }

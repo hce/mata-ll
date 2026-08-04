@@ -627,6 +627,15 @@ pub struct Checker {
     orphan_check_enabled: bool,
     /// Typeclass constraints per function name (for dictionary-passing fallback)
     fn_constraints: HashMap<String, Vec<TyConstraint>>,
+    /// The FULL type argument of each function-signature constraint, in
+    /// declaration order (parallel to `fn_constraints`). A simple `Show a` has
+    /// argument `Ty::Var a` — redundant with `type_var` — but a COMPOUND
+    /// constraint like `GEncode (Rep a)` keeps its structure here (`Rep a`),
+    /// which `fn_constraints`' `type_var: String` cannot. The dictionary-passing
+    /// rewrite matches a method use's binding against these to route it to the
+    /// right dictionary parameter, and reduces them at a call site to build the
+    /// dictionary for the concrete representation. Signature-variable names.
+    fn_constraint_args: HashMap<String, Vec<(String, Ty)>>,
     /// Class constraints carried by a class method, keyed by method name
     /// (e.g. "show" -> [Show a]). Instantiating the method emits a wanted
     /// constraint on the freshened type so it can be discharged.
@@ -754,6 +763,7 @@ impl Checker {
             local_types: HashSet::new(),
             orphan_check_enabled: false,
             fn_constraints: HashMap::new(),
+            fn_constraint_args: HashMap::new(),
             method_constraints: HashMap::new(),
             fn_use_constraints: HashMap::new(),
             fn_dict_constraints: HashMap::new(),
@@ -1015,6 +1025,24 @@ impl Checker {
             // LuaIOCatch "name" (Either String T)  reduces to  IO (Either String T)
             Type::LuaIOCatch { result, .. } => Ty::io(self.ast_type_to_ty(result)),
             Type::Promoted(name) => Ty::Promoted(name.clone()),
+        }
+    }
+
+    /// Is `name` a registered type family? (`&self`, for constraint solving,
+    /// which must treat a family application as instance-less on its own head.)
+    pub(super) fn is_type_family(&self, name: &str) -> bool {
+        self.type_families.contains_key(name)
+    }
+
+    /// Reduce a `Ty`-form family application to normal form, returning the
+    /// reduct only when it actually changed (i.e. the family was NOT stuck on
+    /// a variable). `&self`, so instance solving can peek through `Rep Int`
+    /// without needing `&mut`. Uses the already-built `ty_families`; a stuck
+    /// or divergent application yields `None` (defer to the caller).
+    pub(super) fn reduce_family_ty(&self, ty: &Ty) -> Option<Ty> {
+        match crate::types::reduce_type_families(ty, &self.ty_families) {
+            Ok(reduced) if &reduced != ty => Some(reduced),
+            _ => None,
         }
     }
 
@@ -3603,7 +3631,7 @@ impl Checker {
         // first `ast_type_to_ty`, e.g. a data field of family type in pass 1.)
         for decl in &module.decls {
             match decl {
-                Decl::TypeFamily { name, equations } => {
+                Decl::TypeFamily { name, equations, .. } => {
                     self.type_families.insert(name.clone(), equations.clone());
                 }
                 Decl::TypeAlias { name, params, ty } => {
@@ -3690,7 +3718,7 @@ impl Checker {
                 Decl::ClassDecl { name, type_var, superclasses, methods } => {
                     self.register_class(name, type_var, superclasses, methods);
                 }
-                Decl::TypeFamily { name, equations } => {
+                Decl::TypeFamily { name, equations, .. } => {
                     self.type_families.insert(name.clone(), equations.clone());
                 }
                 Decl::TypeAlias { name, params, ty } => {
@@ -3844,7 +3872,7 @@ impl Checker {
                     // context must use the head's variables consistently.
                     self.check_instance_kind(class_name, target_type, context);
                 }
-                Decl::TypeFamily { name, equations } => {
+                Decl::TypeFamily { name, equations, .. } => {
                     self.check_family_kinds(
                         name,
                         equations,
@@ -3880,8 +3908,15 @@ impl Checker {
                         };
                         TyConstraint { class_name: c.class_name.clone(), type_var }
                     }).collect();
+                    // The structured argument of each constraint (`Rep a` for a
+                    // compound constraint the `type_var` string cannot hold), for
+                    // dictionary passing.
+                    let arg_tys: Vec<(String, Ty)> = constraints.iter()
+                        .map(|c| (c.class_name.clone(), self.ast_type_to_ty(&c.type_arg)))
+                        .collect();
                     if !ty_constraints.is_empty() {
                         self.fn_constraints.insert(name.clone(), ty_constraints);
+                        self.fn_constraint_args.insert(name.clone(), arg_tys);
                     }
                 }
                 sigs.insert(name.clone(), self.ast_type_to_ty(ty));

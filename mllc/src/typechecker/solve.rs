@@ -78,6 +78,25 @@ impl Checker {
                     args.push(a.as_ref());
                     head = f.as_ref();
                 }
+                // A type-family application (`Rep a`, `Element [a]`) has no
+                // instance of its OWN — the instance belongs to whatever the
+                // family reduces to. If it reduces here (its arguments are
+                // concrete enough), resolve on the reduct; if it is STUCK on a
+                // rigid/flexible variable, defer exactly like a bare type
+                // variable — the constraint (`GToJSON (Rep a)`) is carried by
+                // the enclosing signature's context and discharged once
+                // monomorphization pins `a` and the family reduces. Without
+                // this, `has_instance` would peel to the family's head `Con`,
+                // find no instance registered under it, and wrongly reject the
+                // whole polymorphic definition (see the Generics substrate).
+                if let Ty::Con(name) = head {
+                    if self.is_type_family(name) {
+                        return match self.reduce_family_ty(ty) {
+                            Some(reduced) => self.has_instance(class, &reduced),
+                            None => true,
+                        };
+                    }
+                }
                 match head {
                     // Maybe is structural for Show/Eq like lists are: its
                     // built-in Eq is NOT a registered instance, so a structural
@@ -601,13 +620,18 @@ impl Checker {
         }
 
         // Orphan instance detection: either the class or the type must be local.
-        // Only checked when check_module_with_local_start was used (local_start tracking active).
-        // The implicit Prelude is exempt: it is the home module of the builtin
-        // classes and types (Foldable, [], Maybe, …), and every program imports
-        // it, so a Prelude instance can never be the "unseen elsewhere" orphan
-        // the check exists to reject — this is GHC's rule that an instance in
-        // the defining module of its class or type is not an orphan.
-        if self.orphan_check_enabled && !self.checking_prelude {
+        // Only the MAIN module (`checking_local`) is checked. Imported modules —
+        // the stdlib (JSON, Data.Generics, …) and user libraries alike — are
+        // trusted to be coherent, exactly as the implicit Prelude is: mata-ll
+        // compiles the whole program together, so there is no cross-build
+        // incoherence for the orphan rule to guard against in library code, and
+        // a stdlib module legitimately declares instances for builtin types it
+        // codes against (`instance ToJSON Int`, the generic combinator
+        // instances). The check still fires for the top-level program, where it
+        // catches a user adding a rogue instance for a class and type they own
+        // neither of. `local_classes`/`local_types` are the main module's own
+        // declarations (see `check_module_with_local_start`).
+        if self.orphan_check_enabled && self.checking_local {
             let type_head = Self::type_head_name(target_type);
             let class_is_local = self.local_classes.contains(class_name);
             let type_is_local = type_head.as_ref().is_some_and(|t| self.local_types.contains(t));
@@ -779,5 +803,20 @@ impl Checker {
     /// Expose class definitions for the monomorphizer
     pub fn get_classes(&self) -> &HashMap<String, ClassInfo> {
         &self.classes
+    }
+
+    /// The structured argument type of each function's constraints (parallel to
+    /// `get_fn_constraints`), so dictionary passing can handle a compound
+    /// constraint like `GEncode (Rep a)` whose `type_var` string is opaque.
+    pub fn get_fn_constraint_args(&self) -> &HashMap<String, Vec<(String, Ty)>> {
+        &self.fn_constraint_args
+    }
+
+    /// Expose the lowered closed-type-family equations so monomorphization can
+    /// reduce a family application (`Rep T`) to its concrete representation
+    /// before dispatching a class method on it (the Generics substrate leaves
+    /// `Rep a` in a method's dispatch type until `a` is pinned here).
+    pub fn get_ty_families(&self) -> &crate::types::TyFamilies {
+        &self.ty_families
     }
 }

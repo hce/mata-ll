@@ -1479,7 +1479,7 @@ subtraction function, as in GHC.
 # Deriving
 
 Automatic instance generation is supported for Show, Eq, Ord, Enum,
-Bounded, Functor, ToJSON, FromJSON, and LuaDict:
+Bounded, Functor, Generic, ToJSON, FromJSON, and LuaDict:
 
     data Color = Red | Green | Blue
         deriving (Show, Eq, Ord, Enum, Bounded)
@@ -1519,6 +1519,76 @@ which offers a hand-written codec alongside the derived instances:
 `encodeToJSON :: ToJSON a => a -> String` serializes a value, and
 `decodeJSON :: FromJSON a => String -> Either String a` parses one.
 Record fields map to JSON object keys.
+
+## Generic (datatype-generic programming)
+
+`deriving (Generic)` (from `import Data.Generics`) gives a type a
+*structural representation* `Rep a` and the conversions
+`from :: a -> Rep a` / `to :: Rep a -> a`. A generic function is then an
+ordinary typeclass whose instances pattern-match the representation
+combinators — written once, it works for every deriving type. This is the
+substrate datatype-generic code (custom JSON, schema, pretty-printing, …)
+is built on, without a bespoke compiler pass per feature.
+
+    import Data.Generics
+
+    data Colour = Red | Green | Blue deriving (Generic)
+
+    -- A generic constructor-index function, written once for all types.
+    class GIx f where gix :: f -> Int
+    instance GIx U1                     where gix _ = 0
+    instance GIx (K1 c)                 where gix _ = 0
+    instance (GIx a, GIx b) => GIx (a :+: b) where
+        gix (L1 x) = gix x
+        gix (R1 y) = 1 + gix y
+    instance (GIx a, GIx b) => GIx (a :*: b) where gix _ = 0
+    instance GIx f => GIx (D1 d f)      where gix (D1 x) = gix x
+    instance GIx f => GIx (C1 c f)      where gix (C1 x) = gix x
+    instance GIx f => GIx (S1 s f)      where gix (S1 x) = gix x
+
+    conIndex :: (Generic a, GIx (Rep a)) => a -> Int
+    conIndex x = gix (from x)
+    -- conIndex Green == 1
+
+The representation is a *sum of products*: `Rep a` is a `D1` datatype
+wrapper around a sum (`:+:`) of constructors, each a `C1` constructor
+wrapper around a product (`:*:`) of fields, each field an `S1` selector
+wrapper around a `K1` constant that holds the field value. `U1` is the
+empty product (a nullary constructor). `D1`/`C1`/`S1` carry the datatype,
+constructor and field *metadata* — `datatypeName`, `conName` and `selName`
+return the source names (a positional field's `selName` is `""`), which the
+`Datatype`/`Constructor`/`Selector` classes reflect.
+
+`Rep` is a closed type family the compiler extends with one equation per
+`deriving (Generic)`. A generic function's `GC (Rep a)` constraint is
+carried polymorphically and discharged when a concrete call fixes `a` and
+`Rep a` reduces to that type's representation.
+
+The JSON codecs are built on this representation. `deriving (ToJSON)` /
+`deriving (FromJSON)` derive the Generic substrate implicitly (a sibling
+`deriving (Generic)` is detected and shared) and their instances run the
+`JSON` module's generic encoder and decoder,
+
+    genericToJSON   :: (Generic a, GEncode (Rep a)) => a -> Json
+    genericFromJSON :: (Generic a, GDecode (Rep a)) => Json -> Either String a
+
+which are ordinary library code walking the representation — the derived
+metadata (constructor names and tags, record-ness, arity, field keys)
+drives the wire format, and the compiler contributes no codec logic
+beyond the representation itself. Both functions are exported for direct
+use on any `deriving (Generic)` type. A single generic function is
+specialised once per type up to the monomorphiser's 16-specialisation
+guard; past it the generic machinery switches to dictionary passing —
+still correct at any number of types, at some runtime indirection cost
+(see HASKDIFF).
+
+Differences from Haskell's `GHC.Generics`: the module is `Data.Generics`
+(not `GHC.Generics`); the metadata wrappers are the three distinct
+constructors `D1`/`C1`/`S1` rather than one tagged `M1 i c f` (so instances
+dispatch on the wrapper's head); `K1` carries no index tag; the rep
+combinators are of kind `Type` (no phantom `x` on `from`/`to`); and there is
+no `V1`/`U1`-less void case (a type with no constructors cannot derive
+`Generic`). `deriving (Generic)` is for concrete (parameterless) types.
 
 Both levels of the external representation can be renamed with `as`.
 A record field's key: `fieldName as "key" :: T` — one shared external

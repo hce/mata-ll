@@ -256,6 +256,28 @@ impl Checker {
             }).collect();
             self.fn_dict_constraints.insert(name.to_string(), renamed);
         }
+        // The same final-name renaming, applied to the FULL argument TYPE of
+        // each constraint (kept in source spelling by pass 3), so a compound
+        // constraint like `GEncode (Rep a)` reaches dictionary passing with `a`
+        // spelled the way the generalized function type spells it — otherwise a
+        // call site's substitution (keyed by the final names) never lands on it.
+        if let Some(args) = self.fn_constraint_args.get(name).cloned() {
+            let fresh_vars: HashMap<String, TyVar> = fresh_ty.free_vars()
+                .into_iter().map(|v| (v.name.clone(), v)).collect();
+            let renamed: Vec<(String, Ty)> = args.into_iter().map(|(cls, arg)| {
+                let mut t = arg;
+                for sv in t.free_vars() {
+                    let fresh_name = renames.get(&sv.name).cloned().unwrap_or_else(|| sv.name.clone());
+                    if let Some(tv) = fresh_vars.get(&fresh_name) {
+                        let resolved = Ty::Var(tv.clone())
+                            .apply_subst(&overall_subst).demote_skolems(&demote);
+                        t = t.apply_subst(&Subst::singleton(sv.clone(), resolved));
+                    }
+                }
+                (cls, t)
+            }).collect();
+            self.fn_constraint_args.insert(name.to_string(), renamed);
+        }
         // ---- Numeric defaulting (`default (Integer, Number)` — GHC's
         // Haskell-2010 `default (Integer, Double)`, with Number standing in for
         // Double). An unconstrained literal defaults to arbitrary-precision

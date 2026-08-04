@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use crate::ast::Span;
 use crate::tir::*;
 use crate::typechecker::{Checker, ClassInfo, InstanceInfo};
-use crate::types::{Diagnostic, DiagnosticKind, InstHead, Ty, TyVar, TyConstraint, Subst};
+use crate::types::{Diagnostic, DiagnosticKind, InstHead, Ty, TyVar, TyConstraint, Subst, TyFamilies};
 
 /// The message and optional note of a "No instance" error. The note carries a
 /// mata-ll-specific hint when the (method, type) pair is a known
@@ -136,6 +136,27 @@ pub struct Monomorphizer {
     /// rewrite scope because dictionary construction nests (`build_dict_expr`
     /// can enter `build_concrete_dict`, which rewrites with its own context).
     cur_dict_params: Vec<(String, String)>,
+    /// Per-function constraint argument types (parallel to `fn_constraints`),
+    /// so dictionary passing can resolve a COMPOUND constraint (`GEncode (Rep
+    /// a)`) whose `type_var` string is opaque — see the checker field of the
+    /// same name.
+    fn_constraint_args: HashMap<String, Vec<(String, Ty)>>,
+    /// The current dictionary-passing function's `(class, argument type,
+    /// parameter name)` triples, so a method use inside it whose class-variable
+    /// binding matches a compound constraint routes to that parameter instead
+    /// of rebuilding the dictionary. Saved/restored around each rewrite scope.
+    cur_dict_by_arg: Vec<(String, Ty, String)>,
+    /// True while `ensure_dictform` monomorphizes an instance-method body: a
+    /// still-polymorphic call must then keep its NAME (for the dictionary
+    /// rewrite) instead of falling back to an arbitrary existing
+    /// specialization of it.
+    in_dictform: bool,
+    /// Closed-type-family equations (borrowed from the checker) so a family
+    /// application in a method's dispatch type is reduced to its concrete form
+    /// before instance selection. The Generics `Rep` family is the caller:
+    /// `gToJSON :: Rep a -> Json` dispatches on `Rep T`, which must reduce to
+    /// the synthesized representation before its `GToJSON` instance is found.
+    ty_families: TyFamilies,
 }
 
 impl Monomorphizer {
@@ -245,6 +266,42 @@ impl Monomorphizer {
             classes: checker.get_classes().clone(),
             method_to_class,
             locals: HashSet::new(),
+            fn_constraint_args: checker.get_fn_constraint_args().clone(),
+            cur_dict_by_arg: Vec::new(),
+            in_dictform: false,
+            ty_families: checker.get_ty_families().clone(),
+        }
+    }
+
+    /// Does the concrete/stuck type `bound` match a constraint argument pattern
+    /// `pat` — structurally, with a type VARIABLE on either side matching
+    /// anything? `Rep V ~ Rep a` matches (same family head, one variable arg);
+    /// `Rep V ~ Maybe a` does not. Used to route a method use to the dictionary
+    /// parameter standing for the compound constraint it discharges.
+    fn arg_matches(pat: &Ty, bound: &Ty) -> bool {
+        match (pat, bound) {
+            (Ty::Var(_), _) | (_, Ty::Var(_)) => true,
+            (Ty::Con(a), Ty::Con(b)) => a == b,
+            (Ty::App(a1, b1), Ty::App(a2, b2)) =>
+                Self::arg_matches(a1, a2) && Self::arg_matches(b1, b2),
+            (Ty::List(a), Ty::List(b)) | (Ty::IO(a), Ty::IO(b)) => Self::arg_matches(a, b),
+            (Ty::Tuple(a), Ty::Tuple(b)) =>
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| Self::arg_matches(x, y)),
+            (Ty::Unit, Ty::Unit) => true,
+            _ => false,
+        }
+    }
+
+    /// Reduce every closed-type-family application in `ty` to normal form,
+    /// returning the reduct only when it changed. A method's dispatch type may
+    /// still carry a family application (`Rep T`) once its class variable is
+    /// pinned to a concrete type; reducing it exposes the real representation
+    /// head the instance is registered under. A stuck or divergent application
+    /// is left as-is (`None`).
+    fn reduce_families(&self, ty: &Ty) -> Option<Ty> {
+        match crate::types::reduce_type_families(ty, &self.ty_families) {
+            Ok(reduced) if &reduced != ty => Some(reduced),
+            _ => None,
         }
     }
 
@@ -317,36 +374,89 @@ impl Monomorphizer {
             // order they are first demanded. Iterating the HashSet directly
             // would make that order — and the emitted __mll_fn slot numbering —
             // vary from run to run.
-            let mut dict_fns: Vec<String> = self.dict_passing_fns.iter().cloned().collect();
-            dict_fns.sort();
-            for name in &dict_fns {
-                if let Some(pos) = result_fns.iter().position(|f| f.name == *name) {
-                    let mut func = result_fns[pos].clone();
-                    self.rewrite_dict_passing_fn(&mut func);
-                    result_fns[pos] = func;
+            // Fixpoint over the whole phase: rewriting one body can DISCOVER
+            // further dict-passing functions — a sibling constrained call
+            // (gdTag calling gdConBody) marks its callee, and building a
+            // dictionary can trip a fresh specialization cap (flagging an
+            // instance method mid-phase). Each newly flagged function needs
+            // its own body rewrite AND a fresh call-site pass over everything
+            // already processed, so iterate until no new flags appear.
+            let mut rewritten: HashSet<String> = HashSet::new();
+            loop {
+                // (a) Rewrite the bodies of newly flagged dict-passing
+                // functions (worklist: a rewrite can flag more). An instance
+                // METHOD that tripped the cap lives in instance_fns, not
+                // result_fns — search both.
+                loop {
+                    let mut dict_fns: Vec<String> = self.dict_passing_fns.iter()
+                        .filter(|n| !rewritten.contains(*n))
+                        .cloned().collect();
+                    if dict_fns.is_empty() { break; }
+                    dict_fns.sort();
+                    for name in &dict_fns {
+                        rewritten.insert(name.clone());
+                        if let Some(pos) = result_fns.iter().position(|f| f.name == *name) {
+                            let mut func = result_fns[pos].clone();
+                            self.rewrite_dict_passing_fn(&mut func);
+                            result_fns[pos] = func;
+                        } else if let Some(pos) = instance_fns.iter().position(|f| f.name == *name) {
+                            let mut func = instance_fns[pos].clone();
+                            self.rewrite_dict_passing_fn(&mut func);
+                            instance_fns[pos] = func;
+                        }
+                    }
+                }
+                let flagged_before = self.dict_passing_fns.len();
+                // (b) Revert purged references and rewrite call sites in
+                // non-dict functions. Idempotent per function: DictCall nodes
+                // pass through untouched, so re-running after a new flag only
+                // converts the calls to the newly flagged names.
+                for func in &mut result_fns {
+                    if self.dict_passing_fns.contains(&func.name) { continue; }
+                    for clause in &mut func.clauses {
+                        clause.body = self.rewrite_dict_call_sites(
+                            self.revert_purged(clause.body.clone()));
+                        clause.where_binds = clause.where_binds.iter().map(|wb| TLocalDef {
+                            name: wb.name.clone(),
+                            patterns: wb.patterns.clone(),
+                            body: self.rewrite_dict_call_sites(
+                                self.revert_purged(wb.body.clone())),
+                        }).collect();
+                    }
+                }
+                for func in &mut instance_fns {
+                    if self.dict_passing_fns.contains(&func.name) { continue; }
+                    for clause in &mut func.clauses {
+                        clause.body = self.rewrite_dict_call_sites(
+                            self.revert_purged(clause.body.clone()));
+                    }
+                }
+                // (c) The rewrites may have generated new functions:
+                // dictionary-form instance methods and specializations
+                // resolved while building concrete dictionaries. Their
+                // bodies never went through the loops above, so give each
+                // batch the same treatment before emitting.
+                while !self.generated.is_empty() {
+                    let mut batch = std::mem::take(&mut self.generated);
+                    for func in &mut batch {
+                        if self.dict_passing_fns.contains(&func.name) { continue; }
+                        for clause in &mut func.clauses {
+                            clause.body = self.rewrite_dict_call_sites(
+                                self.revert_purged(clause.body.clone()));
+                            clause.where_binds = clause.where_binds.iter().map(|wb| TLocalDef {
+                                name: wb.name.clone(),
+                                patterns: wb.patterns.clone(),
+                                body: self.rewrite_dict_call_sites(
+                                    self.revert_purged(wb.body.clone())),
+                            }).collect();
+                        }
+                    }
+                    result_fns.append(&mut batch);
+                }
+                if self.dict_passing_fns.len() == flagged_before {
+                    break;
                 }
             }
-            // Rewrite call sites in non-dict functions
-            for func in &mut result_fns {
-                if self.dict_passing_fns.contains(&func.name) { continue; }
-                for clause in &mut func.clauses {
-                    clause.body = self.rewrite_dict_call_sites(clause.body.clone());
-                    clause.where_binds = clause.where_binds.iter().map(|wb| TLocalDef {
-                        name: wb.name.clone(),
-                        patterns: wb.patterns.clone(),
-                        body: self.rewrite_dict_call_sites(wb.body.clone()),
-                    }).collect();
-                }
-            }
-            for func in &mut instance_fns {
-                for clause in &mut func.clauses {
-                    clause.body = self.rewrite_dict_call_sites(clause.body.clone());
-                }
-            }
-            // The dictionary rewrite may have generated new functions:
-            // dictionary-form instance methods and specializations resolved
-            // while building concrete dictionaries. Emit them too.
-            result_fns.append(&mut self.generated);
         }
 
         TModule {
@@ -378,22 +488,67 @@ impl Monomorphizer {
         let class_name = self.method_to_class.get(method)?;
         let info = self.classes.get(class_name)?;
         let (_, decl_ty) = info.methods.iter().find(|(n, _)| n == method)?;
+        // A type-family application in the DECLARED method type (`Rep a` in
+        // `from :: a -> Rep a`) is not structurally invertible: the family is
+        // not injective, so matching its argument against the concrete type
+        // cannot determine the class variable, and doing so would bind it to a
+        // piece of the family's REDUCT (`a := Sum U1 U1` from `Rep a ~ Sum U1
+        // (Sum U1 U1)`). Blank those positions before matching; the class
+        // variable is recovered from an injective occurrence elsewhere (the
+        // plain `a` argument of `from`, the plain `a` result of `to`).
+        let decl_ty = self.blank_family_apps(decl_ty);
         let mut bindings: HashMap<String, Ty> = HashMap::new();
-        Self::collect_subst_by_name(decl_ty, use_ty, &mut bindings);
+        Self::collect_subst_by_name(&decl_ty, use_ty, &mut bindings);
         bindings.get(&info.type_var).cloned()
+    }
+
+    /// Replace every type-family application in `ty` with an opaque marker so
+    /// it matches nothing structurally (see `class_var_binding`). Recurses into
+    /// every type former; a family-headed `App` spine becomes the marker whole.
+    fn blank_family_apps(&self, ty: &Ty) -> Ty {
+        let (head, _) = {
+            let mut h = ty;
+            let mut n = 0;
+            while let Ty::App(f, _) = h { h = f.as_ref(); n += 1; }
+            (h, n)
+        };
+        if let Ty::Con(name) = head {
+            if self.ty_families.contains(name) {
+                return Ty::Con("__mll_opaque_family__".into());
+            }
+        }
+        match ty {
+            Ty::App(f, a) => Ty::App(Box::new(self.blank_family_apps(f)), Box::new(self.blank_family_apps(a))),
+            Ty::Arrow(a, b, m) => Ty::Arrow(Box::new(self.blank_family_apps(a)), Box::new(self.blank_family_apps(b)), *m),
+            Ty::List(a) => Ty::List(Box::new(self.blank_family_apps(a))),
+            Ty::IO(a) => Ty::IO(Box::new(self.blank_family_apps(a))),
+            Ty::LuaIO(s, a) => Ty::LuaIO(s.clone(), Box::new(self.blank_family_apps(a))),
+            Ty::Tuple(es) => Ty::Tuple(es.iter().map(|e| self.blank_family_apps(e)).collect()),
+            Ty::Forall(v, i) => Ty::Forall(v.clone(), Box::new(self.blank_family_apps(i))),
+            other => other.clone(),
+        }
     }
 
     /// Dispatch a class-method use at the method type recorded on its TIR
     /// node. Deterministic: bind the class variable (`class_var_binding`),
     /// then resolve the instance for that binding — no positional guessing.
     fn resolve_method_use(&mut self, method: &str, use_ty: &Ty) -> MethodDispatch {
+        // The class-variable binding is read from the RAW method type (its
+        // injective positions — `class_var_binding` blanks family apps), then
+        // the binding itself is reduced: `f := Rep T` becomes the concrete
+        // representation the instance is registered under. Specialization of a
+        // parameterized instance body, in contrast, must match against a
+        // use type whose families are ALSO reduced, so `Sum a b` lines up with
+        // the real representation instead of the un-reduced `Rep T`.
         let Some(binding) = self.class_var_binding(method, use_ty) else {
             return MethodDispatch::Deferred;
         };
+        let binding = self.reduce_families(&binding).unwrap_or(binding);
         if !binding.free_vars().is_empty() || Self::contains_skolem(&binding) {
             return MethodDispatch::Deferred;
         }
-        match self.resolve_at_type(method, &binding, use_ty) {
+        let reduced_use_ty = self.reduce_families(use_ty).unwrap_or_else(|| use_ty.clone());
+        match self.resolve_at_type(method, &binding, &reduced_use_ty) {
             Some(name) => MethodDispatch::Resolved(name),
             None => MethodDispatch::Missing(binding),
         }
@@ -409,8 +564,10 @@ impl Monomorphizer {
         let Some(binding) = self.class_var_binding(method, use_ty) else {
             return MethodDispatch::Deferred;
         };
+        let binding = self.reduce_families(&binding).unwrap_or(binding);
         if binding.free_vars().is_empty() && !Self::contains_skolem(&binding) {
-            return match self.resolve_at_type(method, &binding, use_ty) {
+            let reduced_use_ty = self.reduce_families(use_ty).unwrap_or_else(|| use_ty.clone());
+            return match self.resolve_at_type(method, &binding, &reduced_use_ty) {
                 Some(name) => MethodDispatch::Resolved(name),
                 None => MethodDispatch::Missing(binding),
             };
@@ -574,11 +731,33 @@ impl Monomorphizer {
         if self.is_polymorphic(fn_ty) || !self.poly_fns.contains_key(base) {
             return base.to_string();
         }
+        if self.dict_passing_fns.contains(base) {
+            return base.to_string();
+        }
         let key = SpecKey { name: base.to_string(), ty: fn_ty.clone() };
         if let Some(existing) = self.specializations.get(&key) {
             return existing.clone();
         }
         if self.specializations.keys().filter(|k| k.name == base).count() > 16 {
+            // The same polymorphic-recursion guard as the generic call path:
+            // switch this instance method to dictionary passing and purge its
+            // specializations, so EVERY caller routes through the composed
+            // dictionary form. Returning the raw original here instead (the
+            // old behavior) left the 17th-and-later types calling a body
+            // whose still-polymorphic method uses resolve to nothing at
+            // runtime — a generic function (gSum over the C1 of each
+            // deriving constructor, gFields over each S1 field, …) died with
+            // a nil call as soon as the program passed 16 of them.
+            self.dict_passing_fns.insert(base.to_string());
+            let purged: HashSet<String> = self.specializations.iter()
+                .filter(|(k, _)| k.name == base)
+                .map(|(_, v)| v.clone())
+                .collect();
+            self.specializations.retain(|k, _| k.name != base);
+            self.generated.retain(|f| !purged.contains(&f.name));
+            for p in purged {
+                self.purged_specs.insert(p, base.to_string());
+            }
             return base.to_string();
         }
         let mangled = self.mangle_name(base, fn_ty);
@@ -824,6 +1003,16 @@ impl Monomorphizer {
                         .find(|(n, _)| n == name)
                         .map(|(_, m)| m.clone())
                         .or_else(|| {
+                            // Inside a DICTIONARY-FORM body the call must stay
+                            // by name: the dictionary rewrite that follows
+                            // routes it through the context's dictionaries.
+                            // Pointing it at an arbitrary specialization here
+                            // would weld one constructor's baked metadata into
+                            // the shared dictform (gdTag-for-every-type calling
+                            // gdConBody-for-BlueC).
+                            if self.in_dictform {
+                                return None;
+                            }
                             let mut specs: Vec<String> = self.specializations.iter()
                                 .filter(|(k, _)| k.name == *name)
                                 .map(|(_, v)| v.clone())
@@ -1808,6 +1997,18 @@ impl Monomorphizer {
             Some(cs) => cs.clone(),
             None => return,
         };
+        // Start from the PRISTINE polymorphic body, not the main-walk mono'd
+        // one: ordinary monomorphization resolves a still-polymorphic call
+        // (gdTag's `gdConBody p j`) to an arbitrary existing specialization
+        // as a runtime-fallback heuristic, which would weld one type's baked
+        // metadata into this shared body. Re-monomorphize under in_dictform,
+        // which keeps such calls by NAME for the dictionary rewrite below.
+        if let Some(orig) = self.poly_fns.get(&func.name).cloned() {
+            let saved_in_dictform = std::mem::replace(&mut self.in_dictform, true);
+            let fresh = self.mono_function(orig);
+            self.in_dictform = saved_in_dictform;
+            func.clauses = fresh.clauses;
+        }
         let dict_params: Vec<(String, String)> = constraints.iter().map(|c| {
             (c.class_name.clone(), format!("__dict_{}", c.class_name))
         }).collect();
@@ -1825,7 +2026,22 @@ impl Monomorphizer {
             .map(|(c, (_, p))| ((c.class_name.clone(), c.type_var.clone()), p.clone()))
             .collect();
 
+        // The (class, argument type, parameter) triples for COMPOUND-constraint
+        // routing: pair each constraint's structured argument (parallel, by
+        // declaration order) with its dictionary parameter. Plain `Class a`
+        // constraints (a bare `Var` argument) are EXCLUDED — those are matched
+        // by variable name in the `Some(Ty::Var)` arm, and a bare variable would
+        // otherwise match every structured binding and steal its dictionary.
+        let dict_by_arg: Vec<(String, Ty, String)> = self.fn_constraint_args
+            .get(&func.name).cloned().unwrap_or_default()
+            .into_iter()
+            .zip(dict_params.iter())
+            .filter(|((_, arg), _)| !matches!(arg, Ty::Var(_)))
+            .map(|((cls, arg), (_, param))| (cls, arg, param.clone()))
+            .collect();
+
         let func_name = func.name.clone();
+        let saved_dict_by_arg = std::mem::replace(&mut self.cur_dict_by_arg, dict_by_arg);
         let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params);
         for clause in &mut func.clauses {
             clause.body = self.rewrite_dict_expr(clause.body.clone(), &func_name, &class_to_dict, &env);
@@ -1840,6 +2056,7 @@ impl Monomorphizer {
             }).collect();
         }
         self.cur_dict_params = saved_dict_params;
+        self.cur_dict_by_arg = saved_dict_by_arg;
     }
 
     /// Rewrite an expression for dictionary-passing.
@@ -1858,22 +2075,41 @@ impl Monomorphizer {
             }
             TExprKind::App(_, _) => {
                 let (head, _) = Self::collect_app_chain(&expr);
+                // A call to the function itself, OR to any OTHER constrained
+                // polymorphic function at a still-polymorphic type. Both need
+                // dictionaries: the recursive call because that is the point
+                // of dictionary passing, the sibling call (gdTag calling
+                // gdConBody at `C1 c f`) because inside this polymorphic body
+                // no specialization can ever resolve it — its dictionaries
+                // must be built from this function's own parameters. The
+                // callee is marked dict-passing so run()'s worklist rewrites
+                // it too.
+                let general_callee = |s: &Self, name: &str, t: &Ty| {
+                    name != func_name
+                        && s.poly_fns.contains_key(name)
+                        && s.fn_constraints.get(name).is_some_and(|cs| !cs.is_empty())
+                        && s.is_polymorphic(t)
+                };
                 if let TExprKind::Var(ref call_name) = head.kind
-                    && call_name == func_name {
+                    && (call_name == func_name || general_callee(self, call_name, &ty)) {
+                        let call_name = call_name.clone();
+                        if call_name != *func_name {
+                            self.dict_passing_fns.insert(call_name.clone());
+                        }
                         let (_, args) = Self::collect_app_chain(&expr);
-                        // The recursive call may be at a CHANGED type — that
-                        // is the point of dictionary passing (`poly (n-1)
-                        // [x]` recurses at `[a]`). Bind the declared
-                        // signature against the argument types to find what
-                        // each constrained variable stands for at THIS call,
-                        // and build the dictionary for that type: the plain
-                        // parameter when it is still the bare variable, a
-                        // constructed dictionary otherwise. (Passing the
-                        // enclosing parameter unconditionally handed the `a`
+                        // The call may be at a CHANGED type — a recursion at
+                        // `[a]`, a sibling at this instance's `C1 c f`. Bind
+                        // the declared signature against the argument types
+                        // to find what each constrained variable stands for
+                        // at THIS call, and build the dictionary for that
+                        // type: the plain parameter when it is still an
+                        // enclosing constrained variable, a constructed
+                        // dictionary otherwise. (Passing the enclosing
+                        // parameter unconditionally handed the `a`
                         // dictionary to a `[a]` recursion.)
                         let constraints = self.fn_constraints
-                            .get(func_name).cloned().unwrap_or_default();
-                        let decl_ty = self.poly_fns.get(func_name).map(|f| f.ty.clone());
+                            .get(&call_name).cloned().unwrap_or_default();
+                        let decl_ty = self.poly_fns.get(&call_name).map(|f| f.ty.clone());
                         let mut bind: HashMap<String, Ty> = HashMap::new();
                         if let Some(dt) = &decl_ty {
                             Self::match_fn_args(dt, &args, &mut bind);
@@ -1901,7 +2137,7 @@ impl Monomorphizer {
                             .collect();
                         return TExpr {
                             kind: TExprKind::DictCall {
-                                func_name: func_name.to_string(),
+                                func_name: call_name,
                                 dict_args,
                                 value_args,
                             },
@@ -2001,17 +2237,39 @@ impl Monomorphizer {
                             let poly_fn_ty = self.poly_fns.get(call_name).map(|f| f.ty.clone());
                             let empty_c2d: HashMap<String, String> = HashMap::new();
                             let empty_env: HashMap<(String, String), String> = HashMap::new();
+                            // For a COMPOUND constraint (`GEncode (Rep a)`) the
+                            // recorded argument type drives construction:
+                            // substitute this call's types for the signature
+                            // variables, reduce any family (`Rep T` -> the
+                            // representation), then build the dictionary over it.
+                            // A plain `Class a` keeps the EXACT original path
+                            // (resolve the variable, build) so nothing changes
+                            // for existing dictionary-passing code.
+                            let arg_tys = self.fn_constraint_args.get(call_name).cloned();
+                            let mut subst: HashMap<String, Ty> = HashMap::new();
+                            if arg_tys.is_some() && let Some(ft) = &poly_fn_ty {
+                                Self::match_fn_args(ft, &args, &mut subst);
+                            }
                             let mut dict_args: Vec<TExpr> = Vec::new();
-                            for c in &constraints {
-                                let concrete = self.resolve_constraint_type(
-                                    &c.type_var, poly_fn_ty.as_ref(), &args);
-                                // A concrete call site: build the dictionary
-                                // for the exact type — through the
-                                // parameterized-instance path when the type
-                                // is structured, so a user instance's
-                                // methods resolve to real implementations.
-                                dict_args.push(self.build_dict_expr(
-                                    &c.class_name, &concrete, &empty_c2d, &empty_env));
+                            for (i, c) in constraints.iter().enumerate() {
+                                let compound_arg = arg_tys.as_ref()
+                                    .and_then(|a| a.get(i))
+                                    .filter(|(_, arg)| !matches!(arg, Ty::Var(_)));
+                                if let Some((cls, arg)) = compound_arg {
+                                    let mut concrete = arg.clone();
+                                    for (v, t) in &subst {
+                                        concrete = Self::subst_ty_by_name(&concrete, v, t);
+                                    }
+                                    let concrete = self.reduce_families(&concrete)
+                                        .unwrap_or(concrete);
+                                    dict_args.push(self.build_dict_expr(
+                                        cls, &concrete, &empty_c2d, &empty_env));
+                                } else {
+                                    let concrete = self.resolve_constraint_type(
+                                        &c.type_var, poly_fn_ty.as_ref(), &args);
+                                    dict_args.push(self.build_dict_expr(
+                                        &c.class_name, &concrete, &empty_c2d, &empty_env));
+                                }
                             }
                             let value_args: Vec<TExpr> = args.into_iter()
                                 .map(|a| self.rewrite_dict_call_sites(a))
@@ -2211,6 +2469,20 @@ impl Monomorphizer {
                 }
             }
             Some(bound) => {
+                // A compound binding (`Rep a`) that IS one of this function's
+                // constraints (`GEncode (Rep a)`) takes the dictionary PARAMETER
+                // standing for it — the whole point of dictionary passing —
+                // rather than trying to rebuild a dictionary for a type that is
+                // still polymorphic (which would bottom out at the raw, nil
+                // method name).
+                if let Some((_, _, param)) = self.cur_dict_by_arg.iter()
+                    .find(|(cls, arg, _)| cls == class_name && Self::arg_matches(arg, &bound))
+                {
+                    return TExprKind::DictAccess {
+                        dict_param: param.clone(),
+                        method_name: method.to_string(),
+                    };
+                }
                 let dict = self.build_dict_expr(class_name, &bound, class_to_dict, env);
                 TExprKind::DictMethod {
                     dict: Box::new(dict),
@@ -2229,6 +2501,18 @@ impl Monomorphizer {
                 }
             }
         }
+    }
+
+    /// Is the instance method for `class_name` at `ty`'s head constructor
+    /// dictionary-passing (purged for tripping the specialization cap)? Such a
+    /// method cannot be specialized to one function for a concrete type, so its
+    /// dictionary must be COMPOSED from the parameterized instance rather than
+    /// looked up whole. False for a type with no registered instance head.
+    fn head_method_is_dict_passing(&self, class_name: &str, ty: &Ty) -> bool {
+        InstHead::of(ty)
+            .and_then(|h| self.instances.get(&(class_name.to_string(), h)))
+            .is_some_and(|inst| inst.context.is_some()
+                && inst.method_fns.values().any(|f| self.dict_passing_fns.contains(f)))
     }
 
     /// Build a runtime dictionary EXPRESSION for `class_name` at type `ty`,
@@ -2258,10 +2542,14 @@ impl Monomorphizer {
             }
             return TExpr::new(TExprKind::Lit(TLiteral::Unit), Ty::Unit);
         }
-        if !ty.free_vars().is_empty() {
-            // Structured over the constrained variable(s): construct the
-            // dictionary from the parameterized instance, when it declares a
-            // context (user-written instances always carry Some).
+        if !ty.free_vars().is_empty() || self.head_method_is_dict_passing(class_name, ty) {
+            // Structured over the constrained variable(s) — OR a concrete
+            // structured type whose instance method is itself dictionary-passing
+            // (purged for tripping the specialization cap, as the generic
+            // representation combinators do across many deriving types). In both
+            // cases the method cannot be resolved to one specialized function;
+            // compose the dictionary from the parameterized instance and the
+            // sub-dictionaries its context demands.
             if let Some(head) = InstHead::of(ty)
                 && let Some(inst) = self.instances
                     .get(&(class_name.to_string(), head.clone()))
@@ -2359,8 +2647,12 @@ impl Monomorphizer {
             f.name = dictform.clone();
             // Ordinary monomorphization first: ground method uses and helper
             // calls resolve as usual; still-polymorphic method uses stay
-            // deferred (bare Vars) for the dictionary rewrite below.
+            // deferred (bare Vars) for the dictionary rewrite below —
+            // in_dictform keeps the arbitrary-specialization fallback from
+            // welding one type's spec into this shared body.
+            let saved_in_dictform = std::mem::replace(&mut self.in_dictform, true);
             f = self.mono_function(f);
+            self.in_dictform = saved_in_dictform;
             f.dict_params = dict_params.clone();
             f.specialized = true;
             for clause in f.clauses.iter_mut() {

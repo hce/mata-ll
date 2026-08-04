@@ -194,6 +194,13 @@ pub(super) fn sanitize_name(name: &str) -> String {
                     ']' => {},
                     // Qualified-import separator: `Map.insert` -> `Map_insert`.
                     '.' => s.push('_'),
+                    // A compiler-generated name built from an instance head can
+                    // carry the head's spelling — spaces between type arguments
+                    // (`gix_D1 d f`), colons from an operator constructor
+                    // (`gix_:+: a b`), and its parentheses/commas. None are
+                    // valid in a Lua identifier; fold them to `_` so the emitted
+                    // definition and every reference sanitize identically.
+                    ' ' | ':' | '(' | ')' | ',' => s.push('_'),
                     _ => s.push(c),
                 }
             }

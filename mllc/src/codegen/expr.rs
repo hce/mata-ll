@@ -962,10 +962,17 @@ impl CodeGen {
                 let fref = self.lua_ref(&sfn);
                 let mut cargs = Vec::new();
                 for d in dict_args {
+                    // Dictionaries are total constructions (method tables /
+                    // closed-over sub-dictionaries) — nothing to suspend.
                     cargs.push(self.expr_ast(d));
                 }
                 for v in value_args {
-                    cargs.push(self.expr_ast(v));
+                    // Value arguments take the ordinary lazy call protocol: a
+                    // dictionary-passing callee may never demand an argument
+                    // (a decoder's type proxy, a discarded field), and
+                    // evaluating a possibly-⊥ argument eagerly here would
+                    // raise where GHC would not.
+                    cargs.push(self.arg_ast(v, false));
                 }
                 Expr::call_named(&fref, cargs)
             }

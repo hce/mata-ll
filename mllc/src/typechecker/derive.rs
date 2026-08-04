@@ -24,10 +24,11 @@ impl Checker {
             "Functor" => self.derive_functor(type_name, type_vars, constructors),
             "ToJSON" => self.derive_tojson(type_name, type_vars, constructors),
             "FromJSON" => self.derive_fromjson(type_name, type_vars, constructors),
+            "Generic" => self.ensure_generic(type_name, type_vars, constructors),
             "LuaDict" => { self.derive_luadict(type_name, constructors); vec![] }
             other => {
                 self.push_error_ctx(
-                    DiagnosticKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor, ToJSON, FromJSON and LuaDict are supported", other)),
+                    DiagnosticKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor, Generic, ToJSON, FromJSON and LuaDict are supported", other)),
                     format!("data {}", type_name),
                 );
                 vec![]
@@ -1514,6 +1515,380 @@ impl Checker {
         }]
     }
 
+    // --- Generic deriving ---
+
+    /// Register a compiler-synthesised metadata marker type: a nullary type
+    /// constructor (kind `Type`) that carries no values, existing only so a
+    /// `Datatype`/`Constructor`/`Selector` instance can be keyed on it. Each
+    /// datatype, constructor and field gets its own marker, so the per-name
+    /// instances never collide under head-keyed dispatch.
+    pub(super) fn register_meta_type(&mut self, name: &str) {
+        self.kinds.insert(name.to_string(), Kind::Type);
+    }
+
+    /// A metadata reflection function `\_ -> lit` returning a compile-time
+    /// constant (a name, arity or record flag baked in at derive time). It
+    /// ignores its argument, so its parameter type is a fresh variable.
+    fn meta_const_fn(&self, fn_name: &str, lit: TLiteral, ret_ty: Ty) -> TFunction {
+        let arg_ty = Ty::Var(TyVar { name: "_mw".into(), id: u32::MAX });
+        TFunction {
+            name: fn_name.to_string(),
+            ty: Ty::arrow(arg_ty.clone(), ret_ty.clone()),
+            clauses: vec![TClause {
+                span: None,
+                patterns: vec![TPattern::Var("_meta".into(), arg_ty)],
+                guards: vec![],
+                body: TExpr::new(TExprKind::Lit(lit), ret_ty),
+                where_binds: vec![],
+            }],
+            specialized: false,
+            dict_params: vec![],
+            derived_strict: false,
+        }
+    }
+
+    pub(super) fn meta_string_fn(&self, fn_name: &str, value: &str) -> TFunction {
+        self.meta_const_fn(fn_name, TLiteral::Str(value.as_bytes().to_vec()), Ty::Con("String".into()))
+    }
+
+    fn meta_int_fn(&self, fn_name: &str, value: i64) -> TFunction {
+        self.meta_const_fn(fn_name, TLiteral::Integer(value), Ty::Con("Int".into()))
+    }
+
+    fn meta_bool_fn(&self, fn_name: &str, value: bool) -> TFunction {
+        self.meta_const_fn(fn_name, TLiteral::Bool(value), Ty::Con("Bool".into()))
+    }
+
+    /// Make sure `type_name` has its Generic substrate (Rep equation,
+    /// from/to conversions, metadata markers and instances). The JSON
+    /// derives are built on it, and a type may derive any combination of
+    /// (Generic, ToJSON, FromJSON) in any order — the first derive that
+    /// needs the substrate creates it; later ones find it present.
+    pub(super) fn ensure_generic(
+        &mut self,
+        type_name: &str,
+        type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Vec<TFunction> {
+        if self.instances.contains_key(&("Generic".to_string(), InstHead::Con(type_name.to_string()))) {
+            return vec![];
+        }
+        self.derive_generic(type_name, type_vars, constructors)
+    }
+
+    /// `deriving (Generic)`: synthesise the structural representation `Rep T`,
+    /// the `from`/`to` conversions, and the datatype/constructor/selector
+    /// metadata — the substrate every generic function (JSON codecs, …) runs
+    /// on. Requires `Data.Generics` to be in scope (it declares `Generic`, the
+    /// `Rep` family and the representation combinators).
+    pub(super) fn derive_generic(
+        &mut self,
+        type_name: &str,
+        type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Vec<TFunction> {
+        if !self.classes.contains_key("Generic") {
+            self.push_error_ctx(
+                DiagnosticKind::Other(format!(
+                    "Cannot derive 'Generic' for '{}': the Generic class is not in scope — add `import Data.Generics`",
+                    type_name)),
+                format!("data {}", type_name),
+            );
+            return vec![];
+        }
+        for con in constructors {
+            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
+                self.push_error_ctx(
+                    DiagnosticKind::Other(format!(
+                        "Cannot derive 'Generic' for '{}': constructor '{}' is a GADT or existential constructor, which has no structural representation",
+                        type_name, con.name)),
+                    format!("data {}", type_name),
+                );
+                return vec![];
+            }
+        }
+        if constructors.is_empty() {
+            self.push_error_ctx(
+                DiagnosticKind::Other(format!(
+                    "Cannot derive 'Generic' for '{}': a type with no constructors has no representation",
+                    type_name)),
+                format!("data {}", type_name),
+            );
+            return vec![];
+        }
+
+        let tvars: Vec<TyVar> = type_vars.iter()
+            .map(|n| TyVar { name: n.clone(), id: u32::MAX })
+            .collect();
+        let result_type = tvars.iter().fold(
+            Ty::Con(type_name.to_string()),
+            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
+        );
+
+        // Rep type builders.
+        let k1_t = |t: Ty| Ty::app(Ty::Con("K1".into()), t);
+        let sum_t = |a: Ty, b: Ty| Ty::app(Ty::app(Ty::Con(":+:".into()), a), b);
+        let prod_t = |a: Ty, b: Ty| Ty::app(Ty::app(Ty::Con(":*:".into()), a), b);
+        let d1_t = |d: Ty, f: Ty| Ty::app(Ty::app(Ty::Con("D1".into()), d), f);
+        let c1_t = |c: Ty, f: Ty| Ty::app(Ty::app(Ty::Con("C1".into()), c), f);
+        let s1_t = |s: Ty, f: Ty| Ty::app(Ty::app(Ty::Con("S1".into()), s), f);
+        let u1_t = Ty::Con("U1".into());
+
+        // Value/pattern helpers.
+        let con_e = |name: &str, ty: Ty| TExpr::new(TExprKind::Con(name.into()), ty);
+        let app_e = |f: TExpr, a: TExpr, ty: Ty|
+            TExpr::new(TExprKind::App(Box::new(f), Box::new(a)), ty);
+
+        let mut out_fns: Vec<TFunction> = Vec::new();
+
+        // Datatype metadata marker + instance (name + constructor count).
+        let d_marker = format!("__Meta_D_{}", type_name);
+        self.register_meta_type(&d_marker);
+        let dt_fn = format!("__meta_datatypeName_{}", type_name);
+        let dc_fn = format!("__meta_datatypeConCount_{}", type_name);
+        out_fns.push(self.meta_string_fn(&dt_fn, type_name));
+        out_fns.push(self.meta_int_fn(&dc_fn, constructors.len() as i64));
+        self.register_instance(InstanceInfo {
+            class_name: "Datatype".to_string(),
+            target_type: Ty::Con(d_marker.clone()),
+            method_fns: HashMap::from([
+                ("datatypeName".to_string(), dt_fn),
+                ("datatypeConCount".to_string(), dc_fn),
+            ]),
+            context: None,
+        });
+
+        // Per constructor: gather field info, meta markers, and the C1 rep type.
+        struct ConRep { rep_ty: Ty, field_tys: Vec<Ty>, con_key: String,
+                        s_markers: Vec<String> }
+        let mut cons: Vec<ConRep> = Vec::new();
+
+        for con in constructors {
+            let con_key = self.resolve_con_name(&con.name).to_string();
+            let field_tys: Vec<Ty> = self.constructors.get(&con_key)
+                .map(|c| c.field_types.clone()).unwrap_or_default();
+            let field_names: Vec<String> = match &con.fields {
+                ConstructorFields::Named(fs) => fs.iter().map(|f| f.effective_key().to_string()).collect(),
+                ConstructorFields::Positional(_) => vec![String::new(); field_tys.len()],
+            };
+
+            // Constructor metadata marker + instance (name, arity, record-ness).
+            let c_marker = format!("__Meta_C_{}_{}", type_name, con.name);
+            self.register_meta_type(&c_marker);
+            let cn_fn = format!("__meta_conName_{}_{}", type_name, con.name);
+            let ca_fn = format!("__meta_conArity_{}_{}", type_name, con.name);
+            let cr_fn = format!("__meta_conIsRecord_{}_{}", type_name, con.name);
+            let is_record = matches!(&con.fields, ConstructorFields::Named(fs) if !fs.is_empty());
+            let arity = match &con.fields {
+                ConstructorFields::Named(fs) => fs.len(),
+                ConstructorFields::Positional(fs) => fs.len(),
+            };
+            out_fns.push(self.meta_string_fn(&cn_fn, con.effective_tag()));
+            out_fns.push(self.meta_int_fn(&ca_fn, arity as i64));
+            out_fns.push(self.meta_bool_fn(&cr_fn, is_record));
+            self.register_instance(InstanceInfo {
+                class_name: "Constructor".to_string(),
+                target_type: Ty::Con(c_marker.clone()),
+                method_fns: HashMap::from([
+                    ("conName".to_string(), cn_fn),
+                    ("conArity".to_string(), ca_fn),
+                    ("conIsRecord".to_string(), cr_fn),
+                ]),
+                context: None,
+            });
+
+            // Selector metadata markers + instances, and each field's S1(K1 t).
+            let mut s_markers = Vec::new();
+            let mut field_reps: Vec<Ty> = Vec::new();
+            for (fi, fty) in field_tys.iter().enumerate() {
+                let s_marker = format!("__Meta_S_{}_{}_{}", type_name, con.name, fi);
+                self.register_meta_type(&s_marker);
+                let sn_fn = format!("__meta_selName_{}_{}_{}", type_name, con.name, fi);
+                out_fns.push(self.meta_string_fn(&sn_fn, &field_names[fi]));
+                self.register_instance(InstanceInfo {
+                    class_name: "Selector".to_string(),
+                    target_type: Ty::Con(s_marker.clone()),
+                    method_fns: HashMap::from([("selName".to_string(), sn_fn)]),
+                    context: None,
+                });
+                field_reps.push(s1_t(Ty::Con(s_marker.clone()), k1_t(fty.clone())));
+                s_markers.push(s_marker);
+            }
+
+            // Product of the fields (right-nested), or U1 when there are none.
+            let prod_ty = field_reps.into_iter().rev()
+                .reduce(|acc, t| prod_t(t, acc))
+                .unwrap_or_else(|| u1_t.clone());
+            let rep_ty = c1_t(Ty::Con(c_marker.clone()), prod_ty);
+            cons.push(ConRep { rep_ty, field_tys, con_key, s_markers });
+        }
+
+        let n = cons.len();
+        // Sum suffixes: suffix[i] = rep_i :+: rep_{i+1} :+: … (full sum = suffix[0]).
+        let mut suffix: Vec<Ty> = vec![Ty::Unit; n];
+        suffix[n - 1] = cons[n - 1].rep_ty.clone();
+        for i in (0..n - 1).rev() {
+            suffix[i] = sum_t(cons[i].rep_ty.clone(), suffix[i + 1].clone());
+        }
+        let sum_ty = suffix[0].clone();
+        let rep_type = d1_t(Ty::Con(d_marker.clone()), sum_ty.clone());
+
+        // Extend the `Rep` family with `Rep <result_type> = rep_type`.
+        self.ty_families.add_equation("Rep", vec![result_type.clone()], rep_type.clone());
+
+        // Build `from` and `to` clauses per constructor.
+        let mut from_clauses: Vec<TClause> = Vec::new();
+        let mut to_clauses: Vec<TClause> = Vec::new();
+
+        for (ci, cr) in cons.iter().enumerate() {
+            let fc = cr.field_tys.len();
+            let params: Vec<String> = (0..fc).map(|i| format!("_g{}", i)).collect();
+
+            // ---- from: pattern `Con p0 p1 …`, body the wrapped rep value ----
+            let from_pat = TPattern::Constructor {
+                name: cr.con_key.clone(),
+                args: params.iter().enumerate()
+                    .map(|(i, nm)| TPattern::Var(nm.clone(), cr.field_tys[i].clone()))
+                    .collect(),
+            };
+            // product value
+            let prod_val = if fc == 0 {
+                con_e("U1", u1_t.clone())
+            } else {
+                let fields: Vec<TExpr> = params.iter().enumerate().map(|(i, nm)| {
+                    let fty = cr.field_tys[i].clone();
+                    let k1v = app_e(
+                        con_e("K1", Ty::arrow(fty.clone(), k1_t(fty.clone()))),
+                        TExpr::new(TExprKind::Var(nm.clone()), fty.clone()),
+                        k1_t(fty.clone()));
+                    let s1ty = s1_t(Ty::Con(cr.s_markers[i].clone()), k1_t(fty.clone()));
+                    app_e(con_e("S1", Ty::arrow(k1v.ty.clone(), s1ty.clone())), k1v, s1ty)
+                }).collect();
+                fields.into_iter().rev().reduce(|acc, v| {
+                    let pty = prod_t(v.ty.clone(), acc.ty.clone());
+                    app_e(app_e(con_e("Prod", Ty::arrow(v.ty.clone(), Ty::arrow(acc.ty.clone(), pty.clone()))), v, Ty::arrow(acc.ty.clone(), pty.clone())), acc, pty)
+                }).unwrap()
+            };
+            let c1_val = app_e(
+                con_e("C1", Ty::arrow(prod_val.ty.clone(), cr.rep_ty.clone())),
+                prod_val, cr.rep_ty.clone());
+            // inject into the sum
+            let injected = Self::inject_sum(ci, n, c1_val, &suffix, &con_e, &app_e);
+            let from_body = app_e(
+                con_e("D1", Ty::arrow(injected.ty.clone(), rep_type.clone())),
+                injected, rep_type.clone());
+            from_clauses.push(TClause {
+                span: None, patterns: vec![from_pat], guards: vec![],
+                body: from_body, where_binds: vec![],
+            });
+
+            // ---- to: pattern the wrapped rep, body `Con p0 p1 …` ----
+            let prod_pat = if fc == 0 {
+                TPattern::Constructor { name: "U1".into(), args: vec![] }
+            } else {
+                let field_pats: Vec<TPattern> = params.iter().map(|nm| {
+                    TPattern::Constructor { name: "S1".into(), args: vec![
+                        TPattern::Constructor { name: "K1".into(), args: vec![
+                            TPattern::Var(nm.clone(), Ty::Unit),
+                        ]},
+                    ]}
+                }).collect();
+                field_pats.into_iter().rev().reduce(|acc, p|
+                    TPattern::Constructor { name: "Prod".into(), args: vec![p, acc] }
+                ).unwrap()
+            };
+            let c1_pat = TPattern::Constructor { name: "C1".into(), args: vec![prod_pat] };
+            let inj_pat = Self::inject_sum_pat(ci, n, c1_pat);
+            let to_pat = TPattern::Constructor { name: "D1".into(), args: vec![inj_pat] };
+            // body: Con p0 p1 …
+            let mut to_body = TExpr::new(TExprKind::Con(cr.con_key.clone()),
+                Ty::fun(&cr.field_tys, result_type.clone()));
+            for (i, nm) in params.iter().enumerate() {
+                let rest_ty = to_body.ty.clone();
+                let res_ty = match &rest_ty { Ty::Arrow(_, r, _) => (**r).clone(), _ => result_type.clone() };
+                to_body = app_e(to_body, TExpr::new(TExprKind::Var(nm.clone()), cr.field_tys[i].clone()), res_ty);
+            }
+            to_clauses.push(TClause {
+                span: None, patterns: vec![to_pat], guards: vec![],
+                body: to_body, where_binds: vec![],
+            });
+        }
+
+        let from_fn = format!("__generic_from_{}", type_name);
+        let to_fn = format!("__generic_to_{}", type_name);
+        out_fns.push(TFunction {
+            name: from_fn.clone(),
+            ty: Ty::arrow(result_type.clone(), rep_type.clone()),
+            clauses: from_clauses, specialized: false, dict_params: vec![], derived_strict: false,
+        });
+        out_fns.push(TFunction {
+            name: to_fn.clone(),
+            ty: Ty::arrow(rep_type.clone(), result_type.clone()),
+            clauses: to_clauses, specialized: false, dict_params: vec![], derived_strict: false,
+        });
+        self.register_instance(InstanceInfo {
+            class_name: "Generic".to_string(),
+            target_type: result_type,
+            method_fns: HashMap::from([
+                ("from".to_string(), from_fn),
+                ("to".to_string(), to_fn),
+            ]),
+            context: None,
+        });
+
+        out_fns
+    }
+
+    /// Inject a constructor's `C1` value at position `ci` of `n` into the sum
+    /// spine: `L1`/`R1` nesting matching `derive_generic`'s right-nested sum
+    /// (`rep0 :+: rep1 :+: …`). The last constructor is all `R1`s (no `L1`).
+    fn inject_sum(
+        ci: usize, n: usize, mut v: TExpr, suffix: &[Ty],
+        con_e: &dyn Fn(&str, Ty) -> TExpr,
+        app_e: &dyn Fn(TExpr, TExpr, Ty) -> TExpr,
+    ) -> TExpr {
+        if n == 1 {
+            return v;
+        }
+        let sum_t = |a: Ty, b: Ty| Ty::app(Ty::app(Ty::Con(":+:".into()), a), b);
+        if ci < n - 1 {
+            // L1 into suffix[ci], then R1 up through suffix[ci-1] … suffix[0].
+            let sty = suffix[ci].clone();
+            v = app_e(con_e("L1", Ty::arrow(v.ty.clone(), sty.clone())), v, sty);
+            for j in (0..ci).rev() {
+                let ty = suffix[j].clone();
+                v = app_e(con_e("R1", Ty::arrow(v.ty.clone(), ty.clone())), v, ty);
+            }
+        } else {
+            // Last constructor: R1 through suffix[n-2] … suffix[0].
+            for j in (0..n - 1).rev() {
+                let ty = suffix[j].clone();
+                v = app_e(con_e("R1", Ty::arrow(v.ty.clone(), ty.clone())), v, ty);
+            }
+        }
+        let _ = sum_t; // types come from `suffix`; helper kept for clarity
+        v
+    }
+
+    /// The `to`-side pattern mirror of `inject_sum`.
+    fn inject_sum_pat(ci: usize, n: usize, inner: TPattern) -> TPattern {
+        if n == 1 {
+            return inner;
+        }
+        let mut p = inner;
+        if ci < n - 1 {
+            p = TPattern::Constructor { name: "L1".into(), args: vec![p] };
+            for _ in 0..ci {
+                p = TPattern::Constructor { name: "R1".into(), args: vec![p] };
+            }
+        } else {
+            for _ in 0..n - 1 {
+                p = TPattern::Constructor { name: "R1".into(), args: vec![p] };
+            }
+        }
+        p
+    }
+
     // --- FromJSON deriving ---
 
     pub(super) fn json_ty() -> Ty { Ty::Con("Json".into()) }
@@ -1533,14 +1908,6 @@ impl Checker {
 
     pub(super) fn jx_var(name: &str, ty: Ty) -> TExpr {
         TExpr::new(TExprKind::Var(name.to_string()), ty)
-    }
-
-    pub(super) fn jx_str(s: &str) -> TExpr {
-        TExpr::new(TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())), Ty::Con("String".into()))
-    }
-
-    pub(super) fn jx_int(i: i64) -> TExpr {
-        TExpr::new(TExprKind::Lit(TLiteral::Integer(i)), Ty::Con("Int".into()))
     }
 
     pub(super) fn jx_app(f: TExpr, arg: TExpr, ty: Ty) -> TExpr {
@@ -1563,52 +1930,6 @@ impl Checker {
             e = Self::jx_app(e, a, next_ty);
         }
         e
-    }
-
-    /// `case scrut of { Left e -> Left e; Right ok -> ok_body }` — the
-    /// Either-plumbing every derived decode step threads through.
-    pub(super) fn jx_bind_either(scrut: TExpr, ok_name: &str, ok_ty: Ty, ok_body: TExpr, out_ty: Ty) -> TExpr {
-        let str_ty = Ty::Con("String".into());
-        let err_name = format!("{}e", ok_name);
-        let rethrow = Self::jx_app(
-            TExpr::new(TExprKind::Con("Left".into()), Ty::arrow(str_ty.clone(), out_ty.clone())),
-            Self::jx_var(&err_name, str_ty.clone()),
-            out_ty.clone(),
-        );
-        TExpr::new(TExprKind::Case {
-            scrutinee: Box::new(scrut),
-            branches: vec![
-                TCaseBranch {
-                    pattern: TPattern::Constructor {
-                        name: "Left".into(),
-                        args: vec![TPattern::Var(err_name, str_ty)],
-                    },
-                    guards: vec![],
-                    body: rethrow,
-                },
-                TCaseBranch {
-                    pattern: TPattern::Constructor {
-                        name: "Right".into(),
-                        args: vec![TPattern::Var(ok_name.to_string(), ok_ty)],
-                    },
-                    guards: vec![],
-                    body: ok_body,
-                },
-            ],
-        }, out_ty)
-    }
-
-    /// `Right (Con _f0 … _fN)`
-    pub(super) fn jx_ok_con(con_name: &str, field_tys: &[Ty], result_ty: &Ty, estr: &Ty) -> TExpr {
-        let mut built = TExpr::new(TExprKind::Con(con_name.to_string()), result_ty.clone());
-        for (i, fty) in field_tys.iter().enumerate() {
-            built = Self::jx_app(built, Self::jx_var(&format!("_f{}", i), fty.clone()), result_ty.clone());
-        }
-        Self::jx_app(
-            TExpr::new(TExprKind::Con("Right".into()), Ty::arrow(result_ty.clone(), estr.clone())),
-            built,
-            estr.clone(),
-        )
     }
 
     pub(super) fn fromjson_field_err(what: String, (reason, note): (String, String)) -> (String, String) {
@@ -1678,142 +1999,6 @@ impl Checker {
                 format!("the type '{}' cannot be decoded from JSON", other),
                 "derived FromJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a FromJSON instance.".to_string(),
             )),
-        }
-    }
-
-    /// Decode a record constructor's fields from the object in `_j`
-    /// (effective keys — the `as "key"` rename when present, the field name
-    /// otherwise — as JSON keys; Maybe fields optional via jOptFieldWith).
-    pub(super) fn fromjson_named_body(
-        &self,
-        con_name: &str,
-        fields: &[RecordField],
-        field_tys: &[Ty],
-        estr: &Ty,
-        result_ty: &Ty,
-    ) -> Result<TExpr, (String, String)> {
-        let json = Self::json_ty();
-        // The constructed value uses the registered key (a shadowing local
-        // constructor is mangled); every *string* below keeps the source name.
-        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
-        for i in (0..fields.len()).rev() {
-            let fty = &field_tys[i];
-            let fname = &fields[i].name;
-            // Derive-time errors name the Haskell field; runtime decode
-            // errors name the JSON key, because that is what the document
-            // actually contains.
-            let key = fields[i].effective_key();
-            let err_what = || format!("field '{}' of constructor '{}' cannot be decoded", fname, con_name);
-            let step = if let Some(inner) = Self::ty_maybe_inner(fty) {
-                // Maybe field: a missing key and an explicit null both → Nothing.
-                let dec = self.fromjson_field_decoder(inner)
-                    .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
-                Self::jx_call(
-                    "jOptFieldWith",
-                    vec![dec, Self::jx_str(key), Self::jx_var("_j", json.clone())],
-                    Self::estr_ty(fty),
-                )
-            } else {
-                let dec = self.fromjson_field_decoder(fty)
-                    .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
-                Self::jx_call(
-                    "jFieldWith",
-                    vec![dec, Self::jx_str(key), Self::jx_var("_j", json.clone())],
-                    Self::estr_ty(fty),
-                )
-            };
-            body = Self::jx_bind_either(step, &format!("_f{}", i), fty.clone(), body, estr.clone());
-        }
-        Ok(body)
-    }
-
-    /// Decode positional arguments, argument i taken from `elem_exprs[i]`,
-    /// finishing with `Right (Con _f0 …)`. `json_name` is the name runtime
-    /// decode errors use for the constructor — the effective TAG in a tagged
-    /// type (that is what the document contains), the source name in an
-    /// untagged one (where the two never differ: a rename on an untagged
-    /// constructor is rejected). Derive-time errors keep the source name.
-    pub(super) fn fromjson_positional_chain(
-        &self,
-        con_name: &str,
-        json_name: &str,
-        field_tys: &[Ty],
-        elem_exprs: Vec<TExpr>,
-        estr: &Ty,
-        result_ty: &Ty,
-    ) -> Result<TExpr, (String, String)> {
-        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
-        for i in (0..field_tys.len()).rev() {
-            let fty = &field_tys[i];
-            let dec = self.fromjson_field_decoder(fty).map_err(|e| Self::fromjson_field_err(
-                format!("argument {} of constructor '{}' cannot be decoded", i + 1, con_name), e))?;
-            let step = Self::jx_call(
-                "jArgWith",
-                vec![
-                    dec,
-                    Self::jx_str(json_name),
-                    Self::jx_int((i + 1) as i64),
-                    elem_exprs[i].clone(),
-                ],
-                Self::estr_ty(fty),
-            );
-            body = Self::jx_bind_either(step, &format!("_f{}", i), fty.clone(), body, estr.clone());
-        }
-        Ok(body)
-    }
-
-    /// Decode one constructor from the tagged object bound to `_j`:
-    /// record fields inline in the object, positional arguments under
-    /// "contents" (the value itself for one argument, an array for several),
-    /// nothing needed for a nullary constructor.
-    pub(super) fn fromjson_tagged_con_body(
-        &self,
-        con: &Constructor,
-        field_tys: &[Ty],
-        estr: &Ty,
-        result_ty: &Ty,
-    ) -> Result<TExpr, (String, String)> {
-        let json = Self::json_ty();
-        match &con.fields {
-            ConstructorFields::Named(fields) if !fields.is_empty() => {
-                self.fromjson_named_body(&con.name, fields, field_tys, estr, result_ty)
-            }
-            _ if field_tys.is_empty() => Ok(Self::jx_ok_con(self.resolve_con_name(&con.name), &[], result_ty, estr)),
-            _ => {
-                let contents = Self::jx_call(
-                    "jField",
-                    vec![Self::jx_str("contents"), Self::jx_var("_j", json.clone())],
-                    Self::estr_ty(&json),
-                );
-                let inner = if field_tys.len() == 1 {
-                    self.fromjson_positional_chain(
-                        &con.name, con.effective_tag(), field_tys,
-                        vec![Self::jx_var("_c", json.clone())],
-                        estr, result_ty,
-                    )?
-                } else {
-                    let arr_ty = Ty::list(json.clone());
-                    let elems: Vec<TExpr> = (0..field_tys.len()).map(|i| {
-                        Self::jx_call(
-                            "jNth",
-                            vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
-                            json.clone(),
-                        )
-                    }).collect();
-                    let chain = self.fromjson_positional_chain(&con.name, con.effective_tag(), field_tys, elems, estr, result_ty)?;
-                    let arrn = Self::jx_call(
-                        "jExpectArrN",
-                        vec![
-                            Self::jx_str(con.effective_tag()),
-                            Self::jx_int(field_tys.len() as i64),
-                            Self::jx_var("_c", json.clone()),
-                        ],
-                        Self::estr_ty(&arr_ty),
-                    );
-                    Self::jx_bind_either(arrn, "_xs", arr_ty, chain, estr.clone())
-                };
-                Ok(Self::jx_bind_either(contents, "_c", json, inner, estr.clone()))
-            }
         }
     }
 
@@ -1989,7 +2174,6 @@ impl Checker {
         let estr = Self::estr_ty(&result_ty);
         let json = Self::json_ty();
         let str_ty = Ty::Con("String".into());
-        let bool_ty = Ty::Con("Bool".into());
         let mangled = format!("fromJSON_{}", type_name);
 
         // Constructor field types as registered in pass 1.
@@ -1999,176 +2183,73 @@ impl Checker {
                 .unwrap_or_default()
         }).collect();
 
-        let body_inner: TExpr = if tagged {
-            // "'A', 'B' or 'C'" for the unknown-tag message — the effective
-            // tags (the `as "name"` rename when present): a runtime decode
-            // error names what the document must contain, and the document
-            // carries the external tag, not the source constructor name.
-            let names: Vec<String> = constructors.iter().map(|c| format!("'{}'", c.effective_tag())).collect();
-            let expected = match names.len() {
-                1 => names[0].clone(),
-                _ => format!("{} or {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
-            };
-
-            // Per-constructor decode bodies for the tagged-object form; report
-            // every unsupported field before bailing out.
-            let mut con_bodies: Vec<TExpr> = Vec::new();
-            let mut failed = false;
-            for (con, ftys) in constructors.iter().zip(&con_field_tys) {
-                match self.fromjson_tagged_con_body(con, ftys, &estr, &result_ty) {
-                    Ok(e) => con_bodies.push(e),
-                    Err((reason, note)) => {
-                        reject(self, reason, &note);
-                        failed = true;
+        // Field-type validation. The decoder itself is the JSON module's
+        // GENERIC decoder over the Generic representation, whose leaves
+        // resolve through FromJSON instances at monomorphization time —
+        // where a missing instance would surface as an opaque unresolved-
+        // method error deep in the generic machinery. Validate every field
+        // here instead, with the same per-field derive-time messages the
+        // native decoder generator produced.
+        let mut failed = false;
+        for (con, ftys) in constructors.iter().zip(&con_field_tys) {
+            match &con.fields {
+                ConstructorFields::Named(fields) if !fields.is_empty() => {
+                    for (i, field) in fields.iter().enumerate() {
+                        if let Err(e) = self.fromjson_field_decoder(&ftys[i]) {
+                            let (reason, note) = Self::fromjson_field_err(
+                                format!("field '{}' of constructor '{}' cannot be decoded", field.name, con.name), e);
+                            reject(self, reason, &note);
+                            failed = true;
+                        }
+                    }
+                }
+                _ => {
+                    for (i, fty) in ftys.iter().enumerate() {
+                        if let Err(e) = self.fromjson_field_decoder(fty) {
+                            let (reason, note) = Self::fromjson_field_err(
+                                format!("argument {} of constructor '{}' cannot be decoded", i + 1, con.name), e);
+                            reject(self, reason, &note);
+                            failed = true;
+                        }
                     }
                 }
             }
-            if failed { return vec![]; }
+        }
+        if failed { return vec![]; }
 
-            // Bare-string form: only a nullary constructor may be a bare string.
-            let mut str_chain = Self::jx_call(
-                "jBadTag",
-                vec![Self::jx_str(&expected), Self::jx_var("_s", str_ty.clone())],
-                estr.clone(),
-            );
-            for (con, ftys) in constructors.iter().zip(&con_field_tys).rev() {
-                let then_branch = if ftys.is_empty() {
-                    // TIR construction uses the registered key; the compared
-                    // JSON tag strings are the effective tags (the `as
-                    // "name"` rename when present, the source name otherwise).
-                    Self::jx_ok_con(self.resolve_con_name(&con.name), &[], &result_ty, &estr)
-                } else {
-                    Self::jx_call("jTagNeedsObject", vec![Self::jx_str(con.effective_tag())], estr.clone())
-                };
-                str_chain = TExpr::new(TExprKind::If {
-                    cond: Box::new(TExpr::new(TExprKind::InfixApp {
-                        op: "==".into(),
-                        lhs: Box::new(Self::jx_var("_s", str_ty.clone())),
-                        rhs: Box::new(Self::jx_str(con.effective_tag())),
-                    }, bool_ty.clone())),
-                    then_branch: Box::new(then_branch),
-                    else_branch: Box::new(str_chain),
-                }, estr.clone());
-            }
+        // The Generic substrate the decoder runs on (created here unless a
+        // sibling derive already did).
+        let mut out_fns = self.ensure_generic(type_name, type_vars, constructors);
 
-            // Tagged-object form: dispatch on the decoded "tag" field.
-            let mut tag_chain = Self::jx_call(
-                "jBadTag",
-                vec![Self::jx_str(&expected), Self::jx_var("_tag", str_ty.clone())],
-                estr.clone(),
-            );
-            for (con, con_body) in constructors.iter().zip(con_bodies).rev() {
-                tag_chain = TExpr::new(TExprKind::If {
-                    cond: Box::new(TExpr::new(TExprKind::InfixApp {
-                        op: "==".into(),
-                        lhs: Box::new(Self::jx_var("_tag", str_ty.clone())),
-                        rhs: Box::new(Self::jx_str(con.effective_tag())),
-                    }, bool_ty.clone())),
-                    then_branch: Box::new(con_body),
-                    else_branch: Box::new(tag_chain),
-                }, estr.clone());
-            }
-            let obj_body = Self::jx_bind_either(
-                Self::jx_call(
-                    "jFieldWith",
-                    vec![
-                        Self::jx_var("fromJSONString", Ty::arrow(json.clone(), Self::estr_ty(&str_ty))),
-                        Self::jx_str("tag"),
-                        Self::jx_var("_j", json.clone()),
-                    ],
-                    Self::estr_ty(&str_ty),
-                ),
-                "_tag", str_ty.clone(), tag_chain, estr.clone(),
-            );
+        // fromJSON_T _j = genericFromJSON _j — the generic decoder
+        // reproduces the whole native wire format and error surface
+        // (jContext tagging included, from its D1 instance).
+        let body = Self::jx_app(
+            Self::jx_var("genericFromJSON", Ty::arrow(json.clone(), estr.clone())),
+            Self::jx_var("_j", json.clone()),
+            estr.clone(),
+        );
 
-            TExpr::new(TExprKind::Case {
-                scrutinee: Box::new(Self::jx_var("_j", json.clone())),
-                branches: vec![
-                    TCaseBranch {
-                        pattern: TPattern::Constructor {
-                            name: "JStr".into(),
-                            args: vec![TPattern::Var("_s".into(), str_ty.clone())],
-                        },
-                        guards: vec![],
-                        body: str_chain,
-                    },
-                    TCaseBranch {
-                        pattern: TPattern::Constructor {
-                            name: "JObj".into(),
-                            args: vec![TPattern::Wildcard],
-                        },
-                        guards: vec![],
-                        body: obj_body,
-                    },
-                    TCaseBranch {
-                        pattern: TPattern::Wildcard,
-                        guards: vec![],
-                        body: Self::jx_call(
-                            "jExpectTagged",
-                            vec![Self::jx_var("_j", json.clone())],
-                            estr.clone(),
-                        ),
-                    },
-                ],
-            }, estr.clone())
-        } else {
-            // Single non-nullary constructor: untagged.
-            let con = &constructors[0];
-            let ftys = &con_field_tys[0];
-            let built = match &con.fields {
-                ConstructorFields::Named(fields) if !fields.is_empty() => {
-                    self.fromjson_named_body(&con.name, fields, ftys, &estr, &result_ty)
-                }
-                _ if ftys.len() == 1 => {
-                    self.fromjson_positional_chain(
-                        &con.name, &con.name, ftys,
-                        vec![Self::jx_var("_j", json.clone())],
-                        &estr, &result_ty,
-                    )
-                }
-                _ => {
-                    let arr_ty = Ty::list(json.clone());
-                    let elems: Vec<TExpr> = (0..ftys.len()).map(|i| {
-                        Self::jx_call(
-                            "jNth",
-                            vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
-                            json.clone(),
-                        )
-                    }).collect();
-                    self.fromjson_positional_chain(&con.name, &con.name, ftys, elems, &estr, &result_ty)
-                        .map(|chain| {
-                            let arrn = Self::jx_call(
-                                "jExpectArrN",
-                                vec![
-                                    Self::jx_str(&con.name),
-                                    Self::jx_int(ftys.len() as i64),
-                                    Self::jx_var("_j", json.clone()),
-                                ],
-                                Self::estr_ty(&arr_ty),
-                            );
-                            Self::jx_bind_either(arrn, "_xs", arr_ty, chain, estr.clone())
-                        })
-                }
-            };
-            match built {
-                Ok(e) => e,
-                Err((reason, note)) => {
-                    reject(self, reason, &note);
-                    return vec![];
-                }
-            }
-        };
-
-        // Tag every failure with the type being decoded.
-        let body = Self::jx_call(
-            "jContext",
-            vec![Self::jx_str(type_name), body_inner],
+        // The class's defaulted fromJSONField, specialized to this type's
+        // decoder. register_instance bypasses the default-method fill that
+        // source instances get, so the derive must provide it itself — the
+        // generic decoder reads every record field through fromJSONField.
+        let field_fn = format!("fromJSONField_{}", type_name);
+        let dec_ty = Ty::arrow(json.clone(), estr.clone());
+        let field_body = Self::jx_call(
+            "jFieldWith",
+            vec![
+                Self::jx_var(&mangled, dec_ty),
+                Self::jx_var("_k", str_ty.clone()),
+                Self::jx_var("_j", json.clone()),
+            ],
             estr.clone(),
         );
 
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert("fromJSON".to_string(), mangled.clone());
+        method_fns.insert("fromJSONField".to_string(), field_fn.clone());
         self.register_instance(InstanceInfo {
             class_name: "FromJSON".to_string(),
             target_type: result_ty.clone(),
@@ -2176,9 +2257,9 @@ impl Checker {
             context: None,
         });
 
-        vec![TFunction {
+        out_fns.push(TFunction {
             name: mangled,
-            ty: Ty::arrow(json, estr),
+            ty: Ty::arrow(json.clone(), estr.clone()),
             clauses: vec![TClause {
                 span: None,
                 patterns: vec![TPattern::Var("_j".into(), Self::json_ty())],
@@ -2189,51 +2270,28 @@ impl Checker {
             specialized: false,
             dict_params: vec![],
             derived_strict: false,
-        }]
+        });
+        out_fns.push(TFunction {
+            name: field_fn,
+            ty: Ty::arrow(str_ty, Ty::arrow(json, estr.clone())),
+            clauses: vec![TClause {
+                span: None,
+                patterns: vec![
+                    TPattern::Var("_k".into(), Ty::Con("String".into())),
+                    TPattern::Var("_j".into(), Self::json_ty()),
+                ],
+                guards: vec![],
+                body: field_body,
+                where_binds: vec![],
+            }],
+            specialized: false,
+            dict_params: vec![],
+            derived_strict: false,
+        });
+        out_fns
     }
 
     // --- ToJSON deriving ---
-
-    /// `("key", val)` — one pair of a JSON object, of type `(String, Json)`.
-    pub(super) fn jx_pair(key: &str, val: TExpr) -> TExpr {
-        let ty = Ty::Tuple(vec![Ty::Con("String".into()), Self::json_ty()]);
-        TExpr::new(TExprKind::Tuple(vec![Self::jx_str(key), val]), ty)
-    }
-
-    /// A literal cons list `e0 : e1 : … : []` of the given element type.
-    pub(super) fn jx_list(elems: Vec<TExpr>, elem_ty: Ty) -> TExpr {
-        let list_ty = Ty::list(elem_ty);
-        let mut out = TExpr::new(TExprKind::Con("[]".into()), list_ty.clone());
-        for e in elems.into_iter().rev() {
-            out = TExpr::new(TExprKind::InfixApp {
-                op: ":".into(),
-                lhs: Box::new(e),
-                rhs: Box::new(out),
-            }, list_ty.clone());
-        }
-        out
-    }
-
-    /// `JObj [pair0, pair1, …]`
-    pub(super) fn jx_obj(pairs: Vec<TExpr>) -> TExpr {
-        let pair_ty = Ty::Tuple(vec![Ty::Con("String".into()), Self::json_ty()]);
-        let list = Self::jx_list(pairs, pair_ty);
-        let con_ty = Ty::arrow(list.ty.clone(), Self::json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JObj".into()), con_ty), list, Self::json_ty())
-    }
-
-    /// `JStr "s"`
-    pub(super) fn jx_jstr(s: &str) -> TExpr {
-        let con_ty = Ty::arrow(Ty::Con("String".into()), Self::json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JStr".into()), con_ty), Self::jx_str(s), Self::json_ty())
-    }
-
-    /// `JArr [e0, e1, …]`
-    pub(super) fn jx_jarr(elems: Vec<TExpr>) -> TExpr {
-        let list = Self::jx_list(elems, Self::json_ty());
-        let con_ty = Ty::arrow(list.ty.clone(), Self::json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JArr".into()), con_ty), list, Self::json_ty())
-    }
 
     /// Build the encoder expression (of type `field_ty -> Json`) for one
     /// field of a ToJSON-derived constructor — the exact mirror of
@@ -2298,83 +2356,6 @@ impl Checker {
                 format!("the type '{}' cannot be encoded to JSON", other),
                 "derived ToJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a ToJSON instance.".to_string(),
             )),
-        }
-    }
-
-    /// Encode constructor argument #i: the resolved encoder applied to the
-    /// pattern variable `_x{i}` the clause binds it to.
-    pub(super) fn tojson_arg(&self, i: usize, fty: &Ty) -> Result<TExpr, (String, String)> {
-        let enc = self.tojson_field_encoder(fty)?;
-        Ok(Self::jx_app(enc, Self::jx_var(&format!("_x{}", i), fty.clone()), Self::json_ty()))
-    }
-
-    /// The `("key", encoded value)` pairs of a record constructor, keyed by
-    /// the fields' effective keys — the same keys `fromjson_named_body`
-    /// decodes, and the same shared external name LuaDict uses as the Lua
-    /// table key. A Maybe field encodes Nothing as null (via toJSONMaybe in
-    /// the field encoder); the decoder's jOptFieldWith reads null back as
-    /// Nothing, so the pair round-trips.
-    pub(super) fn tojson_named_pairs(
-        &self,
-        con_name: &str,
-        fields: &[RecordField],
-        field_tys: &[Ty],
-    ) -> Result<Vec<TExpr>, (String, String)> {
-        let mut pairs = Vec::new();
-        for (i, field) in fields.iter().enumerate() {
-            let val = self.tojson_arg(i, &field_tys[i]).map_err(|e| Self::fromjson_field_err(
-                format!("field '{}' of constructor '{}' cannot be encoded", field.name, con_name), e))?;
-            pairs.push(Self::jx_pair(field.effective_key(), val));
-        }
-        Ok(pairs)
-    }
-
-    /// Encode one constructor's value (its arguments are bound to `_x0` …):
-    /// - record fields → a JSON object keyed by the effective keys, with
-    ///   `"tag":"Con"` prepended in a tagged type;
-    /// - a nullary constructor → the bare string `"Con"` (only reachable
-    ///   tagged: a lone nullary constructor is tagged by definition);
-    /// - positional arguments → the encoded argument itself (one) or an
-    ///   array (several), under `"contents"` in a tagged type.
-    ///
-    /// Every emitted tag string is the constructor's effective tag (the
-    /// `as "name"` rename when present, the source name otherwise) — the
-    /// same string the derived decoder dispatches on. Derive-time error
-    /// messages keep the source name.
-    pub(super) fn tojson_con_body(
-        &self,
-        con: &Constructor,
-        field_tys: &[Ty],
-        tagged: bool,
-    ) -> Result<TExpr, (String, String)> {
-        match &con.fields {
-            ConstructorFields::Named(fields) if !fields.is_empty() => {
-                let mut pairs = self.tojson_named_pairs(&con.name, fields, field_tys)?;
-                if tagged {
-                    pairs.insert(0, Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())));
-                }
-                Ok(Self::jx_obj(pairs))
-            }
-            _ if field_tys.is_empty() => Ok(Self::jx_jstr(con.effective_tag())),
-            _ => {
-                let args: Vec<TExpr> = field_tys.iter().enumerate().map(|(i, fty)| {
-                    self.tojson_arg(i, fty).map_err(|e| Self::fromjson_field_err(
-                        format!("argument {} of constructor '{}' cannot be encoded", i + 1, con.name), e))
-                }).collect::<Result<_, _>>()?;
-                let contents = if field_tys.len() == 1 {
-                    args.into_iter().next().unwrap()
-                } else {
-                    Self::jx_jarr(args)
-                };
-                if tagged {
-                    Ok(Self::jx_obj(vec![
-                        Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())),
-                        Self::jx_pair("contents", contents),
-                    ]))
-                } else {
-                    Ok(contents)
-                }
-            }
         }
     }
 
@@ -2466,31 +2447,45 @@ impl Checker {
                 .unwrap_or_default()
         }).collect();
 
-        // One clause per constructor; report every unsupported field before
+        // Field-type validation. The encoder itself is the JSON module's
+        // GENERIC encoder over the Generic representation, whose leaves
+        // resolve through ToJSON instances at monomorphization time — where
+        // a missing instance would surface as an opaque unresolved-method
+        // error deep in the generic machinery. Validate every field here
+        // instead, with the same per-field derive-time messages the native
+        // encoder generator produced; report every unsupported field before
         // bailing out.
-        let mut clauses = Vec::new();
         let mut failed = false;
         for (con, ftys) in constructors.iter().zip(&con_field_tys) {
-            match self.tojson_con_body(con, ftys, tagged) {
-                Ok(body) => {
-                    let args = ftys.iter().enumerate()
-                        .map(|(i, t)| TPattern::Var(format!("_x{}", i), t.clone()))
-                        .collect();
-                    clauses.push(TClause {
-                        span: None,
-                        patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args }],
-                        guards: vec![],
-                        body,
-                        where_binds: vec![],
-                    });
+            match &con.fields {
+                ConstructorFields::Named(fields) if !fields.is_empty() => {
+                    for (i, field) in fields.iter().enumerate() {
+                        if let Err(e) = self.tojson_field_encoder(&ftys[i]) {
+                            let (reason, note) = Self::fromjson_field_err(
+                                format!("field '{}' of constructor '{}' cannot be encoded", field.name, con.name), e);
+                            reject(self, reason, &note);
+                            failed = true;
+                        }
+                    }
                 }
-                Err((reason, note)) => {
-                    reject(self, reason, &note);
-                    failed = true;
+                _ => {
+                    for (i, fty) in ftys.iter().enumerate() {
+                        if let Err(e) = self.tojson_field_encoder(fty) {
+                            let (reason, note) = Self::fromjson_field_err(
+                                format!("argument {} of constructor '{}' cannot be encoded", i + 1, con.name), e);
+                            reject(self, reason, &note);
+                            failed = true;
+                        }
+                    }
                 }
             }
         }
         if failed { return vec![]; }
+        let _ = tagged; // the generic encoder reads tagged-ness off the metadata
+
+        // The Generic substrate the encoder runs on (created here unless a
+        // sibling derive already did).
+        let mut out_fns = self.ensure_generic(type_name, type_vars, constructors);
 
         // Register the instance
         let mut method_fns = HashMap::new();
@@ -2502,13 +2497,27 @@ impl Checker {
             context: None,
         });
 
-        vec![TFunction {
+        // toJSON_T _x = genericToJSON _x — the generic encoder reproduces
+        // the native wire format byte-for-byte.
+        let body = Self::jx_app(
+            Self::jx_var("genericToJSON", Ty::arrow(result_ty.clone(), json.clone())),
+            Self::jx_var("_x", result_ty.clone()),
+            json.clone(),
+        );
+        out_fns.push(TFunction {
             name: mangled,
             ty: Ty::arrow(result_ty, json),
-            clauses,
+            clauses: vec![TClause {
+                span: None,
+                patterns: vec![TPattern::Var("_x".into(), Ty::Con(type_name.to_string()))],
+                guards: vec![],
+                body,
+                where_binds: vec![],
+            }],
             specialized: false,
             dict_params: vec![],
             derived_strict: false,
-        }]
+        });
+        out_fns
     }
 }

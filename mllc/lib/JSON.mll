@@ -1,4 +1,5 @@
 import LString (strByte, strLen, strSub, strChar)
+import Data.Generics
 
 -- JSON value type
 data Json = JNull | JBool Bool | JNum Number | JStr String | JArr [Json] | JObj [(String, Json)]
@@ -65,13 +66,13 @@ decodeJSONWith dec s = case parseJSON s of
 -- ================================================================
 -- Typeclasses
 --
--- The primitive codecs live in the toJSON*/fromJSON* combinators below
--- rather than in `instance ToJSON Int`-style declarations: mata-ll
--- rejects an instance declared in an imported module as an orphan (only the
--- main module's own classes/types count as local), so a stdlib module cannot
--- carry instances for builtin types. Write instances for your own data types
--- in terms of these combinators; a derived FromJSON/ToJSON will call the
--- same combinators.
+-- The primitive codecs come in two forms: the toJSON*/fromJSON* combinators
+-- below, and the `instance ToJSON Int`-style declarations further down that
+-- wrap them, which the generic codec's leaves resolve against. (Orphan
+-- checking is relaxed for library modules, so this stdlib module may carry
+-- instances for builtin types.) `deriving (ToJSON/FromJSON)` derives the
+-- Generic representation and runs genericToJSON/genericFromJSON over it;
+-- hand-written instances for your own data types compose the combinators.
 -- ================================================================
 
 class ToJSON a where
@@ -79,6 +80,12 @@ class ToJSON a where
 
 class FromJSON a where
     fromJSON :: Json -> Either String a
+    -- How a value of this type is read out of one field of a JSON object:
+    -- required by default. The Maybe instance overrides it so a missing key
+    -- and an explicit null both decode to Nothing — the same optionality the
+    -- derived decoders give Maybe record fields.
+    fromJSONField :: String -> Json -> Either String a
+    fromJSONField k j = jFieldWith fromJSON k j
 
 -- ================================================================
 -- Primitive codecs (combinators)
@@ -668,3 +675,308 @@ jBool _ = Nothing
 jIsNull :: Json -> Bool
 jIsNull JNull = True
 jIsNull _ = False
+
+-- ================================================================
+-- Primitive ToJSON instances
+--
+-- With orphan checking relaxed for library modules, the JSON module can
+-- carry the ToJSON instances for builtin types that the generic encoder's
+-- leaves (`K1 c`) resolve against. They wrap the same combinators the native
+-- derive uses, so `toJSON` and the derived encoders agree.
+-- ================================================================
+
+instance ToJSON Int where
+    toJSON n = toJSONInt n
+
+instance ToJSON Number where
+    toJSON n = toJSONNumber n
+
+instance ToJSON String where
+    toJSON s = toJSONString s
+
+instance ToJSON Bool where
+    toJSON b = toJSONBool b
+
+instance ToJSON Json where
+    toJSON j = toJSONValue j
+
+instance ToJSON a => ToJSON [a] where
+    toJSON xs = toJSONList toJSON xs
+
+instance ToJSON a => ToJSON (Maybe a) where
+    toJSON m = toJSONMaybe toJSON m
+
+-- ================================================================
+-- Primitive FromJSON instances
+--
+-- The decode-side twins: the generic decoder's leaves (`K1 c`) resolve
+-- against these. They wrap the same combinators the native derive uses, so
+-- `fromJSON` and the derived decoders agree — including error messages.
+-- The Maybe instance overrides fromJSONField: a Maybe RECORD FIELD is
+-- optional (missing key or null -> Nothing), which is a property of the
+-- field lookup, not of the value decoder.
+-- ================================================================
+
+instance FromJSON Int where
+    fromJSON j = fromJSONInt j
+
+instance FromJSON Number where
+    fromJSON j = fromJSONNumber j
+
+instance FromJSON String where
+    fromJSON j = fromJSONString j
+
+instance FromJSON Bool where
+    fromJSON j = fromJSONBool j
+
+instance FromJSON Json where
+    fromJSON j = fromJSONValue j
+
+instance FromJSON a => FromJSON [a] where
+    fromJSON j = fromJSONList fromJSON j
+
+instance FromJSON a => FromJSON (Maybe a) where
+    fromJSON j = fromJSONMaybe fromJSON j
+    fromJSONField k j = jOptFieldWith fromJSON k j
+
+-- ================================================================
+-- Generic ToJSON  (import Data.Generics)
+--
+-- `genericToJSON` encodes any `deriving (Generic)` type by walking its
+-- representation; it is the encoder `deriving (ToJSON)` runs. The wire
+-- format: a single-constructor record is an object keyed by field name; a
+-- single positional constructor is its argument (or an array); a
+-- multi-constructor type is tagged (a nullary constructor is the bare name
+-- string, a fielded one an object with "tag"); `Maybe` fields encode
+-- Nothing as null. The record/sum/arity decisions are read from the derived
+-- metadata as values, so one instance per combinator suffices.
+-- ================================================================
+
+-- Assemble one constructor's JSON from its name, arity, record-ness, whether
+-- the datatype tags its constructors, and the encoded fields (name + value).
+encodeCon :: String -> Int -> Bool -> Bool -> [(String, Json)] -> Json
+encodeCon nm ar isRec tagged fields =
+    if ar == 0
+        then JStr nm
+        else if isRec
+            then (if tagged then JObj (("tag", JStr nm) : fields) else JObj fields)
+            else genEncodePositional nm ar tagged (map snd fields)
+
+genEncodePositional :: String -> Int -> Bool -> [Json] -> Json
+genEncodePositional nm ar tagged vals =
+    let contents = if ar == 1 then genHead vals else JArr vals
+    in if tagged
+        then JObj (("tag", JStr nm) : ("contents", contents) : [])
+        else contents
+
+genHead :: [Json] -> Json
+genHead (x : _) = x
+genHead [] = JNull
+
+class GEncode f where
+    gEncode :: f -> Json
+
+class GSum f where
+    gSum :: Bool -> f -> Json
+
+class GFields f where
+    gFields :: f -> [(String, Json)]
+
+-- The field leaf: a `K1` holding one value, encoded by its own ToJSON instance.
+class GLeaf f where
+    gLeaf :: f -> Json
+
+genericToJSON :: (Generic a, GEncode (Rep a)) => a -> Json
+genericToJSON x = gEncode (from x)
+
+instance (Datatype d, GSum f) => GEncode (D1 d f) where
+    gEncode d1 = case d1 of
+        D1 y -> gSum (datatypeConCount d1 > 1) y
+
+instance (GSum a, GSum b) => GSum (a :+: b) where
+    gSum t (L1 x) = gSum t x
+    gSum t (R1 y) = gSum t y
+
+instance (Constructor c, GFields f) => GSum (C1 c f) where
+    gSum tagged c1 = case c1 of
+        C1 y -> encodeCon (conName c1) (conArity c1) (conIsRecord c1) tagged (gFields y)
+
+instance GFields U1 where
+    gFields _ = []
+
+instance (GFields a, GFields b) => GFields (a :*: b) where
+    gFields (Prod a b) = gFields a ++ gFields b
+
+instance (Selector s, GLeaf f) => GFields (S1 s f) where
+    gFields s1 = case s1 of
+        S1 y -> (selName s1, gLeaf y) : []
+
+instance ToJSON c => GLeaf (K1 c) where
+    gLeaf k1 = case k1 of
+        K1 v -> toJSON v
+
+-- ================================================================
+-- Generic FromJSON  (import Data.Generics)
+--
+-- `genericFromJSON` decodes any `deriving (Generic)` type by walking its
+-- representation TYPE; it is the decoder `deriving (FromJSON)` runs — the
+-- exact mirror of genericToJSON, so encode/decode round-trips. Decoding
+-- must pick instances before any rep value exists, so it navigates by
+-- proxy (`gProxy` and the `p*` re-typers from Data.Generics) — the proxies
+-- are never forced; only their types matter.
+-- ================================================================
+
+-- Either map, specialized to the decoder's error type.
+gdMap :: (a -> b) -> Either String a -> Either String b
+gdMap _ (Left e) = Left e
+gdMap f (Right x) = Right (f x)
+
+-- "'A', 'B' or 'C'" — the expected-tags list of jBadTag, exactly as the
+-- native derive formats it.
+gdExpected :: [String] -> String
+gdExpected [] = ""
+gdExpected (n : []) = "'" <> n <> "'"
+gdExpected (n : rest) = gdExpectedGo ("'" <> n <> "'") rest
+
+gdExpectedGo :: String -> [String] -> String
+gdExpectedGo acc [] = acc
+gdExpectedGo acc (n : []) = acc <> " or '" <> n <> "'"
+gdExpectedGo acc (n : rest) = gdExpectedGo (acc <> ", '" <> n <> "'") rest
+
+-- The whole-datatype layer.
+class GDecode f where
+    gDecode :: f -> Json -> Either String f
+
+-- The constructor-choice layer. gdStr/gdTag return Nothing when the given
+-- tag names no constructor of this part of the sum — the D1 layer turns
+-- that into jBadTag with the full expected list.
+class GDecSum f where
+    gdStr :: f -> String -> Maybe (Either String f)
+    gdTag :: f -> String -> Json -> Maybe (Either String f)
+    gdUntagged :: f -> Json -> Either String f
+    gdConNames :: f -> [String]
+    gdSoleArity :: f -> Int
+
+-- The fields-of-one-constructor layer.
+class GDecProd f where
+    gdpNullary :: f -> Either String f
+    gdpCount :: f -> Int
+    gdpRecord :: f -> Json -> Either String f
+    gdpArgs :: f -> String -> Int -> [Json] -> Either String f
+
+-- The field leaf: a `K1` holding one value, decoded by its own FromJSON
+-- instance (fromJSONField for record lookup, fromJSON for a bare value).
+class GDecLeaf f where
+    gdlField :: f -> String -> Json -> Either String f
+    gdlValue :: f -> Json -> Either String f
+
+genericFromJSON :: (Generic a, GDecode (Rep a)) => Json -> Either String a
+genericFromJSON j = case gDecode gProxy j of
+    Left e -> Left e
+    Right r -> Right (to r)
+
+instance (Datatype d, GDecSum f) => GDecode (D1 d f) where
+    gDecode p j =
+        jContext (datatypeName p)
+            (gdMap D1 (gdBody (pD1 p) (datatypeConCount p) j))
+
+-- Tagged decoding applies to multi-constructor types, and to a lone
+-- nullary constructor (the constructor NAME is the payload) — the same
+-- rule the native derive applies.
+gdBody :: GDecSum f => f -> Int -> Json -> Either String f
+gdBody p n j =
+    if n > 1 || gdSoleArity p == 0
+        then gdTagged p j
+        else gdUntagged p j
+
+gdTagged :: GDecSum f => f -> Json -> Either String f
+gdTagged p j = case j of
+    JStr s -> case gdStr p s of
+        Just r -> r
+        Nothing -> jBadTag (gdExpected (gdConNames p)) s
+    JObj _ -> case jFieldWith fromJSONString "tag" j of
+        Left e -> Left e
+        Right tag -> case gdTag p tag j of
+            Just r -> r
+            Nothing -> jBadTag (gdExpected (gdConNames p)) tag
+    _ -> jExpectTagged j
+
+instance (GDecSum a, GDecSum b) => GDecSum (a :+: b) where
+    gdStr p s = case gdStr (pSumL p) s of
+        Just r -> Just (gdMap L1 r)
+        Nothing -> case gdStr (pSumR p) s of
+            Just r -> Just (gdMap R1 r)
+            Nothing -> Nothing
+    gdTag p t j = case gdTag (pSumL p) t j of
+        Just r -> Just (gdMap L1 r)
+        Nothing -> case gdTag (pSumR p) t j of
+            Just r -> Just (gdMap R1 r)
+            Nothing -> Nothing
+    gdUntagged _ _ = Left "unreachable: untagged decode of a multi-constructor type"
+    gdConNames p = gdConNames (pSumL p) ++ gdConNames (pSumR p)
+    gdSoleArity _ = 1
+
+-- Decode one constructor's payload from the tagged object `j`: record
+-- fields inline in the object, positional arguments under "contents" (the
+-- value itself for one argument, an array for several), nothing needed for
+-- a nullary constructor.
+gdConBody :: (Constructor c, GDecProd f) => C1 c f -> Json -> Either String (C1 c f)
+gdConBody p j =
+    if conArity p == 0
+        then gdMap C1 (gdpNullary (pC1 p))
+        else if conIsRecord p
+            then gdMap C1 (gdpRecord (pC1 p) j)
+            else case jField "contents" j of
+                Left e -> Left e
+                Right c -> if conArity p == 1
+                    then gdMap C1 (gdpArgs (pC1 p) (conName p) 0 (c : []))
+                    else case jExpectArrN (conName p) (conArity p) c of
+                        Left e -> Left e
+                        Right xs -> gdMap C1 (gdpArgs (pC1 p) (conName p) 0 xs)
+
+instance (Constructor c, GDecProd f) => GDecSum (C1 c f) where
+    gdStr p s =
+        if s == conName p
+            then Just (if conArity p == 0
+                then gdMap C1 (gdpNullary (pC1 p))
+                else jTagNeedsObject (conName p))
+            else Nothing
+    gdTag p t j = if t == conName p then Just (gdConBody p j) else Nothing
+    gdUntagged p j =
+        if conIsRecord p
+            then gdMap C1 (gdpRecord (pC1 p) j)
+            else if conArity p == 1
+                then gdMap C1 (gdpArgs (pC1 p) (conName p) 0 (j : []))
+                else case jExpectArrN (conName p) (conArity p) j of
+                    Left e -> Left e
+                    Right xs -> gdMap C1 (gdpArgs (pC1 p) (conName p) 0 xs)
+    gdConNames p = conName p : []
+    gdSoleArity p = conArity p
+
+instance GDecProd U1 where
+    gdpNullary _ = Right U1
+    gdpCount _ = 0
+    gdpRecord _ _ = Right U1
+    gdpArgs _ _ _ _ = Right U1
+
+instance (Selector s, GDecLeaf f) => GDecProd (S1 s f) where
+    gdpNullary _ = Left "unreachable: a fielded constructor decoded as nullary"
+    gdpCount _ = 1
+    gdpRecord p j = gdMap S1 (gdlField (pS1 p) (selName p) j)
+    gdpArgs p con i elems = gdMap S1 (jArgWith (gdlValue (pS1 p)) con (i + 1) (jNth 0 elems))
+
+instance (GDecProd a, GDecProd b) => GDecProd (a :*: b) where
+    gdpNullary _ = Left "unreachable: a fielded constructor decoded as nullary"
+    gdpCount p = gdpCount (pProdL p) + gdpCount (pProdR p)
+    gdpRecord p j = case gdpRecord (pProdL p) j of
+        Left e -> Left e
+        Right x -> gdMap (\y -> Prod x y) (gdpRecord (pProdR p) j)
+    gdpArgs p con i elems =
+        let nl = gdpCount (pProdL p)
+        in case gdpArgs (pProdL p) con i (take nl elems) of
+            Left e -> Left e
+            Right x -> gdMap (\y -> Prod x y) (gdpArgs (pProdR p) con (i + nl) (drop nl elems))
+
+instance FromJSON c => GDecLeaf (K1 c) where
+    gdlField _ k j = gdMap K1 (fromJSONField k j)
+    gdlValue _ j = gdMap K1 (fromJSON j)

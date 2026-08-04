@@ -191,14 +191,64 @@ types, `SomeException`, `IOException`, or `catches`.
 
 ## No deriving for all classes
 
-`deriving` supports `Show`, `Eq`, `Ord`, `Enum`, `Bounded`, and
-`Functor`, plus three that have no GHC-Prelude equivalent: `ToJSON` and
-`FromJSON` (a JSON encoder/decoder, requiring `import JSON`) and
-`LuaDict` (a name-based Lua-interop representation — a name-keyed table
-for a single-constructor record, a plain string for an all-nullary
-enum). There is no `deriving` for `Read`, `Generic`, `Hashable`,
+`deriving` supports `Show`, `Eq`, `Ord`, `Enum`, `Bounded`,
+`Functor`, and `Generic`, plus three that have no GHC-Prelude
+equivalent: `ToJSON` and `FromJSON` (a JSON encoder/decoder, requiring
+`import JSON`) and `LuaDict` (a name-based Lua-interop representation —
+a name-keyed table for a single-constructor record, a plain string for
+an all-nullary enum). There is no `deriving` for `Read`, `Hashable`,
 `NFData`, or arbitrary classes. There is no `GeneralizedNewtypeDeriving`
 or `DeriveAnyClass`.
+
+## Generics: `Data.Generics`, not `GHC.Generics`
+
+Datatype-generic programming is available via `import Data.Generics`
+and `deriving (Generic)`, but the representation deviates from
+`GHC.Generics` in surface details (the semantics — a sum of products
+with datatype/constructor/selector metadata, and `from`/`to`
+conversions — match). The module is `Data.Generics`; the metadata is
+carried by three distinct wrapper constructors `D1`/`C1`/`S1` rather
+than one index-tagged `M1 i c f` (so a generic instance dispatches on
+the wrapper's head under mata-ll's head-keyed instance resolution);
+`K1` carries no `R` index; the combinators are of kind `Type`, so
+`from`/`to` drop the phantom parameter of GHC's `Rep a x`; there is no
+`V1`, and a type with no constructors cannot derive `Generic`.
+`deriving (Generic)` is for concrete (parameterless) types. `conName`
+and `selName` reflect a constructor's / field's *effective* external
+name (the `as "…"` rename when present, the source name otherwise).
+
+The JSON codecs are built on this substrate: `deriving (ToJSON)` and
+`deriving (FromJSON)` derive the Generic representation implicitly and
+their instances run the JSON module's generic encoder/decoder
+(`genericToJSON :: (Generic a, GEncode (Rep a)) => a -> Json`,
+`genericFromJSON :: (Generic a, GDecode (Rep a)) => Json -> Either
+String a`), which are also usable directly. In GHC this is aeson's
+`genericToJSON`/`genericParseJSON`; the wire format mirrors aeson's
+defaultOptions where mata-ll can (see SPEC).
+
+A performance note, not a semantic one: a polymorphic function is
+specialised at up to 16 distinct types; past that the monomorphiser
+switches it (and the generic-instance methods it uses) to dictionary
+passing, which stays correct at any number of types but pays a runtime
+dictionary indirection where the first 16 got fully specialised code.
+
+## Orphan instances: only the top-level module is checked
+
+An orphan instance (for a class and a type both defined elsewhere) is
+rejected only in the main module. Imported modules — the stdlib and user
+libraries — may declare instances for types they do not define (as the
+`JSON` module does for `Int`, `[a]`, …). mata-ll compiles the whole
+program together, so there is no cross-build incoherence for the rule to
+guard against in library code; the check still catches a rogue instance
+in the program's own module.
+
+## Type operators
+
+Infix type operators whose names begin with `:` are supported, both in
+declarations (`data (:+:) a b = L1 a | R1 b`) and in use (`f :+: g`),
+grouping by their declared fixity. This exists chiefly for the generic
+representation combinators (`:+:`, `:*:`). Non-`:` type operators (a
+`TypeOperators`-style `data a + b`) are not supported.
 
 ## Kinds are inferred; there are no kind annotations
 

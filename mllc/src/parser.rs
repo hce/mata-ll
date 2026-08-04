@@ -215,6 +215,16 @@ impl Parser {
                                 self.advance();
                             }
                             if self.at(&Token::RightParen) { self.advance(); }
+                            // A type operator can carry its constructors:
+                            // `(:+:)(..)` exports the type and everything it
+                            // declares, exactly like `T(..)`.
+                            if self.at(&Token::LeftParen) {
+                                self.advance();
+                                while !self.at(&Token::RightParen) && !self.at_eof() {
+                                    self.advance();
+                                }
+                                if self.at(&Token::RightParen) { self.advance(); }
+                            }
                         }
                         _ => { self.advance(); } // skip unknown
                     }
@@ -321,7 +331,11 @@ impl Parser {
 
     fn parse_data_decl(&mut self) -> PResult<Decl> {
         self.expect(&Token::Data)?;
-        let name = self.expect_upper_ident()?;
+        // The type name is normally an UpperIdent, but a type OPERATOR is
+        // declared in prefix parenthesised form — `data (:+:) a b = …` — just
+        // like an operator value binding (`(<>) a b = …`). Both spellings then
+        // take the same type-variable list.
+        let name = self.parse_type_con_name()?;
 
         let mut type_vars = Vec::new();
         while let Token::Ident(v) = self.peek() {
@@ -384,6 +398,25 @@ impl Parser {
             constructors,
             deriving,
         })
+    }
+
+    /// A type constructor's declared name: an ordinary `UpperIdent`, or a type
+    /// operator written in prefix parenthesised form `( :+: )`. Only `:`-leading
+    /// symbolic operators are type constructors (see `is_type_operator`).
+    fn parse_type_con_name(&mut self) -> PResult<String> {
+        if self.at(&Token::LeftParen) {
+            self.advance();
+            let op = match self.peek().clone() {
+                Token::Operator(o) if Self::is_type_operator(&o) => { self.advance(); o }
+                other => return Err(self.err_here(format!(
+                    "Expected a type operator (a ':'-leading symbol like ':+:') \
+                     in parentheses after 'data', found {:?}", other))),
+            };
+            self.expect(&Token::RightParen)?;
+            Ok(op)
+        } else {
+            self.expect_upper_ident()
+        }
     }
 
     fn parse_constructor(&mut self) -> PResult<Constructor> {
@@ -869,8 +902,11 @@ impl Parser {
         self.expect(&Token::Family)?;
         let name = self.expect_upper_ident()?;
 
-        // Skip type parameter names (they're just documentation here)
-        while matches!(self.peek(), Token::Ident(_)) {
+        // Capture the header parameter names: their count fixes the family's
+        // arity (and thus kind) even when it declares no equations.
+        let mut params = Vec::new();
+        while let Token::Ident(p) = self.peek().clone() {
+            params.push(p);
             self.advance();
         }
 
@@ -903,7 +939,7 @@ impl Parser {
             }
         }
 
-        Ok(vec![Decl::TypeFamily { name, equations }])
+        Ok(vec![Decl::TypeFamily { name, params, equations }])
     }
 
     fn parse_intrinsic_decl(&mut self) -> PResult<Vec<Decl>> {
@@ -1346,7 +1382,7 @@ impl Parser {
     }
 
     fn parse_type_arrow_inner(&mut self) -> PResult<Type> {
-        let lhs = self.parse_type_app()?;
+        let lhs = self.parse_type_op(0)?;
         self.skip_newlines_and_indent();
         // A multiplicity annotation before the arrow: `a %1 -> b` (the
         // argument is consumed exactly once) or the explicit unrestricted
@@ -1421,6 +1457,43 @@ impl Parser {
                  a lowercase multiplicity variable like '%m'",
                 other))),
         }
+    }
+
+    /// Infix type operators (`f :+: g`, `f :*: g`), sitting between the arrow
+    /// layer (looser) and application (tighter). Only symbolic operators that
+    /// begin with `:` are type operators — a type-level operator is a type
+    /// CONSTRUCTOR, exactly as `:`-leading value operators are data
+    /// constructors — which keeps `%` (multiplicity), `.` (forall / qualifier)
+    /// and `..` out. Fixity comes from the same table value operators use, so a
+    /// module's `infixr 6 :*:` / `infixr 5 :+:` group `a :+: b :*: c` as `a :+:
+    /// (b :*: c)`. `F a :+: G b` desugars to `(:+:) (F a) (G b)`.
+    fn is_type_operator(op: &str) -> bool {
+        op.starts_with(':') && op.len() > 1
+    }
+
+    fn parse_type_op(&mut self, min_prec: u8) -> PResult<Type> {
+        let mut lhs = self.parse_type_app()?;
+        loop {
+            let op = match self.peek() {
+                Token::Operator(o) if Self::is_type_operator(o) => o.clone(),
+                _ => break,
+            };
+            let (assoc, prec) = self.operator_fixity(&op);
+            if prec < min_prec {
+                break;
+            }
+            self.advance();
+            self.skip_newlines_and_indent();
+            // Left-assoc consumes only tighter operators on its right (prec+1);
+            // right-assoc re-enters at its own precedence so it nests rightward.
+            let next_min = if assoc == Assoc::Left { prec + 1 } else { prec };
+            let rhs = self.parse_type_op(next_min)?;
+            lhs = Type::App(
+                Box::new(Type::App(Box::new(Type::Con(op)), Box::new(lhs))),
+                Box::new(rhs),
+            );
+        }
+        Ok(lhs)
     }
 
     fn parse_type_app(&mut self) -> PResult<Type> {

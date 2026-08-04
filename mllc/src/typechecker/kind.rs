@@ -757,8 +757,15 @@ impl Checker {
                     self.kinds.insert(name.clone(), kind);
                     declared.push(name.clone());
                 }
-                Decl::TypeFamily { name, equations } => {
-                    let arity = equations.first().map(|eq| eq.args.len()).unwrap_or(0);
+                Decl::TypeFamily { name, params, equations } => {
+                    // Arity comes from the header parameters when present (so an
+                    // equation-less family still gets `k -> … -> Type`), else
+                    // from the first equation's pattern count.
+                    let arity = if !params.is_empty() {
+                        params.len()
+                    } else {
+                        equations.first().map(|eq| eq.args.len()).unwrap_or(0)
+                    };
                     let mut kind = kctx.fresh();
                     for _ in 0..arity {
                         kind = Kind::arrow(kctx.fresh(), kind);
@@ -819,7 +826,7 @@ impl Checker {
                     }
                     let _ = kctx.unify(&kb, &result);
                 }
-                Decl::TypeFamily { name, equations } => {
+                Decl::TypeFamily { name, equations, .. } => {
                     // Each equation constrains the family's argument and
                     // result kinds; pattern variables are scoped per equation.
                     let family_kind = self.kinds.get(name).cloned().unwrap_or(Kind::Type);

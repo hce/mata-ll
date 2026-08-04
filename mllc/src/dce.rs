@@ -186,16 +186,38 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
         TExprKind::SpecCall { original, specialized, args } => {
             refs.insert(original.clone());
             // `specialized` threads element functions inside a `helper:…`
-            // string. Segments come in three shapes:
-            //   "__mll_list_eq:eq_State"            — one function per segment
+            // string. Parse each format exactly the way its consumer
+            // (codegen's spec_call_ast) does — an embedded function name may
+            // itself contain ':' (an instance method of a type OPERATOR,
+            // `gFields_:*: a b_…`), so a whole-string split on ':' would
+            // shred it and DCE would drop a live function. Names must still
+            // never contain ',' or '=' (the intra-list separators).
+            //   "__mll_dict:C:m=f,…" / "__mll_dictc:C:m=f,…"  — method=impl pairs
             //   "__mll_tuple_eq:2:eq_Foo,eq_Bar"    — comma-joined function list
-            //   "__mll_dict:Show:show=show_Foo,…"   — method=impl pairs
-            // Capture every embedded function name so the derived show/eq
-            // implementations they reference stay live.
-            for seg in specialized.split(':') {
-                for part in seg.split(',') {
-                    let name = part.rsplit('=').next().unwrap_or(part);
-                    refs.insert(name.to_string());
+            //   "__mll_list_eq:eq_State" (etc.)     — the rest is ONE name
+            // Formats not listed here (`__mll_io:`, `__mll_iter:`, …) carry
+            // Lua host names, not mll functions — nothing to keep live.
+            if let Some(rest) = specialized.strip_prefix("__mll_dict:")
+                .or_else(|| specialized.strip_prefix("__mll_dictc:"))
+            {
+                let methods = rest.split_once(':').map(|x| x.1).unwrap_or("");
+                for entry in methods.split(',') {
+                    if let Some(impl_name) = entry.split_once('=').map(|x| x.1) {
+                        refs.insert(impl_name.to_string());
+                    }
+                }
+            } else if let Some(name) = specialized.strip_prefix("__mll_list_eq:")
+                .or_else(|| specialized.strip_prefix("__mll_maybe_eq:"))
+                .or_else(|| specialized.strip_prefix("__mll_show_list:"))
+                .or_else(|| specialized.strip_prefix("__mll_show_maybe:"))
+            {
+                refs.insert(name.to_string());
+            } else if let Some(rest) = specialized.strip_prefix("__mll_tuple_eq:") {
+                let fns = rest.split_once(':').map(|x| x.1).unwrap_or("");
+                for name in fns.split(',') {
+                    if !name.is_empty() {
+                        refs.insert(name.to_string());
+                    }
                 }
             }
             for a in args { collect_expr(a, refs); }
