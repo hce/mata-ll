@@ -165,10 +165,14 @@ are resolved by GHC-style defaulting (`Int`, then `Number`) during
 constraint discharge.
 
 Orphan instances (where neither the class nor the type is defined in
-the current module) are rejected.
+the current module) are rejected — in the MAIN module only. Imported
+modules, the stdlib included, may declare instances for types they do
+not define (the `JSON` module carries `ToJSON`/`FromJSON` for `Int`,
+`[a]`, …): mata-ll compiles the whole program together, so there is no
+cross-build incoherence for the rule to guard against in library code.
 
 Deriving is supported for `Show`, `Eq`, `Ord`, `Enum`, `Bounded`,
-`Functor`, `ToJSON`, `FromJSON`, and `LuaDict`.
+`Functor`, `Generic`, `ToJSON`, `FromJSON`, and `LuaDict`.
 
 ### GADTs
 
@@ -199,7 +203,66 @@ intrinsic ones (`LuaPure`, `LuaIO`) reduce during type checking:
     LuaPure "name" a  →  a
     LuaIO "name" a    →  IO a
 
-User-defined type families use closed, equation-based matching.
+User-defined type families use closed, equation-based matching. A
+family may be declared with header parameters and no equations — its
+arity (and kind) comes from the header — and the compiler can extend
+such a family itself: `deriving (Generic)` adds one `Rep T = <rep>`
+equation per derive to the equation-less `Rep` family that
+`Data.Generics` declares.
+
+A stuck family application participates in inference rather than
+blocking it: instance checking defers a constraint whose head is an
+unreduced family application (treated like a bare variable — reduce if
+concrete, satisfiable otherwise), and the unifier decomposes two
+applications of the SAME family argument-wise so a fresh metavariable
+can be bound (`Rep α ~ Rep a  ⟹  α := a`, the most-general unifier —
+not an injectivity deduction; two distinct rigids still fail with the
+family-level mismatch). This is what lets `to (from x)` type-check and
+lets a `GC (Rep a)` constraint ride a polymorphic signature until
+monomorphization fixes `a`.
+
+### Generics
+
+`deriving (Generic)` gives a concrete type a structural representation.
+The compiler contributes only synthesis; everything downstream is
+ordinary library code (`Data.Generics`):
+
+- **Representation types**: a sum of products built from `U1` (empty
+  product), `K1 c` (field leaf), `L1`/`R1` of `a :+: b` (constructor
+  choice), `Prod` of `a :*: b` (fields), wrapped in the metadata
+  carriers `D1 d f` / `C1 c f` / `S1 s f`. All of kind `Type` — mata-ll
+  drops GHC's phantom index, and three distinct wrappers replace GHC's
+  single tagged `M1 i c f` so each layer dispatches on its own head
+  under head-keyed instance resolution.
+- **Derive synthesis** (`derive_generic`): one `Rep T` family equation;
+  `from`/`to` conversion functions as TIR; and per-datatype /
+  constructor / field MARKER types (`__Meta_D_T`, `__Meta_C_T_Con`,
+  `__Meta_S_T_Con_i` — nullary, kind `Type`, never inhabited) carrying
+  baked-string `Datatype`/`Constructor`/`Selector` instances
+  (`datatypeName`, `datatypeConCount`, `conName`, `conArity`,
+  `conIsRecord`, `selName`). Marker-keyed instances are how per-name
+  metadata reflection works under head-keyed dispatch; the reflected
+  names are the effective external names (`as` renames applied).
+- **Resolution**: mata-ll's constraint core is single-variable
+  (`Class var`), so a generic function's `GC (Rep a)` constraint is
+  never solved as a compound given — it defers until monomorphization
+  specialises the function at a concrete `a`, reduces `Rep a`, and
+  resolves the instance chain. Class-variable binding blanks
+  non-injective family applications in a method's declared type, so
+  `from :: a -> Rep a` binds `a` from the argument, never from inside
+  `Rep a`.
+- **Producers navigate by proxy**: a generic consumer walks a rep value
+  it already has; a generic producer (a decoder) must pick instances
+  before any value exists. `Data.Generics` exports `gProxy :: a` (a
+  bottom that is never forced — the metadata methods ignore their
+  argument) and the `p*` re-typers (`pD1`, `pC1`, `pS1`, `pK1`,
+  `pSumL`, `pSumR`, `pProdL`, `pProdR`) that retype a proxy for each
+  representation layer without matching on it.
+
+The `JSON` module's `genericToJSON`/`genericFromJSON` are the worked
+proof: byte-exact against the derived native codecs — wire format and
+error messages — pinned by the generic_json* integration tests. The
+derives themselves keep their specialised native generators for speed.
 
 ### Linear types (multiplicity)
 
@@ -284,10 +347,42 @@ When a function calls itself at progressively different types (e.g.,
 counts specializations per function. When the count exceeds 16, it
 switches that function to dictionary-passing: typeclass methods are
 looked up from a Lua table parameter passed at each call site. Existing
-specializations for that function are discarded.
+specializations for that function are discarded and their call sites
+reverted to the original name.
+
+The same guard covers INSTANCE METHODS, which generic code trips
+legitimately (a rep-combinator instance is specialised once per
+constructor or field across every `deriving (Generic)` type in the
+program). An instance method past the guard is purged to
+dictionary-passing exactly like a top-level function; a dictionary for
+a parameterized instance is COMPOSED from the instance's
+dictionary-form methods closed over the sub-dictionaries its context
+demands, built recursively (`__mll_dictc`). Details that make this
+sound:
+
+- The dictionary phase runs to a FIXPOINT: rewriting one body can
+  discover further dictionary-passing functions (a sibling constrained
+  call marks its callee; composing a dictionary can trip a fresh cap),
+  each needing its own body rewrite and another call-site pass.
+  Functions generated during the phase get the same treatment before
+  emission.
+- A dictionary-passing body is re-monomorphized from its pristine
+  polymorphic copy under an `in_dictform` flag that suppresses the
+  arbitrary-specialization fallback — otherwise a still-polymorphic
+  call inside a SHARED body gets welded to one type's specialization
+  (one constructor's baked metadata serving every type).
+- Inside a dictionary-passing body, a call to ANY constrained
+  polymorphic function at a still-polymorphic type passes dictionaries
+  (not just self-recursion): the callee's constraints are bound against
+  the call's argument types and each dictionary is either the enclosing
+  parameter or a freshly composed one.
+- Value arguments of dictionary-passing calls take the ordinary lazy
+  call protocol — the callee may never demand one (a decoder's type
+  proxy), and evaluating a possibly-⊥ argument eagerly would raise
+  where GHC would not.
 
 This gives zero-overhead dispatch for the common shallow cases and
-bounded overhead for the rare deep-nesting case.
+bounded, correct-at-any-scale overhead past the guard.
 
 
 ## Code generation

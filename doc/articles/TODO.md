@@ -69,6 +69,42 @@ MATA-LL TODO
 
 ## Completed
 
+- [x] **Generics substrate, stress-tested by JSON, shipped with native
+      derives** (2026-08-04; commits `ccd466d` + `c61a643`).
+      `deriving (Generic)` + `Data.Generics` end to end: compiler-
+      populated `Rep` closed family (equation-less declaration, one
+      equation per derive), `from`/`to` synthesis, marker-type metadata
+      instances (effective names), type operators (`:+:`/`:*:`), stuck-
+      family deferral + same-family metavariable unification, proxy
+      navigation for generic producers (`gProxy`, `p*` re-typers). The
+      JSON module gained `genericToJSON`/`genericFromJSON` — BYTE-EXACT
+      against the derived codecs, wire format and every pinned error
+      message — as the substrate's stress test; it exposed and forced
+      the real fixes: instance methods past the 16-specialisation guard
+      now purge to composed dictionary passing (was: raw original → nil
+      call), the dictionary phase runs to a fixpoint with bodies
+      re-monomorphized from pristine copies under `in_dictform`
+      (the arbitrary-specialization fallback had welded one type's baked
+      metadata into shared bodies), sibling constrained calls pass
+      dictionaries, DCE parses dictionary strings format-structurally
+      (`:` in type-operator instance names shredded the old whole-string
+      split), and DictCall value arguments take the lazy protocol (eager
+      emission forced unused bottoms — a GHC-parity strictness bug).
+      DECISION: the generic codecs were measured at +16% (Lua 5.5) /
+      ~2.1x (LuaJIT) / +39% emitted code against the native derives, so
+      `deriving (ToJSON/FromJSON)` keeps the specialised native
+      generators (restored verbatim, plus `fromJSONField_T` emission the
+      generic decoder reads); genericToJSON/genericFromJSON stay as the
+      library-programmable pair, byte-agreement pinned by generic_json
+      (under the guard), generic_json_many (17 types past the guard,
+      user GIx included), generic_json_decode (decoder agreement +
+      absolute error strings + full generic round-trips), and
+      derive_generic (round-trips, conIndex, metadata reflection).
+      975 integration tests green; tracker perf canary unchanged
+      (5.0x/1.8x realtime); proprietary acceptance green. A future
+      rep-collapse/fusion pass could re-attempt generic-backed derives
+      at native speed; do not re-switch without that evidence.
+
 - [x] **Direct-perform IO tails, stage 1: case terminals flatten and
       saturated self tails emit bare Lua tail calls** (2026-07-28;
       codegen/action.rs, pattern.rs, function.rs, module.rs). The

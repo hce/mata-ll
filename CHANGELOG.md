@@ -31,6 +31,15 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Orphan instances are rejected only in the main module.** An
+  imported module — the stdlib and user libraries — may declare
+  instances for classes and types it does not define (the `JSON` module
+  now carries `ToJSON`/`FromJSON` instances for `Int`, `[a]`, …).
+  mata-ll compiles the whole program together, so there is no
+  cross-build incoherence for the rule to guard against in library
+  code; the check still catches a rogue instance in the program's own
+  module.
+
 - **Direct-perform IO recursion runs in constant stack and stops forcing
   `pure` payloads on the way out — with no loop pass needed.** A
   single-clause IO function's body IS its action ("direct-perform"), but
@@ -204,6 +213,38 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **`deriving (Generic)` and `Data.Generics` — datatype-generic
+  programming.** A concrete type deriving `Generic` gets a structural
+  sum-of-products representation: the compiler extends the closed `Rep`
+  type family with one equation per derive, synthesises the
+  `from`/`to` conversions, and reflects datatype/constructor/field
+  metadata (`datatypeName`, `datatypeConCount`, `conName`, `conArity`,
+  `conIsRecord`, `selName` — effective external names, `as` renames
+  applied). A generic function is an ordinary typeclass over the
+  representation combinators (`U1`, `K1`, `:+:`, `:*:`, `D1`/`C1`/`S1`),
+  written once and resolved by monomorphization at each concrete type.
+  Deviations from `GHC.Generics` are surface-level and documented in
+  HASKDIFF (module name, three distinct metadata wrappers instead of a
+  tagged `M1`, combinators of kind `Type`, no `V1`). For generic
+  producers, `Data.Generics` also exports `gProxy` and per-layer proxy
+  re-typers.
+
+- **`genericToJSON` and `genericFromJSON` in the `JSON` module.** A
+  generic encoder and decoder over the `Generic` representation whose
+  wire format AND error messages agree byte-for-byte with the derived
+  native codecs — usable on any `deriving (Generic)` type, and the
+  substrate's proof of fidelity (pinned by integration tests). The
+  module now also carries `ToJSON`/`FromJSON` instances for the
+  primitive leaf types (`Int`, `Number`, `String`, `Bool`, `Json`,
+  `[a]`, `Maybe a`), and the `FromJSON` class gained a defaulted
+  `fromJSONField` method (the `Maybe` instance overrides it, so
+  missing-key/null optionality is a property of the field lookup).
+
+- **Infix type operators.** `:`-leading symbolic names are type
+  constructors, in declarations (`data (:+:) a b = L1 a | R1 b`) and in
+  use (`f :+: g`), grouping by their declared fixity — the notation the
+  generic representation is written in.
+
 - **`schema2mll`, a JSON Schema → mata-ll type generator.** A standalone
   utility written in pure mata-ll (`utilities/schema2mll.mll`): it reads a
   JSON Schema on stdin and emits a data type deriving `FromJSON`/`ToJSON` on
@@ -293,6 +334,30 @@ API of the `mllc` library crate.)
   Lua values.
 
 ### Fixed
+
+- **Past the 16-specialisation guard, polymorphic functions and
+  instance methods now switch to WORKING dictionary passing.** The
+  guard against runaway specialisation (polymorphic recursion) used to
+  leave an instance method past the cap pointing at its raw polymorphic
+  original — whose unresolved method references were `nil` at runtime —
+  so a generic function applied to more than ~16 types died with an
+  opaque nil call. Now an instance method past the guard is purged to
+  dictionary passing like a top-level function; dictionaries for
+  parameterized instances are composed recursively from the instance's
+  context; the rewrite runs to a fixpoint (sibling constrained calls
+  pass dictionaries and mark their callees; bodies are re-monomorphized
+  from their pristine polymorphic copies so no one type's specialisation
+  gets welded into a shared body); and dead-code elimination parses the
+  dictionary strings format-structurally, so a live function whose
+  mangled name contains `:` (a type-operator instance) is no longer
+  dropped. Correct at any number of types; the guard remains a
+  performance boundary only.
+
+- **Dictionary-passing call sites pass value arguments lazily.** They
+  were emitted eagerly, which evaluated a possibly-bottom argument the
+  callee never demands — `g (f x)` with `f _ = error …` and `g`
+  ignoring its argument raised where GHC returns. Value arguments now
+  take the same lazy call protocol as ordinary calls.
 
 - **Self-recursive IO functions that perform as they run no longer
   overflow the Lua stack.** An IO function without pattern dispatch runs
