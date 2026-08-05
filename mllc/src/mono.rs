@@ -1334,6 +1334,24 @@ impl Monomorphizer {
                 let lit_src_ty = if is_frac { "Number" } else { "Int" };
                 match self.numeric_literal_conversion(class, method, &ty) {
                     Some(conv_fn) => {
+                        // An integer literal bound for a real fromInteger must
+                        // arrive EXACT. Emitted as a bare Lua numeral it is read
+                        // back by the host, and a doubles-only host (LuaJIT)
+                        // rounds anything past 2^53 — `9223372036854775807 ::
+                        // Integer` became 2^63 before the bignum ever saw it.
+                        // Past 2^53, re-dispatch as a BigInteger literal, which
+                        // codegen emits through the exact `__mll_biglit`
+                        // decimal pool on every host. (At machine Int/Number
+                        // types the conversion is None and the raw literal
+                        // remains the documented host representation.)
+                        if let TLiteral::Integer(n) = lit {
+                            if n.unsigned_abs() > (1u64 << 53) {
+                                return self.mono_expr(TExpr {
+                                    kind: TExprKind::Lit(TLiteral::BigInteger(n.to_string())),
+                                    ty,
+                                });
+                            }
+                        }
                         // The literal in its source (Int/Number) representation.
                         let raw = TExpr::new(
                             TExprKind::Lit(lit),

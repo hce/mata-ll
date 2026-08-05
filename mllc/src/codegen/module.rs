@@ -246,12 +246,30 @@ impl CodeGen {
         }
 
         if !all_fn_names.is_empty() {
+            // A slot that will be assigned a THUNKED value binding must not
+            // be seeded concrete: a reference emitted before the binding
+            // (forward reference, or any earlier-emitted body) consults
+            // concrete_vars to decide its `__force`, and a missed force
+            // hands strict positions a raw thunk — a False Bool CAF defined
+            // after its user read as a truthy table in an `if`. The
+            // prediction mirrors function_stmts' own concreteness outcome
+            // (debug_asserted there); constructors, newtypes and record
+            // accessors are always function values.
+            let thunked_slots: std::collections::HashSet<String> = module
+                .functions
+                .iter()
+                .chain(module.instance_fns.iter())
+                .filter(|f| !Self::slot_always_whnf(f))
+                .map(|f| sanitize_name(&f.name))
+                .collect();
             stmts.push(Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))));
             for (i, name) in all_fn_names.iter().enumerate() {
                 let slot = i + 1; // 1-based Lua indexing
                 self.fn_table.insert(name.clone(), slot);
                 self.forward_declared.insert(name.clone());
-                self.concrete_vars.insert(name.clone());
+                if !thunked_slots.contains(name) {
+                    self.concrete_vars.insert(name.clone());
+                }
                 self.top_level_names.insert(name.clone());
             }
         }

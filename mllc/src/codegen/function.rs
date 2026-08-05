@@ -20,6 +20,40 @@ use super::util::{count_arrows, expr_evaluates_global_ref, expr_references_name}
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
 impl CodeGen {
+    /// Will this binding's slot hold a directly-usable (WHNF) value from the
+    /// moment it is assigned — i.e. never a thunk? Seeds `concrete_vars` at
+    /// forward-declaration time (see the module layout), where a reference
+    /// emitted EARLIER than the binding must already know whether to
+    /// `__force` it. The answer must be exact on the `true` side: a missed
+    /// force hands a raw thunk to strict positions (an `if` condition read a
+    /// thunked False CAF as a truthy table). `false` merely emits an
+    /// idempotent extra force. Mirrors the branch structure of
+    /// `function_stmts`' value-binding arm, which debug_asserts agreement.
+    pub(super) fn slot_always_whnf(func: &TFunction) -> bool {
+        let clauses = &func.clauses;
+        let Some(first) = clauses.first() else { return true };
+        let type_arity = count_arrows(&func.ty);
+        let pat_arity = if first.patterns.is_empty() { 0 } else { first.patterns.len() };
+        let eta_count = type_arity.saturating_sub(pat_arity);
+        if !(clauses.len() == 1 && first.patterns.is_empty() && first.guards.is_empty()
+            && eta_count == 0)
+        {
+            // A real (or eta-expanded point-free) function: the slot holds a
+            // Lua function value.
+            return true;
+        }
+        // Value binding: the arms of function_stmts that stay concrete.
+        if matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _) | Ty::Forall(_, _)) {
+            return true;
+        }
+        if expr_references_name(&first.body, &func.name) {
+            return Self::is_cons_headed(&first.body);
+        }
+        first.where_binds.is_empty()
+            && Self::is_cheap(&first.body)
+            && !expr_evaluates_global_ref(&first.body)
+    }
+
     pub(super) fn function_stmts(&mut self, func: &TFunction) -> Vec<Stmt> {
         let lua_name = sanitize_name(&func.name);
         let clauses = &func.clauses;
@@ -156,6 +190,15 @@ impl CodeGen {
             self.concrete_vars = saved_concrete;
             self.local_strict_params = saved_local_strict;
             self.local_demand_rows = saved_local_rows;
+            // The forward-declaration seeding predicted this outcome from the
+            // same predicate; a mismatch means an earlier-emitted reference
+            // already chose its force wrongly.
+            debug_assert_eq!(
+                is_concrete,
+                Self::slot_always_whnf(func),
+                "slot_always_whnf out of sync with function_stmts for '{}'",
+                func.name
+            );
             if is_concrete {
                 self.concrete_vars.insert(lua_name);
             } else {

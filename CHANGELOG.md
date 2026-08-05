@@ -29,6 +29,30 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Fixed
+
+- **A thunked top-level binding referenced before its own definition is
+  now forced.** The module layout forward-declares every top-level name
+  and seeded them all as "concrete" (safe to read without `__force`);
+  a value binding emitted as a thunk only cleared that claim at its own
+  emission, so any reference in an earlier-emitted body read the raw
+  thunk table. In a strict position that is silently wrong on every
+  host — an `if` on a False Bool CAF defined after its user took the
+  True branch (a thunk table is truthy). The seeding now predicts each
+  slot's shape with the same rules the emission uses (kept in sync by a
+  debug assertion), so thunked slots keep their force everywhere. Found
+  on LuaJIT, where it made `hasIntegerSubtype` — False there, defined
+  below its users — read as True inside the JSON module, mis-routing
+  the new `Integer` codecs.
+
+- **An `Integer`-typed literal between 2^53 and 2^63 is exact on
+  doubles-only hosts.** Such a literal was emitted as a bare Lua
+  numeral and read back by the host, so LuaJIT rounded it before the
+  bignum ever saw it (`9223372036854775807 :: Integer` became 2^63).
+  A literal bound for a real `fromInteger` now routes through the
+  exact `__mll_biglit` decimal pool past 2^53, on every host; machine
+  `Int`/`Number` literals keep their documented host representation.
+
 ## [0.1.6] - 2026-08-05
 
 ### Changed
