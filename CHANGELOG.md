@@ -29,6 +29,8 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+## [0.1.6] - 2026-08-05
+
 ### Changed
 
 - **Orphan instances are rejected only in the main module.** An
@@ -245,6 +247,33 @@ API of the `mllc` library crate.)
   use (`f :+: g`), grouping by their declared fixity — the notation the
   generic representation is written in.
 
+- **Breaking: arbitrary-precision `Integer`, and it is the numeric
+  default.** 0.1.5 removed the misnamed wrapping `Integer`, leaving
+  `Int` (64-bit, wrapping) as the only integer type; this release
+  restores GHC's model with a real bignum. Unannotated numeric literals
+  default to `Integer` — defaulting is `(Integer, Number)`, matching
+  GHC's `(Integer, Double)` — and `Int` stays the explicit machine-word
+  type. `fromInteger` takes an `Integer` (was `Int`), and `toInteger`
+  returns to `Integral`. The runtime implementation is portable
+  base-2^24 limbs — exact on both Lua 5.3+ (native integers) and LuaJIT
+  (doubles) — with the full `Num`/`Real`/`Integral`/`Enum`/`Eq`/`Ord`/
+  `Show`/`Read` instance set and GHC's `divMod`/`quotRem` sign rules.
+  Literals past `maxBound :: Int` work in expressions and in patterns;
+  each distinct big literal is pooled into a module-level table and
+  parsed once at load, not at every use. Byte-identical to GHC on the
+  oracle cases. Breaking because defaulted arithmetic that previously
+  wrapped at 64 bits now computes the exact result.
+
+- **The `(^)` exponentiation operator.** `(^) :: Num a => a -> Int -> a`,
+  `infixr 8`, exponentiation by squaring over `Num` multiplication — so
+  it is exact at `Integer` (`2 ^ 100` matches GHC byte-for-byte), and a
+  negative exponent is an error. Lua's own `^` is float power and is
+  deliberately not used.
+
+- **`pOpen` in `LIO`.** `pOpen :: String -> String ->
+  LuaTry "io.popen" (Either String FileHandle)` — run a command and read
+  from or write to it through the existing `FileHandle` methods.
+
 - **`schema2mll`, a JSON Schema → mata-ll type generator.** A standalone
   utility written in pure mata-ll (`utilities/schema2mll.mll`): it reads a
   JSON Schema on stdin and emits a data type deriving `FromJSON`/`ToJSON` on
@@ -358,6 +387,34 @@ API of the `mllc` library crate.)
   callee never demands — `g (f x)` with `f _ = error …` and `g`
   ignoring its argument raised where GHC returns. Value arguments now
   take the same lazy call protocol as ordinary calls.
+
+- **A function body can no longer narrow its signature's type
+  variables.** `f :: a -> Int; f x = x` and
+  `g :: Monad m => m (); g = putStrLn "hi"` both compiled: signature
+  variables were freshened to flexible unification variables, so a
+  clause body could silently pin one to a concrete type — the first
+  example handed runtime a `String` typed as `Int` (a Lua "add string to
+  number" crash waiting to happen). GHC rejects both, and mata-ll now
+  does too: signature variables are rigid (skolemized) while the body is
+  checked, with the signature's declared context as the usable
+  instances. GADT index refinement still narrows them legitimately, and
+  the rigid-mismatch error names the signature the variable came from.
+
+- **A higher-rank argument must really be polymorphic.**
+  `apply2 :: (forall a. a -> a) -> …` applied to `\x -> x + 1` compiled,
+  and `apply2` using its argument at both `Int` and `Bool` ran
+  `True + 1` at runtime. The `Num` constraint on the sealed argument was
+  deferred to a caller that cannot exist; it is now reported as
+  unsatisfiable, with a note explaining the argument must work for every
+  type.
+
+- **Four inference bugs that `Int`'s eager evaluation had masked** —
+  found while making `Integer` the default: record-update values unify
+  against the field's type instead of defaulting alone; a shadowed
+  `do`-`let` binding gets a fresh local, so a lazy thunk no longer
+  observes the rebinding; prefix minus and operator-section values
+  dispatch at the operand's type; `where` bindings are inferred against
+  the running substitution.
 
 - **Self-recursive IO functions that perform as they run no longer
   overflow the Lua stack.** An IO function without pattern dispatch runs

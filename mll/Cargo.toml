@@ -3,7 +3,7 @@
 # (matching the project, repo, and matall.org); the installed binary stays `mll`
 # via the [[bin]] target below. `cargo install mata-ll` provides the `mll` command.
 name = "mata-ll"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 rust-version = "1.85"
 description = "mata-ll command-line compiler and runner: compiles a Haskell subset to Lua and runs it via an embedded Lua interpreter."
@@ -23,6 +23,6 @@ path = "src/main.rs"
 
 [dependencies]
 # path for in-workspace builds; version used when published (mllc publishes first).
-mllc = { path = "../mllc", version = "0.1.5" }
+mllc = { path = "../mllc", version = "0.1.6" }
 mlua = { version = "0.12", features = ["lua54", "vendored"] }
 clap = { version = "4.6", features = ["derive"] }

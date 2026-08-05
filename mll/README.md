@@ -32,27 +32,30 @@ mll -r fib.mll     # compile and run immediately
 
 ## Changelog
 
-Latest release — 0.1.5:
+Latest release — 0.1.6:
 
-- Breaking: the integer type is now `Int`, not `Integer`. mata-ll's integer
-  wraps at 64 bits — exactly GHC's `Int` — so it carries that name; there is no
-  arbitrary-precision `Integer`. Writing `Integer` (or `toInteger`) is a compile
-  error with a note pointing at `Int`, and a literal past `maxBound :: Int` is
-  rejected rather than silently wrapped. Numeric defaulting is `default (Int,
-  Number)`. Migration is mechanical: `Integer` → `Int`.
-- Correctness: `show` now matches GHC byte-for-byte — string quoting/escaping,
-  `,`-no-space list and tuple separators, record syntax, and a faithful
-  Burger-Dybvig `Number` (`Double`) formatter, all verified against GHC 9.14.1.
-- Laziness: extracting a list tail no longer forces the next spine cell, so
-  spine walkers stop exactly where GHC does (`take 2 (1 : 2 : error "boom")` is
-  `[1, 2]`); IO sequencing is a proper Lua tail call, so `mapM_` streams a
-  million-element list in constant stack and constant memory.
-- Syntax: `LuaIterator` and `LuaTry` results are written explicitly as a list
-  (`LuaIterator "string.gmatch" [String]`) or `Either String a`; the old
-  bare-payload shorthands are rejected at parse time with the required shape.
-- Determinism: compiling the same source twice yields byte-identical Lua,
-  guarded by a test; the code generator is now AST-based (malformed statements
-  unrepresentable), and demand analysis removes more thunk allocations.
+- Breaking: arbitrary-precision `Integer` — a real bignum this time — and it
+  is the numeric default, restoring GHC's model: unannotated literals default
+  to `Integer` (`default (Integer, Number)`), `Int` stays the explicit 64-bit
+  machine-word type. Exact on both PUC Lua and LuaJIT; with the new `(^)`
+  operator, `2 ^ 100` matches GHC byte-for-byte.
+- Generics: `deriving (Generic)` and a `Data.Generics` module — `from`/`to`,
+  the representation types, and datatype/constructor/field metadata — plus
+  `genericToJSON`/`genericFromJSON` in `JSON`, byte-exact library twins of the
+  native codec derives. Infix type operators (`data (:+:) a b = …`) come with
+  it.
+- Soundness: a function body can no longer narrow its signature's type
+  variables (`f :: a -> Int; f x = x` is rejected, as GHC rejects it), and a
+  higher-rank argument must really be polymorphic — the program that ran
+  `True + 1` at runtime no longer compiles.
+- Performance: self-tail-recursive functions and self-recursive IO loops
+  compile to Lua `while` loops and run in constant stack at any depth, and an
+  annotation engine strips provably redundant `__force` calls from the
+  generated code.
+- Syntax: the full Haskell 2010 string-escape grammar, scientific-notation
+  literals, `let` qualifiers in list comprehensions, and multi-line list
+  literals, comprehensions and parenthesized expressions free of the layout
+  rule.
 
 See [CHANGELOG.md](https://github.com/hce/mata-ll/blob/main/CHANGELOG.md) for the
 full history.
