@@ -789,7 +789,7 @@ variable.
 
     class Read a where
         read :: String -> a
-        -- Instances: Int, Number, Bool, String
+        -- Instances: Int, Integer, Number, Bool, String
 
     class Enum a where
         succ        :: a -> a
@@ -1157,11 +1157,11 @@ is the identity and is erased, so `(42 :: Int)` and
 `3.14`.
 
 An unconstrained numeric literal is resolved by GHC's defaulting rule
-`default (Int, Number)` (`Number` standing in for GHC's `Double`):
-the first of `Int` then `Number` whose instances satisfy the
+`default (Integer, Number)` (matching GHC's `(Integer, Double)`):
+the first of `Integer` then `Number` whose instances satisfy the
 variable's (standard) class constraints is chosen. So `show 5` is
-`show (5 :: Int)`, while `show (5 / 2)` resolves to `Number`
-(because `Int` is not `Fractional`). A variable also constrained
+`show (5 :: Integer)`, while `show (5 / 2)` resolves to `Number`
+(because `Integer` is not `Fractional`). A variable also constrained
 by a non-standard (user) class is not defaulted — such a use is
 ambiguous and needs an annotation, matching GHC.
 
@@ -1518,7 +1518,10 @@ string (see "Boundaries between standard Lua and MATA-LL").
 which offers a hand-written codec alongside the derived instances:
 `encodeToJSON :: ToJSON a => a -> String` serializes a value, and
 `decodeJSON :: FromJSON a => String -> Either String a` parses one.
-Record fields map to JSON object keys.
+Record fields map to JSON object keys. `Integer` round-trips exactly
+at any magnitude — the `Json` type carries integer syntax beyond the
+host number's exact window in a dedicated `JInt Integer` constructor,
+and encoding emits bare decimal digits.
 
 ## Generic (datatype-generic programming)
 

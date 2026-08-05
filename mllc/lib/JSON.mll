@@ -1,8 +1,14 @@
 import LString (strByte, strLen, strSub, strChar)
 import Data.Generics
 
--- JSON value type
-data Json = JNull | JBool Bool | JNum Number | JStr String | JArr [Json] | JObj [(String, Json)]
+-- JSON value type. Numbers come in two constructors: JNum holds a host
+-- number (every value the interpreter represents exactly), and JInt holds
+-- an arbitrary-precision Integer for integer syntax beyond the host
+-- number's exact range — so no digits are ever lost between parseJSON and
+-- encodeJSON. The parser and the ToJSON instances keep the split canonical
+-- — a JInt never holds a value that fits a host number exactly — which is
+-- what keeps Eq meaningful across an encode/parse round trip.
+data Json = JNull | JBool Bool | JNum Number | JInt Integer | JStr String | JArr [Json] | JObj [(String, Json)]
     deriving (Eq)
 
 -- Parse result
@@ -41,6 +47,7 @@ encodeJSON JNull = "null"
 encodeJSON (JBool True) = "true"
 encodeJSON (JBool False) = "false"
 encodeJSON (JNum n) = encodeNum n
+encodeJSON (JInt i) = show i
 encodeJSON (JStr s) = encodeStr s
 encodeJSON (JArr xs) = "[" <> encodeElems xs <> "]"
 encodeJSON (JObj fields) = "{" <> encodePairs fields <> "}"
@@ -97,6 +104,7 @@ jTypeName :: Json -> String
 jTypeName JNull = "null"
 jTypeName (JBool _) = "a boolean"
 jTypeName (JNum _) = "a number"
+jTypeName (JInt _) = "a number"
 jTypeName (JStr _) = "a string"
 jTypeName (JArr _) = "an array"
 jTypeName (JObj _) = "an object"
@@ -106,8 +114,14 @@ toJSONInt n = JNum (intToNum n)
 
 -- Decode a number that must be integral. A non-integral number (3.5) and a
 -- number outside the 64-bit Int range are both rejected with a clear error.
+-- A JInt within the Int range only occurs on a doubles-only host (where the
+-- exact-number window ends at 2^53); narrowing it to the machine type there
+-- matches what parsing the same digits into a host number always did.
 fromJSONInt :: Json -> Either String Int
 fromJSONInt (JNum n) = numToInteger n
+fromJSONInt (JInt i) = if integerFitsInt i
+    then Right (fromInteger i)
+    else Left ("the number " <> show i <> " is outside the 64-bit Int range")
 fromJSONInt j = Left ("expected an integer, but found " <> jTypeName j)
 
 -- A number with Lua's integer subtype is exact and in range by construction
@@ -123,7 +137,8 @@ numToInteger n = if numMathType n == "integer"
 -- rounded there from an out-of-range neighbour (e.g. -9223372036854775809
 -- becomes exactly -2^63), so accepting the boundary float would silently
 -- decode a wrong value. The true minimum -9223372036854775808 still decodes
--- exactly — the parser special-cases its integer spelling (see numExact).
+-- exactly — the parser converts long integer spellings by value, not
+-- through tonumber (see numFinishInt).
 -- note: the one casualty is float syntax for the exact minimum, like
 -- -9223372036854775808.0, which is rejected as out of range; GHC's aeson
 -- accepts it because it parses numbers exactly (Scientific), which a Lua
@@ -136,11 +151,53 @@ numToIntegerFloat n = case numModf n of
             then Right (numFloor n)
             else Left ("the number " <> encodeNum n <> " is outside the 64-bit Int range")
 
+-- Whether an Integer fits GHC's 64-bit Int range.
+integerFitsInt :: Integer -> Bool
+integerFitsInt i = i >= 0 - 9223372036854775808 && i <= 9223372036854775807
+
+-- The window in which the host number type holds an integer exactly: the
+-- full 64-bit range with an integer subtype (Lua 5.3+), and the double's
+-- contiguous integer range +/-2^53 on a doubles-only host (LuaJIT).
+integerIsExactNum :: Integer -> Bool
+integerIsExactNum i = if hasIntegerSubtype
+    then integerFitsInt i
+    else i >= 0 - 9007199254740992 && i <= 9007199254740992
+
+-- Convert an Integer known to be inside the exact window. With an integer
+-- subtype the value goes through Int, so it keeps the subtype and encodeNum
+-- prints plain digits; on a doubles-only host it becomes the (exact) double.
+integerToNum :: Integer -> Number
+integerToNum i = if hasIntegerSubtype then intToNum (fromInteger i) else fromInteger i
+
+-- Encode an Integer of any magnitude. Inside the host number's exact window
+-- it is an ordinary JNum (so encode/parse round-trips the Json value
+-- unchanged); beyond it, a JInt carrying the exact value. Both spellings
+-- serialize to the same bare decimal digits GHC's aeson emits.
+toJSONInteger :: Integer -> Json
+toJSONInteger i = if integerIsExactNum i then JNum (integerToNum i) else JInt i
+
+-- Decode an Integer: exact at any magnitude from integer-syntax JSON, which
+-- the parser delivers without loss (as JNum inside the host's exact window,
+-- JInt beyond it). Float and exponent syntax is held as a host double, so
+-- it is accepted when integral and within the 64-bit range, like Int.
+-- note: GHC's aeson parses every number exactly (Scientific), so it decodes
+-- e.g. 1e30 to an Integer; mata-ll rejects it rather than decode the
+-- neighbouring value the double rounded to. Spell big integers in digits.
+fromJSONInteger :: Json -> Either String Integer
+fromJSONInteger (JInt i) = Right i
+fromJSONInteger (JNum n) = case numToInteger n of
+    Left e -> Left e
+    Right k -> Right (toInteger k)
+fromJSONInteger j = Left ("expected an integer, but found " <> jTypeName j)
+
 toJSONNumber :: Number -> Json
 toJSONNumber n = JNum n
 
+-- A JInt converts with the precision the double affords — the same
+-- narrowing GHC's aeson performs decoding a big Scientific into a Double.
 fromJSONNumber :: Json -> Either String Number
 fromJSONNumber (JNum n) = Right n
+fromJSONNumber (JInt i) = Right (fromInteger i)
 fromJSONNumber j = Left ("expected a number, but found " <> jTypeName j)
 
 toJSONString :: String -> Json
@@ -353,9 +410,10 @@ parseFalse s pos len = if pos + 4 <= len && strSub s pos (pos + 4) == "false" th
 -- Follows the JSON grammar exactly: -?int frac? exp?, where int has no
 -- leading zeros, and frac/exp require at least one digit. Enforcing the
 -- grammar here guarantees the matched text is always a valid Lua numeral,
--- so toNumber can never return garbage. Int-syntax numbers parse to
--- Lua's 64-bit integer subtype (exact for the full Int range) and
--- float syntax parses to a double, so no information is lost that a later
+-- so toNumber can never return garbage. Integer-syntax numbers are exact
+-- at any length: inside the host number's window they parse to a JNum
+-- (Lua's integer subtype where it exists), beyond it to a JInt bignum.
+-- Float syntax parses to a double, so no information is lost that a later
 -- integrality check (fromJSONInt) would need.
 -- ================================================================
 
@@ -373,13 +431,13 @@ numDigits :: String -> Int -> Int -> Int -> JResult
 numDigits s pos len start = if pos <= len && isDigitByte (strByte s pos) then numDigits s (pos + 1) len start else numAfterInt s pos len start
 
 numAfterInt :: String -> Int -> Int -> Int -> JResult
-numAfterInt s pos len start = if pos > len then numFinish s start pos else numAfterIntByte s pos len start (strByte s pos)
+numAfterInt s pos len start = if pos > len then numFinishInt s start pos else numAfterIntByte s pos len start (strByte s pos)
 
 numAfterIntByte :: String -> Int -> Int -> Int -> Int -> JResult
 numAfterIntByte s pos len start 46 = numFracStart s (pos + 1) len start
 numAfterIntByte s pos len start 101 = numExpSign s (pos + 1) len start
 numAfterIntByte s pos len start 69 = numExpSign s (pos + 1) len start
-numAfterIntByte s pos len start c = if isDigitByte c then JErr ("Invalid number at position " <> show start <> ": JSON does not allow leading zeros") else numFinish s start pos
+numAfterIntByte s pos len start c = if isDigitByte c then JErr ("Invalid number at position " <> show start <> ": JSON does not allow leading zeros") else numFinishInt s start pos
 
 numFracStart :: String -> Int -> Int -> Int -> JResult
 numFracStart s pos len start = if pos <= len && isDigitByte (strByte s pos) then numFracDigits s (pos + 1) len start else JErr ("Invalid number at position " <> show start <> ": at least one digit is required after the decimal point")
@@ -399,20 +457,29 @@ numExpStart s pos len start = if pos <= len && isDigitByte (strByte s pos) then 
 numExpDigits :: String -> Int -> Int -> Int -> JResult
 numExpDigits s pos len start = if pos <= len && isDigitByte (strByte s pos) then numExpDigits s (pos + 1) len start else numFinish s start pos
 
+-- Float syntax (a fraction or an exponent was seen): a host double.
 numFinish :: String -> Int -> Int -> JResult
-numFinish s start pos = JOk (JNum (numExact (strSub s start (pos - 1)))) (skipWS s pos (strLen s))
+numFinish s start pos = JOk (JNum (toNumber (strSub s start (pos - 1)))) (skipWS s pos (strLen s))
 
--- Convert matched number text to a Lua number, with one special case: the
--- exact spelling of the minimum 64-bit integer. Lua's tonumber reads it as
--- -(9223372036854775808); the positive magnitude overflows the integer
--- subtype, so the result comes back as a float — indistinguishable from
--- out-of-range neighbours like -9223372036854775809 that round onto the
--- same double. Converting this one spelling by hand keeps the entire int64
--- range decodable with integer precision.
-numExact :: String -> Number
-numExact t = if t == "-9223372036854775808"
-    then intToNum (0 - 9223372036854775807 - 1)
-    else toNumber t
+-- Integer syntax. Up to 15 characters the value is exactly representable
+-- on every host (under both 2^53 and 2^63), so plain tonumber is exact.
+-- Longer tokens are read exactly as Integer first and then placed: a JNum
+-- while the host number still holds the value exactly, a JInt beyond that.
+-- The Integer route also absorbs the one tonumber corner: Lua reads the
+-- exact spelling of the minimum 64-bit integer as -(9223372036854775808),
+-- whose positive magnitude overflows to a float; integerToNum converts by
+-- value instead of respelling, so the entire int64 range stays exact.
+numFinishInt :: String -> Int -> Int -> JResult
+numFinishInt s start pos = JOk (intToken (strSub s start (pos - 1))) (skipWS s pos (strLen s))
+
+intToken :: String -> Json
+intToken t = if strLen t <= 15 then JNum (toNumber t) else intTokenBig (readInteger t)
+
+intTokenBig :: Integer -> Json
+intTokenBig i = if integerIsExactNum i then JNum (integerToNum i) else JInt i
+
+readInteger :: String -> Integer
+readInteger t = read t
 
 isDigitByte :: Int -> Bool
 isDigitByte c = c >= 48 && c <= 57
@@ -665,9 +732,21 @@ jString :: Json -> Maybe String
 jString (JStr s) = Just s
 jString _ = Nothing
 
+-- A JInt answers with the double's precision, like fromJSONNumber; use
+-- jInteger to read big integers exactly.
 jNumber :: Json -> Maybe Number
 jNumber (JNum n) = Just n
+jNumber (JInt i) = Just (fromInteger i)
 jNumber _ = Nothing
+
+-- The exact integer value of a number: any magnitude of integer syntax,
+-- and integral floats within the 64-bit range. Nothing otherwise.
+jInteger :: Json -> Maybe Integer
+jInteger (JInt i) = Just i
+jInteger (JNum n) = case numToInteger n of
+    Left _ -> Nothing
+    Right k -> Just (toInteger k)
+jInteger _ = Nothing
 
 jBool :: Json -> Maybe Bool
 jBool (JBool b) = Just b
@@ -688,6 +767,9 @@ jIsNull _ = False
 
 instance ToJSON Int where
     toJSON n = toJSONInt n
+
+instance ToJSON Integer where
+    toJSON i = toJSONInteger i
 
 instance ToJSON Number where
     toJSON n = toJSONNumber n
@@ -720,6 +802,9 @@ instance ToJSON a => ToJSON (Maybe a) where
 
 instance FromJSON Int where
     fromJSON j = fromJSONInt j
+
+instance FromJSON Integer where
+    fromJSON j = fromJSONInteger j
 
 instance FromJSON Number where
     fromJSON j = fromJSONNumber j

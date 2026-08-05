@@ -264,6 +264,21 @@ API of the `mllc` library crate.)
   oracle cases. Breaking because defaulted arithmetic that previously
   wrapped at 64 bits now computes the exact result.
 
+- **`ToJSON`/`FromJSON` cover `Integer` — exactly, at any magnitude.**
+  Encoding emits the bare decimal digits aeson emits; decoding is exact
+  from integer-syntax JSON of any length. `Json` gains a `JInt Integer`
+  constructor carrying integer syntax beyond the host number's exact
+  window (the full 64-bit range with Lua's integer subtype, 2^53 on a
+  doubles-only host), so parseJSON/encodeJSON never lose digits; inside
+  the window numbers stay ordinary `JNum`s, so encode/parse round-trips
+  a `Json` value unchanged. The native derives, the generic codecs'
+  leaves, and the new `toJSONInteger`/`fromJSONInteger` combinators all
+  agree byte-for-byte; a `jInteger` accessor reads the exact value.
+  Float/exponent syntax is held as a host double and decodes to
+  `Integer` only within the 64-bit range — aeson, which parses every
+  number exactly, also accepts e.g. `1e30`; spell big integers in
+  digits.
+
 - **The `(^)` exponentiation operator.** `(^) :: Num a => a -> Int -> a`,
   `infixr 8`, exponentiation by squaring over `Num` multiplication — so
   it is exact at `Integer` (`2 ^ 100` matches GHC byte-for-byte), and a
@@ -387,6 +402,17 @@ API of the `mllc` library crate.)
   callee never demands — `g (f x)` with `f _ = error …` and `g`
   ignoring its argument raised where GHC returns. Value arguments now
   take the same lazy call protocol as ordinary calls.
+
+- **`fromInteger` to `Int` is exact through the full 64-bit range.** The
+  machine-value reconstruction accumulated in float arithmetic (bignum
+  limbs can carry Lua's float subtype: carry propagation divides with
+  `/`, float division), so `fromInteger (toInteger (maxBound :: Int))`
+  rounded to 2^63 — off by one. It now re-anchors each limb as an
+  integer and accumulates in integer arithmetic: exact through int64,
+  and past 2^64 it wraps exactly like GHC's `Integer`-to-`Int`
+  narrowing. Conversion to `Number` keeps float accumulation, so a huge
+  `Integer` approximates to the nearest double, as GHC's `fromInteger`
+  to `Double` does.
 
 - **A function body can no longer narrow its signature's type
   variables.** `f :: a -> Int; f x = x` and

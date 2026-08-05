@@ -1516,11 +1516,27 @@ local function read_Integer(s)
 end
 -- toInteger @Int: lift a machine Int to an Integer (bignum).
 local function toInteger_Int(x) return fromInteger_Integer(__force(x)) end
--- Reconstruct the machine magnitude of an Integer (high limb first). Exact
--- while the value fits the host's number type (2^63 on Lua 5.3+, 2^53 on a
--- doubles-only host — the documented host limit for Int).
+-- Reconstruct the machine value of an Integer (high limb first). Limbs can
+-- carry Lua's float subtype (carry propagation divides with `/`, which is
+-- float division on 5.3+), though each limb's VALUE is an exact integer
+-- below 2^24 — so the Int target re-anchors every limb with math.tointeger
+-- and accumulates in integer arithmetic: exact through the full int64
+-- range, and past it Lua's integer arithmetic wraps exactly like GHC's
+-- Integer->Int narrowing. Float accumulation instead would round at 2^53
+-- (maxBound :: Int came back off by one). On a doubles-only host the
+-- identity fallback keeps the documented 2^53 exactness window.
+local __int_limb = math.tointeger or function(x) return x end
 local function __int_to_machine(x)
     local acc = 0
+    for i = #x, 2, -1 do acc = acc * __INT_B + __int_limb(x[i]) end
+    if x[1] < 0 then return -acc end
+    return acc
+end
+-- The Number target accumulates in floats: a huge Integer approximates to
+-- the nearest double (as GHC's fromInteger to Double does) instead of
+-- wrapping at 2^64.
+local function __int_to_double(x)
+    local acc = 0.0
     for i = #x, 2, -1 do acc = acc * __INT_B + x[i] end
     if x[1] < 0 then return -acc end
     return acc
@@ -1535,7 +1551,7 @@ local function fromInteger_Int(x)
 end
 local function fromInteger_Number(x)
     x = __force(x)
-    if type(x) == "table" then return __int_to_machine(x) + 0.0 end
+    if type(x) == "table" then return __int_to_double(x) end
     return x
 end
 -- Numeric-literal pattern equality. The scrutinee may be a machine number (Int)

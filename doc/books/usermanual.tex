@@ -1568,12 +1568,19 @@ At the base sits an ordinary algebraic data type for JSON values, with
 a parser and a serializer:
 
 \begin{lstlisting}
-data Json = JNull | JBool Bool | JNum Number | JStr String
-          | JArr [Json] | JObj [(String, Json)]
+data Json = JNull | JBool Bool | JNum Number | JInt Integer
+          | JStr String | JArr [Json] | JObj [(String, Json)]
 
 parseJSON  :: String -> Either String Json
 encodeJSON :: Json -> String
 \end{lstlisting}
+
+Numbers come in two constructors: \texttt{JNum} holds every value the
+host number represents exactly, and \texttt{JInt} carries integer
+syntax beyond that window as an arbitrary-precision \texttt{Integer} ---
+so \texttt{Integer} values of any magnitude round-trip through JSON
+without losing a digit, encoded as the bare decimal digits GHC's aeson
+emits.
 
 You can pattern-match \texttt{Json} values directly, but usually you
 will not need to: deriving \texttt{ToJSON} and \texttt{FromJSON}

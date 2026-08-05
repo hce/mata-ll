@@ -105,24 +105,22 @@ yet write code generic over `Floating a`/`RealFrac a`, nor give those classes a
 user instance. Generalising them is deferred; the underlying operations are all
 present, so this is a missing abstraction, not missing functionality.
 
-## Numeric-literal patterns are monomorphic; some literal errors defer
+## Some literal type errors defer to the enclosing binding
 
-A numeric *literal pattern* (`f 0 = …`) matches at the concrete literal type
-(`Int` or `Number`), not at a polymorphic `Num a`. This differs from GHC,
-where a literal pattern is `(== fromInteger n)` and works at any `Num`/`Eq`
-type; in practice the scrutinee is almost always concrete, so this rarely
-shows. Separately, because integer literals are now `Num a => a`, a mismatch
+Because integer literals are `Num a => a`, a mismatch
 like `let x = 5 in putStrLn x` is reported as a deferred `No instance for
 (Num String)` at the enclosing binding rather than a use-site "cannot unify
-Int with String" — the program is still rejected, but the message is the
-instance error GHC also gives.
+Integer with String" — the program is still rejected, but the message is the
+instance error GHC also gives. (Numeric *literal patterns* are
+`Num`-polymorphic like GHC's `(== fromInteger n)` and compare
+type-directed at runtime.)
 
 ## Numeric defaulting only applies to standard classes
 
-An unconstrained numeric literal defaults `Int` then `Number` — mata-ll is
-defined as GHC with an implicit `default (Int, Double)` (`Number` = GHC's
-`Double`), where standard GHC would use `default (Integer, Double)`. As in
-GHC, defaulting applies only when every
+An unconstrained numeric literal defaults `Integer` then `Number` — mata-ll
+is defined as GHC with an implicit `default (Integer, Number)`, matching
+standard GHC's `default (Integer, Double)` (`Number` = GHC's `Double`).
+As in GHC, defaulting applies only when every
 class constraining the variable is *standard* (a numeric class, `Eq`, `Ord`,
 `Show`, `Read`, `Enum`, `Bounded`). A literal also constrained by a user class
 — e.g. `myClassMethod 5` where `5 :: (MyClass a, Num a) => a` — is

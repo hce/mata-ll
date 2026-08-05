@@ -2003,6 +2003,7 @@ impl Checker {
         let dec_ty = Ty::arrow(Self::json_ty(), Self::estr_ty(field_ty));
         match field_ty {
             Ty::Con(n) if n == "Int" => Ok(Self::jx_var("fromJSONInt", dec_ty)),
+            Ty::Con(n) if n == "Integer" => Ok(Self::jx_var("fromJSONInteger", dec_ty)),
             Ty::Con(n) if n == "Number" => Ok(Self::jx_var("fromJSONNumber", dec_ty)),
             Ty::Con(n) if n == "String" => Ok(Self::jx_var("fromJSONString", dec_ty)),
             Ty::Con(n) if n == "Bool" => Ok(Self::jx_var("fromJSONBool", dec_ty)),
@@ -2658,6 +2659,7 @@ impl Checker {
         let enc_ty = Ty::arrow(field_ty.clone(), Self::json_ty());
         match field_ty {
             Ty::Con(n) if n == "Int" => Ok(Self::jx_var("toJSONInt", enc_ty)),
+            Ty::Con(n) if n == "Integer" => Ok(Self::jx_var("toJSONInteger", enc_ty)),
             Ty::Con(n) if n == "Number" => Ok(Self::jx_var("toJSONNumber", enc_ty)),
             Ty::Con(n) if n == "String" => Ok(Self::jx_var("toJSONString", enc_ty)),
             Ty::Con(n) if n == "Bool" => Ok(Self::jx_var("toJSONBool", enc_ty)),

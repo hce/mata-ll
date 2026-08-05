@@ -1200,6 +1200,7 @@ mll_lib_test!(bytestring_u64_sign_bit, "bytestring_u64_sign_bit.mll");
 mll_lib_test!(lib_lmath, "lib_lmath.mll");
 mll_lib_test!(lib_json, "lib_json.mll");
 mll_lib_test!(json_codec, "json_codec.mll");
+mll_lib_test!(integer_json, "integer_json.mll");
 mll_lib_test!(derive_fromjson, "derive_fromjson.mll");
 mll_lib_test!(derive_tojson, "derive_tojson.mll");
 mll_lib_test!(derive_generic, "derive_generic.mll");

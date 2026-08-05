@@ -26,7 +26,8 @@ Latest release — 0.1.6:
   is the numeric default, restoring GHC's model: unannotated literals default
   to `Integer` (`default (Integer, Number)`), `Int` stays the explicit 64-bit
   machine-word type. Exact on both PUC Lua and LuaJIT; with the new `(^)`
-  operator, `2 ^ 100` matches GHC byte-for-byte.
+  operator, `2 ^ 100` matches GHC byte-for-byte, and the JSON codecs
+  round-trip `Integer` exactly at any magnitude.
 - Generics: `deriving (Generic)` and a `Data.Generics` module — `from`/`to`,
   the representation types, and datatype/constructor/field metadata — plus
   `genericToJSON`/`genericFromJSON` in `JSON`, byte-exact library twins of the

@@ -111,6 +111,16 @@ at a concrete type inlines to bare Lua operators. `fromInteger :: Integer
 
 `Number` maps to Lua's float type (double-precision IEEE 754).
 
+JSON round-trips `Integer` exactly at any magnitude: encoding emits the
+bare decimal digits aeson emits, and the parser keeps integer-syntax
+digits without loss (`Json` carries a `JInt Integer` constructor for
+values beyond the host number's exact window). The one decode divergence:
+aeson parses every number exactly (`Scientific`), so it also decodes
+exponent syntax like `1e30` into an `Integer`; mata-ll's parser holds
+float/exponent syntax as a host double, and `FromJSON Integer` rejects it
+beyond the 64-bit range rather than decode the neighbouring value the
+double rounded to. Spell big integers in digits.
+
 ## Numeric typeclasses: Num / Fractional / Real / Integral
 
 The numeric hierarchy is present with GHC's signatures — `Num`
