@@ -32,7 +32,7 @@ fn desugar_decl(decl: &mut Decl) {
 }
 
 fn desugar_clause(clause: &mut Clause) {
-    clause.body = desugar_expr(std::mem::replace(&mut clause.body, Expr::Lit(Literal::Bool(false))));
+    clause.body = clause.body.take().map(desugar_expr);
     for guard in &mut clause.guards {
         guard.condition = desugar_expr(std::mem::replace(&mut guard.condition, Expr::Lit(Literal::Bool(false))));
         guard.body = desugar_expr(std::mem::replace(&mut guard.body, Expr::Lit(Literal::Bool(false))));
@@ -107,7 +107,7 @@ fn desugar_expr(expr: Expr) -> Expr {
             branches: branches.into_iter().map(|b| CaseBranch {
                 pattern: b.pattern,
                 guards: b.guards,
-                body: desugar_expr(b.body),
+                body: b.body.map(desugar_expr),
             }).collect(),
         },
         Expr::Let { binds, body } => Expr::Let {
@@ -225,7 +225,7 @@ fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
                             branches: vec![CaseBranch {
                                 pattern: pattern.clone(),
                                 guards: vec![],
-                                body: Expr::Var(v),
+                                body: Some(Expr::Var(v)),
                             }],
                         },
                     });
@@ -249,7 +249,7 @@ fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
                             branches: vec![CaseBranch {
                                 pattern: pattern.clone(),
                                 guards: vec![],
-                                body: result,
+                                body: Some(result),
                             }],
                         }),
                     }),

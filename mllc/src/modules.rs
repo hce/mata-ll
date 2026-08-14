@@ -510,7 +510,7 @@ impl Qual<'_> {
                 condition: self.expr(&g.condition, &bound),
                 body: self.expr(&g.body, &bound),
             }).collect(),
-            body: self.expr(&c.body, &bound),
+            body: c.body.as_ref().map(|b| self.expr(b, &bound)),
             where_binds: c.where_binds.iter().map(|ld| self.localdef(ld, &bound)).collect(),
             span: c.span,
         }
@@ -568,7 +568,7 @@ impl Qual<'_> {
                             condition: self.expr(&g.condition, &b),
                             body: self.expr(&g.body, &b),
                         }).collect(),
-                        body: self.expr(&br.body, &b),
+                        body: br.body.as_ref().map(|body| self.expr(body, &b)),
                     }
                 }).collect(),
             },
@@ -690,7 +690,7 @@ fn rewrite_qualified_uses_decl(decl: Decl, aliases: &HashSet<String>) -> Decl {
                     condition: rewrite_uses_expr(g.condition, aliases),
                     body: rewrite_uses_expr(g.body, aliases),
                 }).collect(),
-                body: rewrite_uses_expr(c.body, aliases),
+                body: c.body.map(|b| rewrite_uses_expr(b, aliases)),
                 where_binds: c.where_binds.into_iter()
                     .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
                 span: c.span,
@@ -707,7 +707,7 @@ fn rewrite_qualified_uses_decl(decl: Decl, aliases: &HashSet<String>) -> Decl {
                         condition: rewrite_uses_expr(g.condition, aliases),
                         body: rewrite_uses_expr(g.body, aliases),
                     }).collect(),
-                    body: rewrite_uses_expr(c.body, aliases),
+                    body: c.body.map(|b| rewrite_uses_expr(b, aliases)),
                     where_binds: c.where_binds.into_iter()
                         .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
                     span: c.span,
@@ -831,7 +831,7 @@ fn refs_in_clause(c: &Clause, out: &mut HashSet<String>) {
         refs_in_expr(&g.condition, out);
         refs_in_expr(&g.body, out);
     }
-    refs_in_expr(&c.body, out);
+    if let Some(b) = &c.body { refs_in_expr(b, out); }
     for b in &c.where_binds {
         refs_in_expr(&b.body, out);
     }

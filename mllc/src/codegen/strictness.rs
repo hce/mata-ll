@@ -203,7 +203,7 @@ impl CodeGen {
         let locals = self.clause_local_rows(clause);
         if clause.guards.is_empty() {
             crate::demand::demanded_map(
-                &clause.body,
+                clause.plain_body(),
                 &self.demand_info.rows,
                 &locals,
                 &inlined,

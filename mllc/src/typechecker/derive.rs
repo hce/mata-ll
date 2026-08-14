@@ -277,7 +277,7 @@ impl Checker {
                 span: None,
                 patterns,
                 guards: vec![],
-                body,
+                body: Some(body),
                 where_binds: vec![],
             });
         }
@@ -392,7 +392,7 @@ impl Checker {
                 span: None,
                 patterns: vec![pat_a, pat_b],
                 guards: vec![],
-                body,
+                body: Some(body),
                 where_binds: vec![],
             });
         }
@@ -406,7 +406,7 @@ impl Checker {
                     TPattern::Wildcard,
                 ],
                 guards: vec![],
-                body: TExpr::new(TExprKind::Lit(TLiteral::Bool(false)), Ty::Con("Bool".into())),
+                body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(false)), Ty::Con("Bool".into()))),
                 where_binds: vec![],
             });
         }
@@ -494,7 +494,7 @@ impl Checker {
                             TPattern::Constructor { name: self.resolve_con_name(&con_b.name).to_string(), args: b_args },
                         ],
                         guards: vec![],
-                        body: TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone()),
+                        body: Some(TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone())),
                         where_binds: vec![],
                     });
                     continue;
@@ -560,12 +560,12 @@ impl Checker {
                                 TCaseBranch {
                                     pattern: TPattern::Constructor { name: "EQ".into(), args: vec![] },
                                     guards: vec![],
-                                    body,
+                                    body: Some(body),
                                 },
                                 TCaseBranch {
                                     pattern: TPattern::Var("_o".into(), ordering_ty.clone()),
                                     guards: vec![],
-                                    body: TExpr::new(TExprKind::Var("_o".into()), ordering_ty.clone()),
+                                    body: Some(TExpr::new(TExprKind::Var("_o".into()), ordering_ty.clone())),
                                 },
                             ],
                         },
@@ -577,7 +577,7 @@ impl Checker {
                     span: None,
                     patterns: vec![pat_a, pat_b],
                     guards: vec![],
-                    body,
+                    body: Some(body),
                     where_binds: vec![],
                 });
             }
@@ -619,7 +619,7 @@ impl Checker {
                                 TPattern::Constructor { name: self.resolve_con_name(&con_b.name).to_string(), args: vec![] },
                             ],
                             guards: vec![],
-                            body: TExpr::new(TExprKind::Lit(TLiteral::Bool(result)), bool_ty.clone()),
+                            body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(result)), bool_ty.clone())),
                             where_binds: vec![],
                         });
                     }
@@ -662,24 +662,24 @@ impl Checker {
                         TPattern::Var("_b".into(), result_type.clone()),
                     ],
                     guards: vec![],
-                    body: TExpr::new(
+                    body: Some(TExpr::new(
                         TExprKind::Case {
                             scrutinee: Box::new(cmp_call),
                             branches: vec![
                                 TCaseBranch {
                                     pattern: TPattern::Constructor { name: match_con.into(), args: vec![] },
                                     guards: vec![],
-                                    body: TExpr::new(TExprKind::Lit(TLiteral::Bool(on_match)), bool_ty.clone()),
+                                    body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(on_match)), bool_ty.clone())),
                                 },
                                 TCaseBranch {
                                     pattern: TPattern::Wildcard,
                                     guards: vec![],
-                                    body: TExpr::new(TExprKind::Lit(TLiteral::Bool(!on_match)), bool_ty.clone()),
+                                    body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(!on_match)), bool_ty.clone())),
                                 },
                             ],
                         },
                         bool_ty.clone(),
-                    ),
+                    )),
                     where_binds: vec![],
                 }]
             };
@@ -749,7 +749,7 @@ impl Checker {
                     span: None,
                     patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args: vec![] }],
                     guards: vec![],
-                    body: TExpr::new(TExprKind::Lit(TLiteral::Integer(i as i64)), int_ty.clone()),
+                    body: Some(TExpr::new(TExprKind::Lit(TLiteral::Integer(i as i64)), int_ty.clone())),
                     where_binds: vec![],
                 }
             }).collect();
@@ -771,7 +771,7 @@ impl Checker {
                     span: None,
                     patterns: vec![TPattern::LitPat(TLiteral::Integer(i as i64))],
                     guards: vec![],
-                    body: TExpr::new(TExprKind::Con(self.resolve_con_name(&con.name).to_string()), result_type.clone()),
+                    body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&con.name).to_string()), result_type.clone())),
                     where_binds: vec![],
                 }
             }).collect();
@@ -780,7 +780,7 @@ impl Checker {
                 span: None,
                 patterns: vec![TPattern::Wildcard],
                 guards: vec![],
-                body: TExpr::new(
+                body: Some(TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
@@ -788,7 +788,7 @@ impl Checker {
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
-                ),
+                )),
                 where_binds: vec![],
             });
             functions.push(TFunction {
@@ -810,7 +810,7 @@ impl Checker {
                     span: None,
                     patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&constructors[i].name).to_string(), args: vec![] }],
                     guards: vec![],
-                    body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i+1].name).to_string()), result_type.clone()),
+                    body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i+1].name).to_string()), result_type.clone())),
                     where_binds: vec![],
                 });
             }
@@ -819,7 +819,7 @@ impl Checker {
                 span: None,
                 patterns: vec![TPattern::Wildcard],
                 guards: vec![],
-                body: TExpr::new(
+                body: Some(TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
@@ -827,7 +827,7 @@ impl Checker {
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
-                ),
+                )),
                 where_binds: vec![],
             });
             functions.push(TFunction {
@@ -849,7 +849,7 @@ impl Checker {
                     span: None,
                     patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&constructors[i].name).to_string(), args: vec![] }],
                     guards: vec![],
-                    body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i-1].name).to_string()), result_type.clone()),
+                    body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i-1].name).to_string()), result_type.clone())),
                     where_binds: vec![],
                 });
             }
@@ -858,7 +858,7 @@ impl Checker {
                 span: None,
                 patterns: vec![TPattern::Wildcard],
                 guards: vec![],
-                body: TExpr::new(
+                body: Some(TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
@@ -866,7 +866,7 @@ impl Checker {
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
-                ),
+                )),
                 where_binds: vec![],
             });
             functions.push(TFunction {
@@ -957,7 +957,7 @@ impl Checker {
                         TPattern::Var("_a".into(), result_type.clone()),
                         TPattern::Var("_b".into(), result_type.clone()),
                     ],
-                    guards: vec![], body, where_binds: vec![],
+                    guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
                 dict_params: vec![],
@@ -986,7 +986,7 @@ impl Checker {
                 clauses: vec![TClause {
                     span: None,
                     patterns: vec![TPattern::Var("_a".into(), result_type.clone())],
-                    guards: vec![], body, where_binds: vec![],
+                    guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
                 dict_params: vec![],
@@ -1072,7 +1072,7 @@ impl Checker {
                         TPattern::Var("_s".into(), int_ty.clone()),
                         TPattern::Var("_l".into(), int_ty.clone()),
                     ],
-                    guards: vec![], body, where_binds: vec![],
+                    guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
                 dict_params: vec![],
@@ -1105,7 +1105,7 @@ impl Checker {
                         TPattern::Var("_a".into(), result_type.clone()),
                         TPattern::Var("_b".into(), result_type.clone()),
                     ],
-                    guards: vec![], body, where_binds: vec![],
+                    guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
                 dict_params: vec![],
@@ -1132,7 +1132,7 @@ impl Checker {
                         TPattern::Var("_b".into(), result_type.clone()),
                         TPattern::Var("_c".into(), result_type.clone()),
                     ],
-                    guards: vec![], body, where_binds: vec![],
+                    guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
                 dict_params: vec![],
@@ -1190,7 +1190,7 @@ impl Checker {
                 span: None,
                 patterns: vec![],
                 guards: vec![],
-                body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.first().unwrap().name).to_string()), result_type.clone()),
+                body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.first().unwrap().name).to_string()), result_type.clone())),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -1207,7 +1207,7 @@ impl Checker {
                 span: None,
                 patterns: vec![],
                 guards: vec![],
-                body: TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.last().unwrap().name).to_string()), result_type.clone()),
+                body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.last().unwrap().name).to_string()), result_type.clone())),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -1575,7 +1575,7 @@ impl Checker {
                 span: None,
                 patterns,
                 guards: vec![],
-                body,
+                body: Some(body),
                 where_binds: vec![],
             });
         }
@@ -1624,7 +1624,7 @@ impl Checker {
                 span: None,
                 patterns: vec![TPattern::Var("_meta".into(), arg_ty)],
                 guards: vec![],
-                body: TExpr::new(TExprKind::Lit(lit), ret_ty),
+                body: Some(TExpr::new(TExprKind::Lit(lit), ret_ty)),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -1865,7 +1865,7 @@ impl Checker {
                 injected, rep_type.clone());
             from_clauses.push(TClause {
                 span: None, patterns: vec![from_pat], guards: vec![],
-                body: from_body, where_binds: vec![],
+                body: Some(from_body), where_binds: vec![],
             });
 
             // ---- to: pattern the wrapped rep, body `Con p0 p1 …` ----
@@ -1896,7 +1896,7 @@ impl Checker {
             }
             to_clauses.push(TClause {
                 span: None, patterns: vec![to_pat], guards: vec![],
-                body: to_body, where_binds: vec![],
+                body: Some(to_body), where_binds: vec![],
             });
         }
 
@@ -2045,7 +2045,7 @@ impl Checker {
                         args: vec![TPattern::Var(err_name, str_ty)],
                     },
                     guards: vec![],
-                    body: rethrow,
+                    body: Some(rethrow),
                 },
                 TCaseBranch {
                     pattern: TPattern::Constructor {
@@ -2053,7 +2053,7 @@ impl Checker {
                         args: vec![TPattern::Var(ok_name.to_string(), ok_ty)],
                     },
                     guards: vec![],
-                    body: ok_body,
+                    body: Some(ok_body),
                 },
             ],
         }, out_ty)
@@ -2552,7 +2552,7 @@ impl Checker {
                             args: vec![TPattern::Var("_s".into(), str_ty.clone())],
                         },
                         guards: vec![],
-                        body: str_chain,
+                        body: Some(str_chain),
                     },
                     TCaseBranch {
                         pattern: TPattern::Constructor {
@@ -2560,16 +2560,16 @@ impl Checker {
                             args: vec![TPattern::Wildcard],
                         },
                         guards: vec![],
-                        body: obj_body,
+                        body: Some(obj_body),
                     },
                     TCaseBranch {
                         pattern: TPattern::Wildcard,
                         guards: vec![],
-                        body: Self::jx_call(
+                        body: Some(Self::jx_call(
                             "jExpectTagged",
                             vec![Self::jx_var("_j", json.clone())],
                             estr.clone(),
-                        ),
+                        )),
                     },
                 ],
             }, estr.clone())
@@ -2663,7 +2663,7 @@ impl Checker {
                 span: None,
                 patterns: vec![TPattern::Var("_j".into(), Self::json_ty())],
                 guards: vec![],
-                body,
+                body: Some(body),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -2680,7 +2680,7 @@ impl Checker {
                     TPattern::Var("_j".into(), Self::json_ty()),
                 ],
                 guards: vec![],
-                body: field_body,
+                body: Some(field_body),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -2978,7 +2978,7 @@ impl Checker {
                         span: None,
                         patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args }],
                         guards: vec![],
-                        body,
+                        body: Some(body),
                         where_binds: vec![],
                     });
                 }

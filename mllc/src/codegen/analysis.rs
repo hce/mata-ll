@@ -32,7 +32,9 @@ impl CodeGen {
         // Scan all function bodies (and where-clause bodies) for call sites
         for func in module.functions.iter().chain(module.instance_fns.iter()) {
             for clause in &func.clauses {
-                self.scan_call_sites(&clause.body, &mut ever_thunked, &mut ever_called);
+                if let Some(b) = &clause.body {
+                    self.scan_call_sites(b, &mut ever_thunked, &mut ever_called);
+                }
                 // Guard conditions and bodies are call sites too — without
                 // scanning them, a recursive call that appears only inside a
                 // guard (e.g. `f n | ... = f (g n)`) is missed, and the
@@ -170,7 +172,9 @@ impl CodeGen {
                         self.scan_call_sites(&g.condition, ever_thunked, ever_called);
                         self.scan_call_sites(&g.body, ever_thunked, ever_called);
                     }
-                    self.scan_call_sites(&b.body, ever_thunked, ever_called);
+                    if let Some(bb) = &b.body {
+                        self.scan_call_sites(bb, ever_thunked, ever_called);
+                    }
                 }
             }
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => self.scan_call_sites(inner, ever_thunked, ever_called),
@@ -225,11 +229,11 @@ impl CodeGen {
             if clause.patterns.is_empty() { continue; } // value binding, not a function
             let all_simple = clause.patterns.iter().all(|p| matches!(p, TPattern::Var(_, _)));
             if !all_simple { continue; }
-            if !Self::is_cheap(&clause.body) { continue; }
-            if expr_references_name(&clause.body, &func.name) { continue; } // recursive
+            if !Self::is_cheap(clause.plain_body()) { continue; }
+            if expr_references_name(clause.plain_body(), &func.name) { continue; } // recursive
             // Only inline bodies that are arithmetic/comparison expressions,
             // not constructor applications (which need special expr_ast handling)
-            if Self::body_has_constructors(&clause.body) { continue; }
+            if Self::body_has_constructors(clause.plain_body()) { continue; }
             let params: Vec<String> = clause.patterns.iter().map(|p| {
                 if let TPattern::Var(name, _) = p { name.clone() } else { unreachable!() }
             }).collect();
@@ -242,9 +246,9 @@ impl CodeGen {
             // per candidate) instead of re-walking the body per call site.
             let occ_counts: Vec<usize> = params
                 .iter()
-                .map(|p| count_name_occurrences(&clause.body, p))
+                .map(|p| count_name_occurrences(clause.plain_body(), p))
                 .collect();
-            self.inline_fns.insert(func.name.clone(), (params, clause.body.clone(), occ_counts));
+            self.inline_fns.insert(func.name.clone(), (params, clause.plain_body().clone(), occ_counts));
         }
     }
 

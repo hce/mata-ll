@@ -871,7 +871,7 @@ impl Monomorphizer {
         for name in &pat_vars {
             self.locals.insert(name.clone());
         }
-        clause.body = self.mono_expr(clause.body);
+        clause.body = clause.body.take().map(|b| self.mono_expr(b));
         clause.guards = clause.guards.into_iter().map(|g| TGuard {
             condition: self.mono_expr(g.condition),
             body: self.mono_expr(g.body),
@@ -1250,7 +1250,7 @@ impl Monomorphizer {
                                 condition: self.mono_expr(g.condition),
                                 body: self.mono_expr(g.body),
                             }).collect(),
-                            body: self.mono_expr(b.body),
+                            body: b.body.map(|bb| self.mono_expr(bb)),
                         };
                         for name in &new_vars {
                             self.locals.remove(name);
@@ -1461,7 +1461,7 @@ impl Monomorphizer {
                     .map(|p| TPattern::Var((*p).to_string(), Ty::Unit))
                     .collect(),
                 guards: vec![],
-                body,
+                body: Some(body),
                 where_binds: vec![],
             }],
             specialized: true,
@@ -1618,7 +1618,7 @@ impl Monomorphizer {
                 span: None,
                 patterns: vec![TPattern::Var(param_name, Ty::Unit)],
                 guards: vec![],
-                body,
+                body: Some(body),
                 where_binds: vec![],
             }],
             specialized: true,
@@ -1736,7 +1736,7 @@ impl Monomorphizer {
 
     fn collect_clause_vars(clause: &TClause, vars: &mut Vec<TyVar>) {
         for p in &clause.patterns { Self::collect_pattern_vars(p, vars); }
-        Self::collect_expr_vars(&clause.body, vars);
+        if let Some(cb) = &clause.body { Self::collect_expr_vars(cb, vars); }
         for g in &clause.guards {
             Self::collect_expr_vars(&g.condition, vars);
             Self::collect_expr_vars(&g.body, vars);
@@ -1776,7 +1776,7 @@ impl Monomorphizer {
                         Self::collect_expr_vars(&g.condition, vars);
                         Self::collect_expr_vars(&g.body, vars);
                     }
-                    Self::collect_expr_vars(&b.body, vars);
+                    if let Some(bb) = &b.body { Self::collect_expr_vars(bb, vars); }
                 }
             }
             TExprKind::Let { binds, body } => {
@@ -2364,7 +2364,7 @@ impl Monomorphizer {
             f.specialized = true;
             for clause in f.clauses.iter_mut() {
                 let body = clause.body.clone();
-                clause.body = self.rewrite_dict_expr(body, "", &class_to_dict, &env);
+                clause.body = body.map(|b| self.rewrite_dict_expr(b, "", &class_to_dict, &env));
                 clause.guards = clause.guards.clone().into_iter().map(|g| TGuard {
                     condition: self.rewrite_dict_expr(g.condition, "", &class_to_dict, &env),
                     body: self.rewrite_dict_expr(g.body, "", &class_to_dict, &env),

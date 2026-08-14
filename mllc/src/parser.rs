@@ -1300,11 +1300,12 @@ impl Parser {
             }
         }
 
+        // A guarded clause has no single body: the guard chain IS the body.
         let body = if guards.is_empty() {
             self.expect(&Token::Eq)?;
-            self.parse_expr()?
+            Some(self.parse_expr()?)
         } else {
-            Expr::Var("undefined".to_string())
+            None
         };
 
         // where clause
@@ -2319,7 +2320,7 @@ impl Parser {
                                 branches: vec![CaseBranch {
                                     pattern: pat.clone(),
                                     guards: vec![],
-                                    body: Expr::Var(v),
+                                    body: Some(Expr::Var(v)),
                                 }],
                             },
                         });
@@ -2424,12 +2425,12 @@ impl Parser {
                                 CaseBranch {
                                     pattern: pat.clone(),
                                     guards: vec![],
-                                    body: rest,
+                                    body: Some(rest),
                                 },
                                 CaseBranch {
                                     pattern: Pattern::Wildcard,
                                     guards: vec![],
-                                    body: Expr::Con("[]".to_string()),
+                                    body: Some(Expr::Con("[]".to_string())),
                                 },
                             ],
                         };
@@ -2993,7 +2994,7 @@ impl Parser {
                 let pattern = self.parse_pattern()?;
                 self.expect(&Token::Arrow)?;
                 let body = self.parse_stmt_expr()?;
-                branches.push(CaseBranch { pattern, guards: vec![], body });
+                branches.push(CaseBranch { pattern, guards: vec![], body: Some(body) });
                 if self.at(&Token::Semicolon) { self.advance(); } else { break; }
             }
             self.expect(&Token::RightBrace)?;
@@ -3040,7 +3041,7 @@ impl Parser {
                 branches.push(CaseBranch {
                     pattern,
                     guards,
-                    body: Expr::Var("undefined".to_string()),
+                    body: None,
                 });
             } else {
                 self.expect(&Token::Arrow)?;
@@ -3048,7 +3049,7 @@ impl Parser {
                 branches.push(CaseBranch {
                     pattern,
                     guards: vec![],
-                    body,
+                    body: Some(body),
                 });
             }
         }
@@ -3198,16 +3199,16 @@ impl Parser {
                     let mut branches = vec![CaseBranch {
                         pattern: pat,
                         guards: vec![],
-                        body,
+                        body: Some(body),
                     }];
                     // Add wildcard fallback for partial patterns
                     branches.push(CaseBranch {
                         pattern: Pattern::Wildcard,
                         guards: vec![],
-                        body: Expr::App(
+                        body: Some(Expr::App(
                             Box::new(Expr::Var("error".into())),
                             Box::new(Expr::Lit(Literal::Str(b"non-exhaustive lambda pattern".to_vec()))),
-                        ),
+                        )),
                     });
                     return Ok(Expr::Lambda {
                         params: vec!["__lam".to_string()],

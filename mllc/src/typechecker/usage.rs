@@ -985,9 +985,9 @@ impl<'a> UsageCk<'a> {
     /// while the guard bodies are alternatives (joined, with the
     /// exactly-once parity check). The plain body is the synthetic
     /// fallthrough when guards are present and contributes nothing.
-    fn branch_usage(&mut self, guards: &[TGuard], body: &TExpr) -> Usage {
+    fn branch_usage(&mut self, guards: &[TGuard], body: &Option<TExpr>) -> Usage {
         if guards.is_empty() {
-            return self.expr_usage(body);
+            return self.expr_usage(body.as_ref().expect("guard-free branch carries a body"));
         }
         let mut u = Usage::new();
         let mut bodies: Vec<Usage> = Vec::with_capacity(guards.len());

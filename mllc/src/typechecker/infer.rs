@@ -628,7 +628,7 @@ impl Checker {
         let mut tguards = Vec::new();
         let tbody;
 
-        if !clause.guards.is_empty() {
+        if clause.body.is_none() {
             for guard in &clause.guards {
                 // Check the condition and body against the environment with the
                 // accumulated substitution applied, so a binding used in both the
@@ -648,13 +648,15 @@ impl Checker {
                 subst = subst.compose(&body_s);
                 tguards.push(TGuard { condition: tcond, body: tbody_g });
             }
-            tbody = TExpr::new(TExprKind::Var("undefined".into()), expected_ret);
+            tbody = None;
         } else {
             let body_env = local_env.applied(&subst);
             let ret = expected_ret.apply_subst(&subst);
-            let (tb, body_s) = self.check_expr_typed(&clause.body, &ret, &body_env)?;
+            let body = clause.body.as_ref()
+                .expect("checked is_none above");
+            let (tb, body_s) = self.check_expr_typed(body, &ret, &body_env)?;
             subst = subst.compose(&body_s);
-            tbody = tb;
+            tbody = Some(tb);
         }
 
         // Type-check where bindings fully, accumulating substitutions
@@ -1443,14 +1445,23 @@ impl Checker {
                         }
                     }
 
-                    let (tb, body_ty, body_subst) = self.infer_expr(&branch.body, &branch_env)?;
-                    subst = subst.compose(&body_subst);
-                    // The branch body inferred cleanly; a mismatch here is the
-                    // branch's type disagreeing with the case result, so locate
-                    // it at this branch, not the clause head.
-                    let s = self.unify(&result_ty.apply_subst(&subst), &body_ty)
-                        .inspect_err(|_| self.latch_stmt_span(&branch.body))?;
-                    subst = subst.compose(&s);
+                    let tb = match &branch.body {
+                        Some(body) => {
+                            let (tb, body_ty, body_subst) = self.infer_expr(body, &branch_env)?;
+                            subst = subst.compose(&body_subst);
+                            // The branch body inferred cleanly; a mismatch here
+                            // is the branch's type disagreeing with the case
+                            // result, so locate it at this branch, not the
+                            // clause head.
+                            let s = self.unify(&result_ty.apply_subst(&subst), &body_ty)
+                                .inspect_err(|_| self.latch_stmt_span(body))?;
+                            subst = subst.compose(&s);
+                            Some(tb)
+                        }
+                        // A guarded branch: its guard bodies were checked
+                        // against the result type above; there is no body.
+                        None => None,
+                    };
                     // The case's result outlives the branch, so an unpacked
                     // existential's skolem must not appear in it (e.g.
                     // `case s of Foo x -> x`). Leaks into longer-lived types
@@ -1945,7 +1956,7 @@ impl Checker {
                     span: None,
                     patterns: vec![],
                     guards: vec![],
-                    body,
+                    body: Some(body),
                     where_binds: vec![],
                 }],
                 specialized: false,
@@ -2042,7 +2053,7 @@ impl Checker {
                 span: None,
                 patterns,
                 guards: vec![],
-                body,
+                body: Some(body),
                 where_binds: vec![],
             }],
             specialized: false,

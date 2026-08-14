@@ -115,7 +115,7 @@ pub(super) fn expr_references_name(expr: &TExpr, name: &str) -> bool {
             branches.iter().any(|b| {
                 b.guards.iter().any(|g|
                     expr_references_name(&g.condition, name) || expr_references_name(&g.body, name))
-                || expr_references_name(&b.body, name)
+                || b.body.as_ref().is_some_and(|bb| expr_references_name(bb, name))
             })
         }
         TExprKind::Let { binds, body } => {
@@ -192,7 +192,7 @@ pub(super) fn count_name_occurrences(expr: &TExpr, name: &str) -> usize {
                                     + count_name_occurrences(&g.body, name)
                             })
                             .sum::<usize>()
-                            + count_name_occurrences(&b.body, name)
+                            + b.body.as_ref().map_or(0, |bb| count_name_occurrences(bb, name))
                     })
                     .max()
                     .unwrap_or(0)

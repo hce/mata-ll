@@ -30,7 +30,7 @@ fn fold_clause(mut clause: TClause) -> TClause {
         condition: fold_expr(g.condition),
         body: fold_expr(g.body),
     }).collect();
-    clause.body = fold_expr(clause.body);
+    clause.body = clause.body.take().map(fold_expr);
     clause.where_binds = clause.where_binds.into_iter().map(fold_local).collect();
     clause
 }
@@ -142,7 +142,7 @@ fn fold_expr(expr: TExpr) -> TExpr {
                         condition: fold_expr(g.condition),
                         body: fold_expr(g.body),
                     }).collect(),
-                    body: fold_expr(b.body),
+                    body: b.body.map(fold_expr),
                 }).collect(),
             }, ty)
         }

@@ -108,7 +108,7 @@ fn collect_clause(clause: &TClause, refs: &mut HashSet<String>) {
         collect_expr(&g.condition, refs);
         collect_expr(&g.body, refs);
     }
-    collect_expr(&clause.body, refs);
+    if let Some(b) = &clause.body { collect_expr(b, refs); }
     for wb in &clause.where_binds {
         for p in &wb.patterns {
             collect_pattern(p, refs);
@@ -173,7 +173,7 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
             for b in branches {
                 collect_pattern(&b.pattern, refs);
                 for g in &b.guards { collect_expr(&g.condition, refs); collect_expr(&g.body, refs); }
-                collect_expr(&b.body, refs);
+                if let Some(bb) = &b.body { collect_expr(bb, refs); }
             }
         }
         TExprKind::Let { binds, body } => {

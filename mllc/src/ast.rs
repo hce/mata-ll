@@ -129,11 +129,17 @@ pub enum ImportItem {
 }
 
 /// A single clause of a function definition (pattern matching).
+///
+/// A clause has EITHER a plain body (`f x = e`, `guards` empty, `body`
+/// `Some`) OR a guard chain (`f x | c = e | ...`, `guards` non-empty,
+/// `body` `None`) — never both. `Option` makes the exclusion structural;
+/// this used to be an `Expr::Var("undefined")` sentinel every downstream
+/// pass had to silently know about.
 #[derive(Debug, Clone)]
 pub struct Clause {
     pub patterns: Vec<Pattern>,
     pub guards: Vec<Guard>,
-    pub body: Expr,
+    pub body: Option<Expr>,
     pub where_binds: Vec<LocalDef>,
     pub span: Span,
 }
@@ -338,7 +344,7 @@ impl Expr {
                         condition: f(g.condition),
                         body: f(g.body),
                     }).collect(),
-                    body: f(br.body),
+                    body: br.body.map(&mut *f),
                 }).collect(),
             },
             Expr::Let { binds, body } => Expr::Let {
@@ -401,7 +407,7 @@ impl Expr {
                         f(&g.condition);
                         f(&g.body);
                     }
-                    f(&br.body);
+                    if let Some(b) = &br.body { f(b); }
                 }
             }
             Expr::Let { binds, body } => {
@@ -438,11 +444,13 @@ impl Expr {
     }
 }
 
+/// One branch of a `case`. Same body/guards exclusion as [`Clause`]:
+/// exactly one of `body` (`Some`) and `guards` (non-empty) is present.
 #[derive(Debug, Clone)]
 pub struct CaseBranch {
     pub pattern: Pattern,
     pub guards: Vec<Guard>,
-    pub body: Expr,
+    pub body: Option<Expr>,
 }
 
 /// Do-notation statements.

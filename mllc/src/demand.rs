@@ -176,7 +176,8 @@ pub fn analyze(module: &TModule) -> DemandInfo {
     for func in &functions {
         if func.clauses.len() == 1 {
             let clause = &func.clauses[0];
-            if let TExprKind::SpecCall { original, .. } = &clause.body.kind
+            if let Some(cb) = &clause.body
+                && let TExprKind::SpecCall { original, .. } = &cb.kind
                 && original == &func.name && !clause.patterns.is_empty() {
                     strict_params.insert(func.name.clone(), vec![true; clause.patterns.len()]);
                     continue;
@@ -473,7 +474,7 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
         }
     };
     let mut demanded = if clause.guards.is_empty() {
-        close(demanded_vars_in(&clause.body, env, &local_caps))
+        close(demanded_vars_in(clause.plain_body(), env, &local_caps))
     } else {
         demanded_guards_with(&clause.guards, env, &local_caps, &close)
     };
@@ -803,7 +804,7 @@ fn local_fn_demand(
 
     // Names rebound anywhere in the clause (see the scoping note above).
     let mut rebound: HashSet<String> = HashSet::new();
-    collect_rebound_names(&clause.body, &mut rebound);
+    if let Some(cb) = &clause.body { collect_rebound_names(cb, &mut rebound); }
     for g in &clause.guards {
         collect_rebound_names(&g.condition, &mut rebound);
         collect_rebound_names(&g.body, &mut rebound);
@@ -850,7 +851,7 @@ fn local_fn_demand(
                 .map(|d| TClause {
                     patterns: d.patterns.clone(),
                     guards: vec![],
-                    body: d.body.clone(),
+                    body: Some(d.body.clone()),
                     where_binds: vec![],
                     span: None,
                 })
@@ -908,7 +909,7 @@ fn local_fn_demand(
         for (name, _, clauses) in &group_clauses {
             let mut set: Option<HashSet<String>> = None;
             for c in clauses {
-                let mut d = demanded_vars_in(&c.body, &ext, &captured);
+                let mut d = demanded_vars_in(c.plain_body(), &ext, &captured);
                 let mut bound = HashSet::new();
                 for p in &c.patterns {
                     collect_pattern_vars(p, &mut bound);
@@ -980,7 +981,7 @@ fn collect_rebound_names(expr: &TExpr, out: &mut HashSet<String>) {
                     collect_rebound_names(&g.condition, out);
                     collect_rebound_names(&g.body, out);
                 }
-                collect_rebound_names(&b.body, out);
+                if let Some(bb) = &b.body { collect_rebound_names(bb, out); }
             }
         }
         TExprKind::Let { binds, body } => {
@@ -1219,7 +1220,7 @@ fn demanded_vars_in(
                 // (minus variables bound by each branch's pattern).
                 let mut branch_iter = branches.iter().map(|b| {
                     let body_demanded = if b.guards.is_empty() {
-                        rec(&b.body)
+                        rec(b.plain_body())
                     } else {
                         demanded_guards_with(&b.guards, env, captured, &|s| s)
                     };
@@ -1803,7 +1804,7 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
             };
             let mut branch_maps = branches.iter().map(|b| {
                 let mut bm = if b.guards.is_empty() {
-                    demand_expr(cx, &b.body, rd, run_pos)
+                    demand_expr(cx, b.plain_body(), rd, run_pos)
                 } else {
                     demand_guards_map(cx, &b.guards, rd, run_pos)
                 };
@@ -2024,7 +2025,7 @@ fn demand_guards_map(cx: &RowCx, guards: &[TGuard], rd: &Demand, run_pos: bool) 
 /// demands fire too, exactly as codegen's demanded_bindings evaluates it).
 fn clause_demand_map(cx: &RowCx, clause: &TClause, rd: &Demand) -> DemandMap {
     let mut m = if clause.guards.is_empty() {
-        demand_expr(cx, &clause.body, rd, true)
+        demand_expr(cx, clause.plain_body(), rd, true)
     } else {
         demand_guards_map(cx, &clause.guards, rd, true)
     };
@@ -2073,7 +2074,9 @@ fn seed_param(clauses: &[&TLocalDefLike], i: usize) -> Option<Demand> {
 struct TLocalDefLike {
     patterns: Vec<TPattern>,
     guards: Vec<TGuard>,
-    body: TExpr,
+    /// Same body/guards exclusion as `TClause` for a clause view; a
+    /// local-def view always has `Some` (where binds carry no guards).
+    body: Option<TExpr>,
     where_binds: Vec<TLocalDef>,
 }
 
@@ -2090,7 +2093,7 @@ fn local_def_view(d: &TLocalDef) -> TLocalDefLike {
     TLocalDefLike {
         patterns: d.patterns.clone(),
         guards: vec![],
-        body: d.body.clone(),
+        body: Some(d.body.clone()),
         where_binds: vec![],
     }
 }
@@ -2455,7 +2458,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
     let mut poisoned: HashSet<String> = HashSet::new();
     for func in &functions {
         for clause in &func.clauses {
-            let mut exprs: Vec<&TExpr> = vec![&clause.body];
+            let mut exprs: Vec<&TExpr> = clause.body.iter().collect();
             exprs.extend(clause.guards.iter().flat_map(|g| [&g.condition, &g.body]));
             exprs.extend(clause.where_binds.iter().map(|b| &b.body));
             for e in exprs {
@@ -2557,7 +2560,7 @@ fn collect_fn_refs(
                     collect_fn_refs(&g.condition, fn_names, refs, poisoned);
                     collect_fn_refs(&g.body, fn_names, refs, poisoned);
                 }
-                collect_fn_refs(&b.body, fn_names, refs, poisoned);
+                if let Some(bb) = &b.body { collect_fn_refs(bb, fn_names, refs, poisoned); }
             }
         }
         TExprKind::Let { binds, body } => {

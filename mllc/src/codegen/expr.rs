@@ -680,14 +680,14 @@ impl CodeGen {
                                 bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
                                 self.local_vars.insert(var.clone());
                             }
-                            bs.push(Stmt::Return(self.tail_ast(&branch.body, false)));
+                            bs.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                             else_b = Some(Block(bs));
                         } else {
                             for (var, val) in &bindings {
                                 direct.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
                                 self.local_vars.insert(var.clone());
                             }
-                            direct.push(Stmt::Return(self.tail_ast(&branch.body, false)));
+                            direct.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                         }
                         scope.restore_local_vars(self);
                         break;
@@ -698,7 +698,7 @@ impl CodeGen {
                         bs.push(Stmt::Local(vec![var.clone()], Some(val.clone())));
                         self.local_vars.insert(var.clone());
                     }
-                    bs.push(Stmt::Return(self.tail_ast(&branch.body, false)));
+                    bs.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                     if chain.is_none() {
                         chain = Some((cond, Block(bs)));
                     } else {

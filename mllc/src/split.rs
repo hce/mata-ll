@@ -74,8 +74,7 @@ fn split_function(f: &mut TFunction) {
             let body = std::mem::replace(&mut g.body, dummy());
             g.body = flatten_scope(body, &mut ctr);
         }
-        let body = std::mem::replace(&mut clause.body, dummy());
-        clause.body = flatten_scope(body, &mut ctr);
+        clause.body = clause.body.take().map(|b| flatten_scope(b, &mut ctr));
     }
 }
 
@@ -183,8 +182,7 @@ fn flatten_expr(e: TExpr, binds: &mut Vec<TLocalDef>, ctr: &mut usize) -> TExpr 
                         let bd = std::mem::replace(&mut g.body, dummy());
                         g.body = flatten_scope(bd, &mut inner_ctr);
                     }
-                    let body = std::mem::replace(&mut b.body, dummy());
-                    b.body = flatten_scope(body, &mut inner_ctr);
+                    b.body = b.body.take().map(|bb| flatten_scope(bb, &mut inner_ctr));
                     *ctr = inner_ctr;
                     b
                 })
@@ -400,7 +398,7 @@ fn depth(e: &TExpr) -> usize {
         TExprKind::Case { scrutinee, branches } => {
             let mut d = depth(scrutinee);
             for b in branches {
-                d = d.max(depth(&b.body));
+                if let Some(bb) = &b.body { d = d.max(depth(bb)); }
                 for g in &b.guards {
                     d = d.max(depth(&g.condition)).max(depth(&g.body));
                 }

@@ -139,7 +139,7 @@ impl CodeGen {
                 // string emitter, the clause scope is NOT restored on this
                 // early exit (the enclosing function restores its own scope).
                 let mut bs = self.clause_intro_stmts(clause, &bindings);
-                bs.extend(self.match_tail_stmts(&clause.body, tails));
+                bs.extend(self.match_tail_stmts(clause.plain_body(), tails));
                 if i > 0 {
                     else_b = Some(Block(bs));
                 } else {
@@ -151,7 +151,7 @@ impl CodeGen {
 
             let cond = Expr::and_chain(conditions);
             let mut bs = self.clause_intro_stmts(clause, &bindings);
-            bs.extend(self.match_tail_stmts(&clause.body, tails));
+            bs.extend(self.match_tail_stmts(clause.plain_body(), tails));
             if chain.is_none() {
                 chain = Some((cond, Block(bs)));
             } else if exhaustive && i == clauses.len() - 1 {
@@ -214,7 +214,7 @@ impl CodeGen {
             }
             let mut bs = self.clause_intro_stmts(clause, &bindings);
             if clause.guards.is_empty() {
-                bs.extend(self.match_tail_stmts(&clause.body, tails));
+                bs.extend(self.match_tail_stmts(clause.plain_body(), tails));
             } else {
                 let mut gchain: Option<(Expr, Block)> = None;
                 let mut gelseifs: Vec<(Expr, Block)> = Vec::new();

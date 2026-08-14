@@ -151,12 +151,17 @@ impl CodeGen {
         if matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _) | Ty::Forall(_, _)) {
             return true;
         }
-        if expr_references_name(&first.body, &func.name) {
-            return Self::is_cons_headed(&first.body);
+        let Some(first_body) = &first.body else {
+            // Guarded value binding: function_stmts' concrete arms require a
+            // guard-free clause, so the slot is emitted thunked.
+            return false;
+        };
+        if expr_references_name(first_body, &func.name) {
+            return Self::is_cons_headed(first_body);
         }
         first.where_binds.is_empty()
-            && Self::is_cheap(&first.body)
-            && !expr_evaluates_global_ref(&first.body)
+            && Self::is_cheap(first_body)
+            && !expr_evaluates_global_ref(first_body)
     }
 
     pub(super) fn function_stmts(&mut self, func: &TFunction) -> Vec<Stmt> {
@@ -219,11 +224,11 @@ impl CodeGen {
                 {
                     self.direct_perform_self = Some((func.name.clone(), 0));
                 }
-                body.extend(self.bind_chain_block(&clauses[0].body, true).0);
+                body.extend(self.bind_chain_block(clauses[0].plain_body(), true).0);
                 self.direct_perform_self = saved_dp;
                 stmts.push(Stmt::Function { header, body: Block(body) });
                 is_concrete = true;
-            } else if expr_references_name(&clauses[0].body, &func.name) {
+            } else if expr_references_name(clauses[0].plain_body(), &func.name) {
                 // Self-referencing value binding (e.g., infinite list).
                 // Use the bare name (not fn_table slot) so self-references
                 // resolve to this local binding, not a potentially missing slot.
@@ -231,12 +236,12 @@ impl CodeGen {
                 if !self.forward_declared.contains(&lua_name) {
                     stmts.push(Stmt::Local(vec![lua_name.clone()], None));
                 }
-                if Self::is_cons_headed(&clauses[0].body) {
+                if Self::is_cons_headed(clauses[0].plain_body()) {
                     // Cons-headed (`xs = 0 : xs`): the value is an eagerly built
                     // cons cell whose TAIL self-reference `expr_lazy_ast` defers
                     // into a thunk. The cell itself is a concrete value, so the
                     // deferred self-reference reads it after assignment.
-                    let rhs = self.expr_lazy_ast(&clauses[0].body);
+                    let rhs = self.expr_lazy_ast(clauses[0].plain_body());
                     stmts.push(Stmt::Assign(lua_name.clone(), rhs));
                     is_concrete = true;
                 } else {
@@ -254,32 +259,32 @@ impl CodeGen {
                     // the (thunked) binding still force it.
                     let was_concrete = self.concrete_vars.contains(&lua_name);
                     self.concrete_vars.insert(lua_name.clone());
-                    let rhs = self.expr_ast(&clauses[0].body);
+                    let rhs = self.expr_ast(clauses[0].plain_body());
                     if !was_concrete { self.concrete_vars.remove(&lua_name); }
                     stmts.push(Stmt::Assign(lua_name.clone(), Expr::thunk(rhs)));
                     is_concrete = false;
                 }
-            } else if clauses[0].where_binds.is_empty() && Self::is_cheap(&clauses[0].body)
-                && !expr_evaluates_global_ref(&clauses[0].body) {
+            } else if clauses[0].where_binds.is_empty() && Self::is_cheap(clauses[0].plain_body())
+                && !expr_evaluates_global_ref(clauses[0].plain_body()) {
                 // Cheap value binding that does not eagerly dereference another
                 // top-level binding — safe to evaluate eagerly at module load.
                 // A binding like `y = x` or `useX = x + 1` that reads a global
                 // (possibly defined later in the file) falls through to the
                 // thunk branch below, deferring the read past module load when
                 // the slot is still nil.
-                let rhs = self.expr_ast(&clauses[0].body);
+                let rhs = self.expr_ast(clauses[0].plain_body());
                 stmts.push(self.var_decl_stmt(&lua_name, rhs));
                 is_concrete = true;
             } else if clauses[0].where_binds.is_empty() {
                 // Expensive value binding with no where clause — thunk
-                let rhs = self.expr_ast(&clauses[0].body);
+                let rhs = self.expr_ast(clauses[0].plain_body());
                 stmts.push(self.var_decl_stmt(&lua_name, Expr::thunk(rhs)));
                 is_concrete = false;
             } else {
                 // Value binding with where clause — wrap in thunked IIFE to scope the locals
                 let demanded = self.clause_demanded(&clauses[0]);
                 let mut body = self.where_binds_stmts(&clauses[0], demanded);
-                body.push(Stmt::Return(self.expr_ast(&clauses[0].body)));
+                body.push(Stmt::Return(self.expr_ast(clauses[0].plain_body())));
                 let thunk = Expr::call_named(
                     "__thunk",
                     vec![Expr::Func(vec![], FuncBody::Block(Block(body)))],
@@ -367,7 +372,7 @@ impl CodeGen {
                     // Emit the paren grouping directly instead. Every other
                     // shape keeps the force: the callee must be a function
                     // value, not a thunk.
-                    let body_e = self.expr_ast(&clause.body);
+                    let body_e = self.expr_ast(clause.plain_body());
                     let callee = match body_e {
                         Expr::Func(ps, b) => Expr::paren(Expr::Func(ps, b)),
                         Expr::Paren(inner) if matches!(inner.as_ref(), Expr::Func(..)) => {
@@ -383,7 +388,7 @@ impl CodeGen {
                     // ST-returning function: wrap body in a closure so the
                     // function returns an ST action (deferred computation).
                     // The closure is called by __mll_run in bind chains.
-                    let chain = self.bind_chain_block(&clause.body, true);
+                    let chain = self.bind_chain_block(clause.plain_body(), true);
                     body.push(Stmt::Return(Expr::Func(vec![], FuncBody::Block(chain))));
                 } else if Self::returns_action(&func.ty) {
                     // IO-returning function: flatten bind chains, performing
@@ -400,12 +405,12 @@ impl CodeGen {
                         self.direct_perform_self =
                             Some((func.name.clone(), clause.patterns.len()));
                     }
-                    body.extend(self.bind_chain_block(&clause.body, true).0);
+                    body.extend(self.bind_chain_block(clause.plain_body(), true).0);
                     self.direct_perform_self = saved_dp;
                 } else {
                     // Pure function: use the plain bind-chain builder for the
                     // body so If/>>=/>> flatten into statements instead of IIFEs
-                    body.extend(self.bind_chain_block(&clause.body, false).0);
+                    body.extend(self.bind_chain_block(clause.plain_body(), false).0);
                 }
             } else {
                 // Force only args that are destructured
@@ -640,7 +645,7 @@ impl CodeGen {
                 span: None,
                 patterns: binds[i].patterns.clone(),
                 guards: vec![],
-                body: binds[i].body.clone(),
+                body: Some(binds[i].body.clone()),
                 where_binds: vec![],
             });
             i += 1;
@@ -675,7 +680,7 @@ impl CodeGen {
                         ));
                     }
                 }
-                body.push(Stmt::Return(self.expr_ast(&clause.body)));
+                body.push(Stmt::Return(self.expr_ast(clause.plain_body())));
             } else {
                 for (j, pat) in clause.patterns.iter().enumerate() {
                     if !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard) {

@@ -81,7 +81,7 @@ impl Verifier {
                 self.walk(&g.condition, &f.name);
                 self.walk(&g.body, &f.name);
             }
-            self.walk(&clause.body, &f.name);
+            if let Some(cb) = &clause.body { self.walk(cb, &f.name); }
             for wb in &clause.where_binds {
                 self.walk(&wb.body, &f.name);
             }
@@ -119,7 +119,7 @@ impl Verifier {
                 self.walk(scrutinee, ctx);
                 for b in branches {
                     for g in &b.guards { self.walk(&g.condition, ctx); self.walk(&g.body, ctx); }
-                    self.walk(&b.body, ctx);
+                    if let Some(bb) = &b.body { self.walk(bb, ctx); }
                 }
             }
             TExprKind::Let { binds, body } => {
@@ -178,7 +178,7 @@ mod tests {
                 name: "f".into(),
                 ty: Ty::Con("String".into()),
                 clauses: vec![TClause {
-                    patterns: vec![], guards: vec![], body, where_binds: vec![], span: None,
+                    patterns: vec![], guards: vec![], body: Some(body), where_binds: vec![], span: None,
                 }],
                 specialized: false,
                 dict_params: vec![],

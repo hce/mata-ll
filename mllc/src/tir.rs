@@ -121,7 +121,11 @@ pub struct TFunction {
 pub struct TClause {
     pub patterns: Vec<TPattern>,
     pub guards: Vec<TGuard>,
-    pub body: TExpr,
+    /// `Some` for a plain clause, `None` when `guards` is non-empty — a
+    /// guarded clause's guard chain IS its body (same structural exclusion
+    /// as `ast::Clause`; this used to be a typed `Var("undefined")`
+    /// sentinel every pass processed for nothing).
+    pub body: Option<TExpr>,
     pub where_binds: Vec<TLocalDef>,
     /// Source location of the clause this was checked from. `None` for
     /// compiler-synthesized clauses (derived instances, generated impls).
@@ -285,7 +289,7 @@ impl TExpr {
                         condition: f(g.condition),
                         body: f(g.body),
                     }).collect(),
-                    body: f(b.body),
+                    body: b.body.map(&mut *f),
                 }).collect(),
             },
             TExprKind::Let { binds, body } => TExprKind::Let {
@@ -359,7 +363,7 @@ impl TExpr {
                         f(&mut g.condition);
                         f(&mut g.body);
                     }
-                    f(&mut b.body);
+                    if let Some(bb) = &mut b.body { f(bb); }
                 }
             }
             TExprKind::Let { binds, body } => {
@@ -499,7 +503,7 @@ impl TClause {
             g.condition = f(take(&mut g.condition));
             g.body = f(take(&mut g.body));
         }
-        self.body = f(take(&mut self.body));
+        self.body = self.body.take().map(&mut *f);
         for wb in &mut self.where_binds {
             wb.body = f(take(&mut wb.body));
         }
@@ -513,7 +517,7 @@ impl TClause {
                 condition: g.condition.apply_subst(subst),
                 body: g.body.apply_subst(subst),
             }).collect(),
-            body: self.body.apply_subst(subst),
+            body: self.body.map(|b| b.apply_subst(subst)),
             where_binds: self.where_binds.into_iter().map(|b| TLocalDef {
                 name: b.name, patterns: b.patterns.into_iter().map(|p| p.apply_subst(subst)).collect(),
                 body: b.body.apply_subst(subst),
@@ -532,7 +536,7 @@ impl TClause {
             g.condition.demote_skolems(demote);
             g.body.demote_skolems(demote);
         }
-        self.body.demote_skolems(demote);
+        if let Some(b) = &mut self.body { b.demote_skolems(demote); }
         for b in &mut self.where_binds {
             for p in &mut b.patterns { p.demote_skolems(demote); }
             b.body.demote_skolems(demote);
@@ -641,7 +645,24 @@ pub enum TExprKind {
 pub struct TCaseBranch {
     pub pattern: TPattern,
     pub guards: Vec<TGuard>,
-    pub body: TExpr,
+    /// Same body/guards exclusion as [`TClause`].
+    pub body: Option<TExpr>,
+}
+
+impl TClause {
+    /// The body of a guard-free clause. Callers dispatch on
+    /// `guards.is_empty()` first; a guarded clause has no single body (its
+    /// guard chain is the body), so calling this on one is a compiler bug.
+    pub fn plain_body(&self) -> &TExpr {
+        self.body.as_ref().expect("guard-free clause carries a body")
+    }
+}
+
+impl TCaseBranch {
+    /// See [`TClause::plain_body`] — same invariant.
+    pub fn plain_body(&self) -> &TExpr {
+        self.body.as_ref().expect("guard-free case branch carries a body")
+    }
 }
 
 
