@@ -10,7 +10,10 @@
 //! the native stack. `expr_ast_inner` is the single large match over every
 //! expression form and stays one function on purpose — the arms
 //! cross-reference each other and the WHNF predicates mirror them arm for
-//! arm. `expr_lazy_ast` builds self-referencing definitions with lazy cons
+//! arm. The bulky App/InfixApp arm BODIES live in `try_*_app` /
+//! `*_infix_ast` helpers split out only for readability; the dispatch
+//! itself stays in this one match.
+//! `expr_lazy_ast` builds self-referencing definitions with lazy cons
 //! tails (`__mll_lazy_cons`); `literal_ast` renders literals through the
 //! canonical string quoting in names.rs.
 
@@ -89,520 +92,69 @@ impl CodeGen {
             }
             TExprKind::Lit(lit) => self.literal_ast(lit),
             TExprKind::App(func, arg) => {
-                // Record field accessor: inline as direct table indexing.
-                // The field may hold a thunk (lazy construction), so force the
-                // projected value. The container is forced by expr_ast(arg) when
-                // it is a non-concrete variable; __force is idempotent on values.
-                // Laziness is preserved because non-strict argument positions
-                // thunk-wrap the whole projection (see arg_ast).
-                if let TExprKind::Var(name) = &func.kind
-                    && let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
-                        // A LuaDict field is keyed by name; a plain record field
-                        // by position.
-                        let index = match self.luadict_field_key.get(&sanitize_name(name)) {
-                            Some(key) => lua_field_index(key),
-                            None => format!("[{}]", idx),
-                        };
-                        let container = self.expr_ast(arg);
-                        return Expr::force(Expr::index(container, index));
-                    }
-
-                // Check for cons application: (:) x xs => __mll_cons(x, xs)
-                if let TExprKind::App(inner_f, inner_arg) = &func.kind
-                    && let TExprKind::Con(name) = &inner_f.kind
-                        && name == ":" {
-                            // Try to collect a literal list and emit compactly
-                            if let Some(elems) = Self::collect_list_literal(expr) {
-                                let mut stmts = vec![Stmt::Local(
-                                    vec!["_l".into()],
-                                    Some(Expr::lit("nil")),
-                                )];
-                                for elem in elems.iter().rev() {
-                                    // A cons head is a lazy position: `:` forces
-                                    // neither side. Weigh it like any argument so
-                                    // a possibly-⊥ element is suspended rather
-                                    // than run when the cell is built.
-                                    // Value-consumers force the head on read; see
-                                    // the head-consumption contract on __mll_head.
-                                    let head = self.arg_ast(elem, false);
-                                    stmts.push(Stmt::Assign(
-                                        "_l".into(),
-                                        Expr::call_named("__mll_cons", vec![head, Expr::name("_l")]),
-                                    ));
-                                }
-                                stmts.push(Stmt::Return(Expr::name("_l")));
-                                return Expr::call(
-                                    Expr::paren(Expr::Func(vec![], FuncBody::Inline(stmts))),
-                                    vec![],
-                                );
-                            }
-                            // Keep the cons tail lazy. A bare reference — a
-                            // variable or a nullary constructor like [] —
-                            // already denotes a thunk-or-value, so emit it raw:
-                            // forcing it here (expr_ast forces non-concrete
-                            // vars) would evaluate the rest of the spine eagerly
-                            // and diverge on infinite or self-referential lists
-                            // (e.g. `cons x rest = x : rest`). Any tail that
-                            // requires computation is wrapped in a thunk. The
-                            // runtime forces the cell when read (__mll_head /
-                            // __mll_tail), so an unforced tail is safe to store.
-                            let tail = {
-                                let mut t = arg.as_ref();
-                                while let TExprKind::Paren(inner) = &t.kind { t = inner.as_ref(); }
-                                t
-                            };
-                            let tail_is_ref = matches!(&tail.kind,
-                                TExprKind::Var(_) | TExprKind::Con(_));
-                            if tail_is_ref {
-                                let head = self.arg_ast(inner_arg, false); // lazy head — see below
-                                let tail_e = self.lazy_ref_ast(tail);
-                                return Expr::call_named("__mll_cons", vec![head, tail_e]);
-                            } else {
-                                // Lazy head: suspend a possibly-⊥ element instead
-                                // of running it when the cell is built.
-                                let head = self.arg_ast(inner_arg, false);
-                                let tail_e = self.expr_ast(arg);
-                                return Expr::call_named(
-                                    "__mll_lazy_cons",
-                                    vec![head, Expr::inline_fn0(tail_e)],
-                                );
-                            }
-                        }
-
-                // seq a b (prefix, EXACTLY two args) => force a, return b,
-                // inline. `seq` applied to more than two args (its result is a
-                // function applied further), a partial `seq a`, a backtick
-                // `a `seq` b`, and a first-class `seq` all route through the
-                // runtime `__mll_seq` instead (see the Var arm and the InfixApp
-                // seq case) — this inline form is kept only for the common
-                // prefix shape because it preserves the proper tail call on `b`.
-                if let TExprKind::App(seq_f, seq_a) = &func.kind
-                    && let TExprKind::Var(name) = &seq_f.kind
-                        && name == "seq" {
-                            return self.seq_inline_ast(seq_a, arg);
-                        }
-
-                // return/pure wrap their argument in an IO action closure whose
-                // performed value is the argument, left UNFORCED per the
-                // eagerness contract: running `return ⊥` must not raise until
-                // something demands the value. This is the first-class /
-                // higher-order path (e.g. `fmap f (return e)`,
-                // `mapM (\x -> return (g x)) xs`); the do-block bind chain
-                // flattens its own returns through action_run_ast. The payload
-                // takes the SAME escape decision as an escaping terminal
-                // (pure_action_ast): a provably-safe value stays bare (so
-                // `return 0` yields `function() return 0 end`), anything a
-                // runner could wrongly force or call — a suspended ⊥, a
-                // function-typed value — is wrapped in `__mll_pure`, which
-                // every consuming site strips with exactly one unbox. Left
-                // bare, a thunk payload deviated from GHC whenever the closure
-                // reached a FORWARDING runner (`return __mll_run_tail(<this
-                // closure>)` after inlining, e.g. `g n = id (pure undefined)`
-                // — a direct-perform tail): the forwarder returned the raw
-                // thunk and the consumer's `__mll_run` forced it, raising
-                // where GHC binds the bottom unforced (runghc-confirmed).
-                // Boxed, the box rides the tail chain to the one consuming
-                // unbox and the payload stays untouched.
-                if let TExprKind::Var(name) = &func.kind
-                    && (name == "return" || name == "pure") {
-                        let payload = self.pure_action_ast(arg);
-                        return Expr::paren(Expr::inline_fn0(payload));
-                    }
-
-                // Collect all applied arguments
-                let mut args = vec![arg.as_ref()];
-                let mut f = func.as_ref();
-                while let TExprKind::App(inner_f, inner_arg) = &f.kind {
-                    args.push(inner_arg.as_ref());
-                    f = inner_f.as_ref();
-                }
-                args.reverse();
-
-                // try/catch: wrap IO action argument in a closure so that
-                // errors are deferred into pcall rather than crashing eagerly.
-                if let TExprKind::Var(name) = &f.kind {
-                    if name == "try" && args.len() == 1 {
-                        let action = self.action_run_ast(args[0], false);
-                        return Expr::call_named("try_", vec![Expr::inline_fn0(action)]);
-                    }
-                    if name == "catch" && args.len() == 2 {
-                        let action = self.action_run_ast(args[0], false);
-                        let handler = self.expr_ast(args[1]);
-                        return Expr::call_named(
-                            "catch_",
-                            vec![Expr::inline_fn0(action), handler],
-                        );
-                    }
+                if let Some(e) = self.try_record_accessor_app(func, arg) {
+                    return e;
                 }
 
-                // Typeclass methods on primitive types → inline as Lua operators
-                // (primitive_method_lua_op is also what expr_yields_whnf
-                // keys on to know this emission is a forced native operation).
-                if args.len() == 2
-                    && let TExprKind::Var(name) = &f.kind {
-                        if let Some(op) = primitive_method_lua_op(name) {
-                            let l = self.forced_ast(args[0]);
-                            let r = self.forced_ast(args[1]);
-                            return Expr::paren(Expr::binop(op, l, r));
-                        }
-                    }
-
-
-                // Inline small pure functions at call site. Substitution
-                // re-emits each argument at every occurrence of its
-                // parameter, so an argument whose evaluation costs anything
-                // is admitted only where the parameter is emitted at most
-                // once (occ_counts, see find_inline_candidates) — otherwise
-                // `sq x = x * x` at `sq (nfib 30)` would run the call twice,
-                // a sharing loss GHC's inliner never allows. A declined
-                // site falls through to the ordinary call below, which
-                // evaluates (or thunks) the argument exactly once.
-                if let TExprKind::Var(name) = &f.kind
-                    && let Some((params, body, occ_counts)) = self.inline_fns.get(name)
-                        && args.len() == params.len()
-                        && args.iter().zip(occ_counts.iter())
-                            .all(|(a, &n)| n <= 1 || Self::is_trivial_arg(a)) {
-                            let (params, body) = (params.clone(), body.clone());
-                            let mut subst = std::collections::HashMap::new();
-                            for (param, arg) in params.iter().zip(args.iter()) {
-                                subst.insert(param.clone(), *arg);
-                            }
-                            let inlined = self.expr_subst_ast(&body, &subst);
-                            return Expr::paren(inlined);
-                        }
-
-                // Look up callee's demand info for call-site strictness
-                // decisions. A where-bound local function shadows a
-                // same-named top-level one, so its scoped row wins.
-                let callee_strict = if let TExprKind::Var(name) = &f.kind {
-                    self.local_strict_params.get(name)
-                        .or_else(|| self.demand_info.strict_params.get(name))
-                        .cloned()
-                } else {
-                    None
-                };
-
-                // The function argument of a runtime generic (map/zipWith) may
-                // need a currying adapter — see runtime_generic_adapter.
-                let arg0_adapter = args.first()
-                    .and_then(|a| self.runtime_generic_adapter(f, 0, &a.ty));
-
-                // Check if this is a partial application:
-                // the result type is still a function type
-                let remaining = count_arrows(&expr.ty);
-                if remaining > 0 {
-                    // Partial application — generate a closure
-                    // Wrapped in () so it can be immediately called in Lua
-                    let extra_params: Vec<String> = (0..remaining)
-                        .map(|i| format!("_pa{}", i))
-                        .collect();
-                    let callee = self.callee_ast(f);
-                    let mut cargs = Vec::new();
-                    for (i, a) in args.iter().enumerate() {
-                        let is_strict = callee_strict.as_ref()
-                            .is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                        let arg_e = self.arg_ast(a, is_strict);
-                        if i == 0 && let Some(adapter) = arg0_adapter {
-                            cargs.push(Expr::call_named(adapter, vec![arg_e]));
-                        } else {
-                            cargs.push(arg_e);
-                        }
-                    }
-                    for p in &extra_params {
-                        cargs.push(Expr::name(p.clone()));
-                    }
-                    Expr::paren(Expr::Func(
-                        extra_params,
-                        FuncBody::Block(Block(vec![Stmt::Return(Expr::call(callee, cargs))])),
-                    ))
-                } else {
-                    // Full application
-                    // Wrap function literals in parens so Lua allows calling them
-                    let callee = self.callee_ast(f);
-                    let mut cargs = Vec::new();
-                    for (i, a) in args.iter().enumerate() {
-                        let is_strict = callee_strict.as_ref()
-                            .is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                        let arg_e = self.arg_ast(a, is_strict);
-                        if i == 0 && let Some(adapter) = arg0_adapter {
-                            cargs.push(Expr::call_named(adapter, vec![arg_e]));
-                        } else {
-                            cargs.push(arg_e);
-                        }
-                    }
-                    Expr::call(callee, cargs)
+                if let Some(e) = self.try_cons_app(expr, func, arg) {
+                    return e;
                 }
+
+                if let Some(e) = self.try_seq_prefix_app(func, arg) {
+                    return e;
+                }
+
+                if let Some(e) = self.try_pure_app(func, arg) {
+                    return e;
+                }
+
+                let (f, args) = Self::collect_app_spine(func, arg);
+
+                if let Some(e) = self.try_exception_app(f, &args) {
+                    return e;
+                }
+                if let Some(e) = self.try_primitive_method_app(f, &args) {
+                    return e;
+                }
+                if let Some(e) = self.try_inline_call(f, &args) {
+                    return e;
+                }
+
+                self.general_call_ast(expr, f, &args)
             }
-            TExprKind::InfixApp { op, lhs, rhs } => {
-                if op == "div" || op == "mod" || op == "quot" || op == "rem" {
-                    // Runtime helpers, not inline float math / bare `%`:
-                    // math.floor(a/0) yields inf (a float escaping into
-                    // Int) instead of raising, and float division is
-                    // inexact past 2^53. __mll_div/__mll_mod raise a clear
-                    // error on a zero divisor and use native integer floor
-                    // division (Lua 5.3+ `//`) when the host has it. quot/rem
-                    // truncate toward zero (remainder takes the dividend's sign).
-                    let helper = match op.as_str() {
-                        "div" => "__mll_div", "mod" => "__mll_mod",
-                        "quot" => "__mll_quot", _ => "__mll_rem",
-                    };
-                    let l = self.forced_ast(lhs);
-                    let r = self.forced_ast(rhs);
-                    return Expr::call_named(helper, vec![l, r]);
-                }
-                if op == "++" {
+            TExprKind::InfixApp { op, lhs, rhs } => match op.as_str() {
+                "div" | "mod" | "quot" | "rem" => self.intdiv_infix_ast(op, lhs, rhs),
+                "++" => {
                     let l = self.expr_ast(lhs);
                     let r = self.expr_ast(rhs);
-                    return Expr::call_named(
+                    Expr::call_named(
                         "__mll_list_append",
                         vec![l, Expr::inline_fn0(r)],
-                    );
+                    )
                 }
-                if op == "!!" {
+                "!!" => {
                     let l = self.expr_ast(lhs);
                     let r = self.forced_ast(rhs);
-                    return Expr::call_named("__mll_list_index", vec![l, r]);
+                    Expr::call_named("__mll_list_index", vec![l, r])
                 }
-                if op == "seq" {
-                    // Backtick `a `seq` b`: same inline lowering as prefix
-                    // `seq a b` (force a, return b in tail position). Without
-                    // this the operator fell to the user-operator branch below
-                    // and emitted `seq(a, b)` — a call to a nonexistent global.
-                    return self.seq_inline_ast(lhs, rhs);
+                // Backtick `a `seq` b`: same inline lowering as prefix
+                // `seq a b` (force a, return b in tail position). Without
+                // this the operator fell to the user-operator path
+                // (operator_infix_ast) and emitted `seq(a, b)` — a call to
+                // a nonexistent global.
+                "seq" => self.seq_inline_ast(lhs, rhs),
+                ":" => self.cons_infix_ast(lhs, rhs),
+                "$" => self.dollar_infix_ast(expr, lhs, rhs),
+                ">>=" => self.bind_infix_ast(expr, lhs, rhs),
+                ">>" => {
+                    // IO-then: produce action closure (see bind_infix_ast
+                    // for the cur_result_demand rationale).
+                    let b = self.bind_chain_block(expr, true);
+                    Expr::Func(vec![], FuncBody::Block(b))
                 }
-                let lua_op = match op.as_str() {
-                    "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
-                    // "div"/"mod" never reach here: handled above via
-                    // __mll_div/__mll_mod (zero-divisor check, exact // ).
-                    ":" => {
-                        // Keep the cons tail lazy. A bare reference (variable
-                        // or []) already denotes a thunk-or-value, so emit it
-                        // raw — forcing it would evaluate the rest of the spine
-                        // eagerly and diverge on infinite/self-referential
-                        // lists (e.g. `cons x rest = x : rest`). Any tail that
-                        // requires computation is wrapped in a thunk; the
-                        // runtime forces the cell when read. See lazy_ref_ast.
-                        let tail = {
-                            let mut t = rhs.as_ref();
-                            while let TExprKind::Paren(inner) = &t.kind { t = inner.as_ref(); }
-                            t
-                        };
-                        let tail_is_ref = matches!(&tail.kind,
-                            TExprKind::Var(_) | TExprKind::Con(_));
-                        // The head is a lazy position too; weigh it so a
-                        // possibly-⊥ head is suspended, not run at construction.
-                        if tail_is_ref {
-                            let head = self.arg_ast(lhs, false);
-                            let tail_e = self.lazy_ref_ast(tail);
-                            return Expr::call_named("__mll_cons", vec![head, tail_e]);
-                        } else {
-                            let head = self.arg_ast(lhs, false);
-                            let tail_e = self.expr_ast(rhs);
-                            return Expr::call_named(
-                                "__mll_lazy_cons",
-                                vec![head, Expr::inline_fn0(tail_e)],
-                            );
-                        }
-                    }
-                    "$" => {
-                        // f $ x is exactly f x, so x is weighed like a normal
-                        // application argument (arg_ast): eager when f's next
-                        // parameter position is strict or x is cheap/total,
-                        // suspended otherwise. When the result type still has
-                        // arrows, f's real Lua arity is 1 + remaining under
-                        // the N-ary convention, so close over the missing
-                        // arguments — exactly like the App arm's
-                        // partial-application closure. Calling f with the one
-                        // argument alone would leave its remaining parameters
-                        // nil.
-                        let remaining = count_arrows(&expr.ty);
-                        // `map $ f` puts f straight into a runtime generic's
-                        // function-parameter position (see
-                        // runtime_generic_adapter).
-                        let adapter = self.runtime_generic_adapter(lhs, 0, &rhs.ty);
-                        // x occupies f's NEXT argument position: f is often a
-                        // partial application (`(const 5) $ undefined` is
-                        // `const 5 undefined`), so strip the applied spine off
-                        // lhs and consult the head's strictness row at the
-                        // index PAST the already-applied arguments — the same
-                        // row/index the App arm would use for `f x`. Anything
-                        // short of a known head with a strict row at that
-                        // exact position stays lazy: over-forcing here would
-                        // run a ⊥ that f never demands.
-                        let rhs_strict = {
-                            let mut head = lhs.as_ref();
-                            let mut applied = 0usize;
-                            loop {
-                                match &head.kind {
-                                    TExprKind::Paren(inner) => head = inner.as_ref(),
-                                    TExprKind::App(f, _) => {
-                                        applied += 1;
-                                        head = f.as_ref();
-                                    }
-                                    _ => break,
-                                }
-                            }
-                            matches!(&head.kind, TExprKind::Var(n)
-                                if self.local_strict_params.get(n)
-                                    .or_else(|| self.demand_info.strict_params.get(n))
-                                    .and_then(|v| v.get(applied).copied())
-                                    .unwrap_or(false))
-                        };
-                        let callee = self.callee_ast(lhs);
-                        let arg = self.arg_ast(rhs, rhs_strict);
-                        let arg = match adapter {
-                            Some(a) => Expr::call_named(a, vec![arg]),
-                            None => arg,
-                        };
-                        if remaining > 0 {
-                            let extra: Vec<String> =
-                                (0..remaining).map(|i| format!("_pa{}", i)).collect();
-                            let mut cargs = vec![arg];
-                            for p in &extra {
-                                cargs.push(Expr::name(p.clone()));
-                            }
-                            return Expr::paren(Expr::Func(
-                                extra,
-                                FuncBody::Inline(vec![Stmt::Return(Expr::call(callee, cargs))]),
-                            ));
-                        } else {
-                            return Expr::call(callee, vec![arg]);
-                        }
-                    }
-                    ">>=" => {
-                        // IO actions: do-blocks produce function() closures.
-                        // Bind chain flattens into sequential statements inside
-                        // the action closure; each sub-action is called with ().
-                        // NOTE on cur_result_demand: this arm is reached either
-                        // for a clause body in result position (the guarded /
-                        // multi-clause emission path wraps the ST body here) —
-                        // where the ambient result demand is exactly the demand
-                        // on the action's yielded value — or for a first-class
-                        // action, whose enclosing context (arg_ast, statement
-                        // actions, value-binding RHSes, lambdas) has already
-                        // reset the ambient demand to Head. So it is used as-is.
-                        if let TExprKind::Lambda { .. } = &rhs.kind {
-                            let b = self.bind_chain_block(expr, true);
-                            return Expr::Func(vec![], FuncBody::Block(b));
-                        } else {
-                            // m >>= f (non-lambda RHS, e.g. `step 1 >>= print`):
-                            // under the calling convention, applying an IO-typed
-                            // function to its argument PERFORMS the action and
-                            // returns the result carrying at most one pending
-                            // pure box (see the __mll_run contract in the
-                            // runtime). So the continuation's application must
-                            // flow through the FORWARDING runner, which returns
-                            // a plain result as-is, forwards a pure box, and
-                            // calls a first-class action closure. Calling the
-                            // application result unconditionally — the previous
-                            // emission — crashed ("attempt to call a nil
-                            // value") whenever `f x` returned a plain value,
-                            // which is the normal case.
-                            let f_e = if self.expr_yields_whnf(rhs) {
-                                self.callee_ast(rhs)
-                            } else {
-                                // A thunk-valued continuation (a lazily bound
-                                // local) must be forced to a callable first.
-                                Expr::force(self.expr_ast(rhs))
-                            };
-                            let m_e = self.action_run_ast(lhs, false);
-                            return Expr::inline_fn0(Expr::call_named(
-                                "__mll_run_tail",
-                                vec![Expr::call(f_e, vec![m_e])],
-                            ));
-                        }
-                    }
-                    ">>" => {
-                        // IO-then: produce action closure (see the ">>=" arm
-                        // for the cur_result_demand rationale).
-                        let b = self.bind_chain_block(expr, true);
-                        return Expr::Func(vec![], FuncBody::Block(b));
-                    }
-                    "." => {
-                        // f . g as a value. Under the N-ary convention the
-                        // closure must take ALL count_arrows(expr.ty)
-                        // parameters — `(f . g) x y` is one flat 2-arg call —
-                        // and the extras beyond the first belong to f (whose
-                        // arity is 1 + extras, since its argument type is g's
-                        // result). Likewise, g itself may have arity > 1 when
-                        // it returns a function; the composition feeds it only
-                        // one argument, so wrap `g _x` in the same
-                        // partial-application closure the App arm would emit.
-                        let extras = count_arrows(&expr.ty).saturating_sub(1);
-                        let g_extras = count_arrows(&rhs.ty).saturating_sub(1);
-                        // `map . g` feeds g's result straight into a runtime
-                        // generic's function-parameter position (see
-                        // runtime_generic_adapter).
-                        let adapter = match &rhs.ty {
-                            Ty::Arrow(_, res, _) => self.runtime_generic_adapter(lhs, 0, res),
-                            _ => None,
-                        };
-                        // `(f . g) x` is `f (g x)`. A non-strict `f` must not
-                        // force `g x` — doing so would force `x` and run any
-                        // bottom in `g x` that `f` never demands (e.g.
-                        // `(ignore . add1) (error "boom")` must return, not
-                        // raise). Suspend the inner application in that case.
-                        // Only the actual call form (`g_extras == 0`, no runtime
-                        // adapter) can be bottom; a partial application yields a
-                        // closure value, and a runtime generic (map/zipWith)
-                        // forces its function argument itself, so both are safe
-                        // to pass eagerly.
-                        let f_strict = matches!(&lhs.kind, TExprKind::Var(n)
-                            if self.local_strict_params.get(n)
-                                .or_else(|| self.demand_info.strict_params.get(n))
-                                .and_then(|v| v.first().copied()).unwrap_or(false));
-                        let suspend = !f_strict && g_extras == 0 && adapter.is_none();
-                        let f_callee = self.callee_ast(lhs);
-                        let inner = if g_extras == 0 {
-                            let g_callee = self.callee_ast(rhs);
-                            Expr::call(g_callee, vec![Expr::name("_x")])
-                        } else {
-                            let pb_params: Vec<String> =
-                                (0..g_extras).map(|i| format!("_pb{}", i)).collect();
-                            let g_callee = self.callee_ast(rhs);
-                            let mut gargs = vec![Expr::name("_x")];
-                            for p in &pb_params {
-                                gargs.push(Expr::name(p.clone()));
-                            }
-                            Expr::paren(Expr::Func(
-                                pb_params,
-                                FuncBody::Inline(vec![Stmt::Return(Expr::call(g_callee, gargs))]),
-                            ))
-                        };
-                        let inner = match adapter {
-                            Some(a) => Expr::call_named(a, vec![inner]),
-                            None => inner,
-                        };
-                        let inner = if suspend { Expr::thunk(inner) } else { inner };
-                        let mut outer_params = vec!["_x".to_string()];
-                        let mut fargs = vec![inner];
-                        for i in 0..extras {
-                            outer_params.push(format!("_pa{}", i));
-                            fargs.push(Expr::name(format!("_pa{}", i)));
-                        }
-                        return Expr::paren(Expr::Func(
-                            outer_params,
-                            FuncBody::Inline(vec![Stmt::Return(Expr::call(f_callee, fargs))]),
-                        ));
-                    }
-                    other => other,
-                };
-                if is_builtin_op(op) {
-                    // Lua-native operator: emit as infix. Operands are forced —
-                    // a thunk is a table, which would corrupt arithmetic and
-                    // comparison, and is truthy under `and`/`or`.
-                    let l = self.forced_ast(lhs);
-                    let r = self.forced_ast(rhs);
-                    Expr::paren(Expr::binop(lua_op, l, r))
-                } else {
-                    // User-defined or non-Lua operator: emit as function call
-                    let sop = sanitize_name(op);
-                    let fref = self.lua_ref(&sop);
-                    let l = self.expr_ast(lhs);
-                    let r = self.expr_ast(rhs);
-                    Expr::call_named(&fref, vec![l, r])
-                }
-            }
+                "." => self.compose_infix_ast(expr, lhs, rhs),
+                _ => self.operator_infix_ast(op, lhs, rhs),
+            },
             TExprKind::Negate(inner) => Expr::paren(Expr::neg(self.expr_ast(inner))),
             TExprKind::If { cond, then_branch, else_branch } => {
                 let cond_e = self.expr_ast(cond);
@@ -1097,6 +649,578 @@ impl CodeGen {
         }
     }
 
+    /// The record-accessor case of the App arm, split out only to keep
+    /// `expr_ast_inner` readable: a field accessor applied to a container
+    /// inlines as direct table indexing.
+    ///
+    /// The field may hold a thunk (lazy construction), so force the
+    /// projected value. The container is forced by expr_ast(arg) when
+    /// it is a non-concrete variable; __force is idempotent on values.
+    /// Laziness is preserved because non-strict argument positions
+    /// thunk-wrap the whole projection (see arg_ast).
+    fn try_record_accessor_app(&mut self, func: &TExpr, arg: &TExpr) -> Option<Expr> {
+        if let TExprKind::Var(name) = &func.kind
+            && let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
+                // A LuaDict field is keyed by name; a plain record field
+                // by position.
+                let index = match self.luadict_field_key.get(&sanitize_name(name)) {
+                    Some(key) => lua_field_index(key),
+                    None => format!("[{}]", idx),
+                };
+                let container = self.expr_ast(arg);
+                return Some(Expr::force(Expr::index(container, index)));
+            }
+        None
+    }
+
+    /// The cons-application case of the App arm, split out only to keep
+    /// `expr_ast_inner` readable: `(:) x xs` => `__mll_cons(x, xs)`, after
+    /// first trying to collect a whole literal list for compact emission.
+    fn try_cons_app(&mut self, expr: &TExpr, func: &TExpr, arg: &TExpr) -> Option<Expr> {
+        let TExprKind::App(inner_f, inner_arg) = &func.kind else { return None };
+        let TExprKind::Con(name) = &inner_f.kind else { return None };
+        if name != ":" {
+            return None;
+        }
+        // Try to collect a literal list and emit compactly
+        if let Some(elems) = Self::collect_list_literal(expr) {
+            let mut stmts = vec![Stmt::Local(
+                vec!["_l".into()],
+                Some(Expr::lit("nil")),
+            )];
+            for elem in elems.iter().rev() {
+                // A cons head is a lazy position: `:` forces
+                // neither side. Weigh it like any argument so
+                // a possibly-⊥ element is suspended rather
+                // than run when the cell is built.
+                // Value-consumers force the head on read; see
+                // the head-consumption contract on __mll_head.
+                let head = self.arg_ast(elem, false);
+                stmts.push(Stmt::Assign(
+                    "_l".into(),
+                    Expr::call_named("__mll_cons", vec![head, Expr::name("_l")]),
+                ));
+            }
+            stmts.push(Stmt::Return(Expr::name("_l")));
+            return Some(Expr::call(
+                Expr::paren(Expr::Func(vec![], FuncBody::Inline(stmts))),
+                vec![],
+            ));
+        }
+        // Keep the cons tail lazy. A bare reference — a
+        // variable or a nullary constructor like [] —
+        // already denotes a thunk-or-value, so emit it raw:
+        // forcing it here (expr_ast forces non-concrete
+        // vars) would evaluate the rest of the spine eagerly
+        // and diverge on infinite or self-referential lists
+        // (e.g. `cons x rest = x : rest`). Any tail that
+        // requires computation is wrapped in a thunk. The
+        // runtime forces the cell when read (__mll_head /
+        // __mll_tail), so an unforced tail is safe to store.
+        let tail = {
+            let mut t = arg;
+            while let TExprKind::Paren(inner) = &t.kind { t = inner.as_ref(); }
+            t
+        };
+        let tail_is_ref = matches!(&tail.kind,
+            TExprKind::Var(_) | TExprKind::Con(_));
+        if tail_is_ref {
+            let head = self.arg_ast(inner_arg, false); // lazy head — see below
+            let tail_e = self.lazy_ref_ast(tail);
+            Some(Expr::call_named("__mll_cons", vec![head, tail_e]))
+        } else {
+            // Lazy head: suspend a possibly-⊥ element instead
+            // of running it when the cell is built.
+            let head = self.arg_ast(inner_arg, false);
+            let tail_e = self.expr_ast(arg);
+            Some(Expr::call_named(
+                "__mll_lazy_cons",
+                vec![head, Expr::inline_fn0(tail_e)],
+            ))
+        }
+    }
+
+    /// The fully-applied prefix `seq` case of the App arm, split out only to
+    /// keep `expr_ast_inner` readable.
+    ///
+    /// seq a b (prefix, EXACTLY two args) => force a, return b,
+    /// inline. `seq` applied to more than two args (its result is a
+    /// function applied further), a partial `seq a`, a backtick
+    /// ``a `seq` b``, and a first-class `seq` all route through the
+    /// runtime `__mll_seq` instead (see the Var arm and the InfixApp
+    /// seq case) — this inline form is kept only for the common
+    /// prefix shape because it preserves the proper tail call on `b`.
+    fn try_seq_prefix_app(&mut self, func: &TExpr, arg: &TExpr) -> Option<Expr> {
+        if let TExprKind::App(seq_f, seq_a) = &func.kind
+            && let TExprKind::Var(name) = &seq_f.kind
+                && name == "seq" {
+                    return Some(self.seq_inline_ast(seq_a, arg));
+                }
+        None
+    }
+
+    /// The `return`/`pure` case of the App arm, split out only to keep
+    /// `expr_ast_inner` readable.
+    ///
+    /// return/pure wrap their argument in an IO action closure whose
+    /// performed value is the argument, left UNFORCED per the eagerness
+    /// contract: running `return ⊥` must not raise until something demands
+    /// the value. This is the first-class / higher-order path (e.g.
+    /// `fmap f (return e)`, `mapM (\x -> return (g x)) xs`); the do-block
+    /// bind chain flattens its own returns through action_run_ast. The
+    /// payload takes the SAME escape decision as an escaping terminal
+    /// (pure_action_ast): a provably-safe value stays bare (so `return 0`
+    /// yields `function() return 0 end`), anything a runner could wrongly
+    /// force or call — a suspended ⊥, a function-typed value — is wrapped
+    /// in `__mll_pure`, which every consuming site strips with exactly one
+    /// unbox. Left bare, a thunk payload deviated from GHC whenever the
+    /// closure reached a FORWARDING runner (`return __mll_run_tail(<this
+    /// closure>)` after inlining, e.g. `g n = id (pure undefined)` — a
+    /// direct-perform tail): the forwarder returned the raw thunk and the
+    /// consumer's `__mll_run` forced it, raising where GHC binds the bottom
+    /// unforced (runghc-confirmed). Boxed, the box rides the tail chain to
+    /// the one consuming unbox and the payload stays untouched.
+    fn try_pure_app(&mut self, func: &TExpr, arg: &TExpr) -> Option<Expr> {
+        if let TExprKind::Var(name) = &func.kind
+            && (name == "return" || name == "pure") {
+                let payload = self.pure_action_ast(arg);
+                return Some(Expr::paren(Expr::inline_fn0(payload)));
+            }
+        None
+    }
+
+    /// Collect all applied arguments of a (possibly curried) application,
+    /// split out only to keep `expr_ast_inner` readable: returns the head
+    /// callee and the arguments in application order.
+    fn collect_app_spine<'a>(func: &'a TExpr, arg: &'a TExpr) -> (&'a TExpr, Vec<&'a TExpr>) {
+        let mut args = vec![arg];
+        let mut f = func;
+        while let TExprKind::App(inner_f, inner_arg) = &f.kind {
+            args.push(inner_arg.as_ref());
+            f = inner_f.as_ref();
+        }
+        args.reverse();
+        (f, args)
+    }
+
+    /// The `try`/`catch` case of the App arm, split out only to keep
+    /// `expr_ast_inner` readable: wrap the IO action argument in a closure
+    /// so that errors are deferred into pcall rather than crashing eagerly.
+    fn try_exception_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
+        if let TExprKind::Var(name) = &f.kind {
+            if name == "try" && args.len() == 1 {
+                let action = self.action_run_ast(args[0], false);
+                return Some(Expr::call_named("try_", vec![Expr::inline_fn0(action)]));
+            }
+            if name == "catch" && args.len() == 2 {
+                let action = self.action_run_ast(args[0], false);
+                let handler = self.expr_ast(args[1]);
+                return Some(Expr::call_named(
+                    "catch_",
+                    vec![Expr::inline_fn0(action), handler],
+                ));
+            }
+        }
+        None
+    }
+
+    /// The primitive-operator case of the App arm, split out only to keep
+    /// `expr_ast_inner` readable: typeclass methods on primitive types →
+    /// inline as Lua operators (primitive_method_lua_op is also what
+    /// expr_yields_whnf keys on to know this emission is a forced native
+    /// operation).
+    fn try_primitive_method_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
+        if args.len() == 2
+            && let TExprKind::Var(name) = &f.kind {
+                if let Some(op) = primitive_method_lua_op(name) {
+                    let l = self.forced_ast(args[0]);
+                    let r = self.forced_ast(args[1]);
+                    return Some(Expr::paren(Expr::binop(op, l, r)));
+                }
+            }
+        None
+    }
+
+    /// The small-function inliner gate of the App arm, split out only to
+    /// keep `expr_ast_inner` readable: inline small pure functions at the
+    /// call site. Substitution re-emits each argument at every occurrence
+    /// of its parameter, so an argument whose evaluation costs anything
+    /// is admitted only where the parameter is emitted at most once
+    /// (occ_counts, see find_inline_candidates) — otherwise `sq x = x * x`
+    /// at `sq (nfib 30)` would run the call twice, a sharing loss GHC's
+    /// inliner never allows. A declined site falls through to the ordinary
+    /// call (general_call_ast), which evaluates (or thunks) the argument
+    /// exactly once.
+    fn try_inline_call(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
+        if let TExprKind::Var(name) = &f.kind
+            && let Some((params, body, occ_counts)) = self.inline_fns.get(name)
+                && args.len() == params.len()
+                && args.iter().zip(occ_counts.iter())
+                    .all(|(a, &n)| n <= 1 || Self::is_trivial_arg(a)) {
+                    let (params, body) = (params.clone(), body.clone());
+                    let mut subst = std::collections::HashMap::new();
+                    for (param, arg) in params.iter().zip(args.iter()) {
+                        subst.insert(param.clone(), *arg);
+                    }
+                    let inlined = self.expr_subst_ast(&body, &subst);
+                    return Some(Expr::paren(inlined));
+                }
+        None
+    }
+
+    /// The general call path of the App arm, split out only to keep
+    /// `expr_ast_inner` readable: call-site strictness from the callee's
+    /// demand row, the runtime-generic function-argument adapter, and the
+    /// partial-application closure vs. the flat full call.
+    fn general_call_ast(&mut self, expr: &TExpr, f: &TExpr, args: &[&TExpr]) -> Expr {
+        // Look up callee's demand info for call-site strictness
+        // decisions. A where-bound local function shadows a
+        // same-named top-level one, so its scoped row wins.
+        let callee_strict = if let TExprKind::Var(name) = &f.kind {
+            self.local_strict_params.get(name)
+                .or_else(|| self.demand_info.strict_params.get(name))
+                .cloned()
+        } else {
+            None
+        };
+
+        // The function argument of a runtime generic (map/zipWith) may
+        // need a currying adapter — see runtime_generic_adapter.
+        let arg0_adapter = args.first()
+            .and_then(|a| self.runtime_generic_adapter(f, 0, &a.ty));
+
+        // Check if this is a partial application:
+        // the result type is still a function type
+        let remaining = count_arrows(&expr.ty);
+        if remaining > 0 {
+            // Partial application — generate a closure
+            // Wrapped in () so it can be immediately called in Lua
+            let extra_params: Vec<String> = (0..remaining)
+                .map(|i| format!("_pa{}", i))
+                .collect();
+            let callee = self.callee_ast(f);
+            let mut cargs = Vec::new();
+            for (i, a) in args.iter().enumerate() {
+                let is_strict = callee_strict.as_ref()
+                    .is_some_and(|v| v.get(i).copied().unwrap_or(false));
+                let arg_e = self.arg_ast(a, is_strict);
+                if i == 0 && let Some(adapter) = arg0_adapter {
+                    cargs.push(Expr::call_named(adapter, vec![arg_e]));
+                } else {
+                    cargs.push(arg_e);
+                }
+            }
+            for p in &extra_params {
+                cargs.push(Expr::name(p.clone()));
+            }
+            Expr::paren(Expr::Func(
+                extra_params,
+                FuncBody::Block(Block(vec![Stmt::Return(Expr::call(callee, cargs))])),
+            ))
+        } else {
+            // Full application
+            // Wrap function literals in parens so Lua allows calling them
+            let callee = self.callee_ast(f);
+            let mut cargs = Vec::new();
+            for (i, a) in args.iter().enumerate() {
+                let is_strict = callee_strict.as_ref()
+                    .is_some_and(|v| v.get(i).copied().unwrap_or(false));
+                let arg_e = self.arg_ast(a, is_strict);
+                if i == 0 && let Some(adapter) = arg0_adapter {
+                    cargs.push(Expr::call_named(adapter, vec![arg_e]));
+                } else {
+                    cargs.push(arg_e);
+                }
+            }
+            Expr::call(callee, cargs)
+        }
+    }
+
+    /// The `div`/`mod`/`quot`/`rem` case of the InfixApp arm, split out only
+    /// to keep `expr_ast_inner` readable.
+    ///
+    /// Runtime helpers, not inline float math / bare `%`:
+    /// math.floor(a/0) yields inf (a float escaping into
+    /// Int) instead of raising, and float division is
+    /// inexact past 2^53. __mll_div/__mll_mod raise a clear
+    /// error on a zero divisor and use native integer floor
+    /// division (Lua 5.3+ `//`) when the host has it. quot/rem
+    /// truncate toward zero (remainder takes the dividend's sign).
+    fn intdiv_infix_ast(&mut self, op: &str, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        let helper = match op {
+            "div" => "__mll_div", "mod" => "__mll_mod",
+            "quot" => "__mll_quot", _ => "__mll_rem",
+        };
+        let l = self.forced_ast(lhs);
+        let r = self.forced_ast(rhs);
+        Expr::call_named(helper, vec![l, r])
+    }
+
+    /// The infix cons case (`x : xs`) of the InfixApp arm, split out only to
+    /// keep `expr_ast_inner` readable.
+    ///
+    /// Keep the cons tail lazy. A bare reference (variable
+    /// or []) already denotes a thunk-or-value, so emit it
+    /// raw — forcing it would evaluate the rest of the spine
+    /// eagerly and diverge on infinite/self-referential
+    /// lists (e.g. `cons x rest = x : rest`). Any tail that
+    /// requires computation is wrapped in a thunk; the
+    /// runtime forces the cell when read. See lazy_ref_ast.
+    fn cons_infix_ast(&mut self, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        let tail = {
+            let mut t = rhs;
+            while let TExprKind::Paren(inner) = &t.kind { t = inner.as_ref(); }
+            t
+        };
+        let tail_is_ref = matches!(&tail.kind,
+            TExprKind::Var(_) | TExprKind::Con(_));
+        // The head is a lazy position too; weigh it so a
+        // possibly-⊥ head is suspended, not run at construction.
+        if tail_is_ref {
+            let head = self.arg_ast(lhs, false);
+            let tail_e = self.lazy_ref_ast(tail);
+            Expr::call_named("__mll_cons", vec![head, tail_e])
+        } else {
+            let head = self.arg_ast(lhs, false);
+            let tail_e = self.expr_ast(rhs);
+            Expr::call_named(
+                "__mll_lazy_cons",
+                vec![head, Expr::inline_fn0(tail_e)],
+            )
+        }
+    }
+
+    /// The `$` case of the InfixApp arm, split out only to keep
+    /// `expr_ast_inner` readable.
+    ///
+    /// f $ x is exactly f x, so x is weighed like a normal
+    /// application argument (arg_ast): eager when f's next
+    /// parameter position is strict or x is cheap/total,
+    /// suspended otherwise. When the result type still has
+    /// arrows, f's real Lua arity is 1 + remaining under
+    /// the N-ary convention, so close over the missing
+    /// arguments — exactly like the App arm's
+    /// partial-application closure (general_call_ast). Calling f
+    /// with the one argument alone would leave its remaining parameters
+    /// nil.
+    fn dollar_infix_ast(&mut self, expr: &TExpr, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        let remaining = count_arrows(&expr.ty);
+        // `map $ f` puts f straight into a runtime generic's
+        // function-parameter position (see
+        // runtime_generic_adapter).
+        let adapter = self.runtime_generic_adapter(lhs, 0, &rhs.ty);
+        // x occupies f's NEXT argument position: f is often a
+        // partial application (`(const 5) $ undefined` is
+        // `const 5 undefined`), so strip the applied spine off
+        // lhs and consult the head's strictness row at the
+        // index PAST the already-applied arguments — the same
+        // row/index the App arm would use for `f x`. Anything
+        // short of a known head with a strict row at that
+        // exact position stays lazy: over-forcing here would
+        // run a ⊥ that f never demands.
+        let rhs_strict = {
+            let mut head = lhs;
+            let mut applied = 0usize;
+            loop {
+                match &head.kind {
+                    TExprKind::Paren(inner) => head = inner.as_ref(),
+                    TExprKind::App(f, _) => {
+                        applied += 1;
+                        head = f.as_ref();
+                    }
+                    _ => break,
+                }
+            }
+            matches!(&head.kind, TExprKind::Var(n)
+                if self.local_strict_params.get(n)
+                    .or_else(|| self.demand_info.strict_params.get(n))
+                    .and_then(|v| v.get(applied).copied())
+                    .unwrap_or(false))
+        };
+        let callee = self.callee_ast(lhs);
+        let arg = self.arg_ast(rhs, rhs_strict);
+        let arg = match adapter {
+            Some(a) => Expr::call_named(a, vec![arg]),
+            None => arg,
+        };
+        if remaining > 0 {
+            let extra: Vec<String> =
+                (0..remaining).map(|i| format!("_pa{}", i)).collect();
+            let mut cargs = vec![arg];
+            for p in &extra {
+                cargs.push(Expr::name(p.clone()));
+            }
+            Expr::paren(Expr::Func(
+                extra,
+                FuncBody::Inline(vec![Stmt::Return(Expr::call(callee, cargs))]),
+            ))
+        } else {
+            Expr::call(callee, vec![arg])
+        }
+    }
+
+    /// The `>>=` case of the InfixApp arm, split out only to keep
+    /// `expr_ast_inner` readable.
+    ///
+    /// IO actions: do-blocks produce function() closures.
+    /// Bind chain flattens into sequential statements inside
+    /// the action closure; each sub-action is called with ().
+    /// NOTE on cur_result_demand: this arm is reached either
+    /// for a clause body in result position (the guarded /
+    /// multi-clause emission path wraps the ST body here) —
+    /// where the ambient result demand is exactly the demand
+    /// on the action's yielded value — or for a first-class
+    /// action, whose enclosing context (arg_ast, statement
+    /// actions, value-binding RHSes, lambdas) has already
+    /// reset the ambient demand to Head. So it is used as-is.
+    /// (The `>>` arm shares this rationale.)
+    fn bind_infix_ast(&mut self, expr: &TExpr, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        if let TExprKind::Lambda { .. } = &rhs.kind {
+            let b = self.bind_chain_block(expr, true);
+            Expr::Func(vec![], FuncBody::Block(b))
+        } else {
+            // m >>= f (non-lambda RHS, e.g. `step 1 >>= print`):
+            // under the calling convention, applying an IO-typed
+            // function to its argument PERFORMS the action and
+            // returns the result carrying at most one pending
+            // pure box (see the __mll_run contract in the
+            // runtime). So the continuation's application must
+            // flow through the FORWARDING runner, which returns
+            // a plain result as-is, forwards a pure box, and
+            // calls a first-class action closure. Calling the
+            // application result unconditionally — the previous
+            // emission — crashed ("attempt to call a nil
+            // value") whenever `f x` returned a plain value,
+            // which is the normal case.
+            let f_e = if self.expr_yields_whnf(rhs) {
+                self.callee_ast(rhs)
+            } else {
+                // A thunk-valued continuation (a lazily bound
+                // local) must be forced to a callable first.
+                Expr::force(self.expr_ast(rhs))
+            };
+            let m_e = self.action_run_ast(lhs, false);
+            Expr::inline_fn0(Expr::call_named(
+                "__mll_run_tail",
+                vec![Expr::call(f_e, vec![m_e])],
+            ))
+        }
+    }
+
+    /// The `.` (composition-as-a-value) case of the InfixApp arm, split out
+    /// only to keep `expr_ast_inner` readable.
+    ///
+    /// f . g as a value. Under the N-ary convention the
+    /// closure must take ALL count_arrows(expr.ty)
+    /// parameters — `(f . g) x y` is one flat 2-arg call —
+    /// and the extras beyond the first belong to f (whose
+    /// arity is 1 + extras, since its argument type is g's
+    /// result). Likewise, g itself may have arity > 1 when
+    /// it returns a function; the composition feeds it only
+    /// one argument, so wrap `g _x` in the same
+    /// partial-application closure the App arm would emit.
+    fn compose_infix_ast(&mut self, expr: &TExpr, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        let extras = count_arrows(&expr.ty).saturating_sub(1);
+        let g_extras = count_arrows(&rhs.ty).saturating_sub(1);
+        // `map . g` feeds g's result straight into a runtime
+        // generic's function-parameter position (see
+        // runtime_generic_adapter).
+        let adapter = match &rhs.ty {
+            Ty::Arrow(_, res, _) => self.runtime_generic_adapter(lhs, 0, res),
+            _ => None,
+        };
+        // `(f . g) x` is `f (g x)`. A non-strict `f` must not
+        // force `g x` — doing so would force `x` and run any
+        // bottom in `g x` that `f` never demands (e.g.
+        // `(ignore . add1) (error "boom")` must return, not
+        // raise). Suspend the inner application in that case.
+        // Only the actual call form (`g_extras == 0`, no runtime
+        // adapter) can be bottom; a partial application yields a
+        // closure value, and a runtime generic (map/zipWith)
+        // forces its function argument itself, so both are safe
+        // to pass eagerly.
+        let f_strict = matches!(&lhs.kind, TExprKind::Var(n)
+            if self.local_strict_params.get(n)
+                .or_else(|| self.demand_info.strict_params.get(n))
+                .and_then(|v| v.first().copied()).unwrap_or(false));
+        let suspend = !f_strict && g_extras == 0 && adapter.is_none();
+        let f_callee = self.callee_ast(lhs);
+        let inner = if g_extras == 0 {
+            let g_callee = self.callee_ast(rhs);
+            Expr::call(g_callee, vec![Expr::name("_x")])
+        } else {
+            let pb_params: Vec<String> =
+                (0..g_extras).map(|i| format!("_pb{}", i)).collect();
+            let g_callee = self.callee_ast(rhs);
+            let mut gargs = vec![Expr::name("_x")];
+            for p in &pb_params {
+                gargs.push(Expr::name(p.clone()));
+            }
+            Expr::paren(Expr::Func(
+                pb_params,
+                FuncBody::Inline(vec![Stmt::Return(Expr::call(g_callee, gargs))]),
+            ))
+        };
+        let inner = match adapter {
+            Some(a) => Expr::call_named(a, vec![inner]),
+            None => inner,
+        };
+        let inner = if suspend { Expr::thunk(inner) } else { inner };
+        let mut outer_params = vec!["_x".to_string()];
+        let mut fargs = vec![inner];
+        for i in 0..extras {
+            outer_params.push(format!("_pa{}", i));
+            fargs.push(Expr::name(format!("_pa{}", i)));
+        }
+        Expr::paren(Expr::Func(
+            outer_params,
+            FuncBody::Inline(vec![Stmt::Return(Expr::call(f_callee, fargs))]),
+        ))
+    }
+
+    /// The operator-table dispatch of the InfixApp arm — every operator
+    /// without a dedicated case — split out only to keep `expr_ast_inner`
+    /// readable.
+    fn operator_infix_ast(&mut self, op: &str, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        let lua_op = match op {
+            "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
+            // "div"/"mod" never reach here: handled by intdiv_infix_ast via
+            // __mll_div/__mll_mod (zero-divisor check, exact // ).
+            other => other,
+        };
+        if is_builtin_op(op) {
+            // Lua-native operator: emit as infix. Operands are forced —
+            // a thunk is a table, which would corrupt arithmetic and
+            // comparison, and is truthy under `and`/`or`.
+            let l = self.forced_ast(lhs);
+            let r = self.forced_ast(rhs);
+            Expr::paren(Expr::binop(lua_op, l, r))
+        } else {
+            // User-defined or non-Lua operator: emit as function call
+            let sop = sanitize_name(op);
+            let fref = self.lua_ref(&sop);
+            let l = self.expr_ast(lhs);
+            let r = self.expr_ast(rhs);
+            Expr::call_named(&fref, vec![l, r])
+        }
+    }
+
+    /// Decompose a counted spec payload `N:payload` — the encoding the
+    /// monomorphizer and FFI lowering use for tuple specs
+    /// (`__mll_tuple_eq:N:eqs`, `__mll_tup_ret:N:fn`, `__mll_io_tup:N:fn`).
+    /// A malformed payload is an ENCODER bug (the spec strings are built in
+    /// mono.rs / the typechecker's FFI lowering), so fail naming the spec
+    /// instead of unwrapping bare with no context.
+    fn counted_spec<'s>(kind: &str, rest: &'s str) -> (usize, &'s str) {
+        let (n, payload) = rest.split_once(':').unwrap_or_else(|| {
+            panic!("malformed {kind} spec {rest:?}: missing count separator (encoder bug)")
+        });
+        let n = n.parse().unwrap_or_else(|_| {
+            panic!("malformed {kind} spec {rest:?}: non-numeric count (encoder bug)")
+        });
+        (n, payload)
+    }
+
     /// The SpecCall arms of the expression walk, split out only to keep
     /// `expr_ast_inner` readable. Same arm-for-arm structure as before.
     fn spec_call_ast(&mut self, specialized: &str, args: &[TExpr], expr: &TExpr) -> Expr {
@@ -1177,9 +1301,8 @@ impl CodeGen {
         } else if let Some(rest) = specialized.strip_prefix("__mll_tuple_eq:") {
             // Tuple eq: compare element-wise
             // Format: __mll_tuple_eq:N:eq_E1,eq_E2,...
-            let parts: Vec<&str> = rest.splitn(2, ':').collect();
-            let n: usize = parts[0].parse().unwrap();
-            let eq_fns: Vec<&str> = parts[1].split(',').collect();
+            let (n, payload) = Self::counted_spec("__mll_tuple_eq", rest);
+            let eq_fns: Vec<&str> = payload.split(',').collect();
             let mut acc: Option<Expr> = None;
             for (i, eq_fn) in eq_fns.iter().enumerate().take(n) {
                 let eq_ref = self.lua_ref(eq_fn);
@@ -1230,9 +1353,7 @@ impl CodeGen {
         } else if let Some(rest) = specialized.strip_prefix("__mll_tup_ret:") {
             // Multi-return FFI: pack Lua multiple returns into a tuple table
             // Format: __mll_tup_ret:N:lua_func
-            let parts: Vec<&str> = rest.splitn(2, ':').collect();
-            let n: usize = parts[0].parse().unwrap();
-            let lua_func = parts[1];
+            let (n, lua_func) = Self::counted_spec("__mll_tup_ret", rest);
             let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
             let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
             // Decode the packed tuple like every other FFI result: a
@@ -1391,9 +1512,7 @@ impl CodeGen {
             if needs_wrapper { Expr::inline_fn0(inner) } else { inner }
         } else if let Some(rest) = specialized.strip_prefix("__mll_io_tup:") {
             // IO FFI with multi-return: wrap in action thunk
-            let parts: Vec<&str> = rest.splitn(2, ':').collect();
-            let n: usize = parts[0].parse().unwrap();
-            let lua_func = parts[1];
+            let (n, lua_func) = Self::counted_spec("__mll_io_tup", rest);
             let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
             let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
             // Decode the packed tuple (see the __mll_tup_ret arm).

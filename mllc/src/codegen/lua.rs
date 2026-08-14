@@ -141,15 +141,70 @@ pub(super) enum Stmt {
     /// forbids a goto from jumping into a local's scope, and only a label in
     /// end-of-block position (followed by nothing) is exempt from that rule.
     Label(String),
-    /// A named function definition. The header arrives rendered up to and
-    /// including the parameter list's closing paren — `local function f(a)`,
-    /// `__mll_fn[3] = function(a)`, `go = function(a)` — because the spelling
-    /// is owned by name resolution (`fn_decl` / spill-slot placement). The
-    /// body sits at indent+1 with `end` back at the statement's indent.
-    Function { header: String, body: Block },
+    /// A named function definition: what the header binds or stores to
+    /// (`FnTarget`), the parameter names, and the body at indent+1 with
+    /// `end` back at the statement's indent. The printer renders the header
+    /// as `local function f(a, b)` / `__mll_fn[3] = function(a, b)` /
+    /// `go = function(a, b)` (see `FnTarget::render_header`).
+    Function {
+        target: FnTarget,
+        params: Vec<String>,
+        body: Block,
+    },
     /// The module's export table: `return {` with one `key = value,` entry
     /// per line at indent+1 and `}` back at the statement's indent.
     ReturnTable(Vec<(String, Expr)>),
+}
+
+/// What a named function definition (`Stmt::Function`) binds or stores to.
+/// Three forms, matching the three spellings name resolution produces
+/// (`CodeGen::fn_target` for the first two, the where-group assignment in
+/// function.rs for the third).
+#[derive(Clone)]
+pub(super) enum FnTarget {
+    /// `local function <name>(…)` — the header itself declares and binds.
+    LocalFn(String),
+    /// `__mll_fn[<slot>] = function(…)` — a store to the module function
+    /// table's slot.
+    Slot(u32),
+    /// `<lvalue> = function(…)` — assignment to a forward-declared local.
+    /// The lvalue arrives rendered, like `Stmt::Assign`'s: a bare name
+    /// (`go`) or its `_v[N]` spill slot.
+    Assigned(String),
+}
+
+impl FnTarget {
+    /// Render the full header line up to and including the parameter list's
+    /// closing paren — byte-identical to the pre-rendered header strings
+    /// this node used to carry.
+    pub(super) fn render_header(&self, params: &[String], out: &mut String) {
+        match self {
+            FnTarget::LocalFn(n) => {
+                out.push_str("local function ");
+                out.push_str(n);
+            }
+            FnTarget::Slot(i) => {
+                out.push_str("__mll_fn[");
+                out.push_str(&i.to_string());
+                out.push_str("] = function");
+            }
+            FnTarget::Assigned(lhs) => {
+                out.push_str(lhs);
+                out.push_str(" = function");
+            }
+        }
+        out.push('(');
+        out.push_str(&params.join(", "));
+        out.push(')');
+    }
+
+    /// The rendered header as a string (fresh-name token scans, reverse
+    /// self-check diagnostics).
+    pub(super) fn header_text(&self, params: &[String]) -> String {
+        let mut out = String::new();
+        self.render_header(params, &mut out);
+        out
+    }
 }
 
 fn pad(ind: usize, out: &mut String) {
@@ -625,8 +680,8 @@ impl Stmt {
                 out.push_str(l);
                 out.push_str("::");
             }
-            Stmt::Function { header, body } => {
-                out.push_str(header);
+            Stmt::Function { target, params, body } => {
+                target.render_header(params, out);
                 out.push('\n');
                 body.render(ind + 1, out);
                 pad(ind, out);

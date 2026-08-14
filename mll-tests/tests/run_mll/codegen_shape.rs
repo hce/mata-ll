@@ -208,71 +208,21 @@ main = print (loop 3 big + twice)
     );
 }
 
-/// Paren normalization (codegen/opt.rs): the emitted corpus must be free of
-/// the redundant-paren shapes the pass eliminates. The one with semantic
-/// weight is the paren-wrapped call in return position — `return (f(x))` is
-/// not a proper tail call in Lua — asserted here for the provably
-/// single-return callees (`__mll_*`, `__force`, `show*`) and for thunk
-/// bodies (whose only consumer, `__force`, truncates to one value). The
-/// FFI-wrapper check is the flip side: a host call with a declared
-/// single-value result KEEPS its truncating paren.
+/// Paren normalization, the KEEPS-paren side. The eliminated-paren side is
+/// checked structurally per corpus program by the stamp refutation
+/// (opt::run_refuted re-runs the expression passes over the final tree and
+/// any change refutes — see expression_pass_idempotence), which replaced
+/// the operator-list grep this test used to do. What idempotence cannot
+/// express is a paren that must SURVIVE: an FFI wrapper truncates a
+/// multi-returning host call to the declared single result, so the paren
+/// there is semantics, not grouping.
 #[test]
-fn emitted_parens_are_normalized() {
-    on_compiler_stack(emitted_parens_are_normalized_impl)
+fn ffi_wrapper_keeps_truncating_paren() {
+    on_compiler_stack(ffi_wrapper_keeps_truncating_paren_impl)
 }
 
-fn emitted_parens_are_normalized_impl() {
-    let lib_path = Path::new("../lib").to_path_buf();
+fn ffi_wrapper_keeps_truncating_paren_impl() {
     let dir = Path::new("tests/cases");
-    for entry in std::fs::read_dir(dir).expect("read tests/cases") {
-        let path = entry.expect("dir entry").path();
-        if path.extension().and_then(|e| e.to_str()) != Some("mll") {
-            continue;
-        }
-        let source = std::fs::read_to_string(&path).expect("read case");
-        let lua = match compile(&source, dir, &[&lib_path]) {
-            Ok(r) => r.lua_code,
-            // A case that needs CLI-only setup is not this test's business.
-            Err(_) => continue,
-        };
-        // Dead-branch cleanup (pass 2): the `otherwise` guard arm is
-        // always rewritten to `else`.
-        assert!(
-            !lua.contains("elseif true then"),
-            "{}: `elseif true` survived dead-branch cleanup",
-            path.display()
-        );
-        for forbidden in [
-            "return (__mll",
-            "return (__force",
-            "return (show",
-            "__thunk(function() return (__",
-        ] {
-            for line in lua.lines().filter(|l| l.contains(forbidden)) {
-                // `return (__force(a) * ...` is a grouped binop operand, not
-                // a paren-wrapped call: only flag lines where the paren
-                // closes the return expression (line ends right after the
-                // call's own closing parens).
-                let after = &line[line.find(forbidden).unwrap()..];
-                if after.trim_end().ends_with("))") && !after.contains(" and ")
-                    && !after.contains(" or ") && !after.contains(" + ")
-                    && !after.contains(" * ") && !after.contains(" - ")
-                    && !after.contains(" .. ") && !after.contains(" == ")
-                    && !after.contains(" ~= ") && !after.contains(" < ")
-                    && !after.contains(" > ") && !after.contains(" end")
-                {
-                    panic!(
-                        "{}: redundant paren survived normalization: {}",
-                        path.display(),
-                        line.trim()
-                    );
-                }
-            }
-        }
-    }
-
-    // FFI wrappers truncate a multi-returning host to the declared single
-    // result — the paren here is semantics and must survive the pass.
     let ffi_source = "modf1 :: Number -> LuaPure \"math.modf\" Number\n\
                       main :: IO ()\n\
                       main = assert (modf1 3.75 == 3.0) \"t\"\n";

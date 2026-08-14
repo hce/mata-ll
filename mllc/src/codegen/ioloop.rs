@@ -153,10 +153,10 @@ use std::collections::{HashMap, HashSet};
 
 use super::annot::{self, ScopeView, is_plain_ident};
 use super::loopcore::{self, each_return, render_stmts, run_tail_self_args};
-use super::lua::{Block, Expr, FuncBody, Stmt};
+use super::lua::{Block, Expr, FnTarget, FuncBody, Stmt};
 use super::opt;
 use super::tailloop::{
-    self, SelfName, parse_header, rename_block, rename_blocked, self_qualifies,
+    self, SelfName, rename_block, rename_blocked, self_qualifies, self_target,
 };
 
 pub(super) struct IoLoop;
@@ -164,12 +164,13 @@ pub(super) struct IoLoop;
 impl annot::StructuredPass for IoLoop {
     fn request(
         &mut self,
-        header: &str,
+        target: &FnTarget,
+        params: &[String],
         body: &Block,
         view: &ScopeView<'_>,
         locals_in_scope: &HashSet<String>,
     ) -> Option<Block> {
-        convert(header, body, view, locals_in_scope)
+        convert(target, params, body, view, locals_in_scope)
     }
 }
 
@@ -246,8 +247,14 @@ fn repeat_safe_stmt(s: &Stmt) -> bool {
         // per-self-call definition. A slot header here would be a store the
         // module-wide census counted once but the converted output performs
         // twice — the emitter keeps slot functions top-level, and this
-        // check turns that assumption into a gate.
-        Stmt::Function { header, .. } => !header.contains("__mll_fn"),
+        // check turns that assumption into a gate. (The name/parameter
+        // substring checks reproduce the former whole-header text scan.)
+        Stmt::Function { target, params, .. } => match target {
+            FnTarget::Slot(_) => false,
+            FnTarget::LocalFn(n) | FnTarget::Assigned(n) => {
+                !n.contains("__mll_fn") && !params.iter().any(|p| p.contains("__mll_fn"))
+            }
+        },
         // Raw (opaque), runner calls, multi-assignments, loop scaffolding,
         // returns of tables: outside the vocabulary.
         _ => false,
@@ -362,12 +369,13 @@ fn to_loop(stmts: Vec<Stmt>, name: &SelfName, params: &[String]) -> Vec<Stmt> {
 // ---- The conversion ----
 
 fn convert(
-    header: &str,
+    target: &FnTarget,
+    params: &[String],
     body: &Block,
     view: &ScopeView<'_>,
     locals_in_scope: &HashSet<String>,
 ) -> Option<Block> {
-    let (self_name, params) = parse_header(header)?;
+    let self_name = self_target(target, params)?;
     if !self_qualifies(&self_name, view, locals_in_scope) {
         return None;
     }
@@ -379,7 +387,7 @@ fn convert(
     let mut all_diverge = true;
     each_return(&body.0, &mut |e| {
         if let Some(stmts) = closure_stmts(e) {
-            if body_has_site(stmts, &self_name, &params) {
+            if body_has_site(stmts, &self_name, params) {
                 any_site = true;
             }
             if !opt::block_diverges(&Block(stmts.clone())) {
@@ -400,7 +408,7 @@ fn convert(
 
     // Fresh names for the per-iteration copies and the loop closure,
     // against every identifier token of the rendered function.
-    let used = tailloop::used_tokens(header, &body.0);
+    let used = tailloop::used_tokens(target, params, &body.0);
     let ws = tailloop::fresh_with_prefix(&used, "_w", params.len());
     let lp = {
         let mut cand = String::from("_lp");
@@ -416,9 +424,9 @@ fn convert(
         params.iter().cloned().zip(ws.iter().cloned()).collect();
     let mut loop_stmts = body.0.clone();
     rename_block(&mut loop_stmts, &map);
-    let loop_stmts = to_loop(loop_stmts, &self_name, &params);
+    let loop_stmts = to_loop(loop_stmts, &self_name, params);
 
-    let inner = loopcore::build_loop_scaffold(&ws, &params, loop_stmts);
+    let inner = loopcore::build_loop_scaffold(&ws, params, loop_stmts);
 
     // Locals budget, per scope: the outer body keeps its own locals plus
     // `_lp`; the loop closure is its own scope holding the copies, the
@@ -453,8 +461,8 @@ fn convert(
         loopcore::reverse_check(
             "ioloop",
             "original",
-            header,
-            reverse(&out, &self_name, &params, &ws, &lp),
+            &target.header_text(params),
+            reverse(&out, &self_name, params, &ws, &lp),
             &canonical_closure_returns(&body.0),
         ),
         "ioloop conversion is not reversible (see stderr)"
@@ -661,7 +669,8 @@ mod tests {
         vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[3] = function(_arg0)".into(),
+                target: FnTarget::Slot(3),
+                params: vec!["_arg0".into()],
                 body: Block(vec![
                     Stmt::Assign("_arg0".into(), Expr::force(Expr::name("_arg0"))),
                     Stmt::If {
@@ -723,7 +732,8 @@ mod tests {
         let stmts = vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[3] = function(_arg0)".into(),
+                target: FnTarget::Slot(3),
+                params: vec!["_arg0".into()],
                 body: Block(vec![Stmt::If {
                     cond: Expr::name("_arg0"),
                     then_b: Block(vec![Stmt::Return(Expr::call_named(
@@ -752,7 +762,8 @@ mod tests {
         let stmts = vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[3] = function(_arg0)".into(),
+                target: FnTarget::Slot(3),
+                params: vec!["_arg0".into()],
                 body: Block(vec![Stmt::If {
                     cond: Expr::name("_arg0"),
                     then_b: Block(vec![Stmt::Return(closure(vec![Stmt::Return(run_tail(
@@ -779,7 +790,8 @@ mod tests {
         let stmts = vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[3] = function(_arg0)".into(),
+                target: FnTarget::Slot(3),
+                params: vec!["_arg0".into()],
                 body: Block(vec![
                     Stmt::Expr(run_tail(Expr::call_named(
                         "__mll_fn[9]",
@@ -821,7 +833,8 @@ mod tests {
         let stmts = vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[3] = function(_arg0)".into(),
+                target: FnTarget::Slot(3),
+                params: vec!["_arg0".into()],
                 body: Block(vec![Stmt::If {
                     cond: Expr::name("_arg0"),
                     then_b: Block(vec![Stmt::Return(closure(vec![Stmt::Return(
@@ -874,7 +887,8 @@ mod tests {
         let stmts = vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[3] = function(_arg0)".into(),
+                target: FnTarget::Slot(3),
+                params: vec!["_arg0".into()],
                 body: Block(vec![
                     Stmt::If {
                         cond: Expr::name("_arg0"),
@@ -905,7 +919,8 @@ mod tests {
         let stmts = vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[3] = function(_arg0)".into(),
+                target: FnTarget::Slot(3),
+                params: vec!["_arg0".into()],
                 body: Block(vec![
                     Stmt::If {
                         cond: Expr::name("_arg0"),

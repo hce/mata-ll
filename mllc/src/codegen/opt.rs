@@ -109,7 +109,7 @@
 
 use super::annot;
 use super::ioloop;
-use super::lua::{Block, Expr, FuncBody, Item, Stmt};
+use super::lua::{Block, Expr, FnTarget, FuncBody, Item, Stmt};
 use super::performloop;
 use super::tailloop;
 
@@ -224,12 +224,41 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
 /// `run` would, then refute the carried stamps against a fresh analysis of
 /// the final tree. Empty means clean.
 pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
-    match run_with(stmts, &Disable::from_spec(None)) {
+    let mut findings = match run_with(stmts, &Disable::from_spec(None)) {
         (Some(engine), force_ran) => engine.refute(stmts, force_ran),
         // With every engine-run pass disabled there are no carried stamps
         // and no collapse obligation; a fresh analysis refuting itself
         // checks nothing.
         (None, _) => Vec::new(),
+    };
+    findings.extend(expression_pass_idempotence(stmts));
+    findings
+}
+
+/// Idempotence refutation for the expression passes: re-running paren
+/// normalization and dead-branch cleanup over the FINAL tree must change
+/// nothing — a shape either pass would still rewrite is a shape that
+/// escaped it. This replaces the old harness test that grepped rendered
+/// output for redundant-paren spellings with a hand-kept operator list:
+/// the pass itself is the authority on what is redundant, so running it
+/// twice covers every operator and every guard shape by construction.
+/// (The structured-tier loop passes carry their own reverse self-checks
+/// and are deliberately not re-run: a converted loop no longer offers the
+/// shape the gate looks for, so their idempotence is structural.)
+fn expression_pass_idempotence(stmts: &[Stmt]) -> Vec<String> {
+    let before = super::loopcore::render_stmts(stmts);
+    let mut again = stmts.to_vec();
+    normalize_parens_block(&mut again);
+    dead_branch_block(&mut again);
+    let after = super::loopcore::render_stmts(&again);
+    if before == after {
+        Vec::new()
+    } else {
+        vec![format!(
+            "expression passes are not idempotent over the emitted tree \
+             (a redundant paren or dead branch survived):\n\
+             --- first run ---\n{before}\n--- second run ---\n{after}"
+        )]
     }
 }
 
@@ -627,8 +656,8 @@ pub(super) fn count_locals(stmts: &[Stmt]) -> usize {
     for s in stmts {
         match s {
             Stmt::Local(names, _) => n += names.len(),
-            Stmt::Function { header, .. } => {
-                if header.starts_with("local ") {
+            Stmt::Function { target, .. } => {
+                if matches!(target, FnTarget::LocalFn(_)) {
                     n += 1;
                 }
             }
@@ -974,7 +1003,8 @@ mod tests {
             vec![
                 Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
                 Stmt::Function {
-                    header: "__mll_fn[1] = function(n)".into(),
+                    target: FnTarget::Slot(1),
+                    params: vec!["n".into()],
                     body: Block(vec![Stmt::If {
                         cond: Expr::name("n"),
                         then_b: Block(vec![Stmt::Return(Expr::Func(
@@ -1020,7 +1050,8 @@ mod tests {
             vec![
                 Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
                 Stmt::Function {
-                    header: "__mll_fn[1] = function(n)".into(),
+                    target: FnTarget::Slot(1),
+                    params: vec!["n".into()],
                     body: Block(vec![Stmt::If {
                         cond: Expr::name("n"),
                         then_b: Block(vec![Stmt::Return(Expr::lit("nil"))]),
@@ -1054,7 +1085,8 @@ mod tests {
     fn tailloop_toggle() {
         let make = || {
             vec![Stmt::Function {
-                header: "local function f(x)".into(),
+                target: FnTarget::LocalFn("f".into()),
+                params: vec!["x".into()],
                 body: Block(vec![Stmt::If {
                     cond: Expr::name("x"),
                     then_b: Block(vec![Stmt::Return(Expr::lit("0"))]),

@@ -510,11 +510,12 @@ impl CodeGen {
         // one backward pass when the chain enters a run of `let` statements
         // (see demand::let_spine_maps). Without this every `let` statement
         // re-walked the whole remaining chain for its eagerization seed —
-        // quadratic over a long do-block of `let`s. Keyed by node address,
-        // and only valid for the result demand it was computed under, which
+        // quadratic over a long do-block of `let`s. Keyed by node identity
+        // (a NodeMap: the borrow checker pins the TIR while it lives), and
+        // only valid for the result demand it was computed under, which
         // the `Let` arm checks before use.
         let mut spine_maps: Option<(crate::demand::Demand,
-            std::collections::HashMap<usize, crate::demand::DemandMap>)> = None;
+            crate::demand::NodeMap<'_, crate::demand::DemandMap>)> = None;
         loop {
             match &expr.kind {
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
@@ -632,11 +633,10 @@ impl CodeGen {
                     // the cache does not cover this node or was computed
                     // under a different result demand. Both produce the same
                     // map — the cache is purely a cost saving.
-                    let body_key = body.as_ref() as *const TExpr as usize;
                     let mut seed: Option<crate::demand::DemandMap> =
                         match &spine_maps {
                             Some((rd, maps)) if *rd == self.cur_result_demand =>
-                                maps.get(&body_key).cloned(),
+                                maps.get(body).cloned(),
                             _ => None,
                         };
                     if seed.is_none()
@@ -649,7 +649,7 @@ impl CodeGen {
                         ) {
                             // The spine starts at `expr` (a Let), so `body`
                             // is always covered.
-                            seed = maps.get(&body_key).cloned();
+                            seed = maps.get(body).cloned();
                             spine_maps =
                                 Some((self.cur_result_demand.clone(), maps));
                         }

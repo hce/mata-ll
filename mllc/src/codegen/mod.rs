@@ -306,8 +306,6 @@ impl CodeGen {
         self.newtypes.iter().any(|n| n == name)
     }
 
-    /// Returns "local function name" or "name = function" depending on
-    /// whether the name was forward-declared.
     /// Resolve a sanitized name to its Lua reference.
     /// Forward-declared names use __mll_fn[N], others use the name directly.
     fn lua_ref(&self, lua_name: &str) -> String {
@@ -325,11 +323,13 @@ impl CodeGen {
         }
     }
 
-    fn fn_decl(&self, lua_name: &str, params: &str) -> String {
+    /// The definition target for a top-level function: its `__mll_fn[N]`
+    /// slot when forward-declared, a `local function` binding otherwise.
+    fn fn_target(&self, lua_name: &str) -> lua::FnTarget {
         if let Some(&slot) = self.fn_table.get(lua_name) {
-            format!("__mll_fn[{}] = function({})", slot, params)
+            lua::FnTarget::Slot(u32::try_from(slot).expect("fn_table slot fits u32"))
         } else {
-            format!("local function {}({})", lua_name, params)
+            lua::FnTarget::LocalFn(lua_name.to_string())
         }
     }
 

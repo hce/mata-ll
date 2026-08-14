@@ -1604,18 +1604,69 @@ pub struct LocalRows {
 
 /// Records every fully-applied call-head visit: Var-node address →
 /// `(callee, joined result demand, fully applied)`.
-type CallSites = HashMap<usize, (String, Demand, bool)>;
+/// Identity of one TIR node: its address, branded with the lifetime of the
+/// tree borrow it came from. Only this module builds keys (the constructor
+/// is private), and only inside containers that carry the same brand.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NodeKey<'t>(usize, std::marker::PhantomData<&'t TExpr>);
 
-/// Everything the structured walker needs to look up.
-struct RowCx<'a> {
+impl<'t> NodeKey<'t> {
+    fn of(node: &TExpr) -> Self {
+        NodeKey(node as *const TExpr as usize, std::marker::PhantomData)
+    }
+}
+
+/// A map keyed by TIR node identity, branded with the lifetime `'t` of the
+/// tree borrow it indexes. Node identity used to be a bare
+/// `&TExpr as *const _ as usize`, whose validity silently depended on the
+/// TIR never being moved, rebuilt, or dropped between the pass that
+/// collected the keys and the pass that looked them up — nothing enforced
+/// it. The brand makes that dependency a compile-time fact: a `NodeMap`
+/// cannot outlive the borrow of the tree it was built from, so its
+/// addresses can never dangle. (Cloning a subtree still yields NEW
+/// identities; producer/consumer pairs must walk the SAME borrow, which
+/// each entry point here does by construction.)
+pub struct NodeMap<'t, V> {
+    map: HashMap<NodeKey<'t>, V>,
+    _tree: std::marker::PhantomData<&'t TExpr>,
+}
+
+impl<'t, V> NodeMap<'t, V> {
+    fn new() -> Self {
+        NodeMap { map: HashMap::new(), _tree: std::marker::PhantomData }
+    }
+    fn with_capacity(n: usize) -> Self {
+        NodeMap { map: HashMap::with_capacity(n), _tree: std::marker::PhantomData }
+    }
+    pub fn get(&self, node: &TExpr) -> Option<&V> {
+        self.map.get(&NodeKey::of(node))
+    }
+    fn get_key(&self, key: NodeKey<'t>) -> Option<&V> {
+        self.map.get(&key)
+    }
+    fn get_mut(&mut self, node: &TExpr) -> Option<&mut V> {
+        self.map.get_mut(&NodeKey::of(node))
+    }
+    fn insert(&mut self, node: &TExpr, v: V) {
+        self.map.insert(NodeKey::of(node), v);
+    }
+}
+
+type CallSites<'t> = NodeMap<'t, (String, Demand, bool)>;
+
+/// Everything the structured walker needs to look up. `'t` is the brand
+/// of the tree the optional site recorder indexes (see [`NodeMap`]) —
+/// independent of `'a` so the recorder can outlive the per-iteration
+/// lookup borrows.
+struct RowCx<'a, 't> {
     rows: &'a Rows,
     locals: &'a HashMap<String, LocalRows>,
     inlined: &'a dyn Fn(&str) -> bool,
     /// When present, records every fully-applied call-head visit.
-    sites: Option<&'a std::cell::RefCell<CallSites>>,
+    sites: Option<&'a std::cell::RefCell<CallSites<'t>>>,
 }
 
-impl<'a> RowCx<'a> {
+impl<'a, 't> RowCx<'a, 't> {
     /// Pick the parameter row for a call to `name` whose result receives
     /// demand `rd`: the deep row when the site's demand subsumes the
     /// callee's deep result demand, the run row otherwise.
@@ -1638,11 +1689,10 @@ impl<'a> RowCx<'a> {
     fn record_site(&self, head: &TExpr, name: &str, rd: &Demand, full: bool) {
         if let Some(sites) = self.sites
             && (self.rows.arity.contains_key(name) || self.locals.contains_key(name)) {
-                let key = head as *const TExpr as usize;
                 let mut sites = sites.borrow_mut();
-                match sites.get_mut(&key) {
+                match sites.get_mut(head) {
                     Some((_, d, f)) => { *d = d.join(rd); *f = *f && full; }
-                    None => { sites.insert(key, (name.to_string(), rd.clone(), full)); }
+                    None => { sites.insert(head, (name.to_string(), rd.clone(), full)); }
                 }
             }
     }
@@ -2023,21 +2073,22 @@ fn demand_guards_map(cx: &RowCx, guards: &[TGuard], rd: &Demand, run_pos: bool) 
 /// Demand map of one clause body under result demand `rd`, closed over the
 /// clause's where-bound VALUE definitions (a demanded where-binding's RHS
 /// demands fire too, exactly as codegen's demanded_bindings evaluates it).
-fn clause_demand_map(cx: &RowCx, clause: &TClause, rd: &Demand) -> DemandMap {
+fn clause_demand_map(cx: &RowCx, clause: TLocalDefLike<'_>, rd: &Demand) -> DemandMap {
     let mut m = if clause.guards.is_empty() {
-        demand_expr(cx, clause.plain_body(), rd, true)
+        let body = clause.body.expect("guard-free clause carries a body");
+        demand_expr(cx, body, rd, true)
     } else {
-        demand_guards_map(cx, &clause.guards, rd, true)
+        demand_guards_map(cx, clause.guards, rd, true)
     };
     // A clause's where-bound VALUES close exactly like a `let` group.
-    let_group_close(cx, &clause.where_binds, &mut m);
+    let_group_close(cx, clause.where_binds, &mut m);
     m
 }
 
 /// Per-parameter demands of one clause under result demand `rd`:
 /// pattern-match demands joined with the body's demands on pattern
 /// variables.
-fn clause_param_row(cx: &RowCx, clause: &TClause, arity: usize, rd: &Demand) -> Vec<Option<Demand>> {
+fn clause_param_row(cx: &RowCx, clause: TLocalDefLike<'_>, arity: usize, rd: &Demand) -> Vec<Option<Demand>> {
     let m = clause_demand_map(cx, clause, rd);
     (0..arity)
         .map(|i| match clause.patterns.get(i) {
@@ -2069,42 +2120,37 @@ fn seed_param(clauses: &[&TLocalDefLike], i: usize) -> Option<Demand> {
     Some(Demand::Head)
 }
 
-/// A uniform view over top-level clauses and where-bound local function
-/// equations, for shared row computation.
-struct TLocalDefLike {
-    patterns: Vec<TPattern>,
-    guards: Vec<TGuard>,
+/// A uniform BORROWED view over top-level clauses and where-bound local
+/// function equations, for shared row computation. Borrowing matters:
+/// views are rebuilt per equation per round of two nested fixpoints
+/// (`analyze`, `local_fn_rows`), and the owned version deep-cloned every
+/// pattern, guard, body, and where-bind each time — then cloned AGAIN
+/// (`as_clause`) to call the row functions.
+#[derive(Clone, Copy)]
+struct TLocalDefLike<'a> {
+    patterns: &'a [TPattern],
+    guards: &'a [TGuard],
     /// Same body/guards exclusion as `TClause` for a clause view; a
     /// local-def view always has `Some` (where binds carry no guards).
-    body: Option<TExpr>,
-    where_binds: Vec<TLocalDef>,
+    body: Option<&'a TExpr>,
+    where_binds: &'a [TLocalDef],
 }
 
-fn clause_view(c: &TClause) -> TLocalDefLike {
+fn clause_view(c: &TClause) -> TLocalDefLike<'_> {
     TLocalDefLike {
-        patterns: c.patterns.clone(),
-        guards: c.guards.clone(),
-        body: c.body.clone(),
-        where_binds: c.where_binds.clone(),
+        patterns: &c.patterns,
+        guards: &c.guards,
+        body: c.body.as_ref(),
+        where_binds: &c.where_binds,
     }
 }
 
-fn local_def_view(d: &TLocalDef) -> TLocalDefLike {
+fn local_def_view(d: &TLocalDef) -> TLocalDefLike<'_> {
     TLocalDefLike {
-        patterns: d.patterns.clone(),
-        guards: vec![],
-        body: Some(d.body.clone()),
-        where_binds: vec![],
-    }
-}
-
-fn as_clause(v: &TLocalDefLike) -> TClause {
-    TClause {
-        patterns: v.patterns.clone(),
-        guards: v.guards.clone(),
-        body: v.body.clone(),
-        where_binds: v.where_binds.clone(),
-        span: None,
+        patterns: &d.patterns,
+        guards: &[],
+        body: Some(&d.body),
+        where_binds: &[],
     }
 }
 
@@ -2119,8 +2165,7 @@ fn equations_rows(
     let row_under = |rd: &Demand| -> Vec<Option<Demand>> {
         let mut row: Option<Vec<Option<Demand>>> = None;
         for eq in eqs {
-            let c = as_clause(eq);
-            let r = clause_param_row(cx, &c, arity, rd);
+            let r = clause_param_row(cx, **eq, arity, rd);
             row = Some(match row {
                 None => r,
                 Some(prev) => prev
@@ -2246,13 +2291,13 @@ fn let_group_close(cx: &RowCx, binds: &[TLocalDef], m: &mut DemandMap) {
 /// per-node call computes.
 ///
 /// Returns `None` when `expr` is not a `Let` (no spine to precompute).
-pub fn let_spine_maps(
-    expr: &TExpr,
+pub fn let_spine_maps<'t>(
+    expr: &'t TExpr,
     rows: &Rows,
     locals: &HashMap<String, LocalRows>,
     inlined: &dyn Fn(&str) -> bool,
     rd: &Demand,
-) -> Option<HashMap<usize, DemandMap>> {
+) -> Option<NodeMap<'t, DemandMap>> {
     if !matches!(expr.kind, TExprKind::Let { .. }) {
         return None;
     }
@@ -2265,15 +2310,15 @@ pub fn let_spine_maps(
         cur = body;
     }
     let terminal = cur;
-    let mut maps: HashMap<usize, DemandMap> = HashMap::with_capacity(spine.len() + 1);
+    let mut maps: NodeMap<'_, DemandMap> = NodeMap::with_capacity(spine.len() + 1);
     // Backward pass: the terminal's map, then each enclosing group's.
     let mut m = demand_expr(&cx, terminal, rd, true);
-    maps.insert(terminal as *const TExpr as usize, m.clone());
+    maps.insert(terminal, m.clone());
     for node in spine.iter().rev() {
         if let TExprKind::Let { binds, .. } = &node.kind {
             let_group_close(&cx, binds, &mut m);
         }
-        maps.insert(*node as *const TExpr as usize, m.clone());
+        maps.insert(node, m.clone());
     }
     Some(maps)
 }
@@ -2454,7 +2499,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
     // All references, by callee, as Var-node addresses (plus a poison flag
     // for reference shapes the walker cannot classify).
     let fn_names: HashSet<&str> = rows.arity.keys().map(|s| s.as_str()).collect();
-    let mut refs: HashMap<String, HashSet<usize>> = HashMap::new();
+    let mut refs: HashMap<String, HashSet<NodeKey<'_>>> = HashMap::new();
     let mut poisoned: HashSet<String> = HashSet::new();
     for func in &functions {
         for clause in &func.clauses {
@@ -2472,7 +2517,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
 
     while !deep_result.is_empty() {
         rows.deep_result = deep_result.clone();
-        let sites = std::cell::RefCell::new(HashMap::new());
+        let sites = std::cell::RefCell::new(CallSites::new());
         for func in &functions {
             if func.clauses.is_empty() {
                 continue;
@@ -2482,7 +2527,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
                 let locals = local_fn_rows(&rows, &inlined, &clause.where_binds);
                 let cx = RowCx { rows: &rows, locals: &locals, inlined: &inlined, sites: Some(&sites) };
                 // Clause body + where-value closure (records sites).
-                let _ = clause_demand_map(&cx, clause, &rd);
+                let _ = clause_demand_map(&cx, clause_view(clause), &rd);
                 // Local function bodies run with unknown result demand.
                 for b in &clause.where_binds {
                     if !b.patterns.is_empty() {
@@ -2502,7 +2547,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
                 continue;
             };
             for r in name_refs {
-                match sites.get(r) {
+                match sites.get_key(*r) {
                     Some((cn, rd, full)) if cn == name && *full && rd.subsumes(rdeep) => {}
                     _ => continue 'cand,
                 }
@@ -2525,7 +2570,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
 fn collect_fn_refs(
     expr: &TExpr,
     fn_names: &HashSet<&str>,
-    refs: &mut HashMap<String, HashSet<usize>>,
+    refs: &mut HashMap<String, HashSet<NodeKey<'_>>>,
     poisoned: &mut HashSet<String>,
 ) {
     match &expr.kind {
@@ -2533,7 +2578,7 @@ fn collect_fn_refs(
             if fn_names.contains(name.as_str()) {
                 refs.entry(name.clone())
                     .or_default()
-                    .insert(expr as *const TExpr as usize);
+                    .insert(NodeKey::of(expr));
             }
         }
         TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::OpFunc(_)

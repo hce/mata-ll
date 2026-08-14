@@ -60,7 +60,7 @@
 //! rules that pass used (one binding site, or a parameter/forward-declaration
 //! rebind with exactly one assignment; never a name mentioned in Raw text).
 
-use super::lua::{Block, Expr, Item, Stmt};
+use super::lua::{Block, Expr, FnTarget, Item, Stmt};
 use std::collections::{HashMap, HashSet};
 
 // ---- The stamp lattice ----
@@ -342,9 +342,8 @@ impl ExprPass for NoRewrite {
 #[derive(Default)]
 struct ScopeFacts {
     /// name -> number of binding sites: `local` names, plain-identifier
-    /// assignment lvalues, `AssignIf` lvalues, `Function` header tokens
-    /// (covers the declared name and its parameters), nested
-    /// function-literal parameters.
+    /// assignment lvalues, `AssignIf` lvalues, `Function` targets and
+    /// parameters, nested function-literal parameters.
     binds: HashMap<String, usize>,
     /// name -> number of assignment sites (subset of binds).
     assigns: HashMap<String, usize>,
@@ -427,13 +426,38 @@ fn collect_facts_stmt(s: &Stmt, f: &mut ScopeFacts) {
                 }
             }
         }
-        Stmt::Function { header, .. } => {
-            // The header's tokens include the declared name and every
-            // parameter name — each is a binding site.
-            let mut toks = HashSet::new();
-            super::opt::token_set(header, &mut toks);
-            for t in toks {
-                f.bind(&t);
+        Stmt::Function { target, params, .. } => {
+            // Precise now that the header is structured: the parameters are
+            // exactly the header's parameter binding occurrences, and the
+            // target contributes its bound/stored name. The target counts as
+            // a BIND (not an assign), exactly as the former header
+            // tokenization did — tailloop's Assigned self-identity gate
+            // requires (2 binds, 0 assigns): the forward `local` plus this
+            // header.
+            match target {
+                FnTarget::LocalFn(n) => f.bind(n),
+                FnTarget::Assigned(lhs) if is_plain_ident(lhs) => f.bind(lhs),
+                // Composite `_v[N]` spill lvalue: deliberately conservative,
+                // reproducing the former tokenization — each identifier
+                // token (`_v`) counts as a binding site, so the spill table's
+                // name never qualifies for a name stamp. (Binding only the
+                // precise store target is available now, but would change
+                // `_v`'s counts.)
+                FnTarget::Assigned(lhs) => {
+                    let mut toks = HashSet::new();
+                    super::opt::token_set(lhs, &mut toks);
+                    for t in toks {
+                        f.bind(&t);
+                    }
+                }
+                // Deliberately conservative, reproducing the former
+                // tokenization: the slot store counts one `__mll_fn` binding
+                // site, keeping the table's name disqualified from name
+                // stamps. (The slot census below is the precise view.)
+                FnTarget::Slot(_) => f.bind("__mll_fn"),
+            }
+            for p in params {
+                f.bind(p);
             }
         }
         Stmt::Return(_)
@@ -572,7 +596,8 @@ impl Engine {
 pub(super) trait StructuredPass {
     fn request(
         &mut self,
-        header: &str,
+        target: &FnTarget,
+        params: &[String],
         body: &Block,
         view: &ScopeView<'_>,
         locals_in_scope: &HashSet<String>,
@@ -720,18 +745,21 @@ fn slot_scan_stmt(st: &Stmt, s: &mut SlotStores) {
                 slot_scan_lvalue(l, s);
             }
         }
-        Stmt::Function { header, .. } => {
-            // The only header spelling that stores to a slot is the
-            // `__mll_fn[i] = function(...)` form name resolution emits.
-            if let Some(rest) = header.strip_prefix("__mll_fn") {
-                match parse_slot_suffix(rest) {
-                    Some((slot, len)) if rest[len..].starts_with(" = function(") => {
-                        s.store(&format!("__mll_fn{}", slot))
+        Stmt::Function { target, params, .. } => {
+            // The slot store is structural now: a `Slot` target IS the
+            // `__mll_fn[i] = function(...)` store. Any other `__mll_fn`
+            // spelling in the header — a target or parameter name containing
+            // it — poisons, exactly as the former text scan did.
+            match target {
+                FnTarget::Slot(i) => s.store(&format!("__mll_fn[{}]", i)),
+                FnTarget::LocalFn(n) | FnTarget::Assigned(n) => {
+                    if n.contains("__mll_fn") {
+                        s.poisoned = true;
                     }
-                    _ => s.poisoned = true,
+                    if params.iter().any(|p| p.contains("__mll_fn")) {
+                        s.poisoned = true;
+                    }
                 }
-            } else if header.contains("__mll_fn") {
-                s.poisoned = true;
             }
         }
         Stmt::Return(_)
@@ -866,8 +894,8 @@ fn offer_block(
     for s in stmts {
         match s {
             Stmt::Local(names, _) => locals.extend(names.iter().cloned()),
-            Stmt::Function { header, body } => {
-                if let Some(new_body) = pass.request(header, body, view, &locals)
+            Stmt::Function { target, params, body } => {
+                if let Some(new_body) = pass.request(target, params, body, view, &locals)
                     && structured_valid(&new_body.0)
                 {
                     *body = new_body;
@@ -1721,7 +1749,8 @@ mod tests {
         impl StructuredPass for Rewrite {
             fn request(
                 &mut self,
-                _h: &str,
+                _t: &FnTarget,
+                _p: &[String],
                 _b: &Block,
                 _v: &ScopeView<'_>,
                 _l: &HashSet<String>,
@@ -1731,7 +1760,8 @@ mod tests {
         }
         let module = || {
             vec![Stmt::Function {
-                header: "local function f(x)".into(),
+                target: FnTarget::LocalFn("f".into()),
+                params: vec!["x".into()],
                 body: Block(vec![Stmt::Return(Expr::lit("1"))]),
             }]
         };
@@ -1797,7 +1827,8 @@ mod tests {
                 ]))]))])),
             },
             Stmt::Function {
-                header: "local function go(n)".into(),
+                target: FnTarget::LocalFn("go".into()),
+                params: vec!["n".into()],
                 body: Block(vec![Stmt::Return(Expr::method(
                     Expr::name("n"),
                     "fmt",

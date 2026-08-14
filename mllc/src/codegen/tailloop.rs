@@ -86,11 +86,10 @@
 //!   produce — are single. A parenthesized self-call `return (f(x))`
 //!   converts too: under the single-return proof the truncating paren is
 //!   the identity.
-//! * VARARGS / headers — the header is pre-rendered text; only the three
-//!   spellings verified against the corpus are parsed (`local function
-//!   f(…)`, `f = function(…)`, `__mll_fn[i] = function(…)`, plain-identifier
-//!   parameters). Anything else — `...`, spill-slot `_v[i]` targets, the
-//!   one-line Raw accessor adapters — is skipped.
+//! * VARARGS / headers — the header is structured (`FnTarget` + params);
+//!   `self_target` admits the three target forms with plain-identifier
+//!   parameters only. Anything else — `...`, spill-slot `_v[i]` assignment
+//!   targets, duplicate parameters — is skipped.
 //!
 //! Non-tail self-calls stay ordinary calls (they re-enter the converted
 //! function from the top — same semantics); IO self-loops through
@@ -101,7 +100,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::annot::{self, ScopeView, is_plain_ident};
 use super::loopcore;
-use super::lua::{Block, Expr, Stmt};
+use super::lua::{Block, Expr, FnTarget, Stmt};
 use super::opt;
 
 pub(super) struct TailLoop;
@@ -109,18 +108,19 @@ pub(super) struct TailLoop;
 impl annot::StructuredPass for TailLoop {
     fn request(
         &mut self,
-        header: &str,
+        target: &FnTarget,
+        params: &[String],
         body: &Block,
         view: &ScopeView<'_>,
         locals_in_scope: &HashSet<String>,
     ) -> Option<Block> {
-        convert(header, body, view, locals_in_scope)
+        convert(target, params, body, view, locals_in_scope)
     }
 }
 
-/// The self-name a header binds, in the spelling body calls use.
+/// The self-name a function's target binds, in the spelling body calls use.
 /// Shared with the IO self-loop pass (ioloop.rs), which converts the same
-/// three header spellings.
+/// three target forms.
 pub(super) enum SelfName {
     /// `local function f(…)` — bound by the header itself.
     LocalFn(String),
@@ -139,46 +139,28 @@ impl SelfName {
     }
 }
 
-/// Parse a `Stmt::Function` header into its self-name and parameter list.
-/// Only the three spellings verified against corpus output are accepted;
-/// any other shape (varargs, `_v[i]` spill targets, unexpected trailing
-/// text) returns `None` and the function is skipped.
-pub(super) fn parse_header(header: &str) -> Option<(SelfName, Vec<String>)> {
-    let (name, params_text) = if let Some(rest) = header.strip_prefix("local function ") {
-        let open = rest.find('(')?;
-        let n = &rest[..open];
-        if !is_plain_ident(n) {
-            return None;
-        }
-        (SelfName::LocalFn(n.to_string()), &rest[open..])
-    } else {
-        let eq = header.find(" = function(")?;
-        let n = &header[..eq];
-        let name = if is_plain_ident(n) {
-            SelfName::Assigned(n.to_string())
-        } else if annot::is_slot_ref(n) {
-            SelfName::Slot(n.to_string())
-        } else {
-            return None;
-        };
-        (name, &header[eq + " = function".len()..])
-    };
-    let inner = params_text.strip_prefix('(')?.strip_suffix(')')?;
-    let params: Vec<String> = if inner.is_empty() {
-        Vec::new()
-    } else {
-        inner.split(", ").map(str::to_string).collect()
+/// The self-name of a `Stmt::Function`, from its structured target — with
+/// the gates the former header parser enforced. A composite `Assigned`
+/// lvalue (the `_v[i]` spill form), a non-identifier parameter (hand-built
+/// `...` varargs), or a duplicate parameter returns `None` and the function
+/// is skipped: duplicates would make both the rename and the multiple
+/// assignment ambiguous (the emitter never produces them, but the gate
+/// protects both).
+pub(super) fn self_target(target: &FnTarget, params: &[String]) -> Option<SelfName> {
+    let name = match target {
+        FnTarget::LocalFn(n) if is_plain_ident(n) => SelfName::LocalFn(n.clone()),
+        FnTarget::Assigned(n) if is_plain_ident(n) => SelfName::Assigned(n.clone()),
+        FnTarget::Slot(i) => SelfName::Slot(format!("__mll_fn[{}]", i)),
+        FnTarget::LocalFn(_) | FnTarget::Assigned(_) => return None,
     };
     if !params.iter().all(|p| is_plain_ident(p)) {
         return None;
     }
-    // Duplicate parameters would make both the rename and the multiple
-    // assignment ambiguous; the emitter never produces them.
     let unique: HashSet<&String> = params.iter().collect();
     if unique.len() != params.len() {
         return None;
     }
-    Some((name, params))
+    Some(name)
 }
 
 /// The self-identity gate (see the module comment).
@@ -364,9 +346,19 @@ fn blocked_stmt(s: &Stmt, params: &HashSet<String>) -> bool {
         Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => lvalue_blocked(lhs, params),
         Stmt::MultiAssign(lhs, _) => lhs.iter().any(|l| lvalue_blocked(l, params)),
         // A nested header mentioning a parameter would shadow (its own
-        // parameter) or rebind (its name) it in text the rename cannot
-        // touch: block. Otherwise the body is renamed like any sub-block.
-        Stmt::Function { header, .. } => text_mentions(header, params),
+        // parameter) or rebind (its name/target) it in a position the rename
+        // does not touch: block. Otherwise the body is renamed like any
+        // sub-block. Matches what the textual token check blocked: the
+        // target's identifier tokens (a composite `_v[i]` lvalue via
+        // `text_mentions`, a slot target's `__mll_fn` token) and every
+        // parameter name.
+        Stmt::Function { target, params: ps, .. } => {
+            let target_hit = match target {
+                FnTarget::LocalFn(n) | FnTarget::Assigned(n) => text_mentions(n, params),
+                FnTarget::Slot(_) => params.contains("__mll_fn"),
+            };
+            target_hit || ps.iter().any(|p| params.contains(p))
+        }
         Stmt::Local(..)
         | Stmt::Return(_)
         | Stmt::Expr(_)
@@ -524,8 +516,12 @@ fn rename_expr(e: &mut Expr, map: &HashMap<String, String>) {
 
 /// Every identifier token of the rendered function (Raw text included —
 /// rendering covers it), for fresh-name selection. Shared with ioloop.rs.
-pub(super) fn used_tokens(header: &str, body: &[Stmt]) -> HashSet<String> {
-    let mut text = String::from(header);
+pub(super) fn used_tokens(
+    target: &FnTarget,
+    params: &[String],
+    body: &[Stmt],
+) -> HashSet<String> {
+    let mut text = target.header_text(params);
     for s in body {
         s.render_line(0, &mut text);
     }
@@ -547,24 +543,20 @@ pub(super) fn fresh_with_prefix(used: &HashSet<String>, prefix: &str, n: usize) 
     }
 }
 
-/// Per-iteration copy names for this function: `_w0.._wn`.
-fn fresh_names(header: &str, body: &[Stmt], n: usize) -> Vec<String> {
-    fresh_with_prefix(&used_tokens(header, body), "_w", n)
-}
-
 // ---- The conversion ----
 
 fn convert(
-    header: &str,
+    target: &FnTarget,
+    params: &[String],
     body: &Block,
     view: &ScopeView<'_>,
     locals_in_scope: &HashSet<String>,
 ) -> Option<Block> {
-    let (self_name, params) = parse_header(header)?;
+    let self_name = self_target(target, params)?;
     if !self_qualifies(&self_name, view, locals_in_scope) {
         return None;
     }
-    if !has_tail_self_call(&body.0, &self_name, &params) {
+    if !has_tail_self_call(&body.0, &self_name, params) {
         return None;
     }
     let param_set: HashSet<String> = params.iter().cloned().collect();
@@ -590,13 +582,14 @@ fn convert(
     // body that can fall off needs the `do return end ::continue::` tail.
     let falls_off = !opt::block_diverges(body);
 
-    let ws = fresh_names(header, &body.0, params.len());
+    // Per-iteration copy names for this function: `_w0.._wn`.
+    let ws = fresh_with_prefix(&used_tokens(target, params, &body.0), "_w", params.len());
     let map: HashMap<String, String> =
         params.iter().cloned().zip(ws.iter().cloned()).collect();
 
     let mut stmts = body.0.clone();
     rename_block(&mut stmts, &map);
-    rewrite_tails(&mut stmts, &self_name, &params, falls_off);
+    rewrite_tails(&mut stmts, &self_name, params, falls_off);
 
     let mut inner: Vec<Stmt> = Vec::with_capacity(stmts.len() + params.len() + 2);
     for (w, p) in ws.iter().zip(params.iter()) {
@@ -630,7 +623,8 @@ mod tests {
         vec![
             Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
             Stmt::Function {
-                header: "__mll_fn[1] = function(n, acc)".into(),
+                target: FnTarget::Slot(1),
+                params: vec!["n".into(), "acc".into()],
                 body: Block(vec![Stmt::If {
                     cond: Expr::binop("==", Expr::name("n"), Expr::lit("0")),
                     then_b: Block(vec![Stmt::Return(Expr::name("acc"))]),
@@ -671,7 +665,8 @@ mod tests {
         let stmts = vec![
             Stmt::Local(vec!["go".into()], None),
             Stmt::Function {
-                header: "go = function(a, b)".into(),
+                target: FnTarget::Assigned("go".into()),
+                params: vec!["a".into(), "b".into()],
                 body: Block(vec![Stmt::If {
                     cond: Expr::name("a"),
                     then_b: Block(vec![Stmt::Return(Expr::name("b"))]),
@@ -694,7 +689,8 @@ mod tests {
         // NON-tail `return f(…)` (an if that is not the last statement)
         // stays an ordinary call.
         let stmts = vec![Stmt::Function {
-            header: "local function f(x)".into(),
+            target: FnTarget::LocalFn("f".into()),
+            params: vec!["x".into()],
             body: Block(vec![
                 Stmt::If {
                     cond: Expr::name("x"),
@@ -725,7 +721,8 @@ mod tests {
         // No else arm: the body can fall off, so the update jumps and the
         // loop end returns bare.
         let stmts = vec![Stmt::Function {
-            header: "local function f(x)".into(),
+            target: FnTarget::LocalFn("f".into()),
+            params: vec!["x".into()],
             body: Block(vec![Stmt::If {
                 cond: Expr::name("x"),
                 then_b: Block(vec![Stmt::Return(Expr::call_named(
@@ -761,7 +758,8 @@ mod tests {
         // Same for a rebound local-function name.
         let stmts = vec![
             Stmt::Function {
-                header: "local function f(x)".into(),
+                target: FnTarget::LocalFn("f".into()),
+                params: vec!["x".into()],
                 body: Block(vec![Stmt::Return(Expr::call_named(
                     "f",
                     vec![Expr::lit("1")],
@@ -775,16 +773,22 @@ mod tests {
 
     #[test]
     fn varargs_and_unknown_headers_skip() {
-        for header in [
-            "local function f(...)",
-            "local function f(a, ...)",
-            "_v[3] = function(a)",
-            "__mll_fn[2] = function(_v, ...)",
-        ] {
+        // Varargs parameters, `_v[i]` spill assignment targets, duplicate
+        // parameters: every shape `self_target` must decline.
+        let cases: Vec<(FnTarget, Vec<String>)> = vec![
+            (FnTarget::LocalFn("f".into()), vec!["...".into()]),
+            (FnTarget::LocalFn("f".into()), vec!["a".into(), "...".into()]),
+            (FnTarget::Assigned("_v[3]".into()), vec!["a".into()]),
+            (FnTarget::Slot(2), vec!["_v".into(), "...".into()]),
+            (FnTarget::LocalFn("f".into()), vec!["a".into(), "a".into()]),
+        ];
+        for (target, params) in cases {
+            let header = target.header_text(&params);
             let stmts = vec![
                 Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
                 Stmt::Function {
-                    header: header.into(),
+                    target,
+                    params,
                     body: Block(vec![Stmt::Return(Expr::call_named(
                         "f",
                         vec![Expr::lit("1")],
@@ -799,7 +803,8 @@ mod tests {
     #[test]
     fn raw_mention_of_parameter_blocks() {
         let stmts = vec![Stmt::Function {
-            header: "local function f(x)".into(),
+            target: FnTarget::LocalFn("f".into()),
+            params: vec!["x".into()],
             body: Block(vec![
                 Stmt::Raw("x = x + 1".into()),
                 Stmt::Return(Expr::call_named("f", vec![Expr::lit("1")])),
@@ -813,7 +818,8 @@ mod tests {
     fn raw_mention_of_self_name_blocks() {
         let stmts = vec![
             Stmt::Function {
-                header: "local function f(x)".into(),
+                target: FnTarget::LocalFn("f".into()),
+                params: vec!["x".into()],
                 body: Block(vec![Stmt::Return(Expr::call_named(
                     "f",
                     vec![Expr::lit("1")],
@@ -830,7 +836,8 @@ mod tests {
         // The lambda's own `x` shadows the parameter: its body must keep
         // the name while the outer occurrence is renamed.
         let stmts = vec![Stmt::Function {
-            header: "local function f(x)".into(),
+            target: FnTarget::LocalFn("f".into()),
+            params: vec!["x".into()],
             body: Block(vec![
                 Stmt::Local(
                     vec!["g".into()],
@@ -863,7 +870,8 @@ mod tests {
         // call (unknown callee in tail position) fails the single-return
         // proof.
         let stmts = vec![Stmt::Function {
-            header: "local function f(x)".into(),
+            target: FnTarget::LocalFn("f".into()),
+            params: vec!["x".into()],
             body: Block(vec![Stmt::If {
                 cond: Expr::name("x"),
                 then_b: Block(vec![Stmt::Return(Expr::call_named(

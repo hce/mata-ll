@@ -14,7 +14,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
-use super::lua::{Block, Expr, FuncBody, Stmt};
+use super::lua::{Block, Expr, FnTarget, FuncBody, Stmt};
 use super::names::{sanitize_name};
 use super::util::{count_arrows, expr_evaluates_global_ref, expr_references_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
@@ -210,7 +210,7 @@ impl CodeGen {
                 // Use the IO bind-chain builder to flatten do-block let/bind
                 // chains into sequential local statements instead of nested
                 // IIFEs.
-                let header = self.fn_decl(&lua_name, "");
+                let target = self.fn_target(&lua_name);
                 let demanded = self.clause_demanded(&clauses[0]);
                 let mut body = self.where_binds_stmts(&clauses[0], demanded);
                 // Direct-perform: the emitted function's body IS the action,
@@ -226,7 +226,7 @@ impl CodeGen {
                 }
                 body.extend(self.bind_chain_block(clauses[0].plain_body(), true).0);
                 self.direct_perform_self = saved_dp;
-                stmts.push(Stmt::Function { header, body: Block(body) });
+                stmts.push(Stmt::Function { target, params: Vec::new(), body: Block(body) });
                 is_concrete = true;
             } else if expr_references_name(clauses[0].plain_body(), &func.name) {
                 // Self-referencing value binding (e.g., infinite list).
@@ -322,8 +322,7 @@ impl CodeGen {
             params.extend(eta_params.iter().cloned());
             let mut all_params = dict_param_names.clone();
             all_params.extend(params.iter().cloned());
-            let params_str = all_params.join(", ");
-            let header = self.fn_decl(&lua_name, &params_str);
+            let target = self.fn_target(&lua_name);
             let mut body = Vec::new();
             // The function name is concrete (it's a function value) — allow
             // self-recursive calls to skip __force
@@ -427,7 +426,7 @@ impl CodeGen {
                 body.extend(self.pattern_match_block(&params, clauses).0);
             }
             let stmts = vec![
-                Stmt::Function { header, body: Block(body) },
+                Stmt::Function { target, params: all_params, body: Block(body) },
                 Stmt::Raw(String::new()),
             ];
             scope.restore(self);
@@ -443,8 +442,7 @@ impl CodeGen {
         params.extend(eta_params_multi.iter().cloned());
         let mut all_params = dict_param_names.clone();
         all_params.extend(params.iter().cloned());
-        let params_str = all_params.join(", ");
-        let header = self.fn_decl(&lua_name, &params_str);
+        let target = self.fn_target(&lua_name);
         let mut body = Vec::new();
         self.concrete_vars.insert(lua_name.clone());
         for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
@@ -485,7 +483,7 @@ impl CodeGen {
         }
         body.extend(self.pattern_match_block(&params, clauses).0);
         let stmts = vec![
-            Stmt::Function { header, body: Block(body) },
+            Stmt::Function { target, params: all_params, body: Block(body) },
             Stmt::Raw(String::new()),
         ];
         scope.restore(self);
@@ -654,11 +652,11 @@ impl CodeGen {
         let params: Vec<String> = (0..num_params)
             .map(|j| format!("_warg{}", j))
             .collect();
-        let params_str = params.join(", ");
         let sname = sanitize_name(name);
         let mut stmts = Vec::new();
-        // Name was forward-declared; use assignment form.
-        let header = format!("{} = function({})", self.lua_ref(&sname), params_str);
+        // Name was forward-declared; use assignment form. The lvalue is the
+        // bare local or its `_v[N]` spill slot, whichever `lua_ref` resolves.
+        let target = FnTarget::Assigned(self.lua_ref(&sname));
         let mut body = Vec::new();
         // The `_wargN = __force(_wargN)` entry rebinds below leave the param
         // provably WHNF: mark it concrete so the clause conditions built by
@@ -712,7 +710,7 @@ impl CodeGen {
         }
         scope.restore_concrete_vars(self);
 
-        stmts.push(Stmt::Function { header, body: Block(body) });
+        stmts.push(Stmt::Function { target, params, body: Block(body) });
         stmts
     }
 }
