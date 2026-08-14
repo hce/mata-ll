@@ -8,6 +8,7 @@ mod solve;
 mod derive;
 mod infer;
 mod kind;
+mod prelude;
 mod usage;
 
 pub(crate) use ffi::callback_value_vars;
@@ -1445,1116 +1446,6 @@ impl Checker {
         }
     }
 
-    // --- Prelude ---
-
-    fn init_prelude(&mut self) {
-        let a = TyVar { name: "a".into(), id: u32::MAX };
-        let b = TyVar { name: "b".into(), id: u32::MAX };
-        let c = TyVar { name: "c".into(), id: u32::MAX };
-        let f = TyVar { name: "f".into(), id: u32::MAX };
-        let m = TyVar { name: "m".into(), id: u32::MAX };
-        let ta = Ty::Var(a.clone());
-        let tb = Ty::Var(b.clone());
-        let tc = Ty::Var(c.clone());
-        let tf = Ty::Var(f.clone());
-        let tm = Ty::Var(m.clone());
-
-        // Only register types for builtins that are NOT provided by Prelude.mll
-        // Prelude.mll provides: putStrLn, sqrt, id, const, flip,
-        //   head, tail, map, filter, take, zipWith, length, reverse
-        // (foldr/foldl are Foldable class methods, registered below)
-        let entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
-            ("print", vec![], Ty::arrow(Ty::Con("String".into()), Ty::io(Ty::Unit))),
-            ("++", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::list(ta.clone())], Ty::list(ta.clone()))),
-            ("!!", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::Con("Int".into())], ta.clone())),
-            ("$", vec![a.clone(), b.clone()], Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), ta.clone()], tb.clone())),
-            (".", vec![a.clone(), b.clone(), c.clone()], Ty::fun(&[Ty::arrow(tb.clone(), tc.clone()), Ty::arrow(ta.clone(), tb.clone()), ta.clone()], tc.clone())),
-            ("not", vec![], Ty::arrow(Ty::Con("Bool".into()), Ty::Con("Bool".into()))),
-            ("error", vec![a.clone()], Ty::arrow(Ty::Con("String".into()), ta.clone())),
-            ("undefined", vec![a.clone()], ta.clone()),
-            ("otherwise", vec![], Ty::Con("Bool".into())),
-            ("seq", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), tb.clone()], tb.clone())),
-            // pure/return, >>=, >> are now typeclass methods (Applicative/Monad)
-            // but keep env entries so type inference sees them as polymorphic
-            ("getArgs", vec![], Ty::io(Ty::list(Ty::Con("String".into())))),
-            ("exit", vec![], Ty::arrow(Ty::Con("ExitValue".into()), Ty::io(Ty::Unit))),
-            // Exception handling: catch Lua-level IO errors
-            ("try", vec![a.clone()], Ty::arrow(
-                Ty::io(ta.clone()),
-                Ty::io(Ty::app(Ty::app(Ty::Con("Either".into()), Ty::Con("String".into())), ta.clone())),
-            )),
-            ("catch", vec![a.clone()], Ty::fun(&[
-                Ty::io(ta.clone()),
-                Ty::arrow(Ty::Con("String".into()), Ty::io(ta.clone())),
-            ], Ty::io(ta.clone()))),
-        ];
-        for (name, vars, ty) in entries {
-            self.env.insert(name.into(), Scheme { vars, mult_vars: vec![], ty });
-        }
-        // HashMap operations (backed by Lua tables)
-        let hm = |k: Ty, v: Ty| Ty::app(Ty::app(Ty::Con("HashMap".into()), k), v);
-        let hm_kv = hm(ta.clone(), tb.clone());
-        let hm_entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
-            ("hmEmpty", vec![a.clone(), b.clone()], hm_kv.clone()),
-            ("hmInsert", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), tb.clone(), hm_kv.clone()], hm_kv.clone())),
-            ("hmLookup", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], Ty::app(Ty::Con("Maybe".into()), tb.clone()))),
-            ("hmDelete", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], hm_kv.clone())),
-            ("hmSize", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::Con("Int".into()))),
-            ("hmKeys", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(ta.clone()))),
-            ("hmValues", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(tb.clone()))),
-            ("hmMember", vec![a.clone(), b.clone()], Ty::fun(&[ta.clone(), hm_kv.clone()], Ty::Con("Bool".into()))),
-            ("hmFromList", vec![a.clone(), b.clone()], Ty::arrow(Ty::list(Ty::Tuple(vec![ta.clone(), tb.clone()])), hm_kv.clone())),
-            ("hmToList", vec![a.clone(), b.clone()], Ty::arrow(hm_kv.clone(), Ty::list(Ty::Tuple(vec![ta.clone(), tb.clone()])))),
-        ];
-        for (name, vars, ty) in hm_entries {
-            self.env.insert(name.into(), Scheme { vars, mult_vars: vec![], ty });
-        }
-
-        // ByteString operations (backed by Lua strings as byte arrays)
-        let bs = Ty::Con("ByteString".into());
-        let int = Ty::Con("Int".into());
-        let bool_ = Ty::Con("Bool".into());
-        let bs_entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
-            ("bsEmpty",     vec![], bs.clone()),
-            ("bsLength",    vec![], Ty::arrow(bs.clone(), int.clone())),
-            ("bsIndex",     vec![], Ty::fun(&[bs.clone(), int.clone()], int.clone())),
-            ("bsSub",       vec![], Ty::fun(&[bs.clone(), int.clone(), int.clone()], bs.clone())),
-            ("bsSingleton", vec![], Ty::arrow(int.clone(), bs.clone())),
-            ("bsConcat",    vec![], Ty::fun(&[bs.clone(), bs.clone()], bs.clone())),
-            ("bsConcatList", vec![], Ty::arrow(Ty::list(bs.clone()), bs.clone())),
-            ("bsNull",      vec![], Ty::arrow(bs.clone(), bool_.clone())),
-            ("bsHead",      vec![], Ty::arrow(bs.clone(), int.clone())),
-            ("bsTail",      vec![], Ty::arrow(bs.clone(), bs.clone())),
-            ("bsCons",      vec![], Ty::fun(&[int.clone(), bs.clone()], bs.clone())),
-            ("bsSnoc",      vec![], Ty::fun(&[bs.clone(), int.clone()], bs.clone())),
-            ("bsReplicate", vec![], Ty::fun(&[int.clone(), int.clone()], bs.clone())),
-            ("bsPack",      vec![], Ty::arrow(Ty::list(int.clone()), bs.clone())),
-            ("bsUnpack",    vec![], Ty::arrow(bs.clone(), Ty::list(int.clone()))),
-            ("bsMap",       vec![], Ty::fun(&[Ty::arrow(int.clone(), int.clone()), bs.clone()], bs.clone())),
-            ("bsFoldl",     vec![a.clone()], Ty::fun(&[Ty::fun(&[ta.clone(), int.clone()], ta.clone()), ta.clone(), bs.clone()], ta.clone())),
-            ("bsXor",       vec![], Ty::fun(&[bs.clone(), bs.clone()], bs.clone())),
-            ("bsZipWith",   vec![], Ty::fun(&[Ty::fun(&[int.clone(), int.clone()], int.clone()), bs.clone(), bs.clone()], bs.clone())),
-            ("bsToString",  vec![], Ty::arrow(bs.clone(), Ty::Con("String".into()))),
-            ("bsFromString", vec![], Ty::arrow(Ty::Con("String".into()), bs.clone())),
-            ("bsGetU16LE",  vec![], Ty::fun(&[bs.clone(), int.clone()], int.clone())),
-            ("bsGetU32LE",  vec![], Ty::fun(&[bs.clone(), int.clone()], int.clone())),
-            ("bsGetI8",     vec![], Ty::fun(&[bs.clone(), int.clone()], int.clone())),
-            ("bsGetI16LE",  vec![], Ty::fun(&[bs.clone(), int.clone()], int.clone())),
-            ("bsPutI16LE",  vec![], Ty::arrow(int.clone(), bs.clone())),
-        ];
-        for (name, vars, ty) in bs_entries {
-            self.env.insert(name.into(), Scheme { vars, mult_vars: vec![], ty });
-        }
-
-        for name in &["max", "min"] {
-            self.env.insert(name.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
-        }
-        // Arithmetic operators are the methods of the numeric classes
-        // registered further below (Num for + - *, Fractional for /). Their
-        // env schemes are `forall a. a -> a -> a`; the Num/Fractional class
-        // constraint on `a` is attached via `method_constraints` in the
-        // numeric-class registration block, exactly like `==`/`show`.
-        for op in &["+", "-", "*", "/"] {
-            self.env.insert(op.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
-        }
-        // Comparison operators will be registered as Ord methods below
-        for op in &["&&", "||"] {
-            self.env.insert(op.to_string(), Scheme { vars: vec![], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Bool".into()), Ty::Con("Bool".into())], Ty::Con("Bool".into())) });
-        }
-        // div/mod/quot/rem are the Integral class methods (`forall a. a->a->a`,
-        // constrained to Integral below). Previously monomorphic Int->Int.
-        for name in &["mod", "div", "quot", "rem"] {
-            self.env.insert(name.to_string(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[ta.clone(), ta.clone()], ta.clone()) });
-        }
-        // List functions that need lazy cons (implemented in Lua runtime)
-        self.env.insert("head".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(Ty::list(ta.clone()), ta.clone()) });
-        self.env.insert("tail".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(Ty::list(ta.clone()), Ty::list(ta.clone())) });
-        self.env.insert("map".into(), Scheme { vars: vec![a.clone(), b.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), Ty::list(ta.clone())], Ty::list(tb.clone())) });
-        self.env.insert("filter".into(), Scheme { vars: vec![a.clone(), b.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::arrow(ta.clone(), Ty::Con("Bool".into())), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("take".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Int".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("drop".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::Con("Int".into()), Ty::list(ta.clone())], Ty::list(ta.clone())) });
-        self.env.insert("zipWith".into(), Scheme { vars: vec![a.clone(), b.clone(), c.clone()], mult_vars: vec![], ty: Ty::fun(&[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), Ty::list(ta.clone()), Ty::list(tb.clone())], Ty::list(tc.clone())) });
-
-        // Maybe
-        self.constructors.insert("Just".into(), ConInfo { type_name: "Maybe".into(), variant_index: 1, total_variants: 2, field_types: vec![ta.clone()], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![], existential_constraints: vec![] });
-        self.constructors.insert("Nothing".into(), ConInfo { type_name: "Maybe".into(), variant_index: 2, total_variants: 2, field_types: vec![], type_vars: vec![a.clone()], result_type: Ty::app(Ty::Con("Maybe".into()), ta.clone()), existential_vars: vec![], existential_constraints: vec![] });
-        self.env.insert("Just".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::arrow(ta.clone(), Ty::app(Ty::Con("Maybe".into()), ta.clone())) });
-        self.env.insert("Nothing".into(), Scheme { vars: vec![a.clone()], mult_vars: vec![], ty: Ty::app(Ty::Con("Maybe".into()), ta.clone()) });
-        self.env.insert("True".into(), Scheme::mono(Ty::Con("Bool".into())));
-        self.env.insert("False".into(), Scheme::mono(Ty::Con("Bool".into())));
-
-        // List constructors
-        self.constructors.insert(":".into(), ConInfo {
-            type_name: "[]".into(), variant_index: 1, total_variants: 2,
-            field_types: vec![ta.clone(), Ty::list(ta.clone())],
-            type_vars: vec![a.clone()],
-            result_type: Ty::list(ta.clone()),
-            existential_vars: vec![],
-            existential_constraints: vec![],
-        });
-        self.constructors.insert("[]".into(), ConInfo {
-            type_name: "[]".into(), variant_index: 2, total_variants: 2,
-            field_types: vec![],
-            type_vars: vec![a.clone()],
-            result_type: Ty::list(ta.clone()),
-            existential_vars: vec![],
-            existential_constraints: vec![],
-        });
-        // (:) :: a -> [a] -> [a]
-        self.env.insert(":".into(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[ta.clone(), Ty::list(ta.clone())], Ty::list(ta.clone())),
-        });
-        // [] :: [a]
-        self.env.insert("[]".into(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: Ty::list(ta.clone()),
-        });
-
-        // head, tail, take, zipWith, length, reverse are now in Prelude.mll
-
-        // LuaFunction and engage
-        let s = TyVar { name: "s".into(), id: u32::MAX };
-        let ts = Ty::Var(s.clone());
-
-        // LuaFunction is just an opaque Con type — the scope var is
-        // attached when it appears in a type signature as LuaFunction s
-        // (handled by ast_type_to_ty via type application)
-
-        // liftIO :: IO a -> LuaIO s a
-        self.env.insert("liftIO".into(), Scheme {
-            vars: vec![a.clone(), s.clone()],
-            mult_vars: vec![],
-            ty: Ty::arrow(Ty::io(ta.clone()), Ty::lua_io(s.clone(), ta.clone())),
-        });
-
-        // engage :: LuaFunction s -> a
-        // (the type annotation at the call site determines a)
-        // At runtime, engage is the identity — the LuaFunction is
-        // already a Lua function, engage just satisfies the type system.
-        self.env.insert("engage".into(), Scheme {
-            vars: vec![a.clone(), s.clone()],
-            mult_vars: vec![],
-            ty: Ty::arrow(
-                Ty::app(Ty::Con("LuaFunction".into()), Ty::Var(s.clone())),
-                ta.clone(),
-            ),
-        });
-
-        // ST s a — pure mutable state monad (same runtime as IO, type-level distinction only)
-        // STArray s — mutable integer array, scoped to ST s
-        let st_s = |inner: Ty| Ty::app(Ty::app(Ty::Con("ST".into()), ts.clone()), inner);
-        let sta_s = Ty::app(Ty::Con("STArray".into()), ts.clone());
-
-        // runST :: (forall s. ST s a) -> a
-        // Rank-2: the s is universally quantified in the argument
-        self.env.insert("runST".into(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: Ty::arrow(
-                Ty::Forall(s.clone(), Box::new(st_s(ta.clone()))),
-                ta.clone(),
-            ),
-        });
-        // newSTArray :: Int -> Int -> ST s (STArray s)
-        self.env.insert("newSTArray".into(), Scheme {
-            vars: vec![s.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[int.clone(), int.clone()], st_s(sta_s.clone())),
-        });
-        // readSTArray :: STArray s -> Int -> ST s Int
-        self.env.insert("readSTArray".into(), Scheme {
-            vars: vec![s.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[sta_s.clone(), int.clone()], st_s(int.clone())),
-        });
-        // writeSTArray :: STArray s -> Int -> Int -> ST s ()
-        self.env.insert("writeSTArray".into(), Scheme {
-            vars: vec![s.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[sta_s.clone(), int.clone(), int.clone()], st_s(Ty::Unit)),
-        });
-        // modifySTArray :: STArray s -> Int -> (Int -> Int) -> ST s ()
-        self.env.insert("modifySTArray".into(), Scheme {
-            vars: vec![s.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[sta_s.clone(), int.clone(), Ty::arrow(int.clone(), int.clone())], st_s(Ty::Unit)),
-        });
-        // stArrayLength :: STArray s -> ST s Int
-        self.env.insert("stArrayLength".into(), Scheme {
-            vars: vec![s.clone()],
-            mult_vars: vec![],
-            ty: Ty::arrow(sta_s.clone(), st_s(int.clone())),
-        });
-        // newSTArrayFromList :: [Int] -> ST s (STArray s)
-        self.env.insert("newSTArrayFromList".into(), Scheme {
-            vars: vec![s.clone()],
-            mult_vars: vec![],
-            ty: Ty::arrow(Ty::list(int.clone()), st_s(sta_s.clone())),
-        });
-        // stArrayToList :: STArray s -> ST s [Int]
-        self.env.insert("stArrayToList".into(), Scheme {
-            vars: vec![s.clone()],
-            mult_vars: vec![],
-            ty: Ty::arrow(sta_s.clone(), st_s(Ty::list(int.clone()))),
-        });
-
-        // -- Functor → Applicative → Monad hierarchy --
-
-        // Type abbreviations for higher-kinded method types
-        let fa = Ty::App(Box::new(tf.clone()), Box::new(ta.clone()));
-        let fb = Ty::App(Box::new(tf.clone()), Box::new(tb.clone()));
-        let ma = Ty::App(Box::new(tm.clone()), Box::new(ta.clone()));
-        let mb = Ty::App(Box::new(tm.clone()), Box::new(tb.clone()));
-
-        // Built-in Functor typeclass
-        // fmap :: (a -> b) -> f a -> f b
-        let fmap_ty = Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), fa.clone()], fb.clone());
-        self.classes.insert("Functor".to_string(), ClassInfo {
-            name: "Functor".to_string(),
-            type_var: "f".to_string(),
-            superclasses: vec![],
-            methods: vec![
-                ("fmap".to_string(), fmap_ty.clone()),
-                ("<$>".to_string(), fmap_ty.clone()),
-            ],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("fmap".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), f.clone()],
-            mult_vars: vec![],
-            ty: fmap_ty.clone(),
-        });
-        self.env.insert("<$>".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), f.clone()],
-            mult_vars: vec![],
-            ty: fmap_ty,
-        });
-
-        // Functor instances (fmap and <$> map to same implementations)
-        for tc_name in &["IO", "LuaIO", "ST"] {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("fmap".to_string(), "fmap_IO".to_string());
-            method_fns.insert("<$>".to_string(), "fmap_IO".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Functor".to_string(),
-                target_type: Ty::Con(tc_name.to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("fmap".to_string(), "map".to_string());
-            method_fns.insert("<$>".to_string(), "map".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Functor".to_string(),
-                target_type: Ty::Con("[]".to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-        for tc_name in &["Maybe", "Either"] {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("fmap".to_string(), format!("fmap_{}", tc_name));
-            method_fns.insert("<$>".to_string(), format!("fmap_{}", tc_name));
-            self.register_instance(InstanceInfo {
-                class_name: "Functor".to_string(),
-                target_type: Ty::Con(tc_name.to_string()),
-                method_fns,
-                // Empty context, NOT None: a higher-kinded instance demands
-                // nothing of the constructor's own type arguments, so the
-                // structural fallback rule in `has_instance` (meant for
-                // Show/Eq-style element checking) must not apply. Without
-                // this, a wanted like `Functor (Either String)` — where the
-                // class variable binds to a partially-applied constructor —
-                // would wrongly require `Functor String`.
-                context: Some(vec![]),
-            });
-        }
-
-        // Built-in Applicative typeclass (superclass: Functor)
-        // pure   :: a -> f a
-        // (<*>)  :: f (a -> b) -> f a -> f b
-        // liftA2 :: (a -> b -> c) -> f a -> f b -> f c
-        // liftA2 is a real method (as in GHC), not sugar for <$>/<*>: the
-        // <$>/<*> chain routes a FUNCTION through the applicative (an
-        // `f (b -> c)` intermediate), and the type-erased IO runtime cannot
-        // represent an action whose result is itself a Lua function
-        // (__mll_run could not tell it from an unrun action). liftA2 keeps
-        // only fully-applied values in the container, so generic Applicative
-        // code (traverse) works at IO too.
-        let pure_ty = Ty::arrow(ta.clone(), fa.clone());
-        let fab = Ty::App(Box::new(tf.clone()), Box::new(Ty::arrow(ta.clone(), tb.clone())));
-        let ap_ty = Ty::fun(&[fab, fa.clone()], fb.clone());
-        let fc = Ty::App(Box::new(tf.clone()), Box::new(tc.clone()));
-        let lifta2_ty = Ty::fun(
-            &[Ty::fun(&[ta.clone(), tb.clone()], tc.clone()), fa.clone(), fb.clone()],
-            fc,
-        );
-        self.classes.insert("Applicative".to_string(), ClassInfo {
-            name: "Applicative".to_string(),
-            type_var: "f".to_string(),
-            superclasses: vec!["Functor".to_string()],
-            methods: vec![
-                ("pure".to_string(), pure_ty.clone()),
-                ("<*>".to_string(), ap_ty.clone()),
-                ("liftA2".to_string(), lifta2_ty.clone()),
-            ],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("pure".to_string(), Scheme {
-            vars: vec![a.clone(), f.clone()],
-            mult_vars: vec![],
-            ty: pure_ty.clone(),
-        });
-        self.env.insert("return".to_string(), Scheme {
-            vars: vec![a.clone(), f.clone()],
-            mult_vars: vec![],
-            ty: pure_ty,
-        });
-        self.env.insert("<*>".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), f.clone()],
-            mult_vars: vec![],
-            ty: ap_ty,
-        });
-        self.env.insert("liftA2".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), c.clone(), f.clone()],
-            mult_vars: vec![],
-            ty: lifta2_ty,
-        });
-
-        // Applicative instances
-        for tc_name in &["IO", "LuaIO", "ST"] {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("pure".to_string(), "pure".to_string());
-            method_fns.insert("<*>".to_string(), "ap_IO".to_string());
-            method_fns.insert("liftA2".to_string(), "liftA2_IO".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Applicative".to_string(),
-                target_type: Ty::Con(tc_name.to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("pure".to_string(), "pure_List".to_string());
-            method_fns.insert("<*>".to_string(), "ap_List".to_string());
-            method_fns.insert("liftA2".to_string(), "liftA2_List".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Applicative".to_string(),
-                target_type: Ty::Con("[]".to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("pure".to_string(), "pure_Maybe".to_string());
-            method_fns.insert("<*>".to_string(), "ap_Maybe".to_string());
-            method_fns.insert("liftA2".to_string(), "liftA2_Maybe".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Applicative".to_string(),
-                target_type: Ty::Con("Maybe".to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("pure".to_string(), "pure_Either".to_string());
-            method_fns.insert("<*>".to_string(), "ap_Either".to_string());
-            method_fns.insert("liftA2".to_string(), "liftA2_Either".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Applicative".to_string(),
-                target_type: Ty::Con("Either".to_string()),
-                method_fns,
-                // Empty context, not None — see the Functor Either instance.
-                context: Some(vec![]),
-            });
-        }
-
-        // Built-in Monad typeclass (superclass: Applicative)
-        // >>=    :: m a -> (a -> m b) -> m b
-        // >>     :: m a -> m b -> m b
-        // return :: a -> m a
-        self.classes.insert("Monad".to_string(), ClassInfo {
-            name: "Monad".to_string(),
-            type_var: "m".to_string(),
-            superclasses: vec!["Applicative".to_string()],
-            methods: vec![
-                (">>=".to_string(), Ty::fun(&[ma.clone(), Ty::arrow(ta.clone(), mb.clone())], mb.clone())),
-                (">>".to_string(), Ty::fun(&[ma.clone(), mb.clone()], mb.clone())),
-                ("return".to_string(), Ty::arrow(ta.clone(), ma.clone())),
-            ],
-            default_methods: HashMap::new(),
-        });
-        // >>= and >> env entries
-        self.env.insert(">>=".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), m.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[ma.clone(), Ty::arrow(ta.clone(), mb.clone())], mb.clone()),
-        });
-        self.env.insert(">>".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), m.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[ma.clone(), mb.clone()], mb.clone()),
-        });
-
-        // Monad instances for IO, LuaIO, ST
-        for monad_name in &["IO", "LuaIO", "ST"] {
-            let mut method_fns = HashMap::new();
-            method_fns.insert(">>=".to_string(), ">>=".to_string());
-            method_fns.insert(">>".to_string(), ">>".to_string());
-            method_fns.insert("return".to_string(), "pure".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Monad".to_string(),
-                target_type: Ty::Con(monad_name.to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-
-        // Monad instance for [] (lists)
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert(">>=".to_string(), "bind_List".to_string());
-            method_fns.insert(">>".to_string(), "then_List".to_string());
-            method_fns.insert("return".to_string(), "pure_List".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Monad".to_string(),
-                target_type: Ty::Con("[]".to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-
-        // Monad instance for Maybe
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert(">>=".to_string(), "bind_Maybe".to_string());
-            method_fns.insert(">>".to_string(), "then_Maybe".to_string());
-            method_fns.insert("return".to_string(), "pure_Maybe".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Monad".to_string(),
-                target_type: Ty::Con("Maybe".to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-
-        // Built-in Foldable typeclass
-        // foldr :: (a -> b -> b) -> b -> t a -> b
-        // foldl :: (b -> a -> b) -> b -> t a -> b
-        // The remaining GHC Foldable vocabulary (length, null, elem, sum,
-        // product, maximum, minimum, foldMap, toList) is defined generically
-        // over these two methods in the Prelude / Data.Foldable.
-        let t = TyVar { name: "t".into(), id: u32::MAX };
-        let tt = Ty::Var(t.clone());
-        let ta_in_t = Ty::App(Box::new(tt.clone()), Box::new(ta.clone()));
-        let foldr_ty = Ty::fun(
-            &[Ty::fun(&[ta.clone(), tb.clone()], tb.clone()), tb.clone(), ta_in_t.clone()],
-            tb.clone(),
-        );
-        let foldl_ty = Ty::fun(
-            &[Ty::fun(&[tb.clone(), ta.clone()], tb.clone()), tb.clone(), ta_in_t.clone()],
-            tb.clone(),
-        );
-        self.classes.insert("Foldable".to_string(), ClassInfo {
-            name: "Foldable".to_string(),
-            type_var: "t".to_string(),
-            superclasses: vec![],
-            methods: vec![
-                ("foldr".to_string(), foldr_ty.clone()),
-                ("foldl".to_string(), foldl_ty.clone()),
-            ],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("foldr".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), t.clone()],
-            mult_vars: vec![],
-            ty: foldr_ty,
-        });
-        self.env.insert("foldl".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), t.clone()],
-            mult_vars: vec![],
-            ty: foldl_ty,
-        });
-        // Emit wanted constraints at use sites so a fold over a type without
-        // a Foldable instance — or an ambiguous one like `Right 5` with an
-        // undetermined Left type — is a compile error with the annotation
-        // hint, not a deferred dispatch that fails at runtime.
-        for method in &["foldr", "foldl"] {
-            self.method_constraints.insert(method.to_string(), vec![TyConstraint {
-                class_name: "Foldable".to_string(),
-                type_var: "t".to_string(),
-            }]);
-        }
-
-        // The Foldable instances for [], Maybe and Either (folds over Right,
-        // like GHC) are ordinary `instance Foldable …` declarations in
-        // Prelude.mll — the kind system checks their heads against the class
-        // variable's Type -> Type kind like any user instance. Tuples
-        // deliberately have no instance: the class variable has kind
-        // Type -> Type and mata-ll has no partially-applied tuple constructor
-        // (consistent with tuples having no Ord instance either).
-
-        // Built-in Traversable typeclass (superclasses: Functor, Foldable)
-        // traverse :: Applicative f => (a -> f b) -> t a -> f (t b)
-        // sequenceA is defined in the Prelude as `traverse (\x -> x)`.
-        let tb_in_t = Ty::App(Box::new(tt.clone()), Box::new(tb.clone()));
-        let traverse_ty = Ty::fun(
-            &[Ty::arrow(ta.clone(), fb.clone()), ta_in_t.clone()],
-            Ty::App(Box::new(tf.clone()), Box::new(tb_in_t)),
-        );
-        self.classes.insert("Traversable".to_string(), ClassInfo {
-            name: "Traversable".to_string(),
-            type_var: "t".to_string(),
-            superclasses: vec!["Functor".to_string(), "Foldable".to_string()],
-            methods: vec![("traverse".to_string(), traverse_ty.clone())],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("traverse".to_string(), Scheme {
-            vars: vec![a.clone(), b.clone(), f.clone(), t.clone()],
-            mult_vars: vec![],
-            ty: traverse_ty,
-        });
-        self.method_constraints.insert("traverse".to_string(), vec![
-            TyConstraint { class_name: "Traversable".to_string(), type_var: "t".to_string() },
-            TyConstraint { class_name: "Applicative".to_string(), type_var: "f".to_string() },
-        ]);
-        // Like Foldable, the Traversable instances for [], Maybe and Either
-        // live in Prelude.mll as ordinary `instance Traversable …`
-        // declarations.
-
-        // Built-in Enum typeclass
-        // succ :: a -> a
-        // pred :: a -> a
-        // toEnum :: Int -> a
-        // fromEnum :: a -> Int
-        // enumFrom :: a -> [a]
-        // enumFromThen :: a -> a -> [a]
-        // enumFromTo :: a -> a -> [a]
-        // enumFromThenTo :: a -> a -> a -> [a]
-        let succ_ty = Ty::arrow(ta.clone(), ta.clone());
-        let to_enum_ty = Ty::arrow(Ty::Con("Int".into()), ta.clone());
-        let from_enum_ty = Ty::arrow(ta.clone(), Ty::Con("Int".into()));
-        let enum_from_ty = Ty::arrow(ta.clone(), Ty::List(Box::new(ta.clone())));
-        let enum_from_then_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
-        let enum_from_to_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
-        let enum_from_then_to_ty = Ty::fun(&[ta.clone(), ta.clone(), ta.clone()], Ty::List(Box::new(ta.clone())));
-        self.classes.insert("Enum".to_string(), ClassInfo {
-            name: "Enum".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec![],
-            methods: vec![
-                ("succ".to_string(), succ_ty.clone()),
-                ("pred".to_string(), succ_ty.clone()),
-                ("toEnum".to_string(), to_enum_ty.clone()),
-                ("fromEnum".to_string(), from_enum_ty.clone()),
-                ("enumFrom".to_string(), enum_from_ty.clone()),
-                ("enumFromThen".to_string(), enum_from_then_ty.clone()),
-                ("enumFromTo".to_string(), enum_from_to_ty.clone()),
-                ("enumFromThenTo".to_string(), enum_from_then_to_ty.clone()),
-            ],
-            default_methods: HashMap::new(),
-        });
-        for (name, ty) in &[
-            ("succ", succ_ty.clone()), ("pred", succ_ty),
-            ("toEnum", to_enum_ty), ("fromEnum", from_enum_ty),
-            ("enumFrom", enum_from_ty), ("enumFromThen", enum_from_then_ty),
-            ("enumFromTo", enum_from_to_ty), ("enumFromThenTo", enum_from_then_to_ty),
-        ] {
-            self.env.insert(name.to_string(), Scheme {
-                vars: vec![a.clone()],
-                mult_vars: vec![],
-                ty: ty.clone(),
-            });
-        }
-
-        // Enum instance for Int
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("succ".to_string(), "succ_Int".to_string());
-            method_fns.insert("pred".to_string(), "pred_Int".to_string());
-            method_fns.insert("toEnum".to_string(), "toEnum_Int".to_string());
-            method_fns.insert("fromEnum".to_string(), "fromEnum_Int".to_string());
-            method_fns.insert("enumFrom".to_string(), "enumFrom_Int".to_string());
-            method_fns.insert("enumFromThen".to_string(), "enumFromThen_Int".to_string());
-            method_fns.insert("enumFromTo".to_string(), "enumFromTo_Int".to_string());
-            method_fns.insert("enumFromThenTo".to_string(), "enumFromThenTo_Int".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Enum".to_string(),
-                target_type: Ty::Con("Int".to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-
-        // Built-in Bounded typeclass
-        let min_bound_ty = ta.clone();
-        let max_bound_ty = ta.clone();
-        self.classes.insert("Bounded".to_string(), ClassInfo {
-            name: "Bounded".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec![],
-            methods: vec![
-                ("minBound".to_string(), min_bound_ty.clone()),
-                ("maxBound".to_string(), max_bound_ty.clone()),
-            ],
-            default_methods: HashMap::new(),
-        });
-        for (name, ty) in &[
-            ("minBound", min_bound_ty),
-            ("maxBound", max_bound_ty),
-        ] {
-            self.env.insert(name.to_string(), Scheme {
-                vars: vec![a.clone()],
-                mult_vars: vec![],
-                ty: ty.clone(),
-            });
-        }
-
-        // Built-in Show typeclass
-        let show_ty = Ty::arrow(ta.clone(), Ty::Con("String".into()));
-        self.classes.insert("Show".to_string(), ClassInfo {
-            name: "Show".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec![],
-            methods: vec![("show".to_string(), show_ty.clone())],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("show".to_string(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: show_ty,
-        });
-
-        // Built-in Read typeclass
-        let read_ty = Ty::arrow(Ty::Con("String".into()), ta.clone());
-        self.classes.insert("Read".to_string(), ClassInfo {
-            name: "Read".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec![],
-            methods: vec![("read".to_string(), read_ty.clone())],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("read".to_string(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: read_ty,
-        });
-        // Read instances for base types
-        for type_name in &["Int", "Integer", "Number", "Bool", "String"] {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("read".to_string(), format!("read_{}", type_name));
-            self.register_instance(InstanceInfo {
-                class_name: "Read".to_string(),
-                target_type: Ty::Con(type_name.to_string()),
-                method_fns,
-                context: None,
-            });
-        }
-
-        // Built-in Eq typeclass
-        let eq_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
-        self.classes.insert("Eq".to_string(), ClassInfo {
-            name: "Eq".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec![],
-            methods: vec![("==".to_string(), eq_ty.clone())],
-            default_methods: HashMap::new(),
-        });
-        self.env.insert("==".to_string(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: eq_ty,
-        });
-        // /= is derived from ==
-        self.env.insert("/=".to_string(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into())),
-        });
-
-        // Eq instances for base types
-        for type_name in &["Int", "Integer", "Number", "String", "Bool", "ByteString"] {
-            let target = Ty::Con(type_name.to_string());
-            let mangled = format!("eq_{}", type_name);
-            let mut method_fns = HashMap::new();
-            method_fns.insert("==".to_string(), mangled);
-            self.register_instance(InstanceInfo {
-                class_name: "Eq".to_string(),
-                target_type: target,
-                method_fns,
-                context: None,
-            });
-        }
-
-        // Built-in Ord typeclass (superclass: Eq)
-        let cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
-        // `compare` is an Ord method returning Ordering (defined in the prelude).
-        let compare_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Ordering".into()));
-        self.classes.insert("Ord".to_string(), ClassInfo {
-            name: "Ord".to_string(),
-            type_var: "a".to_string(),
-            superclasses: vec!["Eq".to_string()],
-            methods: vec![
-                ("<".to_string(), cmp_ty.clone()),
-                (">".to_string(), cmp_ty.clone()),
-                ("<=".to_string(), cmp_ty.clone()),
-                (">=".to_string(), cmp_ty.clone()),
-                ("compare".to_string(), compare_ty.clone()),
-            ],
-            default_methods: HashMap::new(),
-        });
-        for op in &["<", ">", "<=", ">="] {
-            self.env.insert(op.to_string(), Scheme {
-                vars: vec![a.clone()],
-                mult_vars: vec![],
-                ty: cmp_ty.clone(),
-            });
-        }
-        self.env.insert("compare".to_string(), Scheme {
-            vars: vec![a.clone()],
-            mult_vars: vec![],
-            ty: compare_ty.clone(),
-        });
-
-        // Class constraints carried by the built-in class methods. Each
-        // constrains the class variable "a"; a use whose "a" resolves to a
-        // concrete type with no instance (a function, an IO action, a type
-        // without the relevant deriving) is rejected at the function boundary.
-        let cm: &[(&str, &str)] = &[
-            ("show", "Show"), ("read", "Read"),
-            ("==", "Eq"), ("/=", "Eq"),
-            ("<", "Ord"), (">", "Ord"), ("<=", "Ord"), (">=", "Ord"),
-            ("compare", "Ord"),
-        ];
-        for (method, class) in cm {
-            self.method_constraints.insert(method.to_string(), vec![TyConstraint {
-                class_name: class.to_string(),
-                type_var: "a".to_string(),
-            }]);
-        }
-
-        // Ord instances for base types
-        for type_name in &["Int", "Integer", "Number", "String", "ByteString"] {
-            let target = Ty::Con(type_name.to_string());
-            let mut method_fns = HashMap::new();
-            for op in &["<", ">", "<=", ">="] {
-                method_fns.insert(op.to_string(), format!("ord_{}__{}", op_to_name(op), type_name));
-            }
-            // Every base Ord type has a `compare` runtime helper.
-            method_fns.insert("compare".to_string(), format!("ord_compare__{}", type_name));
-            self.register_instance(InstanceInfo {
-                class_name: "Ord".to_string(),
-                target_type: target,
-                method_fns,
-                context: None,
-            });
-        }
-
-        // ===================================================================
-        // Numeric class hierarchy: Num, Fractional, Real, Integral.
-        // Registered built-in (like Eq/Ord) rather than as source classes,
-        // because the operator methods (+ - * / div mod quot rem) must map to
-        // THEMSELVES in the Int/Number instances so the monomorphizer keeps
-        // them as inline InfixApp (byte-identical concrete arithmetic) — a
-        // self-reference no source `instance` body can express. The named
-        // methods (negate/abs/signum/fromInteger/recip/fromRational/toInteger/
-        // quotRem/divMod) dispatch to small runtime helpers emitted on demand.
-        // ===================================================================
-        {
-            let bin = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
-            let un = Ty::arrow(ta.clone(), ta.clone());
-            // GHC-faithful: `fromInteger :: Integer -> a` — a numeric literal is
-            // an `Integer` that `fromInteger` lowers to the target Num type.
-            let from_integer_ty = Ty::arrow(Ty::Con("Integer".into()), ta.clone());
-            // `toInteger :: a -> Integer` (restored now that Integer exists).
-            let to_integer_ty = Ty::arrow(ta.clone(), Ty::Con("Integer".into()));
-            // No Rational type in mata-ll: a fractional literal is a Number
-            // (f64) at the source level, so `fromRational` takes that same
-            // representation. Documented as the single numeric-tower deviation.
-            let from_rational_ty = Ty::arrow(Ty::Con("Number".into()), ta.clone());
-            let pair = Ty::Tuple(vec![ta.clone(), ta.clone()]);
-            let to_pair = Ty::fun(&[ta.clone(), ta.clone()], pair);
-
-            // ---- class Num a ----
-            self.classes.insert("Num".to_string(), ClassInfo {
-                name: "Num".to_string(),
-                type_var: "a".to_string(),
-                superclasses: vec![],
-                methods: vec![
-                    ("+".to_string(), bin.clone()),
-                    ("-".to_string(), bin.clone()),
-                    ("*".to_string(), bin.clone()),
-                    ("negate".to_string(), un.clone()),
-                    ("abs".to_string(), un.clone()),
-                    ("signum".to_string(), un.clone()),
-                    ("fromInteger".to_string(), from_integer_ty.clone()),
-                ],
-                default_methods: HashMap::new(),
-            });
-            // ---- class Num a => Fractional a ----
-            self.classes.insert("Fractional".to_string(), ClassInfo {
-                name: "Fractional".to_string(),
-                type_var: "a".to_string(),
-                superclasses: vec!["Num".to_string()],
-                methods: vec![
-                    ("/".to_string(), bin.clone()),
-                    ("recip".to_string(), un.clone()),
-                    ("fromRational".to_string(), from_rational_ty.clone()),
-                ],
-                default_methods: HashMap::new(),
-            });
-            // ---- class (Num a, Ord a) => Real a ----
-            // GHC's `Real` has `toRational :: a -> Rational`; mata-ll has no
-            // Rational, so the class is a superclass marker with no methods.
-            self.classes.insert("Real".to_string(), ClassInfo {
-                name: "Real".to_string(),
-                type_var: "a".to_string(),
-                superclasses: vec!["Num".to_string(), "Ord".to_string()],
-                methods: vec![],
-                default_methods: HashMap::new(),
-            });
-            // ---- class (Real a, Enum a) => Integral a ----
-            self.classes.insert("Integral".to_string(), ClassInfo {
-                name: "Integral".to_string(),
-                type_var: "a".to_string(),
-                superclasses: vec!["Real".to_string(), "Enum".to_string()],
-                methods: vec![
-                    ("quot".to_string(), bin.clone()),
-                    ("rem".to_string(), bin.clone()),
-                    ("div".to_string(), bin.clone()),
-                    ("mod".to_string(), bin.clone()),
-                    ("quotRem".to_string(), to_pair.clone()),
-                    ("divMod".to_string(), to_pair.clone()),
-                    ("toInteger".to_string(), to_integer_ty.clone()),
-                ],
-                default_methods: HashMap::new(),
-            });
-
-            // Env schemes for the NAMED methods (the operators are already in
-            // env from the arithmetic block above).
-            let named: &[(&str, &Ty)] = &[
-                ("negate", &un), ("abs", &un), ("signum", &un),
-                ("fromInteger", &from_integer_ty), ("toInteger", &to_integer_ty),
-                ("recip", &un), ("fromRational", &from_rational_ty),
-                ("quotRem", &to_pair), ("divMod", &to_pair),
-            ];
-            for (name, ty) in named {
-                self.env.insert(name.to_string(), Scheme {
-                    vars: vec![a.clone()], mult_vars: vec![], ty: (*ty).clone(),
-                });
-            }
-
-            // Per-method class constraints (drives wanted emission on use).
-            let ncm: &[(&str, &str)] = &[
-                ("+", "Num"), ("-", "Num"), ("*", "Num"),
-                ("negate", "Num"), ("abs", "Num"), ("signum", "Num"),
-                ("fromInteger", "Num"),
-                ("/", "Fractional"), ("recip", "Fractional"), ("fromRational", "Fractional"),
-                ("quot", "Integral"), ("rem", "Integral"), ("div", "Integral"), ("mod", "Integral"),
-                ("quotRem", "Integral"), ("divMod", "Integral"), ("toInteger", "Integral"),
-            ];
-            for (method, class) in ncm {
-                self.method_constraints.insert(method.to_string(), vec![TyConstraint {
-                    class_name: class.to_string(),
-                    type_var: "a".to_string(),
-                }]);
-            }
-
-            // ---- instances ----
-            // Operators self-map (mono keeps them inline); named methods point
-            // at runtime helpers. See codegen PRELUDE for the helper bodies.
-            let mk = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
-                pairs.iter().map(|(m, f)| (m.to_string(), f.to_string())).collect()
-            };
-            // Num Int
-            self.register_instance(InstanceInfo {
-                class_name: "Num".to_string(),
-                target_type: Ty::Con("Int".to_string()),
-                method_fns: mk(&[("+", "+"), ("-", "-"), ("*", "*"),
-                    ("negate", "negate_Int"), ("abs", "abs_Int"),
-                    ("signum", "signum_Int"), ("fromInteger", "fromInteger_Int")]),
-                context: None,
-            });
-            // Num Number
-            self.register_instance(InstanceInfo {
-                class_name: "Num".to_string(),
-                target_type: Ty::Con("Number".to_string()),
-                method_fns: mk(&[("+", "+"), ("-", "-"), ("*", "*"),
-                    ("negate", "negate_Number"), ("abs", "abs_Number"),
-                    ("signum", "signum_Number"), ("fromInteger", "fromInteger_Number")]),
-                context: None,
-            });
-            // Fractional Number (Integer is deliberately NOT Fractional, as GHC)
-            self.register_instance(InstanceInfo {
-                class_name: "Fractional".to_string(),
-                target_type: Ty::Con("Number".to_string()),
-                method_fns: mk(&[("/", "/"), ("recip", "recip_Number"),
-                    ("fromRational", "fromRational_Number")]),
-                context: None,
-            });
-            // Real Int / Real Number (no methods; just evidence Ord+Num).
-            self.register_instance(InstanceInfo {
-                class_name: "Real".to_string(),
-                target_type: Ty::Con("Int".to_string()),
-                method_fns: HashMap::new(),
-                context: None,
-            });
-            self.register_instance(InstanceInfo {
-                class_name: "Real".to_string(),
-                target_type: Ty::Con("Number".to_string()),
-                method_fns: HashMap::new(),
-                context: None,
-            });
-            // Integral Int (Number is NOT Integral, as GHC). Operators self-map
-            // (mono keeps them inline); toInteger lifts to a bignum.
-            self.register_instance(InstanceInfo {
-                class_name: "Integral".to_string(),
-                target_type: Ty::Con("Int".to_string()),
-                method_fns: mk(&[("div", "div"), ("mod", "mod"), ("quot", "quot"), ("rem", "rem"),
-                    ("quotRem", "quotRem_Int"), ("divMod", "divMod_Int"),
-                    ("toInteger", "toInteger_Int")]),
-                context: None,
-            });
-
-            // ---- Arbitrary-precision Integer instances ----
-            // Unlike Int/Number, the operators do NOT self-map: every method
-            // routes to a bignum runtime helper (see codegen runtime.lua), so
-            // the monomorphizer materialises them as calls rather than inline
-            // Lua arithmetic.
-            self.register_instance(InstanceInfo {
-                class_name: "Num".to_string(),
-                target_type: Ty::Con("Integer".to_string()),
-                method_fns: mk(&[("+", "add_Integer"), ("-", "sub_Integer"), ("*", "mul_Integer"),
-                    ("negate", "negate_Integer"), ("abs", "abs_Integer"),
-                    ("signum", "signum_Integer"), ("fromInteger", "fromInteger_Integer")]),
-                context: None,
-            });
-            self.register_instance(InstanceInfo {
-                class_name: "Real".to_string(),
-                target_type: Ty::Con("Integer".to_string()),
-                method_fns: HashMap::new(),
-                context: None,
-            });
-            self.register_instance(InstanceInfo {
-                class_name: "Integral".to_string(),
-                target_type: Ty::Con("Integer".to_string()),
-                method_fns: mk(&[("div", "div_Integer"), ("mod", "mod_Integer"),
-                    ("quot", "quot_Integer"), ("rem", "rem_Integer"),
-                    ("quotRem", "quotRem_Integer"), ("divMod", "divMod_Integer"),
-                    ("toInteger", "toInteger_Integer")]),
-                context: None,
-            });
-            // Enum Integer: the helpers are mata-ll source in lib/Prelude.mll
-            // (like Enum Int), so they dispatch through the Integer instances.
-            {
-                let mut method_fns = HashMap::new();
-                for m in &["succ", "pred", "toEnum", "fromEnum",
-                           "enumFrom", "enumFromThen", "enumFromTo", "enumFromThenTo"] {
-                    method_fns.insert(m.to_string(), format!("{m}_Integer"));
-                }
-                self.register_instance(InstanceInfo {
-                    class_name: "Enum".to_string(),
-                    target_type: Ty::Con("Integer".to_string()),
-                    method_fns,
-                    context: None,
-                });
-            }
-        }
-
-        // The Semigroup and Monoid CLASS declarations are now ordinary source
-        // classes in lib/Prelude.mll (`class Semigroup a where (<>) :: …` and
-        // `class Semigroup a => Monoid a where { mempty; mappend }`). Their
-        // method env entries and their per-method class constraints —
-        // including the `mempty` ambiguity check — are synthesized by
-        // `register_class` exactly as for any user class, so nothing about
-        // them needs to be hard-registered here anymore. Only the runtime
-        // string-concatenation primitive their String instances call stays a
-        // builtin (below), because Lua `..` has no source-level spelling.
-
-        // `semigroup_String` is the runtime string-concatenation primitive
-        // (Lua `..`, defined in codegen's preamble and inlined at call sites).
-        // mata-ll String is opaque — unlike GHC's `[Char]` it has no `++` — so
-        // this is the ONLY way to concatenate two Strings, and the Prelude's
-        // `instance Semigroup String` / `instance Monoid String` bodies call
-        // it by name. Registering it in the environment makes those source
-        // instance bodies type-check; codegen already knows the name. (The
-        // list instances use the ordinary `++` operator instead, so no such
-        // primitive is exposed for lists.)
-        self.env.insert("semigroup_String".to_string(), Scheme {
-            vars: vec![],
-            mult_vars: vec![],
-            ty: Ty::fun(&[Ty::Con("String".into()), Ty::Con("String".into())], Ty::Con("String".into())),
-        });
-
-        // The Semigroup/Monoid classes and their String/[a] instances all
-        // live in lib/Prelude.mll now. The deliberate mata-ll divergence —
-        // `<>` on a concrete list type is rejected in favour of `++` — lives
-        // in the monomorphizer's dispatch (`resolve_at_type`), keyed on the
-        // class name from the (now source) class registration, so it is
-        // unaffected by the move. `mappend` still dispatches on lists (its
-        // instance body is `xs ++ ys`), and an undetermined `mempty` is an
-        // ambiguity error via the constraint `register_class` synthesizes for
-        // it, exactly as for the builtin `mempty` before.
-
-        // Show instances for base types and parameterized types
-        for type_name in &["Int", "Integer", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {
-            let target = Ty::Con(type_name.to_string());
-            let mangled = format!("show_{}", type_name);
-            let mut method_fns = HashMap::new();
-            method_fns.insert("show".to_string(), mangled);
-            self.register_instance(InstanceInfo {
-                class_name: "Show".to_string(),
-                target_type: target,
-                method_fns,
-                context: None,
-            });
-        }
-
-        // `()` is a base type like any other and carries the GHC base
-        // instances Show/Eq/Ord. It is registered separately from the loops
-        // above because its instance key is the type string "()" (matching
-        // `format!("{}", Ty::Unit)`) while its mangled runtime names must be
-        // identifier-safe (`show_Unit`, not `show_()`). Runtime rep is nil,
-        // so eq/ord are trivial (nil == nil; compare is always EQ).
-        {
-            let mut method_fns = HashMap::new();
-            method_fns.insert("show".to_string(), "show_Unit".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Show".to_string(),
-                target_type: Ty::Unit,
-                method_fns,
-                context: None,
-            });
-            let mut method_fns = HashMap::new();
-            method_fns.insert("==".to_string(), "eq_Unit".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Eq".to_string(),
-                target_type: Ty::Unit,
-                method_fns,
-                context: None,
-            });
-            let mut method_fns = HashMap::new();
-            for op in &["<", ">", "<=", ">="] {
-                method_fns.insert(op.to_string(), format!("ord_{}__Unit", op_to_name(op)));
-            }
-            method_fns.insert("compare".to_string(), "ord_compare__Unit".to_string());
-            self.register_instance(InstanceInfo {
-                class_name: "Ord".to_string(),
-                target_type: Ty::Unit,
-                method_fns,
-                context: None,
-            });
-        }
-    }
-
     fn init_kinds(&mut self) {
         // Base types: kind Type
         // LuaUserData is the opaque builtin for Lua userdata values crossing
@@ -3202,17 +2093,92 @@ impl Checker {
         self.check_module(module)
     }
 
+    /// Check a whole module, producing its TIR. The passes below run in a
+    /// FIXED order; each is a named method whose doc comment states what it
+    /// needs from the passes before it and what it provides to the ones
+    /// after. Do not reorder the calls without re-reading those contracts.
     pub fn check_module(&mut self, module: &Module) -> TModule {
         // Register hidden names from import export control
         self.hidden_names.extend(module.hidden.iter().cloned());
 
-        // Register type families and aliases and lower the families to `Ty`
-        // form BEFORE anything converts a type: the eager (concrete) family
-        // reduction in `ast_type_to_ty` now goes through the shared iterative
-        // normalizer, which needs `ty_families` populated. (Both are also
-        // re-registered in passes 1/2 — idempotent — where they logically
-        // belong; this early pass only makes reduction available from the very
-        // first `ast_type_to_ty`, e.g. a data field of family type in pass 1.)
+        self.preregister_families_and_aliases(module);
+        self.scan_promotable_kinds(module);
+
+        // Pass 1a: infer the kind of everything the module declares at the
+        // type level (data, newtype, alias, type family), solving all their
+        // constraints together so mutual recursion and cross-references work.
+        // Must run before pass 1: registration converts field types with
+        // these kinds in place, and every later kind check reads this table.
+        // Silent — ill-kinded declarations are reported by pass 2b.
+        self.infer_declared_kinds(&module.decls);
+
+        self.register_type_declarations(module);
+
+        // Pass 1b: infer the type-variable kind of every class the module
+        // declares, order-independently (a superclass declared later still
+        // constrains its subclass — see `infer_class_kinds`). Runs after
+        // pass 1 so method signatures can look up data-type kinds, and
+        // before pass 2 so `register_class` and every instance-head kind
+        // check read the finalized `class_kinds` table. Silent — an
+        // inconsistent class is reported by pass 2b.
+        self.infer_class_kinds(&module.decls);
+
+        self.register_classes_and_families(module);
+        self.validate_declaration_types(module);
+
+        let (sigs, ffi_info) = self.collect_signatures(module);
+
+        // Collect names that have function bodies
+        let mut defined_fns: HashSet<String> = HashSet::new();
+        for decl in &module.decls {
+            if let Decl::FunDef { name, .. } = decl {
+                defined_fns.insert(name.clone());
+            }
+        }
+
+        self.preregister_signatures(&sigs);
+        self.prescan_json_instances(module);
+
+        let mut instance_fns = self.process_deriving(module);
+        self.check_instance_decls(module, &mut instance_fns);
+
+        let mut data_defs = Vec::new();
+        let mut functions = Vec::new();
+        self.generate_ffi_functions(&sigs, &ffi_info, &defined_fns, &mut functions);
+        self.unhide_local_redefinitions(module);
+        self.reject_bodyless_signatures(&sigs, &ffi_info, &defined_fns);
+
+        let (has_main, exports, constrained_exports) =
+            self.check_functions_and_exports(module, &sigs, &mut data_defs, &mut functions);
+
+        // Sorted so codegen emits accessors (and assigns their __mll_fn slots)
+        // in a deterministic order; record_fields is a HashMap.
+        let mut record_accessors: Vec<(String, usize)> = self.record_fields.iter()
+            .map(|(name, (_, idx))| (name.clone(), *idx))
+            .collect();
+        record_accessors.sort();
+
+        // Reject exports whose signature uses a type that cannot cross the FFI
+        // boundary (a polymorphic value, a constrained/dictionary type, a
+        // region-scoped ST handle, an inbound IO action, …). Runs on the FINAL
+        // resolved function types — exactly the `export_types` codegen marshals
+        // from — so the error is raised before codegen ever emits a broken
+        // (undefined-at-the-boundary) conversion.
+        self.validate_export_types(&exports, &functions, &constrained_exports);
+
+        let newtypes = self.collect_newtype_keys(module);
+
+        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, record_accessors, newtypes }
+    }
+
+    /// Register type families and aliases and lower the families to `Ty`
+    /// form BEFORE anything converts a type: the eager (concrete) family
+    /// reduction in `ast_type_to_ty` now goes through the shared iterative
+    /// normalizer, which needs `ty_families` populated. (Both are also
+    /// re-registered in passes 1/2 — idempotent — where they logically
+    /// belong; this early pass only makes reduction available from the very
+    /// first `ast_type_to_ty`, e.g. a data field of family type in pass 1.)
+    fn preregister_families_and_aliases(&mut self, module: &Module) {
         for decl in &module.decls {
             match decl {
                 Decl::TypeFamily { name, equations, .. } => {
@@ -3225,13 +2191,16 @@ impl Checker {
             }
         }
         self.build_ty_families();
+    }
 
-        // Determine which data types promote to a REAL kind (DataKinds): the
-        // parameterless, non-GADT, non-existential ones — so the promoted kind
-        // is monomorphic (`Nat`, `Color`, …). Do this BEFORE `infer_declared_kinds`
-        // and pass 1, and register the promoted constructor kinds now, so the
-        // kind-inference prepass can infer an index variable's kind from a
-        // promoted constructor in a GADT return type (`n : Nat` from `Vec 'Z a`).
+    /// Determine which data types promote to a REAL kind (DataKinds): the
+    /// parameterless, non-GADT, non-existential ones — so the promoted kind
+    /// is monomorphic (`Nat`, `Color`, …). Must run BEFORE
+    /// `infer_declared_kinds` (pass 1a) and pass 1, and registers the
+    /// promoted constructor kinds immediately, so the kind-inference prepass
+    /// can infer an index variable's kind from a promoted constructor in a
+    /// GADT return type (`n : Nat` from `Vec 'Z a`).
+    fn scan_promotable_kinds(&mut self, module: &Module) {
         for decl in &module.decls {
             if let Decl::DataDef { name, type_vars, constructors, .. } = decl {
                 let promotable = type_vars.is_empty()
@@ -3252,18 +2221,12 @@ impl Checker {
                 }
             }
         }
+    }
 
-        // Pass 1a: infer the kind of everything the module declares at the
-        // type level (data, newtype, alias, type family), solving all their
-        // constraints together so mutual recursion and cross-references work.
-        // Must run before pass 1: registration converts field types with
-        // these kinds in place, and every later kind check reads this table.
-        // Silent — ill-kinded declarations are reported by pass 2b.
-        self.infer_declared_kinds(&module.decls);
-
-        // Pass 1: register type aliases, data types, and newtypes
-        // Type aliases must be registered first so that data constructors
-        // referencing aliases (e.g. `data Foo = Foo MyAlias`) expand correctly.
+    /// Pass 1: register type aliases, data types, and newtypes.
+    /// Type aliases must be registered first so that data constructors
+    /// referencing aliases (e.g. `data Foo = Foo MyAlias`) expand correctly.
+    fn register_type_declarations(&mut self, module: &Module) {
         for decl in &module.decls {
             if let Decl::TypeAlias { name, params, ty } = decl {
                 self.type_aliases.insert(name.clone(), (params.clone(), ty.clone()));
@@ -3286,17 +2249,12 @@ impl Checker {
         }
         self.checking_local = false;
         self.checking_prelude = false;
+    }
 
-        // Pass 1b: infer the type-variable kind of every class the module
-        // declares, order-independently (a superclass declared later still
-        // constrains its subclass — see `infer_class_kinds`). Runs after
-        // pass 1 so method signatures can look up data-type kinds, and
-        // before pass 2 so `register_class` and every instance-head kind
-        // check read the finalized `class_kinds` table. Silent — an
-        // inconsistent class is reported by pass 2b.
-        self.infer_class_kinds(&module.decls);
-
-        // Pass 2: register typeclass declarations and type families
+    /// Pass 2: register typeclass declarations and type families (and the
+    /// aliases once more — idempotent re-registration, see
+    /// `preregister_families_and_aliases`).
+    fn register_classes_and_families(&mut self, module: &Module) {
         for decl in &module.decls {
             match decl {
                 Decl::ClassDecl { name, type_var, superclasses, methods } => {
@@ -3311,14 +2269,16 @@ impl Checker {
                 _ => {}
             }
         }
+    }
 
-        // Pass 2b: validate every type reference in declarations. All names a
-        // type reference can legitimately use are registered by now (builtins,
-        // data/newtypes from pass 1, aliases and families from pass 2), so a
-        // name in none of those tables is undefined and is rejected here.
-        // This must run before deriving (pass 4a) and instance checking so an
-        // undefined type is reported as "unknown type" instead of surfacing
-        // later as a misleading missing-instance error.
+    /// Pass 2b: validate every type reference in declarations. All names a
+    /// type reference can legitimately use are registered by now (builtins,
+    /// data/newtypes from pass 1, aliases and families from pass 2), so a
+    /// name in none of those tables is undefined and is rejected here.
+    /// This must run before deriving (pass 4a) and instance checking so an
+    /// undefined type is reported as "unknown type" instead of surfacing
+    /// later as a misleading missing-instance error.
+    fn validate_declaration_types(&mut self, module: &Module) {
         for decl in &module.decls {
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
@@ -3418,8 +2378,16 @@ impl Checker {
                 _ => {}
             }
         }
+    }
 
-        // Pass 3: collect type signatures and FFI info
+    /// Pass 3: collect type signatures and FFI info. Also kind-checks every
+    /// signature (and export signature) and extracts each constrained
+    /// function's declared class context into `fn_contexts` before
+    /// `ast_type_to_ty` discards the constraints.
+    fn collect_signatures(
+        &mut self,
+        module: &Module,
+    ) -> (HashMap<String, Ty>, HashMap<String, (String, FfiKind)>) {
         let mut sigs: HashMap<String, Ty> = HashMap::new();
         let mut ffi_info: HashMap<String, (String, FfiKind)> = HashMap::new();
         for decl in &module.decls {
@@ -3448,29 +2416,29 @@ impl Checker {
                 sigs.insert(name.clone(), self.ast_type_to_ty(ty));
             }
         }
+        (sigs, ffi_info)
+    }
 
-        // Collect names that have function bodies
-        let mut defined_fns: std::collections::HashSet<String> = std::collections::HashSet::new();
-        for decl in &module.decls {
-            if let Decl::FunDef { name, .. } = decl {
-                defined_fns.insert(name.clone());
-            }
-        }
-
-        // Pre-register all function signatures BEFORE deriving and instance
-        // checking. Mutually recursive functions need to see each other, and
-        // instance method bodies (pass 4b) are type-checked before function
-        // definitions (pass 6), so without this an instance method could not
-        // call any top-level function — e.g. a FromJSON instance written in
-        // terms of the JSON module's decoder combinators.
-        for (name, ty) in &sigs {
+    /// Pre-register all function signatures BEFORE deriving and instance
+    /// checking. Mutually recursive functions need to see each other, and
+    /// instance method bodies (pass 4b) are type-checked before function
+    /// definitions (pass 6), so without this an instance method could not
+    /// call any top-level function — e.g. a FromJSON instance written in
+    /// terms of the JSON module's decoder combinators.
+    fn preregister_signatures(&mut self, sigs: &HashMap<String, Ty>) {
+        for (name, ty) in sigs {
             let scheme = self.generalize(&self.env, ty);
             self.env.insert(name.clone(), scheme);
         }
+    }
 
-        // Collect the sets of types that will carry a ToJSON / FromJSON
-        // instance once the whole module is processed (see `fromjson_types`
-        // and `tojson_types`).
+    /// Collect the sets of types that will carry a ToJSON / FromJSON
+    /// instance once the whole module is processed (see `fromjson_types`
+    /// and `tojson_types`). Runs before deriving (pass 4a) so a derived
+    /// codec can reference the codec of a type declared later in the module
+    /// (mutual recursion), whose instance is not registered yet when the
+    /// earlier derive is generated.
+    fn prescan_json_instances(&mut self, module: &Module) {
         self.fromjson_types.clear();
         self.tojson_types.clear();
         for decl in &module.decls {
@@ -3496,9 +2464,14 @@ impl Checker {
                 _ => {}
             }
         }
+    }
 
-        // Pass 4a: process deriving clauses first (so derived instances
-        // are available when checking explicit instances with superclass constraints)
+    /// Pass 4a: process deriving clauses first (so derived instances are
+    /// available when checking explicit instances with superclass
+    /// constraints). Also rejects `as` field/constructor renames on types
+    /// that derive none of the classes that could give the rename a meaning.
+    /// Returns the derived instance method implementations.
+    fn process_deriving(&mut self, module: &Module) -> Vec<TFunction> {
         let mut instance_fns = Vec::new();
         for (decl_idx, decl) in module.decls.iter().enumerate() {
             // Derived instances build TIR directly; constructor references in
@@ -3565,15 +2538,19 @@ impl Checker {
                 }
             }
         }
-
         self.checking_local = false;
         self.checking_prelude = false;
+        instance_fns
+    }
 
-        // Pass 4b: register and check explicit instance declarations.
-        // Registration runs over ALL instance decls before any method body is
-        // checked: instances are globally visible, so a body may use its own
-        // instance (`show l` on the sub-`Tree a` inside `instance Show a =>
-        // Show (Tree a)`) or one declared later in the module.
+    /// Pass 4b: register and check explicit instance declarations.
+    /// Registration runs over ALL instance decls before any method body is
+    /// checked: instances are globally visible, so a body may use its own
+    /// instance (`show l` on the sub-`Tree a` inside `instance Show a =>
+    /// Show (Tree a)`) or one declared later in the module. Appends the
+    /// checked method implementations to `instance_fns`, after the derived
+    /// ones from pass 4a.
+    fn check_instance_decls(&mut self, module: &Module, instance_fns: &mut Vec<TFunction>) {
         for decl in module.decls.iter() {
             if let Decl::InstanceDecl { class_name, target_type, context, methods } = decl {
                 self.preregister_instance(class_name, target_type, context, methods);
@@ -3591,14 +2568,20 @@ impl Checker {
         }
         self.checking_local = false;
         self.checking_prelude = false;
+    }
 
-        // Pass 5: generate FFI functions (type sigs with LuaPure/LuaIO and no body)
-        let mut data_defs = Vec::new();
-        let mut functions = Vec::new();
-        let mut has_main = false;
-
-        // Sorted: ffi_info is a HashMap, and this order determines the order
-        // FFI functions are emitted (and their __mll_fn slots assigned).
+    /// Pass 5: generate FFI functions (type sigs with LuaPure/LuaIO and no
+    /// body), validating their callback and marshalled types, and register
+    /// their schemes in the environment. Appends to `functions` in sorted
+    /// name order: ffi_info is a HashMap, and this order determines the
+    /// order FFI functions are emitted (and their __mll_fn slots assigned).
+    fn generate_ffi_functions(
+        &mut self,
+        sigs: &HashMap<String, Ty>,
+        ffi_info: &HashMap<String, (String, FfiKind)>,
+        defined_fns: &HashSet<String>,
+        functions: &mut Vec<TFunction>,
+    ) {
         let mut ffi_names: Vec<&String> = ffi_info.keys().collect();
         ffi_names.sort();
         for name in ffi_names {
@@ -3617,8 +2600,12 @@ impl Checker {
                     self.env.insert(name.clone(), scheme);
                 }
         }
+    }
 
-        // Local declarations that redefine a hidden name should shadow it
+    /// Local declarations that redefine a hidden name should shadow it:
+    /// drop such names from `hidden_names` before hidden-name enforcement
+    /// runs in pass 6.
+    fn unhide_local_redefinitions(&mut self, module: &Module) {
         if !self.hidden_names.is_empty() && self.local_decl_start > 0 {
             for decl in module.decls.iter().skip(self.local_decl_start) {
                 match decl {
@@ -3635,13 +2622,20 @@ impl Checker {
                 }
             }
         }
+    }
 
-        // Reject type signatures that have no accompanying definition and are
-        // not FFI bindings. Without this, `foo :: Int` with no body silently
-        // compiles to a nil value that errors only when forced at runtime — a
-        // soundness hole (the type promises a value the program never provides).
-        // Body-less signatures are legitimate only for FFI declarations
-        // (LuaPure/LuaIO/LuaIterator/LuaTry), which `ffi_info` tracks.
+    /// Reject type signatures that have no accompanying definition and are
+    /// not FFI bindings. Without this, `foo :: Int` with no body silently
+    /// compiles to a nil value that errors only when forced at runtime — a
+    /// soundness hole (the type promises a value the program never provides).
+    /// Body-less signatures are legitimate only for FFI declarations
+    /// (LuaPure/LuaIO/LuaIterator/LuaTry), which `ffi_info` tracks.
+    fn reject_bodyless_signatures(
+        &mut self,
+        sigs: &HashMap<String, Ty>,
+        ffi_info: &HashMap<String, (String, FfiKind)>,
+        defined_fns: &HashSet<String>,
+    ) {
         let mut undefined_sigs: Vec<&String> = sigs.keys()
             .filter(|name| !defined_fns.contains(*name) && !ffi_info.contains_key(*name))
             .collect();
@@ -3653,12 +2647,23 @@ impl Checker {
                 format!("signature '{}'", name),
             );
         }
+    }
 
-        // Pass 6: collect exports and check function definitions
+    /// Pass 6: collect exports and check function definitions, converting
+    /// data definitions to TIR along the way. Returns
+    /// `(has_main, exports, constrained_exports)`; `constrained_exports`
+    /// are exports already rejected here for carrying a class constraint —
+    /// the structural boundary check (`validate_export_types`) skips them
+    /// so their type variable is not reported a second time.
+    fn check_functions_and_exports(
+        &mut self,
+        module: &Module,
+        sigs: &HashMap<String, Ty>,
+        data_defs: &mut Vec<TDataDef>,
+        functions: &mut Vec<TFunction>,
+    ) -> (bool, Vec<String>, Vec<String>) {
+        let mut has_main = false;
         let mut exports = Vec::new();
-        // Exports already rejected for carrying a class constraint — the
-        // structural boundary check is skipped for them (their type variable
-        // would otherwise be reported a second time).
         let mut constrained_exports: Vec<String> = Vec::new();
         for (decl_idx, decl) in module.decls.iter().enumerate() {
             // Enable hidden name enforcement only for local (user) declarations
@@ -3722,30 +2727,17 @@ impl Checker {
                 _ => {}
             }
         }
-
-        // Sorted so codegen emits accessors (and assigns their __mll_fn slots)
-        // in a deterministic order; record_fields is a HashMap.
-        let mut record_accessors: Vec<(String, usize)> = self.record_fields.iter()
-            .map(|(name, (_, idx))| (name.clone(), *idx))
-            .collect();
-        record_accessors.sort();
-
         self.checking_local = false;
         self.checking_prelude = false;
+        (has_main, exports, constrained_exports)
+    }
 
-        // Reject exports whose signature uses a type that cannot cross the FFI
-        // boundary (a polymorphic value, a constrained/dictionary type, a
-        // region-scoped ST handle, an inbound IO action, …). Runs on the FINAL
-        // resolved function types — exactly the `export_types` codegen marshals
-        // from — so the error is raised before codegen ever emits a broken
-        // (undefined-at-the-boundary) conversion.
-        self.validate_export_types(&exports, &functions, &constrained_exports);
-
-        // The newtype list carries the *registered* constructor keys: a local
-        // newtype whose constructor shadows a non-local constructor is known
-        // to codegen (which elides it as an identity function) only under its
-        // mangled key.
-        let newtypes: Vec<String> = module.decls.iter().enumerate().filter_map(|(decl_idx, d)| {
+    /// The newtype list carries the *registered* constructor keys: a local
+    /// newtype whose constructor shadows a non-local constructor is known
+    /// to codegen (which elides it as an identity function) only under its
+    /// mangled key.
+    fn collect_newtype_keys(&self, module: &Module) -> Vec<String> {
+        module.decls.iter().enumerate().filter_map(|(decl_idx, d)| {
             if let Decl::NewtypeDef { name, .. } = d {
                 if decl_idx >= self.local_decl_start
                     && let Some(key) = self.local_con_renames.get(name) {
@@ -3753,9 +2745,7 @@ impl Checker {
                     }
                 Some(name.clone())
             } else { None }
-        }).collect();
-
-        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, record_accessors, newtypes }
+        }).collect()
     }
 }
 

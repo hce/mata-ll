@@ -662,153 +662,7 @@ impl Checker {
         // Type-check where bindings fully, accumulating substitutions
         let mut twhere = Vec::new();
         for ld in &clause.where_binds {
-            if ld.patterns.is_empty() {
-                // Simple value binding: where x = expr
-                // On failure, record the error and continue with a placeholder:
-                // the error makes compilation fail before codegen, and carrying
-                // on lets one pass report errors in later bindings too.
-                let mut binding_errored = false;
-                // On failure the binding's substitution is lost (we continue
-                // with Subst::empty()), so class constraints emitted while
-                // inferring its body reference variables whose determinations
-                // are gone — discharging them would report spurious
-                // ambiguities on top of the real error. Drop them; they are
-                // re-checked for real once the reported error is fixed.
-                let wanted_before = self.wanted.len();
-                // Infer against the env with the accumulated substitution applied,
-                // so a sibling where-binding already checked in this group (e.g.
-                // `f` in `add10 = f 10`) is seen at its RESOLVED type rather than
-                // its still-fresh pre-registered variable. Without this the use's
-                // unifications land on a stale variable and never propagate back to
-                // this binding's literals, leaving them unresolved for the
-                // monomorphizer to default (now to Integer) — the `let` group path
-                // already applies the substitution between bindings.
-                let cur_env = local_env.applied(&subst);
-                let (texpr, inferred_ty, s) = self.infer_expr(&ld.body, &cur_env).unwrap_or_else(|e| {
-                    self.wanted.truncate(wanted_before);
-                    self.push_error_span(
-                        e,
-                        format!("the where-binding '{}' ({})", ld.name, ctx),
-                        clause.span,
-                    );
-                    binding_errored = true;
-                    (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
-                });
-                subst = subst.compose(&s);
-                // Unify with the pre-registered fresh type. That fresh type has
-                // absorbed how the clause body USES the binding, so a failure
-                // here means the binding's definition doesn't match its use —
-                // a real type error that must be reported, not dropped (unless
-                // the body already failed above, where a second message about
-                // the Unit placeholder would only be noise).
-                if let Some(scheme) = cur_env.lookup(&ld.name) {
-                    match self.unify(&scheme.ty.apply_subst(&subst), &inferred_ty.apply_subst(&subst)) {
-                        Ok(us) => subst = subst.compose(&us),
-                        Err(e) => if !binding_errored {
-                            self.push_error_span(
-                                e,
-                                format!("the where-binding '{}' ({})", ld.name, ctx),
-                                clause.span,
-                            );
-                        }
-                    }
-                }
-                twhere.push(TLocalDef {
-                    name: ld.name.clone(),
-                    patterns: vec![],
-                    body: texpr,
-                });
-            } else {
-                // Local function: where go acc [] = ... — see the value-binding
-                // case above for why the running substitution is applied first.
-                let mut fn_env = local_env.applied(&subst).into_owned();
-                let mut param_tys = Vec::new();
-                let mut tpatterns = Vec::new();
-                let mut where_subst = Subst::empty();
-                // A where-function's patterns can unpack an existential too;
-                // its skolems must not survive into the function's own type
-                // (checked below, once that type is assembled).
-                let where_skolems_before = self.pattern_skolems.len();
-                for pat in &ld.patterns {
-                    let param_ty = self.fresh_var("_w");
-                    // On failure, record the error and continue with a wildcard
-                    // placeholder: the error makes compilation fail before
-                    // codegen, and carrying on lets one pass report errors in
-                    // later patterns and bindings too.
-                    let (tp, ps) = self.check_pattern(pat, &param_ty, &mut fn_env).unwrap_or_else(|e| {
-                        self.push_error_span(
-                            e,
-                            format!("a pattern of the where-binding '{}' ({})", ld.name, ctx),
-                            clause.span,
-                        );
-                        (TPattern::Wildcard, Subst::empty())
-                    });
-                    where_subst = where_subst.compose(&ps);
-                    param_tys.push(param_ty.apply_subst(&where_subst));
-                    tpatterns.push(tp);
-                }
-                // Same recovery as the value-binding case above: record, then
-                // continue with a placeholder that can never reach codegen.
-                let mut binding_errored = false;
-                // As in the value-binding case: the failed body's substitution
-                // is lost, so drop the class constraints it emitted rather
-                // than report them as spuriously ambiguous.
-                let wanted_before = self.wanted.len();
-                let (texpr, body_ty, bs) = self.infer_expr(&ld.body, &fn_env).unwrap_or_else(|e| {
-                    self.wanted.truncate(wanted_before);
-                    self.push_error_span(
-                        e,
-                        format!("the where-binding '{}' ({})", ld.name, ctx),
-                        clause.span,
-                    );
-                    binding_errored = true;
-                    (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
-                });
-                where_subst = where_subst.compose(&bs);
-                // Propagate the local-function body's unifications to the outer
-                // substitution. Without this, the resolutions that fix a where
-                // function's parameter types (and any class-method type variables
-                // in its body) are visible only inside the emitted term, leaving
-                // those variables spuriously unresolved at the function boundary.
-                subst = subst.compose(&where_subst);
-                // Build the inferred function type and unify with pre-registered type
-                let mut inferred_fn_ty = body_ty.apply_subst(&where_subst);
-                for pty in param_tys.iter().rev() {
-                    inferred_fn_ty = Ty::arrow(pty.apply_subst(&where_subst), inferred_fn_ty);
-                }
-                // As in the value-binding case: the pre-registered type carries
-                // how the clause body uses this local function, so a unification
-                // failure is a definition-vs-use type error and must be recorded
-                // (suppressed only when the body already failed, to avoid a
-                // second message about the placeholder).
-                if let Some(scheme) = local_env.lookup(&ld.name) {
-                    match self.unify(&scheme.ty.apply_subst(&subst), &inferred_fn_ty.apply_subst(&subst)) {
-                        Ok(us) => subst = subst.compose(&us),
-                        Err(e) => if !binding_errored {
-                            self.push_error_span(
-                                e,
-                                format!("the where-binding '{}' ({})", ld.name, ctx),
-                                clause.span,
-                            );
-                        }
-                    }
-                }
-                // A skolem this where-function unpacked must not appear in
-                // its own type: mata-ll where-bindings are monomorphic, so
-                // every CALL of the function shares one type — a where-fn
-                // returning its unpacked existential (`unpack (Foo x) = x`)
-                // would claim two calls on two different boxes yield the
-                // SAME hidden type, which is false (and, with an Eq-style
-                // constrained existential, exploitable). GHC rejects this
-                // the same way.
-                self.check_existential_escape(
-                    &inferred_fn_ty.apply_subst(&subst), where_skolems_before)?;
-                twhere.push(TLocalDef {
-                    name: ld.name.clone(),
-                    patterns: tpatterns.into_iter().map(|p| p.apply_subst(&where_subst)).collect(),
-                    body: texpr.apply_subst(&where_subst),
-                });
-            }
+            twhere.push(self.check_where_binding(ld, clause.span, ctx, &local_env, &mut subst)?);
         }
 
         // An existential skolem unpacked by this clause (in an argument
@@ -831,6 +685,158 @@ impl Checker {
             span: Some(clause.span),
         };
         Ok((raw_clause.apply_subst(&subst), subst))
+    }
+
+    /// Check one `where` binding of a clause: a simple value binding
+    /// (`where x = expr`, zero parameters) or a local function
+    /// (`where go acc [] = …`). One flow serves both — the value case is the
+    /// zero-parameter instance (its pattern loop is empty and `where_subst`
+    /// ends up being exactly the body's substitution).
+    ///
+    /// Error recovery: on a failed body (or pattern) the error is recorded
+    /// and checking continues with a placeholder — the error makes
+    /// compilation fail before codegen, and carrying on lets one pass report
+    /// errors in later patterns and bindings too. Only the function case's
+    /// existential-escape check propagates an error (`Err`) out to the
+    /// clause.
+    ///
+    /// Beyond arity, the two original code paths differed in two deliberate,
+    /// PRESERVED ways (parameterized on `is_function` below; do not
+    /// normalize them without re-verifying compiled output):
+    /// 1. the pre-registered type is looked up in the substituted env
+    ///    snapshot (`env`) for a value binding but in the raw `local_env`
+    ///    for a function — both sides of the unification then apply the full
+    ///    accumulated substitution;
+    /// 2. a function binding resolves its inferred type and its emitted
+    ///    patterns/body through its own `where_subst` eagerly, while a value
+    ///    binding leaves its body raw for the clause-level
+    ///    `raw_clause.apply_subst(&subst)` to resolve.
+    fn check_where_binding(
+        &mut self,
+        ld: &LocalDef,
+        clause_span: Span,
+        ctx: &str,
+        local_env: &TypeEnv,
+        subst: &mut Subst,
+    ) -> Result<TLocalDef, DiagnosticKind> {
+        let is_function = !ld.patterns.is_empty();
+        // Infer against the env with the accumulated substitution applied,
+        // so a sibling where-binding already checked in this group (e.g.
+        // `f` in `add10 = f 10`) is seen at its RESOLVED type rather than
+        // its still-fresh pre-registered variable. Without this the use's
+        // unifications land on a stale variable and never propagate back to
+        // this binding's literals, leaving them unresolved for the
+        // monomorphizer to default (now to Integer) — the `let` group path
+        // already applies the substitution between bindings.
+        let mut env = local_env.applied(subst);
+
+        let mut param_tys = Vec::new();
+        let mut tpatterns = Vec::new();
+        let mut where_subst = Subst::empty();
+        // A where-function's patterns can unpack an existential too; its
+        // skolems must not survive into the function's own type (checked
+        // below, once that type is assembled).
+        let where_skolems_before = self.pattern_skolems.len();
+        for pat in &ld.patterns {
+            let param_ty = self.fresh_var("_w");
+            // On failure, record the error and continue with a wildcard
+            // placeholder (see the recovery note in the doc comment).
+            let (tp, ps) = self.check_pattern(pat, &param_ty, env.to_mut()).unwrap_or_else(|e| {
+                self.push_error_span(
+                    e,
+                    format!("a pattern of the where-binding '{}' ({})", ld.name, ctx),
+                    clause_span,
+                );
+                (TPattern::Wildcard, Subst::empty())
+            });
+            where_subst = where_subst.compose(&ps);
+            param_tys.push(param_ty.apply_subst(&where_subst));
+            tpatterns.push(tp);
+        }
+
+        // On failure, record the error and continue with a placeholder that
+        // can never reach codegen. The failed body's substitution is lost
+        // (we continue with Subst::empty()), so class constraints emitted
+        // while inferring it reference variables whose determinations are
+        // gone — discharging them would report spurious ambiguities on top
+        // of the real error. Drop them; they are re-checked for real once
+        // the reported error is fixed.
+        let mut binding_errored = false;
+        let wanted_before = self.wanted.len();
+        let (texpr, body_ty, bs) = self.infer_expr(&ld.body, &env).unwrap_or_else(|e| {
+            self.wanted.truncate(wanted_before);
+            self.push_error_span(
+                e,
+                format!("the where-binding '{}' ({})", ld.name, ctx),
+                clause_span,
+            );
+            binding_errored = true;
+            (TExpr::new(TExprKind::Var("error".into()), Ty::Unit), Ty::Unit, Subst::empty())
+        });
+        where_subst = where_subst.compose(&bs);
+        // Propagate the binding's unifications to the outer substitution.
+        // Without this, the resolutions that fix a where-function's
+        // parameter types (and any class-method type variables in its body)
+        // are visible only inside the emitted term, leaving those variables
+        // spuriously unresolved at the function boundary.
+        *subst = subst.compose(&where_subst);
+
+        // Build the inferred type — difference (2): a function binding
+        // resolves its pieces through its own `where_subst`; a value
+        // binding's body type stays raw (the unification below applies the
+        // full accumulated substitution either way).
+        let inferred_ty = if is_function {
+            let mut fn_ty = body_ty.apply_subst(&where_subst);
+            for pty in param_tys.iter().rev() {
+                fn_ty = Ty::arrow(pty.apply_subst(&where_subst), fn_ty);
+            }
+            fn_ty
+        } else {
+            body_ty
+        };
+
+        // Unify with the pre-registered fresh type. That fresh type has
+        // absorbed how the clause body USES the binding, so a failure here
+        // means the binding's definition doesn't match its use — a real
+        // type error that must be reported, not dropped (unless the body
+        // already failed above, where a second message about the
+        // placeholder would only be noise).
+        let pre_registered = if is_function {
+            local_env.lookup(&ld.name)
+        } else {
+            // Difference (1): the value case reads the substituted snapshot.
+            env.lookup(&ld.name)
+        };
+        if let Some(pre_ty) = pre_registered.map(|s| s.ty.clone()) {
+            match self.unify(&pre_ty.apply_subst(subst), &inferred_ty.apply_subst(subst)) {
+                Ok(us) => *subst = subst.compose(&us),
+                Err(e) => if !binding_errored {
+                    self.push_error_span(
+                        e,
+                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        clause_span,
+                    );
+                }
+            }
+        }
+
+        if is_function {
+            // A skolem this where-function unpacked must not appear in its
+            // own type: mata-ll where-bindings are monomorphic, so every
+            // CALL of the function shares one type — a where-fn returning
+            // its unpacked existential (`unpack (Foo x) = x`) would claim
+            // two calls on two different boxes yield the SAME hidden type,
+            // which is false (and, with an Eq-style constrained
+            // existential, exploitable). GHC rejects this the same way.
+            self.check_existential_escape(
+                &inferred_ty.apply_subst(subst), where_skolems_before)?;
+        }
+
+        Ok(TLocalDef {
+            name: ld.name.clone(),
+            patterns: tpatterns.into_iter().map(|p| p.apply_subst(&where_subst)).collect(),
+            body: if is_function { texpr.apply_subst(&where_subst) } else { texpr },
+        })
     }
 
     /// Infer a `let` / do-`let` binding group as **mutually recursive**, then
