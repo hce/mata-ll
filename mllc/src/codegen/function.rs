@@ -19,6 +19,111 @@ use super::names::{sanitize_name};
 use super::util::{count_arrows, expr_evaluates_global_ref, expr_references_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
+/// A snapshot of every `CodeGen` field that constitutes lexical-scope state.
+///
+/// This struct IS the field list: every scope save/restore in the code
+/// generator goes through it, so adding a scope-scoped field to `CodeGen`
+/// means adding it here — once — and every site inherits it. The hand-cloned
+/// per-site subsets this replaces produced a series of leak bugs, each one a
+/// site forgetting one field.
+///
+/// `capture` clones the full set. `restore` writes the full set back. The
+/// `restore_*` variants write back a documented subset — they exist because
+/// some scope exits deliberately let part of the state persist (each variant
+/// says which part and why; the call sites carry the site-specific rationale).
+pub(super) struct ScopeSnapshot {
+    /// Names known to hold WHNF values (references skip `__force`).
+    concrete_vars: std::collections::HashSet<String>,
+    /// Locally-bound names; they shadow `fn_table` slots in `lua_ref`.
+    local_vars: std::collections::HashSet<String>,
+    /// Count of `local` declarations in the current function scope
+    /// (drives the 200-local `_v` spill).
+    local_count: usize,
+    /// Spilled-local name -> 1-based `_v` table index.
+    var_slots: std::collections::HashMap<String, usize>,
+    /// Next free `_v` index.
+    var_slots_next: usize,
+    /// Whether `local _v = {}` has been emitted in the current scope.
+    var_table_emitted: bool,
+    /// Strictness rows of the where-local functions in scope.
+    local_strict_params: std::collections::HashMap<String, Vec<bool>>,
+    /// Structured twin of `local_strict_params`: their demand rows.
+    local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
+}
+
+impl ScopeSnapshot {
+    pub(super) fn capture(cg: &CodeGen) -> Self {
+        ScopeSnapshot {
+            concrete_vars: cg.concrete_vars.clone(),
+            local_vars: cg.local_vars.clone(),
+            local_count: cg.local_count,
+            var_slots: cg.var_slots.clone(),
+            var_slots_next: cg.var_slots_next,
+            var_table_emitted: cg.var_table_emitted,
+            local_strict_params: cg.local_strict_params.clone(),
+            local_demand_rows: cg.local_demand_rows.clone(),
+        }
+    }
+
+    /// Full restore: every scope field returns to its captured value.
+    pub(super) fn restore(self, cg: &mut CodeGen) {
+        cg.concrete_vars = self.concrete_vars;
+        cg.local_vars = self.local_vars;
+        cg.local_count = self.local_count;
+        cg.var_slots = self.var_slots;
+        cg.var_slots_next = self.var_slots_next;
+        cg.var_table_emitted = self.var_table_emitted;
+        cg.local_strict_params = self.local_strict_params;
+        cg.local_demand_rows = self.local_demand_rows;
+    }
+
+    /// Restores concreteness and the where-scope rows, deliberately KEEPING
+    /// `local_vars` and the slot counters (`local_count`, `var_slots`,
+    /// `var_slots_next`, `var_table_emitted`) as grown. Used by the
+    /// module-level value-binding arm of `function_stmts`: the binding's
+    /// `local` declaration persists at module scope, so its name must stay
+    /// registered as a local (later references use the bare name, not a
+    /// `fn_table` slot) and its slot stays counted.
+    pub(super) fn restore_keeping_locals(self, cg: &mut CodeGen) {
+        cg.concrete_vars = self.concrete_vars;
+        cg.local_strict_params = self.local_strict_params;
+        cg.local_demand_rows = self.local_demand_rows;
+    }
+
+    /// Restores name visibility (`local_vars`) and concreteness
+    /// (`concrete_vars`) only. Used by expression-level scopes (guarded-case
+    /// closures, let-IIFEs, lambdas): these sites never reset the slot
+    /// counters, so locals declared inside the nested emission deliberately
+    /// stay counted toward the enclosing function's `_v` spill budget, and
+    /// any where-scope rows are restored by the pattern emitters themselves.
+    pub(super) fn restore_vars(self, cg: &mut CodeGen) {
+        cg.local_vars = self.local_vars;
+        cg.concrete_vars = self.concrete_vars;
+    }
+
+    /// Restores `local_vars` only. Used per-branch by the plain (guard-free)
+    /// value-position `case` emission, which registers pattern-bound names
+    /// for reference resolution but makes no concreteness claims of its own.
+    pub(super) fn restore_local_vars(self, cg: &mut CodeGen) {
+        cg.local_vars = self.local_vars;
+    }
+
+    /// Restores the where-scope rows (`local_strict_params`,
+    /// `local_demand_rows`) only. Used per-clause by the guarded
+    /// independent-block pattern emitter, which restores no other scope
+    /// state between clauses.
+    pub(super) fn restore_rows(self, cg: &mut CodeGen) {
+        cg.local_strict_params = self.local_strict_params;
+        cg.local_demand_rows = self.local_demand_rows;
+    }
+
+    /// Restores `concrete_vars` only. Used by the where-group function-body
+    /// emitter to scope its `_warg` concreteness marks.
+    pub(super) fn restore_concrete_vars(self, cg: &mut CodeGen) {
+        cg.concrete_vars = self.concrete_vars;
+    }
+}
+
 impl CodeGen {
     /// Will this binding's slot hold a directly-usable (WHNF) value from the
     /// moment it is assigned — i.e. never a thunk? Seeds `concrete_vars` at
@@ -57,14 +162,7 @@ impl CodeGen {
     pub(super) fn function_stmts(&mut self, func: &TFunction) -> Vec<Stmt> {
         let lua_name = sanitize_name(&func.name);
         let clauses = &func.clauses;
-        let saved_concrete = self.concrete_vars.clone();
-        let saved_locals = self.local_vars.clone();
-        let saved_local_count = self.local_count;
-        let saved_var_slots = self.var_slots.clone();
-        let saved_var_slots_next = self.var_slots_next;
-        let saved_var_table_emitted = self.var_table_emitted;
-        let saved_local_strict = self.local_strict_params.clone();
-        let saved_local_rows = self.local_demand_rows.clone();
+        let scope = ScopeSnapshot::capture(self);
         self.local_count = 0;
         self.var_slots.clear();
         self.var_slots_next = 0;
@@ -74,7 +172,10 @@ impl CodeGen {
         // demanded-binding analysis of result-position expressions.
         self.cur_result_demand = self.demand_info.rows.result_demand(&func.name);
 
-        if clauses.is_empty() { self.concrete_vars = saved_concrete; self.local_vars = saved_locals; self.local_count = saved_local_count; self.var_slots = saved_var_slots; self.var_slots_next = saved_var_slots_next; self.var_table_emitted = saved_var_table_emitted; self.local_strict_params = saved_local_strict; self.local_demand_rows = saved_local_rows; return Vec::new(); }
+        if clauses.is_empty() {
+            scope.restore(self);
+            return Vec::new();
+        }
 
         // Eta-expand: if the function has fewer patterns than type arrows,
         // add extra params so the Lua function matches the expected arity.
@@ -187,9 +288,9 @@ impl CodeGen {
                 is_concrete = false;
             }
             stmts.push(Stmt::Raw(String::new()));
-            self.concrete_vars = saved_concrete;
-            self.local_strict_params = saved_local_strict;
-            self.local_demand_rows = saved_local_rows;
+            // Keep locals and slot counters: the binding's `local` persists
+            // at module scope (see restore_keeping_locals).
+            scope.restore_keeping_locals(self);
             // The forward-declaration seeding predicted this outcome from the
             // same predicate; a mismatch means an earlier-emitted reference
             // already chose its force wrongly.
@@ -324,14 +425,7 @@ impl CodeGen {
                 Stmt::Function { header, body: Block(body) },
                 Stmt::Raw(String::new()),
             ];
-            self.concrete_vars = saved_concrete;
-            self.local_vars = saved_locals;
-            self.local_count = saved_local_count;
-            self.var_slots = saved_var_slots;
-            self.var_slots_next = saved_var_slots_next;
-            self.var_table_emitted = saved_var_table_emitted;
-            self.local_strict_params = saved_local_strict;
-            self.local_demand_rows = saved_local_rows;
+            scope.restore(self);
             self.concrete_vars.insert(lua_name);
             return stmts;
         }
@@ -389,14 +483,7 @@ impl CodeGen {
             Stmt::Function { header, body: Block(body) },
             Stmt::Raw(String::new()),
         ];
-        self.concrete_vars = saved_concrete;
-        self.local_vars = saved_locals;
-        self.local_count = saved_local_count;
-        self.var_slots = saved_var_slots;
-        self.var_slots_next = saved_var_slots_next;
-        self.var_table_emitted = saved_var_table_emitted;
-        self.local_strict_params = saved_local_strict;
-        self.local_demand_rows = saved_local_rows;
+        scope.restore(self);
         self.concrete_vars.insert(lua_name);
         stmts
     }
@@ -572,7 +659,7 @@ impl CodeGen {
         // provably WHNF: mark it concrete so the clause conditions built by
         // match_scrutinee do not re-force it. `_warg` names are shared by
         // every where-group, so the marks must not outlive this one.
-        let saved_concrete = self.concrete_vars.clone();
+        let scope = ScopeSnapshot::capture(self);
 
         if clauses.len() == 1 {
             let clause = &clauses[0];
@@ -618,7 +705,7 @@ impl CodeGen {
             }
             body.extend(self.pattern_match_block(&params, &clauses).0);
         }
-        self.concrete_vars = saved_concrete;
+        scope.restore_concrete_vars(self);
 
         stmts.push(Stmt::Function { header, body: Block(body) });
         stmts

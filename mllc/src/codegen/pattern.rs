@@ -21,6 +21,7 @@
 
 use crate::tir::*;
 use super::CodeGen;
+use super::function::ScopeSnapshot;
 use super::lua::{Block, Expr, Stmt};
 use super::names::{lua_field_index, lua_number_literal, lua_quoted_string, sanitize_name};
 
@@ -122,14 +123,7 @@ impl CodeGen {
             // clause's `let`/where binding of the same name is emitted without
             // `local` — assigning to a shared global instead, which corrupts
             // when captured by a thunk across calls (e.g. nested FOR loops).
-            let scope_lv = self.local_vars.clone();
-            let scope_vs = self.var_slots.clone();
-            let scope_vsn = self.var_slots_next;
-            let scope_lc = self.local_count;
-            let scope_vte = self.var_table_emitted;
-            let scope_cv = self.concrete_vars.clone();
-            let scope_lsp = self.local_strict_params.clone();
-            let scope_ldr = self.local_demand_rows.clone();
+            let scope = ScopeSnapshot::capture(self);
 
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
@@ -173,14 +167,7 @@ impl CodeGen {
 
             // Restore the scope captured at the start of this clause so its
             // locals do not leak into the next clause.
-            self.local_vars = scope_lv;
-            self.var_slots = scope_vs;
-            self.var_slots_next = scope_vsn;
-            self.local_count = scope_lc;
-            self.var_table_emitted = scope_vte;
-            self.concrete_vars = scope_cv;
-            self.local_strict_params = scope_lsp;
-            self.local_demand_rows = scope_ldr;
+            scope.restore(self);
         }
         let mut stmts = Vec::new();
         match chain {
@@ -218,8 +205,7 @@ impl CodeGen {
         for clause in clauses {
             // A clause's where-scope rows (installed by where_binds_stmts)
             // must not leak into the next clause's independent block.
-            let scope_lsp = self.local_strict_params.clone();
-            let scope_ldr = self.local_demand_rows.clone();
+            let scope = ScopeSnapshot::capture(self);
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
             for (pi, pat) in clause.patterns.iter().enumerate() {
@@ -259,8 +245,7 @@ impl CodeGen {
                     else_b: None,
                 });
             }
-            self.local_strict_params = scope_lsp;
-            self.local_demand_rows = scope_ldr;
+            scope.restore_rows(self);
         }
         stmts.push(Self::non_exhaustive_stmt());
         Block(stmts)
