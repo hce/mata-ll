@@ -60,7 +60,7 @@
 //! rules that pass used (one binding site, or a parameter/forward-declaration
 //! rebind with exactly one assignment; never a name mentioned in Raw text).
 
-use super::lua::{Block, Expr, FuncBody, Item, Stmt};
+use super::lua::{Block, Expr, Item, Stmt};
 use std::collections::{HashMap, HashSet};
 
 // ---- The stamp lattice ----
@@ -149,8 +149,13 @@ impl Stamp {
         self.pure
     }
 
-    /// No production consumer yet: the effect bits' first readers are the
-    /// refutation and the structured-pass tier this engine was built for.
+    /// The effect bits already participate in the refutation (`meet`,
+    /// `absorb_effects`, `no_stronger_than`); these direct accessors have no
+    /// caller yet. Their consumers are the remaining structured-tier passes
+    /// (closure hoisting, liveness-based slot reuse — see doc/articles/TODO.md,
+    /// "Lua-AST optimization layer, structured-pass tier"), which decide per
+    /// node whether hoisting past a possibly-trapping or allocating
+    /// neighbour is sound.
     #[allow(dead_code)]
     pub(super) fn may_trap(&self) -> bool {
         self.may_trap
@@ -392,60 +397,37 @@ fn collect_facts_block(stmts: &[Stmt], f: &mut ScopeFacts) {
     }
 }
 
+// The census decision — which fields bind, assign, or poison — stays
+// spelled per variant with NO wildcard: an unclassified binder would
+// under-count and let `qualifies` claim a name it should not, so a new
+// statement kind must be classified here before this compiles. The descent
+// itself is the AST's own (`for_each_expr` / `for_each_block`); the facts
+// are commutative counts, so visiting order does not matter.
 fn collect_facts_stmt(s: &Stmt, f: &mut ScopeFacts) {
     match s {
         Stmt::Raw(t) => f.raw(t),
-        Stmt::Local(names, init) => {
+        Stmt::Local(names, _) => {
             for n in names {
                 f.bind(n);
             }
-            if let Some(e) = init {
-                collect_facts_expr(e, f);
-            }
         }
-        Stmt::Assign(lhs, e) => {
+        Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => {
             if is_plain_ident(lhs) {
                 f.assign(lhs);
             }
-            collect_facts_expr(e, f);
         }
-        Stmt::AssignIf { lhs, cond, then_e, else_e } => {
-            if is_plain_ident(lhs) {
-                f.assign(lhs);
-            }
-            collect_facts_expr(cond, f);
-            collect_facts_expr(then_e, f);
-            collect_facts_expr(else_e, f);
-        }
-        Stmt::Return(e) | Stmt::Expr(e) => collect_facts_expr(e, f),
-        Stmt::If { cond, then_b, elseifs, else_b } => {
-            collect_facts_expr(cond, f);
-            collect_facts_block(&then_b.0, f);
-            for (c, b) in elseifs {
-                collect_facts_expr(c, f);
-                collect_facts_block(&b.0, f);
-            }
-            if let Some(b) = else_b {
-                collect_facts_block(&b.0, f);
-            }
-        }
-        Stmt::Do(b) | Stmt::WhileTrue(b) => collect_facts_block(&b.0, f),
         // A multiple assignment assigns every plain-identifier lvalue — the
         // tail-loop pass's parameter update is one more assignment site for
         // each parameter, so any name-stamp qualification over those names
         // correctly fails afterward.
-        Stmt::MultiAssign(lhs, exprs) => {
+        Stmt::MultiAssign(lhs, _) => {
             for l in lhs {
                 if is_plain_ident(l) {
                     f.assign(l);
                 }
             }
-            for e in exprs {
-                collect_facts_expr(e, f);
-            }
         }
-        Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
-        Stmt::Function { header, body } => {
+        Stmt::Function { header, .. } => {
             // The header's tokens include the declared name and every
             // parameter name — each is a binding site.
             let mut toks = HashSet::new();
@@ -453,59 +435,44 @@ fn collect_facts_stmt(s: &Stmt, f: &mut ScopeFacts) {
             for t in toks {
                 f.bind(&t);
             }
-            collect_facts_block(&body.0, f);
         }
-        Stmt::ReturnTable(entries) => {
-            for (_, e) in entries {
-                collect_facts_expr(e, f);
-            }
-        }
+        Stmt::Return(_)
+        | Stmt::Expr(_)
+        | Stmt::If { .. }
+        | Stmt::Do(_)
+        | Stmt::WhileTrue(_)
+        | Stmt::ReturnNone
+        | Stmt::Goto(_)
+        | Stmt::Label(_)
+        | Stmt::ReturnTable(_) => {}
     }
+    s.for_each_expr(&mut |e| collect_facts_expr(e, f));
+    s.for_each_block(&mut |b| collect_facts_block(b, f));
 }
 
 fn collect_facts_expr(e: &Expr, f: &mut ScopeFacts) {
     match e {
-        Expr::Name(_) | Expr::Lit(_) => {}
         Expr::Raw(t) => f.raw(t),
-        Expr::Paren(e) | Expr::Neg(e) => collect_facts_expr(e, f),
-        Expr::Call(c, args) => {
-            collect_facts_expr(c, f);
-            for a in args {
-                collect_facts_expr(a, f);
-            }
-        }
-        Expr::Method(recv, _, args) => {
-            collect_facts_expr(recv, f);
-            for a in args {
-                collect_facts_expr(a, f);
-            }
-        }
-        Expr::Index(base, _) => collect_facts_expr(base, f),
-        Expr::Binop(_, l, r) => {
-            collect_facts_expr(l, f);
-            collect_facts_expr(r, f);
-        }
-        Expr::Table(items) | Expr::TableSpaced(items) => {
-            for item in items {
-                match item {
-                    Item::Pos(e) | Item::KV(_, e) => collect_facts_expr(e, f),
-                }
-            }
-        }
+        // A literal's parameters bind (they shadow); its body is statements,
+        // which `for_each_subexpr` does not reach, so descend it here.
         Expr::Func(params, body) => {
             for p in params {
                 f.bind(p);
             }
-            collect_facts_block(func_body_stmts(body), f);
+            collect_facts_block(body.stmts(), f);
         }
+        Expr::Name(_)
+        | Expr::Lit(_)
+        | Expr::Paren(_)
+        | Expr::Neg(_)
+        | Expr::Call(..)
+        | Expr::Method(..)
+        | Expr::Index(..)
+        | Expr::Binop(..)
+        | Expr::Table(_)
+        | Expr::TableSpaced(_) => {}
     }
-}
-
-fn func_body_stmts(body: &FuncBody) -> &Vec<Stmt> {
-    match body {
-        FuncBody::Inline(s) => s,
-        FuncBody::Block(Block(s)) => s,
-    }
+    e.for_each_subexpr(&mut |c| collect_facts_expr(c, f));
 }
 
 // ---- The engine ----
@@ -735,50 +702,25 @@ fn slot_scan_lvalue(lhs: &str, s: &mut SlotStores) {
     }
 }
 
+// Like the binding census: the store/poison decision stays spelled per
+// variant with NO wildcard — a missed store site would let
+// `slot_single_store` claim a twice-stored slot. Descent is the AST's own,
+// and the census is commutative counts, so visiting order does not matter.
 fn slot_scan_stmt(st: &Stmt, s: &mut SlotStores) {
     match st {
         Stmt::Raw(t) => s.scan_raw(t),
-        Stmt::Local(names, init) => {
+        Stmt::Local(names, _) => {
             if names.iter().any(|n| n == "__mll_fn") {
                 s.table_locals += 1;
             }
-            if let Some(e) = init {
-                slot_scan_expr(e, s);
-            }
         }
-        Stmt::Assign(lhs, e) => {
-            slot_scan_lvalue(lhs, s);
-            slot_scan_expr(e, s);
-        }
-        Stmt::MultiAssign(lhs, exprs) => {
+        Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => slot_scan_lvalue(lhs, s),
+        Stmt::MultiAssign(lhs, _) => {
             for l in lhs {
                 slot_scan_lvalue(l, s);
             }
-            for e in exprs {
-                slot_scan_expr(e, s);
-            }
         }
-        Stmt::AssignIf { lhs, cond, then_e, else_e } => {
-            slot_scan_lvalue(lhs, s);
-            slot_scan_expr(cond, s);
-            slot_scan_expr(then_e, s);
-            slot_scan_expr(else_e, s);
-        }
-        Stmt::Return(e) | Stmt::Expr(e) => slot_scan_expr(e, s),
-        Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
-        Stmt::If { cond, then_b, elseifs, else_b } => {
-            slot_scan_expr(cond, s);
-            slot_scan_block(&then_b.0, s);
-            for (c, b) in elseifs {
-                slot_scan_expr(c, s);
-                slot_scan_block(&b.0, s);
-            }
-            if let Some(b) = else_b {
-                slot_scan_block(&b.0, s);
-            }
-        }
-        Stmt::Do(b) | Stmt::WhileTrue(b) => slot_scan_block(&b.0, s),
-        Stmt::Function { header, body } => {
+        Stmt::Function { header, .. } => {
             // The only header spelling that stores to a slot is the
             // `__mll_fn[i] = function(...)` form name resolution emits.
             if let Some(rest) = header.strip_prefix("__mll_fn") {
@@ -791,14 +733,19 @@ fn slot_scan_stmt(st: &Stmt, s: &mut SlotStores) {
             } else if header.contains("__mll_fn") {
                 s.poisoned = true;
             }
-            slot_scan_block(&body.0, s);
         }
-        Stmt::ReturnTable(entries) => {
-            for (_, e) in entries {
-                slot_scan_expr(e, s);
-            }
-        }
+        Stmt::Return(_)
+        | Stmt::Expr(_)
+        | Stmt::If { .. }
+        | Stmt::Do(_)
+        | Stmt::WhileTrue(_)
+        | Stmt::ReturnNone
+        | Stmt::Goto(_)
+        | Stmt::Label(_)
+        | Stmt::ReturnTable(_) => {}
     }
+    st.for_each_expr(&mut |e| slot_scan_expr(e, s));
+    st.for_each_block(&mut |b| slot_scan_block(b, s));
 }
 
 fn slot_scan_expr(e: &Expr, s: &mut SlotStores) {
@@ -806,29 +753,20 @@ fn slot_scan_expr(e: &Expr, s: &mut SlotStores) {
         // Reads (`__mll_fn[3]` as a name, `__mll_fn` as an index base) are
         // not stores; only Raw text is scanned, because the scan cannot see
         // what raw text does with a mention.
-        Expr::Name(_) | Expr::Lit(_) => {}
         Expr::Raw(t) => s.scan_raw(t),
-        Expr::Paren(e) | Expr::Neg(e) => slot_scan_expr(e, s),
-        Expr::Call(f, args) | Expr::Method(f, _, args) => {
-            slot_scan_expr(f, s);
-            for a in args {
-                slot_scan_expr(a, s);
-            }
-        }
-        Expr::Index(base, _) => slot_scan_expr(base, s),
-        Expr::Binop(_, l, r) => {
-            slot_scan_expr(l, s);
-            slot_scan_expr(r, s);
-        }
-        Expr::Table(items) | Expr::TableSpaced(items) => {
-            for item in items {
-                match item {
-                    Item::Pos(e) | Item::KV(_, e) => slot_scan_expr(e, s),
-                }
-            }
-        }
-        Expr::Func(_, body) => slot_scan_block(func_body_stmts(body), s),
+        Expr::Func(_, body) => slot_scan_block(body.stmts(), s),
+        Expr::Name(_)
+        | Expr::Lit(_)
+        | Expr::Paren(_)
+        | Expr::Neg(_)
+        | Expr::Call(..)
+        | Expr::Method(..)
+        | Expr::Index(..)
+        | Expr::Binop(..)
+        | Expr::Table(_)
+        | Expr::TableSpaced(_) => {}
     }
+    e.for_each_subexpr(&mut |c| slot_scan_expr(c, s));
 }
 
 impl Engine {
@@ -880,47 +818,21 @@ fn structured_descend_stmt(
     pass: &mut dyn StructuredPass,
     any: &mut bool,
 ) {
-    match s {
-        Stmt::Function { body, .. } => structured_scope(&mut body.0, slots, pass, any),
-        Stmt::If { cond, then_b, elseifs, else_b } => {
-            structured_descend_expr(cond, slots, pass, any);
-            for b in std::iter::once(&mut then_b.0)
-                .chain(elseifs.iter_mut().map(|(_, b)| &mut b.0))
-                .chain(else_b.iter_mut().map(|b| &mut b.0))
-            {
-                for s in b.iter_mut() {
-                    structured_descend_stmt(s, slots, pass, any);
-                }
-            }
-            for (c, _) in elseifs.iter_mut() {
-                structured_descend_expr(c, slots, pass, any);
-            }
-        }
-        Stmt::Do(b) | Stmt::WhileTrue(b) => {
-            for s in b.0.iter_mut() {
-                structured_descend_stmt(s, slots, pass, any);
-            }
-        }
-        Stmt::Raw(_) | Stmt::Local(_, None) | Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
-        Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
-            structured_descend_expr(e, slots, pass, any)
-        }
-        Stmt::MultiAssign(_, exprs) => {
-            for e in exprs {
-                structured_descend_expr(e, slots, pass, any);
-            }
-        }
-        Stmt::AssignIf { cond, then_e, else_e, .. } => {
-            structured_descend_expr(cond, slots, pass, any);
-            structured_descend_expr(then_e, slots, pass, any);
-            structured_descend_expr(else_e, slots, pass, any);
-        }
-        Stmt::ReturnTable(entries) => {
-            for (_, e) in entries {
-                structured_descend_expr(e, slots, pass, any);
-            }
-        }
+    // A named function's body is a scope of its own: run the scope walk
+    // there instead of the plain descent. (Sibling scopes convert
+    // independently — a conversion touches only its own body and draws its
+    // fresh names from its own text — so the descent order between the
+    // expression side and the block side is free.)
+    if let Stmt::Function { body, .. } = s {
+        structured_scope(&mut body.0, slots, pass, any);
+        return;
     }
+    s.for_each_expr_mut(&mut |e| structured_descend_expr(e, slots, pass, any));
+    s.for_each_block_mut(&mut |b| {
+        for s in b.iter_mut() {
+            structured_descend_stmt(s, slots, pass, any);
+        }
+    });
 }
 
 fn structured_descend_expr(
@@ -929,37 +841,13 @@ fn structured_descend_expr(
     pass: &mut dyn StructuredPass,
     any: &mut bool,
 ) {
-    match e {
-        Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
-        Expr::Paren(e) | Expr::Neg(e) => structured_descend_expr(e, slots, pass, any),
-        Expr::Call(f, args) | Expr::Method(f, _, args) => {
-            structured_descend_expr(f, slots, pass, any);
-            for a in args {
-                structured_descend_expr(a, slots, pass, any);
-            }
-        }
-        Expr::Index(base, _) => structured_descend_expr(base, slots, pass, any),
-        Expr::Binop(_, l, r) => {
-            structured_descend_expr(l, slots, pass, any);
-            structured_descend_expr(r, slots, pass, any);
-        }
-        Expr::Table(items) | Expr::TableSpaced(items) => {
-            for item in items {
-                match item {
-                    Item::Pos(e) | Item::KV(_, e) => {
-                        structured_descend_expr(e, slots, pass, any)
-                    }
-                }
-            }
-        }
-        Expr::Func(_, body) => {
-            let stmts: &mut Vec<Stmt> = match body {
-                FuncBody::Inline(s) => s,
-                FuncBody::Block(Block(s)) => s,
-            };
-            structured_scope(stmts, slots, pass, any);
-        }
+    // A function literal's body is a scope of its own, and the only place
+    // an expression hides statements.
+    if let Expr::Func(_, body) = e {
+        structured_scope(body.stmts_mut(), slots, pass, any);
+        return;
     }
+    e.for_each_subexpr_mut(&mut |c| structured_descend_expr(c, slots, pass, any));
 }
 
 /// Offer every `Stmt::Function` declared in this scope (reachable through
@@ -1051,43 +939,14 @@ fn valid_block(stmts: &[Stmt], loop_label: Option<&str>) -> bool {
 /// Function-literal bodies inside this statement's expressions are fresh
 /// goto scopes and must themselves be valid.
 fn valid_exprs(s: &Stmt) -> bool {
-    let mut slots = Vec::new();
-    stmt_slots_shallow(s, &mut slots);
-    slots.iter().all(|e| valid_expr(e))
-}
-
-fn stmt_slots_shallow<'a>(s: &'a Stmt, out: &mut Vec<&'a Expr>) {
-    match s {
-        Stmt::Raw(_)
-        | Stmt::Local(_, None)
-        | Stmt::ReturnNone
-        | Stmt::Goto(_)
-        | Stmt::Label(_)
-        | Stmt::Do(_)
-        | Stmt::WhileTrue(_)
-        | Stmt::Function { .. } => {}
-        Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
-            out.push(e)
-        }
-        Stmt::MultiAssign(_, exprs) => out.extend(exprs.iter()),
-        Stmt::AssignIf { cond, then_e, else_e, .. } => {
-            out.push(cond);
-            out.push(then_e);
-            out.push(else_e);
-        }
-        Stmt::If { cond, elseifs, .. } => {
-            out.push(cond);
-            for (c, _) in elseifs {
-                out.push(c);
-            }
-        }
-        Stmt::ReturnTable(entries) => out.extend(entries.iter().map(|(_, e)| e)),
-    }
+    let mut ok = true;
+    s.for_each_expr(&mut |e| ok = ok && valid_expr(e));
+    ok
 }
 
 fn valid_expr(e: &Expr) -> bool {
     match e {
-        Expr::Func(_, body) => valid_block(func_body_stmts(body), None),
+        Expr::Func(_, body) => valid_block(body.stmts(), None),
         _ => expr_children(e).iter().all(|(c, _)| valid_expr(c)),
     }
 }
@@ -1181,7 +1040,7 @@ fn expr_children(e: &Expr) -> Vec<(&Expr, Hole)> {
         }
         Expr::Func(_, body) => {
             let mut out = Vec::new();
-            for s in func_body_stmts(body) {
+            for s in body.stmts() {
                 stmt_slots(s, &mut out);
             }
             out
@@ -1545,12 +1404,8 @@ impl Walker<'_> {
                 for p in params.iter() {
                     inner.remove(p);
                 }
-                let stmts: &mut Vec<Stmt> = match body {
-                    FuncBody::Inline(s) => s,
-                    FuncBody::Block(Block(s)) => s,
-                };
                 let mut children = Vec::new();
-                self.block(stmts, facts, &inner, &mut children);
+                self.block(body.stmts_mut(), facts, &inner, &mut children);
                 StampNode {
                     stamp: Stamp::new(Shape::Closure, true, false, true),
                     children,
@@ -1618,6 +1473,7 @@ fn binop_stamp(op: &str, l: &Stamp, r: &Stamp) -> Stamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::lua::FuncBody;
 
     fn force(e: Expr) -> Expr {
         Expr::force(e)

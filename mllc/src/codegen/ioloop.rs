@@ -152,6 +152,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::annot::{self, ScopeView, is_plain_ident};
+use super::loopcore::{self, each_return, render_stmts, run_tail_self_args};
 use super::lua::{Block, Expr, FuncBody, Stmt};
 use super::opt;
 use super::tailloop::{
@@ -190,72 +191,17 @@ fn closure_stmts(e: &Expr) -> Option<&Vec<Stmt>> {
     }
 }
 
-/// `__mll_run_tail(<self>(e1..en))`, both calls in the exact spelling the
-/// action emitter produces (no paren layers — a paren-wrapped form is left
-/// as a value branch, which is correct either way; strictness here keeps
-/// the reverse transform below an exact inverse). The same zero-parameter
-/// exception as tailloop's `rewritable_site` applies: with no parameters
-/// there is no assignment to carry extra arguments' evaluation.
-fn run_tail_self_args<'a>(
-    e: &'a Expr,
-    name: &SelfName,
-    params: &[String],
-) -> Option<&'a Vec<Expr>> {
-    let Expr::Call(f, args) = e else { return None };
-    if !matches!(f.as_ref(), Expr::Name(n) if n == "__mll_run_tail") || args.len() != 1 {
-        return None;
-    }
-    let Expr::Call(callee, call_args) = &args[0] else { return None };
-    // The one spelling the emitter uses (`Name`, slot refs included);
-    // exactness keeps the reverse transform an inverse.
-    if !matches!(callee.as_ref(), Expr::Name(s) if s == name_spelling(name)) {
-        return None;
-    }
-    if params.is_empty() && !call_args.is_empty() {
-        return None;
-    }
-    Some(call_args)
-}
-
 // ---- Branch discovery ----
-
-/// Visit every `return` of the outer body (any depth of `if`/`do` nesting —
-/// guarded matches put returns in non-tail blocks). Nested function bodies'
-/// returns belong to those functions and are not visited.
-fn each_return(stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
-    for s in stmts {
-        match s {
-            Stmt::Return(e) => f(e),
-            Stmt::If { then_b, elseifs, else_b, .. } => {
-                each_return(&then_b.0, f);
-                for (_, b) in elseifs {
-                    each_return(&b.0, f);
-                }
-                if let Some(b) = else_b {
-                    each_return(&b.0, f);
-                }
-            }
-            Stmt::Do(b) => each_return(&b.0, f),
-            _ => {}
-        }
-    }
-}
+// (`run_tail_self_args` — the exact-spelling runner-site predicate — and
+// `each_return` — the every-return visitor over the outer body — are
+// loopcore's, shared with performloop.)
 
 /// Does a spliced closure body have at least one rewritable tail self site?
 /// Tail positions of the CLOSURE body (last statement, tail `if` arms, `do`
 /// blocks) — a site inside a nested loop or literal re-enters the converted
 /// function instead, which is the same semantics.
 fn body_has_site(stmts: &[Stmt], name: &SelfName, params: &[String]) -> bool {
-    match stmts.last() {
-        Some(Stmt::Return(e)) => run_tail_self_args(e, name, params).is_some(),
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            body_has_site(&then_b.0, name, params)
-                || elseifs.iter().any(|(_, b)| body_has_site(&b.0, name, params))
-                || else_b.as_ref().is_some_and(|b| body_has_site(&b.0, name, params))
-        }
-        Some(Stmt::Do(b)) => body_has_site(&b.0, name, params),
-        _ => false,
-    }
+    loopcore::tail_position_has(stmts, &|e| run_tail_self_args(e, name, params).is_some())
 }
 
 // ---- The repeat-safe gate (see the module comment) ----
@@ -368,41 +314,6 @@ fn to_skeleton(stmts: &mut [Stmt], lp: &str) {
     }
 }
 
-/// Replace tail `return __mll_run_tail(self(e…))` sites of a spliced
-/// closure body with the simultaneous parameter update and the jump to the
-/// loop's continue label. Always the goto shape: a spliced site is not in
-/// loop-body tail position in general (see the module comment).
-fn rewrite_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String]) {
-    match stmts.last_mut() {
-        Some(Stmt::Return(e)) => {
-            if run_tail_self_args(e, name, params).is_none() {
-                return;
-            }
-            let Some(Stmt::Return(Expr::Call(_, mut runner_args))) = stmts.pop() else {
-                unreachable!()
-            };
-            let Expr::Call(_, args) = runner_args.pop().expect("runner argument") else {
-                unreachable!()
-            };
-            if !params.is_empty() {
-                stmts.push(Stmt::MultiAssign(params.to_vec(), args));
-            }
-            stmts.push(Stmt::Goto("continue".into()));
-        }
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            rewrite_sites(&mut then_b.0, name, params);
-            for (_, b) in elseifs.iter_mut() {
-                rewrite_sites(&mut b.0, name, params);
-            }
-            if let Some(b) = else_b.as_mut() {
-                rewrite_sites(&mut b.0, name, params);
-            }
-        }
-        Some(Stmt::Do(b)) => rewrite_sites(&mut b.0, name, params),
-        _ => {}
-    }
-}
-
 /// The loop-phase body: branch closures spliced (with their tail self sites
 /// rewritten), value branches run through the forwarding runner. Input
 /// statements are already renamed p→w; the update's lvalues are the real
@@ -422,7 +333,11 @@ fn to_loop(stmts: Vec<Stmt>, name: &SelfName, params: &[String]) -> Vec<Stmt> {
                         FuncBody::Inline(s) => s,
                         FuncBody::Block(Block(s)) => s,
                     };
-                    rewrite_sites(&mut body, name, params);
+                    // Tail sites of the spliced closure body only
+                    // (`everywhere: false`): a spliced site is not in
+                    // loop-body tail position in general, so the rewrite is
+                    // always the goto shape (see the module comment).
+                    loopcore::rewrite_run_tail_sites(&mut body, name, params, false);
                     out.extend(body);
                 } else {
                     out.push(Stmt::Return(Expr::call_named("__mll_run_tail", vec![e])));
@@ -503,16 +418,7 @@ fn convert(
     rename_block(&mut loop_stmts, &map);
     let loop_stmts = to_loop(loop_stmts, &self_name, &params);
 
-    let mut inner: Vec<Stmt> = Vec::with_capacity(loop_stmts.len() + params.len() + 3);
-    for (w, p) in ws.iter().zip(params.iter()) {
-        inner.push(Stmt::Local(vec![w.clone()], Some(Expr::name(p.clone()))));
-    }
-    let falls_off = !opt::block_diverges(&Block(loop_stmts.clone()));
-    inner.extend(loop_stmts);
-    if falls_off {
-        inner.push(Stmt::Do(Block(vec![Stmt::ReturnNone])));
-    }
-    inner.push(Stmt::Label("continue".into()));
+    let inner = loopcore::build_loop_scaffold(&ws, &params, loop_stmts);
 
     // Locals budget, per scope: the outer body keeps its own locals plus
     // `_lp`; the loop closure is its own scope holding the copies, the
@@ -540,31 +446,17 @@ fn convert(
 
     // Self-check (debug/test builds): the conversion must be exactly
     // reversible — un-converting the constructed body must reproduce the
-    // original, byte-for-byte in rendered form (modulo the closure-spelling
-    // canonicalization `reverse` documents). This is the mechanical review
-    // every corpus conversion gets: a debug-build compile of a program
-    // re-derives and checks every conversion in it.
+    // original (modulo the closure-spelling canonicalization `reverse`
+    // documents); `loopcore::reverse_check` does the byte-compare and the
+    // mismatch diagnostics.
     debug_assert!(
-        {
-            let reversed = reverse(&out, &self_name, &params, &ws, &lp);
-            let expect = render_stmts(&canonical_closure_returns(&body.0));
-            match reversed {
-                Some(r) if render_stmts(&r) == expect => true,
-                Some(r) => {
-                    eprintln!(
-                        "ioloop reverse mismatch for `{}`:\n--- original\n{}\n--- reversed\n{}",
-                        header,
-                        expect,
-                        render_stmts(&r)
-                    );
-                    false
-                }
-                None => {
-                    eprintln!("ioloop reverse failed to parse own output for `{}`", header);
-                    false
-                }
-            }
-        },
+        loopcore::reverse_check(
+            "ioloop",
+            "original",
+            header,
+            reverse(&out, &self_name, &params, &ws, &lp),
+            &canonical_closure_returns(&body.0),
+        ),
         "ioloop conversion is not reversible (see stderr)"
     );
 
@@ -572,12 +464,6 @@ fn convert(
 }
 
 // ---- The reverse transform (self-check; see convert) ----
-
-fn render_stmts(stmts: &[Stmt]) -> String {
-    let mut s = String::new();
-    Block(stmts.to_vec()).render(0, &mut s);
-    s
-}
 
 /// The original body with every branch-closure return in the ONE canonical
 /// spelling `reverse` can reproduce: parens peeled, `FuncBody::Block`. Both
@@ -631,23 +517,7 @@ fn reverse(
     }
     let [Stmt::WhileTrue(Block(inner))] = lbody.as_slice() else { return None };
     // Strip the per-iteration copies and the continue scaffolding.
-    let mut rest = inner.as_slice();
-    for (w, p) in ws.iter().zip(params.iter()) {
-        let (c, r) = rest.split_first()?;
-        let Stmt::Local(ns, Some(Expr::Name(src))) = c else { return None };
-        if ns != &vec![w.clone()] || src != p {
-            return None;
-        }
-        rest = r;
-    }
-    let rest = match rest {
-        [r @ .., Stmt::Do(guard), Stmt::Label(l)] if l == "continue" => {
-            let [Stmt::ReturnNone] = guard.0.as_slice() else { return None };
-            r
-        }
-        [r @ .., Stmt::Label(l)] if l == "continue" => r,
-        _ => return None,
-    };
+    let rest = loopcore::peel_loop_scaffold(inner, ws, params)?;
     let unmap: HashMap<String, String> =
         ws.iter().cloned().zip(params.iter().cloned()).collect();
     lockstep(skeleton, rest, name, params, lp, &unmap)
@@ -674,7 +544,7 @@ fn lockstep(
                     return None;
                 }
                 let mut spliced: Vec<Stmt> = l.cloned().collect();
-                unrewrite_sites(&mut spliced, name, params)?;
+                loopcore::unrewrite_run_tail_sites(&mut spliced, name, params, false)?;
                 rename_block(&mut spliced, unmap);
                 out.push(Stmt::Return(Expr::Func(
                     vec![],
@@ -761,47 +631,6 @@ fn unrenames_to(l: &Expr, s: &Expr, unmap: &HashMap<String, String>) -> bool {
     let mut probe = vec![Stmt::Return(l.clone())];
     rename_block(&mut probe, unmap);
     render_stmts(&probe) == render_stmts(&[Stmt::Return(s.clone())])
-}
-
-/// Mirror of `rewrite_sites`: a tail `[…, params = args, goto continue]`
-/// (or a bare `[…, goto continue]` for a zero-parameter function) becomes
-/// the original `return __mll_run_tail(self(args))`.
-fn unrewrite_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String]) -> Option<()> {
-    if matches!(stmts.last(), Some(Stmt::Goto(l)) if l == "continue") {
-        stmts.pop();
-        let args = if params.is_empty() {
-            Vec::new()
-        } else {
-            let Some(Stmt::MultiAssign(lhs, args)) = stmts.pop() else { return None };
-            if lhs != params {
-                return None;
-            }
-            args
-        };
-        let self_call = Expr::call_named(name_spelling(name), args);
-        stmts.push(Stmt::Return(Expr::call_named("__mll_run_tail", vec![self_call])));
-        return Some(());
-    }
-    match stmts.last_mut() {
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            unrewrite_sites(&mut then_b.0, name, params)?;
-            for (_, b) in elseifs.iter_mut() {
-                unrewrite_sites(&mut b.0, name, params)?;
-            }
-            if let Some(b) = else_b.as_mut() {
-                unrewrite_sites(&mut b.0, name, params)?;
-            }
-        }
-        Some(Stmt::Do(b)) => unrewrite_sites(&mut b.0, name, params)?,
-        _ => {}
-    }
-    Some(())
-}
-
-fn name_spelling(name: &SelfName) -> &str {
-    match name {
-        SelfName::LocalFn(s) | SelfName::Assigned(s) | SelfName::Slot(s) => s,
-    }
 }
 
 #[cfg(test)]

@@ -994,27 +994,108 @@ impl Checker {
             });
         }
 
+        // The stepped ranges share one recursive helper over Int indices.
+        // Recursing on T values (the enumFromTo approach) does not work here:
+        // with step s, the successor pair needs toEnum (i + s), which can
+        // overshoot the constructor range before the termination check runs.
+        // On indices the check comes first, so toEnum only ever sees an index
+        // between the start and the (in-range) limit.
+        //
+        // GHC semantics, matched exactly: ascending (step >= 0) stops past
+        // the limit, descending stops below it, and step 0 with a reachable
+        // limit is an infinite list of the start element — as for
+        // [x, x ..] :: [Int]. The runtime is lazy, so the infinite case is as
+        // representable here as it is in GHC.
+
+        let int_var = |name: &str| TExpr::new(TExprKind::Var(name.into()), int_ty.clone());
+        let int_lit = |v: i64| TExpr::new(TExprKind::Lit(TLiteral::Integer(v)), int_ty.clone());
+        let int_op = |op: &str, lhs: TExpr, rhs: TExpr| TExpr::new(TExprKind::InfixApp {
+            op: op.into(),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }, int_ty.clone());
+        let cmp = |op: &str, lhs: TExpr, rhs: TExpr| TExpr::new(TExprKind::InfixApp {
+            op: op.into(),
+            lhs: Box::new(lhs),
+            rhs: Box::new(rhs),
+        }, Ty::Con("Bool".into()));
+        let apply = |fn_name: &str, args: Vec<TExpr>, ret: Ty| {
+            let mut e = TExpr::new(TExprKind::Var(fn_name.into()), Ty::Unit);
+            let last = args.len() - 1;
+            for (i, arg) in args.into_iter().enumerate() {
+                let ty = if i == last { ret.clone() } else { Ty::Unit };
+                e = TExpr::new(TExprKind::App(Box::new(e), Box::new(arg)), ty);
+            }
+            e
+        };
+        let from_enum = |v: &str| apply(&from_name, vec![
+            TExpr::new(TExprKind::Var(v.into()), result_type.clone()),
+        ], int_ty.clone());
+
+        // enumStep_T :: Int -> Int -> Int -> [T]
+        // enumStep i step limit — the index walk behind both stepped ranges.
+        let enum_step_name = format!("enumStep_{}", type_name);
+        {
+            // if step >= 0 then (if i > limit then [] else toEnum i : go)
+            //              else (if i < limit then [] else toEnum i : go)
+            let step_branch = |stop_op: &str| {
+                let stop = cmp(stop_op, int_var("_i"), int_var("_l"));
+                let head = apply(&to_name, vec![int_var("_i")], result_type.clone());
+                let tail = apply(&enum_step_name, vec![
+                    int_op("+", int_var("_i"), int_var("_s")),
+                    int_var("_s"),
+                    int_var("_l"),
+                ], list_ty.clone());
+                let cons = TExpr::new(TExprKind::InfixApp {
+                    op: ":".into(),
+                    lhs: Box::new(head),
+                    rhs: Box::new(tail),
+                }, list_ty.clone());
+                TExpr::new(TExprKind::If {
+                    cond: Box::new(stop),
+                    then_branch: Box::new(TExpr::new(TExprKind::Lit(TLiteral::Unit), list_ty.clone())),
+                    else_branch: Box::new(cons),
+                }, list_ty.clone())
+            };
+            let body = TExpr::new(TExprKind::If {
+                cond: Box::new(cmp(">=", int_var("_s"), int_lit(0))),
+                then_branch: Box::new(step_branch(">")),
+                else_branch: Box::new(step_branch("<")),
+            }, list_ty.clone());
+            functions.push(TFunction {
+                name: enum_step_name.clone(),
+                ty: Ty::fun(&[int_ty.clone(), int_ty.clone(), int_ty.clone()], list_ty.clone()),
+                clauses: vec![TClause {
+                    span: None,
+                    patterns: vec![
+                        TPattern::Var("_i".into(), int_ty.clone()),
+                        TPattern::Var("_s".into(), int_ty.clone()),
+                        TPattern::Var("_l".into(), int_ty.clone()),
+                    ],
+                    guards: vec![], body, where_binds: vec![],
+                }],
+                specialized: false,
+                dict_params: vec![],
+                derived_strict: false,
+            });
+        }
+
         // enumFromThen_T :: T -> T -> [T]
-        // Generate: enumFromThen a b = go (fromEnum a) where step = fromEnum b - fromEnum a
-        //   go i = if i < 0 || i >= n then [] else toEnum i : go (i + step)
+        // enumFromThen a b = enumStep (fromEnum a) (fromEnum b - fromEnum a) limit
+        //   where limit = maxBound index when ascending, 0 when descending
+        // (GHC picks the limit from the step direction the same way.)
         let enum_from_then_name = format!("enumFromThen_{}", type_name);
         {
-            // Simpler: just generate explicit list since enum is finite
-            // enumFromThen a b: start at fromEnum a, step by (fromEnum b - fromEnum a), stop at bounds
-            let a_var = TExpr::new(TExprKind::Var("_a".into()), result_type.clone());
-            let b_var = TExpr::new(TExprKind::Var("_b".into()), result_type.clone());
-            let from_a = TExpr::new(TExprKind::App(
-                Box::new(TExpr::new(TExprKind::Var(from_name.clone()), Ty::Unit)),
-                Box::new(a_var),
-            ), int_ty.clone());
-            let from_b = TExpr::new(TExprKind::App(
-                Box::new(TExpr::new(TExprKind::Var(from_name.clone()), Ty::Unit)),
-                Box::new(b_var),
-            ), int_ty.clone());
-            // For finite enums, enumFromThen is rarely used; generate empty list as placeholder
-            // A proper implementation would need a recursive helper with bounds checking
-            let _ = (from_a, from_b);
-            let body = TExpr::new(TExprKind::Lit(TLiteral::Unit), list_ty.clone());
+            let limit = TExpr::new(TExprKind::If {
+                cond: Box::new(cmp(">=", from_enum("_b"), from_enum("_a"))),
+                then_branch: Box::new(int_lit(n as i64 - 1)),
+                else_branch: Box::new(int_lit(0)),
+            }, int_ty.clone());
+            let body = apply(&enum_step_name, vec![
+                from_enum("_a"),
+                int_op("-", from_enum("_b"), from_enum("_a")),
+                limit,
+            ], list_ty.clone());
             functions.push(TFunction {
                 name: enum_from_then_name.clone(),
                 ty: Ty::fun(&[result_type.clone(), result_type.clone()], list_ty.clone()),
@@ -1033,9 +1114,14 @@ impl Checker {
         }
 
         // enumFromThenTo_T :: T -> T -> T -> [T]
+        // enumFromThenTo a b c = enumStep (fromEnum a) (fromEnum b - fromEnum a) (fromEnum c)
         let enum_from_then_to_name = format!("enumFromThenTo_{}", type_name);
         {
-            let body = TExpr::new(TExprKind::Lit(TLiteral::Unit), list_ty.clone());
+            let body = apply(&enum_step_name, vec![
+                from_enum("_a"),
+                int_op("-", from_enum("_b"), from_enum("_a")),
+                from_enum("_c"),
+            ], list_ty.clone());
             functions.push(TFunction {
                 name: enum_from_then_to_name.clone(),
                 ty: Ty::fun(&[result_type.clone(), result_type.clone(), result_type.clone()], list_ty.clone()),

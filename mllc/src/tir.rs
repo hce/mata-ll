@@ -239,127 +239,221 @@ impl TExpr {
         result
     }
 
-    /// Apply substitution to a single node (non-spine). Recurses for children
-    /// but these have bounded depth (not from bind chains).
-    fn apply_subst_node(self, subst: &Subst) -> Self {
-        let ty = self.ty.apply_subst(subst);
-        let kind = match self.kind {
-            TExprKind::App(f, a) => TExprKind::App(
-                Box::new(f.apply_subst(subst)),
-                Box::new(a.apply_subst(subst)),
-            ),
+    /// Rebuild this node with `f` applied to every DIRECT child expression:
+    /// operands, guard conditions and bodies, let-binding bodies,
+    /// record-update values, dictionary arguments — every `TExpr` exactly one
+    /// level down, and nothing deeper. Recursion is the caller's choice, so a
+    /// pass with its own depth strategy (e.g. `apply_subst`'s iterative
+    /// bind-chain spine) keeps it.
+    ///
+    /// This is THE enumeration of `TExprKind`'s children: every rewriting
+    /// pass goes through here (or `visit_children_mut`), and there is
+    /// deliberately no `_ => ...` fallback, so a variant added to `TExprKind`
+    /// fails to compile until its children are routed — instead of silently
+    /// escaping some of the passes, which is how `DictMethod`'s child
+    /// expression historically got skipped by hand-rolled walkers.
+    pub fn map_children(self, f: &mut impl FnMut(TExpr) -> TExpr) -> TExpr {
+        let TExpr { kind, ty } = self;
+        let kind = match kind {
+            k @ (TExprKind::Var(_)
+            | TExprKind::Con(_)
+            | TExprKind::Lit(_)
+            | TExprKind::OpFunc(_)
+            | TExprKind::DictAccess { .. }) => k,
+            TExprKind::App(a, b) => TExprKind::App(Box::new(f(*a)), Box::new(f(*b))),
             TExprKind::Lambda { params, body } => TExprKind::Lambda {
-                params: params.into_iter().map(|(n, t)| (n, t.apply_subst(subst))).collect(),
-                body: Box::new(body.apply_subst(subst)),
+                params,
+                body: Box::new(f(*body)),
             },
             TExprKind::InfixApp { op, lhs, rhs } => TExprKind::InfixApp {
                 op,
-                lhs: Box::new(lhs.apply_subst(subst)),
-                rhs: Box::new(rhs.apply_subst(subst)),
+                lhs: Box::new(f(*lhs)),
+                rhs: Box::new(f(*rhs)),
             },
-            TExprKind::Negate(e) => TExprKind::Negate(Box::new(e.apply_subst(subst))),
+            TExprKind::Negate(e) => TExprKind::Negate(Box::new(f(*e))),
+            TExprKind::Paren(e) => TExprKind::Paren(Box::new(f(*e))),
             TExprKind::If { cond, then_branch, else_branch } => TExprKind::If {
-                cond: Box::new(cond.apply_subst(subst)),
-                then_branch: Box::new(then_branch.apply_subst(subst)),
-                else_branch: Box::new(else_branch.apply_subst(subst)),
+                cond: Box::new(f(*cond)),
+                then_branch: Box::new(f(*then_branch)),
+                else_branch: Box::new(f(*else_branch)),
             },
             TExprKind::Case { scrutinee, branches } => TExprKind::Case {
-                scrutinee: Box::new(scrutinee.apply_subst(subst)),
+                scrutinee: Box::new(f(*scrutinee)),
                 branches: branches.into_iter().map(|b| TCaseBranch {
-                    pattern: b.pattern.apply_subst(subst),
+                    pattern: b.pattern,
                     guards: b.guards.into_iter().map(|g| TGuard {
-                        condition: g.condition.apply_subst(subst),
-                        body: g.body.apply_subst(subst),
+                        condition: f(g.condition),
+                        body: f(g.body),
                     }).collect(),
-                    body: b.body.apply_subst(subst),
+                    body: f(b.body),
                 }).collect(),
             },
             TExprKind::Let { binds, body } => TExprKind::Let {
                 binds: binds.into_iter().map(|b| TLocalDef {
-                    name: b.name, patterns: b.patterns.into_iter().map(|p| p.apply_subst(subst)).collect(),
-                    body: b.body.apply_subst(subst),
+                    name: b.name,
+                    patterns: b.patterns,
+                    body: f(b.body),
                 }).collect(),
-                body: Box::new(body.apply_subst(subst)),
+                body: Box::new(f(*body)),
             },
-            TExprKind::Paren(e) => TExprKind::Paren(Box::new(e.apply_subst(subst))),
             TExprKind::SpecCall { original, specialized, args } => TExprKind::SpecCall {
-                original, specialized,
-                args: args.into_iter().map(|a| a.apply_subst(subst)).collect(),
+                original,
+                specialized,
+                args: args.into_iter().map(&mut *f).collect(),
             },
-            TExprKind::Tuple(elems) => TExprKind::Tuple(
-                elems.into_iter().map(|e| e.apply_subst(subst)).collect(),
-            ),
+            TExprKind::Tuple(elems) => {
+                TExprKind::Tuple(elems.into_iter().map(&mut *f).collect())
+            }
+            TExprKind::DictMethod { dict, method_name } => TExprKind::DictMethod {
+                dict: Box::new(f(*dict)),
+                method_name,
+            },
             TExprKind::DictCall { func_name, dict_args, value_args } => TExprKind::DictCall {
                 func_name,
-                dict_args: dict_args.into_iter().map(|a| a.apply_subst(subst)).collect(),
-                value_args: value_args.into_iter().map(|a| a.apply_subst(subst)).collect(),
+                dict_args: dict_args.into_iter().map(&mut *f).collect(),
+                value_args: value_args.into_iter().map(&mut *f).collect(),
             },
             TExprKind::RecordUpdate { record, updates, num_fields } => TExprKind::RecordUpdate {
-                record: Box::new(record.apply_subst(subst)),
-                updates: updates.into_iter().map(|(n, idx, e)| (n, idx, e.apply_subst(subst))).collect(),
+                record: Box::new(f(*record)),
+                updates: updates.into_iter().map(|(n, i, e)| (n, i, f(e))).collect(),
                 num_fields,
             },
-            TExprKind::OutgoingCallback { callee, arity, run_io } =>
-                TExprKind::OutgoingCallback {
-                    callee: Box::new(callee.apply_subst(subst)),
-                    arity, run_io,
-                },
-            TExprKind::FfiMaybeArg { value } =>
-                TExprKind::FfiMaybeArg { value: Box::new(value.apply_subst(subst)) },
-            other => other,
+            TExprKind::OutgoingCallback { callee, arity, run_io } => {
+                TExprKind::OutgoingCallback { callee: Box::new(f(*callee)), arity, run_io }
+            }
+            TExprKind::FfiMaybeArg { value } => {
+                TExprKind::FfiMaybeArg { value: Box::new(f(*value)) }
+            }
         };
         TExpr { kind, ty }
+    }
+
+    /// In-place twin of [`map_children`](Self::map_children): `f` on every
+    /// direct child expression, same single-enumeration guarantee.
+    pub fn visit_children_mut(&mut self, f: &mut impl FnMut(&mut TExpr)) {
+        match &mut self.kind {
+            TExprKind::Var(_)
+            | TExprKind::Con(_)
+            | TExprKind::Lit(_)
+            | TExprKind::OpFunc(_)
+            | TExprKind::DictAccess { .. } => {}
+            TExprKind::App(a, b) => {
+                f(a);
+                f(b);
+            }
+            TExprKind::Lambda { body, .. } => f(body),
+            TExprKind::InfixApp { lhs, rhs, .. } => {
+                f(lhs);
+                f(rhs);
+            }
+            TExprKind::Negate(e) | TExprKind::Paren(e) => f(e),
+            TExprKind::If { cond, then_branch, else_branch } => {
+                f(cond);
+                f(then_branch);
+                f(else_branch);
+            }
+            TExprKind::Case { scrutinee, branches } => {
+                f(scrutinee);
+                for b in branches {
+                    for g in &mut b.guards {
+                        f(&mut g.condition);
+                        f(&mut g.body);
+                    }
+                    f(&mut b.body);
+                }
+            }
+            TExprKind::Let { binds, body } => {
+                for b in binds {
+                    f(&mut b.body);
+                }
+                f(body);
+            }
+            TExprKind::SpecCall { args, .. } => {
+                for a in args {
+                    f(a);
+                }
+            }
+            TExprKind::Tuple(elems) => {
+                for e in elems {
+                    f(e);
+                }
+            }
+            TExprKind::DictMethod { dict, .. } => f(dict),
+            TExprKind::DictCall { dict_args, value_args, .. } => {
+                for a in dict_args {
+                    f(a);
+                }
+                for a in value_args {
+                    f(a);
+                }
+            }
+            TExprKind::RecordUpdate { record, updates, .. } => {
+                f(record);
+                for (_, _, e) in updates {
+                    f(e);
+                }
+            }
+            TExprKind::OutgoingCallback { callee, .. } => f(callee),
+            TExprKind::FfiMaybeArg { value } => f(value),
+        }
+    }
+
+    /// Apply substitution to a single node (non-spine). The child
+    /// expressions route through `map_children` (recursing via the
+    /// spine-aware `apply_subst`); only the non-expression payloads that
+    /// carry types — lambda parameters and patterns — need their own arms.
+    fn apply_subst_node(self, subst: &Subst) -> Self {
+        let ty = self.ty.apply_subst(subst);
+        let kind = match self.kind {
+            TExprKind::Lambda { params, body } => TExprKind::Lambda {
+                params: params.into_iter().map(|(n, t)| (n, t.apply_subst(subst))).collect(),
+                body,
+            },
+            TExprKind::Case { scrutinee, branches } => TExprKind::Case {
+                scrutinee,
+                branches: branches.into_iter().map(|b| TCaseBranch {
+                    pattern: b.pattern.apply_subst(subst),
+                    guards: b.guards,
+                    body: b.body,
+                }).collect(),
+            },
+            TExprKind::Let { binds, body } => TExprKind::Let {
+                binds: binds.into_iter().map(|b| TLocalDef {
+                    name: b.name,
+                    patterns: b.patterns.into_iter().map(|p| p.apply_subst(subst)).collect(),
+                    body: b.body,
+                }).collect(),
+                body,
+            },
+            other => other,
+        };
+        TExpr { kind, ty }.map_children(&mut |c| c.apply_subst(subst))
     }
 
     /// In-place counterpart of `Ty::demote_skolems` for a whole expression
     /// tree: rewrite this node's type and recurse into every child. App/cons
     /// chains here are shallow (a comprehension's deep spine lives in the
     /// bind-chain form, handled the same as any other child), so plain
-    /// recursion is bounded.
+    /// recursion is bounded. Child expressions route through
+    /// `visit_children_mut`; only the non-expression payloads that carry
+    /// types (lambda parameters, patterns) need their own arms.
     pub fn demote_skolems(&mut self, demote: &std::collections::HashMap<u32, Ty>) {
         self.ty = self.ty.demote_skolems(demote);
         match &mut self.kind {
-            TExprKind::App(f, a) => { f.demote_skolems(demote); a.demote_skolems(demote); }
-            TExprKind::Lambda { params, body } => {
+            TExprKind::Lambda { params, .. } => {
                 for (_, t) in params.iter_mut() { *t = t.demote_skolems(demote); }
-                body.demote_skolems(demote);
             }
-            TExprKind::InfixApp { lhs, rhs, .. } => { lhs.demote_skolems(demote); rhs.demote_skolems(demote); }
-            TExprKind::Negate(e) | TExprKind::Paren(e) => e.demote_skolems(demote),
-            TExprKind::If { cond, then_branch, else_branch } => {
-                cond.demote_skolems(demote); then_branch.demote_skolems(demote); else_branch.demote_skolems(demote);
+            TExprKind::Case { branches, .. } => {
+                for b in branches.iter_mut() { b.pattern.demote_skolems(demote); }
             }
-            TExprKind::Case { scrutinee, branches } => {
-                scrutinee.demote_skolems(demote);
-                for b in branches.iter_mut() {
-                    b.pattern.demote_skolems(demote);
-                    for g in b.guards.iter_mut() { g.condition.demote_skolems(demote); g.body.demote_skolems(demote); }
-                    b.body.demote_skolems(demote);
-                }
-            }
-            TExprKind::Let { binds, body } => {
+            TExprKind::Let { binds, .. } => {
                 for bind in binds.iter_mut() {
                     for p in bind.patterns.iter_mut() { p.demote_skolems(demote); }
-                    bind.body.demote_skolems(demote);
                 }
-                body.demote_skolems(demote);
             }
-            TExprKind::SpecCall { args, .. } => { for a in args.iter_mut() { a.demote_skolems(demote); } }
-            TExprKind::Tuple(elems) => { for e in elems.iter_mut() { e.demote_skolems(demote); } }
-            TExprKind::DictCall { dict_args, value_args, .. } => {
-                for a in dict_args.iter_mut() { a.demote_skolems(demote); }
-                for a in value_args.iter_mut() { a.demote_skolems(demote); }
-            }
-            TExprKind::RecordUpdate { record, updates, .. } => {
-                record.demote_skolems(demote);
-                for (_, _, e) in updates.iter_mut() { e.demote_skolems(demote); }
-            }
-            TExprKind::OutgoingCallback { callee, .. } => callee.demote_skolems(demote),
-            TExprKind::FfiMaybeArg { value } => value.demote_skolems(demote),
-            TExprKind::DictMethod { dict, .. } => dict.demote_skolems(demote),
-            // Var/Con/Lit/OpFunc/DictAccess and any other leaf: only `ty` above.
             _ => {}
         }
+        self.visit_children_mut(&mut |c| c.demote_skolems(demote));
     }
 }
 
@@ -391,6 +485,26 @@ impl TPattern {
 }
 
 impl TClause {
+    /// Rebuild every top-level expression this clause owns with `f`: guard
+    /// conditions and bodies, the clause body, and each where-binding body.
+    /// This is THE coverage list for whole-clause rewrites — the
+    /// monomorphizer's fixpoint loops previously inlined it four times and
+    /// disagreed (guard expressions were silently skipped in dictionary
+    /// contexts).
+    pub fn map_exprs(&mut self, f: &mut impl FnMut(TExpr) -> TExpr) {
+        fn take(e: &mut TExpr) -> TExpr {
+            std::mem::replace(e, TExpr::new(TExprKind::Lit(TLiteral::Unit), Ty::Unit))
+        }
+        for g in &mut self.guards {
+            g.condition = f(take(&mut g.condition));
+            g.body = f(take(&mut g.body));
+        }
+        self.body = f(take(&mut self.body));
+        for wb in &mut self.where_binds {
+            wb.body = f(take(&mut wb.body));
+        }
+    }
+
     pub fn apply_subst(self, subst: &Subst) -> Self {
         TClause {
             span: self.span,

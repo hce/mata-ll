@@ -324,93 +324,38 @@ fn dead_branch_block(stmts: &mut Vec<Stmt>) {
 fn dead_branch_stmt(stmt: &mut Stmt) {
     // Recurse into nested function-literal bodies inside expressions.
     fn expr_bodies(e: &mut Expr) {
-        match e {
-            Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
-            Expr::Paren(e) | Expr::Neg(e) => expr_bodies(e),
-            Expr::Call(f, args) => {
-                expr_bodies(f);
-                for a in args {
-                    expr_bodies(a);
-                }
-            }
-            Expr::Method(recv, _, args) => {
-                expr_bodies(recv);
-                for a in args {
-                    expr_bodies(a);
-                }
-            }
-            Expr::Index(base, _) => expr_bodies(base),
-            Expr::Binop(_, l, r) => {
-                expr_bodies(l);
-                expr_bodies(r);
-            }
-            Expr::Table(items) | Expr::TableSpaced(items) => {
-                for item in items {
-                    match item {
-                        Item::Pos(e) | Item::KV(_, e) => expr_bodies(e),
-                    }
-                }
-            }
-            Expr::Func(_, body) => match body {
-                FuncBody::Inline(stmts) => dead_branch_block(stmts),
-                FuncBody::Block(Block(stmts)) => dead_branch_block(stmts),
-            },
+        if let Expr::Func(_, body) = e {
+            dead_branch_block(body.stmts_mut());
+            return;
         }
+        e.for_each_subexpr_mut(&mut expr_bodies);
     }
 
-    match stmt {
-        Stmt::Raw(_) => {}
-        Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
-            expr_bodies(e)
+    // Descend first (bottom-up): the statement's expressions for nested
+    // function bodies, its sub-blocks for the block-level rewrites.
+    stmt.for_each_expr_mut(&mut expr_bodies);
+    stmt.for_each_block_mut(&mut dead_branch_block);
+    // Then this statement's own rewrites — all on `If`.
+    if let Stmt::If { cond, then_b, elseifs, else_b } = stmt {
+        // (1) `elseif true` becomes `else`; later arms and the old
+        // `else` are unreachable.
+        if let Some(i) = elseifs.iter().position(|(c, _)| is_true_lit(c)) {
+            let (_, b) = elseifs.swap_remove(i);
+            elseifs.truncate(i);
+            *else_b = Some(b);
         }
-        Stmt::Local(_, None) | Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
-        Stmt::MultiAssign(_, exprs) => {
-            for e in exprs {
-                expr_bodies(e);
-            }
+        // A whole `if true` keeps only its first arm, as a `do` block
+        // so its locals stay scoped; a final-position `do` is spliced
+        // by the parent block's rewrite (4).
+        if is_true_lit(cond) {
+            let then_b = std::mem::replace(then_b, Block(Vec::new()));
+            *stmt = Stmt::Do(then_b);
+            return;
         }
-        Stmt::AssignIf { cond, then_e, else_e, .. } => {
-            expr_bodies(cond);
-            expr_bodies(then_e);
-            expr_bodies(else_e);
-        }
-        Stmt::Do(b) | Stmt::WhileTrue(b) => dead_branch_block(&mut b.0),
-        Stmt::Function { body, .. } => dead_branch_block(&mut body.0),
-        Stmt::ReturnTable(entries) => {
-            for (_, e) in entries {
-                expr_bodies(e);
-            }
-        }
-        Stmt::If { cond, then_b, elseifs, else_b } => {
-            expr_bodies(cond);
-            dead_branch_block(&mut then_b.0);
-            for (c, b) in elseifs.iter_mut() {
-                expr_bodies(c);
-                dead_branch_block(&mut b.0);
-            }
-            if let Some(b) = else_b.as_mut() {
-                dead_branch_block(&mut b.0);
-            }
-            // (1) `elseif true` becomes `else`; later arms and the old
-            // `else` are unreachable.
-            if let Some(i) = elseifs.iter().position(|(c, _)| is_true_lit(c)) {
-                let (_, b) = elseifs.swap_remove(i);
-                elseifs.truncate(i);
-                *else_b = Some(b);
-            }
-            // A whole `if true` keeps only its first arm, as a `do` block
-            // so its locals stay scoped; a final-position `do` is spliced
-            // by the parent block's rewrite (4).
-            if is_true_lit(cond) {
-                let then_b = std::mem::replace(then_b, Block(Vec::new()));
-                *stmt = Stmt::Do(then_b);
-                return;
-            }
-            // (2) Complement collapse: `if C … elseif ¬C …` → if/else.
-            if elseifs.len() == 1 && else_b.is_none() && complement_conds(cond, &elseifs[0].0) {
-                let (_, b) = elseifs.pop().expect("one elseif");
-                *else_b = Some(b);
-            }
+        // (2) Complement collapse: `if C … elseif ¬C …` → if/else.
+        if elseifs.len() == 1 && else_b.is_none() && complement_conds(cond, &elseifs[0].0) {
+            let (_, b) = elseifs.pop().expect("one elseif");
+            *else_b = Some(b);
         }
     }
 }
@@ -529,10 +474,7 @@ fn normalize_expr(slot: &mut Expr, ctx: Ctx) {
                 && args.len() == 1
                 && let Expr::Func(_, body) = &mut args[0]
             {
-                match body {
-                    FuncBody::Inline(stmts) => normalize_parens_block_ret(stmts, Ctx::Delim),
-                    FuncBody::Block(Block(stmts)) => normalize_parens_block_ret(stmts, Ctx::Delim),
-                }
+                normalize_parens_block_ret(body.stmts_mut(), Ctx::Delim);
                 return;
             }
             normalize_expr(f, Ctx::Prefix);
@@ -555,10 +497,7 @@ fn normalize_expr(slot: &mut Expr, ctx: Ctx) {
         }
         Expr::Neg(e) => normalize_expr(e, Ctx::Grouped),
         Expr::Table(items) | Expr::TableSpaced(items) => normalize_items(items),
-        Expr::Func(_, body) => match body {
-            FuncBody::Inline(stmts) => normalize_parens_block(stmts),
-            FuncBody::Block(Block(stmts)) => normalize_parens_block(stmts),
-        },
+        Expr::Func(_, body) => normalize_parens_block(body.stmts_mut()),
     }
 }
 
@@ -754,66 +693,15 @@ fn flatten_scope(stmts: &mut Vec<Stmt>, budget: &mut usize) {
 /// every function-literal body as a fresh scope.
 fn stmt_expr_funcs(stmt: &mut Stmt) {
     fn expr(e: &mut Expr) {
-        match e {
-            Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
-            Expr::Paren(e) | Expr::Neg(e) => expr(e),
-            Expr::Call(f, args) => {
-                expr(f);
-                for a in args {
-                    expr(a);
-                }
-            }
-            Expr::Method(recv, _, args) => {
-                expr(recv);
-                for a in args {
-                    expr(a);
-                }
-            }
-            Expr::Index(base, _) => expr(base),
-            Expr::Binop(_, l, r) => {
-                expr(l);
-                expr(r);
-            }
-            Expr::Table(items) | Expr::TableSpaced(items) => {
-                for item in items {
-                    match item {
-                        Item::Pos(e) | Item::KV(_, e) => expr(e),
-                    }
-                }
-            }
-            Expr::Func(_, body) => match body {
-                FuncBody::Inline(stmts) => flatten_iife_block(stmts),
-                FuncBody::Block(Block(stmts)) => flatten_iife_block(stmts),
-            },
+        if let Expr::Func(_, body) = e {
+            flatten_iife_block(body.stmts_mut());
+            return;
         }
+        e.for_each_subexpr_mut(&mut expr);
     }
-    match stmt {
-        Stmt::Raw(_) | Stmt::Local(_, None) | Stmt::ReturnNone | Stmt::Goto(_)
-        | Stmt::Label(_) => {}
-        Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => expr(e),
-        Stmt::MultiAssign(_, exprs) => {
-            for e in exprs {
-                expr(e);
-            }
-        }
-        Stmt::AssignIf { cond, then_e, else_e, .. } => {
-            expr(cond);
-            expr(then_e);
-            expr(else_e);
-        }
-        Stmt::If { cond, elseifs, .. } => {
-            expr(cond);
-            for (c, _) in elseifs {
-                expr(c);
-            }
-        }
-        Stmt::Do(_) | Stmt::WhileTrue(_) | Stmt::Function { .. } => {}
-        Stmt::ReturnTable(entries) => {
-            for (_, e) in entries {
-                expr(e);
-            }
-        }
-    }
+    // Direct expressions only: `for_each_expr_mut` does not enter
+    // sub-blocks, which is exactly the boundary this helper wants.
+    stmt.for_each_expr_mut(&mut expr);
 }
 
 fn iife_parts(e: &Expr) -> Option<(&Vec<String>, &FuncBody, &Vec<Expr>)> {
@@ -827,13 +715,6 @@ fn iife_parts(e: &Expr) -> Option<(&Vec<String>, &FuncBody, &Vec<Expr>)> {
 }
 
 fn body_stmts(body: FuncBody) -> Vec<Stmt> {
-    match body {
-        FuncBody::Inline(s) => s,
-        FuncBody::Block(Block(s)) => s,
-    }
-}
-
-fn body_stmts_ref(body: &FuncBody) -> &Vec<Stmt> {
     match body {
         FuncBody::Inline(s) => s,
         FuncBody::Block(Block(s)) => s,
@@ -860,7 +741,7 @@ fn try_splice_return(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> boo
                 }
             }
         }
-        let cost = params.len() + count_locals(body_stmts_ref(body));
+        let cost = params.len() + count_locals(body.stmts());
         if cost > *budget {
             return false;
         }
@@ -951,7 +832,7 @@ fn try_splice_value(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> bool
                 return false;
             }
             target = Target::Fresh(names[0].clone());
-            body_ref = body_stmts_ref(body);
+            body_ref = body.stmts();
         }
         Stmt::Assign(lhs, e) => {
             let Some((params, body, _)) = iife_parts(e) else { return false };
@@ -959,7 +840,7 @@ fn try_splice_value(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> bool
                 return false;
             }
             target = Target::Lvalue(lhs.clone());
-            body_ref = body_stmts_ref(body);
+            body_ref = body.stmts();
         }
         _ => return false,
     }

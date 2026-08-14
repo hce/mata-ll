@@ -138,6 +138,7 @@
 use std::collections::{HashMap, HashSet};
 
 use super::annot::{self, ScopeView};
+use super::loopcore::{self, each_return, run_tail_arg, run_tail_self_args};
 use super::lua::{Block, Expr, FuncBody, Stmt};
 use super::opt;
 use super::tailloop::{
@@ -158,23 +159,8 @@ impl annot::StructuredPass for PerformLoop {
     }
 }
 
-fn name_spelling(name: &SelfName) -> &str {
-    match name {
-        SelfName::LocalFn(s) | SelfName::Assigned(s) | SelfName::Slot(s) => s,
-    }
-}
-
-/// `__mll_run_tail(<e>)` in the exact spelling the emitter produces (one
-/// `Name` callee, one argument, no paren layers). Exactness keeps the
-/// reverse transform an inverse, as in ioloop.
-fn run_tail_arg(e: &Expr) -> Option<&Expr> {
-    let Expr::Call(f, args) = e else { return None };
-    if matches!(f.as_ref(), Expr::Name(n) if n == "__mll_run_tail") && args.len() == 1 {
-        Some(&args[0])
-    } else {
-        None
-    }
-}
+// (`run_tail_arg` — the exact-spelling runner matcher — is loopcore's,
+// shared with ioloop; exactness keeps the reverse transform an inverse.)
 
 fn run_tail_arg_owned(e: Expr) -> Result<Expr, Expr> {
     if run_tail_arg(&e).is_some() {
@@ -399,68 +385,20 @@ fn normalize_action_value(x: Expr, tail: bool) -> Option<Vec<Stmt>> {
 
 // ---- Step 2: the loop ----
 
-/// `__mll_run_tail(<self>(e…))` — a rewritable site of the NORMALIZED body.
-/// The zero-parameter exception is tailloop's: with no parameters there is
-/// no assignment to carry extra arguments' evaluation, and the kept runner
-/// return is sound either way.
-fn site_args<'a>(e: &'a Expr, name: &SelfName, params: &[String]) -> Option<&'a Vec<Expr>> {
-    let arg = run_tail_arg(e)?;
-    let Expr::Call(callee, call_args) = arg else { return None };
-    if !matches!(callee.as_ref(), Expr::Name(s) if s == name_spelling(name)) {
-        return None;
-    }
-    if params.is_empty() && !call_args.is_empty() {
-        return None;
-    }
-    Some(call_args)
-}
+// (`run_tail_self_args` — a rewritable site of the NORMALIZED body — and
+// the `rewrite_run_tail_sites`/`unrewrite_run_tail_sites` pair are
+// loopcore's, shared with ioloop. The zero-parameter exception is
+// tailloop's: with no parameters there is no assignment to carry extra
+// arguments' evaluation, and the kept runner return is sound either way.)
 
 /// Is there at least one site anywhere in the normalized body? (Returns are
 /// block-final, so every block position is visited.)
 fn has_site(stmts: &[Stmt], name: &SelfName, params: &[String]) -> bool {
-    stmts.iter().any(|s| match s {
-        Stmt::Return(e) => site_args(e, name, params).is_some(),
-        Stmt::If { then_b, elseifs, else_b, .. } => {
-            has_site(&then_b.0, name, params)
-                || elseifs.iter().any(|(_, b)| has_site(&b.0, name, params))
-                || else_b.as_ref().is_some_and(|b| has_site(&b.0, name, params))
-        }
-        Stmt::Do(b) => has_site(&b.0, name, params),
-        _ => false,
-    })
-}
-
-/// Replace every site with the simultaneous parameter update and the jump
-/// to the loop's continue label. Always the goto shape: after splicing, a
-/// site is not in loop-body tail position in general.
-fn rewrite_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String]) {
-    for s in stmts.iter_mut() {
-        match s {
-            Stmt::If { then_b, elseifs, else_b, .. } => {
-                rewrite_sites(&mut then_b.0, name, params);
-                for (_, b) in elseifs.iter_mut() {
-                    rewrite_sites(&mut b.0, name, params);
-                }
-                if let Some(b) = else_b.as_mut() {
-                    rewrite_sites(&mut b.0, name, params);
-                }
-            }
-            Stmt::Do(b) => rewrite_sites(&mut b.0, name, params),
-            _ => {}
-        }
-    }
-    if matches!(stmts.last(), Some(Stmt::Return(e)) if site_args(e, name, params).is_some()) {
-        let Some(Stmt::Return(Expr::Call(_, mut runner_args))) = stmts.pop() else {
-            unreachable!()
-        };
-        let Expr::Call(_, args) = runner_args.pop().expect("runner argument") else {
-            unreachable!()
-        };
-        if !params.is_empty() {
-            stmts.push(Stmt::MultiAssign(params.to_vec(), args));
-        }
-        stmts.push(Stmt::Goto("continue".into()));
-    }
+    let mut found = false;
+    each_return(stmts, &mut |e| {
+        found = found || run_tail_self_args(e, name, params).is_some();
+    });
+    found
 }
 
 // ---- The conversion ----
@@ -494,18 +432,12 @@ fn convert(
         params.iter().cloned().zip(ws.iter().cloned()).collect();
     let mut loop_stmts = normalized.clone();
     rename_block(&mut loop_stmts, &map);
-    rewrite_sites(&mut loop_stmts, &self_name, &params);
+    // Every site (`everywhere: true`): after splicing, sites sit at any
+    // block position, and none is in loop-body tail position in general —
+    // always the goto shape.
+    loopcore::rewrite_run_tail_sites(&mut loop_stmts, &self_name, &params, true);
 
-    let falls_off = !opt::block_diverges(&Block(loop_stmts.clone()));
-    let mut inner: Vec<Stmt> = Vec::with_capacity(loop_stmts.len() + params.len() + 2);
-    for (w, p) in ws.iter().zip(params.iter()) {
-        inner.push(Stmt::Local(vec![w.clone()], Some(Expr::name(p.clone()))));
-    }
-    inner.extend(loop_stmts);
-    if falls_off {
-        inner.push(Stmt::Do(Block(vec![Stmt::ReturnNone])));
-    }
-    inner.push(Stmt::Label("continue".into()));
+    let inner = loopcore::build_loop_scaffold(&ws, &params, loop_stmts);
 
     // Locals budget: the loop body holds the copies plus every spliced
     // body's locals in one scope; the parameters themselves occupy slots the
@@ -517,33 +449,18 @@ fn convert(
     let out = vec![Stmt::WhileTrue(Block(inner))];
 
     // Self-check (debug/test builds): step 2 must be exactly reversible —
-    // un-converting the loop must reproduce the normalized body,
-    // byte-for-byte in rendered form. Step 1's splices are local rewrites
-    // whose output IS that normalized body (see the module comment).
+    // un-converting the loop must reproduce the normalized body; `loopcore::
+    // reverse_check` does the byte-compare and the mismatch diagnostics.
+    // Step 1's splices are local rewrites whose output IS that normalized
+    // body (see the module comment).
     debug_assert!(
-        {
-            let reversed = reverse(&out, &self_name, &params, &ws);
-            let expect = render_stmts(&normalized);
-            match reversed {
-                Some(r) if render_stmts(&r) == expect => true,
-                Some(r) => {
-                    eprintln!(
-                        "performloop reverse mismatch for `{}`:\n--- normalized\n{}\n--- reversed\n{}",
-                        header,
-                        expect,
-                        render_stmts(&r)
-                    );
-                    false
-                }
-                None => {
-                    eprintln!(
-                        "performloop reverse failed to parse own output for `{}`",
-                        header
-                    );
-                    false
-                }
-            }
-        },
+        loopcore::reverse_check(
+            "performloop",
+            "normalized",
+            header,
+            reverse(&out, &self_name, &params, &ws),
+            &normalized,
+        ),
         "performloop conversion is not reversible (see stderr)"
     );
 
@@ -551,12 +468,6 @@ fn convert(
 }
 
 // ---- The reverse transform (self-check; see convert) ----
-
-fn render_stmts(stmts: &[Stmt]) -> String {
-    let mut s = String::new();
-    Block(stmts.to_vec()).render(0, &mut s);
-    s
-}
 
 /// Un-convert step 2: recover the normalized body from the loop alone.
 /// Returns `None` when the converted tree does not have the exact produced
@@ -568,68 +479,13 @@ fn reverse(
     ws: &[String],
 ) -> Option<Vec<Stmt>> {
     let [Stmt::WhileTrue(Block(inner))] = converted else { return None };
-    let mut rest = inner.as_slice();
-    for (w, p) in ws.iter().zip(params.iter()) {
-        let (c, r) = rest.split_first()?;
-        let Stmt::Local(ns, Some(Expr::Name(src))) = c else { return None };
-        if ns != &vec![w.clone()] || src != p {
-            return None;
-        }
-        rest = r;
-    }
-    let rest = match rest {
-        [r @ .., Stmt::Do(guard), Stmt::Label(l)] if l == "continue" => {
-            let [Stmt::ReturnNone] = guard.0.as_slice() else { return None };
-            r
-        }
-        [r @ .., Stmt::Label(l)] if l == "continue" => r,
-        _ => return None,
-    };
+    let rest = loopcore::peel_loop_scaffold(inner, ws, params)?;
     let mut stmts = rest.to_vec();
-    unrewrite_sites(&mut stmts, name, params)?;
+    loopcore::unrewrite_run_tail_sites(&mut stmts, name, params, true)?;
     let unmap: HashMap<String, String> =
         ws.iter().cloned().zip(params.iter().cloned()).collect();
     rename_block(&mut stmts, &unmap);
     Some(stmts)
-}
-
-/// Mirror of `rewrite_sites`: a block-final `[…, params = args, goto
-/// continue]` (or a bare `[…, goto continue]` for a zero-parameter
-/// function) becomes `return __mll_run_tail(self(args))` again.
-fn unrewrite_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String]) -> Option<()> {
-    for s in stmts.iter_mut() {
-        match s {
-            Stmt::If { then_b, elseifs, else_b, .. } => {
-                unrewrite_sites(&mut then_b.0, name, params)?;
-                for (_, b) in elseifs.iter_mut() {
-                    unrewrite_sites(&mut b.0, name, params)?;
-                }
-                if let Some(b) = else_b.as_mut() {
-                    unrewrite_sites(&mut b.0, name, params)?;
-                }
-            }
-            Stmt::Do(b) => unrewrite_sites(&mut b.0, name, params)?,
-            _ => {}
-        }
-    }
-    if matches!(stmts.last(), Some(Stmt::Goto(l)) if l == "continue") {
-        stmts.pop();
-        let args = if params.is_empty() {
-            Vec::new()
-        } else {
-            let Some(Stmt::MultiAssign(lhs, args)) = stmts.pop() else { return None };
-            if lhs != params {
-                return None;
-            }
-            args
-        };
-        let self_call = Expr::call_named(name_spelling(name), args);
-        stmts.push(Stmt::Return(Expr::call_named(
-            "__mll_run_tail",
-            vec![self_call],
-        )));
-    }
-    Some(())
 }
 
 #[cfg(test)]

@@ -38,6 +38,13 @@ pub struct DemandInfo {
 // demand — lives in the structured `Demand`/`Rows` analysis further down,
 // which codegen uses to decide which let/where bindings may be assigned
 // strictly.
+//
+// The rules the two judgments agree on — the infix operand-strictness
+// table, the guard-chain combine, and the if/`otherwise` rule — each live
+// in exactly ONE place: the "Rules shared by both analyses" section below.
+// That section also catalogues the rules that deliberately DIFFER, which is
+// why the boolean analysis is NOT simply the ">= Head" projection of the
+// structured one and cannot be derived from it.
 
 /// Compiler builtins with known per-argument strictness. These are not mata-ll
 /// functions, so the fixed point below never derives a body for them; their
@@ -250,29 +257,9 @@ pub fn analyze(module: &TModule) -> DemandInfo {
     // Iterate to the greatest fixed point. `analyze_function` is monotone in the
     // environment (a strictly larger strict-set can only demand more), so from
     // the ⊤ seed the strict-sets only shrink; the finite lattice guarantees
-    // termination.
-    // Group same-named functions before iterating: a user definition can
-    // shadow a prelude one under the SAME name, and the environment is
-    // name-keyed — a call site cannot be attributed to one of them, so the
-    // shared entry must be the MEET (per-position AND) of every member's
-    // row. Analyzing them as independent map writes instead makes the loop
-    // oscillate forever the moment the members' rows differ.
-    let mut fn_groups: Vec<(&str, Vec<&TFunction>)> = Vec::new();
-    {
-        let mut index: HashMap<&str, usize> = HashMap::new();
-        for func in &functions {
-            if func.clauses.is_empty() {
-                continue;
-            }
-            match index.get(func.name.as_str()) {
-                Some(&i) => fn_groups[i].1.push(func),
-                None => {
-                    index.insert(func.name.as_str(), fn_groups.len());
-                    fn_groups.push((func.name.as_str(), vec![func]));
-                }
-            }
-        }
-    }
+    // termination. Same-named functions are grouped first — see
+    // `group_by_name` for why per-name meets are mandatory.
+    let fn_groups = group_by_name(&functions);
 
     loop {
         let mut changed = false;
@@ -333,6 +320,32 @@ pub fn analyze(module: &TModule) -> DemandInfo {
     }
 
     DemandInfo { strict_params, rows }
+}
+
+/// Group same-named functions (with at least one clause) in first-seen
+/// order, for both fixed-point drivers: a user definition can shadow a
+/// prelude one under the SAME name, and both environments are name-keyed —
+/// a call site cannot be attributed to one member, so the shared entry
+/// must be the MEET (per-position AND for the boolean rows) of every
+/// member's row. Analyzing the members as independent map writes instead
+/// makes the fixed-point loop oscillate forever the moment their rows
+/// differ.
+fn group_by_name<'a>(functions: &[&'a TFunction]) -> Vec<(&'a str, Vec<&'a TFunction>)> {
+    let mut groups: Vec<(&str, Vec<&TFunction>)> = Vec::new();
+    let mut index: HashMap<&str, usize> = HashMap::new();
+    for func in functions {
+        if func.clauses.is_empty() {
+            continue;
+        }
+        match index.get(func.name.as_str()) {
+            Some(&i) => groups[i].1.push(func),
+            None => {
+                index.insert(func.name.as_str(), groups.len());
+                groups.push((func.name.as_str(), vec![func]));
+            }
+        }
+    }
+    groups
 }
 
 /// Analyze a single function's parameter strictness.
@@ -485,7 +498,128 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
     strict
 }
 
-/// Compute demanded variables from a set of guards.
+// ════════════════════════════════════════════════════════════════════════
+// Rules shared by both analyses
+// ════════════════════════════════════════════════════════════════════════
+//
+// The boolean analysis (`demanded_vars_in`) and the structured analysis
+// (`demand_expr`) are DIFFERENT judgments — SEMANTIC vs EMISSION, see the
+// note at the top of the file — so neither can be derived from the other:
+//
+//   * `seq a b`: the boolean rule claims only `a` (mirroring `__mll_seq`,
+//     deliberately leaving the result operand lazy — a conservative
+//     under-claim); the structured rule passes the whole expression's
+//     demand through to `b`, which IS the expression's result.
+//   * `>>=`/`>>`: the boolean rule demands both actions' WHNF variables;
+//     the structured rule models the flattened bind chain (run position,
+//     lambda continuation, result-demand threading).
+//   * `return`/`pure` (and their `$` spelling), suspension of action
+//     values outside run position, gen_arg's eager floor
+//     (`arg_emitted_eagerly`), tuple projection (`__mll_tup_get`), and `:`
+//     under an element demand exist only in the structured analysis.
+//   * the let/where VALUE closure is a single ordered pass in the boolean
+//     analysis but a subsumption-driven fixpoint (`let_group_close`) in
+//     the structured one.
+//   * the where-local machinery differs: captured-variable sets (boolean)
+//     vs `LocalRows` (structured).
+//
+// Everything the two DO share lives here, in exactly one place each: the
+// operand-strictness table for infix operators, the guard-chain combine,
+// and the if/`otherwise` rule. The combinators are generic over the two
+// demand summaries via `DemandLattice`.
+
+/// A guard or `if` condition that is literally `otherwise` — constant
+/// true. The parser desugars the final guard of a where-bound function
+/// into `if otherwise then b else error "non-exhaustive guards"`, and
+/// codegen emits the condition as the literal `true`: the then-branch (or
+/// guard body) runs unconditionally at that point, so the dead
+/// alternative must not water down its demands. Without this rule a
+/// guarded local accumulator loop loses its recursive-branch demand and
+/// stays lazy.
+fn is_otherwise(cond: &TExpr) -> bool {
+    matches!(&cond.kind, TExprKind::Var(n) if n == "otherwise")
+}
+
+/// Operand strictness of an infix operator, for the operators whose rule
+/// both analyses share — those whose forcing behaviour depends neither on
+/// the result demand nor on run position.
+enum OpOperands {
+    /// Both operands are forced to WHNF.
+    Both,
+    /// Only the left operand is forced.
+    Lhs,
+    /// Neither operand is forced.
+    Neither,
+}
+
+/// The shared operand-strictness table. Returns `None` for the operators
+/// whose rules genuinely differ between the two analyses (`seq`, `>>=`,
+/// `>>`; see the section comment) — each analysis has its own arm for
+/// those. `$` and `:` resolve here for the shared part of their rule; the
+/// structured analysis overrides them first for its emission-specific
+/// cases (`return`/`pure $ x` in run position, `:` under element demand).
+fn shared_op_operands(op: &str, lhs: &TExpr) -> Option<OpOperands> {
+    Some(match op {
+        // Arithmetic/comparison operators force both sides.
+        "+" | "-" | "*" | "/" | "^" | "div" | "mod"
+        | "==" | "/=" | "<" | ">" | "<=" | ">=" => OpOperands::Both,
+        // Short-circuit: the right side runs only when the left
+        // allows it (Lua `and`/`or`; GHC agrees).
+        "&&" | "||" => OpOperands::Lhs,
+        // List append is lazy in its right side (codegen thunks
+        // it); only the left spine is forced.
+        "++" => OpOperands::Lhs,
+        // <> on String is Lua string concat (both sides forced);
+        // on lists it behaves like ++ (right side thunked).
+        "<>" => {
+            if matches!(&lhs.ty, crate::types::Ty::Con(n) if n == "String") {
+                OpOperands::Both
+            } else {
+                OpOperands::Lhs
+            }
+        }
+        // $ forces the function (lhs) but thunks the argument.
+        "$" => OpOperands::Lhs,
+        // Cons is lazy — neither side is forced at WHNF.
+        ":" => OpOperands::Neither,
+        // Analysis-specific rules; handled by each analysis's own arm.
+        "seq" | ">>=" | ">>" => return None,
+        // Unknown operator — claim nothing (an over-claim here
+        // would let a lazy value be forced eagerly).
+        _ => OpOperands::Neither,
+    })
+}
+
+/// The lattice hooks the shared control-flow combinators need, provided by
+/// both demand summaries: `HashSet<String>` (boolean analysis; presence =
+/// forced to WHNF) and `DemandMap` (structured analysis).
+trait DemandLattice: Default {
+    /// Meet: keep only what BOTH summaries claim — used across branch
+    /// alternatives, of which only one runs.
+    fn meet_with(&self, other: &Self) -> Self;
+    /// Join: absorb `other` — both demands occur on the same run.
+    fn join_from(&mut self, other: Self);
+}
+
+impl DemandLattice for HashSet<String> {
+    fn meet_with(&self, other: &Self) -> Self {
+        self & other
+    }
+    fn join_from(&mut self, other: Self) {
+        self.extend(other);
+    }
+}
+
+impl DemandLattice for DemandMap {
+    fn meet_with(&self, other: &Self) -> Self {
+        map_meet(self, other)
+    }
+    fn join_from(&mut self, other: Self) {
+        map_join(self, other);
+    }
+}
+
+/// THE guard-chain rule, shared by both analyses.
 ///
 /// Guards evaluate *sequentially*: the first condition always runs; a body
 /// runs only if its condition was true; a later condition runs only if all
@@ -498,6 +632,55 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
 /// rule) over-claimed: a variable read only by a later guard condition was
 /// forced at entry even when an earlier guard matched and GHC would never
 /// have touched it.
+fn guard_chain<S: DemandLattice>(
+    guards: &[TGuard],
+    cond_demand: &mut dyn FnMut(&TExpr) -> S,
+    body_demand: &mut dyn FnMut(&TExpr) -> S,
+) -> S {
+    // Demand past the end of the chain: fallthrough demands nothing.
+    let mut acc = S::default();
+    for g in guards.iter().rev() {
+        let body_d = body_demand(&g.body);
+        acc = if is_otherwise(&g.condition) {
+            // Condition is `true`: the body runs unconditionally here.
+            body_d
+        } else {
+            let mut s = cond_demand(&g.condition);
+            s.join_from(body_d.meet_with(&acc));
+            s
+        };
+    }
+    acc
+}
+
+/// THE if/then/else rule, shared by both analyses: the condition's demand,
+/// plus what BOTH branches demand (only one of them runs) — unless the
+/// condition is `otherwise` (see `is_otherwise`), in which case the
+/// then-branch runs unconditionally and the dead else-branch is ignored.
+/// Same rule `guard_chain` applies to real guard chains.
+fn if_demand<S: DemandLattice>(
+    cond: &TExpr,
+    then_branch: &TExpr,
+    else_branch: &TExpr,
+    cond_demand: &mut dyn FnMut(&TExpr) -> S,
+    branch_demand: &mut dyn FnMut(&TExpr) -> S,
+) -> S {
+    if is_otherwise(cond) {
+        return branch_demand(then_branch);
+    }
+    let mut s = cond_demand(cond);
+    let t = branch_demand(then_branch);
+    let e = branch_demand(else_branch);
+    s.join_from(t.meet_with(&e));
+    s
+}
+
+// ════════════════════════════════════════════════════════════════════════
+// Boolean (semantic, whole-value) demand analysis — continued
+// ════════════════════════════════════════════════════════════════════════
+
+/// Compute demanded variables from a set of guards. The chain rule itself
+/// (right-to-left combine, `otherwise`) lives in `guard_chain`.
 pub fn demanded_guards(guards: &[TGuard], env: &HashMap<String, Vec<bool>>) -> HashSet<String> {
     demanded_guards_with(guards, env, &CapturedEnv::new(), &|s| s)
 }
@@ -512,21 +695,11 @@ fn demanded_guards_with(
     captured: &CapturedEnv,
     close: &dyn Fn(HashSet<String>) -> HashSet<String>,
 ) -> HashSet<String> {
-    // Demand past the end of the chain: fallthrough demands nothing.
-    let mut acc: HashSet<String> = HashSet::new();
-    for g in guards.iter().rev() {
-        let body_d = close(demanded_vars_in(&g.body, env, captured));
-        let is_otherwise = matches!(&g.condition.kind, TExprKind::Var(n) if n == "otherwise");
-        acc = if is_otherwise {
-            // Condition is `true`: the body runs unconditionally here.
-            body_d
-        } else {
-            let mut s = close(demanded_vars_in(&g.condition, env, captured));
-            s.extend(&body_d & &acc);
-            s
-        };
-    }
-    acc
+    guard_chain(
+        guards,
+        &mut |c: &TExpr| close(demanded_vars_in(c, env, captured)),
+        &mut |b: &TExpr| close(demanded_vars_in(b, env, captured)),
+    )
 }
 
 /// Boolean strict rows for a clause's where-bound local FUNCTIONS (the
@@ -601,14 +774,13 @@ pub fn local_fn_strict_params(
 /// parameters, where-bound VALUES (which `close` then expands), and
 /// further-out/top-level names — each with a single clause-wide meaning.
 /// Dropping a name merely under-approximates, which stays safe.
-fn local_fn_demand(
-    clause: &TClause,
-    env: &HashMap<String, Vec<bool>>,
-) -> (HashMap<String, Vec<bool>>, CapturedEnv) {
-    // Group consecutive same-named function equations, mirroring codegen's
-    // gen_where_func_group_body and the structured local_fn_rows.
+/// Group a clause's CONSECUTIVE same-named function equations, mirroring
+/// codegen's `gen_where_func_group_body`. Shared by the boolean
+/// (`local_fn_demand`) and structured (`local_fn_rows`) local-function
+/// analyses, so both see exactly the groups codegen emits.
+fn group_where_fn_equations(where_binds: &[TLocalDef]) -> Vec<(String, Vec<&TLocalDef>)> {
     let mut groups: Vec<(String, Vec<&TLocalDef>)> = Vec::new();
-    for b in &clause.where_binds {
+    for b in where_binds {
         if b.patterns.is_empty() {
             continue;
         }
@@ -617,6 +789,14 @@ fn local_fn_demand(
             _ => groups.push((b.name.clone(), vec![b])),
         }
     }
+    groups
+}
+
+fn local_fn_demand(
+    clause: &TClause,
+    env: &HashMap<String, Vec<bool>>,
+) -> (HashMap<String, Vec<bool>>, CapturedEnv) {
+    let mut groups = group_where_fn_equations(&clause.where_binds);
     if groups.is_empty() {
         return (HashMap::new(), CapturedEnv::new());
     }
@@ -904,6 +1084,22 @@ pub fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<
     demanded_vars_in(expr, env, &CapturedEnv::new())
 }
 
+/// Demand every argument sitting in a strict position of the callee's
+/// boolean mask. Shared by the prefix-application, SpecCall, and DictCall
+/// arms of `demanded_vars_in`.
+fn demand_strict_args<'a>(
+    s: &mut HashSet<String>,
+    mask: &[bool],
+    args: impl IntoIterator<Item = &'a TExpr>,
+    rec: &dyn Fn(&TExpr) -> HashSet<String>,
+) {
+    for (i, arg) in args.into_iter().enumerate() {
+        if mask.get(i).copied().unwrap_or(false) {
+            s.extend(rec(arg));
+        }
+    }
+}
+
 /// `demanded_vars` with the captured-demand sets of the where-bound local
 /// functions in scope. A demanded, SATURATED call to such a local runs its
 /// body, so the outer variables the body forces on every path are demanded
@@ -943,10 +1139,12 @@ fn demanded_vars_in(
             // Always demand the function.
             let mut s = rec(f);
 
-            // `seq` is strict in its FIRST argument only (it forces it to WHNF)
-            // and lazy in the rest, so a parameter passed as `seq`'s first
-            // argument is demanded, while the second stays lazy. Mirror the
-            // runtime `__mll_seq` / inline lowering exactly.
+            // The boolean `seq` rule (both spellings): strict in its FIRST
+            // argument only (it forces it to WHNF) and lazy in the rest, so
+            // a parameter passed as `seq`'s first argument is demanded,
+            // while the second stays lazy. Mirror the runtime `__mll_seq` /
+            // inline lowering exactly. (The structured analysis claims the
+            // second operand too; see the shared-rules section.)
             if let TExprKind::Var(name) = &f.kind
                 && name == "seq" && !args_rev.is_empty() {
                     s.extend(rec(args_rev[0]));
@@ -956,11 +1154,7 @@ fn demanded_vars_in(
             // and is strict in position i, demand that argument's vars.
             if let TExprKind::Var(name) = &f.kind
                 && let Some(callee_strict) = env.get(name) {
-                    for (i, arg) in args_rev.iter().enumerate() {
-                        if callee_strict.get(i).copied().unwrap_or(false) {
-                            s.extend(rec(arg));
-                        }
-                    }
+                    demand_strict_args(&mut s, callee_strict, args_rev.iter().copied(), &rec);
                 }
 
             // Captured-demand propagation: a call to a where-bound local
@@ -981,47 +1175,28 @@ fn demanded_vars_in(
         }
 
         TExprKind::InfixApp { op, lhs, rhs } => {
-            match op.as_str() {
-                // Arithmetic/comparison operators force both sides.
-                "+" | "-" | "*" | "/" | "^" | "div" | "mod"
-                | "==" | "/=" | "<" | ">" | "<=" | ">=" => {
+            match shared_op_operands(op, lhs) {
+                Some(OpOperands::Both) => {
                     let mut s = rec(lhs);
                     s.extend(rec(rhs));
                     s
                 }
-                // Short-circuit: the right side runs only when the left
-                // allows it (Lua `and`/`or`; GHC agrees).
-                "&&" | "||" => rec(lhs),
-                // List append is lazy in its right side (codegen thunks
-                // it); only the left spine is forced.
-                "++" => rec(lhs),
-                // <> on String is Lua string concat (both sides forced);
-                // on lists it behaves like ++ (right side thunked).
-                "<>" => {
-                    if matches!(&lhs.ty, crate::types::Ty::Con(n) if n == "String") {
+                Some(OpOperands::Lhs) => rec(lhs),
+                Some(OpOperands::Neither) => HashSet::new(),
+                None => match op.as_str() {
+                    // Backtick `a `seq` b`: same rule as prefix `seq a b`
+                    // (see the App arm above — first operand only).
+                    "seq" => rec(lhs),
+                    // Monadic bind/sequence forces both actions.
+                    ">>=" | ">>" => {
                         let mut s = rec(lhs);
                         s.extend(rec(rhs));
                         s
-                    } else {
-                        rec(lhs)
                     }
-                }
-                // $ forces the function (lhs) but thunks the argument.
-                "$" => rec(lhs),
-                // Cons is lazy — neither side is forced.
-                ":" => HashSet::new(),
-                // Backtick `a `seq` b`: forces the FIRST operand only (WHNF),
-                // leaves the second lazy — same as prefix `seq a b`.
-                "seq" => rec(lhs),
-                // Monadic bind/sequence forces both actions.
-                ">>=" | ">>" => {
-                    let mut s = rec(lhs);
-                    s.extend(rec(rhs));
-                    s
-                }
-                // Unknown operator — claim nothing (an over-claim here
-                // would let a lazy value be forced eagerly).
-                _ => HashSet::new(),
+                    // Unreachable: the table returns None only for the ops
+                    // above. Claiming nothing stays sound regardless.
+                    _ => HashSet::new(),
+                },
             }
         }
 
@@ -1029,25 +1204,13 @@ fn demanded_vars_in(
 
         TExprKind::Paren(e) => rec(e),
 
-        TExprKind::If { cond, then_branch, else_branch } => {
-            // `if otherwise then b else …` is what the parser desugars the
-            // final guard of a where-bound function into: the condition is
-            // constant true (codegen emits it as the literal `true`), so
-            // the then-branch runs unconditionally and the dead else-branch
-            // (`error "non-exhaustive guards"`) must not water down its
-            // demands. Same rule demanded_guards applies to real guard
-            // chains — without it a guarded local accumulator loop loses
-            // its recursive-branch demand and stays lazy.
-            if matches!(&cond.kind, TExprKind::Var(n) if n == "otherwise") {
-                return rec(then_branch);
-            }
-            let mut s = rec(cond);
-            // Only demanded if demanded in BOTH branches.
-            let t = rec(then_branch);
-            let e = rec(else_branch);
-            s.extend(&t & &e);
-            s
-        }
+        TExprKind::If { cond, then_branch, else_branch } => if_demand(
+            cond,
+            then_branch,
+            else_branch,
+            &mut |e: &TExpr| rec(e),
+            &mut |e: &TExpr| rec(e),
+        ),
 
         TExprKind::Case { scrutinee, branches } => {
             let mut s = rec(scrutinee);
@@ -1102,11 +1265,7 @@ fn demanded_vars_in(
             // Specialized call: look up the original function's strictness.
             let mut s = HashSet::new();
             if let Some(callee_strict) = env.get(original.as_str()) {
-                for (i, arg) in args.iter().enumerate() {
-                    if callee_strict.get(i).copied().unwrap_or(false) {
-                        s.extend(rec(arg));
-                    }
-                }
+                demand_strict_args(&mut s, callee_strict, args.iter(), &rec);
             }
             s
         }
@@ -1115,11 +1274,7 @@ fn demanded_vars_in(
             // Typeclass method call: look up the method's strictness.
             let mut s = HashSet::new();
             if let Some(callee_strict) = env.get(func_name.as_str()) {
-                for (i, arg) in value_args.iter().enumerate() {
-                    if callee_strict.get(i).copied().unwrap_or(false) {
-                        s.extend(rec(arg));
-                    }
-                }
+                demand_strict_args(&mut s, callee_strict, value_args.iter(), &rec);
             }
             s
         }
@@ -1564,39 +1719,16 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
         TExprKind::App(_, _) => demand_app(cx, expr, rd, run_pos),
 
         TExprKind::InfixApp { op, lhs, rhs } => match op.as_str() {
-            "+" | "-" | "*" | "/" | "^" | "div" | "mod"
-            | "==" | "/=" | "<" | ">" | "<=" | ">=" => {
-                let mut m = head(lhs);
-                map_join(&mut m, head(rhs));
-                m
+            // `return $ x` / `pure $ x` — see `pure_demand_map`. Any other
+            // `f $ x` resolves through the shared table (Lhs: the function
+            // is forced, the argument thunked).
+            "$" if matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") => {
+                pure_demand_map(cx, rhs, rd, run_pos)
             }
-            "&&" | "||" => head(lhs),
-            "++" => head(lhs),
-            "<>" => {
-                if matches!(&lhs.ty, Ty::Con(n) if n == "String") {
-                    let mut m = head(lhs);
-                    map_join(&mut m, head(rhs));
-                    m
-                } else {
-                    head(lhs)
-                }
-            }
-            // `return $ x` / `pure $ x` in run position yields x with the
-            // result demand (nothing at plain WHNF — return is non-strict);
-            // any other `f $ x` forces the function only.
-            "$" => {
-                if matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                    if run_pos && *rd != Demand::Head {
-                        demand_expr(cx, rhs, rd, false)
-                    } else {
-                        DemandMap::new()
-                    }
-                } else {
-                    head(lhs)
-                }
-            }
-            // Cons forces nothing at WHNF; under an element demand the head
-            // is an element and the tail carries the same element demand.
+            // Cons under an element demand: the head is an element and the
+            // tail carries the same element demand. At plain WHNF nothing
+            // is forced (the shared table's Neither, restated here because
+            // the element case must be checked first).
             ":" => {
                 if let Demand::Elems(de) = rd {
                     let mut m = demand_expr(cx, lhs, de, false);
@@ -1606,13 +1738,8 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
                     DemandMap::new()
                 }
             }
-            // `a seq b` forces a to WHNF and yields b: b carries the whole
-            // expression's demand.
-            "seq" => {
-                let mut m = head(lhs);
-                map_join(&mut m, demand_expr(cx, rhs, rd, run_pos));
-                m
-            }
+            // `a seq b` — see `seq_demand_map`.
+            "seq" => seq_demand_map(cx, lhs, Some(rhs), rd, run_pos),
             // Flattened bind chain: the left action runs, then the
             // continuation runs (an earlier raise only replaces one ⊥ with
             // another). The bound variable's demand in the continuation IS
@@ -1642,25 +1769,25 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
                 map_join(&mut m, demand_expr(cx, rhs, rd, run_pos));
                 m
             }
-            _ => DemandMap::new(),
+            // Everything else follows the shared operand table.
+            op => match shared_op_operands(op, lhs) {
+                Some(OpOperands::Both) => {
+                    let mut m = head(lhs);
+                    map_join(&mut m, head(rhs));
+                    m
+                }
+                Some(OpOperands::Lhs) => head(lhs),
+                Some(OpOperands::Neither) | None => DemandMap::new(),
+            },
         },
 
-        TExprKind::If { cond, then_branch, else_branch } => {
-            // `if otherwise then b else …` is what the parser desugars the
-            // final guard of a where-bound function into: the condition is
-            // constant true (codegen emits it as the literal `true`), so
-            // the then-branch runs unconditionally and the dead else-branch
-            // (`error "non-exhaustive guards"`) must not water down its
-            // demands. Same rule demanded_vars and demand_guards_map apply.
-            if matches!(&cond.kind, TExprKind::Var(n) if n == "otherwise") {
-                return demand_expr(cx, then_branch, rd, run_pos);
-            }
-            let mut m = head(cond);
-            let t = demand_expr(cx, then_branch, rd, run_pos);
-            let e = demand_expr(cx, else_branch, rd, run_pos);
-            map_join(&mut m, map_meet(&t, &e));
-            m
-        }
+        TExprKind::If { cond, then_branch, else_branch } => if_demand(
+            cond,
+            then_branch,
+            else_branch,
+            &mut |e: &TExpr| demand_expr(cx, e, &Demand::Head, false),
+            &mut |e: &TExpr| demand_expr(cx, e, rd, run_pos),
+        ),
 
         TExprKind::Case { scrutinee, branches } => {
             let mut m = head(scrutinee);
@@ -1715,11 +1842,7 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
                         return m;
                     }
             if let Some(row) = cx.callee_row(original, &Demand::Head) {
-                for (i, arg) in args.iter().enumerate() {
-                    if let Some(Some(d)) = row.get(i).map(|x| x.as_ref()) {
-                        map_join(&mut m, demand_expr(cx, arg, d, false));
-                    }
-                }
+                apply_callee_row(cx, &mut m, &row, args.iter());
             }
             m
         }
@@ -1727,11 +1850,7 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
         TExprKind::DictCall { func_name, value_args, .. } => {
             let mut m = DemandMap::new();
             if let Some(row) = cx.callee_row(func_name, &Demand::Head) {
-                for (i, arg) in value_args.iter().enumerate() {
-                    if let Some(Some(d)) = row.get(i).map(|x| x.as_ref()) {
-                        map_join(&mut m, demand_expr(cx, arg, d, false));
-                    }
-                }
+                apply_callee_row(cx, &mut m, &row, value_args.iter());
             }
             m
         }
@@ -1748,6 +1867,53 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
 
         TExprKind::OutgoingCallback { callee, .. } => head(callee),
         TExprKind::FfiMaybeArg { value } => head(value),
+    }
+}
+
+/// Apply a callee's structured parameter row: each argument in a demanded
+/// position contributes its own demands under that position's demand.
+/// Shared by the prefix-application, SpecCall, and DictCall arms.
+fn apply_callee_row<'a>(
+    cx: &RowCx,
+    m: &mut DemandMap,
+    row: &[Option<Demand>],
+    args: impl IntoIterator<Item = &'a TExpr>,
+) {
+    for (i, arg) in args.into_iter().enumerate() {
+        if let Some(Some(d)) = row.get(i).map(|x| x.as_ref()) {
+            map_join(m, demand_expr(cx, arg, d, false));
+        }
+    }
+}
+
+/// The structured `seq` rule, shared by its prefix (`seq a b`) and
+/// backtick (`a `seq` b`) spellings: the first operand is forced to WHNF,
+/// and the second — which IS the expression's result — carries the whole
+/// expression's demand. (The boolean analysis deliberately claims only the
+/// first operand; see the shared-rules section.)
+fn seq_demand_map(
+    cx: &RowCx,
+    first: &TExpr,
+    second: Option<&TExpr>,
+    rd: &Demand,
+    run_pos: bool,
+) -> DemandMap {
+    let mut m = demand_expr(cx, first, &Demand::Head, false);
+    if let Some(b) = second {
+        map_join(&mut m, demand_expr(cx, b, rd, run_pos));
+    }
+    m
+}
+
+/// The structured `return e` / `pure e` rule, shared by its prefix and `$`
+/// spellings: non-strict at WHNF; under a deeper result demand in run
+/// position, `e` receives that demand (forcing a field of the yielded
+/// value forces through `e`).
+fn pure_demand_map(cx: &RowCx, arg: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap {
+    if run_pos && *rd != Demand::Head {
+        demand_expr(cx, arg, rd, false)
+    } else {
+        DemandMap::new()
     }
 }
 
@@ -1774,25 +1940,19 @@ fn demand_app(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap
         _ => None,
     };
 
-    // `seq a b`: forces a to WHNF; b carries the expression's demand.
+    // `seq a b` — see `seq_demand_map`; the callee name itself is demanded.
     if fname == Some("seq") {
         if let Some(a) = args.first() {
-            map_join(&mut m, demand_expr(cx, a, &Demand::Head, false));
-        }
-        if args.len() == 2 {
-            map_join(&mut m, demand_expr(cx, args[1], rd, run_pos));
+            let second = if args.len() == 2 { Some(args[1]) } else { None };
+            map_join(&mut m, seq_demand_map(cx, a, second, rd, run_pos));
         }
         map_join_one(&mut m, "seq", Demand::Head);
         return m;
     }
 
-    // `return e` / `pure e`: non-strict at WHNF; under a deeper result
-    // demand in run position, e receives that demand (forcing a field of
-    // the yielded value forces through e).
+    // `return e` / `pure e` — see `pure_demand_map`.
     if let (Some(name @ ("return" | "pure")), 1) = (fname, args.len()) {
-        if run_pos && *rd != Demand::Head {
-            map_join(&mut m, demand_expr(cx, args[0], rd, false));
-        }
+        map_join(&mut m, pure_demand_map(cx, args[0], rd, run_pos));
         map_join_one(&mut m, name, Demand::Head);
         return m;
     }
@@ -1826,11 +1986,7 @@ fn demand_app(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap
                 cx.callee_row(name, rd)
             };
             if let Some(row) = row {
-                for (i, arg) in args.iter().enumerate() {
-                    if let Some(Some(d)) = row.get(i).map(|x| x.as_ref()) {
-                        map_join(&mut m, demand_expr(cx, arg, d, false));
-                    }
-                }
+                apply_callee_row(cx, &mut m, &row, args.iter().copied());
             }
         }
     }
@@ -1853,22 +2009,14 @@ fn demand_app(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap
     m
 }
 
-/// Guard-chain variant of `demand_expr` (same sequencing rule as
-/// `demanded_guards`).
+/// Guard-chain variant of `demand_expr` — the chain rule itself lives in
+/// `guard_chain`.
 fn demand_guards_map(cx: &RowCx, guards: &[TGuard], rd: &Demand, run_pos: bool) -> DemandMap {
-    let mut acc = DemandMap::new();
-    for g in guards.iter().rev() {
-        let body_d = demand_expr(cx, &g.body, rd, run_pos);
-        let is_otherwise = matches!(&g.condition.kind, TExprKind::Var(n) if n == "otherwise");
-        acc = if is_otherwise {
-            body_d
-        } else {
-            let mut s = demand_expr(cx, &g.condition, &Demand::Head, false);
-            map_join(&mut s, map_meet(&body_d, &acc));
-            s
-        };
-    }
-    acc
+    guard_chain(
+        guards,
+        &mut |c: &TExpr| demand_expr(cx, c, &Demand::Head, false),
+        &mut |b: &TExpr| demand_expr(cx, b, rd, run_pos),
+    )
 }
 
 /// Demand map of one clause body under result demand `rd`, closed over the
@@ -1880,32 +2028,8 @@ fn clause_demand_map(cx: &RowCx, clause: &TClause, rd: &Demand) -> DemandMap {
     } else {
         demand_guards_map(cx, &clause.guards, rd, true)
     };
-    let mut walked: HashMap<&str, Demand> = HashMap::new();
-    loop {
-        let mut changed = false;
-        for b in &clause.where_binds {
-            if !b.patterns.is_empty() {
-                continue;
-            }
-            if let Some(d) = m.get(&b.name).cloned() {
-                let redo = match walked.get(b.name.as_str()) {
-                    Some(prev) => !prev.subsumes(&d),
-                    None => true,
-                };
-                if redo {
-                    walked.insert(b.name.as_str(), d.clone());
-                    map_join(&mut m, demand_expr(cx, &b.body, &d, false));
-                    changed = true;
-                }
-            }
-        }
-        if !changed {
-            break;
-        }
-    }
-    for b in &clause.where_binds {
-        m.remove(&b.name);
-    }
+    // A clause's where-bound VALUES close exactly like a `let` group.
+    let_group_close(cx, &clause.where_binds, &mut m);
     m
 }
 
@@ -2017,17 +2141,7 @@ fn equations_rows(
 /// `demanded_map_guards` (via its scoped `local_demand_rows` map), so the
 /// demanded-binding decision sees exactly what the rows analysis saw.
 pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds: &[TLocalDef]) -> HashMap<String, LocalRows> {
-    // Group function equations by name, in order.
-    let mut groups: Vec<(String, Vec<&TLocalDef>)> = Vec::new();
-    for b in where_binds {
-        if b.patterns.is_empty() {
-            continue;
-        }
-        match groups.last_mut() {
-            Some((n, defs)) if *n == b.name => defs.push(b),
-            _ => groups.push((b.name.clone(), vec![b])),
-        }
-    }
+    let groups = group_where_fn_equations(where_binds);
     if groups.is_empty() {
         return HashMap::new();
     }
@@ -2077,12 +2191,14 @@ pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds
     locals
 }
 
-/// Close a `let` group's demand map over its own bindings: pull in the
-/// demands of demanded value bindings, re-walking a binding when its own
-/// demand deepens, then drop the group's names (they are bound here, not
-/// free). Terminates: demands only deepen and the lattice is finite for
-/// finite programs. Shared by `demand_expr`'s `Let` arm and by
-/// `let_spine_maps`, which must reproduce that arm exactly.
+/// Close a `let` (or where-VALUE) group's demand map over its own
+/// bindings: pull in the demands of demanded value bindings, re-walking a
+/// binding when its own demand deepens, then drop the group's names (they
+/// are bound here, not free). Terminates: demands only deepen and the
+/// lattice is finite for finite programs. Shared by `demand_expr`'s `Let`
+/// arm, by `clause_demand_map` (a clause's where-bound values follow the
+/// same rule), and by `let_spine_maps`, which must reproduce the `Let` arm
+/// exactly.
 fn let_group_close(cx: &RowCx, binds: &[TLocalDef], m: &mut DemandMap) {
     let mut walked: HashMap<&str, Demand> = HashMap::new();
     loop {
@@ -2221,28 +2337,9 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
         rows.run.insert(name.to_string(), vec![Some(Demand::Elems(Box::new(Demand::Head)))]);
     }
 
-    // Group same-named functions (a user definition shadowing a prelude
-    // one): the environment is name-keyed and a call site cannot be
-    // attributed to one member, so a shared entry is the MEET over all of
-    // them — analyzing them as independent map writes makes the iteration
-    // oscillate the moment their rows differ (see the same grouping in
-    // `analyze`).
-    let mut fn_groups: Vec<(&str, Vec<&TFunction>)> = Vec::new();
-    {
-        let mut index: HashMap<&str, usize> = HashMap::new();
-        for func in &functions {
-            if func.clauses.is_empty() {
-                continue;
-            }
-            match index.get(func.name.as_str()) {
-                Some(&i) => fn_groups[i].1.push(func),
-                None => {
-                    index.insert(func.name.as_str(), fn_groups.len());
-                    fn_groups.push((func.name.as_str(), vec![func]));
-                }
-            }
-        }
-    }
+    // Same-named functions (a user definition shadowing a prelude one)
+    // share one meet-combined entry — see `group_by_name`.
+    let fn_groups = group_by_name(&functions);
 
     // Seed module functions optimistically (see the GFP rationale in
     // `analyze`): every parameter at the deepest demand of its type, deep

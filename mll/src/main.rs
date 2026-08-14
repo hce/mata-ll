@@ -137,15 +137,30 @@ fn run_compiler(cli: Cli) {
 
     let source_dir = Path::new(filename).parent().unwrap_or(Path::new("."));
 
-    // Auto-add lib/ directory relative to the compiler executable
-    let exe_dir = std::env::current_exe().ok()
-        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
-    let auto_lib = exe_dir.as_ref()
-        .map(|d| d.join("../../lib"))
+    // Auto-add the in-tree lib/ and contrib/ directories when running from a
+    // cargo build tree (target/{debug,release}/mll). The auto-add is gated on
+    // that layout: an installed binary (e.g. ~/.cargo/bin/mll) would resolve
+    // ../../lib to an unrelated user directory and silently extend the module
+    // search path with it. Installed binaries rely on the embedded stdlib;
+    // additional paths come from -L, which always takes precedence (searched
+    // first, in the order given).
+    let dev_root = std::env::current_exe().ok().and_then(|exe| {
+        let exe_dir = exe.parent()?;
+        let profile = exe_dir.file_name()?.to_str()?;
+        if profile != "debug" && profile != "release" {
+            return None;
+        }
+        let target = exe_dir.parent()?;
+        if target.file_name()? != "target" {
+            return None;
+        }
+        target.parent().map(|root| root.to_path_buf())
+    });
+    let auto_lib = dev_root.as_ref()
+        .map(|root| root.join("lib"))
         .and_then(|p| p.canonicalize().ok());
-    // Auto-add contrib/ directory (auxiliary in-tree libraries, not embedded)
-    let auto_contrib = exe_dir.as_ref()
-        .map(|d| d.join("../../contrib"))
+    let auto_contrib = dev_root.as_ref()
+        .map(|root| root.join("contrib"))
         .and_then(|p| p.canonicalize().ok());
 
     let mut lib_paths: Vec<&Path> = cli.lib_paths.iter()
@@ -185,7 +200,23 @@ fn run_compiler(cli: Cli) {
         let out_filename = if cli.recompile {
             filename.clone()
         } else {
-            filename.replace(".mll", ".lua")
+            let path = Path::new(filename);
+            if path.extension().and_then(|e| e.to_str()) != Some("mll") {
+                eprintln!(
+                    "Error: cannot derive an output name for {}: the input \
+                     file does not end in .mll, so writing the .lua output \
+                     would overwrite it or land next to it with a surprising \
+                     name.",
+                    filename
+                );
+                eprintln!(
+                    "note: to recompile a previously emitted .lua file in \
+                     place, use --recompile; to run without writing a file, \
+                     use --run."
+                );
+                std::process::exit(1);
+            }
+            path.with_extension("lua").display().to_string()
         };
         if let Err(e) = std::fs::write(&out_filename, &result.lua_code) {
             eprintln!("Error writing {}: {}", out_filename, e);

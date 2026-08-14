@@ -5,6 +5,31 @@
 
 use super::*;
 
+/// The result of one entailment step (see `Checker::entail_step`).
+enum Entailment<'a> {
+    /// Satisfied outright at this node — no further demands.
+    Satisfied,
+    /// Not decidable at this definition — a type variable, a deferrable
+    /// skolem, a stuck type family, an unknown head. Conservatively treated
+    /// as satisfiable; the enclosing context or the monomorphizer decides.
+    Deferred,
+    /// No instance can ever exist at this node.
+    Failed,
+    /// Satisfying the constraint here reduces to satisfying `subs`. `via` is
+    /// the registered instance whose declared context produced the demands
+    /// (`None` for the structural container rules).
+    Demands { via: Option<&'a InstanceInfo>, subs: Vec<(String, Ty)> },
+}
+
+impl Entailment<'_> {
+    fn demands_one(class: &str, ty: &Ty) -> Self {
+        Entailment::Demands {
+            via: None,
+            subs: vec![(class.to_string(), ty.clone())],
+        }
+    }
+}
+
 impl Checker {
     /// Register an instance under its structured head key, derived from the
     /// instance's target type — never from a Display string. Types with no
@@ -17,16 +42,18 @@ impl Checker {
         }
     }
 
-    /// Does `class` have an instance for `ty`? Conservative: a type variable or
-    /// rigid skolem is treated as satisfiable (deferred to the caller), and a
-    /// container (list/tuple/applied type) is satisfiable when its components
-    /// are. Only the cases that genuinely never have an instance — functions,
-    /// IO/ST actions, and a concrete type constructor with no registered
-    /// instance — are rejected.
-    pub(super) fn has_instance(&self, class: &str, ty: &Ty) -> bool {
+    /// One entailment step for the constraint `class @ ty`: what does
+    /// satisfying it at THIS node reduce to? This is the single encoding of
+    /// the instance-resolution rules — `has_instance` (can it be satisfied?),
+    /// `collect_required_var_constraints` (which variable leaves does it
+    /// need?), and `context_failure_note` (why did it fail?) are all thin
+    /// recursions over it. They used to hand-mirror each other and drifted:
+    /// the collector never learned the family-reduction and
+    /// context-carrying-List rules that were added to `has_instance`.
+    fn entail_step<'a>(&'a self, class: &str, ty: &Ty) -> Entailment<'a> {
         match ty {
             // Polymorphic — not this definition's job to discharge.
-            Ty::Var(_) => true,
+            Ty::Var(_) => Entailment::Deferred,
             // A rank-2 sealing skolem defers to the enclosing context (the
             // caller's constraints discharge it). An EXISTENTIAL skolem
             // cannot defer: the concrete type was erased when the value was
@@ -35,13 +62,19 @@ impl Checker {
             // (`forall a. Show a => …`) guarantees — exactly those classes
             // (and their superclasses), nothing more.
             Ty::Skolem(_, id) => match self.existential_skolems.get(id) {
-                Some(info) => info.givens.iter().any(|g| self.class_satisfies(g, class)),
-                None => true,
+                Some(info) => {
+                    if info.givens.iter().any(|g| self.class_satisfies(g, class)) {
+                        Entailment::Satisfied
+                    } else {
+                        Entailment::Failed
+                    }
+                }
+                None => Entailment::Deferred,
             },
             // No instance for functions or effectful actions, ever.
-            Ty::Arrow(..) | Ty::Forall(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => false,
-            Ty::Promoted(_) => false,
-            Ty::Unit => true,
+            Ty::Arrow(..) | Ty::Forall(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => Entailment::Failed,
+            Ty::Promoted(_) => Entailment::Failed,
+            Ty::Unit => Entailment::Satisfied,
             // Lists/tuples are structural for Show and Eq (mono generates the
             // instance), but not for Ord — mata-ll has no list/tuple ordering.
             // A non-structural class can still have a registered list instance
@@ -49,27 +82,31 @@ impl Checker {
             // must provide, exactly like the Con-headed path below.
             Ty::List(elem) => {
                 if structural_container_class(class) {
-                    return self.has_instance(class, elem);
+                    return Entailment::demands_one(class, elem);
                 }
                 let Some(inst) = self.instances.get(&(class.to_string(), InstHead::List)) else {
-                    return false;
+                    return Entailment::Failed;
                 };
                 match &inst.context {
-                    Some(ctx) => match Self::match_instance_args(&inst.target_type, ty) {
-                        Some(binds) => ctx.iter().all(|c| {
-                            binds.get(&c.type_var)
-                                .map(|t| self.has_instance(&c.class_name, t))
-                                .unwrap_or(true)
-                        }),
-                        None => true,
-                    },
-                    None => self.has_instance(class, elem),
+                    Some(_) => self.instance_context_demands(inst, ty),
+                    None => Entailment::demands_one(class, elem),
                 }
             }
-            Ty::Tuple(elems) =>
-                structural_container_class(class) && elems.iter().all(|e| self.has_instance(class, e)),
-            Ty::Con(_) => InstHead::of(ty)
-                .is_some_and(|h| self.instances.contains_key(&(class.to_string(), h))),
+            Ty::Tuple(elems) => {
+                if structural_container_class(class) {
+                    Entailment::Demands {
+                        via: None,
+                        subs: elems.iter().map(|e| (class.to_string(), e.clone())).collect(),
+                    }
+                } else {
+                    Entailment::Failed
+                }
+            }
+            Ty::Con(_) => {
+                let registered = InstHead::of(ty)
+                    .is_some_and(|h| self.instances.contains_key(&(class.to_string(), h)));
+                if registered { Entailment::Satisfied } else { Entailment::Failed }
+            }
             Ty::App(_, _) => {
                 // Peel `T a b …` to its head constructor and argument types.
                 let mut head = ty;
@@ -86,14 +123,14 @@ impl Checker {
                 // variable — the constraint (`GToJSON (Rep a)`) is carried by
                 // the enclosing signature's context and discharged once
                 // monomorphization pins `a` and the family reduces. Without
-                // this, `has_instance` would peel to the family's head `Con`,
+                // this, resolution would peel to the family's head `Con`,
                 // find no instance registered under it, and wrongly reject the
                 // whole polymorphic definition (see the Generics substrate).
                 if let Ty::Con(name) = head {
                     if self.is_type_family(name) {
                         return match self.reduce_family_ty(ty) {
-                            Some(reduced) => self.has_instance(class, &reduced),
-                            None => true,
+                            Some(reduced) => Entailment::demands_one(class, &reduced),
+                            None => Entailment::Deferred,
                         };
                     }
                 }
@@ -109,8 +146,16 @@ impl Checker {
                     // path was never taken for a user class, so the omission
                     // stayed latent.)
                     Ty::Con(base) if base == "Maybe"
-                        && !self.instances.contains_key(&(class.to_string(), InstHead::Con("Maybe".into()))) =>
-                        structural_container_class(class) && args.iter().all(|a| self.has_instance(class, a)),
+                        && !self.instances.contains_key(&(class.to_string(), InstHead::Con("Maybe".into()))) => {
+                        if structural_container_class(class) {
+                            Entailment::Demands {
+                                via: None,
+                                subs: args.iter().map(|a| (class.to_string(), (*a).clone())).collect(),
+                            }
+                        } else {
+                            Entailment::Failed
+                        }
+                    }
                     // Other type constructors need a registered instance. What
                     // the instance then demands of the type ARGUMENTS depends
                     // on its declared context: a user-written instance carries
@@ -120,30 +165,57 @@ impl Checker {
                     // (context: None) keep the structural rule — every
                     // argument needs the class itself.
                     Ty::Con(_) => {
-                        // A Con head always has an InstHead; mirror the old
-                        // `is_some_and` (reject) if that ever changes.
-                        let Some(h) = InstHead::of(head) else { return false };
+                        // A Con head always has an InstHead; treat it as
+                        // unsatisfiable if that ever changes.
+                        let Some(h) = InstHead::of(head) else { return Entailment::Failed };
                         let Some(inst) = self.instances.get(&(class.to_string(), h)) else {
-                            return false;
+                            return Entailment::Failed;
                         };
                         match &inst.context {
-                            Some(ctx) => match Self::match_instance_args(&inst.target_type, ty) {
-                                Some(binds) => ctx.iter().all(|c| {
-                                    binds.get(&c.type_var)
-                                        .map(|t| self.has_instance(&c.class_name, t))
-                                        // A context variable the use type does
-                                        // not determine — defer, don't reject.
-                                        .unwrap_or(true)
-                                }),
-                                // Argument spines don't line up — defer to the
-                                // monomorphizer rather than over-reject.
-                                None => true,
+                            Some(_) => self.instance_context_demands(inst, ty),
+                            None => Entailment::Demands {
+                                via: None,
+                                subs: args.iter().map(|a| (class.to_string(), (*a).clone())).collect(),
                             },
-                            None => args.iter().all(|a| self.has_instance(class, a)),
                         }
                     }
-                    _ => true, // unknown head — defer rather than over-reject
+                    _ => Entailment::Deferred, // unknown head — defer rather than over-reject
                 }
+            }
+        }
+    }
+
+    /// The demands a context-carrying instance makes when used at `ty`: each
+    /// context constraint, at the type its variable is bound to by the use.
+    /// A context variable the use type does not determine is dropped
+    /// (deferred, not rejected), and argument spines that don't line up defer
+    /// wholesale — the monomorphizer gets to decide, over-rejection here
+    /// would refuse valid programs.
+    fn instance_context_demands<'a>(&self, inst: &'a InstanceInfo, ty: &Ty) -> Entailment<'a> {
+        let Some(ctx) = &inst.context else { return Entailment::Deferred };
+        match Self::match_instance_args(&inst.target_type, ty) {
+            Some(binds) => Entailment::Demands {
+                via: Some(inst),
+                subs: ctx.iter()
+                    .filter_map(|c| binds.get(&c.type_var)
+                        .map(|t| (c.class_name.clone(), t.clone())))
+                    .collect(),
+            },
+            None => Entailment::Deferred,
+        }
+    }
+
+    /// Does `class` have an instance for `ty`? Conservative: a deferred node
+    /// (type variable, rigid skolem, stuck family) is treated as satisfiable —
+    /// the caller's context discharges it. Only the cases that genuinely never
+    /// have an instance — functions, IO/ST actions, a concrete constructor
+    /// with no registered instance — are rejected.
+    pub(super) fn has_instance(&self, class: &str, ty: &Ty) -> bool {
+        match self.entail_step(class, ty) {
+            Entailment::Satisfied | Entailment::Deferred => true,
+            Entailment::Failed => false,
+            Entailment::Demands { subs, .. } => {
+                subs.iter().all(|(c, t)| self.has_instance(c, t))
             }
         }
     }
@@ -155,13 +227,16 @@ impl Checker {
     /// failure is not context-shaped (no registered head instance, a function
     /// type, …); the plain "No instance" message already covers those.
     pub(super) fn context_failure_note(&self, class: &str, ty: &Ty) -> Option<String> {
+        // Only applied-type heads get this note (the plain "No instance"
+        // message covers everything else) — keep the gate so error text
+        // stays stable.
         if !matches!(ty, Ty::App(_, _)) {
             return None;
         }
-        let inst = InstHead::of(ty)
-            .and_then(|h| self.instances.get(&(class.to_string(), h)))?;
+        let Entailment::Demands { via: Some(inst), subs } = self.entail_step(class, ty) else {
+            return None;
+        };
         let ctx = inst.context.as_ref()?;
-        let binds = Self::match_instance_args(&inst.target_type, ty)?;
         // A compound type in constraint position reads wrong without parens
         // ("Show Tree a" vs "Show (Tree a)").
         let paren = |t: &Ty| match t {
@@ -169,9 +244,8 @@ impl Checker {
                 format!("({})", t),
             _ => format!("{}", t),
         };
-        for c in ctx {
-            let Some(bound) = binds.get(&c.type_var) else { continue };
-            if self.has_instance(&c.class_name, bound) {
+        for (c_class, bound) in &subs {
+            if self.has_instance(c_class, bound) {
                 continue;
             }
             let ctx_str = ctx.iter()
@@ -180,11 +254,11 @@ impl Checker {
             let here = format!(
                 "there is an instance '({}) => {} {}', but using it at '{}' needs '{} {}'",
                 ctx_str, inst.class_name, paren(&inst.target_type), ty,
-                c.class_name, paren(bound));
-            return Some(match self.context_failure_note(&c.class_name, bound) {
+                c_class, paren(bound));
+            return Some(match self.context_failure_note(c_class, bound) {
                 Some(deeper) => format!("{}; {}", here, deeper),
                 None => format!("{}, and there is no instance '{} {}'",
-                    here, c.class_name, paren(bound)),
+                    here, c_class, paren(bound)),
             });
         }
         None
@@ -220,52 +294,27 @@ impl Checker {
         Some(binds)
     }
 
-    /// Collect the type-variable leaves a `class ty` constraint ultimately needs
-    /// an instance for, mirroring `has_instance`'s structural recursion (a
-    /// list/tuple/Maybe of `a` needs `class a`; a derived `T a` needs `class a`).
-    /// Only variable leaves are collected; concrete constructors are assumed
-    /// resolved (they passed `has_instance`). Skolems are left rigid/deferred.
+    /// Collect the type-variable leaves a `class ty` constraint ultimately
+    /// needs an instance for (a list/tuple/Maybe of `a` needs `class a`; a
+    /// derived `T a` needs `class a`; a context instance recurses at each
+    /// bound context type). Same entailment rules as `has_instance` — both
+    /// walk `entail_step` — so the two can no longer disagree about which
+    /// demands a constraint decomposes into. Only variable leaves are
+    /// collected; concrete constructors are assumed resolved (they passed
+    /// `has_instance`). Skolems are left rigid/deferred.
     pub(super) fn collect_required_var_constraints(&self, class: &str, ty: &Ty, out: &mut Vec<(String, TyVar)>) {
-        match ty {
-            Ty::Var(v) => out.push((class.to_string(), v.clone())),
-            Ty::List(elem) if structural_container_class(class) =>
-                self.collect_required_var_constraints(class, elem, out),
-            Ty::Tuple(elems) if structural_container_class(class) =>
-                for e in elems { self.collect_required_var_constraints(class, e, out); },
-            Ty::App(_, _) => {
-                let mut head = ty;
-                let mut args: Vec<&Ty> = Vec::new();
-                while let Ty::App(f, a) = head { args.push(a.as_ref()); head = f.as_ref(); }
-                match head {
-                    Ty::Con(base) if base == "Maybe" && structural_container_class(class) =>
-                        for a in args { self.collect_required_var_constraints(class, a, out); },
-                    Ty::Con(_) => {
-                        let Some(inst) = InstHead::of(head)
-                            .and_then(|h| self.instances.get(&(class.to_string(), h)))
-                        else { return };
-                        // Mirror has_instance: a declared context is exact
-                        // (each context constraint recurses at the type its
-                        // variable is bound to), builtin/derived instances
-                        // stay structural (the class itself on every argument).
-                        match inst.context.clone() {
-                            Some(ctx) => {
-                                let Some(binds) = Self::match_instance_args(&inst.target_type, ty)
-                                else { return };
-                                for c in &ctx {
-                                    if let Some(bound) = binds.get(&c.type_var) {
-                                        self.collect_required_var_constraints(
-                                            &c.class_name, bound, out);
-                                    }
-                                }
-                            }
-                            None =>
-                                for a in args { self.collect_required_var_constraints(class, a, out); },
-                        }
-                    }
-                    _ => {}
+        match self.entail_step(class, ty) {
+            Entailment::Deferred => {
+                if let Ty::Var(v) = ty {
+                    out.push((class.to_string(), v.clone()));
                 }
             }
-            _ => {}
+            Entailment::Demands { subs, .. } => {
+                for (c, t) in &subs {
+                    self.collect_required_var_constraints(c, t, out);
+                }
+            }
+            Entailment::Satisfied | Entailment::Failed => {}
         }
     }
 
@@ -293,19 +342,28 @@ impl Checker {
     /// whose signature carries constraints (e.g. `print :: Show a => …`), so a
     /// constraint is checked wherever the function is called.
     pub(super) fn emit_use_constraints(&mut self, name: &str, inst_map: &HashMap<TyVar, Ty>) {
-        let mut constraints: Vec<TyConstraint> = Vec::new();
+        // (class, constrained variable name) pairs to match against the
+        // instantiation map: the method's class constraints, then the
+        // function's own declared context in its at-use spelling. A compound
+        // constraint argument (`GEncode (Rep a)`) constrains no single
+        // variable and emits no call-site wanted — dictionary passing routes
+        // it by its structured argument instead.
+        let mut constraints: Vec<(String, String)> = Vec::new();
         if let Some(cs) = self.method_constraints.get(name) {
-            constraints.extend(cs.iter().cloned());
+            constraints.extend(cs.iter().map(|c| (c.class_name.clone(), c.type_var.clone())));
         }
-        if let Some(cs) = self.fn_use_constraints.get(name) {
-            constraints.extend(cs.iter().cloned());
+        if let Some(cx) = self.fn_contexts.get(name) {
+            constraints.extend(cx.at_use.iter().filter_map(|(cls, arg)| match arg {
+                Ty::Var(v) => Some((cls.clone(), v.name.clone())),
+                _ => None,
+            }));
         }
-        for c in &constraints {
+        for (class_name, var_name) in &constraints {
             if let Some(fresh) = inst_map.iter()
-                .find(|(v, _)| v.name == c.type_var)
+                .find(|(v, _)| v.name == *var_name)
                 .map(|(_, t)| t.clone())
             {
-                self.wanted.push((c.class_name.clone(), fresh));
+                self.wanted.push((class_name.clone(), fresh));
             }
         }
     }
@@ -704,15 +762,15 @@ impl Checker {
 
         // The declared context, re-expressed over the freshened instance
         // variables the specialized method types use. Registered as each
-        // method's declared function context (fn_constraints) — exactly the
+        // method's declared function context (fn_contexts) — exactly the
         // mechanism a constrained top-level function (`f :: Show a => …`)
         // uses — so a method body may use the context's class methods on the
         // instance's type variables, and check_function discharges those
         // wanteds against the declared context instead of rejecting them.
-        let ctx_fresh: Vec<TyConstraint> = ctx.iter().filter_map(|c| {
+        let ctx_fresh: Vec<(String, Ty)> = ctx.iter().filter_map(|c| {
             let (_, fresh) = renames.iter().find(|(v, _)| v.name == c.type_var)?;
-            let Ty::Var(fv) = fresh else { return None };
-            Some(TyConstraint { class_name: c.class_name.clone(), type_var: fv.name.clone() })
+            let Ty::Var(_) = fresh else { return None };
+            Some((c.class_name.clone(), fresh.clone()))
         }).collect();
 
         for method_def in methods {
@@ -745,7 +803,8 @@ impl Checker {
             // Type-check the instance method against the specialized type,
             // with the instance's declared context in scope for its body.
             if !ctx_fresh.is_empty() {
-                self.fn_constraints.insert(mangled_name.clone(), ctx_fresh.clone());
+                self.fn_contexts.insert(mangled_name.clone(),
+                    FnContext { declared: ctx_fresh.clone(), ..FnContext::default() });
             }
             if let Some(tfun) = self.check_function(&mangled_name, &method_def.clauses, &method_ty) {
                 result_fns.push(tfun);
@@ -768,7 +827,8 @@ impl Checker {
                 // A default body is checked at this instance's type, so it
                 // gets the same declared context as an explicit method body.
                 if !ctx_fresh.is_empty() {
-                    self.fn_constraints.insert(mangled_name.clone(), ctx_fresh.clone());
+                    self.fn_contexts.insert(mangled_name.clone(),
+                        FnContext { declared: ctx_fresh.clone(), ..FnContext::default() });
                 }
                 if let Some(tfun) = self.check_function(&mangled_name, default_clauses, &specialized_ty) {
                     result_fns.push(tfun);
@@ -786,18 +846,43 @@ impl Checker {
         &self.instances
     }
 
-    /// Expose typeclass constraints per function for dictionary-passing fallback
-    pub fn get_fn_constraints(&self) -> &HashMap<String, Vec<TyConstraint>> {
-        &self.fn_constraints
+    /// Typeclass constraints per function for dictionary passing, in the
+    /// declared (source) spelling. A view synthesized from `fn_contexts`:
+    /// each constraint's `type_var` is its argument variable's name, or an
+    /// inert placeholder for a compound argument (which no name-keyed
+    /// consumer can match — compound constraints are routed by their
+    /// structured argument, `get_fn_constraint_args`).
+    pub fn get_fn_constraints(&self) -> HashMap<String, Vec<TyConstraint>> {
+        self.fn_contexts.iter()
+            .map(|(name, cx)| (name.clone(), cx.declared.iter()
+                .map(|(cls, arg)| TyConstraint {
+                    class_name: cls.clone(),
+                    type_var: constraint_var_spelling(arg),
+                })
+                .collect()))
+            .collect()
     }
 
     /// The declared constraints re-expressed over each checked function's
     /// FINAL type variable names (see check_function) — the names on the
     /// TFunction the monomorphizer sees. The dictionary-passing rewrite
     /// matches constraint variables against that type, so it must use these;
-    /// the source-name spelling in `fn_constraints` never matches it.
-    pub fn get_fn_dict_constraints(&self) -> &HashMap<String, Vec<TyConstraint>> {
-        &self.fn_dict_constraints
+    /// the source-name spelling in `get_fn_constraints` never matches it.
+    /// A constraint whose final argument is not a bare variable falls back
+    /// to its at-use spelling, matching nothing by name (as intended).
+    pub fn get_fn_dict_constraints(&self) -> HashMap<String, Vec<TyConstraint>> {
+        self.fn_contexts.iter()
+            .filter(|(_, cx)| !cx.at_dict.is_empty())
+            .map(|(name, cx)| (name.clone(), cx.at_dict.iter().zip(cx.at_use.iter())
+                .map(|((cls, arg), (_, use_arg))| TyConstraint {
+                    class_name: cls.clone(),
+                    type_var: match arg {
+                        Ty::Var(v) => v.name.clone(),
+                        _ => constraint_var_spelling(use_arg),
+                    },
+                })
+                .collect()))
+            .collect()
     }
 
     /// Expose class definitions for the monomorphizer
@@ -805,11 +890,18 @@ impl Checker {
         &self.classes
     }
 
-    /// The structured argument type of each function's constraints (parallel to
-    /// `get_fn_constraints`), so dictionary passing can handle a compound
-    /// constraint like `GEncode (Rep a)` whose `type_var` string is opaque.
-    pub fn get_fn_constraint_args(&self) -> &HashMap<String, Vec<(String, Ty)>> {
-        &self.fn_constraint_args
+    /// The structured argument type of each function's constraints (parallel,
+    /// by declaration order, to `get_fn_constraints`), so dictionary passing
+    /// can handle a compound constraint like `GEncode (Rep a)` whose
+    /// `type_var` string is opaque. Final-name spelling for checked
+    /// functions, declared spelling otherwise.
+    pub fn get_fn_constraint_args(&self) -> HashMap<String, Vec<(String, Ty)>> {
+        self.fn_contexts.iter()
+            .map(|(name, cx)| {
+                let args = if cx.at_dict.is_empty() { &cx.declared } else { &cx.at_dict };
+                (name.clone(), args.clone())
+            })
+            .collect()
     }
 
     /// Expose the lowered closed-type-family equations so monomorphization can

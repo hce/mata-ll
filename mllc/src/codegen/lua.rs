@@ -315,6 +315,88 @@ impl Expr {
     }
 }
 
+impl Expr {
+    /// Visit every DIRECT subexpression, left to right in rendering order.
+    /// `Func` contributes nothing: a function literal's children are
+    /// statements, so a walker that wants to enter function bodies must
+    /// intercept `Expr::Func` itself before falling back to this helper.
+    ///
+    /// One exhaustive match, no wildcard arm — a new `Expr` variant fails to
+    /// compile here until its children are routed, so no walker built on
+    /// this helper can silently skip a subtree.
+    pub(super) fn for_each_subexpr(&self, f: &mut impl FnMut(&Expr)) {
+        match self {
+            Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
+            Expr::Paren(e) | Expr::Neg(e) => f(e),
+            Expr::Call(callee, args) | Expr::Method(callee, _, args) => {
+                f(callee);
+                for a in args {
+                    f(a);
+                }
+            }
+            Expr::Index(base, _) => f(base),
+            Expr::Binop(_, l, r) => {
+                f(l);
+                f(r);
+            }
+            Expr::Table(items) | Expr::TableSpaced(items) => {
+                for item in items {
+                    match item {
+                        Item::Pos(e) | Item::KV(_, e) => f(e),
+                    }
+                }
+            }
+            Expr::Func(..) => {}
+        }
+    }
+
+    /// `for_each_subexpr`, mutably. Kept as a spelled-out twin (Rust cannot
+    /// abstract over the mutability) — change both together.
+    pub(super) fn for_each_subexpr_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
+        match self {
+            Expr::Name(_) | Expr::Lit(_) | Expr::Raw(_) => {}
+            Expr::Paren(e) | Expr::Neg(e) => f(e),
+            Expr::Call(callee, args) | Expr::Method(callee, _, args) => {
+                f(callee);
+                for a in args {
+                    f(a);
+                }
+            }
+            Expr::Index(base, _) => f(base),
+            Expr::Binop(_, l, r) => {
+                f(l);
+                f(r);
+            }
+            Expr::Table(items) | Expr::TableSpaced(items) => {
+                for item in items {
+                    match item {
+                        Item::Pos(e) | Item::KV(_, e) => f(e),
+                    }
+                }
+            }
+            Expr::Func(..) => {}
+        }
+    }
+}
+
+impl FuncBody {
+    /// The body's statements, layout-independent (`Inline` and `Block` hold
+    /// the same thing; only the printer cares which).
+    pub(super) fn stmts(&self) -> &[Stmt] {
+        match self {
+            FuncBody::Inline(s) => s,
+            FuncBody::Block(Block(s)) => s,
+        }
+    }
+
+    pub(super) fn stmts_mut(&mut self) -> &mut Vec<Stmt> {
+        match self {
+            FuncBody::Inline(s) => s,
+            FuncBody::Block(Block(s)) => s,
+        }
+    }
+}
+
 fn render_items(items: &[Item], ind: usize, out: &mut String) {
     for (i, item) in items.iter().enumerate() {
         if i > 0 {
@@ -331,6 +413,153 @@ fn render_items(items: &[Item], ind: usize, out: &mut String) {
 }
 
 impl Stmt {
+    /// Visit every DIRECT expression child, in rendering order. Statements
+    /// inside sub-blocks are not entered — that is `for_each_block`'s job —
+    /// so an `If` contributes only its conditions here.
+    ///
+    /// One exhaustive match, no wildcard arm — a new `Stmt` variant fails to
+    /// compile here until its children are routed, so no walker built on
+    /// this helper can silently skip a subtree.
+    pub(super) fn for_each_expr(&self, f: &mut impl FnMut(&Expr)) {
+        match self {
+            Stmt::Raw(_)
+            | Stmt::ReturnNone
+            | Stmt::Goto(_)
+            | Stmt::Label(_)
+            | Stmt::Do(_)
+            | Stmt::WhileTrue(_)
+            | Stmt::Function { .. } => {}
+            Stmt::Local(_, init) => {
+                if let Some(e) = init {
+                    f(e);
+                }
+            }
+            Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => f(e),
+            Stmt::AssignIf { cond, then_e, else_e, .. } => {
+                f(cond);
+                f(then_e);
+                f(else_e);
+            }
+            Stmt::If { cond, elseifs, .. } => {
+                f(cond);
+                for (c, _) in elseifs {
+                    f(c);
+                }
+            }
+            Stmt::MultiAssign(_, exprs) => {
+                for e in exprs {
+                    f(e);
+                }
+            }
+            Stmt::ReturnTable(entries) => {
+                for (_, e) in entries {
+                    f(e);
+                }
+            }
+        }
+    }
+
+    /// `for_each_expr`, mutably. A spelled-out twin — change both together.
+    pub(super) fn for_each_expr_mut(&mut self, f: &mut impl FnMut(&mut Expr)) {
+        match self {
+            Stmt::Raw(_)
+            | Stmt::ReturnNone
+            | Stmt::Goto(_)
+            | Stmt::Label(_)
+            | Stmt::Do(_)
+            | Stmt::WhileTrue(_)
+            | Stmt::Function { .. } => {}
+            Stmt::Local(_, init) => {
+                if let Some(e) = init {
+                    f(e);
+                }
+            }
+            Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => f(e),
+            Stmt::AssignIf { cond, then_e, else_e, .. } => {
+                f(cond);
+                f(then_e);
+                f(else_e);
+            }
+            Stmt::If { cond, elseifs, .. } => {
+                f(cond);
+                for (c, _) in elseifs {
+                    f(c);
+                }
+            }
+            Stmt::MultiAssign(_, exprs) => {
+                for e in exprs {
+                    f(e);
+                }
+            }
+            Stmt::ReturnTable(entries) => {
+                for (_, e) in entries {
+                    f(e);
+                }
+            }
+        }
+    }
+
+    /// Visit every DIRECT sub-block: `if` arms, `do`/`while true` bodies, a
+    /// named function's body. Function literals inside expressions are not
+    /// reached — walkers get to those through the expression side.
+    ///
+    /// Same no-wildcard discipline as `for_each_expr`.
+    pub(super) fn for_each_block(&self, f: &mut impl FnMut(&[Stmt])) {
+        match self {
+            Stmt::Raw(_)
+            | Stmt::Local(..)
+            | Stmt::Assign(..)
+            | Stmt::Return(_)
+            | Stmt::Expr(_)
+            | Stmt::AssignIf { .. }
+            | Stmt::MultiAssign(..)
+            | Stmt::ReturnNone
+            | Stmt::Goto(_)
+            | Stmt::Label(_)
+            | Stmt::ReturnTable(_) => {}
+            Stmt::If { then_b, elseifs, else_b, .. } => {
+                f(&then_b.0);
+                for (_, b) in elseifs {
+                    f(&b.0);
+                }
+                if let Some(b) = else_b {
+                    f(&b.0);
+                }
+            }
+            Stmt::Do(b) | Stmt::WhileTrue(b) => f(&b.0),
+            Stmt::Function { body, .. } => f(&body.0),
+        }
+    }
+
+    /// `for_each_block`, mutably (as `&mut Vec` — block-level passes
+    /// truncate and splice). A spelled-out twin — change both together.
+    pub(super) fn for_each_block_mut(&mut self, f: &mut impl FnMut(&mut Vec<Stmt>)) {
+        match self {
+            Stmt::Raw(_)
+            | Stmt::Local(..)
+            | Stmt::Assign(..)
+            | Stmt::Return(_)
+            | Stmt::Expr(_)
+            | Stmt::AssignIf { .. }
+            | Stmt::MultiAssign(..)
+            | Stmt::ReturnNone
+            | Stmt::Goto(_)
+            | Stmt::Label(_)
+            | Stmt::ReturnTable(_) => {}
+            Stmt::If { then_b, elseifs, else_b, .. } => {
+                f(&mut then_b.0);
+                for (_, b) in elseifs {
+                    f(&mut b.0);
+                }
+                if let Some(b) = else_b {
+                    f(&mut b.0);
+                }
+            }
+            Stmt::Do(b) | Stmt::WhileTrue(b) => f(&mut b.0),
+            Stmt::Function { body, .. } => f(&mut body.0),
+        }
+    }
+
     /// Render the statement as a full line (or run of lines) at `ind`:
     /// indent prefix and trailing newline included.
     pub(super) fn render_line(&self, ind: usize, out: &mut String) {

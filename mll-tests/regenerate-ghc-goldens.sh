@@ -48,9 +48,11 @@ excluded_reason() {
         cases/any_ffi_marshal)           echo "LuaPure FFI declarations marshalling the builtin Any";;
         cases/bytestring)                echo "ByteString builtins (Lua byte strings)";;
         cases/bytestring_u64_sign_bit)   echo "ByteString + Lua 64-bit wrap-around semantics";;
+        cases/caf_forward_reference)     echo "imports LString (Lua string FFI)";;
         cases/constructor_as_rename)     echo "'as \"name\"' constructor-rename syntax (JSON FFI, not Haskell)";;
         cases/constructor_shadowing_json) echo "JSON FFI library";;
         cases/derive_fromjson)           echo "JSON FFI library";;
+        cases/derive_generic)            echo "mata-ll Generics substrate (Data.Generics is not GHC's)";;
         cases/derive_tojson)             echo "JSON FFI library";;
         cases/error_forces_message)      echo "imports LString (Lua string FFI)";;
         cases/exitvalue_prelude)         echo "ExitValue/exit (Lua process control)";;
@@ -59,8 +61,12 @@ excluded_reason() {
         cases/ffi_constructed_values)    echo "FFI declarations";;
         cases/ffi_maybe_args)            echo "FFI declarations";;
         cases/ffi_strictness)            echo "FFI declarations";;
+        cases/generic_json)              echo "Generics substrate + JSON FFI library";;
+        cases/generic_json_decode)       echo "Generics substrate + JSON FFI library";;
+        cases/generic_json_many)         echo "Generics substrate + JSON FFI library";;
         cases/getline)                   echo "reads stdin; LuaUserData FFI";;
         cases/hashmap)                   echo "HashMap builtins (Lua tables)";;
+        cases/integer_json)              echo "Generics substrate + JSON FFI library";;
         cases/json_codec)                echo "JSON FFI library";;
         cases/lbit_64bit_boundary)       echo "LBit (Lua bit-op semantics, deliberately not Data.Bits)";;
         cases/lbit_strict_primitive_arg) echo "LBit (Lua bit-op semantics)";;

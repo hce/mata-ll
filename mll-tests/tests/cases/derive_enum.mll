@@ -53,6 +53,25 @@ main = do
     assert (fromEnum No == 0) "fromEnum No"
     assert (fromEnum Yes == 1) "fromEnum Yes"
 
+    -- Range syntax: enumFromThen (limit comes from the step direction:
+    -- maxBound when ascending, minBound when descending — GHC semantics)
+    assert ([Low, High ..] == [Low, High]) "enumFromThen step 2"
+    assert ([Low, Medium ..] == [Low, Medium, High, Critical]) "enumFromThen step 1"
+    assert ([Low, Critical ..] == [Low, Critical]) "enumFromThen step 3"
+    assert ([Critical, High ..] == [Critical, High, Medium, Low]) "enumFromThen step -1"
+    assert ([Critical, Medium ..] == [Critical, Medium]) "enumFromThen step -2"
+    assert ([Medium, Low ..] == [Medium, Low]) "enumFromThen down to minBound"
+    -- A zero step repeats the start element forever, as for [x, x ..] :: [Int]
+    assert (take 3 [Green, Green ..] == [Green, Green, Green]) "enumFromThen step 0"
+
+    -- Range syntax: enumFromThenTo
+    assert ([Low, Medium .. High] == [Low, Medium, High]) "enumFromThenTo step 1"
+    assert ([Low, High .. Critical] == [Low, High]) "enumFromThenTo step 2"
+    assert ([High, Medium .. Low] == [High, Medium, Low]) "enumFromThenTo step -1"
+    assert ([Low, High .. Medium] == [Low]) "enumFromThenTo overshoot"
+    assert ([Critical, High .. Critical] == [Critical]) "enumFromThenTo single down"
+    assert ([Medium, High .. Low] == []) "enumFromThenTo empty up"
+
     -- Enum + Ord interaction
     assert (Low < Critical) "Ord Low < Critical"
     assert (Critical > Medium) "Ord Critical > Medium"

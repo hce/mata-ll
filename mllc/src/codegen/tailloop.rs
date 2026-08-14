@@ -100,7 +100,8 @@
 use std::collections::{HashMap, HashSet};
 
 use super::annot::{self, ScopeView, is_plain_ident};
-use super::lua::{Block, Expr, FuncBody, Item, Stmt};
+use super::loopcore;
+use super::lua::{Block, Expr, Stmt};
 use super::opt;
 
 pub(super) struct TailLoop;
@@ -131,7 +132,7 @@ pub(super) enum SelfName {
 }
 
 impl SelfName {
-    fn spelling(&self) -> &str {
+    pub(super) fn spelling(&self) -> &str {
         match self {
             SelfName::LocalFn(s) | SelfName::Assigned(s) | SelfName::Slot(s) => s,
         }
@@ -247,18 +248,7 @@ fn rewritable_site<'a>(e: &'a Expr, name: &SelfName, params: &[String]) -> Optio
 /// Is there at least one tail self-call to rewrite? A dry-run twin of
 /// `rewrite_tails` over the same positions.
 fn has_tail_self_call(stmts: &[Stmt], name: &SelfName, params: &[String]) -> bool {
-    match stmts.last() {
-        Some(Stmt::Return(e)) => rewritable_site(e, name, params).is_some(),
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            has_tail_self_call(&then_b.0, name, params)
-                || elseifs.iter().any(|(_, b)| has_tail_self_call(&b.0, name, params))
-                || else_b
-                    .as_ref()
-                    .is_some_and(|b| has_tail_self_call(&b.0, name, params))
-        }
-        Some(Stmt::Do(b)) => has_tail_self_call(&b.0, name, params),
-        _ => false,
-    }
+    loopcore::tail_position_has(stmts, &|e| rewritable_site(e, name, params).is_some())
 }
 
 /// Replace every tail self-call with the parameter update (and, in the
@@ -364,68 +354,65 @@ fn lvalue_blocked(lhs: &str, params: &HashSet<String>) -> bool {
     !params.contains(lhs) && text_mentions(lhs, params)
 }
 
+// The blocking decision — which rendered text could hide a parameter
+// mention the rename cannot touch — stays spelled per variant with NO
+// wildcard: an unclassified statement kind must not silently pass as
+// renamable. Descent is the AST's own (`for_each_expr` / `for_each_block`).
 fn blocked_stmt(s: &Stmt, params: &HashSet<String>) -> bool {
-    match s {
+    let own = match s {
         Stmt::Raw(t) => text_mentions(t, params),
-        Stmt::Local(_, init) => init.as_ref().is_some_and(|e| blocked_expr(e, params)),
-        Stmt::Assign(lhs, e) => lvalue_blocked(lhs, params) || blocked_expr(e, params),
-        Stmt::MultiAssign(lhs, exprs) => {
-            lhs.iter().any(|l| lvalue_blocked(l, params))
-                || exprs.iter().any(|e| blocked_expr(e, params))
-        }
-        Stmt::AssignIf { lhs, cond, then_e, else_e } => {
-            lvalue_blocked(lhs, params)
-                || blocked_expr(cond, params)
-                || blocked_expr(then_e, params)
-                || blocked_expr(else_e, params)
-        }
-        Stmt::Return(e) | Stmt::Expr(e) => blocked_expr(e, params),
-        Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => false,
-        Stmt::If { cond, then_b, elseifs, else_b } => {
-            blocked_expr(cond, params)
-                || rename_blocked(&then_b.0, params)
-                || elseifs
-                    .iter()
-                    .any(|(c, b)| blocked_expr(c, params) || rename_blocked(&b.0, params))
-                || else_b.as_ref().is_some_and(|b| rename_blocked(&b.0, params))
-        }
-        Stmt::Do(b) | Stmt::WhileTrue(b) => rename_blocked(&b.0, params),
+        Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => lvalue_blocked(lhs, params),
+        Stmt::MultiAssign(lhs, _) => lhs.iter().any(|l| lvalue_blocked(l, params)),
         // A nested header mentioning a parameter would shadow (its own
         // parameter) or rebind (its name) it in text the rename cannot
         // touch: block. Otherwise the body is renamed like any sub-block.
-        Stmt::Function { header, body } => {
-            text_mentions(header, params) || rename_blocked(&body.0, params)
-        }
-        Stmt::ReturnTable(entries) => entries.iter().any(|(_, e)| blocked_expr(e, params)),
+        Stmt::Function { header, .. } => text_mentions(header, params),
+        Stmt::Local(..)
+        | Stmt::Return(_)
+        | Stmt::Expr(_)
+        | Stmt::If { .. }
+        | Stmt::Do(_)
+        | Stmt::WhileTrue(_)
+        | Stmt::ReturnNone
+        | Stmt::Goto(_)
+        | Stmt::Label(_)
+        | Stmt::ReturnTable(_) => false,
+    };
+    if own {
+        return true;
     }
+    let mut blocked = false;
+    s.for_each_expr(&mut |e| blocked = blocked || blocked_expr(e, params));
+    s.for_each_block(&mut |b| blocked = blocked || rename_blocked(b, params));
+    blocked
 }
 
 fn blocked_expr(e: &Expr, params: &HashSet<String>) -> bool {
-    match e {
+    let own = match e {
         // An exact parameter name is the renamable case; a composite
         // spelling (`math.pi`, `_v[2]`) mentioning one is not provably a
         // variable occurrence.
         Expr::Name(s) => !params.contains(s) && !is_plain_ident(s) && text_mentions(s, params),
-        Expr::Lit(_) => false,
         Expr::Raw(t) => text_mentions(t, params),
-        Expr::Paren(e) | Expr::Neg(e) => blocked_expr(e, params),
-        Expr::Call(f, args) | Expr::Method(f, _, args) => {
-            blocked_expr(f, params) || args.iter().any(|a| blocked_expr(a, params))
-        }
-        Expr::Index(base, _) => blocked_expr(base, params),
-        Expr::Binop(_, l, r) => blocked_expr(l, params) || blocked_expr(r, params),
-        Expr::Table(items) | Expr::TableSpaced(items) => items.iter().any(|item| match item {
-            Item::Pos(e) | Item::KV(_, e) => blocked_expr(e, params),
-        }),
-        Expr::Func(_, body) => rename_blocked(func_body(body), params),
+        // The literal's body: statements, which `for_each_subexpr` does not
+        // reach.
+        Expr::Func(_, body) => rename_blocked(body.stmts(), params),
+        Expr::Lit(_)
+        | Expr::Paren(_)
+        | Expr::Neg(_)
+        | Expr::Call(..)
+        | Expr::Method(..)
+        | Expr::Index(..)
+        | Expr::Binop(..)
+        | Expr::Table(_)
+        | Expr::TableSpaced(_) => false,
+    };
+    if own {
+        return true;
     }
-}
-
-fn func_body(b: &FuncBody) -> &Vec<Stmt> {
-    match b {
-        FuncBody::Inline(s) => s,
-        FuncBody::Block(Block(s)) => s,
-    }
+    let mut blocked = false;
+    e.for_each_subexpr(&mut |c| blocked = blocked || blocked_expr(c, params));
+    blocked
 }
 
 // ---- The scoped rename ----
@@ -444,7 +431,6 @@ pub(super) fn rename_block(stmts: &mut [Stmt], map: &HashMap<String, String>) {
 
 fn rename_stmt(s: &mut Stmt, map: &mut HashMap<String, String>) {
     match s {
-        Stmt::Raw(_) | Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
         Stmt::Local(names, init) => {
             // The initializer reads the outer binding (`local x = x` reads
             // the old x); the shadow starts after this statement.
@@ -479,27 +465,25 @@ fn rename_stmt(s: &mut Stmt, map: &mut HashMap<String, String>) {
                 *lhs = w.clone();
             }
         }
-        Stmt::Return(e) | Stmt::Expr(e) => rename_expr(e, map),
-        Stmt::If { cond, then_b, elseifs, else_b } => {
-            rename_expr(cond, map);
-            rename_block(&mut then_b.0, map);
-            for (c, b) in elseifs.iter_mut() {
-                rename_expr(c, map);
-                rename_block(&mut b.0, map);
-            }
-            if let Some(b) = else_b.as_mut() {
-                rename_block(&mut b.0, map);
-            }
-        }
-        Stmt::Do(b) | Stmt::WhileTrue(b) => rename_block(&mut b.0, map),
         // The header is proven disjoint from the map's names
         // (`rename_blocked`), so nothing in it shadows: the body renames
         // under the same map (captured outer parameters included).
         Stmt::Function { body, .. } => rename_block(&mut body.0, map),
-        Stmt::ReturnTable(entries) => {
-            for (_, e) in entries {
-                rename_expr(e, map);
-            }
+        // No binders and no lvalues in the rest: rename the expressions
+        // under the current map, and every sub-block under its own
+        // per-block clone (`rename_block`).
+        Stmt::Raw(_)
+        | Stmt::Return(_)
+        | Stmt::Expr(_)
+        | Stmt::If { .. }
+        | Stmt::Do(_)
+        | Stmt::WhileTrue(_)
+        | Stmt::ReturnNone
+        | Stmt::Goto(_)
+        | Stmt::Label(_)
+        | Stmt::ReturnTable(_) => {
+            s.for_each_expr_mut(&mut |e| rename_expr(e, map));
+            s.for_each_block_mut(&mut |b| rename_block(b, map));
         }
     }
 }
@@ -511,37 +495,28 @@ fn rename_expr(e: &mut Expr, map: &HashMap<String, String>) {
                 *s = w.clone();
             }
         }
-        Expr::Lit(_) | Expr::Raw(_) => {}
-        Expr::Paren(e) | Expr::Neg(e) => rename_expr(e, map),
-        Expr::Call(f, args) | Expr::Method(f, _, args) => {
-            rename_expr(f, map);
-            for a in args {
-                rename_expr(a, map);
-            }
-        }
-        Expr::Index(base, _) => rename_expr(base, map),
-        Expr::Binop(_, l, r) => {
-            rename_expr(l, map);
-            rename_expr(r, map);
-        }
-        Expr::Table(items) | Expr::TableSpaced(items) => {
-            for item in items {
-                match item {
-                    Item::Pos(e) | Item::KV(_, e) => rename_expr(e, map),
-                }
-            }
-        }
+        // A literal's parameters shadow: its body renames under a narrowed
+        // map.
         Expr::Func(ps, body) => {
             let mut inner = map.clone();
             for p in ps.iter() {
                 inner.remove(p);
             }
-            let stmts: &mut Vec<Stmt> = match body {
-                FuncBody::Inline(s) => s,
-                FuncBody::Block(Block(s)) => s,
-            };
-            rename_block(stmts, &inner);
+            rename_block(body.stmts_mut(), &inner);
         }
+        // Everything else has no binders and no name fields of its own —
+        // `Raw` is proven mention-free by `rename_blocked` before the
+        // rename ever runs.
+        Expr::Lit(_)
+        | Expr::Raw(_)
+        | Expr::Paren(_)
+        | Expr::Neg(_)
+        | Expr::Call(..)
+        | Expr::Method(..)
+        | Expr::Index(..)
+        | Expr::Binop(..)
+        | Expr::Table(_)
+        | Expr::TableSpaced(_) => e.for_each_subexpr_mut(&mut |c| rename_expr(c, map)),
     }
 }
 
@@ -639,6 +614,7 @@ fn convert(
 mod tests {
     use super::*;
     use crate::codegen::annot::Engine;
+    use crate::codegen::lua::FuncBody;
 
     /// Run the pass over a module and return the rendered output.
     fn converted(mut stmts: Vec<Stmt>) -> (String, bool) {

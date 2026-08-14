@@ -1,5 +1,16 @@
 use std::fmt;
 
+use crate::ast::Span;
+use crate::types::Diagnostic;
+
+/// A lex diagnostic at a known source location. Built on the same
+/// [`Diagnostic`] machinery as parse and type errors, so lex errors render
+/// their span (`at line:col`) and `note:` lines the same way instead of
+/// hand-formatting positions into the message text.
+fn err_at(msg: impl Into<String>, line: usize, col: usize) -> Box<Diagnostic> {
+    Box::new(Diagnostic::parse_at(msg, Span::new(line, col)))
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
     // Literals
@@ -79,24 +90,74 @@ pub enum Token {
     EOF,
 }
 
+/// Renders every token the way it is spelled in source (quoted), or as a
+/// short phrase for the tokens that have no spelling (end of file, line
+/// breaks). Diagnostics interpolate this directly — "Expected '::', found
+/// 'where'" — so no arm may fall back to the Rust `Debug` form.
 impl fmt::Display for Token {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Token::IntLit(n) => write!(f, "{}", n),
-            Token::BigIntLit(s) => write!(f, "{}", s),
-            Token::NumLit(n) => write!(f, "{}", n),
-            Token::StrLit(s) => write!(f, "\"{}\"", String::from_utf8_lossy(s)),
-            Token::Ident(s) => write!(f, "{}", s),
-            Token::UpperIdent(s) => write!(f, "{}", s),
-            Token::Operator(s) => write!(f, "{}", s),
-            Token::Arrow => write!(f, "->"),
-            Token::FatArrow => write!(f, "=>"),
-            Token::DblColon => write!(f, "::"),
-            Token::Eq => write!(f, "="),
-            Token::Pipe => write!(f, "|"),
-            Token::Bind => write!(f, "<-"),
-            _ => write!(f, "{:?}", self),
-        }
+        let spelled = match self {
+            Token::IntLit(n) => return write!(f, "integer literal '{}'", n),
+            Token::BigIntLit(s) => return write!(f, "integer literal '{}'", s),
+            Token::NumLit(n) => return write!(f, "number literal '{}'", n),
+            Token::StrLit(s) => {
+                return write!(f, "string literal \"{}\"", String::from_utf8_lossy(s))
+            }
+            Token::Ident(s) => return write!(f, "'{}'", s),
+            Token::UpperIdent(s) => return write!(f, "'{}'", s),
+            Token::Operator(s) => return write!(f, "'{}'", s),
+            Token::KwModule => "module",
+            Token::Import => "import",
+            Token::Qualified => "qualified",
+            Token::As => "as",
+            Token::Data => "data",
+            Token::Newtype => "newtype",
+            Token::Class => "class",
+            Token::Instance => "instance",
+            Token::Where => "where",
+            Token::Let => "let",
+            Token::In => "in",
+            Token::Case => "case",
+            Token::Of => "of",
+            Token::If => "if",
+            Token::Then => "then",
+            Token::Else => "else",
+            Token::Do => "do",
+            Token::Intrinsic => "intrinsic",
+            Token::Export => "export",
+            Token::KwType => "type",
+            Token::Deriving => "deriving",
+            Token::Family => "family",
+            Token::Infixl => "infixl",
+            Token::Infixr => "infixr",
+            Token::Infix => "infix",
+            Token::Arrow => "->",
+            Token::FatArrow => "=>",
+            Token::DblColon => "::",
+            Token::Backslash => "\\",
+            Token::Dot => ".",
+            Token::Comma => ",",
+            Token::Semicolon => ";",
+            Token::Eq => "=",
+            Token::Pipe => "|",
+            Token::Backtick => "`",
+            Token::Underscore => "_",
+            Token::LeftParen => "(",
+            Token::RightParen => ")",
+            Token::LeftBracket => "[",
+            Token::RightBracket => "]",
+            Token::LeftBrace => "{",
+            Token::RightBrace => "}",
+            Token::At => "@",
+            Token::Bind => "<-",
+            Token::Tick => "'",
+            Token::Indent(n) => {
+                return write!(f, "start of a new line (indentation {})", n)
+            }
+            Token::Newline => return write!(f, "end of line"),
+            Token::EOF => return write!(f, "end of file"),
+        };
+        write!(f, "'{}'", spelled)
     }
 }
 
@@ -107,7 +168,7 @@ pub struct Located {
     pub col: usize,
 }
 
-pub fn lex(source: &str) -> Result<Vec<Located>, String> {
+pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
     let mut tokens = Vec::new();
     let chars: Vec<char> = source.chars().collect();
     let mut pos = 0;
@@ -126,10 +187,13 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 col += 1;
             }
             if pos < chars.len() && chars[pos] == '\t' {
-                return Err(format!(
-                    "Tab character in indentation at {}:{}. Use spaces instead.",
-                    line, col
-                ));
+                let mut diag = err_at("Tab character in indentation", line, col);
+                diag.notes.push(
+                    "indent with spaces: layout-sensitive parsing would \
+                     otherwise change meaning with the reader's tab width"
+                        .to_string(),
+                );
+                return Err(diag);
             }
             // Skip blank lines
             if pos < chars.len() && chars[pos] == '\n' {
@@ -232,9 +296,9 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                     lex_string_escape(&chars, &mut pos, &mut col, &mut line, &mut bytes)?;
                 } else {
                     if chars[pos] == '\n' {
-                        return Err(format!(
-                            "Unterminated string literal at {}:{}",
-                            tok_line, tok_col
+                        return Err(err_at(
+                            "Unterminated string literal",
+                            tok_line, tok_col,
                         ));
                     }
                     // A source character contributes its UTF-8 bytes: mata-ll
@@ -246,9 +310,9 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 }
             }
             if pos >= chars.len() {
-                return Err(format!(
-                    "Unterminated string literal at {}:{}",
-                    tok_line, tok_col
+                return Err(err_at(
+                    "Unterminated string literal",
+                    tok_line, tok_col,
                 ));
             }
             pos += 1; // closing quote
@@ -305,7 +369,9 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
             }
             let s: String = chars[start..pos].iter().collect();
             if is_float {
-                let n: f64 = s.parse().map_err(|e| format!("Invalid number '{}': {}", s, e))?;
+                let n: f64 = s.parse().map_err(|e| {
+                    err_at(format!("Invalid number '{}': {}", s, e), tok_line, tok_col)
+                })?;
                 tokens.push(Located {
                     token: Token::NumLit(n),
                     line: tok_line,
@@ -460,9 +526,9 @@ pub fn lex(source: &str) -> Result<Vec<Located>, String> {
                 });
             }
             _ => {
-                return Err(format!(
-                    "Unexpected character '{}' at {}:{}",
-                    ch, line, col
+                return Err(err_at(
+                    format!("Unexpected character '{}'", ch),
+                    line, col,
                 ));
             }
         }
@@ -507,16 +573,13 @@ fn lex_string_escape(
     col: &mut usize,
     line: &mut usize,
     out: &mut Vec<u8>,
-) -> Result<(), String> {
+) -> Result<(), Box<Diagnostic>> {
     // Position of the backslash, for error messages.
     let (esc_line, esc_col) = (*line, *col);
     *pos += 1; // consume backslash
     *col += 1;
     if *pos >= chars.len() {
-        return Err(format!(
-            "Unterminated escape sequence at {}:{}",
-            esc_line, esc_col
-        ));
+        return Err(err_at("Unterminated escape sequence", esc_line, esc_col));
     }
     let c = chars[*pos];
 
@@ -557,10 +620,10 @@ fn lex_string_escape(
             *pos += 1;
         }
         if *pos >= chars.len() || chars[*pos] != '\\' {
-            return Err(format!(
-                "Malformed string gap at {}:{}: a `\\<whitespace>` gap must be \
-                 closed by a second `\\`",
-                esc_line, esc_col
+            return Err(err_at(
+                "Malformed string gap: a `\\<whitespace>` gap must be closed \
+                 by a second `\\`",
+                esc_line, esc_col,
             ));
         }
         *pos += 1; // closing backslash
@@ -573,19 +636,22 @@ fn lex_string_escape(
         *pos += 1;
         *col += 1;
         if *pos >= chars.len() {
-            return Err(format!(
-                "Unterminated `\\^` control escape at {}:{}",
-                esc_line, esc_col
+            return Err(err_at(
+                "Unterminated `\\^` control escape",
+                esc_line, esc_col,
             ));
         }
         let cc = chars[*pos];
         let code = match cc {
             '@'..='_' => (cc as u32) - ('@' as u32), // '@'=64 -> 0 ... '_'=95 -> 31
             _ => {
-                return Err(format!(
-                    "Invalid `\\^` control escape `\\^{}` at {}:{}: expected a \
-                     character in the range `@`..`_`",
-                    cc, esc_line, esc_col
+                return Err(err_at(
+                    format!(
+                        "Invalid `\\^` control escape `\\^{}`: expected a \
+                         character in the range `@`..`_`",
+                        cc
+                    ),
+                    esc_line, esc_col,
                 ));
             }
         };
@@ -619,23 +685,21 @@ fn lex_string_escape(
             *col += 1;
         }
         if *pos == digit_start {
-            return Err(format!(
-                "Malformed numeric escape at {}:{}: `\\{}` must be followed by \
-                 at least one {} digit",
-                esc_line,
-                esc_col,
-                c,
-                match radix { 8 => "octal", 16 => "hexadecimal", _ => "decimal" },
+            return Err(err_at(
+                format!(
+                    "Malformed numeric escape: `\\{}` must be followed by at \
+                     least one {} digit",
+                    c,
+                    match radix { 8 => "octal", 16 => "hexadecimal", _ => "decimal" },
+                ),
+                esc_line, esc_col,
             ));
         }
         let digits: String = chars[digit_start..*pos].iter().collect();
         // The escape as written, for error messages (`\o37`, `\181`).
         let shown = if radix == 10 { digits.clone() } else { format!("{}{}", c, digits) };
         let value = u32::from_str_radix(&digits, radix).map_err(|_| {
-            format!(
-                "Numeric escape `\\{}` at {}:{} overflows",
-                shown, esc_line, esc_col
-            )
+            err_at(format!("Numeric escape `\\{}` overflows", shown), esc_line, esc_col)
         })?;
         // mata-ll strings are byte arrays (HASKDIFF.md "Strings and
         // ByteStrings"): a character is a single byte 0..=255 (this is exactly
@@ -645,17 +709,23 @@ fn lex_string_escape(
         // rather than a silent wrong value. This is the one place mata-ll's
         // byte-string model forces a deviation from GHC's char-string model.
         if value > 255 {
-            return Err(format!(
-                "Numeric escape `\\{}` at {}:{} is out of range for a mata-ll \
-                 String.\n  note: a mata-ll String is a byte array (the Lua \
-                 string), not a sequence of Unicode Char; a character is a \
-                 single byte 0..=255. GHC accepts up to \\1114111 because its \
-                 String is [Char], but that value has no single-byte \
-                 representation here. Encode the code point as its UTF-8 \
-                 bytes if you need it (see HASKDIFF.md, \"Strings and \
-                 ByteStrings\").",
-                shown, esc_line, esc_col
-            ));
+            let mut diag = err_at(
+                format!(
+                    "Numeric escape `\\{}` is out of range for a mata-ll String.",
+                    shown
+                ),
+                esc_line, esc_col,
+            );
+            diag.notes.push(
+                "a mata-ll String is a byte array (the Lua string), not a \
+                 sequence of Unicode Char; a character is a single byte \
+                 0..=255. GHC accepts up to \\1114111 because its String is \
+                 [Char], but that value has no single-byte representation \
+                 here. Encode the code point as its UTF-8 bytes if you need \
+                 it (see HASKDIFF.md, \"Strings and ByteStrings\")."
+                    .to_string(),
+            );
+            return Err(diag);
         }
         out.push(value as u8);
         return Ok(());
@@ -688,8 +758,8 @@ fn lex_string_escape(
         return Ok(());
     }
 
-    Err(format!(
-        "Unknown escape sequence `\\{}` at {}:{}",
-        c, esc_line, esc_col
+    Err(err_at(
+        format!("Unknown escape sequence `\\{}`", c),
+        esc_line, esc_col,
     ))
 }

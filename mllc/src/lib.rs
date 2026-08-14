@@ -89,7 +89,7 @@ pub struct CompileOptions {
 /// renders them exactly as before.
 #[derive(Debug)]
 pub enum CompileError {
-    Lex(String),
+    Lex(types::Diagnostic),
     Parse(Vec<types::Diagnostic>),
     Import(String),
     Type(Vec<types::Diagnostic>),
@@ -128,7 +128,7 @@ impl std::fmt::Display for CompileError {
 
 /// Parse and return the prelude declarations.
 fn parse_prelude() -> Result<Vec<ast::Decl>, CompileError> {
-    let tokens = lexer::lex(stdlib::PRELUDE).map_err(CompileError::Lex)?;
+    let tokens = lexer::lex(stdlib::PRELUDE).map_err(|d| CompileError::Lex(*d))?;
     let module = parser::parse(&tokens).map_err(CompileError::Parse)?;
     Ok(module.decls)
 }
@@ -175,7 +175,7 @@ fn compile_impl(
     stamp_check: bool,
 ) -> Result<CompileResult, CompileError> {
     // Lex
-    let tokens = lexer::lex(source).map_err(CompileError::Lex)?;
+    let tokens = lexer::lex(source).map_err(|d| CompileError::Lex(*d))?;
 
     // The module loader is created before parsing: fixity travels with an
     // import in Haskell, so the root module's expressions must be parsed

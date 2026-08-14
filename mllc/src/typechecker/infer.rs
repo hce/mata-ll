@@ -122,47 +122,55 @@ impl Checker {
         // evidence. GADT refinement happens BEFORE this (at pattern time), so a
         // refined variable is concrete by the time the body is checked and is
         // never skolemized. See `skolemize_sig_body_vars` / `check_clause`.
-        let declared_constraints = self.fn_constraints.get(name).cloned().unwrap_or_default();
+        let declared_context = self.fn_contexts.get(name).cloned().unwrap_or_default();
         let (sig_skolems, demote) =
-            self.skolemize_sig_body_vars(&fresh_ty, &declared_constraints);
+            self.skolemize_sig_body_vars(&fresh_ty, &declared_context);
 
         // Re-express this function's declared constraints over the freshened
-        // variable names, so a caller can match each constraint to the type it
-        // instantiates the function at (and reject e.g. `print` of a function).
-        if let Some(cs) = self.fn_constraints.get(name) {
-            let renamed: Vec<TyConstraint> = cs.iter().map(|c| TyConstraint {
-                class_name: c.class_name.clone(),
-                type_var: renames.get(&c.type_var).cloned().unwrap_or_else(|| c.type_var.clone()),
-            }).collect();
-            self.fn_use_constraints.insert(name.to_string(), renamed);
+        // signature variables (the `at_use` epoch), so a caller can match each
+        // constraint to the type it instantiates the function at (and reject
+        // e.g. `print` of a function). Each variable becomes the ACTUAL
+        // freshened TyVar of the scheme, not just a renamed string. A
+        // constraint var not in `renames` was already fresh in the signature
+        // (id != MAX) — freshen_sig_type_mapped left it alone.
+        // Instance-method signatures are like this: check_instance
+        // alpha-renames the instance's variables before specializing the
+        // method type, and declares the instance context over those same
+        // pre-freshened names.
+        let name_to_var: HashMap<String, TyVar> = fresh_ty.free_vars()
+            .into_iter().map(|v| (v.name.clone(), v)).collect();
+        // Alongside `at_use`, collect the declared context as (class,
+        // freshened variable) pairs: the actual freshened signature TyVar
+        // (with its id), so it can be resolved through the clause substitution
+        // at discharge time — a signature variable often unifies with a fresh
+        // parameter variable, and a plain name match would then miss it. Used
+        // to decide whether a wanted constraint over a signature variable is
+        // provided by the context. Only a bare-variable constraint whose
+        // variable actually occurs in the scheme provides such evidence — a
+        // compound argument constrains no single variable, and a variable
+        // absent from the type cannot be instantiated by a caller.
+        let mut declared_cvars: Vec<(String, TyVar)> = Vec::new();
+        let at_use: Vec<(String, Ty)> = declared_context.declared.iter()
+            .map(|(cls, arg)| {
+                let mut t = arg.clone();
+                for sv in t.free_vars() {
+                    let fresh_name = renames.get(&sv.name).unwrap_or(&sv.name);
+                    if let Some(tv) = name_to_var.get(fresh_name) {
+                        if matches!(arg, Ty::Var(_)) {
+                            declared_cvars.push((cls.clone(), tv.clone()));
+                        }
+                        t = t.apply_subst(&Subst::singleton(sv, Ty::Var(tv.clone())));
+                    }
+                }
+                (cls.clone(), t)
+            })
+            .collect();
+        if !at_use.is_empty() && let Some(cx) = self.fn_contexts.get_mut(name) {
+            cx.at_use = at_use;
         }
 
-        // The declared context as (class, freshened variable) pairs. The variable
-        // is the actual freshened signature TyVar (with its id), so it can be
-        // resolved through the clause substitution at discharge time — a signature
-        // variable often unifies with a fresh parameter variable, and a plain
-        // name match would then miss it. Used to decide whether a wanted
-        // constraint over a signature variable is provided by the context.
-        let declared_cvars: Vec<(String, TyVar)> = {
-            let name_to_var: HashMap<String, TyVar> = fresh_ty.free_vars()
-                .into_iter().map(|v| (v.name.clone(), v)).collect();
-            self.fn_constraints.get(name).cloned().unwrap_or_default().iter()
-                .filter_map(|c| {
-                    // A constraint var not in `renames` was already fresh in
-                    // the signature (id != MAX) — freshen_sig_type_mapped left
-                    // it alone. Instance-method signatures are like this:
-                    // check_instance alpha-renames the instance's variables
-                    // before specializing the method type, and declares the
-                    // instance context over those same pre-freshened names.
-                    let fresh_name = renames.get(&c.type_var).unwrap_or(&c.type_var);
-                    let tv = name_to_var.get(fresh_name)?;
-                    Some((c.class_name.clone(), tv.clone()))
-                })
-                .collect()
-        };
-
         // Add self for recursion
-        let self_scheme = self.generalize(&self.env.clone(), &fresh_ty);
+        let self_scheme = self.generalize(&self.env, &fresh_ty);
         self.env.insert(name.to_string(), self_scheme);
 
         let mut tclauses = Vec::new();
@@ -233,50 +241,39 @@ impl Checker {
         // must not be defaulted).
 
         // Record this function's declared constraints over the FINAL type's
-        // variable names. Clause checking may unify a freshened signature
-        // variable with a fresh unification variable, and it is THAT
-        // variable's name the generalized function type carries — so neither
-        // the source-name nor the freshened-sig-name spelling of the
-        // constraints reliably matches the type. The dictionary-passing
-        // rewrite needs the spelling that does.
-        if let Some(cs) = self.fn_use_constraints.get(name).cloned() {
-            let fresh_vars: HashMap<String, TyVar> = fresh_ty.free_vars()
-                .into_iter().map(|v| (v.name.clone(), v)).collect();
-            let renamed: Vec<TyConstraint> = cs.into_iter().map(|c| {
-                let final_name = fresh_vars.get(&c.type_var)
-                    // Resolve through the clause substitution, then demote any
-                    // body skolem back to its flexible variable (a declared sig
-                    // variable resolves to its skolem, which is not a `Ty::Var`).
-                    .map(|tv| Ty::Var(tv.clone()).apply_subst(&overall_subst).demote_skolems(&demote))
-                    .and_then(|t| if let Ty::Var(v) = t { Some(v.name) } else { None });
-                TyConstraint {
-                    class_name: c.class_name,
-                    type_var: final_name.unwrap_or(c.type_var),
-                }
-            }).collect();
-            self.fn_dict_constraints.insert(name.to_string(), renamed);
-        }
-        // The same final-name renaming, applied to the FULL argument TYPE of
-        // each constraint (kept in source spelling by pass 3), so a compound
-        // constraint like `GEncode (Rep a)` reaches dictionary passing with `a`
-        // spelled the way the generalized function type spells it — otherwise a
-        // call site's substitution (keyed by the final names) never lands on it.
-        if let Some(args) = self.fn_constraint_args.get(name).cloned() {
-            let fresh_vars: HashMap<String, TyVar> = fresh_ty.free_vars()
-                .into_iter().map(|v| (v.name.clone(), v)).collect();
-            let renamed: Vec<(String, Ty)> = args.into_iter().map(|(cls, arg)| {
-                let mut t = arg;
-                for sv in t.free_vars() {
-                    let fresh_name = renames.get(&sv.name).cloned().unwrap_or_else(|| sv.name.clone());
-                    if let Some(tv) = fresh_vars.get(&fresh_name) {
-                        let resolved = Ty::Var(tv.clone())
-                            .apply_subst(&overall_subst).demote_skolems(&demote);
-                        t = t.apply_subst(&Subst::singleton(sv.clone(), resolved));
+        // variable names (the `at_dict` epoch). Clause checking may unify a
+        // freshened signature variable with a fresh unification variable, and
+        // it is THAT variable's name the generalized function type carries —
+        // so neither the source-name nor the freshened-sig-name spelling of
+        // the constraints reliably matches the type. The dictionary-passing
+        // rewrite needs the spelling that does. The renaming is applied to
+        // the FULL argument type of each constraint, so a compound
+        // `GEncode (Rep a)` reaches dictionary passing with `a` spelled the
+        // way the generalized function type spells it — otherwise a call
+        // site's substitution (keyed by the final names) never lands on it.
+        // A variable absent from the final type keeps its declared spelling.
+        if !declared_context.declared.is_empty() {
+            let at_dict: Vec<(String, Ty)> = declared_context.declared.iter()
+                .map(|(cls, arg)| {
+                    let mut t = arg.clone();
+                    for sv in t.free_vars() {
+                        let fresh_name = renames.get(&sv.name).unwrap_or(&sv.name);
+                        if let Some(tv) = name_to_var.get(fresh_name) {
+                            // Resolve through the clause substitution, then
+                            // demote any body skolem back to its flexible
+                            // variable (a declared sig variable resolves to its
+                            // skolem, which is not a `Ty::Var`).
+                            let resolved = Ty::Var(tv.clone())
+                                .apply_subst(&overall_subst).demote_skolems(&demote);
+                            t = t.apply_subst(&Subst::singleton(sv, resolved));
+                        }
                     }
-                }
-                (cls, t)
-            }).collect();
-            self.fn_constraint_args.insert(name.to_string(), renamed);
+                    (cls.clone(), t)
+                })
+                .collect();
+            if let Some(cx) = self.fn_contexts.get_mut(name) {
+                cx.at_dict = at_dict;
+            }
         }
         // ---- Numeric defaulting (`default (Integer, Number)` — GHC's
         // Haskell-2010 `default (Integer, Double)`, with Number standing in for
@@ -306,24 +303,84 @@ impl Checker {
             })
             .collect();
 
-        // Discharge wanted class constraints against the available instances.
-        // has_instance defers on bare type variables (returns true), so a still-
-        // polymorphic constraint is left for the caller; only a structurally
-        // impossible one (a function, an action, an instance-less type) is
-        // rejected — even when its components are not yet resolved, since e.g.
-        // no function type has a Show instance regardless of its arg/result.
         let span = clauses.first().map(|c| c.span).unwrap_or_default();
-        // A leftover constraint mentioning a variable that this binding is
-        // genuinely polymorphic over (i.e. in its caller-visible type) is left
-        // for the caller to discharge. A variable that is fixed by how some
-        // value-level binder (parameter, let/where/lambda binding) is used is
-        // likewise determined, even when it does not appear in the function's own
-        // type. Only a variable that is neither — nothing in the definition or
-        // its callers can ever fix it — makes the constraint ambiguous, so it is
-        // rejected rather than silently dropped (matching Haskell 2010 / GHC).
-        // This function's own signature-quantified variables (a leftover
-        // constraint over one of these must be discharged by the declared
-        // context) versus variables determined by a local binder.
+        self.discharge_wanted_constraints(
+            name, span, &final_ty, &declared_cvars, &overall_subst, &demote);
+        // Check exhaustiveness of first argument patterns
+        if !clauses.is_empty() && !clauses[0].patterns.is_empty() {
+            let first_patterns: Vec<&Pattern> = clauses.iter()
+                .map(|c| &c.patterns[0])
+                .collect();
+            // Extract the first argument type for GADT-aware exhaustiveness
+            let first_arg_ty = if let Ty::Arrow(a, _, _) = &final_ty { Some(a.as_ref()) } else { None };
+            let missing = self.check_exhaustiveness(&first_patterns, first_arg_ty);
+            if !missing.is_empty() {
+                self.push_error_span(
+                    DiagnosticKind::NonExhaustive(format!(
+                        "'{}': missing patterns for {}", name, missing.join(", ")
+                    )),
+                    format!("definition of '{}'", name),
+                    clauses[0].span,
+                );
+            }
+        }
+
+        self.current_fn = None;
+
+        if tclauses.is_empty() && !clauses.is_empty() {
+            return None;
+        }
+
+        let tfun = TFunction {
+            name: name.to_string(),
+            ty: final_ty,
+            clauses: tclauses,
+            specialized: false,
+            dict_params: vec![],
+            derived_strict: false,
+        };
+
+        // Affine-usage check (linear types): with every multiplicity now
+        // resolved on the final types, enforce that anything bound at a `%1`
+        // arrow is used at most once (typechecker/usage.rs). A function that
+        // never touches a `%1` type has nothing tracked, so this is a cheap
+        // no-op walk for ordinary code.
+        self.check_function_usage(&tfun);
+
+        Some(tfun)
+    }
+
+    /// Discharge the wanted class constraints collected while checking one
+    /// function against the available instances, the binding's polymorphism,
+    /// and its declared context, pushing a diagnostic for each constraint
+    /// that fails.
+    ///
+    /// has_instance defers on bare type variables (returns true), so a still-
+    /// polymorphic constraint is left for the caller; only a structurally
+    /// impossible one (a function, an action, an instance-less type) is
+    /// rejected — even when its components are not yet resolved, since e.g.
+    /// no function type has a Show instance regardless of its arg/result.
+    ///
+    /// A leftover constraint mentioning a variable that this binding is
+    /// genuinely polymorphic over (i.e. in its caller-visible type) is left
+    /// for the caller to discharge. A variable that is fixed by how some
+    /// value-level binder (parameter, let/where/lambda binding) is used is
+    /// likewise determined, even when it does not appear in the function's own
+    /// type. Only a variable that is neither — nothing in the definition or
+    /// its callers can ever fix it — makes the constraint ambiguous, so it is
+    /// rejected rather than silently dropped (matching Haskell 2010 / GHC).
+    /// This function's own signature-quantified variables (a leftover
+    /// constraint over one of these must be discharged by the declared
+    /// context) versus variables determined by a local binder.
+    fn discharge_wanted_constraints(
+        &mut self,
+        name: &str,
+        span: Span,
+        final_ty: &Ty,
+        declared_cvars: &[(String, TyVar)],
+        overall_subst: &Subst,
+        demote: &HashMap<u32, Ty>,
+    ) {
         let type_vars = final_ty.free_vars();
         // A set, not a Vec: with one binder per statement (a long do-block of
         // `let`s), the membership probes below are per-wanted-constraint ×
@@ -400,49 +457,6 @@ impl Checker {
                 }
             }
         }
-
-        // Check exhaustiveness of first argument patterns
-        if !clauses.is_empty() && !clauses[0].patterns.is_empty() {
-            let first_patterns: Vec<&Pattern> = clauses.iter()
-                .map(|c| &c.patterns[0])
-                .collect();
-            // Extract the first argument type for GADT-aware exhaustiveness
-            let first_arg_ty = if let Ty::Arrow(a, _, _) = &final_ty { Some(a.as_ref()) } else { None };
-            let missing = self.check_exhaustiveness(&first_patterns, first_arg_ty);
-            if !missing.is_empty() {
-                self.push_error_span(
-                    DiagnosticKind::NonExhaustive(format!(
-                        "'{}': missing patterns for {}", name, missing.join(", ")
-                    )),
-                    format!("definition of '{}'", name),
-                    clauses[0].span,
-                );
-            }
-        }
-
-        self.current_fn = None;
-
-        if tclauses.is_empty() && !clauses.is_empty() {
-            return None;
-        }
-
-        let tfun = TFunction {
-            name: name.to_string(),
-            ty: final_ty,
-            clauses: tclauses,
-            specialized: false,
-            dict_params: vec![],
-            derived_strict: false,
-        };
-
-        // Affine-usage check (linear types): with every multiplicity now
-        // resolved on the final types, enforce that anything bound at a `%1`
-        // arrow is used at most once (typechecker/usage.rs). A function that
-        // never touches a `%1` type has nothing tracked, so this is a cheap
-        // no-op walk for ordinary code.
-        self.check_function_usage(&tfun);
-
-        Some(tfun)
     }
 
     /// Haskell 2010 / GHC numeric defaulting for this binding.
@@ -1312,19 +1326,33 @@ impl Checker {
                     Box::new(*rhs.clone()),
                 );
                 let (te, ty, subst) = self.infer_expr(&desugared, env)?;
-                // Reconstruct as InfixApp in the TIR for codegen
-                if let TExprKind::App(f, rhs_t) = te.kind
-                    && let TExprKind::App(_, lhs_t) = f.kind {
-                        return Ok((
-                            TExpr::new(TExprKind::InfixApp {
-                                op: op.clone(), lhs: lhs_t, rhs: rhs_t,
-                            }, ty.clone()),
-                            ty, subst,
-                        ));
+                // Reconstruct as InfixApp in the TIR for codegen. App
+                // inference on the two-argument desugaring always yields
+                // App(App(op, lhs), rhs) today; the non-App arms rebuild the
+                // inferred TIR as-is (NOT re-infer — a second inference pass
+                // would emit every wanted constraint twice) in case a future
+                // App special case returns another node kind.
+                match te.kind {
+                    TExprKind::App(f, rhs_t) => {
+                        let f_ty = f.ty.clone();
+                        match f.kind {
+                            TExprKind::App(_, lhs_t) => Ok((
+                                TExpr::new(TExprKind::InfixApp {
+                                    op: op.clone(), lhs: lhs_t, rhs: rhs_t,
+                                }, ty.clone()),
+                                ty, subst,
+                            )),
+                            inner => Ok((
+                                TExpr::new(TExprKind::App(
+                                    Box::new(TExpr::new(inner, f_ty)),
+                                    rhs_t,
+                                ), ty.clone()),
+                                ty, subst,
+                            )),
+                        }
                     }
-                // Fallback: just return the desugared form
-                let (te2, ty2, subst2) = self.infer_expr(&desugared, env)?;
-                Ok((te2, ty2, subst2))
+                    kind => Ok((TExpr::new(kind, ty.clone()), ty, subst)),
+                }
             }
             Expr::Negate(inner) => {
                 let (te, ty, s) = self.infer_expr(inner, env)?;

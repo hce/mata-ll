@@ -3,11 +3,14 @@ use crate::ast::*;
 use crate::tir::*;
 use crate::types::*;
 
+mod ffi;
 mod solve;
 mod derive;
 mod infer;
 mod kind;
 mod usage;
+
+pub(crate) use ffi::callback_value_vars;
 
 /// Fuel for type-alias expansion while resolving one top-level type (reset at
 /// each depth-0 `ast_type_to_ty`). Charged by the size of every expanded alias
@@ -293,107 +296,6 @@ impl TypeEnv {
     }
 }
 
-/// The direction a value crosses the FFI boundary. Used by the export-type
-/// whitelist (`ffi_marshallable` / `validate_top_level_callback`): an export
-/// argument and a callback's result are `Import`; an export result and a
-/// callback's argument are `Export`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FfiDir {
-    /// Lua → mata-ll: an export ARGUMENT, or (after unwrapping its effect) a
-    /// callback's own result. Decoded by the argument-decode path.
-    Import,
-    /// mata-ll → Lua: an export RESULT, or a callback's own argument. Marshalled
-    /// by the result path.
-    Export,
-}
-
-/// The scalar type names the FFI marshaller round-trips as bare Lua values
-/// (derived from `codegen::Codegen::scalar_lua_type`: numbers, strings,
-/// booleans). Keep in sync with that function.
-fn ffi_scalar_name(n: &str) -> bool {
-    matches!(n,
-        "Int" | "Number" | "Double" | "Float"
-        | "String" | "Char" | "ByteString" | "Bool")
-}
-
-/// Peel `App(App(Con(H), a), b)` into `(Some("H"), [a, b])`; the argument-source
-/// order dual of `codegen::decompose_app`, so `HashMap k v` → `("HashMap",
-/// [k, v])` and `Tree a` → `("Tree", [a])`. A non-`Con` head yields `None`.
-fn decompose_ty_app(ty: &Ty) -> (Option<&str>, Vec<&Ty>) {
-    let mut args: Vec<&Ty> = Vec::new();
-    let mut head = ty;
-    while let Ty::App(f, a) = head {
-        args.push(a.as_ref());
-        head = f.as_ref();
-    }
-    args.reverse();
-    match head {
-        Ty::Con(n) => (Some(n.as_str()), args),
-        _ => (None, args),
-    }
-}
-
-/// Rename EVERY free type variable in the given types to friendly single
-/// letters (`a`, `b`, …), sharing one map so the same variable reads the same
-/// on every side of the message. Unlike the diagnostic renderer's
-/// `pretty_var_subst` — which preserves user-written names — this renames a
-/// freshened user var (`a890`) too, because an export error's variables have no
-/// meaningful source name to keep (the export is being rejected *for* being
-/// polymorphic) and a leaked internal spelling is noise.
-fn friendly_export_tys(tys: &[&Ty]) -> Vec<Ty> {
-    let mut vars: Vec<TyVar> = Vec::new();
-    for t in tys {
-        for v in t.free_vars() {
-            if !vars.contains(&v) { vars.push(v); }
-        }
-    }
-    let mut map: HashMap<TyVar, Ty> = HashMap::new();
-    for (i, v) in vars.iter().enumerate() {
-        let letter = (b'a' + (i % 26) as u8) as char;
-        let name = if i < 26 { letter.to_string() } else { format!("{}{}", letter, i / 26) };
-        map.insert(v.clone(), Ty::Var(TyVar { name, id: v.id }));
-    }
-    let sub = Subst::from_map(map);
-    tys.iter().map(|t| t.apply_subst(&sub)).collect()
-}
-
-/// The `note:` line explaining why `culprit` cannot cross in direction `dir`.
-fn export_ffi_note(culprit: &Ty, dir: FfiDir) -> String {
-    let (head, _) = decompose_ty_app(culprit);
-    match culprit {
-        Ty::Var(_) | Ty::Skolem(..) =>
-            "Lua has no representation for a polymorphic value; give the export a \
-             concrete type.".to_string(),
-        Ty::IO(_) | Ty::LuaIO(_, _) if dir == FfiDir::Import =>
-            "a Lua caller cannot supply an IO/LuaIO action; only a callback (a \
-             function returning LuaIO) may cross inward.".to_string(),
-        Ty::Arrow(..) =>
-            "a callback is only marshalled as a DIRECT top-level argument of the \
-             export (returning LuaIO); a function nested in a container/result, or \
-             a callback that itself takes a callback, is not.".to_string(),
-        _ if matches!(head, Some("ST") | Some("STArray") | Some("STRef")) =>
-            "an ST handle is region-scoped (it must not outlive its runST) and has \
-             no Lua representation.".to_string(),
-        // A plain user/prelude `data` type (Either/Ordering/ExitValue or a
-        // user ADT) reached here has real constructors but no designed FFI
-        // shape — it would cross only as its internal `{tag, fields…}` table,
-        // which the host cannot interpret. Say so and point at the fixes.
-        _ if head.is_some() =>
-            "this type has real constructors but no FFI representation: it would \
-             cross only as mata-ll's internal `{tag, ...}` tagged table, which has \
-             no meaning to a Lua host. To carry structured data, use a `LuaDict` \
-             record (a name-keyed table); for a dynamic scalar, use `Any`; or \
-             encode the value as a scalar or a list. A newtype over a marshallable \
-             type crosses transparently; a plain `data` type does not."
-                .to_string(),
-        _ =>
-            "only scalars, (), lists, tuples, Maybe, HashMap, LuaDict records, \
-             newtypes over marshallable types, Any, and a top-level callback may \
-             cross the FFI boundary. Either crosses only as a LuaTry/LuaIOCatch \
-             result.".to_string(),
-    }
-}
-
 /// Constructor info
 #[derive(Debug, Clone)]
 pub struct ConInfo {
@@ -478,6 +380,75 @@ pub struct InstanceInfo {
     /// derived instances, which have no declared context) falls back to the
     /// structural rule: every type argument needs the class itself.
     pub context: Option<Vec<TyConstraint>>,
+}
+
+/// The declared class context of one function, across the variable-naming
+/// epochs the pipeline speaks. Each list holds `(class, full constraint
+/// argument)` pairs in DECLARATION ORDER — the order is significant, because
+/// dictionary passing pairs a call's dictionary arguments with the context
+/// positionally.
+///
+/// Why three spellings of one list: the checker renames type variables twice.
+/// `freshen_sig_type_mapped` turns the source signature's `a` into a fresh
+/// flexible `a519` (the caller-visible scheme's name), and clause checking may
+/// then unify `a519` with some other fresh variable — and it is THAT
+/// variable's name the final generalized type carries. A consumer must match
+/// constraints against whichever type it holds, so each epoch is recorded
+/// when it comes into existence rather than re-derived (the rename maps are
+/// long gone by the time the monomorphizer runs).
+#[derive(Debug, Clone, Default)]
+pub(super) struct FnContext {
+    /// Source spelling, as written in the signature: `Show a` is
+    /// `("Show", Var a)`, `GEncode (Rep a)` keeps its structure as
+    /// `("GEncode", App(Rep, Var a))`. For an instance method this is the
+    /// instance's declared context over the pre-freshened instance variables.
+    pub declared: Vec<(String, Ty)>,
+    /// `declared` over the FRESHENED signature variables — set when the
+    /// function is checked (`check_function`), empty before. Call sites map
+    /// each constraint through these names to the type it was instantiated
+    /// at (`emit_use_constraints`).
+    pub at_use: Vec<(String, Ty)>,
+    /// `declared` over the FINAL generalized type's variable names — the
+    /// spelling the `TFunction` handed to the monomorphizer carries; set at
+    /// the end of `check_function`, empty before. Dictionary passing matches
+    /// these against that type.
+    pub at_dict: Vec<(String, Ty)>,
+}
+
+impl FnContext {
+    /// The constrained VARIABLE of each `declared` constraint, paired with
+    /// its class. A compound argument (`GEncode (Rep a)`) constrains no
+    /// single variable and is skipped — exactly the constraints that can
+    /// provide a "given" for a signature variable are returned.
+    pub fn declared_class_vars(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.declared.iter().filter_map(|(cls, arg)| match arg {
+            Ty::Var(v) => Some((cls.as_str(), v.name.as_str())),
+            _ => None,
+        })
+    }
+}
+
+/// The string spelling of a constraint argument for the monomorphizer's
+/// name-keyed views (`TyConstraint.type_var`): a bare variable's name, or an
+/// inert placeholder for a compound argument. The placeholder can never equal
+/// a type-variable name (it contains punctuation), so name-matching consumers
+/// simply never match a compound constraint — those are routed by their
+/// structured argument instead (`get_fn_constraint_args`).
+fn constraint_var_spelling(arg: &Ty) -> String {
+    match arg {
+        Ty::Var(v) => v.name.clone(),
+        _ => format!("<compound: {:?}>", arg),
+    }
+}
+
+/// Which surface form declared a constructor's existential context — the
+/// classic `forall a. Show a => …` or a GADT signature. Same validation
+/// rules; the diagnostics phrase the wrong-variable case differently
+/// (see `validate_existential_constraints`).
+#[derive(Clone, Copy)]
+enum ExConstraintForm {
+    Forall,
+    Gadt,
 }
 
 /// The type checker — validates types and produces typed IR
@@ -625,33 +596,16 @@ pub struct Checker {
     local_types: HashSet<String>,
     /// Whether orphan instance checking is active
     orphan_check_enabled: bool,
-    /// Typeclass constraints per function name (for dictionary-passing fallback)
-    fn_constraints: HashMap<String, Vec<TyConstraint>>,
-    /// The FULL type argument of each function-signature constraint, in
-    /// declaration order (parallel to `fn_constraints`). A simple `Show a` has
-    /// argument `Ty::Var a` — redundant with `type_var` — but a COMPOUND
-    /// constraint like `GEncode (Rep a)` keeps its structure here (`Rep a`),
-    /// which `fn_constraints`' `type_var: String` cannot. The dictionary-passing
-    /// rewrite matches a method use's binding against these to route it to the
-    /// right dictionary parameter, and reduces them at a call site to build the
-    /// dictionary for the concrete representation. Signature-variable names.
-    fn_constraint_args: HashMap<String, Vec<(String, Ty)>>,
+    /// The declared class context of each constrained function (its `=>`
+    /// constraints), tracked across the naming epochs the pipeline speaks.
+    /// One entry holds the constraint list ONCE, as structured `Ty` arguments
+    /// — a compound constraint like `GEncode (Rep a)` keeps its shape — with
+    /// a field per spelling. See [`FnContext`].
+    fn_contexts: HashMap<String, FnContext>,
     /// Class constraints carried by a class method, keyed by method name
     /// (e.g. "show" -> [Show a]). Instantiating the method emits a wanted
     /// constraint on the freshened type so it can be discharged.
     method_constraints: HashMap<String, Vec<TyConstraint>>,
-    /// A function's signature constraints, expressed over the *freshened*
-    /// variable names its caller-visible scheme uses (so a call site can map
-    /// each constraint to the freshly-instantiated type). E.g. with `needsShow
-    /// :: Show a => …` freshened to `a519`, this holds [Show a519].
-    fn_use_constraints: HashMap<String, Vec<TyConstraint>>,
-    /// The declared constraints of each checked function, re-expressed a
-    /// second time over the FINAL (post-solve, generalized) type's variable
-    /// names — the names that appear on the TFunction handed to the
-    /// monomorphizer. The dictionary-passing rewrite matches these against
-    /// that type; both earlier spellings (source names, freshened sig names)
-    /// can disagree with it after unification.
-    pub(super) fn_dict_constraints: HashMap<String, Vec<TyConstraint>>,
     /// Wanted class constraints collected while checking the current function:
     /// (class name, the instantiated type the constraint applies to). Discharged
     /// at the function boundary once unification has resolved the type.
@@ -762,11 +716,8 @@ impl Checker {
             local_classes: HashSet::new(),
             local_types: HashSet::new(),
             orphan_check_enabled: false,
-            fn_constraints: HashMap::new(),
-            fn_constraint_args: HashMap::new(),
+            fn_contexts: HashMap::new(),
             method_constraints: HashMap::new(),
-            fn_use_constraints: HashMap::new(),
-            fn_dict_constraints: HashMap::new(),
             wanted: Vec::new(),
             binder_types: Vec::new(),
             fromjson_types: HashSet::new(),
@@ -1337,20 +1288,22 @@ impl Checker {
     fn skolemize_sig_body_vars(
         &mut self,
         fresh_ty: &Ty,
-        declared_constraints: &[TyConstraint],
+        declared_context: &FnContext,
     ) -> (HashMap<TyVar, Ty>, HashMap<u32, Ty>) {
         // The declared context re-expressed over the FRESHENED variable names,
         // so a class can be matched to the fresh variable that carries it. A
         // constraint whose variable is not freshened (an instance-method
-        // signature, already alpha-renamed) matches by its own name.
+        // signature, already alpha-renamed) matches by its own name. A
+        // compound constraint (`GEncode (Rep a)`) constrains no single
+        // variable and provides no given (`declared_class_vars` skips it).
         let free: Vec<TyVar> = fresh_ty.free_vars();
         let mut givens_for: HashMap<String, Vec<String>> = HashMap::new();
-        for c in declared_constraints {
-            // `c.type_var` here is the SOURCE name; the freshened variable keeps
+        for (cls, var) in declared_context.declared_class_vars() {
+            // `var` here is the SOURCE name; the freshened variable keeps
             // the source name as a prefix, so match by trimming the id suffix is
             // fragile. Instead map by exact source name against the fresh var's
             // name prefix below.
-            givens_for.entry(c.type_var.clone()).or_default().push(c.class_name.clone());
+            givens_for.entry(var.to_string()).or_default().push(cls.to_string());
         }
         // Recover each fresh variable's SOURCE name. `freshen_sig_type_mapped`
         // builds a fresh name as `<source_name><id>` via `fresh_tyvar`, so the
@@ -1391,430 +1344,6 @@ impl Checker {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
         self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file: None, notes, baseline });
-    }
-
-    /// Reject exports whose declared type uses something the FFI marshaller
-    /// cannot correctly move across the boundary. Runs on each export's FINAL
-    /// resolved type — the same `export_types` the code generator marshals from
-    /// — so the whitelist is derived from what `ffi_arg_marshal_desc` /
-    /// `ffi_decode_desc_inner` / the deep-force fallback actually handle, and a
-    /// silently-wrong `"false"`/`__mll_to_lua` conversion never reaches codegen.
-    fn validate_export_types(&mut self, exports: &[String], functions: &[TFunction], constrained: &[String]) {
-        let tys: HashMap<&str, &Ty> = functions.iter()
-            .filter(|f| exports.contains(&f.name))
-            .map(|f| (f.name.as_str(), &f.ty))
-            .collect();
-        // Deterministic diagnostics: follow the source export order.
-        for name in exports {
-            // Already rejected for a class constraint — its type variable would
-            // be reported a second time here.
-            if constrained.contains(name) { continue; }
-            let Some(&ty) = tys.get(name.as_str()) else { continue };
-            // Peel a leading rank-2 forall (the LuaIO scope variable etc.).
-            let mut t = ty;
-            while let Ty::Forall(_, inner) = t { t = inner; }
-            // An export `A1 -> … -> An -> R` decodes each Ai (Lua→mata-ll, the
-            // IMPORT direction) and marshals R (mata-ll→Lua, the EXPORT
-            // direction). A top-level argument that is itself a function is a
-            // CALLBACK — the one arrow position codegen fully marshals — so it
-            // is validated by `validate_top_level_callback`; every other arrow
-            // (nested in a container, in the result, or a callback's own
-            // argument) is rejected by `ffi_marshallable`.
-            let (arg_tys, res) = t.peel_arrows();
-            for (i, a) in arg_tys.iter().enumerate() {
-                let pos = format!("argument {}", i + 1);
-                if matches!(a, Ty::Arrow(..)) {
-                    self.validate_top_level_callback(name, &pos, a);
-                } else if let Err((culprit, cdir)) =
-                    self.ffi_marshallable(a, FfiDir::Import, &mut Vec::new())
-                {
-                    self.push_export_ffi_error(name, &pos, a, &culprit, cdir);
-                }
-            }
-            if let Err((culprit, cdir)) =
-                self.ffi_marshallable(res, FfiDir::Export, &mut Vec::new())
-            {
-                self.push_export_ffi_error(name, "the result", res, &culprit, cdir);
-            }
-        }
-    }
-
-    /// Whether `ty` can cross the FFI boundary in direction `dir`. Returns the
-    /// first offending sub-type (and the direction it was reached in) so the
-    /// diagnostic can name the exact culprit.
-    ///
-    /// A type may cross ONLY if it has DEFINED marshalling behavior — a shape
-    /// the host is meant to see, not an internal representation that happens to
-    /// be a table. The allowed set:
-    ///   - scalars (Int/Number/Double/Float/String/Char/ByteString/Bool),
-    ///     `()`, and the opaque `LuaUserData` interop handle;
-    ///   - `[a]` iff `a` allowed; tuples iff every element allowed;
-    ///   - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;
-    ///   - `Maybe a` iff `a` allowed (designed: nil ↔ Nothing);
-    ///   - `Any` — the dynamic boundary type, allowed by name (its runtime
-    ///     conversion is defined by codegen);
-    ///   - a `LuaDict` record iff every declared field is allowed (designed: a
-    ///     name-keyed table);
-    ///   - a NEWTYPE iff its single underlying field is allowed — a newtype is
-    ///     transparent (codegen represents the value AS the field, no wrapper),
-    ///     so it inherits the field's representation (this is what keeps
-    ///     `newtype FileHandle = FileHandle LuaUserData` and the whole `LIO`
-    ///     file API crossing);
-    ///   - `IO a` / `LuaIO _ a` in EXPORT (result) position iff `a` is allowed.
-    ///
-    /// A recursive newtype/record re-entry is cycle-guarded and passes as opaque.
-    ///
-    /// Everything else is REJECTED. In particular a plain user `data` type with
-    /// real constructors — a multi-constructor and/or multi-field ADT — is
-    /// refused EVEN WHEN its fields would each marshal, because it would cross
-    /// only as its internal `{tag, fields…}` table, which has no host-facing
-    /// meaning. This is where prelude ADTs `Either`/`Ordering`/`ExitValue` land
-    /// when used outside their one designed context (the `Either String a` of a
-    /// `LuaTry`/`LuaIOCatch` result is peeled and validated by its caller, not
-    /// here). Also rejected: a bare type variable (no runtime rep for a
-    /// polymorphic value), a region-scoped `ST`/`STArray`/`STRef` handle, `IO`/
-    /// `LuaIO` in IMPORT (argument) position, and any unknown constructor.
-    ///
-    /// A FUNCTION type is rejected here in EVERY position. Codegen only fully
-    /// marshals a callback when it is a DIRECT top-level export argument (the
-    /// branch emitting `__mll_wrap_callback_in`); a function nested inside a
-    /// container/result — or a callback's own function-typed argument — is
-    /// passed opaque (`"false"` descriptor) and would leak. So the only accepted
-    /// arrow position is handled separately by `validate_top_level_callback`,
-    /// and this recursive check treats any arrow it reaches as unmarshallable.
-    fn ffi_marshallable(&self, ty: &Ty, dir: FfiDir, visited: &mut Vec<String>)
-        -> Result<(), (Ty, FfiDir)>
-    {
-        self.ffi_marshallable_allowing(ty, dir, &[], visited)
-    }
-
-    /// As `ffi_marshallable`, but a bare type variable in `opaque` is accepted
-    /// rather than rejected. This is the ONE designed exception: the threaded
-    /// STATE of a polymorphic outgoing-callback FFI (the fold pattern) crosses
-    /// Lua opaquely, and `validate_ffi_callbacks` already enforces that it is a
-    /// single shared variable threaded soundly through the callback's
-    /// accumulator, the callback's result, an FFI argument, and the FFI return.
-    /// So when validating such an import, those state variables are whitelisted;
-    /// every OTHER type variable (and every other position) is checked as usual.
-    /// Exports and non-stateful imports pass an empty `opaque`.
-    fn ffi_marshallable_allowing(&self, ty: &Ty, dir: FfiDir, opaque: &[TyVar], visited: &mut Vec<String>)
-        -> Result<(), (Ty, FfiDir)>
-    {
-        match ty {
-            Ty::Forall(_, inner) => self.ffi_marshallable_allowing(inner, dir, opaque, visited),
-            Ty::Unit => Ok(()),
-            Ty::Con(n) if ffi_scalar_name(n) || n == "LuaUserData" => Ok(()),
-            // A whitelisted opaque state variable (see the doc above) round-trips.
-            Ty::Var(v) if opaque.contains(v) => Ok(()),
-            Ty::Var(_) | Ty::Skolem(..) | Ty::Promoted(_) => Err((ty.clone(), dir)),
-            Ty::List(a) => self.ffi_marshallable_allowing(a, dir, opaque, visited),
-            Ty::Tuple(es) => {
-                for e in es { self.ffi_marshallable_allowing(e, dir, opaque, visited)?; }
-                Ok(())
-            }
-            // An action can be a RESULT (the export performs it and marshals the
-            // yielded value) but never an ARGUMENT — Lua has nothing to hand in.
-            Ty::IO(a) | Ty::LuaIO(_, a) => match dir {
-                FfiDir::Export => self.ffi_marshallable_allowing(a, FfiDir::Export, opaque, visited),
-                FfiDir::Import => Err((ty.clone(), dir)),
-            },
-            // A function reached in any recursive position (nested in a
-            // container, in result position, or as a callback's own argument)
-            // is NOT marshalled by codegen — reject it. The one accepted arrow,
-            // a top-level export-argument callback, never reaches here.
-            Ty::Arrow(..) => Err((ty.clone(), dir)),
-            Ty::App(..) | Ty::Con(_) => {
-                let (head, args) = decompose_ty_app(ty);
-                match head {
-                    Some("HashMap") if args.len() == 2 => {
-                        // Keys are Lua table keys — must be a scalar; values
-                        // marshal by the value type in the same direction.
-                        if !matches!(args[0], Ty::Con(n) if ffi_scalar_name(n)) {
-                            return Err((ty.clone(), dir));
-                        }
-                        self.ffi_marshallable_allowing(args[1], dir, opaque, visited)
-                    }
-                    // `Maybe a` has a designed shape at the boundary — `nil` for
-                    // Nothing, the marshalled payload for `Just` — so it crosses
-                    // iff its type argument crosses in the same direction.
-                    Some("Maybe") if args.len() == 1 => {
-                        self.ffi_marshallable_allowing(args[0], dir, opaque, visited)
-                    }
-                    // `Any` is the dynamic FFI boundary type: it has a defined
-                    // runtime conversion (supplied by codegen), so it crosses in
-                    // both directions regardless of what value it wraps.
-                    Some("Any") => Ok(()),
-                    Some(name) => {
-                        // A recursive type re-entered (a newtype/record whose
-                        // field mentions itself): the marshaller treats the
-                        // re-entry as opaque and it round-trips, so accept and stop.
-                        if visited.iter().any(|v| v == name) {
-                            return Ok(());
-                        }
-                        // Only types with a DEFINED marshalling shape may cross.
-                        // Dispatch on the designed representation, not on "does
-                        // every field happen to marshal":
-                        //   - a newtype is transparent (codegen represents the
-                        //     value AS its single field with no wrapper), so it
-                        //     crosses iff that field crosses;
-                        //   - a LuaDict record crosses as a name-keyed table, so
-                        //     it crosses iff every declared field crosses;
-                        //   - any other user `data` type — a plain ADT with real
-                        //     constructors — would cross only as its internal
-                        //     `{tag, fields…}` table, an implementation detail
-                        //     with no host-facing meaning, so it is REJECTED even
-                        //     when its fields would each marshal. (This is where
-                        //     `Either`/`Ordering`/`ExitValue` land outside their
-                        //     designed contexts — a plain ADT is a plain ADT.)
-                        // No constructors ⇒ an abstract/handle constructor (ST,
-                        // STArray, STRef, an unknown type, …) with no marshalling
-                        // ⇒ reject.
-                        let is_newtype = self.newtype_types.contains(name);
-                        let is_luadict = self.luadict_types.contains(name);
-                        if !is_newtype && !is_luadict {
-                            return Err((ty.clone(), dir));
-                        }
-                        let cons: Vec<ConInfo> = self.constructors.values()
-                            .filter(|c| c.type_name == name)
-                            .cloned()
-                            .collect();
-                        if cons.is_empty() {
-                            return Err((ty.clone(), dir));
-                        }
-                        visited.push(name.to_string());
-                        for con in &cons {
-                            let mut smap: HashMap<TyVar, Ty> = HashMap::new();
-                            for (tv, a) in con.type_vars.iter().zip(args.iter()) {
-                                smap.insert(tv.clone(), (*a).clone());
-                            }
-                            let sub = Subst::from_map(smap);
-                            for fty in &con.field_types {
-                                let fty = fty.apply_subst(&sub);
-                                if let Err(e) = self.ffi_marshallable_allowing(&fty, dir, opaque, visited) {
-                                    visited.pop();
-                                    return Err(e);
-                                }
-                            }
-                        }
-                        visited.pop();
-                        Ok(())
-                    }
-                    None => Err((ty.clone(), dir)),
-                }
-            }
-        }
-    }
-
-    /// Validate the ONE arrow position codegen fully marshals: a direct
-    /// top-level export argument that is a callback. The codegen (the export
-    /// loop's `if matches!(ty, Ty::Arrow(..))` branch, which emits
-    /// `__mll_wrap_callback_in`) marshals each callback argument OUT
-    /// (mata-ll→Lua, the EXPORT direction) with `ffi_arg_marshal_desc` and
-    /// decodes the callback's result IN (Lua→mata-ll, the IMPORT direction)
-    /// after unwrapping its `LuaIO`/`IO` — but it hard-codes the opaque
-    /// `"false"` descriptor for a callback argument that is ITSELF a function.
-    /// So we accept this callback iff none of its arguments is a function and
-    /// every argument (Export) and its unwrapped result (Import) marshal. (The
-    /// separate pre-existing rule that the result be an action lives in
-    /// `check_export_callbacks`.)
-    fn validate_top_level_callback(&mut self, name: &str, position: &str, cb_ty: &Ty) {
-        let (cb_args, cb_ret) = cb_ty.peel_arrows();
-        for a in &cb_args {
-            let cb_pos = format!("{} (a callback argument)", position);
-            if matches!(a, Ty::Arrow(..)) {
-                // A callback taking a callback: codegen passes the inner
-                // function opaque, so reject it (name it via the shared helper).
-                self.push_export_ffi_error(name, &cb_pos, cb_ty, a, FfiDir::Export);
-            } else if let Err((culprit, cdir)) =
-                self.ffi_marshallable(a, FfiDir::Export, &mut Vec::new())
-            {
-                self.push_export_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
-            }
-        }
-        // The callback's result crosses back IN; codegen unwraps its LuaIO/IO
-        // and decodes the payload, so validate the payload in Import direction.
-        let payload = match cb_ret {
-            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-            other => other,
-        };
-        if let Err((culprit, cdir)) =
-            self.ffi_marshallable(payload, FfiDir::Import, &mut Vec::new())
-        {
-            let cb_pos = format!("{} (the callback result)", position);
-            self.push_export_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
-        }
-    }
-
-    /// Build the export-boundary diagnostic: name the binder, the position
-    /// (argument N / the result), the whole position type and the offending
-    /// sub-type, and the crossing direction — with a `note:` explaining WHY the
-    /// culprit cannot cross.
-    fn push_export_ffi_error(&mut self, name: &str, position: &str, whole: &Ty, culprit: &Ty, dir: FfiDir) {
-        let dir_phrase = match dir {
-            FfiDir::Import => "cross into mata-ll from Lua (argument direction)",
-            FfiDir::Export => "cross out to Lua from mata-ll (result direction)",
-        };
-        // Rename internal/freshened type variables (e.g. `a890`, `_r7`) to
-        // friendly letters, sharing one map so `whole` and `culprit` agree.
-        let (whole, culprit) = {
-            let pair = friendly_export_tys(&[whole, culprit]);
-            (pair[0].clone(), pair[1].clone())
-        };
-        let nested = if whole == culprit {
-            String::new()
-        } else {
-            format!(" (inside '{}')", whole)
-        };
-        self.push_error_ctx(
-            DiagnosticKind::Other(format!(
-                "Export '{}': {} has type '{}', which cannot {} — the type '{}'{} has no FFI marshalling.",
-                name, position, whole, dir_phrase, culprit, nested
-            )),
-            format!("export declaration of '{}'", name),
-        );
-        let note = export_ffi_note(&culprit, dir);
-        if let Some(diag) = self.errors.last_mut() {
-            diag.notes.push(note);
-        }
-    }
-
-    /// Validate the signature of an FFI IMPORT — a `LuaPure`/`LuaIO`/`LuaTry`/
-    /// `LuaIOCatch` (or `LuaCatch`/`LuaIterator`) declaration mata-ll calls INTO
-    /// Lua with. This is the mirror of `validate_export_types`: an import
-    /// `f :: A1 -> … -> An -> R` marshals each `Ai` OUT to Lua (mata-ll→Lua, the
-    /// EXPORT direction) and decodes `R` back IN (Lua→mata-ll, the IMPORT
-    /// direction), so the arguments and the result are checked in the OPPOSITE
-    /// directions to an export. `ty` is the FINAL resolved type (the `LuaIO`/…
-    /// wrappers already reduced to `IO`/the raw result), `ffi_kind` says which
-    /// FFI form it is so the `Try`/`IOCatch` `Either String _` layer is peeled
-    /// exactly as codegen's `ffi_catch_decode_desc` does.
-    ///
-    /// A function-typed argument is an OUTGOING CALLBACK (mata-ll passes it to
-    /// the host, which calls it): its own arguments come IN from Lua (Import) and
-    /// its result goes back OUT (Export) — the exact dual of an export-argument
-    /// callback — so it is validated with the directions swapped.
-    fn validate_ffi_import_types(&mut self, name: &str, ffi_kind: FfiKind, ty: &Ty) {
-        let mut t = ty;
-        while let Ty::Forall(_, inner) = t { t = inner; }
-        let (arg_tys, res) = t.peel_arrows();
-
-        // The threaded-state fold pattern (see `validate_ffi_callbacks`): a
-        // polymorphic outgoing callback threads an OPAQUE state variable that
-        // round-trips through Lua untouched. `validate_ffi_callbacks` already
-        // enforces the soundness of that variable (one shared variable across
-        // the callback's accumulator/result and the FFI's initial-state
-        // argument/return), so here we whitelist those variables and let every
-        // OTHER type still be structurally checked. A callback whose value
-        // variables are empty is concrete and contributes none.
-        let mut opaque: Vec<TyVar> = Vec::new();
-        for cb in arg_tys.iter().filter(|t| matches!(t, Ty::Arrow(..))) {
-            for v in callback_value_vars(cb) {
-                if !opaque.contains(&v) { opaque.push(v); }
-            }
-        }
-
-        for (i, a) in arg_tys.iter().enumerate() {
-            let pos = format!("argument {}", i + 1);
-            if matches!(a, Ty::Arrow(..)) {
-                self.validate_ffi_import_callback(name, &pos, a, &opaque);
-            } else if let Err((culprit, cdir)) =
-                self.ffi_marshallable_allowing(a, FfiDir::Export, &opaque, &mut Vec::new())
-            {
-                self.push_import_ffi_error(name, &pos, a, &culprit, cdir);
-            }
-        }
-
-        // The result crosses IN from Lua. For a plain Pure/IO import that is the
-        // whole result (its `IO` peeled here, so a bare `IO a` result validates
-        // `a`); for a Try/IOCatch import the `pcall` wrapper builds the
-        // `Either String _` tags itself, so only the inner payload is decoded —
-        // peel `IO`/`Either String` exactly like `ffi_catch_decode_desc`.
-        let payload = match ffi_kind {
-            FfiKind::Try | FfiKind::Catch | FfiKind::IOCatch => {
-                let inner = match res {
-                    Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-                    other => other,
-                };
-                let (head, args) = decompose_ty_app(inner);
-                match head {
-                    Some("Either") if args.len() == 2 => args[1],
-                    // Not the expected `Either String a` shape: validate the
-                    // whole inner result rather than silently skipping it.
-                    _ => inner,
-                }
-            }
-            // A plain IO/LuaIO result: decode the yielded value.
-            _ => match res {
-                Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-                other => other,
-            },
-        };
-        if let Err((culprit, cdir)) =
-            self.ffi_marshallable_allowing(payload, FfiDir::Import, &opaque, &mut Vec::new())
-        {
-            self.push_import_ffi_error(name, "the result", payload, &culprit, cdir);
-        }
-    }
-
-    /// Validate an OUTGOING callback argument of an FFI import: mata-ll hands
-    /// this function to the host, which invokes it, so its arguments arrive IN
-    /// from Lua (Import) and its result is sent back OUT (Export) — the mirror
-    /// of `validate_top_level_callback`. A callback nested one level deeper (a
-    /// callback that itself takes a callback) is passed opaque by codegen, so it
-    /// is rejected. `opaque` is the threaded-state whitelist (see the caller).
-    fn validate_ffi_import_callback(&mut self, name: &str, position: &str, cb_ty: &Ty, opaque: &[TyVar]) {
-        let (cb_args, cb_ret) = cb_ty.peel_arrows();
-        for a in &cb_args {
-            let cb_pos = format!("{} (a callback argument)", position);
-            if matches!(a, Ty::Arrow(..)) {
-                self.push_import_ffi_error(name, &cb_pos, cb_ty, a, FfiDir::Import);
-            } else if let Err((culprit, cdir)) =
-                self.ffi_marshallable_allowing(a, FfiDir::Import, opaque, &mut Vec::new())
-            {
-                self.push_import_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
-            }
-        }
-        // The callback's result goes back OUT to the host; unwrap its effect.
-        let payload = match cb_ret {
-            Ty::IO(a) | Ty::LuaIO(_, a) => a.as_ref(),
-            other => other,
-        };
-        if let Err((culprit, cdir)) =
-            self.ffi_marshallable_allowing(payload, FfiDir::Export, opaque, &mut Vec::new())
-        {
-            let cb_pos = format!("{} (the callback result)", position);
-            self.push_import_ffi_error(name, &cb_pos, cb_ty, &culprit, cdir);
-        }
-    }
-
-    /// The import-boundary analogue of `push_export_ffi_error`: same shape and
-    /// same `note:` guidance, phrased for an FFI import (a Lua call) rather than
-    /// an export.
-    fn push_import_ffi_error(&mut self, name: &str, position: &str, whole: &Ty, culprit: &Ty, dir: FfiDir) {
-        let dir_phrase = match dir {
-            FfiDir::Import => "cross into mata-ll from Lua (the host's return value)",
-            FfiDir::Export => "cross out to Lua from mata-ll (an argument to the host)",
-        };
-        let (whole, culprit) = {
-            let pair = friendly_export_tys(&[whole, culprit]);
-            (pair[0].clone(), pair[1].clone())
-        };
-        let nested = if whole == culprit {
-            String::new()
-        } else {
-            format!(" (inside '{}')", whole)
-        };
-        self.push_error_ctx(
-            DiagnosticKind::Other(format!(
-                "FFI import '{}': {} has type '{}', which cannot {} — the type '{}'{} has no FFI marshalling.",
-                name, position, whole, dir_phrase, culprit, nested
-            )),
-            format!("FFI declaration of '{}'", name),
-        );
-        let note = export_ffi_note(&culprit, dir);
-        if let Some(diag) = self.errors.last_mut() {
-            diag.notes.push(note);
-        }
     }
 
     /// Provenance notes for every existential skolem a diagnostic's types
@@ -3076,12 +2605,11 @@ impl Checker {
             context: None,
         });
 
-        // `Int` is the canonical builtin fixed-width integer (registered with
-        // kind Type above). There is deliberately no `Int` type and no
-        // `Int`/`Int` alias: mata-ll's integer is 64-bit and wrapping, so
-        // it carries GHC's `Int` name, and `Integer` (arbitrary precision) is
-        // rejected with a note (see Diagnostic::hint) rather than silently
-        // aliased — the alias would be the soundness back door.
+        // The two builtin integer types (both registered with kind Type
+        // above) mirror GHC: `Int` is 64-bit and wrapping, `Integer` is
+        // arbitrary-precision and the numeric default. They are distinct
+        // types, not aliases — an alias would let a wrapping value flow
+        // where exact arithmetic was promised.
 
         // The builtin `Bool` promotes (DataKinds) like any parameterless data
         // type: `'True`/`'False` have kind `Bool`. `Bool` is already in
@@ -3317,6 +2845,62 @@ impl Checker {
             }
         } else {
             Some(con_name.to_string())
+        }
+    }
+
+    /// Validate the constraints of one constructor's existential context
+    /// (pass 2b): each must name a known class and apply it, in the
+    /// Haskell-2010 form `C a`, to a variable the constructor actually
+    /// hides. Both surface forms — `forall a. Show a => …` and a GADT
+    /// signature's context — share every rule; only the explanation of the
+    /// wrong-variable case differs (a GADT's non-existential variable
+    /// reaches the result type, which is worth saying), so the form picks
+    /// the phrasing. `is_existential` answers whether a variable name is
+    /// bound by this constructor's forall (resp. computed existential set).
+    fn validate_existential_constraints(
+        &mut self,
+        con_name: &str,
+        constraints: &[Constraint],
+        is_existential: impl Fn(&str) -> bool,
+        form: ExConstraintForm,
+        ctx: &str,
+    ) {
+        for c in constraints {
+            match &c.type_arg {
+                Type::Var(v) if is_existential(v) => {
+                    if !self.classes.contains_key(&c.class_name) {
+                        self.push_error_ctx(
+                            DiagnosticKind::Other(format!(
+                                "Unknown typeclass '{}' in the context of constructor '{}': the constraint names the class the packed value must have an instance of, so it must be a class that is in scope",
+                                c.class_name, con_name)),
+                            ctx.to_string(),
+                        );
+                    }
+                }
+                Type::Var(v) => {
+                    let msg = match form {
+                        ExConstraintForm::Forall => format!(
+                            "Constraint '{} {}' on constructor '{}' does not mention any of its existentially quantified variables: only the variables bound by this constructor's 'forall' can carry a constraint here",
+                            c.class_name, v, con_name),
+                        ExConstraintForm::Gadt => format!(
+                            "Constraint '{} {}' on constructor '{}' does not mention any of its existential variables ('{}' reaches the constructor's result type, so it is chosen by the caller, not hidden by the constructor)",
+                            c.class_name, v, con_name, v),
+                    };
+                    self.push_error_ctx(DiagnosticKind::Other(msg), ctx.to_string());
+                }
+                other => {
+                    let shown = self.ast_type_to_ty(other);
+                    let msg = match form {
+                        ExConstraintForm::Forall => format!(
+                            "Constraint '{} {}' on constructor '{}' must apply the class to a plain type variable bound by the 'forall' (the Haskell 2010 form 'C a')",
+                            c.class_name, shown, con_name),
+                        ExConstraintForm::Gadt => format!(
+                            "Constraint '{} {}' on constructor '{}' must apply the class to a plain type variable (the Haskell 2010 form 'C a')",
+                            c.class_name, shown, con_name),
+                    };
+                    self.push_error_ctx(DiagnosticKind::Other(msg), ctx.to_string());
+                }
+            }
         }
     }
 
@@ -3746,37 +3330,13 @@ impl Checker {
                         // silently dropped anything malformed; report it here
                         // so a typo'd class or a constraint on the wrong
                         // variable cannot silently become "no constraint".
-                        for c in &con.existential_constraints {
-                            match &c.type_arg {
-                                Type::Var(v) if con.existential_vars.contains(v) => {
-                                    if !self.classes.contains_key(&c.class_name) {
-                                        self.push_error_ctx(
-                                            DiagnosticKind::Other(format!(
-                                                "Unknown typeclass '{}' in the context of constructor '{}': the constraint names the class the packed value must have an instance of, so it must be a class that is in scope",
-                                                c.class_name, con.name)),
-                                            ctx.clone(),
-                                        );
-                                    }
-                                }
-                                Type::Var(v) => {
-                                    self.push_error_ctx(
-                                        DiagnosticKind::Other(format!(
-                                            "Constraint '{} {}' on constructor '{}' does not mention any of its existentially quantified variables: only the variables bound by this constructor's 'forall' can carry a constraint here",
-                                            c.class_name, v, con.name)),
-                                        ctx.clone(),
-                                    );
-                                }
-                                other => {
-                                    let shown = self.ast_type_to_ty(other);
-                                    self.push_error_ctx(
-                                        DiagnosticKind::Other(format!(
-                                            "Constraint '{} {}' on constructor '{}' must apply the class to a plain type variable bound by the 'forall' (the Haskell 2010 form 'C a')",
-                                            c.class_name, shown, con.name)),
-                                        ctx.clone(),
-                                    );
-                                }
-                            }
-                        }
+                        self.validate_existential_constraints(
+                            &con.name,
+                            &con.existential_constraints,
+                            |v| con.existential_vars.iter().any(|ev| ev == v),
+                            ExConstraintForm::Forall,
+                            &ctx,
+                        );
                         if let Some(gadt_ty) = &con.gadt_type {
                             // A GADT signature's context is subject to the
                             // same rules as a forall-constructor's: each
@@ -3787,37 +3347,13 @@ impl Checker {
                             // belong on the functions that use the type).
                             let (gadt_constraints, _, _, ex_vars) =
                                 self.analyze_gadt_signature(gadt_ty);
-                            for c in &gadt_constraints {
-                                match &c.type_arg {
-                                    Type::Var(v) if ex_vars.iter().any(|t| &t.name == v) => {
-                                        if !self.classes.contains_key(&c.class_name) {
-                                            self.push_error_ctx(
-                                                DiagnosticKind::Other(format!(
-                                                    "Unknown typeclass '{}' in the context of constructor '{}': the constraint names the class the packed value must have an instance of, so it must be a class that is in scope",
-                                                    c.class_name, con.name)),
-                                                ctx.clone(),
-                                            );
-                                        }
-                                    }
-                                    Type::Var(v) => {
-                                        self.push_error_ctx(
-                                            DiagnosticKind::Other(format!(
-                                                "Constraint '{} {}' on constructor '{}' does not mention any of its existential variables ('{}' reaches the constructor's result type, so it is chosen by the caller, not hidden by the constructor)",
-                                                c.class_name, v, con.name, v)),
-                                            ctx.clone(),
-                                        );
-                                    }
-                                    other => {
-                                        let shown = self.ast_type_to_ty(other);
-                                        self.push_error_ctx(
-                                            DiagnosticKind::Other(format!(
-                                                "Constraint '{} {}' on constructor '{}' must apply the class to a plain type variable (the Haskell 2010 form 'C a')",
-                                                c.class_name, shown, con.name)),
-                                            ctx.clone(),
-                                        );
-                                    }
-                                }
-                            }
+                            self.validate_existential_constraints(
+                                &con.name,
+                                &gadt_constraints,
+                                |v| ex_vars.iter().any(|t| t.name == v),
+                                ExConstraintForm::Gadt,
+                                &ctx,
+                            );
                             // A GADT signature scopes its own type variables
                             // (the header parameters are arity markers), so
                             // it is checked as a standalone complete type.
@@ -3901,22 +3437,12 @@ impl Checker {
                 }
                 // Extract typeclass constraints before ast_type_to_ty discards them
                 if let Type::Constrained { constraints, .. } = ty {
-                    let ty_constraints: Vec<TyConstraint> = constraints.iter().map(|c| {
-                        let type_var = match &c.type_arg {
-                            Type::Var(v) => v.clone(),
-                            _ => format!("{:?}", c.type_arg),
-                        };
-                        TyConstraint { class_name: c.class_name.clone(), type_var }
-                    }).collect();
-                    // The structured argument of each constraint (`Rep a` for a
-                    // compound constraint the `type_var` string cannot hold), for
-                    // dictionary passing.
-                    let arg_tys: Vec<(String, Ty)> = constraints.iter()
+                    let declared: Vec<(String, Ty)> = constraints.iter()
                         .map(|c| (c.class_name.clone(), self.ast_type_to_ty(&c.type_arg)))
                         .collect();
-                    if !ty_constraints.is_empty() {
-                        self.fn_constraints.insert(name.clone(), ty_constraints);
-                        self.fn_constraint_args.insert(name.clone(), arg_tys);
+                    if !declared.is_empty() {
+                        self.fn_contexts.insert(name.clone(),
+                            FnContext { declared, ..FnContext::default() });
                     }
                 }
                 sigs.insert(name.clone(), self.ast_type_to_ty(ty));
@@ -3938,7 +3464,7 @@ impl Checker {
         // call any top-level function — e.g. a FromJSON instance written in
         // terms of the JSON module's decoder combinators.
         for (name, ty) in &sigs {
-            let scheme = self.generalize(&self.env.clone(), ty);
+            let scheme = self.generalize(&self.env, ty);
             self.env.insert(name.clone(), scheme);
         }
 
@@ -4087,7 +3613,7 @@ impl Checker {
                     let ffi_fn = self.generate_ffi_function(name, lua_name, *ffi_kind, ty);
                     functions.push(ffi_fn);
                     // Register in env
-                    let scheme = self.generalize(&self.env.clone(), ty);
+                    let scheme = self.generalize(&self.env, ty);
                     self.env.insert(name.clone(), scheme);
                 }
         }
@@ -4315,26 +3841,6 @@ fn outgoing_cb_flags(cb_ty: &Ty) -> (usize, bool) {
     let (args, ret) = cb_ty.peel_arrows();
     let run_io = matches!(ret, Ty::IO(_) | Ty::LuaIO(_, _));
     (args.len(), run_io)
-}
-
-/// Free type variables a callback carries through its argument and result
-/// *values*, excluding the phantom `LuaIO s` scope variable.
-fn callback_value_vars(cb_ty: &Ty) -> Vec<TyVar> {
-    let (args, ret) = cb_ty.peel_arrows();
-    let mut vars = Vec::new();
-    for a in &args {
-        for v in a.free_vars() {
-            if !vars.contains(&v) { vars.push(v); }
-        }
-    }
-    let produced = match ret {
-        Ty::IO(inner) | Ty::LuaIO(_, inner) => inner.as_ref(),
-        other => other,
-    };
-    for v in produced.free_vars() {
-        if !vars.contains(&v) { vars.push(v); }
-    }
-    vars
 }
 
 /// Node count of an AST `Type`, but stops counting at `cap` (returns `cap`

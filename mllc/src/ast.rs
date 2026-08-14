@@ -294,6 +294,148 @@ impl Expr {
         }
         e
     }
+
+    /// Rebuild this node with `f` applied to each DIRECT sub-expression.
+    ///
+    /// This is the one place that knows where an `Expr`'s child expressions
+    /// live — including the ones tucked inside case branches, guards,
+    /// let/do `LocalDef` bodies, do-statements, and record fields. Walkers
+    /// call this instead of re-encoding that structure, so a new variant only
+    /// needs a match arm here (and in `for_each_subexpr`), not in every pass.
+    ///
+    /// Deliberately NOT recursive: `f` receives each child once and decides
+    /// whether to recurse (typically by calling itself through this helper).
+    /// That keeps pass-specific concerns — scope tracking, pre- vs post-order
+    /// — in the pass, not here.
+    ///
+    /// Types are not visited (`Ascription` keeps its type untouched); a pass
+    /// that rewrites types must handle that variant itself.
+    pub fn map_subexprs(self, f: &mut impl FnMut(Expr) -> Expr) -> Expr {
+        match self {
+            // Leaves: names and literals carry no sub-expressions.
+            Expr::Var(_) | Expr::Con(_) | Expr::Lit(_) | Expr::OpFunc(_) => self,
+            Expr::App(func, arg) => Expr::App(Box::new(f(*func)), Box::new(f(*arg))),
+            Expr::Lambda { params, body } => Expr::Lambda {
+                params,
+                body: Box::new(f(*body)),
+            },
+            Expr::InfixApp { op, lhs, rhs } => Expr::InfixApp {
+                op,
+                lhs: Box::new(f(*lhs)),
+                rhs: Box::new(f(*rhs)),
+            },
+            Expr::Negate(x) => Expr::Negate(Box::new(f(*x))),
+            Expr::If { cond, then_branch, else_branch } => Expr::If {
+                cond: Box::new(f(*cond)),
+                then_branch: Box::new(f(*then_branch)),
+                else_branch: Box::new(f(*else_branch)),
+            },
+            Expr::Case { scrutinee, branches } => Expr::Case {
+                scrutinee: Box::new(f(*scrutinee)),
+                branches: branches.into_iter().map(|br| CaseBranch {
+                    pattern: br.pattern,
+                    guards: br.guards.into_iter().map(|g| Guard {
+                        condition: f(g.condition),
+                        body: f(g.body),
+                    }).collect(),
+                    body: f(br.body),
+                }).collect(),
+            },
+            Expr::Let { binds, body } => Expr::Let {
+                binds: binds.into_iter().map(|ld| LocalDef {
+                    name: ld.name,
+                    patterns: ld.patterns,
+                    body: f(ld.body),
+                }).collect(),
+                body: Box::new(f(*body)),
+            },
+            Expr::Do(stmts) => Expr::Do(stmts.into_iter().map(|s| match s {
+                DoStmt::Bind { name, expr } => DoStmt::Bind { name, expr: f(expr) },
+                DoStmt::Expr(e) => DoStmt::Expr(f(e)),
+                DoStmt::DoLet { binds } => DoStmt::DoLet {
+                    binds: binds.into_iter().map(|ld| LocalDef {
+                        name: ld.name,
+                        patterns: ld.patterns,
+                        body: f(ld.body),
+                    }).collect(),
+                },
+                DoStmt::PatternBind { pattern, expr } =>
+                    DoStmt::PatternBind { pattern, expr: f(expr) },
+                DoStmt::PatternDoLet { pattern, expr } =>
+                    DoStmt::PatternDoLet { pattern, expr: f(expr) },
+            }).collect()),
+            Expr::Ascription(x, t) => Expr::Ascription(Box::new(f(*x)), t),
+            Expr::RecordCon { constructor, fields } => Expr::RecordCon {
+                constructor,
+                fields: fields.into_iter().map(|(n, e)| (n, f(e))).collect(),
+            },
+            Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
+                expr: Box::new(f(*expr)),
+                updates: updates.into_iter().map(|(n, e)| (n, f(e))).collect(),
+            },
+            Expr::Paren(x) => Expr::Paren(Box::new(f(*x))),
+            Expr::Tuple(xs) => Expr::Tuple(xs.into_iter().map(|x| f(x)).collect()),
+            Expr::Spanned(sp, inner) => Expr::Spanned(sp, Box::new(f(*inner))),
+        }
+    }
+
+    /// Call `f` on each DIRECT sub-expression, by reference. The read-only
+    /// twin of `map_subexprs` — same child set, same non-recursive contract —
+    /// for collector passes that build up state instead of rewriting.
+    pub fn for_each_subexpr(&self, f: &mut impl FnMut(&Expr)) {
+        match self {
+            Expr::Var(_) | Expr::Con(_) | Expr::Lit(_) | Expr::OpFunc(_) => {}
+            Expr::App(func, arg) => { f(func); f(arg); }
+            Expr::Lambda { body, .. } => f(body),
+            Expr::InfixApp { lhs, rhs, .. } => { f(lhs); f(rhs); }
+            Expr::Negate(x) => f(x),
+            Expr::If { cond, then_branch, else_branch } => {
+                f(cond);
+                f(then_branch);
+                f(else_branch);
+            }
+            Expr::Case { scrutinee, branches } => {
+                f(scrutinee);
+                for br in branches {
+                    for g in &br.guards {
+                        f(&g.condition);
+                        f(&g.body);
+                    }
+                    f(&br.body);
+                }
+            }
+            Expr::Let { binds, body } => {
+                for ld in binds { f(&ld.body); }
+                f(body);
+            }
+            Expr::Do(stmts) => {
+                for s in stmts {
+                    match s {
+                        DoStmt::Bind { expr, .. }
+                        | DoStmt::Expr(expr)
+                        | DoStmt::PatternBind { expr, .. }
+                        | DoStmt::PatternDoLet { expr, .. } => f(expr),
+                        DoStmt::DoLet { binds } => {
+                            for ld in binds { f(&ld.body); }
+                        }
+                    }
+                }
+            }
+            Expr::Ascription(x, _) => f(x),
+            Expr::RecordCon { fields, .. } => {
+                for (_, e) in fields { f(e); }
+            }
+            Expr::RecordUpdate { expr, updates } => {
+                f(expr);
+                for (_, e) in updates { f(e); }
+            }
+            Expr::Paren(x) => f(x),
+            Expr::Tuple(xs) => {
+                for x in xs { f(x); }
+            }
+            Expr::Spanned(_, inner) => f(inner),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

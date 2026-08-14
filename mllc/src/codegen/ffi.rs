@@ -18,7 +18,64 @@ use super::lua::{Expr, FuncBody, Stmt};
 use super::names::{lua_quoted_string};
 use super::util::{con_name, decompose_app, subst_tyvars};
 
+/// The container classification BOTH boundary directions share.
+///
+/// PARITY INVARIANT: the argument marshaller (`ffi_arg_marshal_desc`) and the
+/// result decoder (`ffi_decode_desc_inner`) must descend into exactly the
+/// same container types, so encode-then-decode is identity at every nesting
+/// depth. Both obtain their classification here and match on it exhaustively
+/// (no `_` arm), so the parity holds by construction: a new container variant
+/// fails to compile until BOTH directions handle it. Only the descriptor
+/// formats — `t`/`w` diagnostics and `rb` rebuild flags exist on the decode
+/// side alone — stay direction-specific.
+pub(super) enum FfiShape {
+    List(Ty),
+    Tuple(Vec<Ty>),
+    Maybe(Ty),
+    /// A `LuaDict` record, its declared fields already instantiated at the
+    /// use's type arguments.
+    Record { name: String, fields: Vec<(String, Ty)> },
+    HashMap { key: Ty, value: Ty },
+    Any,
+    /// Everything without a designed container shape: scalars, type
+    /// variables, `LuaUserData`, functions, plain ADTs. The value crosses
+    /// as-is (possibly under a scalar check on the decode side).
+    Opaque,
+}
+
 impl CodeGen {
+    /// Classify `ty` for the FFI boundary (see [`FfiShape`]).
+    pub(super) fn ffi_shape(&self, ty: &Ty) -> FfiShape {
+        match ty {
+            Ty::List(inner) => FfiShape::List((**inner).clone()),
+            Ty::Tuple(elems) => FfiShape::Tuple(elems.clone()),
+            _ => {
+                let (head, args) = decompose_app(ty);
+                match head {
+                    Some("Maybe") if args.len() == 1 => FfiShape::Maybe(args[0].clone()),
+                    Some("HashMap") if args.len() == 2 => FfiShape::HashMap {
+                        key: args[0].clone(),
+                        value: args[1].clone(),
+                    },
+                    Some("Any") if args.is_empty() => FfiShape::Any,
+                    Some(name) if self.luadict_type_fields.contains_key(name) => {
+                        let (tvars, fields) = self.luadict_type_fields.get(name).unwrap();
+                        let mut smap = std::collections::HashMap::new();
+                        for (tv, a) in tvars.iter().zip(args.iter()) {
+                            smap.insert(tv.clone(), (*a).clone());
+                        }
+                        FfiShape::Record {
+                            name: name.to_string(),
+                            fields: fields.iter()
+                                .map(|(n, t)| (n.clone(), subst_tyvars(t, &smap)))
+                                .collect(),
+                        }
+                    }
+                    _ => FfiShape::Opaque,
+                }
+            }
+        }
+    }
     /// Build a Lua *descriptor* expression that drives type-directed decoding of
     /// a value of type `ty` that has just crossed the Lua FFI boundary (an FFI
     /// result). The descriptor is consumed at runtime by `__mll_ffi_decode`.
@@ -122,10 +179,8 @@ impl CodeGen {
     /// `ffi_arg_marshal_desc`). When the payload has no structure to marshal
     /// (a scalar or opaque payload), emit it directly — `__mll_opt` forces it.
     pub(super) fn ffi_boundary_value_ast(&mut self, value: &TExpr) -> Expr {
-        let (head, args) = decompose_app(&value.ty);
-        if head == Some("Maybe")
-            && args.len() == 1
-            && let Some(pdesc) = self.ffi_arg_marshal_desc(args[0], &mut Vec::new())
+        if let FfiShape::Maybe(payload) = self.ffi_shape(&value.ty)
+            && let Some(pdesc) = self.ffi_arg_marshal_desc(&payload, &mut Vec::new())
         {
             let v = self.expr_ast(value);
             Expr::call_named(
@@ -142,16 +197,13 @@ impl CodeGen {
     /// Lua host reads — the argument-direction dual of `ffi_decode_desc_inner`,
     /// interpreted at runtime by `__mll_arg_marshal`.
     ///
-    /// PARITY INVARIANT: this must descend into exactly the same container types
-    /// the result decoder (`ffi_decode_desc_inner`) descends into, so that
-    /// encode-then-decode is identity at every nesting depth. The decoder
-    /// converts: **list**, **tuple**, **`Maybe`**, **`HashMap`** (values; keys
-    /// are validated but not converted), and **`LuaDict` record**. Each has its
-    /// dual here. Anything the decoder leaves opaque — a type variable,
-    /// `LuaUserData`, a function, a plain (non-`LuaDict`) ADT, or a bare scalar —
-    /// this leaves opaque too (returns `None` → a shallow `__force` at the
-    /// boundary), so an opaque round-trip value (a fold's threaded state, a
-    /// polymorphic argument) passes through untouched and is never mangled.
+    /// Descends into exactly the container set [`FfiShape`] defines — the
+    /// same set the result decoder descends into (the parity invariant lives
+    /// on that enum). Anything `Opaque` — a type variable, `LuaUserData`, a
+    /// function, a plain (non-`LuaDict`) ADT, or a bare scalar — returns
+    /// `None` (a shallow `__force` at the boundary), so an opaque round-trip
+    /// value (a fold's threaded state, a polymorphic argument) passes
+    /// through untouched and is never mangled.
     ///
     /// A host reads:
     ///   - a **list** as a plain 1-based Lua array — a cons list (lazy spine,
@@ -175,83 +227,73 @@ impl CodeGen {
         let child = |slf: &Self, t: &Ty, stack: &mut Vec<String>| {
             slf.ffi_arg_marshal_desc(t, stack).unwrap_or_else(|| "false".into())
         };
-        match ty {
+        match self.ffi_shape(ty) {
             // A cons list is never host-readable raw: rebuild it into an array.
-            Ty::List(inner) => {
-                let e = child(self, inner, stack);
+            FfiShape::List(inner) => {
+                let e = child(self, &inner, stack);
                 Some(format!("{{k=\"list\",e={}}}", e))
             }
             // A tuple shares Lua's positional layout; force its lazy fields (and
             // convert any nested list/record/tuple/map/Maybe field) into a fresh
             // positional table.
-            Ty::Tuple(elems) => {
+            FfiShape::Tuple(elems) => {
                 let es: Vec<String> = elems.iter().map(|e| child(self, e, stack)).collect();
                 Some(format!("{{k=\"tuple\",n={},es={{{}}}}}", elems.len(), es.join(",")))
             }
-            _ => {
-                let (head, args) = decompose_app(ty);
-                if head == Some("Maybe") && args.len() == 1 {
-                    // A Maybe reached through the structural descent — a record
-                    // field, list element, or tuple field — is UNWRAPPED for the
-                    // host: `Just x` becomes the bare `x` (recursively marshalled
-                    // by x's type), `Nothing` becomes `nil` (an absent field).
-                    // This matches __mll_to_lua and is the exact inverse of the
-                    // result decoder's Maybe case (nil -> Nothing, value -> Just).
-                    // Always Some, so even a `Maybe Int` field is unwrapped,
-                    // not handed over as the raw `{x}` wrapper table.
-                    //
-                    // The TOP-LEVEL optional positional-argument path is separate:
-                    // it keeps the wrapper for __mll_opt/__mll_opt_tail (which
-                    // detect present/absent) and marshals only the payload — see
-                    // ffi_boundary_value_ast, which emits the `just` descriptor
-                    // and never routes a Maybe through here.
-                    let e = self.ffi_arg_marshal_desc(args[0], stack)
-                        .unwrap_or_else(|| "false".into());
-                    Some(format!("{{k=\"maybe\",e={}}}", e))
-                } else if let Some(name) = head.filter(|n| self.luadict_type_fields.contains_key(*n)) {
-                    // A LuaDict record is a name-keyed table; force its lazy
-                    // fields (the host reads `rec.field`) and convert nested
-                    // structure into a fresh table. Cycle guard: a recursive
-                    // record (e.g. a tree) would otherwise expand forever — treat
-                    // the re-entry as opaque (shallow force).
-                    if stack.iter().any(|s| s == name) {
-                        return None;
-                    }
-                    let (tvars, fields) = self.luadict_type_fields.get(name).unwrap().clone();
-                    let mut smap = std::collections::HashMap::new();
-                    for (tv, a) in tvars.iter().zip(args.iter()) {
-                        smap.insert(tv.clone(), (*a).clone());
-                    }
-                    stack.push(name.to_string());
-                    let fs: Vec<String> = fields.iter().map(|(fname, fty)| {
-                        let fty = subst_tyvars(fty, &smap);
-                        let d = child(self, &fty, stack);
-                        format!("{{n={},d={}}}", lua_quoted_string(fname.as_bytes()), d)
-                    }).collect();
-                    stack.pop();
-                    Some(format!("{{k=\"record\",fs={{{}}}}}", fs.join(",")))
-                } else if head == Some("HashMap") && args.len() == 2 {
-                    // A HashMap is a string-keyed Lua table the host reads as a
-                    // dict. Keys are scalars already usable as Lua keys — like the
-                    // result decoder (and __mll_to_lua), we never convert keys,
-                    // only marshal each VALUE by the value type. Always Some, the
-                    // dual of the decoder, which always descends a HashMap: a
-                    // `HashMap String [Int]` must reach the host as a dict of
-                    // real arrays, `HashMap String (Maybe X)` / `HashMap String
-                    // Record` / nested maps marshal recursively.
-                    let vdesc = child(self, args[1], stack);
-                    Some(format!("{{k=\"hashmap\",v={}}}", vdesc))
-                } else if head == Some("Any") {
-                    // Any is UNTAGGED for the host: the dynamic ADT's payload —
-                    // the scalar at field [2] of `{tag, payload}` — is handed over
-                    // bare (AnyNull is `{5}`, so its absent payload is nil). Always
-                    // Some, the dual of the result decoder's `any` arm; marshalling
-                    // an Any cannot fail, so no `t`/`w`.
-                    Some("{k=\"any\"}".into())
-                } else {
-                    None
-                }
+            // A Maybe reached through the structural descent — a record
+            // field, list element, or tuple field — is UNWRAPPED for the
+            // host: `Just x` becomes the bare `x` (recursively marshalled
+            // by x's type), `Nothing` becomes `nil` (an absent field).
+            // This matches __mll_to_lua and is the exact inverse of the
+            // result decoder's Maybe case (nil -> Nothing, value -> Just).
+            // Always Some, so even a `Maybe Int` field is unwrapped,
+            // not handed over as the raw `{x}` wrapper table.
+            //
+            // The TOP-LEVEL optional positional-argument path is separate:
+            // it keeps the wrapper for __mll_opt/__mll_opt_tail (which
+            // detect present/absent) and marshals only the payload — see
+            // ffi_boundary_value_ast, which emits the `just` descriptor
+            // and never routes a Maybe through here.
+            FfiShape::Maybe(payload) => {
+                let e = child(self, &payload, stack);
+                Some(format!("{{k=\"maybe\",e={}}}", e))
             }
+            // A LuaDict record is a name-keyed table; force its lazy
+            // fields (the host reads `rec.field`) and convert nested
+            // structure into a fresh table. Cycle guard: a recursive
+            // record (e.g. a tree) would otherwise expand forever — treat
+            // the re-entry as opaque (shallow force).
+            FfiShape::Record { name, fields } => {
+                if stack.iter().any(|s| s == &name) {
+                    return None;
+                }
+                stack.push(name);
+                let fs: Vec<String> = fields.iter().map(|(fname, fty)| {
+                    let d = child(self, fty, stack);
+                    format!("{{n={},d={}}}", lua_quoted_string(fname.as_bytes()), d)
+                }).collect();
+                stack.pop();
+                Some(format!("{{k=\"record\",fs={{{}}}}}", fs.join(",")))
+            }
+            // A HashMap is a string-keyed Lua table the host reads as a
+            // dict. Keys are scalars already usable as Lua keys — like the
+            // result decoder (and __mll_to_lua), we never convert keys,
+            // only marshal each VALUE by the value type. Always Some, the
+            // dual of the decoder, which always descends a HashMap: a
+            // `HashMap String [Int]` must reach the host as a dict of
+            // real arrays, `HashMap String (Maybe X)` / `HashMap String
+            // Record` / nested maps marshal recursively.
+            FfiShape::HashMap { value, .. } => {
+                let vdesc = child(self, &value, stack);
+                Some(format!("{{k=\"hashmap\",v={}}}", vdesc))
+            }
+            // Any is UNTAGGED for the host: the dynamic ADT's payload —
+            // the scalar at field [2] of `{tag, payload}` — is handed over
+            // bare (AnyNull is `{5}`, so its absent payload is nil). Always
+            // Some, the dual of the result decoder's `any` arm; marshalling
+            // an Any cannot fail, so no `t`/`w`.
+            FfiShape::Any => Some("{k=\"any\"}".into()),
+            FfiShape::Opaque => None,
         }
     }
 
@@ -365,14 +407,14 @@ impl CodeGen {
             Some(s) => format!(",w={:?}", s),
             None => String::new(),
         };
-        match ty {
+        match self.ffi_shape(ty) {
             // A list always needs converting: the host hands us a Lua array
             // (1-based, possibly empty) which must become a cons list. An empty
             // array MUST decode to the empty list (nil), never a bogus element.
-            Ty::List(inner) => {
+            FfiShape::List(inner) => {
                 let t = ty.to_string();
                 let (e, _) = self.ffi_child_desc(
-                    inner,
+                    &inner,
                     stack,
                     &format!("an element of the list declared {}", t),
                 );
@@ -382,7 +424,7 @@ impl CodeGen {
             // rebuild when some element itself needs conversion; when elements
             // only need scalar checks the descriptor is validation-only
             // (rb=false) and the host array passes through unchanged.
-            Ty::Tuple(elems) => {
+            FfiShape::Tuple(elems) => {
                 let t = ty.to_string();
                 let mut converts = false;
                 let mut any = false;
@@ -411,105 +453,94 @@ impl CodeGen {
                     converts,
                 ))
             }
-            _ => {
-                let (head, args) = decompose_app(ty);
-                match head {
-                    // Maybe: a host value crossing in must be wrapped as `Just`
-                    // (nil stays Nothing), since `Just` is now a tagged wrapper
-                    // rather than the identity. Always emit the descriptor so the
-                    // wrapping happens; `e` decodes/checks the payload (false =
-                    // pass the payload through).
-                    Some("Maybe") if args.len() == 1 => {
-                        let t = ty.to_string();
-                        let (e, _) = self.ffi_child_desc(
-                            args[0],
-                            stack,
-                            &format!("the payload of the declared {}", t),
-                        );
-                        Some((format!("{{k=\"maybe\",t={:?},e={}{}}}", t, e, wlua), true))
-                    }
-                    // HashMap always decodes: it validates each key's Lua type
-                    // against the declared key type (catching a host array where
-                    // a String-keyed map was declared) and decodes each value.
-                    Some("HashMap") if args.len() == 2 => {
-                        let t = ty.to_string();
-                        let kt = con_name(args[0]).unwrap_or("");
-                        let (v, _) = self.ffi_child_desc(
-                            args[1],
-                            stack,
-                            &format!("a value of the map declared {}", t),
-                        );
-                        Some((
-                            format!("{{k=\"hashmap\",t={:?},kt={:?},v={}{}}}", t, kt, v, wlua),
-                            true,
-                        ))
-                    }
-                    // A LuaDict record: recurse into declared fields, substituting
-                    // the type arguments for the record's type parameters.
-                    Some(name) if self.luadict_type_fields.contains_key(name) => {
-                        // Cycle guard: a recursive record type (e.g. a tree) would
-                        // otherwise expand forever. Treat the re-entry as opaque.
-                        if stack.iter().any(|s| s == name) {
-                            return None;
-                        }
-                        let t = ty.to_string();
-                        let (tvars, fields) = self.luadict_type_fields.get(name).unwrap().clone();
-                        let mut smap = std::collections::HashMap::new();
-                        for (tv, a) in tvars.iter().zip(args.iter()) {
-                            smap.insert(tv.clone(), (*a).clone());
-                        }
-                        stack.push(name.to_string());
-                        let mut converts = false;
-                        let mut any = false;
-                        let mut fs = Vec::new();
-                        for (fname, fty) in &fields {
-                            let fty = subst_tyvars(fty, &smap);
-                            let (d, c) = self.ffi_child_desc(
-                                &fty,
-                                stack,
-                                &format!("field '{}' of record {}", fname, name),
-                            );
-                            converts |= c;
-                            any |= d != "false";
-                            fs.push(format!("{{n={},d={}}}", lua_quoted_string(fname.as_bytes()), d));
-                        }
-                        stack.pop();
-                        // If every field is opaque there is nothing to convert
-                        // OR check — leave the host table untouched.
-                        if !any {
-                            return None;
-                        }
-                        Some((
-                            format!(
-                                "{{k=\"record\",t={:?},fs={{{}}},rb={}{}}}",
-                                t,
-                                fs.join(","),
-                                converts,
-                                wlua
-                            ),
-                            converts,
-                        ))
-                    }
-                    // Any: a host scalar crossing in is TAGGED into the dynamic
-                    // ADT — a Lua string becomes `AnyString`, an integer-valued
-                    // number `AnyInt`, a non-integer number `AnyNumber`, a
-                    // boolean `AnyBool`, and nil `AnyNull`. Always emit the
-                    // descriptor so the tagging happens; a value that is neither a
-                    // scalar nor nil (a table/function/userdata) fails at runtime,
-                    // localized by `w`, since `Any` models only scalar Lua values.
-                    Some("Any") if args.is_empty() => {
-                        let t = ty.to_string();
-                        Some((format!("{{k=\"any\",t={:?}{}}}", t, wlua), true))
-                    }
-                    // Scalars, opaque type variables, functions, IO, etc.: the raw
-                    // host value already matches the mata-ll representation. Bare
-                    // scalar results are deliberately NOT wrapped in a `chk` —
-                    // scalar FFI (e.g. bit ops) is the hot path, and the check
-                    // would tax every call; inside structures scalars ARE checked
-                    // (see ffi_child_desc).
-                    _ => None,
-                }
+            // Maybe: a host value crossing in must be wrapped as `Just`
+            // (nil stays Nothing), since `Just` is now a tagged wrapper
+            // rather than the identity. Always emit the descriptor so the
+            // wrapping happens; `e` decodes/checks the payload (false =
+            // pass the payload through).
+            FfiShape::Maybe(payload) => {
+                let t = ty.to_string();
+                let (e, _) = self.ffi_child_desc(
+                    &payload,
+                    stack,
+                    &format!("the payload of the declared {}", t),
+                );
+                Some((format!("{{k=\"maybe\",t={:?},e={}{}}}", t, e, wlua), true))
             }
+            // A LuaDict record: recurse into the declared fields (already
+            // instantiated at the use's type arguments by `ffi_shape`).
+            FfiShape::Record { name, fields } => {
+                // Cycle guard: a recursive record type (e.g. a tree) would
+                // otherwise expand forever. Treat the re-entry as opaque.
+                if stack.iter().any(|s| s == &name) {
+                    return None;
+                }
+                let t = ty.to_string();
+                stack.push(name.clone());
+                let mut converts = false;
+                let mut any = false;
+                let mut fs = Vec::new();
+                for (fname, fty) in &fields {
+                    let (d, c) = self.ffi_child_desc(
+                        fty,
+                        stack,
+                        &format!("field '{}' of record {}", fname, name),
+                    );
+                    converts |= c;
+                    any |= d != "false";
+                    fs.push(format!("{{n={},d={}}}", lua_quoted_string(fname.as_bytes()), d));
+                }
+                stack.pop();
+                // If every field is opaque there is nothing to convert
+                // OR check — leave the host table untouched.
+                if !any {
+                    return None;
+                }
+                Some((
+                    format!(
+                        "{{k=\"record\",t={:?},fs={{{}}},rb={}{}}}",
+                        t,
+                        fs.join(","),
+                        converts,
+                        wlua
+                    ),
+                    converts,
+                ))
+            }
+            // HashMap always decodes: it validates each key's Lua type
+            // against the declared key type (catching a host array where
+            // a String-keyed map was declared) and decodes each value.
+            FfiShape::HashMap { key, value } => {
+                let t = ty.to_string();
+                let kt = con_name(&key).unwrap_or("");
+                let (v, _) = self.ffi_child_desc(
+                    &value,
+                    stack,
+                    &format!("a value of the map declared {}", t),
+                );
+                Some((
+                    format!("{{k=\"hashmap\",t={:?},kt={:?},v={}{}}}", t, kt, v, wlua),
+                    true,
+                ))
+            }
+            // Any: a host scalar crossing in is TAGGED into the dynamic
+            // ADT — a Lua string becomes `AnyString`, an integer-valued
+            // number `AnyInt`, a non-integer number `AnyNumber`, a
+            // boolean `AnyBool`, and nil `AnyNull`. Always emit the
+            // descriptor so the tagging happens; a value that is neither a
+            // scalar nor nil (a table/function/userdata) fails at runtime,
+            // localized by `w`, since `Any` models only scalar Lua values.
+            FfiShape::Any => {
+                let t = ty.to_string();
+                Some((format!("{{k=\"any\",t={:?}{}}}", t, wlua), true))
+            }
+            // Scalars, opaque type variables, functions, IO, etc.: the raw
+            // host value already matches the mata-ll representation. Bare
+            // scalar results are deliberately NOT wrapped in a `chk` —
+            // scalar FFI (e.g. bit ops) is the hot path, and the check
+            // would tax every call; inside structures scalars ARE checked
+            // (see ffi_child_desc).
+            FfiShape::Opaque => None,
         }
     }
 }

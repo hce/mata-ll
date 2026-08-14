@@ -60,6 +60,7 @@ mod ffi;
 mod function;
 mod inline;
 mod ioloop;
+mod loopcore;
 mod lua;
 mod module;
 mod names;

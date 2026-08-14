@@ -10,6 +10,12 @@ use crate::tir::*;
 use crate::typechecker::{Checker, ClassInfo, InstanceInfo};
 use crate::types::{Diagnostic, DiagnosticKind, InstHead, Ty, TyVar, TyConstraint, Subst, TyFamilies};
 
+/// Per-function cap on generated specializations. Trips on polymorphic
+/// recursion — each specialization demanding another at a bigger type — and
+/// switches the function to dictionary passing (see
+/// `Monomorphizer::trip_spec_cap`).
+const SPEC_LIMIT: usize = 16;
+
 /// The message and optional note of a "No instance" error. The note carries a
 /// mata-ll-specific hint when the (method, type) pair is a known
 /// GHC-vs-mata-ll divergence.
@@ -253,20 +259,20 @@ impl Monomorphizer {
             gen_stack: Vec::new(),
             cur_dict_params: Vec::new(),
             fn_constraints: {
-                // Prefer the freshened-name spelling of each function's
+                // Prefer the final-name spelling of each function's
                 // constraints (the names its checked type actually uses);
                 // fall back to the source-name record for functions the
                 // checker did not re-express (none today, defensively).
-                let mut cs = checker.get_fn_constraints().clone();
+                let mut cs = checker.get_fn_constraints();
                 for (name, use_cs) in checker.get_fn_dict_constraints() {
-                    cs.insert(name.clone(), use_cs.clone());
+                    cs.insert(name, use_cs);
                 }
                 cs
             },
             classes: checker.get_classes().clone(),
             method_to_class,
             locals: HashSet::new(),
-            fn_constraint_args: checker.get_fn_constraint_args().clone(),
+            fn_constraint_args: checker.get_fn_constraint_args(),
             cur_dict_by_arg: Vec::new(),
             in_dictform: false,
             ty_families: checker.get_ty_families().clone(),
@@ -352,16 +358,7 @@ impl Monomorphizer {
         if !self.purged_specs.is_empty() {
             for func in result_fns.iter_mut().chain(instance_fns.iter_mut()) {
                 for clause in &mut func.clauses {
-                    clause.body = self.revert_purged(clause.body.clone());
-                    clause.guards = clause.guards.iter().map(|g| TGuard {
-                        condition: self.revert_purged(g.condition.clone()),
-                        body: self.revert_purged(g.body.clone()),
-                    }).collect();
-                    clause.where_binds = clause.where_binds.iter().map(|wb| TLocalDef {
-                        name: wb.name.clone(),
-                        patterns: wb.patterns.clone(),
-                        body: self.revert_purged(wb.body.clone()),
-                    }).collect();
+                    clause.map_exprs(&mut |e| self.revert_purged(e));
                 }
             }
         }
@@ -411,24 +408,26 @@ impl Monomorphizer {
                 // non-dict functions. Idempotent per function: DictCall nodes
                 // pass through untouched, so re-running after a new flag only
                 // converts the calls to the newly flagged names.
+                // `TClause::map_exprs` covers body, guards AND where-binding
+                // bodies — the previous inlined copies of this loop skipped
+                // the guards, so a dict-passing call in a guard condition was
+                // never rewritten.
                 for func in &mut result_fns {
                     if self.dict_passing_fns.contains(&func.name) { continue; }
                     for clause in &mut func.clauses {
-                        clause.body = self.rewrite_dict_call_sites(
-                            self.revert_purged(clause.body.clone()));
-                        clause.where_binds = clause.where_binds.iter().map(|wb| TLocalDef {
-                            name: wb.name.clone(),
-                            patterns: wb.patterns.clone(),
-                            body: self.rewrite_dict_call_sites(
-                                self.revert_purged(wb.body.clone())),
-                        }).collect();
+                        clause.map_exprs(&mut |e| {
+                            let e = self.revert_purged(e);
+                            self.rewrite_dict_call_sites(e)
+                        });
                     }
                 }
                 for func in &mut instance_fns {
                     if self.dict_passing_fns.contains(&func.name) { continue; }
                     for clause in &mut func.clauses {
-                        clause.body = self.rewrite_dict_call_sites(
-                            self.revert_purged(clause.body.clone()));
+                        clause.map_exprs(&mut |e| {
+                            let e = self.revert_purged(e);
+                            self.rewrite_dict_call_sites(e)
+                        });
                     }
                 }
                 // (c) The rewrites may have generated new functions:
@@ -441,14 +440,10 @@ impl Monomorphizer {
                     for func in &mut batch {
                         if self.dict_passing_fns.contains(&func.name) { continue; }
                         for clause in &mut func.clauses {
-                            clause.body = self.rewrite_dict_call_sites(
-                                self.revert_purged(clause.body.clone()));
-                            clause.where_binds = clause.where_binds.iter().map(|wb| TLocalDef {
-                                name: wb.name.clone(),
-                                patterns: wb.patterns.clone(),
-                                body: self.rewrite_dict_call_sites(
-                                    self.revert_purged(wb.body.clone())),
-                            }).collect();
+                            clause.map_exprs(&mut |e| {
+                                let e = self.revert_purged(e);
+                                self.rewrite_dict_call_sites(e)
+                            });
                         }
                     }
                     result_fns.append(&mut batch);
@@ -561,17 +556,16 @@ impl Monomorphizer {
     /// polymorphic derived `eq_Tree`), dispatch by head — the instance choice
     /// depends only on the head — without specializing anything.
     fn resolve_op_use(&mut self, method: &str, use_ty: &Ty) -> MethodDispatch {
+        // The shared concrete path first; only a still-polymorphic binding
+        // (Deferred) falls through to the operator-only dispatch below.
+        match self.resolve_method_use(method, use_ty) {
+            MethodDispatch::Deferred => {}
+            decided => return decided,
+        }
         let Some(binding) = self.class_var_binding(method, use_ty) else {
             return MethodDispatch::Deferred;
         };
         let binding = self.reduce_families(&binding).unwrap_or(binding);
-        if binding.free_vars().is_empty() && !Self::contains_skolem(&binding) {
-            let reduced_use_ty = self.reduce_families(use_ty).unwrap_or_else(|| use_ty.clone());
-            return match self.resolve_at_type(method, &binding, &reduced_use_ty) {
-                Some(name) => MethodDispatch::Resolved(name),
-                None => MethodDispatch::Missing(binding),
-            };
-        }
         // Polymorphic binding: structural eq still specializes by shape
         // (element eq degrades to the raw-equality runtime fallback), other
         // methods dispatch by instance head alone.
@@ -738,49 +732,69 @@ impl Monomorphizer {
         if let Some(existing) = self.specializations.get(&key) {
             return existing.clone();
         }
-        if self.specializations.keys().filter(|k| k.name == base).count() > 16 {
-            // The same polymorphic-recursion guard as the generic call path:
-            // switch this instance method to dictionary passing and purge its
-            // specializations, so EVERY caller routes through the composed
-            // dictionary form. Returning the raw original here instead (the
-            // old behavior) left the 17th-and-later types calling a body
-            // whose still-polymorphic method uses resolve to nothing at
-            // runtime — a generic function (gSum over the C1 of each
-            // deriving constructor, gFields over each S1 field, …) died with
-            // a nil call as soon as the program passed 16 of them.
-            self.dict_passing_fns.insert(base.to_string());
-            let purged: HashSet<String> = self.specializations.iter()
-                .filter(|(k, _)| k.name == base)
-                .map(|(_, v)| v.clone())
-                .collect();
-            self.specializations.retain(|k, _| k.name != base);
-            self.generated.retain(|f| !purged.contains(&f.name));
-            for p in purged {
-                self.purged_specs.insert(p, base.to_string());
-            }
+        // The same polymorphic-recursion guard as the generic call path:
+        // switch this instance method to dictionary passing so EVERY caller
+        // routes through the composed dictionary form. Returning the raw
+        // original here instead (the old behavior) left the 17th-and-later
+        // types calling a body whose still-polymorphic method uses resolve
+        // to nothing at runtime — a generic function (gSum over the C1 of
+        // each deriving constructor, gFields over each S1 field, …) died
+        // with a nil call as soon as the program passed 16 of them.
+        if self.trip_spec_cap(base) {
             return base.to_string();
         }
         let mangled = self.mangle_name(base, fn_ty);
         // Insert before generating the body so a recursive field of the same
         // type resolves to this same specialization instead of looping.
         self.specializations.insert(key, mangled.clone());
-        if let Some(poly_fn) = self.poly_fns.get(base).cloned() {
-            let subst = Self::compute_body_subst(&poly_fn, fn_ty);
-            let mut spec_fn = poly_fn.clone();
-            spec_fn.name = mangled.clone();
-            spec_fn.ty = fn_ty.clone();
-            spec_fn.clauses = spec_fn.clauses.into_iter()
-                .map(|c| c.apply_subst(&subst))
-                .collect();
-            spec_fn.specialized = true;
-            // Keep the generation stack accurate so a still-polymorphic
-            // recursive call inside this body resolves to THIS specialization.
-            self.gen_stack.push((base.to_string(), mangled.clone()));
-            spec_fn = self.mono_function(spec_fn);
-            self.gen_stack.pop();
-            self.generated.push(spec_fn);
-        }
+        self.generate_specialization(base, &mangled, fn_ty);
         mangled
+    }
+
+    /// True when `name` has just tripped the per-function specialization cap
+    /// (a polymorphic-recursion symptom: each specialization demands another
+    /// at a bigger type). Flags the function as dictionary-passing and purges
+    /// exactly the specializations OF THIS function — identified by their
+    /// recorded mangled names, never by name prefix, which would also delete
+    /// specializations of a sibling `foo_bar` when `foo` trips the limit.
+    /// Call sites already rewritten to a purged name are reverted to the
+    /// original function in `run` via `purged_specs`.
+    fn trip_spec_cap(&mut self, name: &str) -> bool {
+        if self.specializations.keys().filter(|k| k.name == name).count() <= SPEC_LIMIT {
+            return false;
+        }
+        self.dict_passing_fns.insert(name.to_string());
+        let purged: HashSet<String> = self.specializations.iter()
+            .filter(|(k, _)| k.name == name)
+            .map(|(_, v)| v.clone())
+            .collect();
+        self.specializations.retain(|k, _| k.name != name);
+        self.generated.retain(|f| !purged.contains(&f.name));
+        for p in purged {
+            self.purged_specs.insert(p, name.to_string());
+        }
+        true
+    }
+
+    /// Clone the polymorphic original of `name` at `fn_ty`, substitute its
+    /// body types, and monomorphize it under an accurate generation stack (a
+    /// still-polymorphic recursive call inside the body then resolves to THIS
+    /// specialization). The `mangled` name must already be registered in
+    /// `specializations` so recursive uses find it instead of looping.
+    fn generate_specialization(&mut self, name: &str, mangled: &str, fn_ty: &Ty) {
+        let Some(poly_fn) = self.poly_fns.get(name).cloned() else { return };
+        let subst = Self::compute_body_subst(&poly_fn, fn_ty);
+        let mut spec_fn = poly_fn;
+        spec_fn.name = mangled.to_string();
+        spec_fn.ty = fn_ty.clone();
+        spec_fn.clauses = spec_fn.clauses.into_iter()
+            .map(|c| c.apply_subst(&subst))
+            .collect();
+        spec_fn.specialized = true;
+        self.gen_stack.push((name.to_string(), mangled.to_string()));
+        let spec_fn = self.mono_function(spec_fn);
+        self.gen_stack.pop();
+        self.generated.push(spec_fn);
     }
 
     fn ty_to_suffix(&self, ty: &Ty) -> String {
@@ -1029,49 +1043,15 @@ impl Monomorphizer {
                     let mangled = if let Some(existing) = self.specializations.get(&key) {
                         existing.clone()
                     } else {
-                        // Check for polymorphic recursion (too many specializations)
-                        let spec_count = self.specializations.keys()
-                            .filter(|k| k.name == *name)
-                            .count();
-                        if spec_count > 16 {
-                            // Switch to dictionary-passing for this function.
-                            // Purge exactly the specializations OF THIS
-                            // function, identified by their recorded mangled
-                            // names — never by name prefix, which would also
-                            // delete specializations of a sibling `foo_bar`
-                            // when `foo` trips the limit.
-                            self.dict_passing_fns.insert(name.clone());
-                            let purged: HashSet<String> = self.specializations.iter()
-                                .filter(|(k, _)| k.name == *name)
-                                .map(|(_, v)| v.clone())
-                                .collect();
-                            self.specializations.retain(|k, _| k.name != *name);
-                            self.generated.retain(|f| !purged.contains(&f.name));
-                            // Remember what was purged: call sites rewritten
-                            // to these names before the limit tripped are
-                            // reverted to the original function in `run`.
-                            for p in purged {
-                                self.purged_specs.insert(p, name.clone());
-                            }
+                        // Polymorphic recursion trips the specialization cap;
+                        // the reference stays by name and run()'s worklist
+                        // routes it through dictionary passing.
+                        if self.trip_spec_cap(name) {
                             return TExpr { kind: expr.kind, ty };
                         }
                         let mangled = self.mangle_name(name, &ty);
                         self.specializations.insert(key, mangled.clone());
-                        if let Some(poly_fn) = self.poly_fns.get(name).cloned() {
-                            let mut spec_fn = poly_fn.clone();
-                            spec_fn.name = mangled.clone();
-                            // Apply type substitution to body for correct method resolution
-                            let subst = Self::compute_body_subst(&poly_fn, &ty);
-                            spec_fn.ty = ty.clone();
-                            spec_fn.clauses = spec_fn.clauses.into_iter()
-                                .map(|c| c.apply_subst(&subst))
-                                .collect();
-                            spec_fn.specialized = true;
-                            self.gen_stack.push((name.clone(), mangled.clone()));
-                            spec_fn = self.mono_function(spec_fn);
-                            self.gen_stack.pop();
-                            self.generated.push(spec_fn);
-                        }
+                        self.generate_specialization(name, &mangled, &ty);
                         mangled
                     };
                     TExprKind::Var(mangled)
@@ -1253,13 +1233,6 @@ impl Monomorphizer {
                 }
                 TExprKind::Lambda { params, body }
             }
-            TExprKind::If { cond, then_branch, else_branch } => {
-                TExprKind::If {
-                    cond: Box::new(self.mono_expr(*cond)),
-                    then_branch: Box::new(self.mono_expr(*then_branch)),
-                    else_branch: Box::new(self.mono_expr(*else_branch)),
-                }
-            }
             TExprKind::Case { scrutinee, branches } => {
                 TExprKind::Case {
                     scrutinee: Box::new(self.mono_expr(*scrutinee)),
@@ -1304,20 +1277,6 @@ impl Monomorphizer {
                 }
                 TExprKind::Let { binds, body }
             }
-            TExprKind::Paren(inner) => TExprKind::Paren(Box::new(self.mono_expr(*inner))),
-            TExprKind::Tuple(elems) => TExprKind::Tuple(elems.into_iter().map(|e| self.mono_expr(e)).collect()),
-            TExprKind::RecordUpdate { record, updates, num_fields } => TExprKind::RecordUpdate {
-                record: Box::new(self.mono_expr(*record)),
-                updates: updates.into_iter().map(|(n, idx, e)| (n, idx, self.mono_expr(e))).collect(),
-                num_fields,
-            },
-            TExprKind::OutgoingCallback { callee, arity, run_io } =>
-                TExprKind::OutgoingCallback {
-                    callee: Box::new(self.mono_expr(*callee)),
-                    arity, run_io,
-                },
-            TExprKind::FfiMaybeArg { value } =>
-                TExprKind::FfiMaybeArg { value: Box::new(self.mono_expr(*value)) },
             // Numeric-literal overloading, GHC-faithful. A polymorphic integer
             // literal is `fromInteger (n :: Integer)`; a fractional literal is
             // `fromRational (n :: Number)`. At a concrete Int/Number type the
@@ -1404,7 +1363,13 @@ impl Monomorphizer {
                     _ => return raw,
                 }
             }
-            other => other,
+            // Everything else — If, Paren, Tuple, RecordUpdate, SpecCall and
+            // dictionary nodes, callbacks, non-numeric literals — is pure
+            // structural descent: no dispatch decision and no scope to track.
+            other => {
+                return TExpr { kind: other, ty }
+                    .map_children(&mut |c| self.mono_expr(c));
+            }
         };
         TExpr { kind, ty }
     }
@@ -1449,54 +1414,52 @@ impl Monomorphizer {
         }
     }
 
-    /// Generate a specialized eq function for a tuple type.
-    fn generate_tuple_eq(&mut self, elem_tys: &[Ty]) -> String {
-        let tuple_ty = Ty::Tuple(elem_tys.to_vec());
-        let mangled = self.mangle_name("eq", &tuple_ty);
-
-        let key = ("==".to_string(), tuple_ty.clone());
+    /// Build and register a synthetic runtime-backed function: a single
+    /// clause whose body is one `SpecCall` handing the work to a runtime
+    /// helper together with the resolved element implementations (see
+    /// codegen's `spec_call_ast` for the decode side of the spec string).
+    /// Shared by the structural eq/show generators, which used to be four
+    /// near-identical copies of this scaffolding. Memoized per
+    /// `(method, ty)` in `generated_impls` — the memo is inserted BEFORE
+    /// `build_spec` runs, so a recursive element type re-entering its own
+    /// generator terminates on the memo hit.
+    fn synthetic_spec_fn(
+        &mut self,
+        method: &str,
+        base: &str,
+        ty: &Ty,
+        param_names: &[&str],
+        result_ty: Ty,
+        build_spec: impl FnOnce(&mut Self) -> String,
+    ) -> String {
+        let key = (method.to_string(), ty.clone());
         if let Some(existing) = self.generated_impls.get(&key) {
             return existing.clone();
         }
+        let mangled = self.mangle_name(base, ty);
         self.generated_impls.insert(key, mangled.clone());
 
-        // Resolve eq for each element type (recursively generates specialized eq)
-        let elem_tys_owned: Vec<Ty> = elem_tys.to_vec();
-        let mut elem_eq_names = Vec::new();
-        for et in &elem_tys_owned {
-            elem_eq_names.push(self.resolve_elem_eq(et));
-        }
-
-        // Build body: eq_E1(a[1], b[1]) and eq_E2(a[2], b[2]) and ...
-        let bool_ty = Ty::Con("Bool".to_string());
-        let a = "_a".to_string();
-        let b = "_b".to_string();
-
-        // Encode element eq names in the SpecCall
-        let eq_spec = format!("__mll_tuple_eq:{}:{}", elem_tys.len(),
-            elem_eq_names.join(","));
-
+        let spec = build_spec(self);
+        let args: Vec<TExpr> = param_names.iter()
+            .map(|p| TExpr::new(TExprKind::Var((*p).to_string()), ty.clone()))
+            .collect();
         let body = TExpr::new(
             TExprKind::SpecCall {
                 original: mangled.clone(),
-                specialized: eq_spec,
-                args: vec![
-                    TExpr::new(TExprKind::Var(a.clone()), tuple_ty.clone()),
-                    TExpr::new(TExprKind::Var(b.clone()), tuple_ty.clone()),
-                ],
+                specialized: spec,
+                args,
             },
-            bool_ty.clone(),
+            result_ty.clone(),
         );
-
+        let param_tys: Vec<Ty> = param_names.iter().map(|_| ty.clone()).collect();
         let func = TFunction {
             name: mangled.clone(),
-            ty: Ty::fun(&[tuple_ty.clone(), tuple_ty], bool_ty),
+            ty: Ty::fun(&param_tys, result_ty),
             clauses: vec![TClause {
                 span: None,
-                patterns: vec![
-                    TPattern::Var(a, Ty::Unit),
-                    TPattern::Var(b, Ty::Unit),
-                ],
+                patterns: param_names.iter()
+                    .map(|p| TPattern::Var((*p).to_string(), Ty::Unit))
+                    .collect(),
                 guards: vec![],
                 body,
                 where_binds: vec![],
@@ -1509,49 +1472,26 @@ impl Monomorphizer {
         mangled
     }
 
+    /// Generate a specialized eq function for a tuple type.
+    fn generate_tuple_eq(&mut self, elem_tys: &[Ty]) -> String {
+        let tuple_ty = Ty::Tuple(elem_tys.to_vec());
+        let elem_tys = elem_tys.to_vec();
+        self.synthetic_spec_fn("==", "eq", &tuple_ty, &["_a", "_b"], Ty::Con("Bool".into()),
+            move |slf| {
+                // Resolve eq per element (recursively generating nested
+                // specialized eqs) and encode the names in the SpecCall.
+                let names: Vec<String> = elem_tys.iter()
+                    .map(|et| slf.resolve_elem_eq(et))
+                    .collect();
+                format!("__mll_tuple_eq:{}:{}", elem_tys.len(), names.join(","))
+            })
+    }
+
     fn generate_list_eq(&mut self, elem_ty: &Ty) -> String {
         let list_ty = Ty::List(Box::new(elem_ty.clone()));
-        let mangled = self.mangle_name("eq", &list_ty);
-
-        let key = ("==".to_string(), list_ty.clone());
-        if let Some(existing) = self.generated_impls.get(&key) {
-            return existing.clone();
-        }
-        self.generated_impls.insert(key, mangled.clone());
-
-        let elem_ty_owned = elem_ty.clone();
-        let elem_eq = self.resolve_elem_eq(&elem_ty_owned);
-
-        let bool_ty = Ty::Con("Bool".to_string());
-        let body = TExpr::new(
-            TExprKind::SpecCall {
-                original: mangled.clone(),
-                specialized: format!("__mll_list_eq:{}", elem_eq),
-                args: vec![
-                    TExpr::new(TExprKind::Var("_a".into()), list_ty.clone()),
-                    TExpr::new(TExprKind::Var("_b".into()), list_ty.clone()),
-                ],
-            },
-            bool_ty.clone(),
-        );
-
-        let func = TFunction {
-            name: mangled.clone(),
-            ty: Ty::fun(&[list_ty.clone(), list_ty], bool_ty),
-            clauses: vec![TClause {
-                span: None,
-                patterns: vec![
-                    TPattern::Var("_a".into(), Ty::Unit),
-                    TPattern::Var("_b".into(), Ty::Unit),
-                ],
-                guards: vec![], body, where_binds: vec![],
-            }],
-            specialized: true,
-            dict_params: vec![],
-            derived_strict: false,
-        };
-        self.generated.push(func);
-        mangled
+        let elem_ty = elem_ty.clone();
+        self.synthetic_spec_fn("==", "eq", &list_ty, &["_a", "_b"], Ty::Con("Bool".into()),
+            move |slf| format!("__mll_list_eq:{}", slf.resolve_elem_eq(&elem_ty)))
     }
 
     fn is_maybe_type(ty: &Ty) -> bool {
@@ -1568,47 +1508,9 @@ impl Monomorphizer {
 
     fn generate_maybe_eq(&mut self, inner_ty: &Ty) -> String {
         let maybe_ty = Ty::app(Ty::Con("Maybe".into()), inner_ty.clone());
-        let mangled = self.mangle_name("eq", &maybe_ty);
-
-        let key = ("==".to_string(), maybe_ty.clone());
-        if let Some(existing) = self.generated_impls.get(&key) {
-            return existing.clone();
-        }
-        self.generated_impls.insert(key, mangled.clone());
-
-        let inner_ty_owned = inner_ty.clone();
-        let elem_eq = self.resolve_elem_eq(&inner_ty_owned);
-
-        let bool_ty = Ty::Con("Bool".to_string());
-        let body = TExpr::new(
-            TExprKind::SpecCall {
-                original: mangled.clone(),
-                specialized: format!("__mll_maybe_eq:{}", elem_eq),
-                args: vec![
-                    TExpr::new(TExprKind::Var("_a".into()), maybe_ty.clone()),
-                    TExpr::new(TExprKind::Var("_b".into()), maybe_ty.clone()),
-                ],
-            },
-            bool_ty.clone(),
-        );
-
-        let func = TFunction {
-            name: mangled.clone(),
-            ty: Ty::fun(&[maybe_ty.clone(), maybe_ty], bool_ty),
-            clauses: vec![TClause {
-                span: None,
-                patterns: vec![
-                    TPattern::Var("_a".into(), Ty::Unit),
-                    TPattern::Var("_b".into(), Ty::Unit),
-                ],
-                guards: vec![], body, where_binds: vec![],
-            }],
-            specialized: true,
-            dict_params: vec![],
-            derived_strict: false,
-        };
-        self.generated.push(func);
-        mangled
+        let inner_ty = inner_ty.clone();
+        self.synthetic_spec_fn("==", "eq", &maybe_ty, &["_a", "_b"], Ty::Con("Bool".into()),
+            move |slf| format!("__mll_maybe_eq:{}", slf.resolve_elem_eq(&inner_ty)))
     }
 
     fn generate_container_show(&mut self, ty: &Ty) -> Option<String> {
@@ -1627,42 +1529,10 @@ impl Monomorphizer {
     /// helper (`__mll_show_list` / `__mll_show_maybe`). Shared by the container
     /// arms above so list and Maybe stay in lockstep.
     fn generate_threaded_show(&mut self, ty: &Ty, elem_ty: &Ty, runtime_fn: &str) -> String {
-        let mangled = self.mangle_name("show", ty);
-        let key = ("show".to_string(), ty.clone());
-        if let Some(existing) = self.generated_impls.get(&key) {
-            return existing.clone();
-        }
-        self.generated_impls.insert(key, mangled.clone());
-
-        // Resolve show for the element type
-        let elem_show = self.resolve_show_for(elem_ty);
-
-        let str_ty = Ty::Con("String".to_string());
-        let param = "_x".to_string();
-        let body = TExpr::new(
-            TExprKind::SpecCall {
-                original: mangled.clone(),
-                specialized: format!("{}:{}", runtime_fn, elem_show),
-                args: vec![TExpr::new(TExprKind::Var(param.clone()), ty.clone())],
-            },
-            str_ty.clone(),
-        );
-        let func = TFunction {
-            name: mangled.clone(),
-            ty: Ty::arrow(ty.clone(), str_ty),
-            clauses: vec![TClause {
-                span: None,
-                patterns: vec![TPattern::Var(param, Ty::Unit)],
-                guards: vec![],
-                body,
-                where_binds: vec![],
-            }],
-            specialized: true,
-            dict_params: vec![],
-            derived_strict: false,
-        };
-        self.generated.push(func);
-        mangled
+        let elem_ty = elem_ty.clone();
+        let runtime_fn = runtime_fn.to_string();
+        self.synthetic_spec_fn("show", "show", ty, &["_x"], Ty::Con("String".into()),
+            move |slf| format!("{}:{}", runtime_fn, slf.resolve_show_for(&elem_ty)))
     }
 
     /// Resolve the show function name for a given type.
@@ -1762,81 +1632,13 @@ impl Monomorphizer {
     /// Rewrite every reference to a purged specialization back to the original
     /// function name (see `purged_specs`).
     fn revert_purged(&self, expr: TExpr) -> TExpr {
-        let ty = expr.ty.clone();
-        let kind = match expr.kind {
-            TExprKind::Var(name) => {
-                let name = self.purged_specs.get(&name).cloned().unwrap_or(name);
-                TExprKind::Var(name)
-            }
-            TExprKind::App(f, a) => TExprKind::App(
-                Box::new(self.revert_purged(*f)),
-                Box::new(self.revert_purged(*a)),
-            ),
-            TExprKind::Lambda { params, body } => TExprKind::Lambda {
-                params,
-                body: Box::new(self.revert_purged(*body)),
-            },
-            TExprKind::InfixApp { op, lhs, rhs } => TExprKind::InfixApp {
-                op,
-                lhs: Box::new(self.revert_purged(*lhs)),
-                rhs: Box::new(self.revert_purged(*rhs)),
-            },
-            TExprKind::Negate(e) => TExprKind::Negate(Box::new(self.revert_purged(*e))),
-            TExprKind::Paren(e) => TExprKind::Paren(Box::new(self.revert_purged(*e))),
-            TExprKind::If { cond, then_branch, else_branch } => TExprKind::If {
-                cond: Box::new(self.revert_purged(*cond)),
-                then_branch: Box::new(self.revert_purged(*then_branch)),
-                else_branch: Box::new(self.revert_purged(*else_branch)),
-            },
-            TExprKind::Case { scrutinee, branches } => TExprKind::Case {
-                scrutinee: Box::new(self.revert_purged(*scrutinee)),
-                branches: branches.into_iter().map(|b| TCaseBranch {
-                    pattern: b.pattern,
-                    guards: b.guards.into_iter().map(|g| TGuard {
-                        condition: self.revert_purged(g.condition),
-                        body: self.revert_purged(g.body),
-                    }).collect(),
-                    body: self.revert_purged(b.body),
-                }).collect(),
-            },
-            TExprKind::Let { binds, body } => TExprKind::Let {
-                binds: binds.into_iter().map(|b| TLocalDef {
-                    name: b.name,
-                    patterns: b.patterns,
-                    body: self.revert_purged(b.body),
-                }).collect(),
-                body: Box::new(self.revert_purged(*body)),
-            },
-            TExprKind::SpecCall { original, specialized, args } => TExprKind::SpecCall {
-                original,
-                specialized,
-                args: args.into_iter().map(|a| self.revert_purged(a)).collect(),
-            },
-            TExprKind::Tuple(es) => TExprKind::Tuple(
-                es.into_iter().map(|e| self.revert_purged(e)).collect(),
-            ),
-            TExprKind::DictCall { func_name, dict_args, value_args } => TExprKind::DictCall {
-                func_name,
-                dict_args: dict_args.into_iter().map(|a| self.revert_purged(a)).collect(),
-                value_args: value_args.into_iter().map(|a| self.revert_purged(a)).collect(),
-            },
-            TExprKind::RecordUpdate { record, updates, num_fields } => TExprKind::RecordUpdate {
-                record: Box::new(self.revert_purged(*record)),
-                updates: updates.into_iter()
-                    .map(|(n, idx, e)| (n, idx, self.revert_purged(e)))
-                    .collect(),
-                num_fields,
-            },
-            TExprKind::OutgoingCallback { callee, arity, run_io } =>
-                TExprKind::OutgoingCallback {
-                    callee: Box::new(self.revert_purged(*callee)),
-                    arity, run_io,
-                },
-            TExprKind::FfiMaybeArg { value } =>
-                TExprKind::FfiMaybeArg { value: Box::new(self.revert_purged(*value)) },
-            other => other,
+        let expr = if let TExprKind::Var(name) = expr.kind {
+            let name = self.purged_specs.get(&name).cloned().unwrap_or(name);
+            TExpr { kind: TExprKind::Var(name), ty: expr.ty }
+        } else {
+            expr
         };
-        TExpr { kind, ty }
+        expr.map_children(&mut |c| self.revert_purged(c))
     }
 
     // --- Dictionary-passing support for polymorphic recursion ---
@@ -1874,16 +1676,23 @@ impl Monomorphizer {
         Subst::from_map(map)
     }
 
-    fn collect_subst_by_name(pattern: &Ty, concrete: &Ty, map: &mut HashMap<String, Ty>) {
+    /// One structural matcher behind both substitution collectors: walk
+    /// `pattern` (a declared/polymorphic type) against `concrete` (the type
+    /// at a use) and report each variable binding, in traversal order, to
+    /// `insert`. The two public collectors differ only in their map key
+    /// (variable NAME for the signature-name epoch, full `TyVar` for exact
+    /// identity) — they used to be byte-identical 35-line copies of this
+    /// match.
+    fn collect_subst_with(pattern: &Ty, concrete: &Ty, insert: &mut impl FnMut(&TyVar, &Ty)) {
         match (pattern, concrete) {
-            (Ty::Var(v), _) => { map.insert(v.name.clone(), concrete.clone()); }
+            (Ty::Var(v), _) => insert(v, concrete),
             (Ty::Arrow(pa, pb, _), Ty::Arrow(ca, cb, _)) |
             (Ty::App(pa, pb), Ty::App(ca, cb)) => {
-                Self::collect_subst_by_name(pa, ca, map);
-                Self::collect_subst_by_name(pb, cb, map);
+                Self::collect_subst_with(pa, ca, insert);
+                Self::collect_subst_with(pb, cb, insert);
             }
             (Ty::List(pa), Ty::List(ca)) |
-            (Ty::IO(pa), Ty::IO(ca)) => Self::collect_subst_by_name(pa, ca, map),
+            (Ty::IO(pa), Ty::IO(ca)) => Self::collect_subst_with(pa, ca, insert),
             // A constraint variable applied to an argument (`m a`) matched
             // against a sugared concrete type: IO b binds m := IO, [b] binds
             // m := [], LuaIO s b binds m := LuaIO s. Without these cases a
@@ -1891,61 +1700,38 @@ impl Monomorphizer {
             // (`pure`, `>>=`) could not be dispatched at the use site.
             // Mirrors the App-vs-IO/List/LuaIO cases in types::unify.
             (Ty::App(pf, pa), Ty::IO(ca)) => {
-                Self::collect_subst_by_name(pf, &Ty::Con("IO".into()), map);
-                Self::collect_subst_by_name(pa, ca, map);
+                Self::collect_subst_with(pf, &Ty::Con("IO".into()), insert);
+                Self::collect_subst_with(pa, ca, insert);
             }
             (Ty::App(pf, pa), Ty::List(ca)) => {
-                Self::collect_subst_by_name(pf, &Ty::Con("[]".into()), map);
-                Self::collect_subst_by_name(pa, ca, map);
+                Self::collect_subst_with(pf, &Ty::Con("[]".into()), insert);
+                Self::collect_subst_with(pa, ca, insert);
             }
             (Ty::App(pf, pa), Ty::LuaIO(s, ca)) => {
                 let lua_io_s = Ty::App(Box::new(Ty::Con("LuaIO".into())), Box::new(Ty::Var(s.clone())));
-                Self::collect_subst_by_name(pf, &lua_io_s, map);
-                Self::collect_subst_by_name(pa, ca, map);
+                Self::collect_subst_with(pf, &lua_io_s, insert);
+                Self::collect_subst_with(pa, ca, insert);
             }
             (Ty::Tuple(ps), Ty::Tuple(cs)) if ps.len() == cs.len() => {
                 for (p, c) in ps.iter().zip(cs.iter()) {
-                    Self::collect_subst_by_name(p, c, map);
+                    Self::collect_subst_with(p, c, insert);
                 }
             }
-            (Ty::Forall(_, pi), _) => Self::collect_subst_by_name(pi, concrete, map),
+            (Ty::Forall(_, pi), _) => Self::collect_subst_with(pi, concrete, insert),
             _ => {}
         }
     }
 
+    fn collect_subst_by_name(pattern: &Ty, concrete: &Ty, map: &mut HashMap<String, Ty>) {
+        Self::collect_subst_with(pattern, concrete, &mut |v, t| {
+            map.insert(v.name.clone(), t.clone());
+        });
+    }
+
     fn collect_subst_exact(pattern: &Ty, concrete: &Ty, map: &mut HashMap<TyVar, Ty>) {
-        match (pattern, concrete) {
-            (Ty::Var(v), _) => { map.insert(v.clone(), concrete.clone()); }
-            (Ty::Arrow(pa, pb, _), Ty::Arrow(ca, cb, _)) |
-            (Ty::App(pa, pb), Ty::App(ca, cb)) => {
-                Self::collect_subst_exact(pa, ca, map);
-                Self::collect_subst_exact(pb, cb, map);
-            }
-            (Ty::List(pa), Ty::List(ca)) |
-            (Ty::IO(pa), Ty::IO(ca)) => Self::collect_subst_exact(pa, ca, map),
-            // Same sugared-type equivalences as collect_subst_by_name:
-            // `m a` vs IO b / [b] / LuaIO s b binds the constructor variable.
-            (Ty::App(pf, pa), Ty::IO(ca)) => {
-                Self::collect_subst_exact(pf, &Ty::Con("IO".into()), map);
-                Self::collect_subst_exact(pa, ca, map);
-            }
-            (Ty::App(pf, pa), Ty::List(ca)) => {
-                Self::collect_subst_exact(pf, &Ty::Con("[]".into()), map);
-                Self::collect_subst_exact(pa, ca, map);
-            }
-            (Ty::App(pf, pa), Ty::LuaIO(s, ca)) => {
-                let lua_io_s = Ty::App(Box::new(Ty::Con("LuaIO".into())), Box::new(Ty::Var(s.clone())));
-                Self::collect_subst_exact(pf, &lua_io_s, map);
-                Self::collect_subst_exact(pa, ca, map);
-            }
-            (Ty::Tuple(ps), Ty::Tuple(cs)) if ps.len() == cs.len() => {
-                for (p, c) in ps.iter().zip(cs.iter()) {
-                    Self::collect_subst_exact(p, c, map);
-                }
-            }
-            (Ty::Forall(_, pi), _) => Self::collect_subst_exact(pi, concrete, map),
-            _ => {}
-        }
+        Self::collect_subst_with(pattern, concrete, &mut |v, t| {
+            map.insert(v.clone(), t.clone());
+        });
     }
 
     fn collect_clause_vars(clause: &TClause, vars: &mut Vec<TyVar>) {
@@ -2062,16 +1848,9 @@ impl Monomorphizer {
         let saved_dict_by_arg = std::mem::replace(&mut self.cur_dict_by_arg, dict_by_arg);
         let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params);
         for clause in &mut func.clauses {
-            clause.body = self.rewrite_dict_expr(clause.body.clone(), &func_name, &class_to_dict, &env);
-            clause.guards = clause.guards.iter().map(|g| TGuard {
-                condition: self.rewrite_dict_expr(g.condition.clone(), &func_name, &class_to_dict, &env),
-                body: self.rewrite_dict_expr(g.body.clone(), &func_name, &class_to_dict, &env),
-            }).collect();
-            clause.where_binds = clause.where_binds.iter().map(|wb| TLocalDef {
-                name: wb.name.clone(),
-                patterns: wb.patterns.clone(),
-                body: self.rewrite_dict_expr(wb.body.clone(), &func_name, &class_to_dict, &env),
-            }).collect();
+            clause.map_exprs(&mut |e| {
+                self.rewrite_dict_expr(e, &func_name, &class_to_dict, &env)
+            });
         }
         self.cur_dict_params = saved_dict_params;
         self.cur_dict_by_arg = saved_dict_by_arg;
@@ -2162,12 +1941,8 @@ impl Monomorphizer {
                             ty,
                         };
                     }
-                if let TExprKind::App(func, arg) = expr.kind {
-                    TExprKind::App(
-                        Box::new(self.rewrite_dict_expr(*func, func_name, class_to_dict, env)),
-                        Box::new(self.rewrite_dict_expr(*arg, func_name, class_to_dict, env)),
-                    )
-                } else { unreachable!() }
+                // Not a dict-passing call: generic descent below.
+                expr.kind
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
                 if let Some(class_name) = self.method_to_class.get(&op).cloned()
@@ -2185,49 +1960,14 @@ impl Monomorphizer {
                             let app1 = TExpr::new(TExprKind::App(Box::new(dict_access), Box::new(lhs)), Ty::Unit);
                             return TExpr::new(TExprKind::App(Box::new(app1), Box::new(rhs)), ty);
                         }
-                TExprKind::InfixApp {
-                    op,
-                    lhs: Box::new(self.rewrite_dict_expr(*lhs, func_name, class_to_dict, env)),
-                    rhs: Box::new(self.rewrite_dict_expr(*rhs, func_name, class_to_dict, env)),
-                }
+                // An InfixApp whose operator is not a dict method: generic
+                // descent below, like every other structural node.
+                TExprKind::InfixApp { op, lhs, rhs }
             }
-            TExprKind::Lambda { params, body } => TExprKind::Lambda {
-                params, body: Box::new(self.rewrite_dict_expr(*body, func_name, class_to_dict, env)),
-            },
-            TExprKind::If { cond, then_branch, else_branch } => TExprKind::If {
-                cond: Box::new(self.rewrite_dict_expr(*cond, func_name, class_to_dict, env)),
-                then_branch: Box::new(self.rewrite_dict_expr(*then_branch, func_name, class_to_dict, env)),
-                else_branch: Box::new(self.rewrite_dict_expr(*else_branch, func_name, class_to_dict, env)),
-            },
-            TExprKind::Case { scrutinee, branches } => TExprKind::Case {
-                scrutinee: Box::new(self.rewrite_dict_expr(*scrutinee, func_name, class_to_dict, env)),
-                branches: branches.into_iter().map(|b| TCaseBranch {
-                    pattern: b.pattern,
-                    guards: b.guards.into_iter().map(|g| TGuard {
-                        condition: self.rewrite_dict_expr(g.condition, func_name, class_to_dict, env),
-                        body: self.rewrite_dict_expr(g.body, func_name, class_to_dict, env),
-                    }).collect(),
-                    body: self.rewrite_dict_expr(b.body, func_name, class_to_dict, env),
-                }).collect(),
-            },
-            TExprKind::Let { binds, body } => TExprKind::Let {
-                binds: binds.into_iter().map(|b| TLocalDef {
-                    name: b.name, patterns: b.patterns,
-                    body: self.rewrite_dict_expr(b.body, func_name, class_to_dict, env),
-                }).collect(),
-                body: Box::new(self.rewrite_dict_expr(*body, func_name, class_to_dict, env)),
-            },
-            TExprKind::Negate(e) => TExprKind::Negate(Box::new(self.rewrite_dict_expr(*e, func_name, class_to_dict, env))),
-            TExprKind::Paren(e) => TExprKind::Paren(Box::new(self.rewrite_dict_expr(*e, func_name, class_to_dict, env))),
-            TExprKind::Tuple(es) => TExprKind::Tuple(es.into_iter().map(|e| self.rewrite_dict_expr(e, func_name, class_to_dict, env)).collect()),
-            TExprKind::RecordUpdate { record, updates, num_fields } => TExprKind::RecordUpdate {
-                record: Box::new(self.rewrite_dict_expr(*record, func_name, class_to_dict, env)),
-                updates: updates.into_iter().map(|(n, idx, e)| (n, idx, self.rewrite_dict_expr(e, func_name, class_to_dict, env))).collect(),
-                num_fields,
-            },
             other => other,
         };
         TExpr { kind, ty }
+            .map_children(&mut |c| self.rewrite_dict_expr(c, func_name, class_to_dict, env))
     }
 
     /// Decompose nested App into (head_function, [arg1, arg2, ...])
@@ -2301,62 +2041,11 @@ impl Monomorphizer {
                                 ty,
                             };
                         }
-                if let TExprKind::App(func, arg) = expr.kind {
-                    TExpr {
-                        kind: TExprKind::App(
-                            Box::new(self.rewrite_dict_call_sites(*func)),
-                            Box::new(self.rewrite_dict_call_sites(*arg)),
-                        ),
-                        ty,
-                    }
-                } else { unreachable!() }
+                // Not a dict-passing call: generic descent (which also
+                // covers the App operands themselves).
+                expr.map_children(&mut |c| self.rewrite_dict_call_sites(c))
             }
-            TExprKind::InfixApp { op, lhs, rhs } => TExpr {
-                kind: TExprKind::InfixApp {
-                    op,
-                    lhs: Box::new(self.rewrite_dict_call_sites(*lhs)),
-                    rhs: Box::new(self.rewrite_dict_call_sites(*rhs)),
-                }, ty,
-            },
-            TExprKind::Lambda { params, body } => TExpr {
-                kind: TExprKind::Lambda { params, body: Box::new(self.rewrite_dict_call_sites(*body)) }, ty,
-            },
-            TExprKind::If { cond, then_branch, else_branch } => TExpr {
-                kind: TExprKind::If {
-                    cond: Box::new(self.rewrite_dict_call_sites(*cond)),
-                    then_branch: Box::new(self.rewrite_dict_call_sites(*then_branch)),
-                    else_branch: Box::new(self.rewrite_dict_call_sites(*else_branch)),
-                }, ty,
-            },
-            TExprKind::Case { scrutinee, branches } => TExpr {
-                kind: TExprKind::Case {
-                    scrutinee: Box::new(self.rewrite_dict_call_sites(*scrutinee)),
-                    branches: branches.into_iter().map(|b| TCaseBranch {
-                        pattern: b.pattern,
-                        guards: b.guards.into_iter().map(|g| TGuard {
-                            condition: self.rewrite_dict_call_sites(g.condition),
-                            body: self.rewrite_dict_call_sites(g.body),
-                        }).collect(),
-                        body: self.rewrite_dict_call_sites(b.body),
-                    }).collect(),
-                }, ty,
-            },
-            TExprKind::Let { binds, body } => TExpr {
-                kind: TExprKind::Let {
-                    binds: binds.into_iter().map(|b| TLocalDef {
-                        name: b.name, patterns: b.patterns,
-                        body: self.rewrite_dict_call_sites(b.body),
-                    }).collect(),
-                    body: Box::new(self.rewrite_dict_call_sites(*body)),
-                }, ty,
-            },
-            TExprKind::Negate(e) => TExpr {
-                kind: TExprKind::Negate(Box::new(self.rewrite_dict_call_sites(*e))), ty,
-            },
-            TExprKind::Paren(e) => TExpr {
-                kind: TExprKind::Paren(Box::new(self.rewrite_dict_call_sites(*e))), ty,
-            },
-            _ => expr,
+            _ => expr.map_children(&mut |c| self.rewrite_dict_call_sites(c)),
         }
     }
 

@@ -132,7 +132,7 @@ impl Parser {
             Ok(())
         } else {
             Err(self.err_here(format!(
-                "Expected {:?}, found {:?}",
+                "Expected {}, found {}",
                 expected, self.peek()
             )))
         }
@@ -226,7 +226,22 @@ impl Parser {
                                 if self.at(&Token::RightParen) { self.advance(); }
                             }
                         }
-                        _ => { self.advance(); } // skip unknown
+                        other => {
+                            let mut diag = self.err_here(format!(
+                                "This export-list entry is not understood \
+                                 (found {}). An entry names a value, a \
+                                 type (optionally with '(..)'), or an \
+                                 operator in parentheses.",
+                                other
+                            ));
+                            diag.notes.push(
+                                "module re-exports ('module M') are not \
+                                 supported yet; export the module's names \
+                                 individually"
+                                    .to_string(),
+                            );
+                            return Err(vec![*diag]);
+                        }
                     }
                     self.skip_newlines_and_indent();
                     if self.at(&Token::Comma) { self.advance(); } else { break; }
@@ -322,7 +337,7 @@ impl Parser {
             Token::LeftParen => self.parse_operator_decl(),
             _ => {
                 Err(self.err_here(format!(
-                    "Unexpected token {:?} at top level",
+                    "Unexpected token {} at top level",
                     self.peek()
                 )))
             }
@@ -346,7 +361,9 @@ impl Parser {
         // Check for GADT syntax
         if self.at(&Token::Where) {
             self.advance();
-            // GADT constructors - for now just skip them and create a basic structure
+            // GADT constructors: each is `Con :: type`, with the full
+            // signature kept in `gadt_type` (the typechecker derives the
+            // fields, result-type indices and existentials from it).
             let mut constructors = Vec::new();
             self.skip_newlines_and_indent();
             let gadt_indent = self.current_indent;
@@ -410,7 +427,7 @@ impl Parser {
                 Token::Operator(o) if Self::is_type_operator(&o) => { self.advance(); o }
                 other => return Err(self.err_here(format!(
                     "Expected a type operator (a ':'-leading symbol like ':+:') \
-                     in parentheses after 'data', found {:?}", other))),
+                     in parentheses after 'data', found {}", other))),
             };
             self.expect(&Token::RightParen)?;
             Ok(op)
@@ -470,7 +487,7 @@ impl Parser {
                         Token::StrLit(s) => { self.advance(); Some(self.strlit_as_symbol(s, "a field rename key")?) }
                         _ => {
                             return Err(self.err_here(format!(
-                                "Expected a string literal after 'as' in field '{}' (e.g. `{} as \"key\" :: T`), found {:?}",
+                                "Expected a string literal after 'as' in field '{}' (e.g. `{} as \"key\" :: T`), found {}",
                                 field_name, field_name, self.peek()
                             )));
                         }
@@ -544,7 +561,7 @@ impl Parser {
                 Ok(Some(self.strlit_as_symbol(s, "a constructor rename name")?))
             }
             other => Err(self.err_here(format!(
-                "Expected a string literal after 'as' in constructor '{}' (e.g. `{} as \"name\"`), found {:?}",
+                "Expected a string literal after 'as' in constructor '{}' (e.g. `{} as \"name\"`), found {}",
                 con_name, con_name, other
             ))),
         }
@@ -694,31 +711,82 @@ impl Parser {
     fn parse_class_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Class)?;
 
-        // Parse optional superclass constraints: Eq a => or (Eq a, Show a) =>
+        // Parse optional superclass constraints: `Eq a =>` needs no parens,
+        // `(Eq a, Show a) =>` wraps one or more. Parsing is speculative: when
+        // the tokens turn out not to form a `... =>` context, they are
+        // re-read as the class head itself.
         let save = self.pos;
         let save_indent = self.current_indent;
         let mut superclasses = Vec::new();
 
-        // Try to parse constraints followed by =>
-        let first = self.expect_upper_ident()?;
-        if let Token::Ident(_) = self.peek() {
-            let _tv = self.expect_ident()?;
-            if self.at(&Token::FatArrow) {
-                // Single constraint: Eq a =>
-                superclasses.push(first);
+        if self.at(&Token::LeftParen) {
+            // ( C1 v, C2 v, ... ) =>
+            self.advance();
+            let mut supers = Vec::new();
+            loop {
+                let Token::UpperIdent(name) = self.peek().clone() else { break };
+                self.advance();
+                if !matches!(self.peek(), Token::Ident(_)) {
+                    supers.clear();
+                    break;
+                }
+                self.advance();
+                supers.push(name);
+                if self.at(&Token::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            let mut complete = !supers.is_empty() && self.at(&Token::RightParen);
+            if complete {
+                self.advance();
+                complete = self.at(&Token::FatArrow);
+            }
+            if complete {
                 self.advance(); // consume =>
+                superclasses = supers;
             } else {
-                // No constraint, backtrack
+                // A class head cannot start with '(' — this was an attempt
+                // at a context, so a targeted error beats backtracking into
+                // "Expected type/constructor name" at the paren.
+                self.pos = save;
+                self.current_indent = save_indent;
+                return Err(self.err_here(
+                    "A parenthesized class context lists superclass \
+                     constraints, each a class name applied to the class's \
+                     type variable, and ends with '=>': \
+                     class (Eq a, Show a) => MyClass a"
+                        .to_string(),
+                ));
+            }
+        } else {
+            // Try to parse a single constraint followed by =>
+            let first = self.expect_upper_ident()?;
+            if let Token::Ident(_) = self.peek() {
+                let tv = self.expect_ident()?;
+                if self.at(&Token::FatArrow) {
+                    // Single constraint: Eq a =>
+                    superclasses.push(first);
+                    self.advance(); // consume =>
+                } else if self.at(&Token::Comma) {
+                    // `class Eq a, Show a => ...`: several constraints were
+                    // meant, but a bare comma-separated context is not legal
+                    // Haskell — GHC requires the parens too.
+                    return Err(self.err_here(format!(
+                        "Several superclass constraints must be wrapped in \
+                         parentheses: class ({} {}, ...) => ...",
+                        first, tv
+                    )));
+                } else {
+                    // No constraint, backtrack
+                    self.pos = save;
+                    self.current_indent = save_indent;
+                }
+            } else {
                 self.pos = save;
                 self.current_indent = save_indent;
             }
-        } else if self.at(&Token::Comma) {
-            // Multiple constraints would need parens, skip for now
-            self.pos = save;
-            self.current_indent = save_indent;
-        } else {
-            self.pos = save;
-            self.current_indent = save_indent;
         }
 
         let class_name = self.expect_upper_ident()?;
@@ -955,15 +1023,12 @@ impl Parser {
             let ty = self.parse_type()?;
             return Ok(vec![Decl::TypeSig { name, ty }]);
         }
-        // Unknown intrinsic form — skip
-        while !self.at_eof() {
-            match self.peek() {
-                Token::Indent(n) if *n == 0 => break,
-                Token::EOF => break,
-                _ => { self.advance(); }
-            }
-        }
-        Ok(vec![])
+        Err(self.err_here(format!(
+            "An 'intrinsic' declaration is either 'intrinsic type family \
+             ...' or 'intrinsic name :: type' (a signature whose \
+             implementation the compiler provides); found {}",
+            self.peek()
+        )))
     }
 
     /// Look up an operator's fixity: a declared fixity (this module's or an
@@ -1764,7 +1829,7 @@ impl Parser {
                 Ok(Type::Con(format!("\"{}\"", sym)))
             }
             _ => {
-                Err(self.err_here(format!("Expected type, found {:?}", self.peek())))
+                Err(self.err_here(format!("Expected type, found {}", self.peek())))
             }
         }
     }
@@ -2267,7 +2332,7 @@ impl Parser {
             // handled by the let pipeline).
             if !patterns.is_empty() {
                 body = Expr::Lambda {
-                    params: Self::lambda_param_names(patterns),
+                    params: self.lambda_param_names(patterns)?,
                     body: Box::new(body),
                 };
             }
@@ -3163,7 +3228,7 @@ impl Parser {
                         // Desugar: wrap body in a single multi-param lambda
                         if !params.is_empty() {
                             expr = Expr::Lambda {
-                                params: Self::lambda_param_names(params),
+                                params: self.lambda_param_names(params)?,
                                 body: Box::new(expr),
                             };
                         }
@@ -3195,7 +3260,7 @@ impl Parser {
                                             let mut expr2 = self.parse_expr()?;
                                             if !params2.is_empty() {
                                                 expr2 = Expr::Lambda {
-                                                    params: Self::lambda_param_names(params2),
+                                                    params: self.lambda_param_names(params2)?,
                                                     body: Box::new(expr2),
                                                 };
                                             }
@@ -3328,7 +3393,7 @@ impl Parser {
                 })
             }
             _ => {
-                Err(self.err_here(format!("Expected expression, found {:?}", self.peek())))
+                Err(self.err_here(format!("Expected expression, found {}", self.peek())))
             }
         }
     }
@@ -3385,11 +3450,29 @@ impl Parser {
     /// Map a function binding's parameter patterns to plain lambda parameter
     /// names (`let f x y = e` => `f = \x y -> e`). Non-variable patterns collapse
     /// to a placeholder, matching the existing let-binding capability.
-    fn lambda_param_names(patterns: Vec<Pattern>) -> Vec<String> {
+    /// Parameter names of a local function-form binding (`let f x y = e`,
+    /// do-`let`). Local bindings support plain variable (or wildcard)
+    /// parameters only; a pattern parameter is rejected here rather than
+    /// silently renamed away, which would leave the pattern's variables
+    /// unbound and fail far from the cause.
+    fn lambda_param_names(&self, patterns: Vec<Pattern>) -> PResult<Vec<String>> {
         patterns.into_iter().map(|pat| match pat {
-            Pattern::Var(n) => n,
-            Pattern::Wildcard => "_".to_string(),
-            _ => "_p".to_string(),
+            Pattern::Var(n) => Ok(n),
+            Pattern::Wildcard => Ok("_".to_string()),
+            _ => {
+                let mut diag = self.err_here(
+                    "A local function binding cannot take a pattern as a \
+                     parameter; bind a plain variable and match it with \
+                     'case' in the body."
+                        .to_string(),
+                );
+                diag.notes.push(
+                    "GHC accepts pattern parameters in let/where bindings; \
+                     mata-ll does not support that yet"
+                        .to_string(),
+                );
+                Err(diag)
+            }
         }).collect()
     }
 
@@ -3538,7 +3621,7 @@ impl Parser {
                 }
             }
             _ => {
-                Err(self.err_here(format!("Expected pattern, found {:?}", self.peek())))
+                Err(self.err_here(format!("Expected pattern, found {}", self.peek())))
             }
         }
     }
@@ -3552,7 +3635,7 @@ impl Parser {
                 Ok(name)
             }
             _ => {
-                Err(self.err_here(format!("Expected identifier, found {:?}", self.peek())))
+                Err(self.err_here(format!("Expected identifier, found {}", self.peek())))
             }
         }
     }
@@ -3564,7 +3647,7 @@ impl Parser {
                 Ok(name)
             }
             _ => {
-                Err(self.err_here(format!("Expected type/constructor name, found {:?}", self.peek())))
+                Err(self.err_here(format!("Expected type/constructor name, found {}", self.peek())))
             }
         }
     }

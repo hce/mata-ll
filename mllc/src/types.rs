@@ -1804,10 +1804,6 @@ impl Diagnostic {
                 "Double" | "Float" =>
                     Some("the floating-point type is spelled 'Number' (Lua's number type); \
                           GHC's Double and Float do not exist in mata-ll."),
-                "Int" =>
-                    Some("the fixed-width integer type is spelled 'Int' — 64-bit and \
-                          wrapping, exactly like GHC's Int. For arbitrary precision use \
-                          'Integer' (the numeric default)."),
                 _ => None,
             },
             _ => None,

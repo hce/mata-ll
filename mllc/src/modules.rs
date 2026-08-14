@@ -102,7 +102,10 @@ impl ModuleLoader {
                 .ok_or_else(|| format!("Cannot find module '{}'", key))?,
         };
 
-        let tokens = lexer::lex(&source)?;
+        // An imported module's lex and parse errors surface through the
+        // import-error channel, prefixed with the module that failed.
+        let tokens = lexer::lex(&source)
+            .map_err(|d| format!("in module '{}': {}", key, d))?;
         // Fixity is part of a module's interface: this module's operators
         // must group under the fixities its imports (and the implicit
         // Prelude) declare, so those are collected before parsing.
@@ -525,6 +528,8 @@ impl Qual<'_> {
 
     fn expr(&self, e: &Expr, bound: &HashSet<String>) -> Expr {
         match e {
+            // The rename decisions: qualify a name only when it refers to a
+            // module-level sibling, not a local binding.
             Expr::Var(n) => {
                 if !bound.contains(n) && self.names.vals.contains(n) {
                     Expr::Var(self.q(n))
@@ -540,25 +545,18 @@ impl Qual<'_> {
                     Expr::OpFunc(n.clone())
                 }
             }
-            Expr::Con(_) | Expr::Lit(_) => e.clone(),
-            Expr::App(f, x) =>
-                Expr::App(Box::new(self.expr(f, bound)), Box::new(self.expr(x, bound))),
+            // Ascriptions carry a type; the generic descent visits only
+            // expressions, and sibling type names need qualifying too.
+            Expr::Ascription(x, t) =>
+                Expr::Ascription(Box::new(self.expr(x, bound)), self.ty(t)),
+            // Binder nodes: their children see an extended (or, for do-blocks,
+            // sequentially threaded) scope, so each computes its own `bound`
+            // instead of taking the uniform descent.
             Expr::Lambda { params, body } => {
                 let mut b = bound.clone();
                 for p in params { b.insert(p.clone()); }
                 Expr::Lambda { params: params.clone(), body: Box::new(self.expr(body, &b)) }
             }
-            Expr::InfixApp { op, lhs, rhs } => Expr::InfixApp {
-                op: op.clone(),
-                lhs: Box::new(self.expr(lhs, bound)),
-                rhs: Box::new(self.expr(rhs, bound)),
-            },
-            Expr::Negate(x) => Expr::Negate(Box::new(self.expr(x, bound))),
-            Expr::If { cond, then_branch, else_branch } => Expr::If {
-                cond: Box::new(self.expr(cond, bound)),
-                then_branch: Box::new(self.expr(then_branch, bound)),
-                else_branch: Box::new(self.expr(else_branch, bound)),
-            },
             Expr::Case { scrutinee, branches } => Expr::Case {
                 scrutinee: Box::new(self.expr(scrutinee, bound)),
                 branches: branches.iter().map(|br| {
@@ -586,19 +584,9 @@ impl Qual<'_> {
                 let mut b = bound.clone();
                 Expr::Do(stmts.iter().map(|s| self.dostmt(s, &mut b)).collect())
             }
-            Expr::Ascription(x, t) =>
-                Expr::Ascription(Box::new(self.expr(x, bound)), self.ty(t)),
-            Expr::RecordCon { constructor, fields } => Expr::RecordCon {
-                constructor: constructor.clone(),
-                fields: fields.iter().map(|(n, fe)| (n.clone(), self.expr(fe, bound))).collect(),
-            },
-            Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
-                expr: Box::new(self.expr(expr, bound)),
-                updates: updates.iter().map(|(n, fe)| (n.clone(), self.expr(fe, bound))).collect(),
-            },
-            Expr::Paren(x) => Expr::Paren(Box::new(self.expr(x, bound))),
-            Expr::Tuple(xs) => Expr::Tuple(xs.iter().map(|x| self.expr(x, bound)).collect()),
-            Expr::Spanned(sp, inner) => Expr::Spanned(*sp, Box::new(self.expr(inner, bound))),
+            // Everything else neither names a sibling nor binds anything:
+            // descend uniformly with the current scope.
+            other => other.clone().map_subexprs(&mut |c| self.expr(&c, bound)),
         }
     }
 
@@ -740,63 +728,7 @@ fn rewrite_uses_localdef(ld: LocalDef, aliases: &HashSet<String>) -> LocalDef {
 
 fn rewrite_uses_expr(e: Expr, aliases: &HashSet<String>) -> Expr {
     // Recurse first (post-order), then collapse the field-access shape.
-    let e = match e {
-        Expr::App(f, x) => Expr::App(
-            Box::new(rewrite_uses_expr(*f, aliases)),
-            Box::new(rewrite_uses_expr(*x, aliases)),
-        ),
-        Expr::Lambda { params, body } => Expr::Lambda {
-            params, body: Box::new(rewrite_uses_expr(*body, aliases)),
-        },
-        Expr::InfixApp { op, lhs, rhs } => Expr::InfixApp {
-            op,
-            lhs: Box::new(rewrite_uses_expr(*lhs, aliases)),
-            rhs: Box::new(rewrite_uses_expr(*rhs, aliases)),
-        },
-        Expr::Negate(x) => Expr::Negate(Box::new(rewrite_uses_expr(*x, aliases))),
-        Expr::If { cond, then_branch, else_branch } => Expr::If {
-            cond: Box::new(rewrite_uses_expr(*cond, aliases)),
-            then_branch: Box::new(rewrite_uses_expr(*then_branch, aliases)),
-            else_branch: Box::new(rewrite_uses_expr(*else_branch, aliases)),
-        },
-        Expr::Case { scrutinee, branches } => Expr::Case {
-            scrutinee: Box::new(rewrite_uses_expr(*scrutinee, aliases)),
-            branches: branches.into_iter().map(|br| CaseBranch {
-                pattern: br.pattern,
-                guards: br.guards.into_iter().map(|g| Guard {
-                    condition: rewrite_uses_expr(g.condition, aliases),
-                    body: rewrite_uses_expr(g.body, aliases),
-                }).collect(),
-                body: rewrite_uses_expr(br.body, aliases),
-            }).collect(),
-        },
-        Expr::Let { binds, body } => Expr::Let {
-            binds: binds.into_iter().map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
-            body: Box::new(rewrite_uses_expr(*body, aliases)),
-        },
-        Expr::Do(stmts) => Expr::Do(stmts.into_iter().map(|s| match s {
-            DoStmt::Bind { name, expr } => DoStmt::Bind { name, expr: rewrite_uses_expr(expr, aliases) },
-            DoStmt::Expr(e) => DoStmt::Expr(rewrite_uses_expr(e, aliases)),
-            DoStmt::DoLet { binds } => DoStmt::DoLet {
-                binds: binds.into_iter().map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
-            },
-            DoStmt::PatternBind { pattern, expr } => DoStmt::PatternBind { pattern, expr: rewrite_uses_expr(expr, aliases) },
-            DoStmt::PatternDoLet { pattern, expr } => DoStmt::PatternDoLet { pattern, expr: rewrite_uses_expr(expr, aliases) },
-        }).collect()),
-        Expr::Ascription(x, t) => Expr::Ascription(Box::new(rewrite_uses_expr(*x, aliases)), t),
-        Expr::RecordCon { constructor, fields } => Expr::RecordCon {
-            constructor,
-            fields: fields.into_iter().map(|(n, e)| (n, rewrite_uses_expr(e, aliases))).collect(),
-        },
-        Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
-            expr: Box::new(rewrite_uses_expr(*expr, aliases)),
-            updates: updates.into_iter().map(|(n, e)| (n, rewrite_uses_expr(e, aliases))).collect(),
-        },
-        Expr::Paren(x) => Expr::Paren(Box::new(rewrite_uses_expr(*x, aliases))),
-        Expr::Tuple(xs) => Expr::Tuple(xs.into_iter().map(|x| rewrite_uses_expr(x, aliases)).collect()),
-        Expr::Spanned(sp, inner) => Expr::Spanned(sp, Box::new(rewrite_uses_expr(*inner, aliases))),
-        other => other,
-    };
+    let e = e.map_subexprs(&mut |c| rewrite_uses_expr(c, aliases));
     // `App(Var field, Con alias)` with a known alias is a qualified reference.
     if let Expr::App(f, x) = &e
         && let Expr::Var(field) = f.as_ref()
@@ -906,74 +838,16 @@ fn refs_in_clause(c: &Clause, out: &mut HashSet<String>) {
 }
 
 fn refs_in_expr(e: &Expr, out: &mut HashSet<String>) {
+    // The collection decisions: which nodes NAME a value. Everything else is
+    // generic descent.
     match e {
-        Expr::Var(name) => { out.insert(name.clone()); }
-        Expr::Con(_) | Expr::Lit(_) => {}
-        Expr::App(f, x) => { refs_in_expr(f, out); refs_in_expr(x, out); }
-        Expr::Lambda { body, .. } => refs_in_expr(body, out),
-        Expr::InfixApp { op, lhs, rhs } => {
-            out.insert(op.clone());
-            refs_in_expr(lhs, out);
-            refs_in_expr(rhs, out);
-        }
-        Expr::Negate(x) => refs_in_expr(x, out),
-        Expr::If { cond, then_branch, else_branch } => {
-            refs_in_expr(cond, out);
-            refs_in_expr(then_branch, out);
-            refs_in_expr(else_branch, out);
-        }
-        Expr::Case { scrutinee, branches } => {
-            refs_in_expr(scrutinee, out);
-            for b in branches {
-                for g in &b.guards {
-                    refs_in_expr(&g.condition, out);
-                    refs_in_expr(&g.body, out);
-                }
-                refs_in_expr(&b.body, out);
-            }
-        }
-        Expr::Let { binds, body } => {
-            for b in binds {
-                refs_in_expr(&b.body, out);
-            }
-            refs_in_expr(body, out);
-        }
-        Expr::Do(stmts) => {
-            for s in stmts {
-                match s {
-                    DoStmt::Bind { expr, .. }
-                    | DoStmt::Expr(expr)
-                    | DoStmt::PatternBind { expr, .. }
-                    | DoStmt::PatternDoLet { expr, .. } => refs_in_expr(expr, out),
-                    DoStmt::DoLet { binds } => {
-                        for b in binds {
-                            refs_in_expr(&b.body, out);
-                        }
-                    }
-                }
-            }
-        }
-        Expr::Ascription(x, _) => refs_in_expr(x, out),
-        Expr::RecordCon { fields, .. } => {
-            for (_, x) in fields {
-                refs_in_expr(x, out);
-            }
-        }
-        Expr::RecordUpdate { expr, updates } => {
-            refs_in_expr(expr, out);
-            for (_, x) in updates {
-                refs_in_expr(x, out);
-            }
-        }
-        Expr::Paren(x) => refs_in_expr(x, out),
-        Expr::OpFunc(op) => { out.insert(op.clone()); }
-        Expr::Tuple(xs) => {
-            for x in xs {
-                refs_in_expr(x, out);
-            }
-        }
-        Expr::Spanned(_, inner) => refs_in_expr(inner, out),
+        Expr::Var(name) | Expr::OpFunc(name) => { out.insert(name.clone()); }
+        // An infix use `a >>= b` is a reference to the operator itself, on
+        // top of whatever its operands reference.
+        Expr::InfixApp { op, .. } => { out.insert(op.clone()); }
+        _ => {}
     }
+    e.for_each_subexpr(&mut |c| refs_in_expr(c, out));
 }
 
 fn collision_error(module: &str, collisions: &[(String, String)]) -> String {

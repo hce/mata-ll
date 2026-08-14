@@ -4,8 +4,9 @@
 
 use std::path::Path;
 
-fn run_mll_file(path: &Path) {
+fn run_mll_file(path: &Path, libs: &[&Path]) {
     let path = path.to_path_buf();
+    let libs: Vec<std::path::PathBuf> = libs.iter().map(|p| p.to_path_buf()).collect();
     // Run on a thread with the same stack size as the mll CLI driver: the
     // compiler's nesting-depth limit (mllc::MAX_NESTING_DEPTH) is calibrated
     // against mllc::COMPILER_STACK_SIZE, so a smaller test stack would
@@ -17,13 +18,15 @@ fn run_mll_file(path: &Path) {
                 .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
 
             let source_dir = path.parent().unwrap_or(Path::new("."));
+            let lib_refs: Vec<&Path> = libs.iter().map(|p| p.as_path()).collect();
             // The stamp-refutation twin of mllc::compile: same output, plus
             // the emitted-Lua annotation check every corpus program should
             // exercise (see verify::check_stamps).
-            let lua_code = match mllc::compile_with_stamp_refutation(&source, source_dir, &[]) {
-                Ok(r) => r.lua_code,
-                Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
-            };
+            let lua_code =
+                match mllc::compile_with_stamp_refutation(&source, source_dir, &lib_refs) {
+                    Ok(r) => r.lua_code,
+                    Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
+                };
 
             let lua = mlua::Lua::new();
             match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
@@ -80,7 +83,7 @@ macro_rules! mll_test {
     ($name:ident, $file:expr) => {
         #[test]
         fn $name() {
-            run_mll_file(Path::new(concat!("tests/cases/", $file)));
+            run_mll_file(Path::new(concat!("tests/cases/", $file)), &[]);
         }
     };
 }
@@ -724,40 +727,14 @@ fn modules_with_a_host_surface_do_not_warn() {
     );
 }
 
-fn run_mll_file_with_lib(path: &Path) {
-    let path = path.to_path_buf();
-    let lib_path = Path::new("../lib").to_path_buf();
-    // Same stack size as the mll CLI driver (see run_mll_file).
-    let result = std::thread::Builder::new()
-        .stack_size(mllc::COMPILER_STACK_SIZE)
-        .spawn(move || {
-            let source = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
-
-            let source_dir = path.parent().unwrap_or(Path::new("."));
-            let lua_code = match compile(&source, source_dir, &[&lib_path]) {
-                Ok(r) => r.lua_code,
-                Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
-            };
-
-            let lua = mlua::Lua::new();
-            match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
-                Ok(()) => {}
-                Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
-            }
-        })
-        .unwrap()
-        .join();
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
-}
-
 macro_rules! mll_lib_test {
     ($name:ident, $file:expr) => {
         #[test]
         fn $name() {
-            run_mll_file_with_lib(Path::new(concat!("tests/cases/", $file)));
+            run_mll_file(
+                Path::new(concat!("tests/cases/", $file)),
+                &[Path::new("../lib")],
+            );
         }
     };
 }
@@ -770,6 +747,7 @@ mll_test!(luadict, "luadict.mll");
 mll_test!(newtypes, "newtypes.mll");
 mll_test!(typeclasses, "typeclasses.mll");
 mll_test!(superclass, "superclass.mll");
+mll_test!(superclass_context, "superclass_context.mll");
 mll_test!(where_clauses, "where_clauses.mll");
 mll_test!(where_io_types, "where_io_types.mll");
 mll_test!(bind_first_class, "bind_first_class.mll");
@@ -1064,7 +1042,7 @@ macro_rules! ghc_test {
     ($name:ident, $file:expr) => {
         #[test]
         fn $name() {
-            run_mll_file(Path::new(concat!("tests/ghc/", $file)));
+            run_mll_file(Path::new(concat!("tests/ghc/", $file)), &[]);
         }
     };
 }
@@ -4368,37 +4346,37 @@ sumList (x:xs) = x + sumList xs
 // their own correctness at runtime (a failed roundtrip -> error -> test fail).
 #[test]
 fn example_huffman_roundtrip() {
-    run_mll_file_with_lib(Path::new("../experiments/huffman.mll"));
+    run_mll_file(Path::new("../experiments/huffman.mll"), &[Path::new("../lib")]);
 }
 
 #[test]
 fn example_redblack_invariants() {
-    run_mll_file_with_lib(Path::new("../experiments/redblack.mll"));
+    run_mll_file(Path::new("../experiments/redblack.mll"), &[Path::new("../lib")]);
 }
 
 #[test]
 fn example_scheme_eval() {
-    run_mll_file_with_lib(Path::new("../experiments/scheme.mll"));
+    run_mll_file(Path::new("../experiments/scheme.mll"), &[Path::new("../lib")]);
 }
 
 #[test]
 fn example_raytracer_renders() {
-    run_mll_file_with_lib(Path::new("../experiments/raytracer.mll"));
+    run_mll_file(Path::new("../experiments/raytracer.mll"), &[Path::new("../lib")]);
 }
 
 #[test]
 fn example_typeinfer_checks() {
-    run_mll_file_with_lib(Path::new("../experiments/typeinfer.mll"));
+    run_mll_file(Path::new("../experiments/typeinfer.mll"), &[Path::new("../lib")]);
 }
 
 #[test]
 fn example_listcomp() {
-    run_mll_file_with_lib(Path::new("../experiments/listcomp.mll"));
+    run_mll_file(Path::new("../experiments/listcomp.mll"), &[Path::new("../lib")]);
 }
 
 #[test]
 fn example_lambda_reduction() {
-    run_mll_file_with_lib(Path::new("../experiments/lambda.mll"));
+    run_mll_file(Path::new("../experiments/lambda.mll"), &[Path::new("../lib")]);
 }
 
 // ============================================================
@@ -7055,6 +7033,67 @@ fn compile_err(source: &str) -> String {
     }
 }
 
+/// `class Eq a, Show a => C a` — several superclass constraints without the
+/// required parentheses — must say what is wrong instead of backtracking
+/// into an unrelated error at the class head.
+#[test]
+fn class_context_comma_without_parens_is_diagnosed() {
+    let e = compile_err(
+        "class Eq a, Show a => Broken a where\n    broken :: a -> String\n",
+    );
+    assert!(
+        e.contains("Several superclass constraints must be wrapped in parentheses"),
+        "expected the parenthesization diagnosis, got: {e}"
+    );
+}
+
+/// A malformed parenthesized class context gets a targeted explanation of
+/// the expected shape (constraints + '=>'), not "Expected type/constructor
+/// name" pointing at the '('.
+#[test]
+fn class_context_malformed_parens_is_diagnosed() {
+    let e = compile_err(
+        "class (Eq, Show) => Broken a where\n    broken :: a -> String\n",
+    );
+    assert!(
+        e.contains("A parenthesized class context"),
+        "expected the class-context shape diagnosis, got: {e}"
+    );
+}
+
+/// An export-list entry the grammar does not know (here a `module M`
+/// re-export) is rejected with an explanation, not silently dropped from
+/// the export list.
+#[test]
+fn export_list_unknown_entry_is_diagnosed() {
+    let e = compile_err(
+        "module Main (module Data, main) where\n\nmain :: IO ()\nmain = putStrLn \"x\"\n",
+    );
+    assert!(
+        e.contains("export-list entry is not understood")
+            && e.contains("module re-exports"),
+        "expected the export-list diagnosis with the re-export note, got: {e}"
+    );
+}
+
+/// A pattern parameter on a local (let/do-let) function binding is a clear
+/// error at the binding, not a silent rename that leaves the pattern's
+/// variables unbound.
+#[test]
+fn local_binding_pattern_parameter_is_diagnosed() {
+    let e = compile_err(
+        "main :: IO ()\nmain = do\n    let f (Just x) = x\n    putStrLn (f (Just \"a\"))\n",
+    );
+    assert!(
+        e.contains("cannot take a pattern as a parameter"),
+        "expected the pattern-parameter diagnosis, got: {e}"
+    );
+    assert!(
+        e.contains("GHC accepts pattern parameters"),
+        "expected the GHC-deviation note, got: {e}"
+    );
+}
+
 #[test]
 fn type_error_locates_the_offending_statement() {
     // A type error must point at the statement/binding line that carries it,
@@ -7920,11 +7959,11 @@ main = ]
 "#,
     );
     assert!(
-        e.contains("Parse error: Expected type/constructor name, found Eq at 1:12"),
-        "first error must keep its exact historical rendering, got: {e}"
+        e.contains("Parse error: Expected type/constructor name, found '=' at 1:12"),
+        "first error must keep its exact rendering (source-spelled token, inline location), got: {e}"
     );
     assert!(
-        e.contains("Expected expression, found RightBracket at 7:8"),
+        e.contains("Expected expression, found ']' at 7:8"),
         "second independent error must also be reported, got: {e}"
     );
     assert!(
@@ -10434,6 +10473,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ioloop_seq_parity, "cases", "ioloop_seq_parity.mll"),
         (ghc_oracle_integral_semantics, "cases", "integral_semantics.mll"),
         (ghc_oracle_io_actions, "cases", "io_actions.mll"),
+        (ghc_oracle_inline_sharing, "cases", "inline_sharing.mll"),
         (ghc_oracle_kinds_hkt, "cases", "kinds_hkt.mll"),
         (ghc_oracle_lambdas, "cases", "lambdas.mll"),
         (ghc_oracle_lazy_cheap_bindings, "cases", "lazy_cheap_bindings.mll"),
@@ -10504,6 +10544,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_source_class_nullary, "cases", "source_class_nullary.mll"),
         (ghc_oracle_spec_limit_sibling, "cases", "spec_limit_sibling.mll"),
         (ghc_oracle_st_return, "cases", "st_return.mll"),
+        (ghc_oracle_superclass_context, "cases", "superclass_context.mll"),
         (ghc_oracle_stress_complex_program, "cases", "stress_complex_program.mll"),
         (ghc_oracle_stress_deep_chain, "cases", "stress_deep_chain.mll"),
         (ghc_oracle_stress_deep_parens, "cases", "stress_deep_parens.mll"),
@@ -10522,6 +10563,9 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_tco_case_let, "cases", "tco_case_let.mll"),
         (ghc_oracle_traversable, "cases", "traversable.mll"),
         (ghc_oracle_trees, "cases", "trees.mll"),
+        (ghc_oracle_tailloop_capture, "cases", "tailloop_capture.mll"),
+        (ghc_oracle_tailloop_deep, "cases", "tailloop_deep.mll"),
+        (ghc_oracle_tailloop_swap, "cases", "tailloop_swap.mll"),
         (ghc_oracle_tuple_ctor, "cases", "tuple_ctor.mll"),
         (ghc_oracle_tuple_eq_adt_elems, "cases", "tuple_eq_adt_elems.mll"),
         (ghc_oracle_tuple_field_laziness, "cases", "tuple_field_laziness.mll"),
