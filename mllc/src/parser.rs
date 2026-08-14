@@ -1320,6 +1320,37 @@ impl Parser {
         })
     }
 
+    /// The head of one binding-group entry: `name [patterns]`. Shared by
+    /// where blocks, let-expression bindings, and do-`let` groups (the
+    /// caller has already established that an identifier starts the line).
+    fn parse_binding_head(&mut self) -> PResult<(String, Vec<Pattern>)> {
+        let name = self.expect_ident()?;
+        let mut patterns = Vec::new();
+        while self.is_pattern_start() {
+            patterns.push(self.parse_pattern_atom()?);
+        }
+        Ok((name, patterns))
+    }
+
+    /// Build the `LocalDef` for a binding-group entry: a function binding
+    /// `f x y = e` desugars to the value binding `f = \x y -> e`, so the
+    /// whole group stays a uniform value-binding group and is inferred and
+    /// generated as one mutually recursive scope (patterns on group
+    /// bindings are otherwise not handled by the let pipeline). Where
+    /// blocks do NOT use this — a where binding keeps its patterns and the
+    /// where pipeline handles the function form itself.
+    fn group_binding(&mut self, name: String, patterns: Vec<Pattern>, body: Expr) -> PResult<LocalDef> {
+        let body = if patterns.is_empty() {
+            body
+        } else {
+            Expr::Lambda {
+                params: self.lambda_param_names(patterns)?,
+                body: Box::new(body),
+            }
+        };
+        Ok(LocalDef { name, patterns: vec![], body })
+    }
+
     fn parse_where(&mut self) -> PResult<Vec<LocalDef>> {
         self.skip_newlines_and_indent();
         if !self.at(&Token::Where) {
@@ -1341,11 +1372,7 @@ impl Parser {
             if !matches!(self.peek(), Token::Ident(_)) {
                 break;
             }
-            let name = self.expect_ident()?;
-            let mut patterns = Vec::new();
-            while self.is_pattern_start() {
-                patterns.push(self.parse_pattern_atom()?);
-            }
+            let (name, patterns) = self.parse_binding_head()?;
 
             // Handle guards: go acc i | i <= 0 = acc | otherwise = ...
             self.skip_newlines_and_indent();
@@ -2304,26 +2331,10 @@ impl Parser {
             if !matches!(self.peek(), Token::Ident(_)) {
                 break;
             }
-            let name = self.expect_ident()?;
-            let mut patterns = Vec::new();
-            while self.is_pattern_start() {
-                patterns.push(self.parse_pattern_atom()?);
-            }
+            let (name, patterns) = self.parse_binding_head()?;
             self.expect(&Token::Eq)?;
-            let mut body = self.parse_stmt_expr()?;
-            // Desugar a function binding `let f x y = e` into a value
-            // binding of a lambda `f = \x y -> e`, matching do-`let`.
-            // This keeps the whole `let` group a uniform value-binding
-            // group so it is inferred and generated as one mutually
-            // recursive scope (patterns on let-binds are otherwise not
-            // handled by the let pipeline).
-            if !patterns.is_empty() {
-                body = Expr::Lambda {
-                    params: self.lambda_param_names(patterns)?,
-                    body: Box::new(body),
-                };
-            }
-            binds.push(LocalDef { name, patterns: vec![], body });
+            let body = self.parse_stmt_expr()?;
+            binds.push(self.group_binding(name, patterns, body)?);
         }
 
         self.skip_newlines_and_indent();
@@ -3086,56 +3097,34 @@ impl Parser {
                 // same column is not swallowed as a continuation arg.
                 let saved_do_block = self.block_indent;
                 self.block_indent = self.peek_loc().col.saturating_sub(1);
-                let name = self.expect_ident()?;
-                // Collect optional patterns: let f x y = expr => let f = \x y -> expr
-                let mut params = Vec::new();
-                while self.is_pattern_start() && !self.at(&Token::Eq) {
-                    params.push(self.parse_pattern_atom()?);
-                }
+                let (name, params) = self.parse_binding_head()?;
                 self.expect(&Token::Eq)?;
-                let mut expr = self.parse_expr()?;
-                // Desugar: wrap body in a single multi-param lambda
-                if !params.is_empty() {
-                    expr = Expr::Lambda {
-                        params: self.lambda_param_names(params)?,
-                        body: Box::new(expr),
-                    };
-                }
+                let expr = self.parse_expr()?;
                 // Accumulate all bindings of THIS `let` group into one
                 // list so they share a single mutually-recursive scope
                 // (Haskell 2010 letrec); a later binding may be referenced
                 // by an earlier one regardless of source order.
-                let mut group = vec![LocalDef { name, patterns: vec![], body: expr }];
+                let mut group = vec![self.group_binding(name, params, expr)?];
                 // Continue parsing additional bindings at the same or deeper indent
                 loop {
                     let save_pos = self.checkpoint();
                     self.skip_newlines_and_indent();
                     if self.current_indent >= let_indent
                         && let Token::Ident(_) = self.peek() {
-                            // Peek ahead for `name [patterns] =`
+                            // Peek ahead for `name [patterns] =`; anything
+                            // else (including a malformed head) is not a
+                            // continuation binding — rewind and let the
+                            // next do-statement parse report it.
                             let save2 = self.checkpoint();
-                            let name2 = self.expect_ident().ok();
-                            if let Some(n2) = name2 {
-                                let mut params2 = Vec::new();
-                                while self.is_pattern_start() && !self.at(&Token::Eq) {
-                                    if let Ok(p) = self.parse_pattern_atom() {
-                                        params2.push(p);
-                                    } else { break; }
-                                }
-                                if self.at(&Token::Eq) {
+                            match self.parse_binding_head() {
+                                Ok((n2, params2)) if self.at(&Token::Eq) => {
                                     self.advance();
-                                    let mut expr2 = self.parse_expr()?;
-                                    if !params2.is_empty() {
-                                        expr2 = Expr::Lambda {
-                                            params: self.lambda_param_names(params2)?,
-                                            body: Box::new(expr2),
-                                        };
-                                    }
-                                    group.push(LocalDef { name: n2, patterns: vec![], body: expr2 });
+                                    let expr2 = self.parse_expr()?;
+                                    group.push(self.group_binding(n2, params2, expr2)?);
                                     continue;
                                 }
+                                _ => self.rewind(save2),
                             }
-                            self.rewind(save2);
                         }
                     // Not a continuation binding — backtrack
                     self.rewind(save_pos);
