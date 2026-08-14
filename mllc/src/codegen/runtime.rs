@@ -1,6 +1,7 @@
 //! The runtime prelude and its on-demand selection.
 //!
-//! `PRELUDE` embeds runtime.lua. `ondemand_prelude` emits only the prelude
+//! `PRELUDE` assembles runtime.lua and runtime_integer.lua (spliced in at a
+//! marker) into one byte-identical text stream. `ondemand_prelude` emits only the prelude
 //! definitions reachable from the generated body: the roots are the prelude
 //! identifiers appearing in the body, closed transitively over inter-chunk
 //! references. References are read from raw chunk text (comments and
@@ -187,4 +188,31 @@ pub(super) fn idents(s: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-const PRELUDE: &str = include_str!("runtime.lua");
+/// The evaluation/FFI/IO substrate, with a `--#include runtime_integer.lua`
+/// marker line where the Integer library belongs.
+const RUNTIME: &str = include_str!("runtime.lua");
+/// The arbitrary-precision Integer library: a file header, a `--#begin`
+/// separator, then the library text spliced verbatim into the prelude.
+const RUNTIME_INTEGER: &str = include_str!("runtime_integer.lua");
+/// Marker line in runtime.lua replaced by the Integer library text.
+const INTEGER_MARKER: &str = "--#include runtime_integer.lua\n";
+/// Separator in runtime_integer.lua between its file header and the payload.
+const INTEGER_BEGIN: &str = "--#begin\n";
+
+/// The full runtime prelude: runtime.lua with the Integer library spliced in
+/// at its marker. The assembled text is byte-identical to the historical
+/// single-file runtime.lua, so chunk boundaries, tree-shaking, and emitted
+/// programs are exactly what they were before the split.
+static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
+    let (before, after) = RUNTIME
+        .split_once(INTEGER_MARKER)
+        .expect("runtime.lua: missing `--#include runtime_integer.lua` marker line");
+    let (_header, integer) = RUNTIME_INTEGER
+        .split_once(INTEGER_BEGIN)
+        .expect("runtime_integer.lua: missing `--#begin` separator line");
+    let mut s = String::with_capacity(before.len() + integer.len() + after.len());
+    s.push_str(before);
+    s.push_str(integer);
+    s.push_str(after);
+    s
+});

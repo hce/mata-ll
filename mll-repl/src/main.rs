@@ -31,23 +31,13 @@ struct ReplState {
     decls: Vec<String>,
     /// Library search paths
     lib_paths: Vec<String>,
-    /// Line index where the bare main slot starts (everything before is prelude/runtime)
-    baseline_main_line: usize,
 }
 
 impl ReplState {
     fn new(lib_paths: Vec<String>) -> Self {
-        // Compile a bare program to find where the main slot definition starts.
-        // Everything before that line is prelude/runtime boilerplate.
-        let baseline_source = "main :: IO ()\nmain = pure ()\n";
-        let baseline_main_line = match compile_on_compiler_stack(baseline_source, &lib_paths) {
-            Ok(r) => find_main_slot_line(&r.lua_code),
-            Err(_) => 0,
-        };
         ReplState {
             decls: Vec::new(),
             lib_paths,
-            baseline_main_line,
         }
     }
 
@@ -55,67 +45,93 @@ impl ReplState {
         self.decls.clear();
     }
 
-    /// Try to compile and run an expression, printing the result.
+    /// Build the full program for one interpretation of the input:
+    /// as a new top-level declaration, or as an expression to print.
+    fn source_for(&self, input: &str, as_decl: bool) -> String {
+        if as_decl {
+            let mut all_decls = self.decls.clone();
+            all_decls.push(input.to_string());
+            build_source(&all_decls, None)
+        } else {
+            build_source(&self.decls, Some(input))
+        }
+    }
+
+    /// Compile and run the input, printing the result.
     /// Returns true if the input was consumed (even on error), false if empty.
+    ///
+    /// An input line is ambiguous: `double x = x * 2` is a declaration,
+    /// `let x = 1 in x + 1` is an expression, and no syntactic test tells
+    /// them apart reliably. So the compiler decides: try one interpretation,
+    /// and on compile failure try the other; whichever compiles wins. The
+    /// syntactic shape (`looks_like_declaration`) only picks which
+    /// interpretation goes FIRST — and, when both fail, whose error is
+    /// reported: the first interpretation's, because the shape test encodes
+    /// the surface cues (leading keyword, `::`, an `=` binding) of what the
+    /// user most plausibly meant, while the other interpretation's error is
+    /// usually an artifact of the wrapping (`main = putStrLn (show (data
+    /// Foo)))` and would mislead.
     fn eval(&mut self, input: &str) -> bool {
         let trimmed = input.trim();
         if trimmed.is_empty() {
             return false;
         }
 
-        // Build a full program from accumulated decls + this input.
-        // Heuristic: if the input looks like a top-level declaration, add it
-        // to decls. Otherwise, wrap it as a main expression.
-        let is_decl = is_declaration(trimmed);
+        let decl_first = looks_like_declaration(trimmed);
+        let mut first_err: Option<mllc::CompileError> = None;
 
-        let source = if is_decl {
-            // Try compiling with the new declaration added
-            let mut all_decls = self.decls.clone();
-            all_decls.push(trimmed.to_string());
-            build_source(&all_decls, None)
-        } else {
-            // Treat as an expression to evaluate and print
-            build_source(&self.decls, Some(trimmed))
-        };
+        for as_decl in [decl_first, !decl_first] {
+            let source = self.source_for(trimmed, as_decl);
 
-        // Compile. Caught rather than resumed: a compiler panic must not
-        // take the REPL session down with it.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            compile_on_compiler_stack(&source, &self.lib_paths)
-        }));
+            // Compile. Caught rather than resumed: a compiler panic must not
+            // take the REPL session down with it. A panic is a compiler bug,
+            // not a wrong interpretation — report it immediately rather than
+            // masking it behind the fallback.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                compile_on_compiler_stack(&source, &self.lib_paths)
+            }));
 
-        let compile_result = match result {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
-                eprintln!("{}", e);
-                return true;
-            }
-            Err(e) => {
-                eprintln!("compiler panicked: {:?}", e);
-                return true;
-            }
-        };
+            let compile_result = match result {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    eprintln!("compiler panicked: {:?}", e);
+                    return true;
+                }
+            };
 
-        // Execute in a fresh Lua VM (we recompile everything each time)
-        let lua = mlua::Lua::new();
-        match lua.load(&compile_result.lua_code).set_name("repl").exec() {
-            Ok(()) => {
-                // If it was a declaration, persist it
-                if is_decl {
-                    self.decls.push(trimmed.to_string());
+            // Execute in a fresh Lua VM (we recompile everything each time)
+            let lua = mlua::Lua::new();
+            match lua.load(&compile_result.lua_code).set_name("repl").exec() {
+                Ok(()) => {
+                    // If it was a declaration, persist it
+                    if as_decl {
+                        self.decls.push(trimmed.to_string());
+                    }
+                }
+                Err(e) => {
+                    eprintln!("runtime error: {}", e);
                 }
             }
-            Err(e) => {
-                eprintln!("runtime error: {}", e);
-            }
+            return true;
         }
 
+        // Both interpretations failed to compile: report the first (more
+        // plausible) interpretation's error — see the method comment.
+        eprintln!("{}", first_err.expect("both interpretations tried"));
         true
     }
 }
 
-/// Heuristic: does this input look like a top-level declaration?
-fn is_declaration(s: &str) -> bool {
+/// Syntactic shape test: does this input look like a top-level declaration?
+/// Only a plausibility ranking — it picks which interpretation `eval` tries
+/// first and whose error is reported; the compiler makes the actual call.
+fn looks_like_declaration(s: &str) -> bool {
     // Type signatures: foo :: Type
     if s.contains(" :: ") && !s.starts_with('(') {
         return true;
@@ -123,8 +139,12 @@ fn is_declaration(s: &str) -> bool {
     // Data/newtype/class/instance/type definitions
     let first_word = s.split_whitespace().next().unwrap_or("");
     matches!(first_word, "data" | "newtype" | "class" | "instance" | "type" | "infixl" | "infixr" | "infix" | "import")
-        // Function definition: starts with lowercase identifier followed by args/pattern or =
-        || (first_word.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
+        // Expression-only leading keywords can never open a top-level
+        // declaration, no matter what follows (`let x = 1 in x + 1`,
+        // `if p then ... else ...`, `case e of ...`, `do ...`).
+        || (!matches!(first_word, "let" | "if" | "then" | "else" | "case" | "of" | "do" | "in")
+            // Function definition: starts with lowercase identifier followed by args/pattern or =
+            && first_word.starts_with(|c: char| c.is_ascii_lowercase() || c == '_')
             && (s.contains(" = ") || s.contains(" =\n")))
 }
 
@@ -234,10 +254,10 @@ fn main() {
                     if expr.is_empty() {
                         // Show lua for current accumulated state
                         let source = build_source(&state.decls, None);
-                        show_lua(&source, &state.lib_paths, state.baseline_main_line);
+                        show_lua(&source, &state.lib_paths);
                     } else {
                         let source = build_source(&state.decls, Some(expr));
-                        show_lua(&source, &state.lib_paths, state.baseline_main_line);
+                        show_lua(&source, &state.lib_paths);
                     }
                 }
                 "/source" => {
@@ -263,38 +283,16 @@ fn main() {
     }
 }
 
-/// Find the line index where the last __mll_fn[N] = definition starts,
-/// just before the "-- Entry point" comment. This is where main lives.
-fn find_main_slot_line(lua_code: &str) -> usize {
-    let lines: Vec<&str> = lua_code.lines().collect();
-    // Find "-- Entry point" and walk backwards to the slot definition
-    let entry_idx = lines.iter().rposition(|l| l.starts_with("-- Entry point"));
-    if let Some(idx) = entry_idx {
-        // Walk backwards past blank lines to find the start of the main fn
-        let mut i = idx.saturating_sub(1);
-        while i > 0 && lines[i].trim().is_empty() {
-            i -= 1;
-        }
-        // Now walk backwards to the start of this function (the __mll_fn[N] = line)
-        while i > 0 && !lines[i].starts_with("__mll_fn[") && !lines[i].starts_with("local ") {
-            i -= 1;
-        }
-        return i;
-    }
-    0
-}
-
-fn show_lua(source: &str, lib_paths: &[String], baseline_main_line: usize) {
+fn show_lua(source: &str, lib_paths: &[String]) {
     match compile_on_compiler_stack(source, lib_paths) {
         Ok(r) => {
-            // Skip the runtime+prelude, show from where user code starts.
-            // Also strip the entry point boilerplate at the end.
-            let user_code: String = r.lua_code
-                .lines()
-                .skip(baseline_main_line)
-                .take_while(|l| !l.starts_with("-- Entry point"))
-                .collect::<Vec<_>>()
-                .join("\n");
+            // Show only the code compiled from the user's program: the
+            // section boundaries published on CompileResult cut off the
+            // runtime prelude before it and the entry-point/exports
+            // boilerplate after it. Computed by the compiler where the file
+            // is assembled — never rediscovered here by scanning the text.
+            let end = r.entry_point_start.unwrap_or(r.lua_code.len());
+            let user_code = &r.lua_code[r.user_code_start..end];
             let trimmed = user_code.trim();
             if trimmed.is_empty() {
                 println!("(no user code generated)");

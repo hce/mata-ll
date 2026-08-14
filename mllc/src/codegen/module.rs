@@ -19,6 +19,14 @@ use super::CodeGen;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{lua_field_assign, lua_field_index, lua_quoted_string, sanitize_name};
 
+/// First line of the entry-point section. `generate` (codegen/mod.rs) locates
+/// this exact `Stmt::Raw` in the finished statement list to compute
+/// `CompileResult::entry_point_start`, so the section boundary is defined
+/// once, here, at emission — front-ends must consume the published offset,
+/// never rediscover the boundary by scanning the rendered text.
+pub(super) const ENTRY_POINT_COMMENT: &str =
+    "-- Entry point (run main unless this file was loaded via require)";
+
 impl CodeGen {
     pub(super) fn register_data_type(&mut self, def: &TDataDef) {
         let is_enum = def.constructors.iter().all(|c| matches!(&c.fields, TConFields::Positional(f) if f.is_empty()));
@@ -362,9 +370,7 @@ impl CodeGen {
             // testing only `... == nil` (as we used to) misfired the moment the
             // program was run standalone WITH arguments: the CLI arg looked like
             // a require modname and main was wrongly skipped.
-            stmts.push(Stmt::Raw(
-                "-- Entry point (run main unless this file was loaded via require)".into(),
-            ));
+            stmts.push(Stmt::Raw(ENTRY_POINT_COMMENT.into()));
             stmts.push(Stmt::Local(vec!["__mll_arg1".into()], Some(Expr::name("..."))));
             let run_ref = self.lua_ref("__run");
             stmts.push(Stmt::Raw(format!(

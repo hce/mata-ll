@@ -50,6 +50,18 @@ pub struct Parser {
     depth: usize,
 }
 
+/// A parser position to rewind to when a speculative parse fails. Captures
+/// BOTH the token cursor and the layout state: restoring `pos` alone leaves
+/// `current_indent` describing a line the parser is no longer on, and the
+/// backtrack sites used to apply that two-field discipline inconsistently
+/// by hand. (`block_indent` is scoped by its own save/restore at the block
+/// constructs and is never part of speculative backtracking.)
+#[derive(Clone, Copy)]
+struct Checkpoint {
+    pos: usize,
+    current_indent: usize,
+}
+
 impl Parser {
     fn new(tokens: Vec<Located>) -> Self {
         Parser {
@@ -61,6 +73,20 @@ impl Parser {
             fixities: HashMap::new(),
             depth: 0,
         }
+    }
+
+    /// Capture the state a failed speculative parse must restore via
+    /// `rewind`. See [`Checkpoint`].
+    fn checkpoint(&self) -> Checkpoint {
+        Checkpoint {
+            pos: self.pos,
+            current_indent: self.current_indent,
+        }
+    }
+
+    fn rewind(&mut self, cp: Checkpoint) {
+        self.pos = cp.pos;
+        self.current_indent = cp.current_indent;
     }
 
     fn peek(&self) -> &Token {
@@ -102,10 +128,8 @@ impl Parser {
 
     /// Depth guard for the recursive-descent productions. Checked BEFORE
     /// descending, so the parser itself can never overflow the native stack:
-    /// past the limit it stops and reports a clean diagnostic. Every
-    /// production that can recurse into itself (directly or through the
-    /// atom rules) calls this on entry; a successful call must be paired
-    /// with `self.depth -= 1` on exit.
+    /// past the limit it stops and reports a clean diagnostic. Only called
+    /// through `guarded`, which pairs the check with the exit decrement.
     fn enter_nested(&mut self, what: &str) -> PResult<()> {
         if self.depth >= crate::MAX_NESTING_DEPTH {
             let mut diag = self.err_here(format!(
@@ -124,6 +148,22 @@ impl Parser {
         }
         self.depth += 1;
         Ok(())
+    }
+
+    /// Run one recursive production a level deeper: the `enter_nested` check
+    /// plus its paired decrement in one place, so a production cannot forget
+    /// the exit bookkeeping. Recursive calls throughout the parser go
+    /// through the wrappers built on this, so the counter tracks the real
+    /// recursion depth.
+    fn guarded<T>(
+        &mut self,
+        what: &str,
+        f: impl FnOnce(&mut Self) -> PResult<T>,
+    ) -> PResult<T> {
+        self.enter_nested(what)?;
+        let r = f(self);
+        self.depth -= 1;
+        r
     }
 
     fn expect(&mut self, expected: &Token) -> PResult<()> {
@@ -449,24 +489,23 @@ impl Parser {
                 }
                 self.expect(&Token::Operator(".".to_string()))?;
                 // Check for optional constraints: `Show a =>`
-                let save = self.pos;
+                let save = self.checkpoint();
                 if let Ok(constraints) = self.try_parse_constraints() {
                     if self.at(&Token::FatArrow) {
                         self.advance();
                         existential_constraints = constraints;
                     } else {
-                        self.pos = save;
+                        self.rewind(save);
                     }
                 } else {
-                    self.pos = save;
+                    self.rewind(save);
                 }
             }
 
         let name = self.expect_upper_ident()?;
 
         // Check for record syntax (may be on next line)
-        let save_pos = self.pos;
-        let save_indent = self.current_indent;
+        let save_pos = self.checkpoint();
         self.skip_newlines_and_indent();
         if self.at(&Token::LeftBrace) {
             self.advance();
@@ -518,8 +557,7 @@ impl Parser {
             });
         } else {
             // Not record syntax — backtrack
-            self.pos = save_pos;
-            self.current_indent = save_indent;
+            self.rewind(save_pos);
         }
 
         // Positional fields. A bare `as` after the constructor name or a
@@ -570,12 +608,10 @@ impl Parser {
     /// Parse optional `deriving (Show, Eq)` clause after a data declaration.
     fn parse_deriving(&mut self) -> PResult<Vec<String>> {
         // Look ahead past newlines/indents for 'deriving'
-        let save = self.pos;
-        let save_indent = self.current_indent;
+        let save = self.checkpoint();
         self.skip_newlines_and_indent();
         if !self.at(&Token::Deriving) {
-            self.pos = save;
-            self.current_indent = save_indent;
+            self.rewind(save);
             return Ok(vec![]);
         }
         self.advance(); // consume 'deriving'
@@ -708,6 +744,28 @@ impl Parser {
         })
     }
 
+    /// Parse a method name at the start of a class/instance member line: a
+    /// plain identifier, or an operator in parentheses (`(+)`). Returns
+    /// `Ok(None)` when the line starts with neither — the member block ends
+    /// there. `what` names the construct for the error when the parentheses
+    /// hold something other than an operator.
+    fn parse_method_name(&mut self, what: &str) -> PResult<Option<String>> {
+        if self.at(&Token::LeftParen) {
+            self.advance();
+            let op = match self.peek().clone() {
+                Token::Operator(op) => { self.advance(); op }
+                _ => return Err(self.err_here(format!("Expected operator in {}", what))),
+            };
+            self.expect(&Token::RightParen)?;
+            Ok(Some(op))
+        } else if let Token::Ident(name) = self.peek().clone() {
+            self.advance();
+            Ok(Some(name))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn parse_class_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Class)?;
 
@@ -715,8 +773,7 @@ impl Parser {
         // `(Eq a, Show a) =>` wraps one or more. Parsing is speculative: when
         // the tokens turn out not to form a `... =>` context, they are
         // re-read as the class head itself.
-        let save = self.pos;
-        let save_indent = self.current_indent;
+        let save = self.checkpoint();
         let mut superclasses = Vec::new();
 
         if self.at(&Token::LeftParen) {
@@ -750,8 +807,7 @@ impl Parser {
                 // A class head cannot start with '(' — this was an attempt
                 // at a context, so a targeted error beats backtracking into
                 // "Expected type/constructor name" at the paren.
-                self.pos = save;
-                self.current_indent = save_indent;
+                self.rewind(save);
                 return Err(self.err_here(
                     "A parenthesized class context lists superclass \
                      constraints, each a class name applied to the class's \
@@ -780,12 +836,10 @@ impl Parser {
                     )));
                 } else {
                     // No constraint, backtrack
-                    self.pos = save;
-                    self.current_indent = save_indent;
+                    self.rewind(save);
                 }
             } else {
-                self.pos = save;
-                self.current_indent = save_indent;
+                self.rewind(save);
             }
         }
 
@@ -803,55 +857,23 @@ impl Parser {
                 break;
             }
 
-            // Parse method signature: name :: type
-            // Could be an operator like (+) :: ...
-            let save_method = self.pos;
-            let save_method_indent = self.current_indent;
-            let name = if self.at(&Token::LeftParen) {
-                self.advance();
-                let op = match self.peek().clone() {
-                    Token::Operator(op) => { self.advance(); op }
-                    _ => return Err(self.err_here("Expected operator in class method".to_string())),
-                };
-                self.expect(&Token::RightParen)?;
-                op
-            } else if let Token::Ident(name) = self.peek().clone() {
-                self.advance();
-                name
-            } else {
-                break;
-            };
+            // Parse method name: a `name :: type` signature line or a
+            // default method clause. Could be an operator like (+) :: ...
+            let Some(name) = self.parse_method_name("class method")? else { break };
 
-            // Check if this is a type signature (::) or a default method clause (patterns... =)
+            // A `::` after the name makes it a type signature; anything
+            // else is a default method clause — `parse_clause` picks up
+            // right after the already-consumed name, exactly like a
+            // top-level function clause.
             if self.at(&Token::DblColon) {
                 self.advance();
                 let ty = self.parse_type()?;
                 methods.push(ClassMethod { name, ty, default_clauses: None });
             } else {
-                // This line is a default method definition — backtrack and parse as clause
-                self.pos = save_method;
-                self.current_indent = save_method_indent;
-
-                // Parse method name (again, consuming it for the clause parser)
-                let def_name = if self.at(&Token::LeftParen) {
-                    self.advance();
-                    let op = match self.peek().clone() {
-                        Token::Operator(op) => { self.advance(); op }
-                        _ => return Err(self.err_here("Expected operator in default method".to_string())),
-                    };
-                    self.expect(&Token::RightParen)?;
-                    op
-                } else if let Token::Ident(n) = self.peek().clone() {
-                    self.advance();
-                    n
-                } else {
-                    break;
-                };
-
                 let clause = self.parse_clause()?;
 
                 // Attach to the matching method signature
-                if let Some(m) = methods.iter_mut().find(|m| m.name == def_name) {
+                if let Some(m) = methods.iter_mut().find(|m| m.name == name) {
                     match &mut m.default_clauses {
                         Some(clauses) => clauses.push(clause),
                         None => m.default_clauses = Some(vec![clause]),
@@ -859,7 +881,7 @@ impl Parser {
                 } else {
                     return Err(Box::new(Diagnostic::parse_at(format!(
                         "Default implementation for '{}' has no preceding type signature in class '{}'",
-                        def_name, class_name
+                        name, class_name
                     ), clause.span)));
                 }
             }
@@ -878,14 +900,14 @@ impl Parser {
         // starts like a constraint (`Show` + a type atom), so only commit to
         // the context reading when a `=>` actually follows; otherwise backtrack
         // and treat what was parsed as the class + target.
-        let save = self.pos;
+        let save = self.checkpoint();
         let context = match self.try_parse_constraints() {
             Ok(cs) if self.at(&Token::FatArrow) => {
                 self.advance(); // consume =>
                 cs
             }
             _ => {
-                self.pos = save;
+                self.rewind(save);
                 Vec::new()
             }
         };
@@ -905,20 +927,7 @@ impl Parser {
                 break;
             }
 
-            let name = if self.at(&Token::LeftParen) {
-                self.advance();
-                let op = match self.peek().clone() {
-                    Token::Operator(op) => { self.advance(); op }
-                    _ => return Err(self.err_here("Expected operator in instance method".to_string())),
-                };
-                self.expect(&Token::RightParen)?;
-                op
-            } else if let Token::Ident(name) = self.peek().clone() {
-                self.advance();
-                name
-            } else {
-                break;
-            };
+            let Some(name) = self.parse_method_name("instance method")? else { break };
 
             // Collect all clauses for this method
             let clause = self.parse_clause()?;
@@ -1374,14 +1383,9 @@ impl Parser {
 
     // --- Type parsing ---
 
-    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
-    // `parse_type_inner`; recursive calls throughout the parser go through this
-    // wrapper, so the counter tracks the real recursion depth.
+    // Depth-guard wrapper: the grammar rule itself is in `parse_type_inner`.
     fn parse_type(&mut self) -> PResult<Type> {
-        self.enter_nested("type")?;
-        let r = self.parse_type_inner();
-        self.depth -= 1;
-        r
+        self.guarded("type", Self::parse_type_inner)
     }
 
     fn parse_type_inner(&mut self) -> PResult<Type> {
@@ -1399,7 +1403,7 @@ impl Parser {
             }
 
         // Check for constraints: `Show a => ...`
-        let save = self.pos;
+        let save = self.checkpoint();
         if let Ok(constraints) = self.try_parse_constraints()
             && self.at(&Token::FatArrow) {
                 self.advance();
@@ -1409,7 +1413,7 @@ impl Parser {
                     ty: Box::new(ty),
                 });
             }
-        self.pos = save;
+        self.rewind(save);
         self.parse_type_arrow()
     }
 
@@ -1436,14 +1440,9 @@ impl Parser {
         Ok(constraints)
     }
 
-    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
-    // `parse_type_arrow_inner`; recursive calls throughout the parser go through this
-    // wrapper, so the counter tracks the real recursion depth.
+    // Depth-guard wrapper: the grammar rule itself is in `parse_type_arrow_inner`.
     fn parse_type_arrow(&mut self) -> PResult<Type> {
-        self.enter_nested("type")?;
-        let r = self.parse_type_arrow_inner();
-        self.depth -= 1;
-        r
+        self.guarded("type", Self::parse_type_arrow_inner)
     }
 
     fn parse_type_arrow_inner(&mut self) -> PResult<Type> {
@@ -1651,14 +1650,9 @@ impl Parser {
         Ok(lua_name)
     }
 
-    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
-    // `parse_type_atom_inner`; recursive calls throughout the parser go through this
-    // wrapper, so the counter tracks the real recursion depth.
+    // Depth-guard wrapper: the grammar rule itself is in `parse_type_atom_inner`.
     fn parse_type_atom(&mut self) -> PResult<Type> {
-        self.enter_nested("type")?;
-        let r = self.parse_type_atom_inner();
-        self.depth -= 1;
-        r
+        self.guarded("type", Self::parse_type_atom_inner)
     }
 
     fn parse_type_atom_inner(&mut self) -> PResult<Type> {
@@ -1868,14 +1862,9 @@ impl Parser {
         Ok(expr)
     }
 
-    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
-    // `parse_expr_infix_inner`; recursive calls throughout the parser go through this
-    // wrapper, so the counter tracks the real recursion depth.
+    // Depth-guard wrapper: the grammar rule itself is in `parse_expr_infix_inner`.
     fn parse_expr_infix(&mut self, min_prec: u8, parent: Option<&ParentOp>) -> PResult<Expr> {
-        self.enter_nested("expression")?;
-        let r = self.parse_expr_infix_inner(min_prec, parent);
-        self.depth -= 1;
-        r
+        self.guarded("expression", |p| p.parse_expr_infix_inner(min_prec, parent))
     }
 
     fn parse_expr_infix_inner(&mut self, min_prec: u8, parent: Option<&ParentOp>) -> PResult<Expr> {
@@ -1938,13 +1927,13 @@ impl Parser {
             if let Token::Indent(n) = self.peek() {
                 let n = *n;
                 if n >= self.expr_min_indent {
-                    let save = self.pos;
+                    let save = self.checkpoint();
                     self.advance(); // consume indent
                     self.current_indent = n;
                     // Check if next token is an operator (continuation)
                     if !matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
                         // Not a continuation — put it back
-                        self.pos = save;
+                        self.rewind(save);
                     }
                 }
             }
@@ -1987,7 +1976,7 @@ impl Parser {
                     lhs_is_negation = false;
                 }
                 Token::Backtick => {
-                    let save = self.pos;
+                    let save = self.checkpoint();
                     self.advance();
                     let func = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
@@ -1995,7 +1984,7 @@ impl Parser {
                     // left-section tail (``(a * b `div`)``) — same stop as
                     // the symbolic-operator arm above.
                     if self.at(&Token::RightParen) {
-                        self.pos = save;
+                        self.rewind(save);
                         break;
                     }
                     let (assoc, prec) = self.operator_fixity(&func);
@@ -2005,7 +1994,7 @@ impl Parser {
                     if !self.infix_should_consume(parent, min_prec, &func, assoc, prec)? {
                         // The operator belongs to an enclosing call — rewind
                         // past the backticks so it can consume them itself.
-                        self.pos = save;
+                        self.rewind(save);
                         break;
                     }
                     self.skip_newlines_and_indent();
@@ -2228,8 +2217,7 @@ impl Parser {
             // grabbed, so this works even for a function whose first argument is
             // on the next line (e.g. inside explicit brackets).
             if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
-                let save_pos = self.pos;
-                let save_indent = self.current_indent;
+                let save_pos = self.checkpoint();
                 self.skip_newlines_and_indent();
                 if self.current_indent > self.block_indent
                     && self.is_expr_atom_start()
@@ -2239,8 +2227,7 @@ impl Parser {
                     continue;
                 }
                 // Not a continuation — backtrack
-                self.pos = save_pos;
-                self.current_indent = save_indent;
+                self.rewind(save_pos);
             }
 
             break;
@@ -2359,8 +2346,7 @@ impl Parser {
                 break;
             }
             // Try generator: pattern <- expr
-            let save = self.pos;
-            let save_indent = self.current_indent;
+            let save = self.checkpoint();
             if self.is_pattern_start() {
                 if let Ok(pat) = self.parse_pattern()
                     && self.at(&Token::Bind) {
@@ -2372,8 +2358,7 @@ impl Parser {
                         break;
                     }
                 // Not a generator — backtrack and parse as guard
-                self.pos = save;
-                self.current_indent = save_indent;
+                self.rewind(save);
             }
             // Guard expression
             let expr = self.parse_expr()?;
@@ -2506,15 +2491,13 @@ impl Parser {
         // left of the block column belongs to a sibling item (a do-statement,
         // the next binding), never to this expression.
         loop {
-            let save_pos = self.pos;
-            let save_indent = self.current_indent;
+            let save_pos = self.checkpoint();
             if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
                 self.skip_newlines_and_indent();
                 if !(self.at(&Token::LeftBrace)
                     && self.current_indent > self.block_indent)
                 {
-                    self.pos = save_pos;
-                    self.current_indent = save_indent;
+                    self.rewind(save_pos);
                     break;
                 }
             } else {
@@ -2533,8 +2516,7 @@ impl Parser {
                     updates,
                 };
             } else {
-                self.pos = save_pos;
-                self.current_indent = save_indent;
+                self.rewind(save_pos);
                 break;
             }
         }
@@ -2629,14 +2611,699 @@ impl Parser {
             | Token::RightParen | Token::RightBracket)
     }
 
-    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
-    // `parse_expr_atom_inner`; recursive calls throughout the parser go through this
-    // wrapper, so the counter tracks the real recursion depth.
+    // Depth-guard wrapper: the grammar rule itself is in `parse_expr_atom_inner`.
     fn parse_expr_atom(&mut self) -> PResult<Expr> {
-        self.enter_nested("expression")?;
-        let r = self.parse_expr_atom_inner();
-        self.depth -= 1;
-        r
+        self.guarded("expression", Self::parse_expr_atom_inner)
+    }
+
+    /// A parenthesized atom: unit `()`, the tuple constructor `(,)`, a
+    /// section (`(+ 2)`, `(2 +)`), an operator as a function (`(+)`), a
+    /// tuple, or a plain parenthesized expression — disambiguated in ONE
+    /// forward pass (see the section-vs-expression notes inside; parsing
+    /// speculatively per alternative would be exponential in nesting
+    /// depth). Consumes the opening `(` itself.
+    fn parse_paren_expr(&mut self) -> PResult<Expr> {
+        self.advance();
+
+        // (,) (,,) ... — tuple constructor as a prefix function. N commas
+        // denote an (N+1)-ary constructor. Desugar to a single multi-param
+        // lambda building a tuple: this compiles to a genuine N+1-arg Lua
+        // function (matching how binary functions are passed to `zipWith`,
+        // `foldr`, etc.), while partial application (e.g. `(,) x`) is
+        // handled by the ordinary call-site eta-wrap. Type: `a -> b -> (a, b)`.
+        if self.at(&Token::Comma) {
+            let mut commas = 0;
+            while self.at(&Token::Comma) { self.advance(); commas += 1; }
+            self.expect(&Token::RightParen)?;
+            let params: Vec<String> =
+                (0..commas + 1).map(|i| format!("_tup{}", i)).collect();
+            let elems: Vec<Expr> =
+                params.iter().map(|p| Expr::Var(p.clone())).collect();
+            return Ok(Expr::Lambda { params, body: Box::new(Expr::Tuple(elems)) });
+        }
+
+        // Check for operator-starting forms: (+), (+1), (-).
+        // A leading '-' that is NOT the bare operator `(-)` is
+        // prefix minus, never a right section (the GHC rule): it
+        // falls through to the general parenthesised-expression
+        // path below, which parses it by the negation grammar —
+        // so `(-a + b)` is `(negate a) + b` and `(-a * b)` is
+        // `negate (a * b)`, not a blanket negation of the whole
+        // body.
+        if let Token::Operator(op) = self.peek().clone() {
+            let bare_op = self.pos + 1 < self.tokens.len()
+                && self.tokens[self.pos + 1].token == Token::RightParen;
+            if op != "-" || bare_op {
+                let op_span = {
+                    let l = self.peek_loc();
+                    Span::new(l.line, l.col)
+                };
+                self.advance(); // consume operator
+                if self.at(&Token::RightParen) {
+                    // (op) — operator as function
+                    self.advance();
+                    return Ok(Expr::OpFunc(op));
+                }
+                // (op expr) — right section: \x -> x op expr.
+                // Prefix minus in the operand follows the infix
+                // rule: legal only under a precedence < 6 operator
+                // (GHC rejects `(* -2)` like `a * -2`).
+                let (assoc, prec) = self.operator_fixity(&op);
+                if prec >= 6
+                    && let Token::Operator(m) = self.peek()
+                    && m == "-"
+                {
+                    let par = ParentOp { op: op.clone(), prec, assoc };
+                    return Err(self.prefix_minus_rhs_err(&par));
+                }
+                let rhs = self.parse_expr()?;
+                self.check_section_operand(
+                    &op, assoc, prec, Assoc::Right, &rhs, op_span,
+                )?;
+                self.expect(&Token::RightParen)?;
+                return Ok(Expr::Lambda {
+                    params: vec!["_sec".into()],
+                    body: Box::new(Expr::InfixApp {
+                        op,
+                        lhs: Box::new(Expr::Var("_sec".into())),
+                        rhs: Box::new(rhs),
+                    }),
+                });
+            }
+        }
+
+        // (`name` expr) — backtick right section: \x -> x `name` expr
+        if self.at(&Token::Backtick) {
+            let op_span = {
+                let l = self.peek_loc();
+                Span::new(l.line, l.col)
+            };
+            self.advance();
+            let name = self.expect_ident()?;
+            self.expect(&Token::Backtick)?;
+            if self.at(&Token::RightParen) {
+                // (`name`) — operator as function
+                self.advance();
+                return Ok(Expr::OpFunc(name));
+            }
+            // Prefix minus in the operand follows the infix rule
+            // (see the symbolic right-section arm above).
+            let (assoc, prec) = self.operator_fixity(&name);
+            if prec >= 6
+                && let Token::Operator(m) = self.peek()
+                && m == "-"
+            {
+                let par = ParentOp { op: name.clone(), prec, assoc };
+                return Err(self.prefix_minus_rhs_err(&par));
+            }
+            let rhs = self.parse_expr()?;
+            self.check_section_operand(
+                &name, assoc, prec, Assoc::Right, &rhs, op_span,
+            )?;
+            self.expect(&Token::RightParen)?;
+            return Ok(Expr::Lambda {
+                params: vec!["_sec".into()],
+                body: Box::new(Expr::InfixApp {
+                    op: name,
+                    lhs: Box::new(Expr::Var("_sec".into())),
+                    rhs: Box::new(rhs),
+                }),
+            });
+        }
+
+        // () — unit
+        if self.at(&Token::RightParen) {
+            self.advance();
+            return Ok(Expr::Lit(Literal::Unit));
+        }
+
+        // Parse the parenthesised body ONCE. To test for a left section
+        // `(expr op)` we need the application-level parse; if it turns
+        // out not to be a section we *continue* infix parsing from that
+        // same parse rather than backtracking and re-parsing. Parsing
+        // twice (the old behaviour) made nested parens cost O(2^n).
+        //
+        // Set up exactly as `parse_expr` does (leading layout skip and
+        // `expr_min_indent = current_indent`) so the resulting AST — and
+        // thus the emitted code — is identical to the previous
+        // parse-then-reparse path. `expr_min_indent` is restored before
+        // handling `::` ascription and the tuple/paren tail, mirroring
+        // `parse_expr`.
+        self.skip_newlines_and_indent();
+        let saved_expr_min_indent = self.expr_min_indent;
+        self.expr_min_indent = self.current_indent;
+        // Prefix (not just application) level: a leading '-' is
+        // negation here (`(-a + b)` fell through from the
+        // operator-section check above).
+        let lhs = self.parse_expr_prefix(None)?;
+
+        // Finish the infix expression from the parse we already have
+        // (no re-parse). `continue_infix` stops in front of an
+        // operator directly followed by ')', so a left-section tail
+        // — with a simple operand (`(a +)`) or a full infix one
+        // (`(a * b +)`) — is still unconsumed here.
+        let mut expr = self.continue_infix(lhs, 0, None)?;
+
+        // (expr op) — left section: \x -> expr op x. The operand
+        // must satisfy the section-operand precedence rule
+        // (`check_section_operand`): `(a * b +)` is legal,
+        // `(a + b *)` is not.
+        if let Token::Operator(op) = self.peek().clone() {
+            let after_op = self.pos + 1;
+            if after_op < self.tokens.len()
+                && self.tokens[after_op].token == Token::RightParen {
+                    let (op_assoc, op_prec) = self.operator_fixity(&op);
+                    let op_span = {
+                        let l = self.peek_loc();
+                        Span::new(l.line, l.col)
+                    };
+                    self.check_section_operand(
+                        &op, op_assoc, op_prec, Assoc::Left, &expr, op_span,
+                    )?;
+                    self.advance(); // consume operator
+                    self.advance(); // consume )
+                    self.expr_min_indent = saved_expr_min_indent;
+                    return Ok(Expr::Lambda {
+                        params: vec!["_sec".into()],
+                        body: Box::new(Expr::InfixApp {
+                            op,
+                            lhs: Box::new(expr),
+                            rhs: Box::new(Expr::Var("_sec".into())),
+                        }),
+                    });
+                }
+        }
+
+        // (expr `name`) — backtick left section: \x -> expr `name` x
+        if self.at(&Token::Backtick) {
+            let after_bt = self.pos + 1;
+            if after_bt + 1 < self.tokens.len()
+                && let Token::Ident(_) = &self.tokens[after_bt].token
+                    && self.tokens[after_bt + 1].token == Token::Backtick
+                        && after_bt + 2 < self.tokens.len()
+                        && self.tokens[after_bt + 2].token == Token::RightParen
+                    {
+                        let op_span = {
+                            let l = self.peek_loc();
+                            Span::new(l.line, l.col)
+                        };
+                        self.advance(); // consume first backtick
+                        let name = self.expect_ident()?;
+                        self.advance(); // consume second backtick
+                        let (op_assoc, op_prec) = self.operator_fixity(&name);
+                        self.check_section_operand(
+                            &name, op_assoc, op_prec, Assoc::Left, &expr, op_span,
+                        )?;
+                        self.advance(); // consume )
+                        self.expr_min_indent = saved_expr_min_indent;
+                        return Ok(Expr::Lambda {
+                            params: vec!["_sec".into()],
+                            body: Box::new(Expr::InfixApp {
+                                op: name,
+                                lhs: Box::new(expr),
+                                rhs: Box::new(Expr::Var("_sec".into())),
+                            }),
+                        });
+                    }
+        }
+
+        // Not a section — this mirrors `parse_expr`:
+        // restore `expr_min_indent`, then `::` ascription.
+        self.expr_min_indent = saved_expr_min_indent;
+        // Inside explicit ( ) newlines are insignificant: `::`, a tuple
+        // comma, or the closing `)` may sit on a continuation line.
+        // continue_infix stops at the newline, so skip it before each
+        // of those decisions.
+        self.skip_newlines_and_indent();
+        if self.at(&Token::DblColon) {
+            self.advance();
+            let ty = self.parse_type()?;
+            expr = Expr::Ascription(Box::new(expr), ty);
+            self.skip_newlines_and_indent();
+        }
+        if self.at(&Token::Comma) {
+            // Tuple expression: (a, b, ...)
+            let mut elems = vec![expr];
+            while self.at(&Token::Comma) {
+                self.advance();
+                elems.push(self.parse_expr()?);
+                self.skip_newlines_and_indent();
+            }
+            self.expect(&Token::RightParen)?;
+            Ok(Expr::Tuple(elems))
+        } else {
+            self.expect(&Token::RightParen)?;
+            Ok(Expr::Paren(Box::new(expr)))
+        }
+    }
+
+    /// A bracketed atom: list literal, range (`[a ..]`, `[a, b .. c]`),
+    /// or list comprehension — disambiguated after the first element.
+    /// Consumes the opening `[`.
+    fn parse_list_expr(&mut self) -> PResult<Expr> {
+        self.advance();
+        self.skip_newlines_and_indent();
+        if self.at(&Token::RightBracket) {
+            self.advance();
+            return Ok(Expr::Con("[]".to_string()));
+        }
+        let first = self.parse_expr()?;
+        // Inside brackets newlines/indents are insignificant, so a
+        // comprehension bar, range `..`, comma or closing `]` may sit
+        // on a continuation line.
+        self.skip_newlines_and_indent();
+        // Check for list comprehension: [expr | qualifiers]
+        if self.at(&Token::Pipe) {
+            self.advance();
+            let quals = self.parse_list_comprehension_quals()?;
+            self.skip_newlines_and_indent();
+            self.expect(&Token::RightBracket)?;
+            return Ok(self.desugar_list_comprehension(first, &quals, &mut 0));
+        }
+        // Check for range syntax: [x..], [x..y], [x,y..], [x,y..z]
+        if self.at(&Token::Operator("..".to_string())) {
+            self.advance();
+            self.skip_newlines_and_indent();
+            if self.at(&Token::RightBracket) {
+                // [x..] → enumFrom x
+                self.advance();
+                return Ok(Expr::App(
+                    Box::new(Expr::Var("enumFrom".to_string())),
+                    Box::new(first),
+                ));
+            }
+            // [x..y] → enumFromTo x y
+            let end = self.parse_expr()?;
+            self.skip_newlines_and_indent();
+            self.expect(&Token::RightBracket)?;
+            return Ok(Expr::App(
+                Box::new(Expr::App(
+                    Box::new(Expr::Var("enumFromTo".to_string())),
+                    Box::new(first),
+                )),
+                Box::new(end),
+            ));
+        }
+        // Regular list literal or range with step
+        let mut items = vec![first];
+        self.skip_newlines_and_indent();
+        if self.at(&Token::Comma) {
+            self.advance();
+            self.skip_newlines_and_indent();
+            let second = self.parse_expr()?;
+            // Check for [x,y..] or [x,y..z]
+            if self.at(&Token::Operator("..".to_string())) {
+                self.advance();
+                self.skip_newlines_and_indent();
+                if self.at(&Token::RightBracket) {
+                    // [x,y..] → enumFromThen x y
+                    self.advance();
+                    return Ok(Expr::App(
+                        Box::new(Expr::App(
+                            Box::new(Expr::Var("enumFromThen".to_string())),
+                            Box::new(items.pop().unwrap()),
+                        )),
+                        Box::new(second),
+                    ));
+                }
+                // [x,y..z] → enumFromThenTo x y z
+                let end = self.parse_expr()?;
+                self.skip_newlines_and_indent();
+                self.expect(&Token::RightBracket)?;
+                return Ok(Expr::App(
+                    Box::new(Expr::App(
+                        Box::new(Expr::App(
+                            Box::new(Expr::Var("enumFromThenTo".to_string())),
+                            Box::new(items.pop().unwrap()),
+                        )),
+                        Box::new(second),
+                    )),
+                    Box::new(end),
+                ));
+            }
+            items.push(second);
+            loop {
+                self.skip_newlines_and_indent();
+                if !self.at(&Token::Comma) { break; }
+                self.advance();
+                self.skip_newlines_and_indent();
+                items.push(self.parse_expr()?);
+            }
+        }
+        self.skip_newlines_and_indent();
+        self.expect(&Token::RightBracket)?;
+        let mut list = Expr::Con("[]".to_string());
+        for item in items.into_iter().rev() {
+            list = Expr::App(
+                Box::new(Expr::App(
+                    Box::new(Expr::Con(":".to_string())),
+                    Box::new(item),
+                )),
+                Box::new(list),
+            );
+        }
+        Ok(list)
+    }
+
+    /// A `case scrutinee of` expression with layout-aligned branches and
+    /// optional guards. Consumes the `case`.
+    fn parse_case_expr(&mut self) -> PResult<Expr> {
+        self.advance();
+        let scrutinee = self.parse_expr()?;
+        self.expect(&Token::Of)?;
+
+        // Inline brace syntax: case x of { A -> e1; B -> e2 }
+        if self.at(&Token::LeftBrace) {
+            self.advance();
+            let mut branches = Vec::new();
+            loop {
+                self.skip_newlines_and_indent();
+                if self.at(&Token::RightBrace) { break; }
+                let pattern = self.parse_pattern()?;
+                self.expect(&Token::Arrow)?;
+                let body = self.parse_stmt_expr()?;
+                branches.push(CaseBranch { pattern, guards: vec![], body });
+                if self.at(&Token::Semicolon) { self.advance(); } else { break; }
+            }
+            self.expect(&Token::RightBrace)?;
+            return Ok(Expr::Case {
+                scrutinee: Box::new(scrutinee),
+                branches,
+            });
+        }
+
+        // Layout-based syntax
+        self.skip_newlines_and_indent();
+        let case_indent = self.current_indent;
+        let mut branches = Vec::new();
+        let saved_block = self.block_indent;
+        self.block_indent = self.peek_loc().col.saturating_sub(1);
+
+        loop {
+            let save_pos = self.checkpoint();
+            self.skip_newlines_and_indent();
+            if self.at_eof() || self.current_indent < case_indent
+                || self.at(&Token::Where)
+                || self.at(&Token::RightParen)
+                || self.at(&Token::RightBracket)
+                || self.at(&Token::RightBrace) {
+                // Restore position so the caller sees the
+                // newline/indent tokens and doesn't accidentally
+                // consume the next statement as an argument.
+                self.rewind(save_pos);
+                break;
+            }
+            let pattern = self.parse_pattern()?;
+
+            if self.at(&Token::Pipe) {
+                // Guards on case branch
+                let mut guards = Vec::new();
+                while self.at(&Token::Pipe) {
+                    self.advance();
+                    let condition = self.parse_expr()?;
+                    self.expect(&Token::Arrow)?;
+                    let body = self.parse_stmt_expr()?;
+                    guards.push(Guard { condition, body });
+                    self.skip_newlines_and_indent();
+                }
+                branches.push(CaseBranch {
+                    pattern,
+                    guards,
+                    body: Expr::Var("undefined".to_string()),
+                });
+            } else {
+                self.expect(&Token::Arrow)?;
+                let body = self.parse_stmt_expr()?;
+                branches.push(CaseBranch {
+                    pattern,
+                    guards: vec![],
+                    body,
+                });
+            }
+        }
+        self.block_indent = saved_block;
+
+        Ok(Expr::Case {
+            scrutinee: Box::new(scrutinee),
+            branches,
+        })
+    }
+
+    /// A `do` block: layout-driven statement list with `let`, `pat <-`,
+    /// `_ <-`, named binds and bare expressions. Consumes the `do`.
+    fn parse_do_block(&mut self) -> PResult<Expr> {
+        self.advance();
+        self.skip_newlines_and_indent();
+        let do_indent = self.current_indent;
+        let mut stmts = Vec::new();
+        let saved_block = self.block_indent;
+        self.block_indent = self.peek_loc().col.saturating_sub(1);
+
+        loop {
+            self.skip_newlines_and_indent();
+            if self.at_eof() || self.current_indent < do_indent
+                || self.at(&Token::RightParen) {
+                break;
+            }
+
+            // Check for `let name = expr` or `let (a, b) = expr`
+            if self.at(&Token::Let) {
+                self.advance();
+                let let_indent = self.current_indent;
+                // Tuple pattern: let (a, b) = expr
+                if matches!(self.peek(), Token::LeftParen) {
+                    let pat = self.parse_pattern_atom()?;
+                    if matches!(pat, Pattern::Tuple(_)) {
+                        self.expect(&Token::Eq)?;
+                        let expr = self.parse_expr()?;
+                        stmts.push(DoStmt::PatternDoLet { pattern: pat, expr });
+                        continue;
+                    }
+                    return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
+                }
+                // The binding column is the layout block for the
+                // binding RHS(s), so a following sibling binding at the
+                // same column is not swallowed as a continuation arg.
+                let saved_do_block = self.block_indent;
+                self.block_indent = self.peek_loc().col.saturating_sub(1);
+                let name = self.expect_ident()?;
+                // Collect optional patterns: let f x y = expr => let f = \x y -> expr
+                let mut params = Vec::new();
+                while self.is_pattern_start() && !self.at(&Token::Eq) {
+                    params.push(self.parse_pattern_atom()?);
+                }
+                self.expect(&Token::Eq)?;
+                let mut expr = self.parse_expr()?;
+                // Desugar: wrap body in a single multi-param lambda
+                if !params.is_empty() {
+                    expr = Expr::Lambda {
+                        params: self.lambda_param_names(params)?,
+                        body: Box::new(expr),
+                    };
+                }
+                // Accumulate all bindings of THIS `let` group into one
+                // list so they share a single mutually-recursive scope
+                // (Haskell 2010 letrec); a later binding may be referenced
+                // by an earlier one regardless of source order.
+                let mut group = vec![LocalDef { name, patterns: vec![], body: expr }];
+                // Continue parsing additional bindings at the same or deeper indent
+                loop {
+                    let save_pos = self.checkpoint();
+                    self.skip_newlines_and_indent();
+                    if self.current_indent >= let_indent
+                        && let Token::Ident(_) = self.peek() {
+                            // Peek ahead for `name [patterns] =`
+                            let save2 = self.checkpoint();
+                            let name2 = self.expect_ident().ok();
+                            if let Some(n2) = name2 {
+                                let mut params2 = Vec::new();
+                                while self.is_pattern_start() && !self.at(&Token::Eq) {
+                                    if let Ok(p) = self.parse_pattern_atom() {
+                                        params2.push(p);
+                                    } else { break; }
+                                }
+                                if self.at(&Token::Eq) {
+                                    self.advance();
+                                    let mut expr2 = self.parse_expr()?;
+                                    if !params2.is_empty() {
+                                        expr2 = Expr::Lambda {
+                                            params: self.lambda_param_names(params2)?,
+                                            body: Box::new(expr2),
+                                        };
+                                    }
+                                    group.push(LocalDef { name: n2, patterns: vec![], body: expr2 });
+                                    continue;
+                                }
+                            }
+                            self.rewind(save2);
+                        }
+                    // Not a continuation binding — backtrack
+                    self.rewind(save_pos);
+                    break;
+                }
+                stmts.push(DoStmt::DoLet { binds: group });
+                self.block_indent = saved_do_block;
+                continue;
+            }
+
+            // Check for `(a, b) <- expr` (pattern bind)
+            if matches!(self.peek(), Token::LeftParen) {
+                let save_tup = self.checkpoint();
+                if let Ok(pat) = self.parse_pattern_atom()
+                    && matches!(pat, Pattern::Tuple(_)) && self.at(&Token::Bind) {
+                        self.advance();
+                        let expr = self.parse_stmt_expr()?;
+                        stmts.push(DoStmt::PatternBind { pattern: pat, expr });
+                        continue;
+                    }
+                self.rewind(save_tup);
+            }
+
+            // Check for `_ <- expr` (discard bind)
+            if self.at(&Token::Underscore) {
+                let save_u = self.checkpoint();
+                self.advance();
+                if self.at(&Token::Bind) {
+                    self.advance();
+                    let expr = self.parse_stmt_expr()?;
+                    stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
+                    continue;
+                }
+                self.rewind(save_u);
+            }
+
+            // Check for `name <- expr` (bind)
+            let save = self.checkpoint();
+            if let Token::Ident(name) = self.peek().clone() {
+                self.advance();
+                if self.at(&Token::Bind) {
+                    self.advance();
+                    let expr = self.parse_stmt_expr()?;
+                    stmts.push(DoStmt::Bind { name, expr });
+                    continue;
+                }
+                self.rewind(save);
+            }
+
+            // Bare expression
+            let expr = self.parse_stmt_expr()?;
+            stmts.push(DoStmt::Expr(expr));
+        }
+
+        self.block_indent = saved_block;
+        Ok(Expr::Do(stmts))
+    }
+
+    /// A lambda: `\p1 p2 -> body`. Consumes the leading backslash.
+    fn parse_lambda(&mut self) -> PResult<Expr> {
+        self.advance();
+        // Check for pattern-matching lambda: \(Con x) -> body
+        // Desugars to \__arg -> case __arg of { pattern -> body }
+        if matches!(self.peek(), Token::LeftParen | Token::UpperIdent(_) | Token::LeftBracket) {
+            let save = self.checkpoint();
+            // Try parsing as pattern
+            if let Ok(pat) = self.parse_pattern()
+                && self.at(&Token::Arrow) {
+                    self.advance();
+                    let body = self.parse_expr()?;
+                    let mut branches = vec![CaseBranch {
+                        pattern: pat,
+                        guards: vec![],
+                        body,
+                    }];
+                    // Add wildcard fallback for partial patterns
+                    branches.push(CaseBranch {
+                        pattern: Pattern::Wildcard,
+                        guards: vec![],
+                        body: Expr::App(
+                            Box::new(Expr::Var("error".into())),
+                            Box::new(Expr::Lit(Literal::Str(b"non-exhaustive lambda pattern".to_vec()))),
+                        ),
+                    });
+                    return Ok(Expr::Lambda {
+                        params: vec!["__lam".to_string()],
+                        body: Box::new(Expr::Case {
+                            scrutinee: Box::new(Expr::Var("__lam".to_string())),
+                            branches,
+                        }),
+                    });
+                }
+            // Not a pattern lambda — backtrack
+            self.rewind(save);
+        }
+        let mut params = Vec::new();
+        loop {
+            match self.peek().clone() {
+                Token::Ident(name) => {
+                    params.push(name);
+                    self.advance();
+                }
+                Token::Underscore => {
+                    params.push("_".to_string());
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        if params.is_empty() {
+            return Err(self.err_here("Expected lambda parameter".to_string()));
+        }
+        self.expect(&Token::Arrow)?;
+        let body = self.parse_expr()?;
+        Ok(Expr::Lambda {
+            params,
+            body: Box::new(body),
+        })
+    }
+
+    /// A constructor atom: record construction `Con { f = v, ... }`
+    /// (the brace may open on a continuation line indented past the
+    /// layout block, like application arguments), or the bare
+    /// constructor. The constructor name is already consumed.
+    fn parse_con_atom(&mut self, name: String) -> PResult<Expr> {
+            // Check for record construction: Con { field = val, ... }
+            // The brace may open on a following line indented
+            // strictly past the current layout block's column —
+            // the same cross-line continuation rule application
+            // arguments use (parse_expr_app). At or left of the
+            // block column the brace would belong to a sibling
+            // item, so `Foo` stays a bare constructor and the
+            // position is restored.
+            if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
+                let save_pos = self.checkpoint();
+                self.skip_newlines_and_indent();
+                if !(self.at(&Token::LeftBrace)
+                    && self.current_indent > self.block_indent)
+                {
+                    self.rewind(save_pos);
+                }
+            }
+            if self.at(&Token::LeftBrace) {
+                self.advance();
+                let mut fields = Vec::new();
+                loop {
+                    self.skip_newlines_and_indent();
+                    if self.at(&Token::RightBrace) {
+                        self.advance();
+                        break;
+                    }
+                    let field_name = self.expect_ident()?;
+                    self.expect(&Token::Eq)?;
+                    let value = self.parse_expr()?;
+                    fields.push((field_name, value));
+                    self.skip_newlines_and_indent();
+                    if self.at(&Token::Comma) {
+                        self.advance();
+                    } else {
+                        self.skip_newlines_and_indent();
+                        self.expect(&Token::RightBrace)?;
+                        break;
+                    }
+                }
+                Ok(Expr::RecordCon { constructor: name, fields })
+            } else {
+                Ok(Expr::Con(name))
+            }
     }
 
     fn parse_expr_atom_inner(&mut self) -> PResult<Expr> {
@@ -2685,393 +3352,11 @@ impl Parser {
                 match name.as_str() {
                     "True" => Ok(Expr::Lit(Literal::Bool(true))),
                     "False" => Ok(Expr::Lit(Literal::Bool(false))),
-                    _ => {
-                        // Check for record construction: Con { field = val, ... }
-                        // The brace may open on a following line indented
-                        // strictly past the current layout block's column —
-                        // the same cross-line continuation rule application
-                        // arguments use (parse_expr_app). At or left of the
-                        // block column the brace would belong to a sibling
-                        // item, so `Foo` stays a bare constructor and the
-                        // position is restored.
-                        if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
-                            let save_pos = self.pos;
-                            let save_indent = self.current_indent;
-                            self.skip_newlines_and_indent();
-                            if !(self.at(&Token::LeftBrace)
-                                && self.current_indent > self.block_indent)
-                            {
-                                self.pos = save_pos;
-                                self.current_indent = save_indent;
-                            }
-                        }
-                        if self.at(&Token::LeftBrace) {
-                            self.advance();
-                            let mut fields = Vec::new();
-                            loop {
-                                self.skip_newlines_and_indent();
-                                if self.at(&Token::RightBrace) {
-                                    self.advance();
-                                    break;
-                                }
-                                let field_name = self.expect_ident()?;
-                                self.expect(&Token::Eq)?;
-                                let value = self.parse_expr()?;
-                                fields.push((field_name, value));
-                                self.skip_newlines_and_indent();
-                                if self.at(&Token::Comma) {
-                                    self.advance();
-                                } else {
-                                    self.skip_newlines_and_indent();
-                                    self.expect(&Token::RightBrace)?;
-                                    break;
-                                }
-                            }
-                            Ok(Expr::RecordCon { constructor: name, fields })
-                        } else {
-                            Ok(Expr::Con(name))
-                        }
-                    }
+                    _ => self.parse_con_atom(name),
                 }
             }
-            Token::LeftParen => {
-                self.advance();
-
-                // (,) (,,) ... — tuple constructor as a prefix function. N commas
-                // denote an (N+1)-ary constructor. Desugar to a single multi-param
-                // lambda building a tuple: this compiles to a genuine N+1-arg Lua
-                // function (matching how binary functions are passed to `zipWith`,
-                // `foldr`, etc.), while partial application (e.g. `(,) x`) is
-                // handled by the ordinary call-site eta-wrap. Type: `a -> b -> (a, b)`.
-                if self.at(&Token::Comma) {
-                    let mut commas = 0;
-                    while self.at(&Token::Comma) { self.advance(); commas += 1; }
-                    self.expect(&Token::RightParen)?;
-                    let params: Vec<String> =
-                        (0..commas + 1).map(|i| format!("_tup{}", i)).collect();
-                    let elems: Vec<Expr> =
-                        params.iter().map(|p| Expr::Var(p.clone())).collect();
-                    return Ok(Expr::Lambda { params, body: Box::new(Expr::Tuple(elems)) });
-                }
-
-                // Check for operator-starting forms: (+), (+1), (-).
-                // A leading '-' that is NOT the bare operator `(-)` is
-                // prefix minus, never a right section (the GHC rule): it
-                // falls through to the general parenthesised-expression
-                // path below, which parses it by the negation grammar —
-                // so `(-a + b)` is `(negate a) + b` and `(-a * b)` is
-                // `negate (a * b)`, not a blanket negation of the whole
-                // body.
-                if let Token::Operator(op) = self.peek().clone() {
-                    let bare_op = self.pos + 1 < self.tokens.len()
-                        && self.tokens[self.pos + 1].token == Token::RightParen;
-                    if op != "-" || bare_op {
-                        let op_span = {
-                            let l = self.peek_loc();
-                            Span::new(l.line, l.col)
-                        };
-                        self.advance(); // consume operator
-                        if self.at(&Token::RightParen) {
-                            // (op) — operator as function
-                            self.advance();
-                            return Ok(Expr::OpFunc(op));
-                        }
-                        // (op expr) — right section: \x -> x op expr.
-                        // Prefix minus in the operand follows the infix
-                        // rule: legal only under a precedence < 6 operator
-                        // (GHC rejects `(* -2)` like `a * -2`).
-                        let (assoc, prec) = self.operator_fixity(&op);
-                        if prec >= 6
-                            && let Token::Operator(m) = self.peek()
-                            && m == "-"
-                        {
-                            let par = ParentOp { op: op.clone(), prec, assoc };
-                            return Err(self.prefix_minus_rhs_err(&par));
-                        }
-                        let rhs = self.parse_expr()?;
-                        self.check_section_operand(
-                            &op, assoc, prec, Assoc::Right, &rhs, op_span,
-                        )?;
-                        self.expect(&Token::RightParen)?;
-                        return Ok(Expr::Lambda {
-                            params: vec!["_sec".into()],
-                            body: Box::new(Expr::InfixApp {
-                                op,
-                                lhs: Box::new(Expr::Var("_sec".into())),
-                                rhs: Box::new(rhs),
-                            }),
-                        });
-                    }
-                }
-
-                // (`name` expr) — backtick right section: \x -> x `name` expr
-                if self.at(&Token::Backtick) {
-                    let op_span = {
-                        let l = self.peek_loc();
-                        Span::new(l.line, l.col)
-                    };
-                    self.advance();
-                    let name = self.expect_ident()?;
-                    self.expect(&Token::Backtick)?;
-                    if self.at(&Token::RightParen) {
-                        // (`name`) — operator as function
-                        self.advance();
-                        return Ok(Expr::OpFunc(name));
-                    }
-                    // Prefix minus in the operand follows the infix rule
-                    // (see the symbolic right-section arm above).
-                    let (assoc, prec) = self.operator_fixity(&name);
-                    if prec >= 6
-                        && let Token::Operator(m) = self.peek()
-                        && m == "-"
-                    {
-                        let par = ParentOp { op: name.clone(), prec, assoc };
-                        return Err(self.prefix_minus_rhs_err(&par));
-                    }
-                    let rhs = self.parse_expr()?;
-                    self.check_section_operand(
-                        &name, assoc, prec, Assoc::Right, &rhs, op_span,
-                    )?;
-                    self.expect(&Token::RightParen)?;
-                    return Ok(Expr::Lambda {
-                        params: vec!["_sec".into()],
-                        body: Box::new(Expr::InfixApp {
-                            op: name,
-                            lhs: Box::new(Expr::Var("_sec".into())),
-                            rhs: Box::new(rhs),
-                        }),
-                    });
-                }
-
-                // () — unit
-                if self.at(&Token::RightParen) {
-                    self.advance();
-                    return Ok(Expr::Lit(Literal::Unit));
-                }
-
-                // Parse the parenthesised body ONCE. To test for a left section
-                // `(expr op)` we need the application-level parse; if it turns
-                // out not to be a section we *continue* infix parsing from that
-                // same parse rather than backtracking and re-parsing. Parsing
-                // twice (the old behaviour) made nested parens cost O(2^n).
-                //
-                // Set up exactly as `parse_expr` does (leading layout skip and
-                // `expr_min_indent = current_indent`) so the resulting AST — and
-                // thus the emitted code — is identical to the previous
-                // parse-then-reparse path. `expr_min_indent` is restored before
-                // handling `::` ascription and the tuple/paren tail, mirroring
-                // `parse_expr`.
-                self.skip_newlines_and_indent();
-                let saved_expr_min_indent = self.expr_min_indent;
-                self.expr_min_indent = self.current_indent;
-                // Prefix (not just application) level: a leading '-' is
-                // negation here (`(-a + b)` fell through from the
-                // operator-section check above).
-                let lhs = self.parse_expr_prefix(None)?;
-
-                // Finish the infix expression from the parse we already have
-                // (no re-parse). `continue_infix` stops in front of an
-                // operator directly followed by ')', so a left-section tail
-                // — with a simple operand (`(a +)`) or a full infix one
-                // (`(a * b +)`) — is still unconsumed here.
-                let mut expr = self.continue_infix(lhs, 0, None)?;
-
-                // (expr op) — left section: \x -> expr op x. The operand
-                // must satisfy the section-operand precedence rule
-                // (`check_section_operand`): `(a * b +)` is legal,
-                // `(a + b *)` is not.
-                if let Token::Operator(op) = self.peek().clone() {
-                    let after_op = self.pos + 1;
-                    if after_op < self.tokens.len()
-                        && self.tokens[after_op].token == Token::RightParen {
-                            let (op_assoc, op_prec) = self.operator_fixity(&op);
-                            let op_span = {
-                                let l = self.peek_loc();
-                                Span::new(l.line, l.col)
-                            };
-                            self.check_section_operand(
-                                &op, op_assoc, op_prec, Assoc::Left, &expr, op_span,
-                            )?;
-                            self.advance(); // consume operator
-                            self.advance(); // consume )
-                            self.expr_min_indent = saved_expr_min_indent;
-                            return Ok(Expr::Lambda {
-                                params: vec!["_sec".into()],
-                                body: Box::new(Expr::InfixApp {
-                                    op,
-                                    lhs: Box::new(expr),
-                                    rhs: Box::new(Expr::Var("_sec".into())),
-                                }),
-                            });
-                        }
-                }
-
-                // (expr `name`) — backtick left section: \x -> expr `name` x
-                if self.at(&Token::Backtick) {
-                    let after_bt = self.pos + 1;
-                    if after_bt + 1 < self.tokens.len()
-                        && let Token::Ident(_) = &self.tokens[after_bt].token
-                            && self.tokens[after_bt + 1].token == Token::Backtick
-                                && after_bt + 2 < self.tokens.len()
-                                && self.tokens[after_bt + 2].token == Token::RightParen
-                            {
-                                let op_span = {
-                                    let l = self.peek_loc();
-                                    Span::new(l.line, l.col)
-                                };
-                                self.advance(); // consume first backtick
-                                let name = self.expect_ident()?;
-                                self.advance(); // consume second backtick
-                                let (op_assoc, op_prec) = self.operator_fixity(&name);
-                                self.check_section_operand(
-                                    &name, op_assoc, op_prec, Assoc::Left, &expr, op_span,
-                                )?;
-                                self.advance(); // consume )
-                                self.expr_min_indent = saved_expr_min_indent;
-                                return Ok(Expr::Lambda {
-                                    params: vec!["_sec".into()],
-                                    body: Box::new(Expr::InfixApp {
-                                        op: name,
-                                        lhs: Box::new(expr),
-                                        rhs: Box::new(Expr::Var("_sec".into())),
-                                    }),
-                                });
-                            }
-                }
-
-                // Not a section — this mirrors `parse_expr`:
-                // restore `expr_min_indent`, then `::` ascription.
-                self.expr_min_indent = saved_expr_min_indent;
-                // Inside explicit ( ) newlines are insignificant: `::`, a tuple
-                // comma, or the closing `)` may sit on a continuation line.
-                // continue_infix stops at the newline, so skip it before each
-                // of those decisions.
-                self.skip_newlines_and_indent();
-                if self.at(&Token::DblColon) {
-                    self.advance();
-                    let ty = self.parse_type()?;
-                    expr = Expr::Ascription(Box::new(expr), ty);
-                    self.skip_newlines_and_indent();
-                }
-                if self.at(&Token::Comma) {
-                    // Tuple expression: (a, b, ...)
-                    let mut elems = vec![expr];
-                    while self.at(&Token::Comma) {
-                        self.advance();
-                        elems.push(self.parse_expr()?);
-                        self.skip_newlines_and_indent();
-                    }
-                    self.expect(&Token::RightParen)?;
-                    Ok(Expr::Tuple(elems))
-                } else {
-                    self.expect(&Token::RightParen)?;
-                    Ok(Expr::Paren(Box::new(expr)))
-                }
-            }
-            Token::LeftBracket => {
-                self.advance();
-                self.skip_newlines_and_indent();
-                if self.at(&Token::RightBracket) {
-                    self.advance();
-                    return Ok(Expr::Con("[]".to_string()));
-                }
-                let first = self.parse_expr()?;
-                // Inside brackets newlines/indents are insignificant, so a
-                // comprehension bar, range `..`, comma or closing `]` may sit
-                // on a continuation line.
-                self.skip_newlines_and_indent();
-                // Check for list comprehension: [expr | qualifiers]
-                if self.at(&Token::Pipe) {
-                    self.advance();
-                    let quals = self.parse_list_comprehension_quals()?;
-                    self.skip_newlines_and_indent();
-                    self.expect(&Token::RightBracket)?;
-                    return Ok(self.desugar_list_comprehension(first, &quals, &mut 0));
-                }
-                // Check for range syntax: [x..], [x..y], [x,y..], [x,y..z]
-                if self.at(&Token::Operator("..".to_string())) {
-                    self.advance();
-                    self.skip_newlines_and_indent();
-                    if self.at(&Token::RightBracket) {
-                        // [x..] → enumFrom x
-                        self.advance();
-                        return Ok(Expr::App(
-                            Box::new(Expr::Var("enumFrom".to_string())),
-                            Box::new(first),
-                        ));
-                    }
-                    // [x..y] → enumFromTo x y
-                    let end = self.parse_expr()?;
-                    self.skip_newlines_and_indent();
-                    self.expect(&Token::RightBracket)?;
-                    return Ok(Expr::App(
-                        Box::new(Expr::App(
-                            Box::new(Expr::Var("enumFromTo".to_string())),
-                            Box::new(first),
-                        )),
-                        Box::new(end),
-                    ));
-                }
-                // Regular list literal or range with step
-                let mut items = vec![first];
-                self.skip_newlines_and_indent();
-                if self.at(&Token::Comma) {
-                    self.advance();
-                    self.skip_newlines_and_indent();
-                    let second = self.parse_expr()?;
-                    // Check for [x,y..] or [x,y..z]
-                    if self.at(&Token::Operator("..".to_string())) {
-                        self.advance();
-                        self.skip_newlines_and_indent();
-                        if self.at(&Token::RightBracket) {
-                            // [x,y..] → enumFromThen x y
-                            self.advance();
-                            return Ok(Expr::App(
-                                Box::new(Expr::App(
-                                    Box::new(Expr::Var("enumFromThen".to_string())),
-                                    Box::new(items.pop().unwrap()),
-                                )),
-                                Box::new(second),
-                            ));
-                        }
-                        // [x,y..z] → enumFromThenTo x y z
-                        let end = self.parse_expr()?;
-                        self.skip_newlines_and_indent();
-                        self.expect(&Token::RightBracket)?;
-                        return Ok(Expr::App(
-                            Box::new(Expr::App(
-                                Box::new(Expr::App(
-                                    Box::new(Expr::Var("enumFromThenTo".to_string())),
-                                    Box::new(items.pop().unwrap()),
-                                )),
-                                Box::new(second),
-                            )),
-                            Box::new(end),
-                        ));
-                    }
-                    items.push(second);
-                    loop {
-                        self.skip_newlines_and_indent();
-                        if !self.at(&Token::Comma) { break; }
-                        self.advance();
-                        self.skip_newlines_and_indent();
-                        items.push(self.parse_expr()?);
-                    }
-                }
-                self.skip_newlines_and_indent();
-                self.expect(&Token::RightBracket)?;
-                let mut list = Expr::Con("[]".to_string());
-                for item in items.into_iter().rev() {
-                    list = Expr::App(
-                        Box::new(Expr::App(
-                            Box::new(Expr::Con(":".to_string())),
-                            Box::new(item),
-                        )),
-                        Box::new(list),
-                    );
-                }
-                Ok(list)
-            }
+            Token::LeftParen => self.parse_paren_expr(),
+            Token::LeftBracket => self.parse_list_expr(),
             Token::If => {
                 self.advance();
                 let cond = self.parse_expr()?;
@@ -3087,89 +3372,7 @@ impl Parser {
                     else_branch: Box::new(else_branch),
                 })
             }
-            Token::Case => {
-                self.advance();
-                let scrutinee = self.parse_expr()?;
-                self.expect(&Token::Of)?;
-
-                // Inline brace syntax: case x of { A -> e1; B -> e2 }
-                if self.at(&Token::LeftBrace) {
-                    self.advance();
-                    let mut branches = Vec::new();
-                    loop {
-                        self.skip_newlines_and_indent();
-                        if self.at(&Token::RightBrace) { break; }
-                        let pattern = self.parse_pattern()?;
-                        self.expect(&Token::Arrow)?;
-                        let body = self.parse_stmt_expr()?;
-                        branches.push(CaseBranch { pattern, guards: vec![], body });
-                        if self.at(&Token::Semicolon) { self.advance(); } else { break; }
-                    }
-                    self.expect(&Token::RightBrace)?;
-                    return Ok(Expr::Case {
-                        scrutinee: Box::new(scrutinee),
-                        branches,
-                    });
-                }
-
-                // Layout-based syntax
-                self.skip_newlines_and_indent();
-                let case_indent = self.current_indent;
-                let mut branches = Vec::new();
-                let saved_block = self.block_indent;
-                self.block_indent = self.peek_loc().col.saturating_sub(1);
-
-                loop {
-                    let save_pos = self.pos;
-                    let save_indent = self.current_indent;
-                    self.skip_newlines_and_indent();
-                    if self.at_eof() || self.current_indent < case_indent
-                        || self.at(&Token::Where)
-                        || self.at(&Token::RightParen)
-                        || self.at(&Token::RightBracket)
-                        || self.at(&Token::RightBrace) {
-                        // Restore position so the caller sees the
-                        // newline/indent tokens and doesn't accidentally
-                        // consume the next statement as an argument.
-                        self.pos = save_pos;
-                        self.current_indent = save_indent;
-                        break;
-                    }
-                    let pattern = self.parse_pattern()?;
-
-                    if self.at(&Token::Pipe) {
-                        // Guards on case branch
-                        let mut guards = Vec::new();
-                        while self.at(&Token::Pipe) {
-                            self.advance();
-                            let condition = self.parse_expr()?;
-                            self.expect(&Token::Arrow)?;
-                            let body = self.parse_stmt_expr()?;
-                            guards.push(Guard { condition, body });
-                            self.skip_newlines_and_indent();
-                        }
-                        branches.push(CaseBranch {
-                            pattern,
-                            guards,
-                            body: Expr::Var("undefined".to_string()),
-                        });
-                    } else {
-                        self.expect(&Token::Arrow)?;
-                        let body = self.parse_stmt_expr()?;
-                        branches.push(CaseBranch {
-                            pattern,
-                            guards: vec![],
-                            body,
-                        });
-                    }
-                }
-                self.block_indent = saved_block;
-
-                Ok(Expr::Case {
-                    scrutinee: Box::new(scrutinee),
-                    branches,
-                })
-            }
+            Token::Case => self.parse_case_expr(),
             Token::Let => {
                 self.advance();
                 let binds = self.parse_let_binds()?;
@@ -3182,216 +3385,8 @@ impl Parser {
                     body: Box::new(body),
                 })
             }
-            Token::Do => {
-                self.advance();
-                self.skip_newlines_and_indent();
-                let do_indent = self.current_indent;
-                let mut stmts = Vec::new();
-                let saved_block = self.block_indent;
-                self.block_indent = self.peek_loc().col.saturating_sub(1);
-
-                loop {
-                    self.skip_newlines_and_indent();
-                    if self.at_eof() || self.current_indent < do_indent
-                        || self.at(&Token::RightParen) {
-                        break;
-                    }
-
-                    // Check for `let name = expr` or `let (a, b) = expr`
-                    if self.at(&Token::Let) {
-                        self.advance();
-                        let let_indent = self.current_indent;
-                        // Tuple pattern: let (a, b) = expr
-                        if matches!(self.peek(), Token::LeftParen) {
-                            let pat = self.parse_pattern_atom()?;
-                            if matches!(pat, Pattern::Tuple(_)) {
-                                self.expect(&Token::Eq)?;
-                                let expr = self.parse_expr()?;
-                                stmts.push(DoStmt::PatternDoLet { pattern: pat, expr });
-                                continue;
-                            }
-                            return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
-                        }
-                        // The binding column is the layout block for the
-                        // binding RHS(s), so a following sibling binding at the
-                        // same column is not swallowed as a continuation arg.
-                        let saved_do_block = self.block_indent;
-                        self.block_indent = self.peek_loc().col.saturating_sub(1);
-                        let name = self.expect_ident()?;
-                        // Collect optional patterns: let f x y = expr => let f = \x y -> expr
-                        let mut params = Vec::new();
-                        while self.is_pattern_start() && !self.at(&Token::Eq) {
-                            params.push(self.parse_pattern_atom()?);
-                        }
-                        self.expect(&Token::Eq)?;
-                        let mut expr = self.parse_expr()?;
-                        // Desugar: wrap body in a single multi-param lambda
-                        if !params.is_empty() {
-                            expr = Expr::Lambda {
-                                params: self.lambda_param_names(params)?,
-                                body: Box::new(expr),
-                            };
-                        }
-                        // Accumulate all bindings of THIS `let` group into one
-                        // list so they share a single mutually-recursive scope
-                        // (Haskell 2010 letrec); a later binding may be referenced
-                        // by an earlier one regardless of source order.
-                        let mut group = vec![LocalDef { name, patterns: vec![], body: expr }];
-                        // Continue parsing additional bindings at the same or deeper indent
-                        loop {
-                            let save_pos = self.pos;
-                            let save_indent = self.current_indent;
-                            self.skip_newlines_and_indent();
-                            if self.current_indent >= let_indent
-                                && let Token::Ident(_) = self.peek() {
-                                    // Peek ahead for `name [patterns] =`
-                                    let save2 = self.pos;
-                                    let save2_indent = self.current_indent;
-                                    let name2 = self.expect_ident().ok();
-                                    if let Some(n2) = name2 {
-                                        let mut params2 = Vec::new();
-                                        while self.is_pattern_start() && !self.at(&Token::Eq) {
-                                            if let Ok(p) = self.parse_pattern_atom() {
-                                                params2.push(p);
-                                            } else { break; }
-                                        }
-                                        if self.at(&Token::Eq) {
-                                            self.advance();
-                                            let mut expr2 = self.parse_expr()?;
-                                            if !params2.is_empty() {
-                                                expr2 = Expr::Lambda {
-                                                    params: self.lambda_param_names(params2)?,
-                                                    body: Box::new(expr2),
-                                                };
-                                            }
-                                            group.push(LocalDef { name: n2, patterns: vec![], body: expr2 });
-                                            continue;
-                                        }
-                                    }
-                                    self.pos = save2;
-                                    self.current_indent = save2_indent;
-                                }
-                            // Not a continuation binding — backtrack
-                            self.pos = save_pos;
-                            self.current_indent = save_indent;
-                            break;
-                        }
-                        stmts.push(DoStmt::DoLet { binds: group });
-                        self.block_indent = saved_do_block;
-                        continue;
-                    }
-
-                    // Check for `(a, b) <- expr` (pattern bind)
-                    if matches!(self.peek(), Token::LeftParen) {
-                        let save_tup = self.pos;
-                        let save_tup_indent = self.current_indent;
-                        if let Ok(pat) = self.parse_pattern_atom()
-                            && matches!(pat, Pattern::Tuple(_)) && self.at(&Token::Bind) {
-                                self.advance();
-                                let expr = self.parse_stmt_expr()?;
-                                stmts.push(DoStmt::PatternBind { pattern: pat, expr });
-                                continue;
-                            }
-                        self.pos = save_tup;
-                        self.current_indent = save_tup_indent;
-                    }
-
-                    // Check for `_ <- expr` (discard bind)
-                    if self.at(&Token::Underscore) {
-                        let save_u = self.pos;
-                        self.advance();
-                        if self.at(&Token::Bind) {
-                            self.advance();
-                            let expr = self.parse_stmt_expr()?;
-                            stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
-                            continue;
-                        }
-                        self.pos = save_u;
-                    }
-
-                    // Check for `name <- expr` (bind)
-                    let save = self.pos;
-                    if let Token::Ident(name) = self.peek().clone() {
-                        self.advance();
-                        if self.at(&Token::Bind) {
-                            self.advance();
-                            let expr = self.parse_stmt_expr()?;
-                            stmts.push(DoStmt::Bind { name, expr });
-                            continue;
-                        }
-                        self.pos = save;
-                    }
-
-                    // Bare expression
-                    let expr = self.parse_stmt_expr()?;
-                    stmts.push(DoStmt::Expr(expr));
-                }
-
-                self.block_indent = saved_block;
-                Ok(Expr::Do(stmts))
-            }
-            Token::Backslash => {
-                self.advance();
-                // Check for pattern-matching lambda: \(Con x) -> body
-                // Desugars to \__arg -> case __arg of { pattern -> body }
-                if matches!(self.peek(), Token::LeftParen | Token::UpperIdent(_) | Token::LeftBracket) {
-                    let save = self.pos;
-                    let save_indent = self.current_indent;
-                    // Try parsing as pattern
-                    if let Ok(pat) = self.parse_pattern()
-                        && self.at(&Token::Arrow) {
-                            self.advance();
-                            let body = self.parse_expr()?;
-                            let mut branches = vec![CaseBranch {
-                                pattern: pat,
-                                guards: vec![],
-                                body,
-                            }];
-                            // Add wildcard fallback for partial patterns
-                            branches.push(CaseBranch {
-                                pattern: Pattern::Wildcard,
-                                guards: vec![],
-                                body: Expr::App(
-                                    Box::new(Expr::Var("error".into())),
-                                    Box::new(Expr::Lit(Literal::Str(b"non-exhaustive lambda pattern".to_vec()))),
-                                ),
-                            });
-                            return Ok(Expr::Lambda {
-                                params: vec!["__lam".to_string()],
-                                body: Box::new(Expr::Case {
-                                    scrutinee: Box::new(Expr::Var("__lam".to_string())),
-                                    branches,
-                                }),
-                            });
-                        }
-                    // Not a pattern lambda — backtrack
-                    self.pos = save;
-                    self.current_indent = save_indent;
-                }
-                let mut params = Vec::new();
-                loop {
-                    match self.peek().clone() {
-                        Token::Ident(name) => {
-                            params.push(name);
-                            self.advance();
-                        }
-                        Token::Underscore => {
-                            params.push("_".to_string());
-                            self.advance();
-                        }
-                        _ => break,
-                    }
-                }
-                if params.is_empty() {
-                    return Err(self.err_here("Expected lambda parameter".to_string()));
-                }
-                self.expect(&Token::Arrow)?;
-                let body = self.parse_expr()?;
-                Ok(Expr::Lambda {
-                    params,
-                    body: Box::new(body),
-                })
-            }
+            Token::Do => self.parse_do_block(),
+            Token::Backslash => self.parse_lambda(),
             _ => {
                 Err(self.err_here(format!("Expected expression, found {}", self.peek())))
             }
@@ -3400,14 +3395,9 @@ impl Parser {
 
     // --- Pattern parsing ---
 
-    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
-    // `parse_pattern_inner`; recursive calls throughout the parser go through this
-    // wrapper, so the counter tracks the real recursion depth.
+    // Depth-guard wrapper: the grammar rule itself is in `parse_pattern_inner`.
     fn parse_pattern(&mut self) -> PResult<Pattern> {
-        self.enter_nested("pattern")?;
-        let r = self.parse_pattern_inner();
-        self.depth -= 1;
-        r
+        self.guarded("pattern", Self::parse_pattern_inner)
     }
 
     fn parse_pattern_inner(&mut self) -> PResult<Pattern> {
@@ -3506,14 +3496,9 @@ impl Parser {
         false
     }
 
-    // Depth-guard wrapper: see `enter_nested`. The grammar rule itself is in
-    // `parse_pattern_atom_inner`; recursive calls throughout the parser go through this
-    // wrapper, so the counter tracks the real recursion depth.
+    // Depth-guard wrapper: the grammar rule itself is in `parse_pattern_atom_inner`.
     fn parse_pattern_atom(&mut self) -> PResult<Pattern> {
-        self.enter_nested("pattern")?;
-        let r = self.parse_pattern_atom_inner();
-        self.depth -= 1;
-        r
+        self.guarded("pattern", Self::parse_pattern_atom_inner)
     }
 
     fn parse_pattern_atom_inner(&mut self) -> PResult<Pattern> {

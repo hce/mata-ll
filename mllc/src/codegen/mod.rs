@@ -439,17 +439,35 @@ impl CodeGen {
     }
 }
 
+/// The rendered Lua module plus its section boundaries, computed at the one
+/// place the final text is concatenated. `compile` republishes the offsets on
+/// `CompileResult`; front-ends (the REPL's `/lua` in particular) must slice
+/// with them instead of rediscovering the sections by scanning the text.
+pub(crate) struct GeneratedLua {
+    pub code: String,
+    /// Byte offset into `code` where the compiled module body begins:
+    /// everything before it is the embedded-source block (when enabled) and
+    /// the on-demand runtime prelude; everything from it up to
+    /// `entry_point_start` derives from the compiled module (hoisted
+    /// big-integer literals, provenance header, declarations, functions).
+    pub user_code_start: usize,
+    /// Byte offset into `code` of the `-- Entry point` line (the section
+    /// that runs `main`; the export table follows it). `None` when the
+    /// module has no `main`.
+    pub entry_point_start: Option<usize>,
+}
+
 /// Generate the Lua module. `Err` carries the codegen depth-guard
 /// diagnostic (see `CodeGen::expr_ast`) — the only error this pass can
 /// produce; everything else was rejected by earlier passes.
 /// `opt_disable`: explicit optimization-pass skip list (comma-separated,
 /// the `MLL_OPT_DISABLE` vocabulary); `None` reads the environment
 /// variable — see `CompileOptions::disable_opt_passes`.
-pub fn generate(
+pub(crate) fn generate(
     module: &TModule,
     embed_source: Option<(EmbedMode, &str)>,
     opt_disable: Option<&str>,
-) -> Result<String, String> {
+) -> Result<GeneratedLua, String> {
     let mut cg = CodeGen::new();
     cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
     cg.demand_info = crate::demand::analyze(module);
@@ -461,8 +479,28 @@ pub fn generate(
         return Err(msg);
     }
     opt::run(&mut stmts, opt_disable);
+    // Locate the entry-point marker AFTER the optimization passes: they may
+    // splice top-level statements (so an index recorded at emission could
+    // drift), but they treat `Stmt::Raw` as opaque and never synthesize or
+    // rewrite one, so the exact statement module_stmts pushed is findable.
+    // Matched at the statement level against the shared constant — this is
+    // the emission side of the boundary, not a rendered-text scrape.
+    let entry_idx = stmts
+        .iter()
+        .position(|s| matches!(s, lua::Stmt::Raw(t) if t == module::ENTRY_POINT_COMMENT));
+    debug_assert_eq!(
+        entry_idx.is_some(),
+        module.has_main,
+        "entry-point marker must be present exactly when the module has a main"
+    );
     let mut body = String::new();
-    lua::Block(stmts).render(0, &mut body);
+    let mut entry_in_body = None;
+    for (i, s) in stmts.iter().enumerate() {
+        if entry_idx == Some(i) {
+            entry_in_body = Some(body.len());
+        }
+        s.render_line(0, &mut body);
+    }
     // Hoisted big-integer literals (see BigLitPool): a `local __mll_biglit`
     // table calling `__int_from_decimal`, sitting between the prelude and the
     // body. The prelude scan is fed `big_lit_defs` too so `__int_from_decimal`
@@ -479,9 +517,15 @@ pub fn generate(
     };
     out.push_str(&prelude);
     out.push('\n');
+    let user_code_start = out.len();
     out.push_str(&big_lit_defs);
+    let body_start = out.len();
     out.push_str(&body);
-    Ok(out)
+    Ok(GeneratedLua {
+        code: out,
+        user_code_start,
+        entry_point_start: entry_in_body.map(|o| body_start + o),
+    })
 }
 
 /// Test-only support behind `verify::check_stamps`: rebuild the module body,
