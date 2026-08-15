@@ -218,7 +218,7 @@ main = print (loop 3 big + twice)
 /// there is semantics, not grouping.
 #[test]
 fn ffi_wrapper_keeps_truncating_paren() {
-    on_compiler_stack(ffi_wrapper_keeps_truncating_paren_impl)
+    with_compiler_stack(ffi_wrapper_keeps_truncating_paren_impl)
 }
 
 fn ffi_wrapper_keeps_truncating_paren_impl() {
@@ -241,7 +241,7 @@ fn ffi_wrapper_keeps_truncating_paren_impl() {
 /// concrete; opt.rs pass 4 is the safety net).
 #[test]
 fn where_group_calls_not_forced() {
-    on_compiler_stack(where_group_calls_not_forced_impl)
+    with_compiler_stack(where_group_calls_not_forced_impl)
 }
 
 fn where_group_calls_not_forced_impl() {

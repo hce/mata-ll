@@ -60,7 +60,7 @@ fn with_compiler_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
 
 /// `mllc::compile`, on the compiler's calibrated stack. EVERY compile in this
 /// harness must run on such a stack (via this, `run_mll_file`, or
-/// `on_compiler_stack`): the nesting-depth limit assumes
+/// `with_compiler_stack`): the nesting-depth limit assumes
 /// `mllc::COMPILER_STACK_SIZE`, and libtest worker threads are far smaller —
 /// in a debug build even the ~30-level inference spine of the 8-line
 /// examples/primes_check.mll overflows them.
@@ -70,20 +70,6 @@ fn compile(
     libs: &[&Path],
 ) -> Result<mllc::CompileResult, mllc::CompileError> {
     with_compiler_stack(|| mllc::compile(source, dir, libs))
-}
-
-/// Run a whole test body on the calibrated stack: for tests that do more
-/// around the compile (deep own recursion, `compile_with_options`) or call
-/// `compile` in a tight loop where one spawn should cover all of them.
-fn on_compiler_stack(f: impl FnOnce() + Send + 'static) {
-    with_compiler_stack(f)
-}
-
-fn compile_err(source: &str) -> String {
-    match compile(source, Path::new("."), &[]) {
-        Ok(_) => panic!("expected compilation to fail, but it succeeded"),
-        Err(e) => e.to_string(),
-    }
 }
 
 /// Compile `source` (rooted at `.`, with `libs` on the search path) expecting

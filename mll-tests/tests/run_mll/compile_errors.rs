@@ -822,16 +822,13 @@ fn argument_specialized_instance_head_rejected() {
     // Dispatch keys on the head constructor alone, so `Pretty [Int]` would
     // silently run for `pretty [True]` — reject it. (Was: `pretty [True]` ran
     // the `[Int]` body.)
-    let e = compile_err(
-        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty [Int] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = putStrLn (pretty ([True] :: [Bool]))\n",
-    );
-    assert!(e.contains("too specific"), "got: {e}");
-    assert!(e.contains("[Int]"), "got: {e}");
+    expect_compile_error("class Pretty a where\n    pretty :: a -> String\ninstance Pretty [Int] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = putStrLn (pretty ([True] :: [Bool]))\n", &[], &[
+        "too specific",
+        "[Int]",
+    ]);
 
     // Repeated type argument (`Pair a a`) is likewise rejected.
-    let e = compile_err(
-        "data Pair a b = Pair a b\nclass Pretty a where\n    pretty :: a -> String\ninstance Pretty (Pair a a) where\n    pretty _ = \"pair\"\nmain :: IO ()\nmain = pure ()\n",
-    );
+    let e = expect_compile_error("data Pair a b = Pair a b\nclass Pretty a where\n    pretty :: a -> String\ninstance Pretty (Pair a a) where\n    pretty _ = \"pair\"\nmain :: IO ()\nmain = pure ()\n", &[], &[]);
     assert!(e.contains("too specific") || e.contains("DISTINCT"), "got: {e}");
 }
 
@@ -840,10 +837,10 @@ fn duplicate_instance_is_hard_error() {
     // Two instances for the same (class, head) silently overwrote (last wins);
     // now a compile error, like GHC's duplicate-instance rejection. (Strict
     // version of `duplicate_instance_rejected`, which tolerated the old gap.)
-    let e = compile_err(
-        "class Greet a where\n    greet :: a -> String\ninstance Greet Int where\n    greet _ = \"first\"\ninstance Greet Int where\n    greet _ = \"second\"\nmain :: IO ()\nmain = putStrLn (greet (1 :: Int))\n",
-    );
-    assert!(e.contains("Duplicate instance") && e.contains("Greet Int"), "got: {e}");
+    expect_compile_error("class Greet a where\n    greet :: a -> String\ninstance Greet Int where\n    greet _ = \"first\"\ninstance Greet Int where\n    greet _ = \"second\"\nmain :: IO ()\nmain = putStrLn (greet (1 :: Int))\n", &[], &[
+        "Duplicate instance",
+        "Greet Int",
+    ]);
 }
 
 #[test]
@@ -851,9 +848,7 @@ fn overlapping_instances_rejected() {
     // `instance Pretty [a]` and `instance Pretty [Int]` overlap at head
     // `[]`; both `pretty [1]` and `pretty [True]` used to pick the
     // last-declared body. Now the specific head is rejected.
-    let e = compile_err(
-        "class Pretty a where\n    pretty :: a -> String\ninstance Pretty a => Pretty [a] where\n    pretty _ = \"generic\"\ninstance Pretty [Int] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = pure ()\n",
-    );
+    let e = expect_compile_error("class Pretty a where\n    pretty :: a -> String\ninstance Pretty a => Pretty [a] where\n    pretty _ = \"generic\"\ninstance Pretty [Int] where\n    pretty _ = \"int list\"\nmain :: IO ()\nmain = pure ()\n", &[], &[]);
     assert!(e.contains("too specific") || e.contains("Duplicate instance"), "got: {e}");
 }
 
@@ -1924,14 +1919,17 @@ fn operator_in_type_position_rejected() {
     // different from what was written (`f ()` ran fine). An operator in type
     // position must be a parse error that explains why, with a note on the
     // GHC deviation (TypeOperators).
-    let e = compile_err("f :: (+) -> Int\nf _ = 1\nmain :: IO ()\nmain = print (f ())\n");
-    assert!(e.contains("The operator '+' cannot appear in a type"), "got: {e}");
-    assert!(e.contains("'(+)' names a function (a value)"), "got: {e}");
-    assert!(e.contains("note:") && e.contains("TypeOperators"), "got: {e}");
+    expect_compile_error("f :: (+) -> Int\nf _ = 1\nmain :: IO ()\nmain = print (f ())\n", &[], &[
+        "The operator '+' cannot appear in a type",
+        "'(+)' names a function (a value)",
+        "note:",
+        "TypeOperators",
+    ]);
 
     // Same rejection for other operators and positions inside the type.
-    let e = compile_err("g :: Int -> (<>)\ng x = x\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("The operator '<>' cannot appear in a type"), "got: {e}");
+    expect_compile_error("g :: Int -> (<>)\ng x = x\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "The operator '<>' cannot appear in a type",
+    ]);
 }
 
 // --- Kind system -----------------------------------------------------------
@@ -1944,98 +1942,85 @@ fn operator_in_type_position_rejected() {
 #[test]
 fn kind_error_unsaturated_constructor_in_signature() {
     // `Maybe` alone is not a type — it still needs its element type.
-    let e = compile_err("f :: Maybe -> Int\nf _ = 1\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Kind error"), "got: {e}");
-    assert!(e.contains("'Maybe' has kind Type -> Type"), "got: {e}");
-    assert!(e.contains("still needs 1 more type argument"), "got: {e}");
-    assert!(e.contains("in the type signature for 'f'"), "got: {e}");
+    expect_compile_error("f :: Maybe -> Int\nf _ = 1\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+        "'Maybe' has kind Type -> Type",
+        "still needs 1 more type argument",
+        "in the type signature for 'f'",
+    ]);
 }
 
 #[test]
 fn kind_error_saturated_type_applied_to_argument() {
     // `Maybe Int` is complete; applying it to `Bool` is a kind error.
-    let e = compile_err("x :: Maybe Int Bool\nx = undefined\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Kind error"), "got: {e}");
-    assert!(
-        e.contains("'Maybe Int' is applied to the type argument 'Bool'"),
-        "got: {e}"
-    );
-    assert!(e.contains("takes no type arguments"), "got: {e}");
+    expect_compile_error("x :: Maybe Int Bool\nx = undefined\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+        "'Maybe Int' is applied to the type argument 'Bool'",
+        "takes no type arguments",
+    ]);
 }
 
 #[test]
 fn kind_error_type_application_argument_kind() {
     // HashMap's parameters are complete types; a bare `Maybe` is not one.
-    let e = compile_err("h :: HashMap Maybe Int -> Int\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(
-        e.contains("'HashMap' needs an argument of kind Type, but 'Maybe' has kind Type -> Type"),
-        "got: {e}"
-    );
+    expect_compile_error("h :: HashMap Maybe Int -> Int\nh _ = 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "'HashMap' needs an argument of kind Type, but 'Maybe' has kind Type -> Type",
+    ]);
 }
 
 #[test]
 fn kind_error_data_field_must_be_complete_type() {
-    let e = compile_err("data T = MkT Maybe\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Kind error"), "got: {e}");
-    assert!(e.contains("'Maybe' has kind Type -> Type"), "got: {e}");
-    assert!(e.contains("in the definition of data type 'T'"), "got: {e}");
+    expect_compile_error("data T = MkT Maybe\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+        "'Maybe' has kind Type -> Type",
+        "in the definition of data type 'T'",
+    ]);
 }
 
 #[test]
 fn kind_error_type_variable_used_at_two_kinds() {
     // `t` is used bare (kind Type) AND applied (`t a`) in one signature.
-    let e = compile_err("g :: t -> t a -> Int\ng _ _ = 1\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Kind error"), "got: {e}");
-    assert!(
-        e.contains("a single type variable cannot be used at two different kinds"),
-        "got: {e}"
-    );
+    expect_compile_error("g :: t -> t a -> Int\ng _ _ = 1\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+        "a single type variable cannot be used at two different kinds",
+    ]);
 }
 
 #[test]
 fn kind_error_ascription_checked() {
     // Ascribed types are user-written type syntax like any signature.
-    let e = compile_err("main :: IO ()\nmain = print (Nothing :: Maybe)\n");
-    assert!(e.contains("Kind error"), "got: {e}");
-    assert!(e.contains("in a type ascription"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print (Nothing :: Maybe)\n", &[], &[
+        "Kind error",
+        "in a type ascription",
+    ]);
 }
 
 #[test]
 fn kind_error_instance_head_needs_unapplied_constructor() {
     // A Type -> Type class rejects a complete type as its instance head —
     // and the note must point at the [] / Maybe spelling.
-    let e = compile_err(
-        "class Collapse t where\n    collapse :: t Int -> Int\ninstance Collapse Int where\n    collapse x = x\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(
-        e.contains("'instance Collapse Int' is ill-kinded"),
-        "got: {e}"
-    );
-    assert!(
-        e.contains("use its type variable 't' at kind Type -> Type"),
-        "got: {e}"
-    );
+    expect_compile_error("class Collapse t where\n    collapse :: t Int -> Int\ninstance Collapse Int where\n    collapse x = x\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "'instance Collapse Int' is ill-kinded",
+        "use its type variable 't' at kind Type -> Type",
+    ]);
 
     // The classic trap: `instance C [a]` where `instance C []` is meant.
-    let e = compile_err(
-        "class Collapse t where\n    collapse :: t Int -> Int\ninstance Collapse [a] where\n    collapse _ = 0\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e.contains("'instance Collapse [a]' is ill-kinded"), "got: {e}");
-    assert!(
-        e.contains("note:") && e.contains("write 'instance C []', not 'instance C [a]'"),
-        "got: {e}"
-    );
+    expect_compile_error("class Collapse t where\n    collapse :: t Int -> Int\ninstance Collapse [a] where\n    collapse _ = 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "'instance Collapse [a]' is ill-kinded",
+        "note:",
+        "write 'instance C []', not 'instance C [a]'",
+    ]);
 }
 
 #[test]
 fn kind_error_instance_head_needs_complete_type() {
     // The reverse direction: a Type class rejects an unapplied constructor.
-    let e = compile_err(
-        "data T a = MkT a\nclass Pretty a where\n    pretty :: a -> String\ninstance Pretty T where\n    pretty _ = \"t\"\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e.contains("'instance Pretty T' is ill-kinded"), "got: {e}");
-    assert!(e.contains("'T' has kind Type -> Type"), "got: {e}");
-    assert!(e.contains("note:") && e.contains("Expecting one more argument"), "got: {e}");
+    expect_compile_error("data T a = MkT a\nclass Pretty a where\n    pretty :: a -> String\ninstance Pretty T where\n    pretty _ = \"t\"\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "'instance Pretty T' is ill-kinded",
+        "'T' has kind Type -> Type",
+        "note:",
+        "Expecting one more argument",
+    ]);
 }
 
 #[test]
@@ -2047,10 +2032,9 @@ fn bare_list_constructor_parses_and_kind_checks_in_instance_head() {
     // still rejected, but only by the orphan rule (Foldable and [] both live
     // in the Prelude, whose own instance declarations use exactly this
     // spelling) — there must be no parse error and no kind error.
-    let e = compile_err(
-        "instance Foldable [] where\n    foldr _ z [] = z\n    foldr f z (x:xs) = f x (foldr f z xs)\n    foldl _ z [] = z\n    foldl f z (x:xs) = foldl f (f z x) xs\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e.contains("Orphan instance"), "got: {e}");
+    let e = expect_compile_error("instance Foldable [] where\n    foldr _ z [] = z\n    foldr f z (x:xs) = f x (foldr f z xs)\n    foldl _ z [] = z\n    foldl f z (x:xs) = foldl f (f z x) xs\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Orphan instance",
+    ]);
     assert!(!e.contains("Kind error"), "must kind-check, got: {e}");
     assert!(!e.contains("Expected type"), "must parse, got: {e}");
 }
@@ -2060,10 +2044,9 @@ fn higher_kinded_class_variable_inferred_from_constraint() {
     // A constraint alone fixes the variable's kind: `Foldable t` forces
     // `t : Type -> Type`, so using `t` bare in the same signature is a kind
     // error even though the body never applies it.
-    let e = compile_err(
-        "f :: Foldable t => t -> Int\nf _ = 0\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e.contains("Kind error"), "got: {e}");
+    expect_compile_error("f :: Foldable t => t -> Int\nf _ = 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+    ]);
 
     // And the well-kinded spelling still compiles.
     let src = "f :: Foldable t => t Int -> Int\nf t = sum t\nmain :: IO ()\nmain = print (f [1, 2, 3])\n";
@@ -2117,14 +2100,10 @@ fn kind_class_var_from_superclass_after_still_rejects_wrong_instance() {
     // after), an instance head at kind `Type` (Int) is still a kind
     // error. A regression that made class kinds default to `Type` would make
     // this program compile — this test would then fail loudly.
-    let e = compile_err(
-        "class Super t => Sub t where\n    marker :: Int\n\nclass Super t where\n    op :: t Int -> Int\n\ninstance Sub Int where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e.contains("'instance Sub Int' is ill-kinded"), "got: {e}");
-    assert!(
-        e.contains("use its type variable 't' at kind Type -> Type"),
-        "got: {e}"
-    );
+    expect_compile_error("class Super t => Sub t where\n    marker :: Int\n\nclass Super t where\n    op :: t Int -> Int\n\ninstance Sub Int where\n    marker = 99\n\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "'instance Sub Int' is ill-kinded",
+        "use its type variable 't' at kind Type -> Type",
+    ]);
 }
 
 #[test]
@@ -2135,10 +2114,9 @@ fn kind_class_genuine_superclass_conflict_is_reported() {
     // The two constraints share one variable and cannot both hold. The
     // silent prepass keeps a first solution; the reporting pass 2b MUST
     // still surface the clash rather than swallow it.
-    let e = compile_err(
-        "class Super t => Sub t where\n    bad :: t -> Int\n\nclass Super t where\n    op :: t Int -> Int\n\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e.contains("Kind error"), "conflict must not be swallowed, got: {e}");
+    expect_compile_error("class Super t => Sub t where\n    bad :: t -> Int\n\nclass Super t where\n    op :: t Int -> Int\n\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+    ]);
 }
 
 #[test]
@@ -2151,10 +2129,9 @@ fn kind_mutually_recursive_data_conflict_is_reported() {
     // which is simultaneously `Type` and `Type -> Type`. The silent prepass
     // registers a first-solution kind for each; the reporting checking pass
     // must still find the conflict.
-    let e = compile_err(
-        "data P a = MkP (a Int) (Q a)\ndata Q b = MkQ b (P b)\n\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e.contains("Kind error"), "mutual conflict must not be swallowed, got: {e}");
+    expect_compile_error("data P a = MkP (a Int) (Q a)\ndata Q b = MkQ b (P b)\n\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+    ]);
 }
 
 #[test]
@@ -2165,14 +2142,10 @@ fn kind_ill_kinded_use_at_wrong_arity_surfaces_at_use_site() {
     // (`T Int`, where `Int : Type`). The registered kind of `T` must
     // drive the check at the use site so the misuse surfaces there — the
     // first (well-kinded) declaration must not mask the second's error.
-    let e = compile_err(
-        "data T a = MkT (a Int)\ndata U = MkU (T Int)\n\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(
-        e.contains("'T' needs an argument of kind Type -> Type, but 'Int' has kind Type"),
-        "got: {e}"
-    );
-    assert!(e.contains("in the definition of data type 'U'"), "got: {e}");
+    expect_compile_error("data T a = MkT (a Int)\ndata U = MkU (T Int)\n\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "'T' needs an argument of kind Type -> Type, but 'Int' has kind Type",
+        "in the definition of data type 'U'",
+    ]);
 }
 
 #[test]
@@ -2181,15 +2154,13 @@ fn kind_intra_declaration_conflict_caught_in_both_field_orders() {
     // applied — in the SAME declaration. This must be a kind error no matter
     // which field comes first, so the silent prepass's arbitrary
     // first-solution choice cannot mask the conflict.
-    let e_bare_first = compile_err(
-        "data Bad a = MkBad a (a Int)\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e_bare_first.contains("Kind error"), "bare-first order, got: {e_bare_first}");
+    expect_compile_error("data Bad a = MkBad a (a Int)\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+    ]);
 
-    let e_applied_first = compile_err(
-        "data Bad2 a = MkBad2 (a Int) a\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(e_applied_first.contains("Kind error"), "applied-first order, got: {e_applied_first}");
+    expect_compile_error("data Bad2 a = MkBad2 (a Int) a\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Kind error",
+    ]);
 }
 
 #[test]
@@ -2199,13 +2170,9 @@ fn kind_phantom_param_defaults_to_type_and_higher_kinded_use_rejected() {
     // higher kind (`Phantom Maybe`, where `Maybe : Type -> Type`) is then a
     // kind error caught at the use site — the default must not be silently
     // widened to fit the use.
-    let e = compile_err(
-        "data Phantom a = MkPhantom Int\nuseHK :: Phantom Maybe -> Int\nuseHK _ = 0\nmain :: IO ()\nmain = pure ()\n",
-    );
-    assert!(
-        e.contains("'Phantom' needs an argument of kind Type, but 'Maybe' has kind Type -> Type"),
-        "got: {e}"
-    );
+    expect_compile_error("data Phantom a = MkPhantom Int\nuseHK :: Phantom Maybe -> Int\nuseHK _ = 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "'Phantom' needs an argument of kind Type, but 'Maybe' has kind Type -> Type",
+    ]);
 }
 
 // --- Semigroup/Monoid instances moved to the Prelude ------------------------
@@ -2222,9 +2189,7 @@ fn list_semigroup_operator_still_rejected_after_move() {
     // for polymorphic dispatch and for `mappend`). Moving the instance to the
     // Prelude must not make `<>` start dispatching on concrete lists — the
     // rejection lives in the monomorphizer, independent of instance source.
-    let e = compile_err(
-        "main :: IO ()\nmain = putStrLn (show ([1, 2] <> [3, 4]))\n",
-    );
+    let e = expect_compile_error("main :: IO ()\nmain = putStrLn (show ([1, 2] <> [3, 4]))\n", &[], &[]);
     // Unannotated list literals default to Integer (GHC `default (Integer, …)`).
     assert!(e.contains("No instance for '<>' on type '[Integer]'"), "got: {e}");
     assert!(
@@ -2250,9 +2215,10 @@ fn mempty_ambiguity_preserved_after_move() {
     // An undetermined `mempty` is still ambiguous with the same guidance —
     // the `Monoid` method-constraint machinery stays in the compiler; only the
     // instances moved.
-    let e = compile_err("main :: IO ()\nmain = putStrLn (show mempty)\n");
-    assert!(e.contains("Ambiguous type"), "got: {e}");
-    assert!(e.contains("Monoid"), "the Monoid ambiguity must still be reported, got: {e}");
+    expect_compile_error("main :: IO ()\nmain = putStrLn (show mempty)\n", &[], &[
+        "Ambiguous type",
+        "Monoid",
+    ]);
 
     // A determined `mempty` still resolves at each element type.
     for src in [
@@ -2280,12 +2246,7 @@ fn source_class_nullary_ambiguity_rejected() {
     // pin which instance — so it must be a compile-time ambiguity error, the
     // same as `show mempty`, NOT a silent compile that crashes at runtime.
     let src = "class Default a where\n    def :: a\n    name :: a -> String\ndata Foo = Foo\ndata Bar = Bar\ninstance Default Foo where\n    def = Foo\n    name _ = \"foo\"\ninstance Default Bar where\n    def = Bar\n    name _ = \"bar\"\nambiguous :: String\nambiguous = name def\nmain :: IO ()\nmain = putStrLn ambiguous\n";
-    let e = compile_err(src);
-    assert!(e.contains("Ambiguous type"), "must be a compile-time ambiguity, got: {e}");
-    assert!(
-        e.contains("'Default'"),
-        "the ambiguity must name the user class, got: {e}"
-    );
+    let e = expect_compile_error(src, &[], &["Ambiguous type", "'Default'"]);
     // The guidance must be present, exactly like the builtin mempty case.
     assert!(e.contains("add a type annotation"), "got: {e}");
 }
@@ -2316,10 +2277,9 @@ fn source_class_method_no_instance_rejected_at_compile_time() {
     // compile-time "No instance" error (was caught in the monomorphizer
     // before; now the synthesized wanted catches it in the type checker,
     // consistent with how `show`/`==` report).
-    let e = compile_err(
-        "class Greet a where\n    greet :: a -> String\ndata Foo = Foo\ninstance Greet Foo where\n    greet _ = \"hi\"\ndata Bar = Bar\nuseBar :: String\nuseBar = greet Bar\nmain :: IO ()\nmain = putStrLn useBar\n",
-    );
-    assert!(e.contains("No instance for 'Greet Bar'"), "got: {e}");
+    expect_compile_error("class Greet a where\n    greet :: a -> String\ndata Foo = Foo\ninstance Greet Foo where\n    greet _ = \"hi\"\ndata Bar = Bar\nuseBar :: String\nuseBar = greet Bar\nmain :: IO ()\nmain = putStrLn useBar\n", &[], &[
+        "No instance for 'Greet Bar'",
+    ]);
 }
 
 #[test]
@@ -2380,8 +2340,7 @@ needsTwo (VCons x _) = x\n\
 main :: IO ()\n\
 main = print (needsTwo (vappend (VCons 1 VNil) (VCons 2 (VCons 3 VNil))))\n"
     );
-    let e = compile_err(&src);
-    assert!(e.contains("Cannot unify"), "length mismatch must be rejected, got: {e}");
+    let e = expect_compile_error(&src, &[], &["Cannot unify"]);
     // The rejection is between the reduced lengths (2 vs 3), i.e. it saw
     // through the family application rather than treating it as opaque.
     assert!(
@@ -2401,8 +2360,7 @@ vhead (VCons x _) = x\n\
 main :: IO ()\n\
 main = print (vhead (vappend (VNil :: Vec 'Z Int) (VNil :: Vec 'Z Int)))\n"
     );
-    let e = compile_err(&src);
-    assert!(e.contains("Cannot unify"), "vhead of empty vappend must be rejected, got: {e}");
+    expect_compile_error(&src, &[], &["Cannot unify"]);
 }
 
 #[test]
@@ -2417,25 +2375,17 @@ coerce v = v\n\
 main :: IO ()\n\
 main = pure ()\n"
     );
-    let e = compile_err(&src);
-    assert!(
-        e.contains("Cannot unify") && e.contains("Plus"),
-        "two different stuck family apps must not unify (no injectivity), got: {e}"
-    );
+    expect_compile_error(&src, &[], &["Cannot unify", "Plus"]);
 }
 
 #[test]
 fn type_family_divergence_errors_not_hangs() {
     // A non-terminating family (`Loop x = Loop x`) must be reported as a
-    // divergence, not loop or overflow the stack. (compile_err runs the
+    // divergence, not loop or overflow the stack. (expect_compile_error runs the
     // compiler in-process; if reduction were unbounded this test would hang or
     // crash the harness — so reaching the assertion is itself the guarantee.)
     let src = "type family Loop x where\n    Loop x = Loop x\nf :: Loop Int -> Int\nf n = 0\nmain :: IO ()\nmain = pure ()\n";
-    let e = compile_err(src);
-    assert!(
-        e.contains("did not terminate") && e.contains("Loop"),
-        "divergent family must report a termination error, got: {e}"
-    );
+    expect_compile_error(src, &[], &["did not terminate", "Loop"]);
 }
 
 // --- Promoted data types have real kinds (DataKinds step 2) ------------------
@@ -2456,12 +2406,11 @@ data Vec n a where\n\
 fn promoted_kind_rejects_bool_tag_for_nat_index() {
     // `'True :: Bool`, but `Vec`'s index has kind `Nat`.
     let src = format!("{PROMOTED_VEC_PRELUDE}bad :: Vec 'True Int -> Int\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
-    let e = compile_err(&src);
-    assert!(e.contains("Kind error"), "got: {e}");
-    assert!(
-        e.contains("needs an argument of kind Nat") && e.contains("'True has kind Bool"),
-        "expected a Nat-vs-Bool kind error, got: {e}"
-    );
+    expect_compile_error(&src, &[], &[
+        "Kind error",
+        "needs an argument of kind Nat",
+        "'True has kind Bool",
+    ]);
 }
 
 #[test]
@@ -2469,11 +2418,7 @@ fn promoted_kind_rejects_wrong_user_tag_for_nat_index() {
     // A promoted constructor of ANOTHER user data type (`'Red :: Color`) where
     // a `Nat` is required.
     let src = format!("data Color = Red | Blue\n{PROMOTED_VEC_PRELUDE}bad :: Vec 'Red Int -> Int\nbad _ = 0\nmain :: IO ()\nmain = pure ()\n");
-    let e = compile_err(&src);
-    assert!(
-        e.contains("needs an argument of kind Nat") && e.contains("'Red has kind Color"),
-        "expected a Nat-vs-Color kind error, got: {e}"
-    );
+    expect_compile_error(&src, &[], &["needs an argument of kind Nat", "'Red has kind Color"]);
 }
 
 #[test]
@@ -2481,11 +2426,11 @@ fn promoted_kind_rejects_nested_wrong_tag() {
     // The ill-kinded tag is nested inside `'S`, which itself has kind
     // `Nat -> Nat`, so `'S 'True` fails at the inner application.
     let src = format!("{PROMOTED_VEC_PRELUDE}bad :: Vec ('S 'True) a -> a\nbad _ = undefined\nmain :: IO ()\nmain = pure ()\n");
-    let e = compile_err(&src);
-    assert!(
-        e.contains("'S") && e.contains("needs an argument of kind Nat") && e.contains("'True has kind Bool"),
-        "expected 'S to reject a Bool argument, got: {e}"
-    );
+    expect_compile_error(&src, &[], &[
+        "'S",
+        "needs an argument of kind Nat",
+        "'True has kind Bool",
+    ]);
 }
 
 #[test]
@@ -2504,11 +2449,10 @@ bad _ = undefined\n\
 main :: IO ()\n\
 main = pure ()\n"
     );
-    let e = compile_err(&src);
-    assert!(
-        e.contains("'Plus' needs an argument of kind Nat") && e.contains("'True has kind Bool"),
-        "the family's Nat argument kind must be checked, got: {e}"
-    );
+    expect_compile_error(&src, &[], &[
+        "'Plus' needs an argument of kind Nat",
+        "'True has kind Bool",
+    ]);
 }
 
 #[test]
@@ -2552,9 +2496,7 @@ fn promoted_kind_non_gadt_phantom_tag_rejected_but_gadt_pins_it() {
     // constructor return type (as `datakinds.mll` does), which is checked and
     // accepted.
     let phantom = "data Color = Red | Blue\ndata Tagged a = Tagged Int\nf :: Tagged 'Red -> Int\nf (Tagged n) = n\nmain :: IO ()\nmain = pure ()\n";
-    let e = compile_err(phantom);
-    assert!(e.contains("Kind error"), "phantom promoted tag should be rejected, got: {e}");
-    assert!(e.contains("'Red has kind Color"), "got: {e}");
+    expect_compile_error(phantom, &[], &["Kind error", "'Red has kind Color"]);
 
     // The GADT form pins the index's kind and is accepted.
     let gadt = "data Color = Red | Blue\ndata Tagged a where\n    MkTagged :: Int -> Tagged 'Red\nf :: Tagged 'Red -> Int\nf (MkTagged n) = n\nmain :: IO ()\nmain = print (f (MkTagged 7))\n";
@@ -2574,15 +2516,12 @@ fn promoted_kind_non_gadt_phantom_tag_rejected_but_gadt_pins_it() {
 fn prelude_builtin_redefinition_reports_user_site_not_prelude() {
     // `error` is a builtin the Prelude's own code depends on (assert, init,
     // last). Redefining it used to fail inside those Prelude functions.
-    let e = compile_err(
-        "error :: String -> Int\nerror s = 42\n\nmain :: IO ()\nmain = print (error \"hi\")\n",
-    );
-    assert!(
-        e.contains("'error' is already provided by the Prelude and cannot be redefined"),
-        "got: {e}"
-    );
-    assert!(e.contains("at 2:"), "should point at the user's definition line, got: {e}");
-    assert!(e.contains("note:") && e.contains("rename your function"), "got: {e}");
+    let e = expect_compile_error("error :: String -> Int\nerror s = 42\n\nmain :: IO ()\nmain = print (error \"hi\")\n", &[], &[
+        "'error' is already provided by the Prelude and cannot be redefined",
+        "at 2:",
+        "note:",
+        "rename your function",
+    ]);
     // The misleading Prelude-internal cascade must be gone entirely.
     assert!(!e.contains("Cannot unify"), "cascade leaked through, got: {e}");
     assert!(
@@ -2595,14 +2534,10 @@ fn prelude_builtin_redefinition_reports_user_site_not_prelude() {
 fn prelude_load_bearing_name_redefinition_rejected() {
     // `map` is a builtin the Prelude uses internally (ap_List). Redefining it
     // used to compile silently and corrupt `<*>` on lists.
-    let e = compile_err(
-        "map :: (Int -> Int) -> [Int] -> [Int]\nmap f xs = xs\n\nmain :: IO ()\nmain = print (map (\\x -> x + 1) [1, 2, 3])\n",
-    );
-    assert!(
-        e.contains("'map' is already provided by the Prelude and cannot be redefined"),
-        "got: {e}"
-    );
-    assert!(e.contains("Prelude's own functions use 'map'"), "got: {e}");
+    expect_compile_error("map :: (Int -> Int) -> [Int] -> [Int]\nmap f xs = xs\n\nmain :: IO ()\nmain = print (map (\\x -> x + 1) [1, 2, 3])\n", &[], &[
+        "'map' is already provided by the Prelude and cannot be redefined",
+        "Prelude's own functions use 'map'",
+    ]);
 }
 
 #[test]
@@ -2614,14 +2549,10 @@ fn prelude_same_type_duplicate_definition_rejected() {
     // `Foldable t => t Int -> Int`; the monomorphic signature is now a
     // DIFFERENT type, i.e. an allowed user-wins redefinition — see the test
     // below — so the exact-duplicate case is probed with `reverse` instead.)
-    let e = compile_err(
-        "reverse :: [a] -> [a]\nreverse xs = xs\n\nmain :: IO ()\nmain = print (reverse [1, 2, 3])\n",
-    );
-    assert!(
-        e.contains("'reverse' is already provided by the Prelude and cannot be redefined"),
-        "got: {e}"
-    );
-    assert!(e.contains("same type as the Prelude's 'reverse'"), "got: {e}");
+    expect_compile_error("reverse :: [a] -> [a]\nreverse xs = xs\n\nmain :: IO ()\nmain = print (reverse [1, 2, 3])\n", &[], &[
+        "'reverse' is already provided by the Prelude and cannot be redefined",
+        "same type as the Prelude's 'reverse'",
+    ]);
 }
 
 #[test]
@@ -2664,13 +2595,9 @@ fn prelude_redefinition_breaking_prelude_body_reports_user_not_prelude() {
     // result is not a String). The safety net must convert the resulting
     // Prelude-internal error (formerly "Cannot unify '[String]' with 'String'
     // at 96:11") into the same clear redefinition report.
-    let e = compile_err(
-        "replicate :: Int -> String -> String\nreplicate n s = s\n\nmain :: IO ()\nmain = putStrLn (replicate 3 \"x\")\n",
-    );
-    assert!(
-        e.contains("'replicate' is already provided by the Prelude and cannot be redefined"),
-        "got: {e}"
-    );
+    let e = expect_compile_error("replicate :: Int -> String -> String\nreplicate n s = s\n\nmain :: IO ()\nmain = putStrLn (replicate 3 \"x\")\n", &[], &[
+        "'replicate' is already provided by the Prelude and cannot be redefined",
+    ]);
     assert!(!e.contains("Cannot unify"), "Prelude-internal error leaked, got: {e}");
     assert!(!e.contains("96:"), "points at a Prelude source line, got: {e}");
 }
@@ -2696,52 +2623,55 @@ fn prelude_benign_shadowing_still_compiles() {
 
 #[test]
 fn no_show_instance_for_function() {
-    let e = compile_err("main :: IO ()\nmain = putStrLn (show (\\a b -> a + b))\n");
-    assert!(e.contains("No instance for 'Show (a -> a -> a)'"), "got: {e}");
-    assert!(e.contains("no Show/Eq/Ord instance"), "missing function note, got: {e}");
+    expect_compile_error("main :: IO ()\nmain = putStrLn (show (\\a b -> a + b))\n", &[], &[
+        "No instance for 'Show (a -> a -> a)'",
+        "no Show/Eq/Ord instance",
+    ]);
 }
 
 #[test]
 fn no_eq_instance_for_function() {
-    let e = compile_err("main :: IO ()\nmain = print ((\\x -> x :: Int) == (\\x -> x))\n");
-    assert!(e.contains("No instance for 'Eq (Int -> Int)'"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print ((\\x -> x :: Int) == (\\x -> x))\n", &[], &[
+        "No instance for 'Eq (Int -> Int)'",
+    ]);
 }
 
 #[test]
 fn no_ord_instance_for_function() {
-    let e = compile_err(
-        "f :: (Int -> Int) -> Bool\nf g = g < g\nmain :: IO ()\nmain = print (f (\\x -> x))\n",
-    );
-    assert!(e.contains("No instance for 'Ord (Int -> Int)'"), "got: {e}");
+    expect_compile_error("f :: (Int -> Int) -> Bool\nf g = g < g\nmain :: IO ()\nmain = print (f (\\x -> x))\n", &[], &[
+        "No instance for 'Ord (Int -> Int)'",
+    ]);
 }
 
 #[test]
 fn no_show_instance_for_tuple_containing_function() {
-    let e = compile_err("main :: IO ()\nmain = putStrLn (show ((1 :: Int), (\\x -> x :: Int)))\n");
-    assert!(e.contains("No instance for 'Show (Int, Int -> Int)'"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = putStrLn (show ((1 :: Int), (\\x -> x :: Int)))\n", &[], &[
+        "No instance for 'Show (Int, Int -> Int)'",
+    ]);
 }
 
 #[test]
 fn no_show_instance_for_io_action() {
-    let e = compile_err("main :: IO ()\nmain = print (putStrLn \"x\")\n");
-    assert!(e.contains("No instance for"), "got: {e}");
-    assert!(e.contains("IO"), "should mention the IO action type, got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print (putStrLn \"x\")\n", &[], &[
+        "No instance for",
+        "IO",
+    ]);
 }
 
 #[test]
 fn constraint_propagates_through_print() {
     // `print :: Show a => …` — its constraint is checked at the call site, so
     // even a never-applied (polymorphic) function is rejected.
-    let e = compile_err("main :: IO ()\nmain = print (\\a b -> a + b)\n");
-    assert!(e.contains("No instance for 'Show (a -> a -> a)'"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print (\\a b -> a + b)\n", &[], &[
+        "No instance for 'Show (a -> a -> a)'",
+    ]);
 }
 
 #[test]
 fn constraint_propagates_through_user_function() {
-    let e = compile_err(
-        "needsShow :: Show a => a -> String\nneedsShow x = show x\nmain :: IO ()\nmain = putStrLn (needsShow (\\y -> y + (1 :: Int)))\n",
-    );
-    assert!(e.contains("No instance for 'Show (Int -> Int)'"), "got: {e}");
+    expect_compile_error("needsShow :: Show a => a -> String\nneedsShow x = show x\nmain :: IO ()\nmain = putStrLn (needsShow (\\y -> y + (1 :: Int)))\n", &[], &[
+        "No instance for 'Show (Int -> Int)'",
+    ]);
 }
 
 #[test]
@@ -2764,13 +2694,9 @@ fn valid_show_constraints_still_compile() {
 /// into an unrelated error at the class head.
 #[test]
 fn class_context_comma_without_parens_is_diagnosed() {
-    let e = compile_err(
-        "class Eq a, Show a => Broken a where\n    broken :: a -> String\n",
-    );
-    assert!(
-        e.contains("Several superclass constraints must be wrapped in parentheses"),
-        "expected the parenthesization diagnosis, got: {e}"
-    );
+    expect_compile_error("class Eq a, Show a => Broken a where\n    broken :: a -> String\n", &[], &[
+        "Several superclass constraints must be wrapped in parentheses",
+    ]);
 }
 
 /// A malformed parenthesized class context gets a targeted explanation of
@@ -2778,13 +2704,9 @@ fn class_context_comma_without_parens_is_diagnosed() {
 /// name" pointing at the '('.
 #[test]
 fn class_context_malformed_parens_is_diagnosed() {
-    let e = compile_err(
-        "class (Eq, Show) => Broken a where\n    broken :: a -> String\n",
-    );
-    assert!(
-        e.contains("A parenthesized class context"),
-        "expected the class-context shape diagnosis, got: {e}"
-    );
+    expect_compile_error("class (Eq, Show) => Broken a where\n    broken :: a -> String\n", &[], &[
+        "A parenthesized class context",
+    ]);
 }
 
 /// An export-list entry the grammar does not know (here a `module M`
@@ -2792,14 +2714,10 @@ fn class_context_malformed_parens_is_diagnosed() {
 /// the export list.
 #[test]
 fn export_list_unknown_entry_is_diagnosed() {
-    let e = compile_err(
-        "module Main (module Data, main) where\n\nmain :: IO ()\nmain = putStrLn \"x\"\n",
-    );
-    assert!(
-        e.contains("export-list entry is not understood")
-            && e.contains("module re-exports"),
-        "expected the export-list diagnosis with the re-export note, got: {e}"
-    );
+    expect_compile_error("module Main (module Data, main) where\n\nmain :: IO ()\nmain = putStrLn \"x\"\n", &[], &[
+        "export-list entry is not understood",
+        "module re-exports",
+    ]);
 }
 
 /// A pattern parameter on a local (let/do-let) function binding is a clear
@@ -2807,17 +2725,10 @@ fn export_list_unknown_entry_is_diagnosed() {
 /// variables unbound.
 #[test]
 fn local_binding_pattern_parameter_is_diagnosed() {
-    let e = compile_err(
-        "main :: IO ()\nmain = do\n    let f (Just x) = x\n    putStrLn (f (Just \"a\"))\n",
-    );
-    assert!(
-        e.contains("cannot take a pattern as a parameter"),
-        "expected the pattern-parameter diagnosis, got: {e}"
-    );
-    assert!(
-        e.contains("GHC accepts pattern parameters"),
-        "expected the GHC-deviation note, got: {e}"
-    );
+    expect_compile_error("main :: IO ()\nmain = do\n    let f (Just x) = x\n    putStrLn (f (Just \"a\"))\n", &[], &[
+        "cannot take a pattern as a parameter",
+        "GHC accepts pattern parameters",
+    ]);
 }
 
 #[test]
@@ -2829,37 +2740,52 @@ fn type_error_locates_the_offending_statement() {
     // multi-line body was reported at the function's first line.
 
     // let-binding body: the error is on the `c = ...` line, not `compute x =`.
-    let e = compile_err(
+    expect_compile_error(
         "compute :: Int -> Int\n\
          compute x =\n\
          \x20   let a = x + 1\n\
          \x20       c = a <> \"oops\"\n\
-         \x20   in c\n");
-    assert!(e.contains("at 4:"), "let-binding error points at the binding line (4): {e}");
+         \x20   in c\n",
+        &[],
+        &[
+            "at 4:",
+        ],
+    );
 
     // case-branch reconciliation: the error is on the offending branch line.
-    let e = compile_err(
+    expect_compile_error(
         "f :: Int -> String\n\
          f n = case n of\n\
          \x20   0 -> \"zero\"\n\
-         \x20   _ -> n\n");
-    assert!(e.contains("at 4:"), "case-branch error points at the branch line (4): {e}");
+         \x20   _ -> n\n",
+        &[],
+        &[
+            "at 4:",
+        ],
+    );
 
     // do-statement: a unification error inside a statement is on its own line.
-    let e = compile_err(
+    expect_compile_error(
         "main :: IO ()\n\
          main = do\n\
          \x20   putStrLn \"ok\"\n\
-         \x20   putStrLn (length \"x\")\n");
-    assert!(e.contains("at 4:"), "do-statement error points at the statement line (4): {e}");
+         \x20   putStrLn (length \"x\")\n",
+        &[],
+        &[
+            "at 4:",
+        ],
+    );
 
     // if-branch reconciliation: the error is on a branch line, not the head.
-    let e = compile_err(
+    let e = expect_compile_error(
         "g :: Int -> Int\n\
          g x =\n\
          \x20   if x > 0\n\
          \x20       then \"pos\"\n\
-         \x20       else x\n");
+         \x20       else x\n",
+        &[],
+        &[],
+    );
     assert!(e.contains("at 4:") || e.contains("at 5:"),
         "if-branch error points at a branch line (4 or 5): {e}");
 }
@@ -2869,39 +2795,42 @@ fn type_error_locates_the_offending_statement() {
 /// these programs the same way.
 #[test]
 fn non_associative_chains_are_rejected() {
-    on_compiler_stack(non_associative_chains_are_rejected_impl)
+    with_compiler_stack(non_associative_chains_are_rejected_impl)
 }
 
 fn non_associative_chains_are_rejected_impl() {
     // The classic: comparison operators do not chain.
-    let e = compile_err("main :: IO ()\nmain = print (1 == 2 == True)\n");
-    assert!(e.contains("non-associative"), "got: {e}");
-    assert!(e.contains("'=='"), "got: {e}");
-    assert!(e.contains("parenthesize"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print (1 == 2 == True)\n", &[], &[
+        "non-associative",
+        "'=='",
+        "parenthesize",
+    ]);
 
     // Two different comparison operators conflict too, and the notes offer
     // the three-way-comparison rewrite.
-    let e = compile_err("main :: IO ()\nmain = print (1 < 2 <= 3)\n");
-    assert!(e.contains("non-associative"), "got: {e}");
-    assert!(e.contains("&&"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print (1 < 2 <= 3)\n", &[], &[
+        "non-associative",
+        "&&",
+    ]);
 
     // A user-declared `infix` operator is non-associative as well.
-    let e = compile_err(
-        "infix 5 <+>\n(<+>) :: Int -> Int -> Int\na <+> b = a + b\nmain :: IO ()\nmain = print (1 <+> 2 <+> 3)\n",
-    );
-    assert!(e.contains("non-associative"), "got: {e}");
-    assert!(e.contains("'<+>'"), "got: {e}");
+    expect_compile_error("infix 5 <+>\n(<+>) :: Int -> Int -> Int\na <+> b = a + b\nmain :: IO ()\nmain = print (1 <+> 2 <+> 3)\n", &[], &[
+        "non-associative",
+        "'<+>'",
+    ]);
 
     // Prelude `elem` is infix 4 (as in GHC), so it cannot chain with ==.
-    let e = compile_err("main :: IO ()\nmain = print (1 `elem` [1] == True)\n");
-    assert!(e.contains("`elem`"), "got: {e}");
-    assert!(e.contains("non-associative"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print (1 `elem` [1] == True)\n", &[], &[
+        "`elem`",
+        "non-associative",
+    ]);
 
     // The Prelude's <$> and <*> are infixl 4 (as in GHC): mixing them with a
     // comparison at the same precedence is rejected.
-    let e = compile_err("main :: IO ()\nmain = print ((+1) <$> Just 1 == Just 2)\n");
-    assert!(e.contains("'<$>'"), "got: {e}");
-    assert!(e.contains("'=='"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = print ((+1) <$> Just 1 == Just 2)\n", &[], &[
+        "'<$>'",
+        "'=='",
+    ]);
 
     // Parenthesized, every one of them compiles.
     for src in [
@@ -2926,17 +2855,14 @@ fn non_associative_chains_are_rejected_impl() {
 /// programs with "Cannot unify 'IO a' with 'b -> IO ()'".
 #[test]
 fn final_do_bind_types_like_top_level() {
-    on_compiler_stack(final_do_bind_types_like_top_level_impl)
+    with_compiler_stack(final_do_bind_types_like_top_level_impl)
 }
 
 fn final_do_bind_types_like_top_level_impl() {
-    let e = compile_err(
-        "step :: Int -> IO Int\nstep n = return (n + 1)\n\nmain :: IO ()\nmain = do\n    putStrLn \"x\"\n    step 1 >>= step\n",
-    );
-    assert!(
-        e.contains("Int") && e.contains("()"),
-        "must reject with the Int-vs-() mismatch GHC reports, got: {e}"
-    );
+    let e = expect_compile_error("step :: Int -> IO Int\nstep n = return (n + 1)\n\nmain :: IO ()\nmain = do\n    putStrLn \"x\"\n    step 1 >>= step\n", &[], &[
+        "Int",
+        "()",
+    ]);
     assert!(
         !e.contains("->"),
         "must not leak a synthetic continuation arrow into the error, got: {e}"
@@ -2954,7 +2880,7 @@ fn final_do_bind_types_like_top_level_impl() {
 /// prefix_minus GHC-golden case).
 #[test]
 fn prefix_minus_matches_ghc() {
-    on_compiler_stack(prefix_minus_matches_ghc_impl)
+    with_compiler_stack(prefix_minus_matches_ghc_impl)
 }
 
 fn prefix_minus_matches_ghc_impl() {
@@ -2968,7 +2894,7 @@ fn prefix_minus_matches_ghc_impl() {
         ("main :: IO ()\nmain = print ((+ - 2) 3)\n", "'+'"),
         ("main :: IO ()\nmain = print ((`div` - 2) 8)\n", "`div`"),
     ] {
-        let e = compile_err(src);
+        let e = expect_compile_error(src, &[], &[]);
         assert!(e.contains("Prefix minus"), "{src}: got: {e}");
         assert!(e.contains(op), "{src}: got: {e}");
         assert!(e.contains("parenthesize"), "{src}: got: {e}");
@@ -2976,9 +2902,10 @@ fn prefix_minus_matches_ghc_impl() {
 
     // Rejected: prefix minus left of a non-left-associative precedence-6
     // operator (GHC: "cannot mix prefix `-' and `<>'").
-    let e = compile_err("main :: IO ()\nmain = putStrLn (- 1 <> \"a\")\n");
-    assert!(e.contains("prefix minus"), "got: {e}");
-    assert!(e.contains("'<>'"), "got: {e}");
+    expect_compile_error("main :: IO ()\nmain = putStrLn (- 1 <> \"a\")\n", &[], &[
+        "prefix minus",
+        "'<>'",
+    ]);
 
     // Accepted: parenthesized negation anywhere, negation left of infixl 6,
     // negation under a precedence < 6 operator, and `(- x)`/`(-)` forms.
@@ -3009,7 +2936,7 @@ fn prefix_minus_matches_ghc_impl() {
 /// via the operator_sections and operator_fixity golden cases.
 #[test]
 fn section_operand_precedence_matches_ghc() {
-    on_compiler_stack(section_operand_precedence_impl)
+    with_compiler_stack(section_operand_precedence_impl)
 }
 
 fn section_operand_precedence_impl() {
@@ -3058,7 +2985,7 @@ fn section_operand_precedence_impl() {
             &["'.|.' (infixl 2)", "'==' (infix 4)", "(== (a .|. b))"][..],
         ),
     ] {
-        let e = compile_err(src);
+        let e = expect_compile_error(src, &[], &[]);
         assert!(
             e.contains("must bind tighter than the section operator"),
             "{src}: got: {e}"
@@ -3095,16 +3022,16 @@ fn section_operand_precedence_impl() {
 /// opposite associativities defines no grouping either.
 #[test]
 fn conflicting_associativities_at_same_precedence_are_rejected() {
-    on_compiler_stack(conflicting_associativities_impl)
+    with_compiler_stack(conflicting_associativities_impl)
 }
 
 fn conflicting_associativities_impl() {
     // infixl 6 <#> against the builtin infixr 6 <>.
-    let e = compile_err(
-        "infixl 6 <#>\n(<#>) :: String -> String -> String\na <#> b = a ++ b\nmain :: IO ()\nmain = putStrLn (\"a\" <#> \"b\" <> \"c\")\n",
-    );
-    assert!(e.contains("opposite directions"), "got: {e}");
-    assert!(e.contains("infixl 6") && e.contains("infixr 6"), "got: {e}");
+    expect_compile_error("infixl 6 <#>\n(<#>) :: String -> String -> String\na <#> b = a ++ b\nmain :: IO ()\nmain = putStrLn (\"a\" <#> \"b\" <> \"c\")\n", &[], &[
+        "opposite directions",
+        "infixl 6",
+        "infixr 6",
+    ]);
 
     // Same-precedence, same-associativity chains still parse: both infixl...
     let ok_l = "infixl 6 <#>\n(<#>) :: Int -> Int -> Int\na <#> b = a + b\nmain :: IO ()\nmain = print (1 <#> 2 - 3)\n";
@@ -3119,7 +3046,7 @@ fn conflicting_associativities_impl() {
 /// fixity travels with the export (FixityOps declares `infix 4 ~=~`).
 #[test]
 fn imported_infix_operator_is_non_associative_at_import_site() {
-    on_compiler_stack(imported_infix_non_associative_impl)
+    with_compiler_stack(imported_infix_non_associative_impl)
 }
 
 fn imported_infix_non_associative_impl() {
@@ -3132,13 +3059,16 @@ fn type_errors_are_explained_not_cryptic() {
     // Passing a String to a list-typed function: internal unification vars
     // must render as friendly letters (a, b, …), never as `_i700`, and the
     // message must explain that String is not a list in mata-ll.
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 main :: IO ()
 main = print (length "hello")
 "#,
+        &[],
+        &[
+            "[a]",
+        ],
     );
-    assert!(e.contains("[a]"), "var should prettify to [a], got: {e}");
     assert!(!e.contains("_i"), "internal `_i` var names must not leak, got: {e}");
     // The String/list note must explain the opaque-String design: not [Char],
     // list ops don't apply, and <> is how you concatenate Strings. (Updated
@@ -3150,14 +3080,17 @@ main = print (length "hello")
         "note must point at <> and HASKDIFF.md, got: {e}");
 
     // `<>` on a list should point the user at `++`.
-    let e = compile_err(
+    expect_compile_error(
         r#"
 main :: IO ()
 main = print ([1, 2] <> [3, 4] :: [Int])
 "#,
+        &[],
+        &[
+            "No instance for '<>'",
+            "concatenated with ++",
+        ],
     );
-    assert!(e.contains("No instance for '<>'"), "got: {e}");
-    assert!(e.contains("concatenated with ++"), "missing ++ note, got: {e}");
 
     // Ordering whole tuples is rejected at type-check with the missing-instance
     // explanation (the checker discharges the Ord constraint before codegen).
@@ -3166,14 +3099,17 @@ main = print ([1, 2] <> [3, 4] :: [Int])
     // polymorphic literals `(1, 2)` alone is `(Num a, Num b) => (a, b)`, and
     // since mata-ll has no `Ord (a, b)` instance the elements cannot default,
     // so an un-annotated tuple would report an (also-correct) ambiguity error.
-    let e = compile_err(
+    expect_compile_error(
         r#"
 main :: IO ()
 main = print (((1, 2) :: (Int, Int)) > (1, 3))
 "#,
+        &[],
+        &[
+            "No instance for 'Ord (Int, Int)'",
+            "no Ord instance",
+        ],
     );
-    assert!(e.contains("No instance for 'Ord (Int, Int)'"), "got: {e}");
-    assert!(e.contains("no Ord instance"), "missing tuple Ord note, got: {e}");
 }
 
 /// Unpacking an existential must SKOLEMIZE: the hidden type variable becomes
@@ -3182,7 +3118,7 @@ main = print (((1, 2) :: (Int, Int)) > (1, 3))
 /// crash ("attempt to add a 'string' with a 'number'").
 #[test]
 fn existential_unpacking_skolemizes() {
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 data Foo = forall a. Foo a
 
@@ -3192,13 +3128,13 @@ unFoo (Foo x) = x + 1
 main :: IO ()
 main = putStrLn (show (unFoo (Foo "hello")))
 "#,
+        &[],
+        &[
+            "Cannot match 'a' with 'Int'",
+            "rigid type variable",
+            "in definition of 'unFoo'",
+        ],
     );
-    assert!(
-        e.contains("Cannot match 'a' with 'Int'"),
-        "the skolem must not unify with Int, got: {e}"
-    );
-    assert!(e.contains("rigid type variable"), "must explain rigidity, got: {e}");
-    assert!(e.contains("in definition of 'unFoo'"), "must locate the clause, got: {e}");
     // The provenance note: 'a' alone is baffling unless the error says the
     // type was hidden by the constructor.
     assert!(
@@ -3212,7 +3148,7 @@ main = putStrLn (show (unFoo (Foo "hello")))
 
     // GADT syntax declares existentials implicitly (a signature variable
     // that does not reach the result type); it must skolemize identically.
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 data Box where
   MkBox :: a -> Box
@@ -3223,15 +3159,15 @@ coerce (MkBox x) = x
 main :: IO ()
 main = putStrLn (show (coerce (MkBox "boom") + 1))
 "#,
+        &[],
+        &[
+            "hidden by constructor 'MkBox'",
+        ],
     );
     assert!(
         e.contains("Cannot match 'a' with 'Int'")
             || e.contains("escapes its scope"),
         "GADT-syntax existential must be rigid too, got: {e}"
-    );
-    assert!(
-        e.contains("hidden by constructor 'MkBox'"),
-        "must name the hiding constructor, got: {e}"
     );
 }
 
@@ -3249,7 +3185,7 @@ fn existential_skolem_cannot_escape() {
     // exactly how GHC reports it ("Couldn't match expected type 'a' with actual
     // type 'a1'"). Escape into a *concrete* return/case type still surfaces the
     // dedicated existential-escape diagnostic (the two cases below).
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 data Foo = forall a. Foo a
 
@@ -3259,10 +3195,10 @@ unFoo (Foo x) = x
 main :: IO ()
 main = putStrLn "no"
 "#,
-    );
-    assert!(
-        e.contains("Cannot match 'a' with 'a'"),
-        "returning an existential as a signature variable must be rejected as a rigid mismatch, got: {e}"
+        &[],
+        &[
+            "Cannot match 'a' with 'a'",
+        ],
     );
     // Both provenance notes appear: `a` is the existential hidden by `Foo`, and
     // `a` is also the signature's rigid variable.
@@ -3273,7 +3209,7 @@ main = putStrLn "no"
     );
 
     // Escape through a case expression's result type.
-    let e = compile_err(
+    expect_compile_error(
         r#"
 data Foo = forall a. Foo a
 
@@ -3284,17 +3220,17 @@ useCase f = case f of
 main :: IO ()
 main = putStrLn "no"
 "#,
-    );
-    assert!(
-        e.contains("escapes its scope"),
-        "case-result escape must be rejected, got: {e}"
+        &[],
+        &[
+            "escapes its scope",
+        ],
     );
 
     // Escape through a where-function's type: where-bindings are
     // monomorphic, so `unpack e1` and `unpack e2` would claim the SAME
     // hidden type for two different boxes — with an Eq-constrained
     // existential that "equates" an Int with a String.
-    let e = compile_err(
+    expect_compile_error(
         r#"
 data EqBox = forall a. Eq a => EqBox a
 
@@ -3305,10 +3241,10 @@ test e1 e2 = unpack e1 == unpack e2
 main :: IO ()
 main = putStrLn (show (test (EqBox 1) (EqBox "one")))
 "#,
-    );
-    assert!(
-        e.contains("escapes its scope"),
-        "where-function escape must be rejected, got: {e}"
+        &[],
+        &[
+            "escapes its scope",
+        ],
     );
 }
 
@@ -3320,7 +3256,7 @@ main = putStrLn (show (test (EqBox 1) (EqBox "one")))
 fn existential_constraints_enforced_both_ways() {
     // Unpack side: Show is declared, Num is not — arithmetic on the hidden
     // type must be rejected, and the note must say what IS available.
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 data Showable = forall a. Show a => Showable a
 
@@ -3331,6 +3267,8 @@ bad s = case s of
 main :: IO ()
 main = putStrLn "no"
 "#,
+        &[],
+        &[],
     );
     // The literal is annotated `Int` so `+` forces the hidden type to be
     // Int, surfacing the rigid-match rejection. (An un-annotated `x + 1`
@@ -3347,7 +3285,7 @@ main = putStrLn "no"
 
     // Pack side: a function has no Show instance, so it cannot be packed
     // into a Show-constrained existential.
-    let e = compile_err(
+    expect_compile_error(
         r#"
 data Showable = forall a. Show a => Showable a
 
@@ -3357,25 +3295,25 @@ pack = Showable (\x -> (x :: Int))
 main :: IO ()
 main = putStrLn "no"
 "#,
-    );
-    assert!(
-        e.contains("No instance for 'Show (Int -> Int)'"),
-        "packing an instance-less type must be rejected, got: {e}"
+        &[],
+        &[
+            "No instance for 'Show (Int -> Int)'",
+        ],
     );
 
     // A typo'd class in the constructor context must error at the data
     // declaration, not silently become "no constraint".
-    let e = compile_err(
+    expect_compile_error(
         r#"
 data Box = forall a. Showw a => Box a
 
 main :: IO ()
 main = putStrLn "no"
 "#,
-    );
-    assert!(
-        e.contains("Unknown typeclass 'Showw' in the context of constructor 'Box'"),
-        "unknown context class must be reported, got: {e}"
+        &[],
+        &[
+            "Unknown typeclass 'Showw' in the context of constructor 'Box'",
+        ],
     );
 }
 
@@ -3398,7 +3336,7 @@ fn signature_vars_are_skolemized() {
     // where the signature promises `Int`. `a` is rigid, so it cannot be
     // matched with `Int`. GHC: "Couldn't match expected type 'Int' with
     // actual type 'a'" / "'a' is a rigid type variable bound by ...".
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 f :: a -> Int
 f x = x
@@ -3406,10 +3344,10 @@ f x = x
 main :: IO ()
 main = print (f (5 :: Int))
 "#,
-    );
-    assert!(
-        e.contains("rigid"),
-        "the signature variable 'a' must be rigid (skolemized), got: {e}"
+        &[],
+        &[
+            "rigid",
+        ],
     );
     assert!(
         e.contains('a') && e.contains("Int"),
@@ -3419,7 +3357,7 @@ main = print (f (5 :: Int))
     // Case 2: `g :: Monad m => m ()` / `g = putStrLn "hi"`. The body is `IO ()`
     // but the signature quantifies over an arbitrary `Monad m`; `m` is rigid,
     // so pinning it to `IO` is rejected. GHC: no instance / rigid `m`.
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 g :: Monad m => m ()
 g = putStrLn "hi"
@@ -3427,6 +3365,8 @@ g = putStrLn "hi"
 main :: IO ()
 main = g
 "#,
+        &[],
+        &[],
     );
     assert!(
         e.contains("rigid") || e.contains("No instance") || e.contains("instance"),
@@ -3520,34 +3460,38 @@ fn higher_rank_argument_must_be_polymorphic_enough() {
                apply2 f = (f 1, f True)\n";
 
     // REJECT 1: `\x -> x + 1` is `Num a => a -> a`, not `forall a. a -> a`.
-    let e = compile_err(&format!(
+    expect_compile_error(
+        &format!(
         "{hdr}use :: (Int, Bool)\nuse = apply2 (\\x -> x + 1)\nmain :: IO ()\nmain = return ()\n"
-    ));
-    assert!(
-        e.contains("higher-rank argument"),
-        "the rejection must explain the argument is not polymorphic enough for the \
-         higher-rank parameter, got: {e}"
-    );
-    assert!(
-        e.contains("Num"),
-        "the residual `Num a` constraint on the sealed variable should be named, got: {e}"
+    ),
+        &[],
+        &[
+            "higher-rank argument",
+            "Num",
+        ],
     );
 
     // REJECT 2: `\x -> seq (show x) x` forces `Show a`, equally unsatisfiable.
-    let e = compile_err(&format!(
+    expect_compile_error(
+        &format!(
         "{hdr}use :: (Int, Bool)\nuse = apply2 (\\x -> seq (show x) x)\nmain :: IO ()\nmain = return ()\n"
-    ));
-    assert!(
-        e.contains("higher-rank argument") && e.contains("Show"),
-        "a `Show a`-demanding lambda must be rejected against a `forall a. a -> a` \
-         parameter, got: {e}"
+    ),
+        &[],
+        &[
+            "higher-rank argument",
+            "Show",
+        ],
     );
 
     // REJECT 3: a monomorphic NAMED function (`Bool -> Bool`) is not the
     // requested `forall a. a -> a` either — the skolem cannot unify with Bool.
-    let e = compile_err(&format!(
+    let e = expect_compile_error(
+        &format!(
         "{hdr}notF :: Bool -> Bool\nnotF b = b\nuse :: (Int, Bool)\nuse = apply2 notF\nmain :: IO ()\nmain = return ()\n"
-    ));
+    ),
+        &[],
+        &[],
+    );
     assert!(
         e.contains("rigid") || e.contains("Cannot match"),
         "a monomorphic `Bool -> Bool` must not satisfy `forall a. a -> a`, got: {e}"
@@ -3576,20 +3520,20 @@ fn higher_rank_argument_must_be_polymorphic_enough() {
 /// against). Both were runtime type confusions before the fix.
 #[test]
 fn existential_record_fields_have_no_selector_or_update() {
-    let e = compile_err(
+    expect_compile_error(
         r#"
 data Foo = forall a. Foo { getIt :: a }
 
 main :: IO ()
 main = putStrLn (show (getIt (Foo "hello") + 1))
 "#,
-    );
-    assert!(
-        e.contains("has an existential type, so it has no selector function"),
-        "selector use must be rejected with an explanation, got: {e}"
+        &[],
+        &[
+            "has an existential type, so it has no selector function",
+        ],
     );
 
-    let e = compile_err(
+    expect_compile_error(
         r#"
 data Foo = forall a. Foo { getIt :: a, label :: String }
 
@@ -3599,10 +3543,10 @@ update f = f { getIt = 42 }
 main :: IO ()
 main = putStrLn "no"
 "#,
-    );
-    assert!(
-        e.contains("cannot be record-updated"),
-        "existential field update must be rejected, got: {e}"
+        &[],
+        &[
+            "cannot be record-updated",
+        ],
     );
 }
 
@@ -3614,18 +3558,18 @@ main = putStrLn "no"
 /// while keeping the message and the `note:` line verbatim.
 #[test]
 fn mono_error_reports_source_location() {
-    let e = compile_err(
+    expect_compile_error(
         r#"
 main :: IO ()
 main = print ([1, 2] <> [3, 4] :: [Int])
 "#,
+        &[],
+        &[
+            "No instance for '<>' on type '[Int]'",
+            "at 3:6, in definition of 'main'",
+            "note: lists are concatenated with ++",
+        ],
     );
-    assert!(e.contains("No instance for '<>' on type '[Int]'"), "got: {e}");
-    assert!(
-        e.contains("at 3:6, in definition of 'main'"),
-        "mono error must carry the clause's source location, got: {e}"
-    );
-    assert!(e.contains("note: lists are concatenated with ++"), "missing ++ note, got: {e}");
 }
 
 /// The parser recovers at declaration boundaries: one run reports every
@@ -3633,7 +3577,7 @@ main = print ([1, 2] <> [3, 4] :: [Int])
 /// must render exactly as it always has (inline ` at line:col`).
 #[test]
 fn parser_reports_multiple_errors_per_run() {
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"data Foo = = Bar
 
 good :: Int -> Int
@@ -3642,14 +3586,11 @@ good x = x + 1
 main :: IO ()
 main = ]
 "#,
-    );
-    assert!(
-        e.contains("Parse error: Expected type/constructor name, found '=' at 1:12"),
-        "first error must keep its exact rendering (source-spelled token, inline location), got: {e}"
-    );
-    assert!(
-        e.contains("Expected expression, found ']' at 7:8"),
-        "second independent error must also be reported, got: {e}"
+        &[],
+        &[
+            "Parse error: Expected type/constructor name, found '=' at 1:12",
+            "Expected expression, found ']' at 7:8",
+        ],
     );
     assert!(
         e.matches("Parse error: ").count() >= 2,
@@ -3661,20 +3602,11 @@ main = ]
 // Regression tests: recursion-depth guard. Nesting past
 // mllc::MAX_NESTING_DEPTH must produce the clean "nested too deeply"
 // diagnostic — never a native stack overflow (SIGABRT). Reaching the limit
-// still consumes (limit x frame) native stack, so these run on a thread with
-// the SAME stack size as the mll CLI driver (mllc::COMPILER_STACK_SIZE, which
-// the limit is calibrated against).
+// still consumes (limit x frame) native stack, so these rely on the harness
+// `compile` helper running on a thread with the SAME stack size as the mll
+// CLI driver (mllc::COMPILER_STACK_SIZE, which the limit is calibrated
+// against).
 // ---------------------------------------------------------------------------
-
-/// Compile `source` on a compiler-sized thread and return the result.
-fn compile_on_compiler_stack(source: String) -> Result<mllc::CompileResult, mllc::CompileError> {
-    std::thread::Builder::new()
-        .stack_size(mllc::COMPILER_STACK_SIZE)
-        .spawn(move || compile(&source, Path::new("."), &[]))
-        .expect("failed to spawn compiler-sized thread")
-        .join()
-        .expect("the compiler must not crash on deeply nested input")
-}
 
 /// Parser face of the guard: nested parentheses beyond the limit.
 #[test]
@@ -3685,7 +3617,7 @@ fn deeply_nested_parens_yield_clean_depth_error() {
         "(".repeat(n),
         ")".repeat(n)
     );
-    match compile_on_compiler_stack(source) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3715,7 +3647,7 @@ fn deeply_nested_types_yield_clean_depth_error() {
         "(".repeat(n),
         ")".repeat(n)
     );
-    match compile_on_compiler_stack(source) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3739,7 +3671,7 @@ fn deeply_nested_types_yield_clean_depth_error() {
         "f :: A{} -> Int\nf _ = 1\nmain :: IO ()\nmain = print (f [])\n",
         n
     ));
-    match compile_on_compiler_stack(source) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3770,7 +3702,7 @@ fn doubling_alias_tower_yields_clean_size_error() {
         source.push_str(&format!("type P{} a = P{} (P{} a)\n", i, i - 1, i - 1));
     }
     source.push_str("x :: P10 Int\nx = undefined\nmain :: IO ()\nmain = putStrLn \"ok\"\n");
-    match compile_on_compiler_stack(source) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3790,7 +3722,7 @@ fn doubling_alias_tower_yields_clean_size_error() {
         ok.push_str(&format!("type Q{} a = Q{} (Q{} a)\n", i, i - 1, i - 1));
     }
     ok.push_str("y :: Q3 Int -> Int\ny _ = 0\nmain :: IO ()\nmain = print (y undefined)\n");
-    compile_on_compiler_stack(ok)
+    compile(&ok, Path::new("."), &[])
         .expect("a shallow (Q3) alias tower is small and must still compile");
 }
 
@@ -3806,7 +3738,7 @@ fn operator_spine_past_limit_yields_clean_depth_error() {
         "x :: Int\nx = {}\nmain :: IO ()\nmain = print x\n",
         vec!["1"; n].join("+")
     );
-    match compile_on_compiler_stack(source) {
+    match compile(&source, Path::new("."), &[]) {
         Err(e) => {
             let msg = format!("{}", e);
             assert!(
@@ -3831,7 +3763,7 @@ fn thousand_element_list_literal_still_compiles_and_runs() {
         vec!["2"; n].join(","),
         2 * n
     );
-    let lua_code = compile_on_compiler_stack(source)
+    let lua_code = compile(&source, Path::new("."), &[])
         .expect("a 1200-element list literal must compile")
         .lua_code;
     let lua = mlua::Lua::new();

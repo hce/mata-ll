@@ -680,13 +680,18 @@ main = pure ()
     // designed FFI shape — it would leak only as mata-ll's internal
     // `{tag, payload}` table — so an export using it directly is REJECTED. (Use
     // Maybe, a LuaDict record, or a scalar/list encoding instead.)
-    let e = compile_err(
+    expect_compile_error(
         "export classify :: Int -> Either String Int\n\
          classify n = if n < 0 then Left \"negative\" else Right n\n\
-         main :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'classify'") && e.contains("the result") && e.contains("Either"),
-        "bare Either in an export result is rejected: {e}");
-    assert!(e.contains("tagged table"), "note explains the leak: {e}");
+         main :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "Export 'classify'",
+            "the result",
+            "Either",
+            "tagged table",
+        ],
+    );
 }
 
 #[test]
@@ -783,21 +788,32 @@ fn ffi_export_adt() {
     // (mkRed :: Int -> Color). (To carry an enum across, derive LuaDict on
     // an all-nullary sum so its constructors cross as name strings; to carry a
     // record, use a LuaDict record; a newtype crosses transparently.)
-    let e = compile_err(
+    expect_compile_error(
         "data Color = Red | Green | Blue\n\
          export colorCode :: Color -> Int\ncolorCode _ = 1\n\
-         main :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'colorCode'") && e.contains("argument 1") && e.contains("Color"),
-        "plain ADT rejected as an export argument: {e}");
-    assert!(e.contains("internal") && e.contains("tagged table") && e.contains("LuaDict"),
-        "note explains the tagged-table leak and points at the fixes: {e}");
+         main :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "Export 'colorCode'",
+            "argument 1",
+            "Color",
+            "internal",
+            "tagged table",
+            "LuaDict",
+        ],
+    );
 
-    let e = compile_err(
+    expect_compile_error(
         "data Color = Red | Green | Blue\n\
          export mkRed :: Int -> Color\nmkRed _ = Red\n\
-         main :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'mkRed'") && e.contains("the result") && e.contains("Color"),
-        "plain ADT rejected as an export result: {e}");
+         main :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "Export 'mkRed'",
+            "the result",
+            "Color",
+        ],
+    );
 }
 
 #[test]
@@ -1131,81 +1147,100 @@ fn ffi_export_rejects_unmarshallable_types() {
 
     // A bare type variable has no runtime representation — rejected in both an
     // argument (import) and a result (export) position.
-    let e = compile_err("export idf :: a -> a\nidf x = x\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'idf'"), "names the binder: {e}");
-    assert!(e.contains("argument 1") && e.contains("argument direction"), "arg position+dir: {e}");
-    assert!(e.contains("the result") && e.contains("result direction"), "result position+dir: {e}");
-    assert!(e.contains("polymorphic value"), "type-var note: {e}");
+    let e = expect_compile_error("export idf :: a -> a\nidf x = x\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'idf'",
+        "argument 1",
+        "argument direction",
+        "the result",
+        "result direction",
+        "polymorphic value",
+    ]);
     // The internal/freshened variable name must not leak (prettified to `a`).
     assert!(!e.contains("a890") && !e.contains("_r") && !e.contains("_lit"),
         "type variables must prettify, not leak internal names: {e}");
 
     // A class constraint would require a dictionary to cross.
-    let e = compile_err("export addN :: Num a => a -> a\naddN x = x + x\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'addN'") && e.contains("class constraint"), "constraint rejected: {e}");
-    assert!(e.contains("dictionary"), "dictionary note: {e}");
+    expect_compile_error("export addN :: Num a => a -> a\naddN x = x + x\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'addN'",
+        "class constraint",
+        "dictionary",
+    ]);
 
     // A region-scoped ST handle, in both directions.
-    let e = compile_err("export g :: [Int] -> ST s (STArray s)\ng xs = newSTArrayFromList xs\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'g'") && e.contains("the result"), "ST result rejected: {e}");
-    assert!(e.contains("STArray") && e.contains("region-scoped"), "ST note: {e}");
+    expect_compile_error("export g :: [Int] -> ST s (STArray s)\ng xs = newSTArrayFromList xs\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'g'",
+        "the result",
+        "STArray",
+        "region-scoped",
+    ]);
 
-    let e = compile_err("export f :: forall s. STArray s -> Int\nf _ = 5\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'f'") && e.contains("argument 1") && e.contains("STArray"),
-        "ST argument rejected: {e}");
+    expect_compile_error("export f :: forall s. STArray s -> Int\nf _ = 5\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'f'",
+        "argument 1",
+        "STArray",
+    ]);
 
     // An IO action cannot be supplied by a Lua caller (import position).
-    let e = compile_err("export bad :: IO () -> Int\nbad _ = 5\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'bad'") && e.contains("argument 1") && e.contains("IO ()"),
-        "IO-in-argument rejected: {e}");
-    assert!(e.contains("cannot supply an IO/LuaIO action"), "IO-arg note: {e}");
+    expect_compile_error("export bad :: IO () -> Int\nbad _ = 5\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'bad'",
+        "argument 1",
+        "IO ()",
+        "cannot supply an IO/LuaIO action",
+    ]);
 
     // Recursion + direction-flip: a rejected type nested inside a tuple, a list,
     // and a Maybe is still caught and located.
-    let e = compile_err("export t :: (Int, a) -> Int\nt (n, _) = n\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("(inside '(Int, a)')"), "nested-in-tuple culprit located: {e}");
-    let e = compile_err("export h :: [a] -> Int\nh _ = 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("(inside '[a]')"), "nested-in-list culprit located: {e}");
-    let e = compile_err("export j :: Maybe a -> Int\nj _ = 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("(inside 'Maybe a')"), "nested-in-Maybe culprit located: {e}");
+    expect_compile_error("export t :: (Int, a) -> Int\nt (n, _) = n\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "(inside '(Int, a)')",
+    ]);
+    expect_compile_error("export h :: [a] -> Int\nh _ = 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "(inside '[a]')",
+    ]);
+    expect_compile_error("export j :: Maybe a -> Int\nj _ = 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "(inside 'Maybe a')",
+    ]);
 
     // A callback whose own signature contains a rejected type. The callback's
     // RESULT is in the import direction (unwrapping its LuaIO), so an ST handle
     // there is rejected.
-    let e = compile_err(
-        "export ap :: forall s. (Int -> LuaIO s (ST s (STArray s))) -> LuaIO s Int\nap f = pure 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'ap'") && e.contains("STArray"), "callback-result ST rejected: {e}");
+    expect_compile_error("export ap :: forall s. (Int -> LuaIO s (ST s (STArray s))) -> LuaIO s Int\nap f = pure 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'ap'",
+        "STArray",
+    ]);
 
     // The callback's ARGUMENT flips to the export (result) direction — a type
     // variable there is reported as a result-direction failure.
-    let e = compile_err(
-        "export cb :: forall s. (a -> LuaIO s Int) -> LuaIO s Int\ncb f = pure 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'cb'") && e.contains("result direction"),
-        "callback-argument direction flip: {e}");
+    expect_compile_error("export cb :: forall s. (a -> LuaIO s Int) -> LuaIO s Int\ncb f = pure 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'cb'",
+        "result direction",
+    ]);
 
     // A callback is marshalled ONLY as a direct top-level export argument.
     // Nested inside a container it is passed opaque by codegen, so it is
     // rejected — here a callback nested in a Maybe inside a tuple argument.
-    let e = compile_err(
-        "export ap :: (Maybe (Bool -> [Int]), Int) -> Int\nap _ = 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'ap'") && e.contains("argument 1"), "nested callback rejected: {e}");
-    assert!(e.contains("Bool -> [Int]") && e.contains("(inside '(Maybe (Bool -> [Int]), Int)')"),
-        "names the nested callback and its position: {e}");
-    assert!(e.contains("DIRECT top-level argument"), "callback-position note: {e}");
+    expect_compile_error("export ap :: (Maybe (Bool -> [Int]), Int) -> Int\nap _ = 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'ap'",
+        "argument 1",
+        "Bool -> [Int]",
+        "(inside '(Maybe (Bool -> [Int]), Int)')",
+        "DIRECT top-level argument",
+    ]);
 
     // A function nested in the RESULT is rejected (a list of functions — a bare
     // `Int -> (Bool -> Int)` would just be a two-argument export).
-    let e = compile_err(
-        "export rf :: Int -> [Bool -> Int]\nrf n = [\\b -> n]\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'rf'") && e.contains("the result") && e.contains("Bool -> Int"),
-        "function nested in result rejected: {e}");
+    expect_compile_error("export rf :: Int -> [Bool -> Int]\nrf n = [\\b -> n]\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'rf'",
+        "the result",
+        "Bool -> Int",
+    ]);
 
     // A callback whose OWN argument is a callback (callback-taking-a-callback):
     // codegen passes the inner function opaque, so reject it.
-    let e = compile_err(
-        "export cc :: forall s. ((Int -> Int) -> LuaIO s Int) -> LuaIO s Int\ncc _ = pure 0\nmain :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("Export 'cc'") && e.contains("callback argument") && e.contains("Int -> Int"),
-        "callback-taking-a-callback rejected: {e}");
+    expect_compile_error("export cc :: forall s. ((Int -> Int) -> LuaIO s Int) -> LuaIO s Int\ncc _ = pure 0\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'cc'",
+        "callback argument",
+        "Int -> Int",
+    ]);
 }
 
 #[test]
@@ -1278,29 +1313,44 @@ fn ffi_import_rejects_unmarshallable_types() {
     // would leak as an internal tagged table), so it is rejected in BOTH.
 
     // ADT in an import ARGUMENT position (crosses OUT to the host).
-    let e = compile_err(
+    expect_compile_error(
         "data Color = Red | Green | Blue\n\
          paint :: Color -> LuaIO \"paint\" ()\n\
-         main :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("FFI import 'paint'") && e.contains("argument 1") && e.contains("Color"),
-        "plain ADT rejected as an FFI import argument: {e}");
-    assert!(e.contains("tagged table") && e.contains("LuaDict"),
-        "import note explains the leak and the fixes: {e}");
+         main :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "FFI import 'paint'",
+            "argument 1",
+            "Color",
+            "tagged table",
+            "LuaDict",
+        ],
+    );
 
     // ADT in an import RESULT position (crosses IN from the host).
-    let e = compile_err(
+    expect_compile_error(
         "data Color = Red | Green | Blue\n\
          mkColor :: Int -> LuaIO \"mk_color\" Color\n\
-         main :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("FFI import 'mkColor'") && e.contains("the result") && e.contains("Color"),
-        "plain ADT rejected as an FFI import result: {e}");
+         main :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "FFI import 'mkColor'",
+            "the result",
+            "Color",
+        ],
+    );
 
     // Bare `Either` in a plain (non-LuaTry) import result is also a plain ADT.
-    let e = compile_err(
+    expect_compile_error(
         "lookupIt :: String -> LuaIO \"lookup\" (Either String Int)\n\
-         main :: IO ()\nmain = pure ()\n");
-    assert!(e.contains("FFI import 'lookupIt'") && e.contains("the result") && e.contains("Either"),
-        "bare Either in a plain LuaIO import result is rejected: {e}");
+         main :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "FFI import 'lookupIt'",
+            "the result",
+            "Either",
+        ],
+    );
 }
 
 #[test]
@@ -1917,32 +1967,40 @@ main = pure ()
 #[test]
 fn ffi_outgoing_callback_rejects_bad_signatures() {
     // Effectful callbacks must use `LuaIO s acc`, not `IO acc`.
-    let e = compile_err(
+    expect_compile_error(
         r#"
 bad :: String -> (Int -> acc -> IO acc) -> acc -> LuaPure "h.f" acc
 main :: IO ()
 main = pure ()
 "#,
+        &[],
+        &[
+            "LuaIO s",
+        ],
     );
-    assert!(e.contains("LuaIO s"), "IO acc should be rejected, got: {e}");
 
     // The callback's result must be the threaded state, not some other type.
-    let e = compile_err(
+    expect_compile_error(
         r#"
 bad :: String -> (Int -> acc -> LuaIO s Bool) -> acc -> LuaPure "h.f" acc
 main :: IO ()
 main = pure ()
 "#,
+        &[],
+        &[
+            "threaded state",
+        ],
     );
-    assert!(e.contains("threaded state"), "mismatched result should be rejected, got: {e}");
 
     // A polymorphic callback requires a polymorphic (variable) FFI return type.
-    let e = compile_err(
+    let e = expect_compile_error(
         r#"
 bad :: String -> (Int -> a -> a) -> Int -> LuaPure "h.f" Int
 main :: IO ()
 main = pure ()
 "#,
+        &[],
+        &[],
     );
     assert!(
         e.contains("type variable") || e.contains("threaded state"),
@@ -2331,18 +2389,18 @@ main = pure ()
 /// diagnostic naming the offending string and declaration form.
 #[test]
 fn ffi_target_with_space_is_rejected_at_compile_time() {
-    let e = compile_err(
+    expect_compile_error(
         r#"
 foo :: Int -> LuaPure "a b" Int
 
 export doit :: IO ()
 doit = print (foo 3)
 "#,
-    );
-    assert!(
-        e.contains("invalid Lua target") && e.contains("LuaPure \"a b\""),
-        "expected a clean diagnostic naming the malformed FFI target, got: {}",
-        e
+        &[],
+        &[
+            "invalid Lua target",
+            "LuaPure \"a b\"",
+        ],
     );
 }
 
@@ -2350,22 +2408,14 @@ doit = print (foo 3)
 /// segment (`math..floor`) and a Lua reserved word as a name component.
 #[test]
 fn ffi_target_other_malformed_forms_are_rejected() {
-    let e = compile_err(
-        "foo :: Int -> LuaIO \"math..floor\" Int\nmain :: IO ()\nmain = foo 3 >>= print\n",
-    );
-    assert!(
-        e.contains("invalid Lua target") && e.contains("math..floor"),
-        "expected a clean diagnostic for the empty path segment, got: {}",
-        e
-    );
-    let e = compile_err(
-        "foo :: Int -> LuaPure \"os.end\" Int\nmain :: IO ()\nmain = print (foo 3)\n",
-    );
-    assert!(
-        e.contains("invalid Lua target") && e.contains("reserved word"),
-        "expected a clean diagnostic for the reserved-word segment, got: {}",
-        e
-    );
+    expect_compile_error("foo :: Int -> LuaIO \"math..floor\" Int\nmain :: IO ()\nmain = foo 3 >>= print\n", &[], &[
+        "invalid Lua target",
+        "math..floor",
+    ]);
+    expect_compile_error("foo :: Int -> LuaPure \"os.end\" Int\nmain :: IO ()\nmain = print (foo 3)\n", &[], &[
+        "invalid Lua target",
+        "reserved word",
+    ]);
 }
 
 /// The FFI target is deliberately a Lua callee EXPRESSION, not just a name:

@@ -106,7 +106,7 @@ mll_test!(perform_bare_tco_deep, "perform_bare_tco_deep.mll");
 /// tailloop conversion the normal build applies.
 #[test]
 fn perform_bare_tco_deep_unoptimized() {
-    on_compiler_stack(|| {
+    with_compiler_stack(|| {
         let path = Path::new("tests/cases/perform_bare_tco_deep.mll");
         let source = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
