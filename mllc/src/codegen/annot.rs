@@ -749,14 +749,14 @@ fn slot_scan_stmt(st: &Stmt, s: &mut SlotStores) {
             // The slot store is structural now: a `Slot` target IS the
             // `__mll_fn[i] = function(...)` store. Any other `__mll_fn`
             // spelling in the header — a target or parameter name containing
-            // it — poisons, exactly as the former text scan did.
+            // it — poisons, exactly as the former text scan did (shared
+            // predicate: lua::name_mentions_fn_table).
             match target {
-                FnTarget::Slot(i) => s.store(&format!("__mll_fn[{}]", i)),
+                FnTarget::Slot(i) => {
+                    s.store(&format!("{}[{}]", super::lua::FN_TABLE, i))
+                }
                 FnTarget::LocalFn(n) | FnTarget::Assigned(n) => {
-                    if n.contains("__mll_fn") {
-                        s.poisoned = true;
-                    }
-                    if params.iter().any(|p| p.contains("__mll_fn")) {
+                    if super::lua::name_mentions_fn_table(n, params) {
                         s.poisoned = true;
                     }
                 }

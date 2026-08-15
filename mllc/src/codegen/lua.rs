@@ -156,6 +156,22 @@ pub(super) enum Stmt {
     ReturnTable(Vec<(String, Expr)>),
 }
 
+/// The forward-declaration function table's reserved name. Structured
+/// consumers match [`FnTarget::Slot`]; the residual substring scans (see
+/// `name_mentions_fn_table`) and the store-key spelling share this one
+/// constant instead of repeating the literal.
+pub(super) const FN_TABLE: &str = "__mll_fn";
+
+/// Does a NON-`Slot` header mention the function table — in its target
+/// name or any parameter? Both consumers (the slot census's poison arm in
+/// annot.rs and ioloop's repeat-safety gate) reproduce the former
+/// whole-header TEXT scan, so this is deliberately a substring test, not
+/// an exact match: parity with the retired scan is what the corpus stamp
+/// refutation pins. Callers handle `Slot` structurally first.
+pub(super) fn name_mentions_fn_table(name: &str, params: &[String]) -> bool {
+    name.contains(FN_TABLE) || params.iter().any(|p| p.contains(FN_TABLE))
+}
+
 /// What a named function definition (`Stmt::Function`) binds or stores to.
 /// Three forms, matching the three spellings name resolution produces
 /// (`CodeGen::fn_target` for the first two, the where-group assignment in

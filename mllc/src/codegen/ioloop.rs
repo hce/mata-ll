@@ -247,12 +247,11 @@ fn repeat_safe_stmt(s: &Stmt) -> bool {
         // per-self-call definition. A slot header here would be a store the
         // module-wide census counted once but the converted output performs
         // twice — the emitter keeps slot functions top-level, and this
-        // check turns that assumption into a gate. (The name/parameter
-        // substring checks reproduce the former whole-header text scan.)
+        // check turns that assumption into a gate.
         Stmt::Function { target, params, .. } => match target {
             FnTarget::Slot(_) => false,
             FnTarget::LocalFn(n) | FnTarget::Assigned(n) => {
-                !n.contains("__mll_fn") && !params.iter().any(|p| p.contains("__mll_fn"))
+                !super::lua::name_mentions_fn_table(n, params)
             }
         },
         // Raw (opaque), runner calls, multi-assignments, loop scaffolding,
