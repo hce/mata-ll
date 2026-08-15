@@ -1287,18 +1287,8 @@ impl Parser {
         saved_block: usize,
     ) -> PResult<Clause> {
         // Guards
-        let mut guards = Vec::new();
         self.skip_newlines_and_indent();
-        if self.at(&Token::Pipe) {
-            while self.at(&Token::Pipe) {
-                self.advance();
-                let condition = self.parse_expr()?;
-                self.expect(&Token::Eq)?;
-                let body = self.parse_stmt_expr()?;
-                guards.push(Guard { condition, body });
-                self.skip_newlines_and_indent();
-            }
-        }
+        let guards = self.parse_guard_chain(&Token::Eq)?;
 
         // A guarded clause has no single body: the guard chain IS the body.
         let body = if guards.is_empty() {
@@ -1319,6 +1309,25 @@ impl Parser {
             where_binds,
             span,
         })
+    }
+
+    /// One `| cond <sep> body` guard chain, shared by function clauses
+    /// (`= body`), where bindings (`= body`, then desugared to if/else),
+    /// and case branches (`-> body`). The chain is parsed identically in
+    /// all three positions; each guard body gets the `Spanned` statement
+    /// marker so a type error inside it is reported at the body's own
+    /// line, not the clause head.
+    fn parse_guard_chain(&mut self, sep: &Token) -> PResult<Vec<Guard>> {
+        let mut guards = Vec::new();
+        while self.at(&Token::Pipe) {
+            self.advance();
+            let condition = self.parse_expr()?;
+            self.expect(sep)?;
+            let body = self.parse_stmt_expr()?;
+            guards.push(Guard { condition, body });
+            self.skip_newlines_and_indent();
+        }
+        Ok(guards)
     }
 
     /// The head of one binding-group entry: `name [patterns]`. Shared by
@@ -1378,22 +1387,15 @@ impl Parser {
             // Handle guards: go acc i | i <= 0 = acc | otherwise = ...
             self.skip_newlines_and_indent();
             if self.at(&Token::Pipe) {
-                // Parse guarded where binding — desugar to if/else chain
-                let mut guards = Vec::new();
-                while self.at(&Token::Pipe) {
-                    self.advance();
-                    let cond = self.parse_expr()?;
-                    self.expect(&Token::Eq)?;
-                    let val = self.parse_expr()?;
-                    guards.push((cond, val));
-                    self.skip_newlines_and_indent();
-                }
-                // Build nested if/else from guards
+                // Guarded where binding: parse the shared chain, then
+                // desugar to an if/else spine (a where binding is one
+                // equation — no next-clause fall-through to preserve).
+                let guards = self.parse_guard_chain(&Token::Eq)?;
                 let body = guards.into_iter().rev().fold(
                     Expr::App(Box::new(Expr::Var("error".into())), Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec())))),
-                    |else_branch, (cond, val)| Expr::If {
-                        cond: Box::new(cond),
-                        then_branch: Box::new(val),
+                    |else_branch, g| Expr::If {
+                        cond: Box::new(g.condition),
+                        then_branch: Box::new(g.body),
                         else_branch: Box::new(else_branch),
                     },
                 );
@@ -3029,15 +3031,7 @@ impl Parser {
 
             if self.at(&Token::Pipe) {
                 // Guards on case branch
-                let mut guards = Vec::new();
-                while self.at(&Token::Pipe) {
-                    self.advance();
-                    let condition = self.parse_expr()?;
-                    self.expect(&Token::Arrow)?;
-                    let body = self.parse_stmt_expr()?;
-                    guards.push(Guard { condition, body });
-                    self.skip_newlines_and_indent();
-                }
+                let guards = self.parse_guard_chain(&Token::Arrow)?;
                 branches.push(CaseBranch {
                     pattern,
                     guards,
