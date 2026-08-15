@@ -224,39 +224,64 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
 /// `run` would, then refute the carried stamps against a fresh analysis of
 /// the final tree. Empty means clean.
 pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
-    let mut findings = match run_with(stmts, &Disable::from_spec(None)) {
+    let d = Disable::from_spec(None);
+    let mut findings = match run_with(stmts, &d) {
         (Some(engine), force_ran) => engine.refute(stmts, force_ran),
         // With every engine-run pass disabled there are no carried stamps
         // and no collapse obligation; a fresh analysis refuting itself
         // checks nothing.
         (None, _) => Vec::new(),
     };
-    findings.extend(expression_pass_idempotence(stmts));
+    findings.extend(expression_pass_idempotence(stmts, &d));
     findings
 }
 
-/// Idempotence refutation for the expression passes: re-running paren
-/// normalization and dead-branch cleanup over the FINAL tree must change
-/// nothing — a shape either pass would still rewrite is a shape that
-/// escaped it. This replaces the old harness test that grepped rendered
-/// output for redundant-paren spellings with a hand-kept operator list:
-/// the pass itself is the authority on what is redundant, so running it
-/// twice covers every operator and every guard shape by construction.
-/// (The structured-tier loop passes carry their own reverse self-checks
-/// and are deliberately not re-run: a converted loop no longer offers the
-/// shape the gate looks for, so their idempotence is structural.)
-fn expression_pass_idempotence(stmts: &[Stmt]) -> Vec<String> {
+/// Idempotence refutation for the expression passes: re-running each
+/// EXPRESSION-tier pass that actually ran (paren normalization,
+/// dead-branch cleanup, IIFE flattening) over the FINAL tree must change
+/// nothing — a shape a pass would still rewrite is a shape that escaped
+/// it. This replaces the old harness test that grepped rendered output
+/// for redundant-paren spellings with a hand-kept operator list: the pass
+/// itself is the authority on what is redundant, so running it twice
+/// covers every operator and every guard shape by construction.
+///
+/// A pass disabled via `Disable` (the `MLL_OPT_DISABLE` knob) is not
+/// re-run — the tree legitimately retains its shapes, and re-checking a
+/// deliberately skipped pass would turn the debugging knob into a false
+/// "compiler bug" report.
+///
+/// Deliberately NOT covered, unlike the deleted rendered-text grep:
+/// `Stmt::Raw`/`Expr::Raw` interiors and the runtime prelude (the passes
+/// treat Raw as opaque and the prelude is concatenated after opt runs —
+/// both are fixed text audited by their own review, not per-program), and
+/// any `true` cond that is not the literal node (`is_true_lit`; the
+/// emitter builds boolean literals uniformly via `Expr::lit`). The
+/// structured-tier loop passes are also not re-run: a converted loop no
+/// longer offers the shape the gate looks for, so their idempotence is
+/// structural and their reverse self-checks carry the burden.
+fn expression_pass_idempotence(stmts: &[Stmt], d: &Disable) -> Vec<String> {
+    if d.parens && d.dead && d.iife {
+        return Vec::new();
+    }
     let before = super::loopcore::render_stmts(stmts);
     let mut again = stmts.to_vec();
-    normalize_parens_block(&mut again);
-    dead_branch_block(&mut again);
+    if !d.parens {
+        normalize_parens_block(&mut again);
+    }
+    if !d.dead {
+        dead_branch_block(&mut again);
+    }
+    if !d.iife {
+        flatten_iife_block(&mut again);
+    }
     let after = super::loopcore::render_stmts(&again);
     if before == after {
         Vec::new()
     } else {
         vec![format!(
             "expression passes are not idempotent over the emitted tree \
-             (a redundant paren or dead branch survived):\n\
+             (a redundant paren, dead branch, or flattenable IIFE \
+             survived):\n\
              --- first run ---\n{before}\n--- second run ---\n{after}"
         )]
     }
