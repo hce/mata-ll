@@ -140,22 +140,24 @@ impl CodeGen {
         let type_arity = count_arrows(&func.ty);
         let pat_arity = if first.patterns.is_empty() { 0 } else { first.patterns.len() };
         let eta_count = type_arity.saturating_sub(pat_arity);
-        if !(clauses.len() == 1 && first.patterns.is_empty() && first.guards.is_empty()
-            && eta_count == 0)
-        {
+        if !(clauses.len() == 1 && first.patterns.is_empty() && eta_count == 0) {
             // A real (or eta-expanded point-free) function: the slot holds a
-            // Lua function value.
+            // Lua function value. (A guarded ZERO-pattern clause is NOT a
+            // function — it falls through to the value rules below.)
             return true;
         }
         // Value binding: the arms of function_stmts that stay concrete.
         if matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _) | Ty::Forall(_, _)) {
             return true;
         }
-        let Some(first_body) = &first.body else {
-            // Guarded value binding: function_stmts' concrete arms require a
-            // guard-free clause, so the slot is emitted thunked.
+        if !first.guards.is_empty() {
+            // A guarded value binding (`x | c = a | otherwise = b`) is
+            // desugared by function_stmts into a guard-chain CAF; the
+            // chain (an `if` with an error fallback) is never a cheap
+            // expression, so the slot is always thunked.
             return false;
-        };
+        }
+        let first_body = first.plain_body();
         if expr_references_name(first_body, &func.name) {
             return Self::is_cons_headed(first_body);
         }
@@ -164,7 +166,63 @@ impl CodeGen {
             && !expr_evaluates_global_ref(first_body)
     }
 
+    /// A guarded VALUE binding — one clause, zero patterns, nothing to
+    /// eta-expand, a non-action type — is a CAF whose body is its guard
+    /// chain. Rewrite it into a plain value clause whose body is the
+    /// desugared chain (nested `if` with a non-exhaustive-guards error
+    /// fallback, the same lowering where-bindings get in the parser), so
+    /// the value-binding arm handles it. Without this the clause fell
+    /// through to the function arm and was emitted as a NULLARY Lua
+    /// function while `slot_always_whnf` predicted a WHNF value — use
+    /// sites then read the slot bare and did arithmetic on a function
+    /// value. Action types (IO/LuaIO/Forall) are excluded: their slots
+    /// legitimately hold nullary action functions and the function arm
+    /// emits their guard chains correctly.
+    fn desugar_guarded_value(func: &TFunction) -> Option<TFunction> {
+        let [clause] = func.clauses.as_slice() else { return None };
+        if clause.guards.is_empty()
+            || !clause.patterns.is_empty()
+            || count_arrows(&func.ty) != 0
+            || matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _) | Ty::Forall(_, _))
+        {
+            return None;
+        }
+        let fallback = TExpr::new(
+            TExprKind::App(
+                Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
+                Box::new(TExpr::new(
+                    TExprKind::Lit(TLiteral::Str(
+                        format!("Non-exhaustive guards in '{}'", func.name).into_bytes(),
+                    )),
+                    Ty::Con("String".into()),
+                )),
+            ),
+            func.ty.clone(),
+        );
+        let chain = clause.guards.iter().rev().fold(fallback, |els, g| {
+            TExpr::new(
+                TExprKind::If {
+                    cond: Box::new(g.condition.clone()),
+                    then_branch: Box::new(g.body.clone()),
+                    else_branch: Box::new(els),
+                },
+                func.ty.clone(),
+            )
+        });
+        let mut func = func.clone();
+        func.clauses[0].guards = Vec::new();
+        func.clauses[0].body = Some(chain);
+        Some(func)
+    }
+
     pub(super) fn function_stmts(&mut self, func: &TFunction) -> Vec<Stmt> {
+        // Guarded value bindings become guard-chain CAFs first — see
+        // `desugar_guarded_value` (and its mirror rule in `slot_always_whnf`).
+        let desugared;
+        let func = match Self::desugar_guarded_value(func) {
+            Some(f) => { desugared = f; &desugared }
+            None => func,
+        };
         let lua_name = sanitize_name(&func.name);
         let clauses = &func.clauses;
         let scope = ScopeSnapshot::capture(self);
