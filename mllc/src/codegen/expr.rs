@@ -20,7 +20,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
-use super::function::ScopeSnapshot;
+use super::function::{LocalVarsSnapshot, ScopeSnapshot};
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
@@ -224,7 +224,7 @@ impl CodeGen {
                     // Register pattern-bound names as locals (scoped to this
                     // branch) so references resolve to them rather than a
                     // same-named top-level/prelude function.
-                    let scope = ScopeSnapshot::capture(self);
+                    let scope = LocalVarsSnapshot::capture(self);
                     if conditions.is_empty() {
                         if i > 0 {
                             let mut bs = Vec::new();
@@ -241,7 +241,7 @@ impl CodeGen {
                             }
                             direct.push(Stmt::Return(self.tail_ast(branch.plain_body(), false)));
                         }
-                        scope.restore_local_vars(self);
+                        scope.restore(self);
                         break;
                     }
                     let cond = Expr::and_chain(conditions);
@@ -256,7 +256,7 @@ impl CodeGen {
                     } else {
                         elseifs.push((cond, Block(bs)));
                     }
-                    scope.restore_local_vars(self);
+                    scope.restore(self);
                 }
                 let mut stmts = vec![scrut_stmt];
                 match chain {

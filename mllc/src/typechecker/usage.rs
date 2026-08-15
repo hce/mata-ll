@@ -983,8 +983,8 @@ impl<'a> UsageCk<'a> {
     /// Usage of one guarded body: every guard condition may run (charged
     /// sequentially — conservative for guards after the one that matches),
     /// while the guard bodies are alternatives (joined, with the
-    /// exactly-once parity check). The plain body is the synthetic
-    /// fallthrough when guards are present and contributes nothing.
+    /// exactly-once parity check). When guards are present the body is
+    /// structurally absent (`None`) — the guard chain IS the body.
     fn branch_usage(&mut self, guards: &[TGuard], body: &Option<TExpr>) -> Usage {
         if guards.is_empty() {
             return self.expr_usage(body.as_ref().expect("guard-free branch carries a body"));

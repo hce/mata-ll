@@ -21,7 +21,7 @@
 
 use crate::tir::*;
 use super::CodeGen;
-use super::function::ScopeSnapshot;
+use super::function::{RowsSnapshot, ScopeSnapshot};
 use super::lua::{Block, Expr, Stmt};
 use super::names::{lua_field_index, lua_number_literal, lua_quoted_string, sanitize_name};
 
@@ -205,7 +205,7 @@ impl CodeGen {
         for clause in clauses {
             // A clause's where-scope rows (installed by where_binds_stmts)
             // must not leak into the next clause's independent block.
-            let scope = ScopeSnapshot::capture(self);
+            let scope = RowsSnapshot::capture(self);
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
             for (pi, pat) in clause.patterns.iter().enumerate() {
@@ -245,7 +245,7 @@ impl CodeGen {
                     else_b: None,
                 });
             }
-            scope.restore_rows(self);
+            scope.restore(self);
         }
         stmts.push(Self::non_exhaustive_stmt());
         Block(stmts)

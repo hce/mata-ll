@@ -628,6 +628,17 @@ impl Checker {
         let mut tguards = Vec::new();
         let tbody;
 
+        // The body/guards exclusion is a producer-side convention the type
+        // does not enforce; a violating clause would silently DROP its
+        // guards below (the dispatch keys on the body). Fail loudly at the
+        // boundary instead.
+        debug_assert!(
+            clause.guards.is_empty() == clause.body.is_some(),
+            "clause for '{}' violates the body/guards exclusion              (guards: {}, body: {})",
+            ctx,
+            clause.guards.len(),
+            if clause.body.is_some() { "Some" } else { "None" },
+        );
         if clause.body.is_none() {
             for guard in &clause.guards {
                 // Check the condition and body against the environment with the
@@ -807,8 +818,8 @@ impl Checker {
             // Difference (1): the value case reads the substituted snapshot.
             env.lookup(&ld.name)
         };
-        if let Some(pre_ty) = pre_registered.map(|s| s.ty.clone()) {
-            match self.unify(&pre_ty.apply_subst(subst), &inferred_ty.apply_subst(subst)) {
+        if let Some(pre_ty) = pre_registered.map(|s| s.ty.apply_subst(subst)) {
+            match self.unify(&pre_ty, &inferred_ty.apply_subst(subst)) {
                 Ok(us) => *subst = subst.compose(&us),
                 Err(e) => if !binding_errored {
                     self.push_error_span(
@@ -1433,7 +1444,14 @@ impl Checker {
                     // Each guard condition must be Bool and each guard body must
                     // agree with the case result type, exactly as for function
                     // clause guards. When guards are present the branch body is
-                    // the synthetic `undefined` fallthrough produced by the parser.
+                    // structurally absent (`None`) — the guard chain IS the
+                    // body.
+                    debug_assert!(
+                        branch.guards.is_empty() == branch.body.is_some(),
+                        "case branch violates the body/guards exclusion                          (guards: {}, body: {})",
+                        branch.guards.len(),
+                        if branch.body.is_some() { "Some" } else { "None" },
+                    );
                     let mut tguards = Vec::new();
                     if !branch.guards.is_empty() {
                         for guard in &branch.guards {

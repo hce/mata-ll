@@ -1627,16 +1627,17 @@ impl<'t> NodeKey<'t> {
 /// identities; producer/consumer pairs must walk the SAME borrow, which
 /// each entry point here does by construction.)
 pub struct NodeMap<'t, V> {
+    /// The key type itself carries the `'t` brand, so the map's lifetime
+    /// is pinned to the tree borrow through it — no separate phantom.
     map: HashMap<NodeKey<'t>, V>,
-    _tree: std::marker::PhantomData<&'t TExpr>,
 }
 
 impl<'t, V> NodeMap<'t, V> {
     fn new() -> Self {
-        NodeMap { map: HashMap::new(), _tree: std::marker::PhantomData }
+        NodeMap { map: HashMap::new() }
     }
     fn with_capacity(n: usize) -> Self {
-        NodeMap { map: HashMap::with_capacity(n), _tree: std::marker::PhantomData }
+        NodeMap { map: HashMap::with_capacity(n) }
     }
     pub fn get(&self, node: &TExpr) -> Option<&V> {
         self.map.get(&NodeKey::of(node))

@@ -101,26 +101,53 @@ impl ScopeSnapshot {
         cg.concrete_vars = self.concrete_vars;
     }
 
-    /// Restores `local_vars` only. Used per-branch by the plain (guard-free)
-    /// value-position `case` emission, which registers pattern-bound names
-    /// for reference resolution but makes no concreteness claims of its own.
-    pub(super) fn restore_local_vars(self, cg: &mut CodeGen) {
-        cg.local_vars = self.local_vars;
-    }
-
-    /// Restores the where-scope rows (`local_strict_params`,
-    /// `local_demand_rows`) only. Used per-clause by the guarded
-    /// independent-block pattern emitter, which restores no other scope
-    /// state between clauses.
-    pub(super) fn restore_rows(self, cg: &mut CodeGen) {
-        cg.local_strict_params = self.local_strict_params;
-        cg.local_demand_rows = self.local_demand_rows;
-    }
-
     /// Restores `concrete_vars` only. Used by the where-group function-body
     /// emitter to scope its `_warg` concreteness marks.
     pub(super) fn restore_concrete_vars(self, cg: &mut CodeGen) {
         cg.concrete_vars = self.concrete_vars;
+    }
+}
+
+/// Narrow snapshot for the per-BRANCH loop of the plain (guard-free)
+/// value-position `case` emission, which registers pattern-bound names for
+/// reference resolution but makes no concreteness claims of its own. A
+/// full [`ScopeSnapshot`] there cloned five collections per branch —
+/// including the module-sized `concrete_vars` — only to write back one.
+/// The capture/restore pair keeps the field list in one place, same as the
+/// full snapshot's variants.
+pub(super) struct LocalVarsSnapshot {
+    local_vars: std::collections::HashSet<String>,
+}
+
+impl LocalVarsSnapshot {
+    pub(super) fn capture(cg: &CodeGen) -> Self {
+        LocalVarsSnapshot { local_vars: cg.local_vars.clone() }
+    }
+    pub(super) fn restore(self, cg: &mut CodeGen) {
+        cg.local_vars = self.local_vars;
+    }
+}
+
+/// Narrow snapshot for the per-clause loop of the guarded independent-block
+/// pattern emitter: a clause's where-scope rows (installed by
+/// where_binds_stmts) must not leak into the next clause's independent
+/// block, and nothing else is restored between clauses. The full snapshot
+/// cloned five collections per clause to write back these two maps.
+pub(super) struct RowsSnapshot {
+    local_strict_params: std::collections::HashMap<String, Vec<bool>>,
+    local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
+}
+
+impl RowsSnapshot {
+    pub(super) fn capture(cg: &CodeGen) -> Self {
+        RowsSnapshot {
+            local_strict_params: cg.local_strict_params.clone(),
+            local_demand_rows: cg.local_demand_rows.clone(),
+        }
+    }
+    pub(super) fn restore(self, cg: &mut CodeGen) {
+        cg.local_strict_params = self.local_strict_params;
+        cg.local_demand_rows = self.local_demand_rows;
     }
 }
 
