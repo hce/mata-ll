@@ -573,18 +573,10 @@ impl Monomorphizer {
         // Polymorphic binding: structural eq still specializes by shape
         // (element eq degrades to the raw-equality runtime fallback), other
         // methods dispatch by instance head alone.
-        if method == "==" {
-            if let Ty::List(elem_ty) = &binding {
-                return MethodDispatch::Resolved(self.generate_list_eq(&elem_ty.clone()));
+        if method == "=="
+            && let Some(name) = self.structural_eq_impl(&binding) {
+                return MethodDispatch::Resolved(name);
             }
-            if Self::is_maybe_type(&binding) {
-                let inner = Self::maybe_inner_type(&binding).unwrap();
-                return MethodDispatch::Resolved(self.generate_maybe_eq(&inner));
-            }
-            if let Ty::Tuple(elem_tys) = &binding {
-                return MethodDispatch::Resolved(self.generate_tuple_eq(&elem_tys.clone()));
-            }
-        }
         if let Some(head) = InstHead::of(&binding)
             && let Some(mangled) = self.instance_methods.get(&(method.to_string(), head)) {
                 return MethodDispatch::Resolved(mangled.clone());
@@ -605,15 +597,8 @@ impl Monomorphizer {
         }
         match method {
             "==" => {
-                if let Ty::List(elem_ty) = binding {
-                    return Some(self.generate_list_eq(&elem_ty.clone()));
-                }
-                if Self::is_maybe_type(binding) {
-                    let inner = Self::maybe_inner_type(binding).unwrap();
-                    return Some(self.generate_maybe_eq(&inner));
-                }
-                if let Ty::Tuple(elem_tys) = binding {
-                    return Some(self.generate_tuple_eq(&elem_tys.clone()));
+                if let Some(name) = self.structural_eq_impl(binding) {
+                    return Some(name);
                 }
             }
             "show" => {
@@ -649,6 +634,24 @@ impl Monomorphizer {
             // Resolves to itself (e.g. IO's `>>=`): nothing to rewrite.
             Some(mangled)
         }
+    }
+
+    /// The structural `==` for a compiler-owned shape — list, Maybe, tuple —
+    /// generated (or memoized) by element type; `None` for every other type.
+    /// Shared by the concrete resolver and the polymorphic-binding operator
+    /// dispatch, which once carried the same three-arm block each.
+    fn structural_eq_impl(&mut self, binding: &Ty) -> Option<String> {
+        if let Ty::List(elem_ty) = binding {
+            return Some(self.generate_list_eq(&elem_ty.clone()));
+        }
+        if Self::is_maybe_type(binding) {
+            let inner = Self::maybe_inner_type(binding).unwrap();
+            return Some(self.generate_maybe_eq(&inner));
+        }
+        if let Ty::Tuple(elem_tys) = binding {
+            return Some(self.generate_tuple_eq(&elem_tys.clone()));
+        }
+        None
     }
 
     /// True if the type contains a rigid skolem anywhere — dispatch on those
@@ -1436,12 +1439,10 @@ impl Monomorphizer {
         result_ty: Ty,
         build_spec: impl FnOnce(&mut Self) -> String,
     ) -> String {
-        let key = (method.to_string(), ty.clone());
-        if let Some(existing) = self.generated_impls.get(&key) {
-            return existing.clone();
-        }
-        let mangled = self.mangle_name(base, ty);
-        self.generated_impls.insert(key, mangled.clone());
+        let mangled = match self.memo_or_mangle(method, base, ty) {
+            Ok(existing) => return existing,
+            Err(fresh) => fresh,
+        };
 
         let spec = build_spec(self);
         let args: Vec<TExpr> = param_names.iter()
@@ -1474,6 +1475,20 @@ impl Monomorphizer {
         };
         self.generated.push(func);
         mangled
+    }
+
+    /// The memoization every generated implementation goes through: the name
+    /// already generated for (`method`, `ty`) as `Ok`, or — recorded first,
+    /// so a recursive demand for the same shape while the body is being
+    /// built finds it — the fresh mangled name as `Err`.
+    fn memo_or_mangle(&mut self, method: &str, base: &str, ty: &Ty) -> Result<String, String> {
+        let key = (method.to_string(), ty.clone());
+        if let Some(existing) = self.generated_impls.get(&key) {
+            return Ok(existing.clone());
+        }
+        let mangled = self.mangle_name(base, ty);
+        self.generated_impls.insert(key, mangled.clone());
+        Err(mangled)
     }
 
     /// Generate a specialized eq function for a tuple type.
@@ -1554,14 +1569,10 @@ impl Monomorphizer {
     /// show_(Int, String) produces: function(t) return "(" .. show_Int(t[1]) .. ", " .. show_String(t[2]) .. ")" end
     fn generate_tuple_show(&mut self, elem_tys: &[Ty]) -> String {
         let tuple_ty = Ty::Tuple(elem_tys.to_vec());
-        let mangled = self.mangle_name("show", &tuple_ty);
-
-        // Check if already generated
-        let key = ("show".to_string(), tuple_ty.clone());
-        if let Some(existing) = self.generated_impls.get(&key) {
-            return existing.clone();
-        }
-        self.generated_impls.insert(key, mangled.clone());
+        let mangled = match self.memo_or_mangle("show", "show", &tuple_ty) {
+            Ok(existing) => return existing,
+            Err(fresh) => fresh,
+        };
 
         // Resolve show for each element type. Use the unified resolver so a
         // structured element (list, Maybe, nested tuple, user ADT) gets its
