@@ -1688,7 +1688,17 @@ fn quote_ty(s: &str) -> String {
 }
 
 /// Render the i-th friendly type-variable name: a, b, … z, a1, b1, …
-fn pretty_var_name(i: usize) -> String {
+/// A type rendered for constraint position (`Show (Tree a)`, `Num (a -> b)`):
+/// a compound type is parenthesized, a plain one is not — one rule for every
+/// message that names a class applied to a type.
+pub(crate) fn paren_ty(t: &Ty) -> String {
+    match t {
+        Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => format!("({})", t),
+        _ => format!("{}", t),
+    }
+}
+
+pub(crate) fn pretty_var_name(i: usize) -> String {
     let letter = (b'a' + (i % 26) as u8) as char;
     let suffix = i / 26;
     if suffix == 0 { letter.to_string() } else { format!("{}{}", letter, suffix) }
@@ -1872,24 +1882,12 @@ impl fmt::Display for Diagnostic {
             }
             DiagnosticKind::NoInstance { class, ty } => {
                 let s = pretty_var_subst(&[ty]);
-                let rendered = ty.apply_subst(&s);
-                let shown = match &rendered {
-                    Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
-                        format!("({})", rendered),
-                    _ => format!("{}", rendered),
-                };
-                write!(f, "No instance for '{} {}'", class, shown)?
+                write!(f, "No instance for '{} {}'", class, paren_ty(&ty.apply_subst(&s)))?
             }
             DiagnosticKind::AmbiguousType { class, ty } => {
                 let s = pretty_var_subst(&[ty]);
-                let rendered = ty.apply_subst(&s);
-                let shown = match &rendered {
-                    Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
-                        format!("({})", rendered),
-                    _ => format!("{}", rendered),
-                };
                 write!(f, "Ambiguous type: nothing here determines the type '{}', so no '{}' instance can be chosen for it",
-                    shown, class)?
+                    paren_ty(&ty.apply_subst(&s)), class)?
             }
             DiagnosticKind::MissingContextConstraint { class, ty } => {
                 // Show the signature variable's written name: a freshened rigid

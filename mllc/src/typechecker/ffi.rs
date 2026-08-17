@@ -123,9 +123,7 @@ fn friendly_export_tys(tys: &[&Ty]) -> Vec<Ty> {
     }
     let mut map: HashMap<TyVar, Ty> = HashMap::new();
     for (i, v) in vars.iter().enumerate() {
-        let letter = (b'a' + (i % 26) as u8) as char;
-        let name = if i < 26 { letter.to_string() } else { format!("{}{}", letter, i / 26) };
-        map.insert(v.clone(), Ty::Var(TyVar { name, id: v.id }));
+        map.insert(v.clone(), Ty::Var(TyVar { name: crate::types::pretty_var_name(i), id: v.id }));
     }
     let sub = Subst::from_map(map);
     tys.iter().map(|t| t.apply_subst(&sub)).collect()

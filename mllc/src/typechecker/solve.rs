@@ -239,11 +239,7 @@ impl Checker {
         let ctx = inst.context.as_ref()?;
         // A compound type in constraint position reads wrong without parens
         // ("Show Tree a" vs "Show (Tree a)").
-        let paren = |t: &Ty| match t {
-            Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) =>
-                format!("({})", t),
-            _ => format!("{}", t),
-        };
+        let paren = crate::types::paren_ty;
         for (c_class, bound) in &subs {
             if self.has_instance(c_class, bound) {
                 continue;
@@ -501,11 +497,7 @@ impl Checker {
                 Type::Var(v) => v.clone(),
                 other => {
                     if report {
-                        let shown = match self.ast_type_to_ty(other) {
-                            t @ (Ty::Arrow(..) | Ty::App(_, _) | Ty::IO(_) | Ty::LuaIO(_, _)) =>
-                                format!("({})", t),
-                            t => format!("{}", t),
-                        };
+                        let shown = crate::types::paren_ty(&self.ast_type_to_ty(other));
                         self.push_error_ctx_note(
                             DiagnosticKind::Other(format!(
                                 "Constraint '{} {}' in the instance context must apply the class to a plain type variable: the context names which of the instance head's type variables need their own instance, so a compound type has nothing to attach to here",
