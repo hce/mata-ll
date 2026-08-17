@@ -2332,9 +2332,19 @@ impl Parser {
     fn parse_let_binds(&mut self) -> PResult<Vec<LocalDef>> {
         self.skip_newlines_and_indent();
         let mut binds = Vec::new();
-        let let_indent = self.current_indent;
+        // The first binding's column is the group's layout block: a later
+        // line at that column is the next binding, a line indented less
+        // closes the group (so a do-block's next statement, at the `let`
+        // line's own indent, is never read as a binding), and the block
+        // column keeps a same-column sibling from being swallowed as a
+        // continuation argument of the previous RHS.
+        let let_indent = self.peek_loc().col.saturating_sub(1);
+        // A first binding on the `let` line opens the block mid-line: its
+        // column becomes the layout context (`current_indent` is the line's
+        // indent until the next line's Indent token resets it).
+        self.current_indent = let_indent;
         let saved_block = self.block_indent;
-        self.block_indent = self.peek_loc().col.saturating_sub(1);
+        self.block_indent = let_indent;
         // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
         let mut fresh_counter = 0usize;
 
@@ -3121,61 +3131,22 @@ impl Parser {
                 break;
             }
 
-            // Check for `let name = expr` or `let (a, b) = expr`
+            // `let` statement: one binding group — simple, function and
+            // tuple-pattern bindings, all in one mutually recursive scope —
+            // parsed by the same layout rules as a let-expression's group.
             if self.at(&Token::Let) {
                 self.advance();
-                let let_indent = self.current_indent;
-                // Tuple pattern: let (a, b) = expr
-                if matches!(self.peek(), Token::LeftParen) {
-                    let pat = self.parse_pattern_atom()?;
-                    if matches!(pat, Pattern::Tuple(_)) {
-                        self.expect(&Token::Eq)?;
-                        let expr = self.parse_expr()?;
-                        stmts.push(DoStmt::PatternDoLet { pattern: pat, expr });
-                        continue;
-                    }
-                    return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
+                let let_loc = self.peek_loc().clone();
+                let binds = self.parse_let_binds()?;
+                if binds.is_empty() {
+                    return Err(Box::new(Diagnostic::parse_at(
+                        "Expected a binding after `let`: `name = expr`, \
+                         `f x = expr`, or `(a, b) = expr`"
+                            .to_string(),
+                        Span::new(let_loc.line, let_loc.col),
+                    )));
                 }
-                // The binding column is the layout block for the
-                // binding RHS(s), so a following sibling binding at the
-                // same column is not swallowed as a continuation arg.
-                let saved_do_block = self.block_indent;
-                self.block_indent = self.peek_loc().col.saturating_sub(1);
-                let (name, params) = self.parse_binding_head()?;
-                self.expect(&Token::Eq)?;
-                let expr = self.parse_expr()?;
-                // Accumulate all bindings of THIS `let` group into one
-                // list so they share a single mutually-recursive scope
-                // (Haskell 2010 letrec); a later binding may be referenced
-                // by an earlier one regardless of source order.
-                let mut group = vec![self.group_binding(name, params, expr)?];
-                // Continue parsing additional bindings at the same or deeper indent
-                loop {
-                    let save_pos = self.checkpoint();
-                    self.skip_newlines_and_indent();
-                    if self.current_indent >= let_indent
-                        && let Token::Ident(_) = self.peek() {
-                            // Peek ahead for `name [patterns] =`; anything
-                            // else (including a malformed head) is not a
-                            // continuation binding — rewind and let the
-                            // next do-statement parse report it.
-                            let save2 = self.checkpoint();
-                            match self.parse_binding_head() {
-                                Ok((n2, params2)) if self.at(&Token::Eq) => {
-                                    self.advance();
-                                    let expr2 = self.parse_expr()?;
-                                    group.push(self.group_binding(n2, params2, expr2)?);
-                                    continue;
-                                }
-                                _ => self.rewind(save2),
-                            }
-                        }
-                    // Not a continuation binding — backtrack
-                    self.rewind(save_pos);
-                    break;
-                }
-                stmts.push(DoStmt::DoLet { binds: group });
-                self.block_indent = saved_do_block;
+                stmts.push(DoStmt::DoLet { binds });
                 continue;
             }
 

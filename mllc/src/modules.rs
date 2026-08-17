@@ -610,11 +610,6 @@ impl Qual<'_> {
                 collect_pattern_vars(pattern, bound);
                 DoStmt::PatternBind { pattern: pattern.clone(), expr: e }
             }
-            DoStmt::PatternDoLet { pattern, expr } => {
-                let e = self.expr(expr, bound);
-                collect_pattern_vars(pattern, bound);
-                DoStmt::PatternDoLet { pattern: pattern.clone(), expr: e }
-            }
         }
     }
 

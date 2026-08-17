@@ -367,8 +367,6 @@ impl Expr {
                 },
                 DoStmt::PatternBind { pattern, expr } =>
                     DoStmt::PatternBind { pattern, expr: f(expr) },
-                DoStmt::PatternDoLet { pattern, expr } =>
-                    DoStmt::PatternDoLet { pattern, expr: f(expr) },
             }).collect()),
             Expr::Ascription(x, t) => Expr::Ascription(Box::new(f(*x)), t),
             Expr::RecordCon { constructor, fields } => Expr::RecordCon {
@@ -419,8 +417,7 @@ impl Expr {
                     match s {
                         DoStmt::Bind { expr, .. }
                         | DoStmt::Expr(expr)
-                        | DoStmt::PatternBind { expr, .. }
-                        | DoStmt::PatternDoLet { expr, .. } => f(expr),
+                        | DoStmt::PatternBind { expr, .. } => f(expr),
                         DoStmt::DoLet { binds } => {
                             for ld in binds { f(&ld.body); }
                         }
@@ -464,10 +461,10 @@ pub enum DoStmt {
     /// one mutually-recursive scope (Haskell 2010 letrec), so declaration order
     /// within the group is irrelevant.
     DoLet { binds: Vec<LocalDef> },
-    /// `(a, b) <- expr` (pattern bind)
+    /// `(a, b) <- expr` (pattern bind). A `let (a, b) = expr` statement is
+    /// NOT a variant of its own: the parser desugars it into `DoLet`
+    /// selector bindings, exactly like a let-expression's tuple binding.
     PatternBind { pattern: Pattern, expr: Expr },
-    /// `let (a, b) = expr` (pattern let)
-    PatternDoLet { pattern: Pattern, expr: Expr },
 }
 
 /// Literal values.
