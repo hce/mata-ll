@@ -1883,26 +1883,24 @@ impl Checker {
         self.register_kind(name, type_vars.len());
         let (tvars, result_type) = Self::data_result_type(name, type_vars);
 
-        // DataKinds: register the kinds of this type's promoted constructors.
-        // A promotable data type (parameterless, non-GADT, non-existential —
-        // see `promotable_kinds`) promotes to a REAL kind named after it, so
-        // its constructors get promoted kinds ending in that kind (`'Z :: Nat`,
-        // `'S :: Nat -> Nat`). Every other data type keeps the historical
+        // DataKinds: the promoted-constructor kinds. A promotable data type
+        // (parameterless, non-GADT, non-existential — see `promotable_kinds`)
+        // promotes to a REAL kind named after it, and its constructors'
+        // promoted kinds (`'Z :: Nat`, `'S :: Nat -> Nat`) were registered by
+        // scan_promotable_kinds, the pre-pass that also decided
+        // promotability (they were once recomputed and re-inserted here,
+        // identically). Every other data type keeps the historical
         // approximation: each promoted constructor with N fields gets
         // `Type -> … -> Type` (promoting it precisely would need kind
         // polymorphism, which mata-ll does not have).
-        let promotable = self.promotable_kinds.contains(name);
-        for con in constructors {
-            let kind = if promotable {
-                self.promoted_constructor_kind(con, name)
-            } else {
+        if !self.promotable_kinds.contains(name) {
+            for con in constructors {
                 let mut kind = Kind::Type;
                 for _ in 0..con.field_count() {
                     kind = Kind::Arrow(Box::new(Kind::Type), Box::new(kind));
                 }
-                kind
-            };
-            self.kinds.insert(format!("'{}", con.name), kind);
+                self.kinds.insert(format!("'{}", con.name), kind);
+            }
         }
 
         for (i, con) in constructors.iter().enumerate() {
