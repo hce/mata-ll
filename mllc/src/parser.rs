@@ -208,6 +208,40 @@ impl Parser {
         }
     }
 
+    /// Open the layout block that follows a `where` (class body, instance
+    /// body, clause bindings). Skips to the block's first token and returns
+    /// the column (0-based) every item of the block starts at — a later
+    /// line at that indent is the next item, a smaller indent closes the
+    /// block — or `None` for an EMPTY block.
+    ///
+    /// Haskell's layout rule: the block's context column is the column of
+    /// the token after the keyword; when that token sits on a later line
+    /// and is not indented past the ENCLOSING context (`enclosing_indent`),
+    /// the block is `{}` and the token belongs to the enclosing context.
+    /// Without this an empty `class C a where` / `instance C T where`
+    /// swallowed the following top-level declarations as methods (the
+    /// item indent was read from the next line, i.e. 0), and a `where`
+    /// alone on its line swallowed the next definition as a binding.
+    ///
+    /// When the first item shares the keyword's line, `current_indent` is
+    /// moved to its column: that column is the layout context from here
+    /// on (a following line at a smaller indent closes the block, as in
+    /// GHC), and the block loops compare against `current_indent`.
+    fn open_layout_block(&mut self, keyword_line: usize, enclosing_indent: usize) -> Option<usize> {
+        self.skip_newlines_and_indent();
+        if self.at_eof() {
+            return None;
+        }
+        let loc = self.peek_loc();
+        if loc.line > keyword_line {
+            (self.current_indent > enclosing_indent).then_some(self.current_indent)
+        } else {
+            let col = loc.col.saturating_sub(1);
+            self.current_indent = col;
+            Some(col)
+        }
+    }
+
     /// Check if the current token is at or beyond a given indentation level
     fn parse_module(&mut self) -> Result<Module, Vec<Diagnostic>> {
         let mut decls = Vec::new();
@@ -767,6 +801,9 @@ impl Parser {
     }
 
     fn parse_class_decl(&mut self) -> PResult<Vec<Decl>> {
+        // The declaration's own indent is the enclosing layout context of
+        // its `where` block (see `open_layout_block`).
+        let decl_indent = self.current_indent;
         self.expect(&Token::Class)?;
 
         // Parse optional superclass constraints: `Eq a =>` needs no parens,
@@ -845,11 +882,13 @@ impl Parser {
 
         let class_name = self.expect_upper_ident()?;
         let type_var = self.expect_ident()?;
+        let where_line = self.peek_loc().line;
         self.expect(&Token::Where)?;
-        self.skip_newlines_and_indent();
 
         let mut methods = Vec::new();
-        let method_indent = self.current_indent;
+        let Some(method_indent) = self.open_layout_block(where_line, decl_indent) else {
+            return Ok(vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }]);
+        };
 
         loop {
             self.skip_newlines_and_indent();
@@ -891,6 +930,7 @@ impl Parser {
     }
 
     fn parse_instance_decl(&mut self) -> PResult<Vec<Decl>> {
+        let decl_indent = self.current_indent;
         self.expect(&Token::Instance)?;
 
         // Parse an optional context, then `ClassName TargetType where`.
@@ -915,11 +955,15 @@ impl Parser {
         let class_name = self.expect_upper_ident()?;
         let target_type = self.parse_type_atom()?;
 
+        let where_line = self.peek_loc().line;
         self.expect(&Token::Where)?;
-        self.skip_newlines_and_indent();
 
+        // An empty body (`instance C T where` with every method defaulted)
+        // is legal; the following declarations are NOT its methods.
         let mut methods = Vec::new();
-        let method_indent = self.current_indent;
+        let Some(method_indent) = self.open_layout_block(where_line, decl_indent) else {
+            return Ok(vec![Decl::InstanceDecl { class_name, target_type, context, methods }]);
+        };
 
         loop {
             self.skip_newlines_and_indent();
@@ -1366,13 +1410,18 @@ impl Parser {
         if !self.at(&Token::Where) {
             return Ok(vec![]);
         }
+        let where_line = self.peek_loc().line;
         self.advance();
-        self.skip_newlines_and_indent();
 
+        // The clause's column (`block_indent`, set by parse_clause) is the
+        // enclosing layout context: bindings must be indented past it, or
+        // the `where` is empty and the next line is the next definition.
         let mut binds = Vec::new();
-        let where_indent = self.current_indent;
         let saved_block = self.block_indent;
-        self.block_indent = self.peek_loc().col.saturating_sub(1);
+        let Some(where_indent) = self.open_layout_block(where_line, self.block_indent) else {
+            return Ok(binds);
+        };
+        self.block_indent = where_indent;
 
         loop {
             self.skip_newlines_and_indent();
