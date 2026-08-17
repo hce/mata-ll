@@ -282,6 +282,45 @@ impl CodeGen {
             }
         }
 
+        // Direct-perform classification, whole-module and BEFORE any body is
+        // emitted: a tail terminal that saturates a call to any of these
+        // functions returns bare (see action_run_ast), and the callee may be
+        // defined later in the file (mutual recursion). The predicate
+        // mirrors function_stmts' arms, which debug_assert agreement at
+        // emission — the same discipline as the concreteness prediction
+        // above. A name may be defined MORE THAN ONCE in the merged module
+        // (a definition reached along two import paths, or a user
+        // redefinition of an imported name — the documented user-wins case);
+        // all such definitions write the same slot and the last-emitted one
+        // is the one calls reach. When the duplicates classify identically
+        // the prediction is unambiguous and stays; when they disagree the
+        // name is excluded (every call keeps its runner, which is always
+        // sound) and exempted from the emission-time agreement assert.
+        {
+            let mut classified: std::collections::HashMap<&str, Option<usize>> =
+                std::collections::HashMap::new();
+            for f in module.functions.iter().chain(module.instance_fns.iter()) {
+                let arity = Self::direct_perform_arity(f);
+                match classified.entry(f.name.as_str()) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(arity);
+                    }
+                    std::collections::hash_map::Entry::Occupied(o) => {
+                        if *o.get() != arity {
+                            self.direct_perform_conflicts.insert(f.name.clone());
+                        }
+                    }
+                }
+            }
+            for (name, arity) in classified {
+                if let Some(arity) = arity
+                    && !self.direct_perform_conflicts.contains(name)
+                {
+                    self.direct_perform_fns.insert(name.to_string(), arity);
+                }
+            }
+        }
+
         // Emit constructors (now using fn_table slots)
         for def in &module.data_defs {
             stmts.extend(self.data_constructor_stmts(def));

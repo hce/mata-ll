@@ -125,6 +125,35 @@ fn perform_bare_tco_deep_unoptimized() {
             .expect("2e6-deep bare-TCO run in constant stack");
     });
 }
+mll_test!(perform_bare_tco_mutual, "perform_bare_tco_mutual.mll");
+
+/// The interprocedural twin of perform_bare_tco_deep_unoptimized: two
+/// direct-perform functions tail-calling EACH OTHER, 2e6 deep, with every
+/// loop pass disabled (no pass can loop mutual recursion anyway). This pins
+/// the module-level direct-perform classification (direct_perform_fns): a
+/// saturated tail call to a KNOWN direct-perform callee — not just self —
+/// emits the bare `return callee(...)` Lua tail call.
+#[test]
+fn perform_bare_tco_mutual_unoptimized() {
+    with_compiler_stack(|| {
+        let path = Path::new("tests/cases/perform_bare_tco_mutual.mll");
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
+        let opts = mllc::CompileOptions {
+            disable_opt_passes: Some("tailloop,ioloop,performloop".into()),
+            ..Default::default()
+        };
+        let lua_code =
+            mllc::compile_with_options(&source, Path::new("tests/cases"), &[], &opts)
+                .expect("perform_bare_tco_mutual compiles")
+                .lua_code;
+        let lua = mlua::Lua::new();
+        lua.load(&lua_code)
+            .set_name("perform_bare_tco_mutual (loop passes disabled)")
+            .exec()
+            .expect("2e6-deep mutual bare-TCO run in constant stack");
+    });
+}
 mll_test!(seq_forms, "seq_forms.mll");
 mll_test!(self_referential_caf, "self_referential_caf.mll");
 mll_test!(lazy_take_zip, "lazy_take_zip.mll");

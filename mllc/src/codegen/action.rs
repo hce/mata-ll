@@ -300,35 +300,42 @@ impl CodeGen {
                 Expr::call_named(fused, cargs)
             }
             _ => {
-                // Direct-perform self tail: inside the body of a
-                // direct-perform IO function (see function_stmts), a
-                // saturated call to the function itself PERFORMS and returns
-                // a result that — by the enclosing function's own contract —
-                // needs exactly one consumer application. Forwarding it bare
-                // preserves that count (the one-root-application invariant;
-                // see the __mll_run contract comment in the runtime), and
-                // `return self(...)` is the exact syntactic form Lua's
-                // tail-call elimination reclaims the frame for: deep
-                // self-recursion runs in constant stack with no runner
-                // re-application forcing a `pure` payload on unwind. A
-                // statement-position self call (result discarded) drops the
-                // runner for the same reason — the forwarding application
-                // was the identity on every value the callee can return.
-                // Builders (multi-clause IO functions, the two-level shape)
-                // never set the flag and keep their runner, which performs.
-                if tail && self.is_direct_perform_self_call(expr) {
+                // Direct-perform tail: a saturated call to a module-level
+                // DIRECT-PERFORM function (its emitted body IS the action —
+                // see direct_perform_arity / direct_perform_fns) PERFORMS
+                // when called and returns a result in the runners' range,
+                // on which the forwarding runner is the identity. So in a
+                // forwarding position the call returns bare: `return
+                // callee(...)` is the exact syntactic form Lua's tail-call
+                // elimination reclaims the frame for, and it skips the
+                // runner re-application whose `__force` would evaluate a
+                // thunk `pure` payload GHC never forces on unwind. The
+                // callee may be the function being emitted (self-recursion)
+                // or ANY other direct-perform function (mutual recursion,
+                // `f` ↔ `g`): the invariant is the callee's, not the
+                // caller's — the callee's single pending consumer
+                // application simply becomes this function's (the
+                // one-root-application invariant; see the __mll_run contract
+                // comment in the runtime), and every forwarding position
+                // (a direct-perform body's terminal, a first-class action
+                // closure's terminal, a discarded effect statement) delivers
+                // its value to exactly one consumer application. Builders
+                // (multi-clause IO functions, the two-level shape; ST
+                // closures) are never in the map and keep their runner,
+                // which performs the action closure they return.
+                if tail && let Some(arity) = self.direct_perform_callee_arity(expr) {
                     let e = self.expr_ast(expr);
-                    match e {
-                        Expr::Call(..) => return e,
-                        // Arity-0 self reference: the emission is the bare
-                        // function reference — the call is spelled here.
-                        e if matches!(&self.direct_perform_self, Some((_, 0))) => {
-                            return Expr::call(e, vec![]);
-                        }
-                        // Any other emitted shape: keep the runner (it
-                        // handles every action form).
-                        e => return Expr::call_named(runner, vec![e]),
+                    if Self::call_head_is(&e, &self.direct_perform_callee_ref(expr)) {
+                        return e;
                     }
+                    // Arity-0 callee: the emission is the bare function
+                    // reference — the call is spelled here.
+                    if arity == 0 && matches!(&e, Expr::Name(n) if *n == self.direct_perform_callee_ref(expr)) {
+                        return Expr::call(e, vec![]);
+                    }
+                    // Any other emitted shape (an inlined body, an adapter):
+                    // keep the runner — it handles every action form.
+                    return Expr::call_named(runner, vec![e]);
                 }
                 // General IO/ST action: the runner handles both direct
                 // values and action closures (function or value).
@@ -338,19 +345,35 @@ impl CodeGen {
         }
     }
 
-    /// Whether `expr` is a SATURATED call to the direct-perform function
-    /// currently being emitted (see `direct_perform_self` in function_stmts):
-    /// an application spine (grouping parens transparent) whose head is a
-    /// `Var` spelling the function's own un-shadowed name, applied to exactly
-    /// its parameter count. Shadowing check: a local binding of the same name
-    /// is a first-class value whose emission arm this claim knows nothing
-    /// about. Partial applications (a closure value, not a perform) and
-    /// SpecCall spines (a specialized copy is a different emitted function)
-    /// report false and keep the runner.
-    fn is_direct_perform_self_call(&self, expr: &TExpr) -> bool {
-        let Some((self_name, arity)) = &self.direct_perform_self else {
-            return false;
-        };
+    /// If `expr` is a SATURATED call to a module-level direct-perform
+    /// function (`direct_perform_fns`, seeded by module_stmts before any
+    /// body is emitted), its arity: an application spine (grouping parens
+    /// transparent) whose head is a `Var` spelling an un-shadowed name in
+    /// the map, applied to exactly that entry's parameter count. Shadowing
+    /// check: a local binding of the same name is a first-class value whose
+    /// emission arm this claim knows nothing about — the test is the same
+    /// `local_vars` membership `lua_ref` resolves references by. Partial
+    /// applications (a closure value, not a perform), over-applications and
+    /// SpecCall spines (runtime/FFI protocols, never a compiled function)
+    /// report `None` and keep the runner.
+    fn direct_perform_callee_arity(&self, expr: &TExpr) -> Option<usize> {
+        let (name, nargs) = Self::var_call_spine(expr)?;
+        let arity = *self.direct_perform_fns.get(name)?;
+        (nargs == arity && !self.local_vars.contains(&sanitize_name(name))).then_some(arity)
+    }
+
+    /// The Lua reference a direct-perform callee is emitted as (its
+    /// `__mll_fn` slot or plain name — the same resolution `expr_ast` uses
+    /// for a concrete top-level function). Only meaningful after
+    /// `direct_perform_callee_arity` accepted `expr`.
+    fn direct_perform_callee_ref(&self, expr: &TExpr) -> String {
+        let (name, _) = Self::var_call_spine(expr).expect("accepted direct-perform spine");
+        self.lua_ref(&sanitize_name(name))
+    }
+
+    /// The head name and argument count of an application spine headed by
+    /// a `Var` (grouping parens transparent); `None` for any other head.
+    fn var_call_spine(expr: &TExpr) -> Option<(&str, usize)> {
         let mut nargs = 0usize;
         let mut f = expr;
         loop {
@@ -360,14 +383,27 @@ impl CodeGen {
                     nargs += 1;
                     f = inner_f.as_ref();
                 }
-                TExprKind::Var(n) => {
-                    return n == self_name
-                        && nargs == *arity
-                        && !self.local_vars.contains(&sanitize_name(n));
-                }
-                _ => return false,
+                TExprKind::Var(n) => return Some((n, nargs)),
+                _ => return None,
             }
         }
+    }
+
+    /// Whether the emitted expression is a call chain whose innermost callee
+    /// is exactly the name `head` — the shape `general_call_ast` produces
+    /// for a saturated call to a concrete top-level function
+    /// (`__mll_fn[k](a, b)`), as opposed to an inlined body (`Paren`), a
+    /// runtime-generic adapter, or a partial-application closure. The bare
+    /// tail is emitted only for this shape; the gate is on the EMITTED tree,
+    /// so no belief about which expr_ast arm fired is relied on.
+    fn call_head_is(e: &Expr, head: &str) -> bool {
+        let mut e = e;
+        let mut depth = 0usize;
+        while let Expr::Call(f, _) = e {
+            e = f.as_ref();
+            depth += 1;
+        }
+        depth > 0 && matches!(e, Expr::Name(n) if n == head)
     }
 
     pub(super) fn is_nullary_action_type(ty: &Ty) -> bool {

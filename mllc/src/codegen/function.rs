@@ -193,6 +193,61 @@ impl CodeGen {
             && !expr_evaluates_global_ref(first_body)
     }
 
+    /// Is this binding emitted DIRECT-PERFORM — a Lua function whose body IS
+    /// the IO action, so calling it saturated performs and returns a result
+    /// in the runners' range (see the __mll_run contract in the runtime)?
+    /// `Some(n)` gives the saturating argument count. Two arms of
+    /// `function_stmts` emit that way, and this predicate mirrors their
+    /// branch structure exactly (function_stmts debug_asserts agreement at
+    /// each arm, so the two cannot drift):
+    ///
+    ///  * the nullary IO/LuaIO value arm (`main :: IO ()`, `loop :: IO a`):
+    ///    one clause, no patterns, no guards, nothing to eta-expand — the
+    ///    `Ty::Forall` CAF wrapper that arm also emits is a deferred value,
+    ///    not a performing action, so it is excluded;
+    ///  * the single-clause, guard-free, all-simple-pattern function arm
+    ///    whose type returns an IO/LuaIO action, with nothing to eta-expand
+    ///    (an eta-expanded body applies a callee, it does not perform) and
+    ///    not an ST action (ST bodies are wrapped in a closure the runner
+    ///    calls).
+    ///
+    /// Both decline dictionary-taking functions: their call spine carries
+    /// dictionary arguments the saturation count cannot see. Multi-clause
+    /// and guarded functions are two-level builders (dispatch returns an
+    /// action closure) and are never direct-perform. Consumed by
+    /// `module_stmts` to seed `direct_perform_fns` before emission.
+    pub(super) fn direct_perform_arity(func: &TFunction) -> Option<usize> {
+        // A guarded value binding is rewritten first, exactly as
+        // function_stmts does — after the rewrite it is a plain value clause
+        // (never an action type: desugar_guarded_value excludes them).
+        let desugared;
+        let func = match Self::desugar_guarded_value(func) {
+            Some(f) => { desugared = f; &desugared }
+            None => func,
+        };
+        if !func.dict_params.is_empty() {
+            return None;
+        }
+        let [clause] = func.clauses.as_slice() else { return None };
+        if !clause.guards.is_empty() {
+            return None;
+        }
+        let type_arity = count_arrows(&func.ty);
+        let eta_count = type_arity.saturating_sub(clause.patterns.len());
+        if eta_count > 0 {
+            return None;
+        }
+        if clause.patterns.is_empty() {
+            return matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _)).then_some(0);
+        }
+        let all_simple = clause
+            .patterns
+            .iter()
+            .all(|p| matches!(p, TPattern::Var(_, _) | TPattern::Wildcard));
+        (all_simple && !Self::returns_st(&func.ty) && Self::returns_action(&func.ty))
+            .then_some(clause.patterns.len())
+    }
+
     /// A guarded VALUE binding — one clause, zero patterns, nothing to
     /// eta-expand, a non-action type — is a CAF whose body is its guard
     /// chain. Rewrite it into a plain value clause whose body is the
@@ -252,6 +307,14 @@ impl CodeGen {
         };
         let lua_name = sanitize_name(&func.name);
         let clauses = &func.clauses;
+        // The direct-perform outcome this emission actually takes (`Some(n)`
+        // at the two arms whose Lua function body IS the action). Every exit
+        // checks it against the module-level prediction
+        // (`direct_perform_arity` via `direct_perform_fns`), on BOTH sides:
+        // a predicted-but-not-emitted entry would let a caller drop the
+        // runner around an unperformed action; an emitted-but-unpredicted
+        // arm merely loses the bare tail. See check_direct_perform_prediction.
+        let mut emitted_direct_perform: Option<usize> = None;
         let scope = ScopeSnapshot::capture(self);
         self.local_count = 0;
         self.var_slots.clear();
@@ -264,6 +327,7 @@ impl CodeGen {
 
         if clauses.is_empty() {
             scope.restore(self);
+            self.check_direct_perform_prediction(func, emitted_direct_perform);
             return Vec::new();
         }
 
@@ -299,18 +363,16 @@ impl CodeGen {
                 let demanded = self.clause_demanded(&clauses[0]);
                 let mut body = self.where_binds_stmts(&clauses[0], demanded);
                 // Direct-perform: the emitted function's body IS the action,
-                // so a tail self-reference may return bare (see
-                // direct_perform_self / action_run_ast). Only for genuine
-                // IO/LuaIO — the Ty::Forall CAF wrapper this arm also emits
-                // is a deferred value, not a performing action.
-                let saved_dp = self.direct_perform_self.take();
-                if matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _))
-                    && func.dict_params.is_empty()
-                {
-                    self.direct_perform_self = Some((func.name.clone(), 0));
+                // so a saturated tail call to it (from its own body or any
+                // other) may return bare — see direct_perform_arity, which
+                // predicted this arm's outcome for the module-level map,
+                // and action_run_ast. Only for genuine IO/LuaIO — the
+                // Ty::Forall CAF wrapper this arm also emits is a deferred
+                // value, not a performing action.
+                if matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _)) && func.dict_params.is_empty() {
+                    emitted_direct_perform = Some(0);
                 }
                 body.extend(self.bind_chain_block(clauses[0].plain_body(), true).0);
-                self.direct_perform_self = saved_dp;
                 stmts.push(Stmt::Function { target, params: Vec::new(), body: Block(body) });
                 is_concrete = true;
             } else if expr_references_name(clauses[0].plain_body(), &func.name) {
@@ -396,6 +458,7 @@ impl CodeGen {
                 // Thunked value — must NOT be concrete (needs __force)
                 self.concrete_vars.remove(&lua_name);
             }
+            self.check_direct_perform_prediction(func, emitted_direct_perform);
             return stmts;
         }
 
@@ -479,18 +542,17 @@ impl CodeGen {
                     // sub-actions directly. The function itself acts as the action
                     // closure — callers use the action runners to invoke it.
                     // Direct-perform: a saturated tail call to this function
-                    // performs and forwards its own runner-normalized result,
-                    // so it may return bare — Lua's tail-call form (see
-                    // direct_perform_self / action_run_ast). Dict-taking
-                    // functions are declined: their call spine carries
-                    // dictionary arguments this saturation count cannot see.
-                    let saved_dp = self.direct_perform_self.take();
+                    // (from its own body or any other) performs and forwards
+                    // its own runner-normalized result, so it may return
+                    // bare — Lua's tail-call form (see direct_perform_arity,
+                    // which predicted this arm's outcome for the module-level
+                    // map, and action_run_ast). Dict-taking functions are
+                    // declined: their call spine carries dictionary
+                    // arguments this saturation count cannot see.
                     if func.dict_params.is_empty() {
-                        self.direct_perform_self =
-                            Some((func.name.clone(), clause.patterns.len()));
+                        emitted_direct_perform = Some(clause.patterns.len());
                     }
                     body.extend(self.bind_chain_block(clause.plain_body(), true).0);
-                    self.direct_perform_self = saved_dp;
                 } else {
                     // Pure function: use the plain bind-chain builder for the
                     // body so If/>>=/>> flatten into statements instead of IIFEs
@@ -516,6 +578,7 @@ impl CodeGen {
             ];
             scope.restore(self);
             self.concrete_vars.insert(lua_name);
+            self.check_direct_perform_prediction(func, emitted_direct_perform);
             return stmts;
         }
 
@@ -573,7 +636,29 @@ impl CodeGen {
         ];
         scope.restore(self);
         self.concrete_vars.insert(lua_name);
+        self.check_direct_perform_prediction(func, emitted_direct_perform);
         stmts
+    }
+
+    /// The direct-perform twin of the `slot_always_whnf` agreement check:
+    /// the module-level prediction (`direct_perform_fns`, seeded from
+    /// `direct_perform_arity` before any body was emitted) must equal what
+    /// `function_stmts` just did. A mismatch means an already-emitted tail
+    /// site chose bare-vs-runner from a wrong belief about this function —
+    /// on the predicted-but-not-emitted side that is a dropped runner around
+    /// an unperformed action, so it fails loudly here. A name whose
+    /// duplicate definitions classify differently is exempt (and never
+    /// predicted direct-perform; see `direct_perform_conflicts`).
+    fn check_direct_perform_prediction(&self, func: &TFunction, emitted: Option<usize>) {
+        if self.direct_perform_conflicts.contains(&func.name) {
+            return;
+        }
+        debug_assert_eq!(
+            self.direct_perform_fns.get(&func.name).copied(),
+            emitted,
+            "direct_perform_arity out of sync with function_stmts for '{}'",
+            func.name
+        );
     }
 
     /// `demanded` seeds which where-bound names are provably forced by the

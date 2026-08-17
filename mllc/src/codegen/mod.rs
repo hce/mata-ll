@@ -212,17 +212,30 @@ struct CodeGen {
     /// first-class action closures, value-position lets) must reset it to
     /// `Head` around the nested generation.
     cur_result_demand: crate::demand::Demand,
-    /// Set while emitting the body of a DIRECT-PERFORM IO function — the
-    /// single-clause simple-pattern IO arm and the nullary IO-value arm of
-    /// function_stmts, where the emitted Lua function's body IS the action —
-    /// to the function's source name and saturating argument count. A tail
-    /// terminal that is a saturated call to this name returns bare
-    /// (`return self(...)`, Lua's tail-call form) instead of riding the
-    /// forwarding runner's argument position; see action_run_ast /
-    /// is_direct_perform_self_call. `None` everywhere else: multi-clause and
-    /// ST emissions build actions their caller's runner performs — a bare
-    /// self call there would return an unperformed value.
-    direct_perform_self: Option<(String, usize)>,
+    /// The module's DIRECT-PERFORM functions — source name → saturating
+    /// argument count — computed by `module_stmts` from
+    /// `direct_perform_arity` BEFORE any function body is emitted, so a
+    /// body may consult it for callees defined later in the file. A
+    /// direct-perform function is one whose emitted Lua function's body IS
+    /// the action (the single-clause simple-pattern IO arm and the nullary
+    /// IO-value arm of function_stmts): calling it performs and returns a
+    /// result in the runners' range, on which the forwarding runner is the
+    /// identity. So a tail terminal that is a saturated call to ANY name in
+    /// this map — the function itself or another one (mutual recursion) —
+    /// returns bare (`return callee(...)`, Lua's tail-call form) instead of
+    /// riding the forwarding runner's argument position; see action_run_ast
+    /// / direct_perform_callee_arity. Everything else keeps the runner:
+    /// multi-clause and ST emissions build actions their caller's runner
+    /// performs — a bare call there would return an unperformed value.
+    /// function_stmts debug_asserts its own emission decision against this
+    /// map (the `slot_always_whnf` pattern), so the two cannot drift.
+    direct_perform_fns: std::collections::HashMap<String, usize>,
+    /// Names defined more than once in the merged module whose definitions
+    /// classify differently (see the seeding in module_stmts): never in
+    /// `direct_perform_fns`, and exempt from function_stmts' agreement
+    /// assert — which definition wins the slot is an emission-order fact
+    /// the prediction does not model.
+    direct_perform_conflicts: std::collections::HashSet<String>,
     /// Source embedding in `EmbedMode::Var`: the emitted file starts with a
     /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
     /// return table must export it — even when there are no other exports.
@@ -261,7 +274,8 @@ impl CodeGen {
             local_strict_params: std::collections::HashMap::new(),
             local_demand_rows: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
-            direct_perform_self: None,
+            direct_perform_fns: std::collections::HashMap::new(),
+            direct_perform_conflicts: std::collections::HashSet::new(),
             embed_var_export: false,
             big_lits: std::cell::RefCell::new(BigLitPool::default()),
         }
