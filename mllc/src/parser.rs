@@ -208,6 +208,40 @@ impl Parser {
         }
     }
 
+    /// Open an implicit layout block whose items start at the NEXT token
+    /// (do statements, case alternatives, let bindings): skips newlines
+    /// and makes that token's column the block column — as
+    /// `current_indent`, so a following line at a smaller indent closes
+    /// the block also when the first item shares the keyword's line
+    /// (`main = do putStrLn "a"` followed by a column-0 declaration; the
+    /// line's own indent would have let the declaration in as a
+    /// statement) — and as `block_indent`, so a same-column sibling is the
+    /// next item rather than a continuation argument of the previous one.
+    /// Returns the column; the caller restores `block_indent` at the end.
+    fn open_item_block(&mut self) -> usize {
+        self.skip_newlines_and_indent();
+        let col = self.peek_loc().col.saturating_sub(1);
+        self.current_indent = col;
+        self.block_indent = col;
+        col
+    }
+
+    /// Is the next token one that ends an implicit layout block from
+    /// INSIDE its line — the closing bracket of an enclosing paren/list/
+    /// record, the separator of an enclosing tuple/list, or the keyword of
+    /// an enclosing construct? Haskell's layout algorithm closes the block
+    /// on the parse error such a token would cause (the `parse-error(t)`
+    /// rule); the do-block and case-alternative loops test for these
+    /// explicitly, so `(do a; b, 2)`, `[do …, …]`, `if c then do … else …`
+    /// and `let x = do … in …` end the block where GHC does.
+    fn at_block_closer(&self) -> bool {
+        matches!(
+            self.peek(),
+            Token::RightParen | Token::RightBracket | Token::RightBrace | Token::Comma
+                | Token::Then | Token::Else | Token::Of | Token::In | Token::Where
+        )
+    }
+
     /// Open the layout block that follows a `where` (class body, instance
     /// body, clause bindings). Skips to the block's first token and returns
     /// the column (0-based) every item of the block starts at — a later
@@ -2330,21 +2364,13 @@ impl Parser {
     /// let-expression atom and the comprehension qualifier so they bind
     /// identically.
     fn parse_let_binds(&mut self) -> PResult<Vec<LocalDef>> {
-        self.skip_newlines_and_indent();
         let mut binds = Vec::new();
         // The first binding's column is the group's layout block: a later
         // line at that column is the next binding, a line indented less
         // closes the group (so a do-block's next statement, at the `let`
-        // line's own indent, is never read as a binding), and the block
-        // column keeps a same-column sibling from being swallowed as a
-        // continuation argument of the previous RHS.
-        let let_indent = self.peek_loc().col.saturating_sub(1);
-        // A first binding on the `let` line opens the block mid-line: its
-        // column becomes the layout context (`current_indent` is the line's
-        // indent until the next line's Indent token resets it).
-        self.current_indent = let_indent;
+        // line's own indent, is never read as a binding).
         let saved_block = self.block_indent;
-        self.block_indent = let_indent;
+        let let_indent = self.open_item_block();
         // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
         let mut fresh_counter = 0usize;
 
@@ -3066,20 +3092,14 @@ impl Parser {
         }
 
         // Layout-based syntax
-        self.skip_newlines_and_indent();
-        let case_indent = self.current_indent;
         let mut branches = Vec::new();
         let saved_block = self.block_indent;
-        self.block_indent = self.peek_loc().col.saturating_sub(1);
+        let case_indent = self.open_item_block();
 
         loop {
             let save_pos = self.checkpoint();
             self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < case_indent
-                || self.at(&Token::Where)
-                || self.at(&Token::RightParen)
-                || self.at(&Token::RightBracket)
-                || self.at(&Token::RightBrace) {
+            if self.at_eof() || self.current_indent < case_indent || self.at_block_closer() {
                 // Restore position so the caller sees the
                 // newline/indent tokens and doesn't accidentally
                 // consume the next statement as an argument.
@@ -3118,16 +3138,13 @@ impl Parser {
     /// `_ <-`, named binds and bare expressions. Consumes the `do`.
     fn parse_do_block(&mut self) -> PResult<Expr> {
         self.advance();
-        self.skip_newlines_and_indent();
-        let do_indent = self.current_indent;
         let mut stmts = Vec::new();
         let saved_block = self.block_indent;
-        self.block_indent = self.peek_loc().col.saturating_sub(1);
+        let do_indent = self.open_item_block();
 
         loop {
             self.skip_newlines_and_indent();
-            if self.at_eof() || self.current_indent < do_indent
-                || self.at(&Token::RightParen) {
+            if self.at_eof() || self.current_indent < do_indent || self.at_block_closer() {
                 break;
             }
 
