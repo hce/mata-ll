@@ -3,6 +3,19 @@ MATA-LL TODO
 
 ## Planned — top priority
 
+- [ ] **Force-once for parameters scrutinized only by LATER clauses.** Both
+      multi-clause emitters (top-level `function_stmts`, where-group
+      `where_func_group_body_stmts`, aligned 2026-08-17) force a parameter
+      at entry only when the FIRST clause scrutinizes it — GHC clause-order
+      laziness (`go [] _ = []` must not force `_`) — so a parameter matched
+      only by later clauses is forced inside those clauses' conditions,
+      once per use (`__force(_warg0) ~= nil and __mll_tail(__force(_warg0))
+      …`). Cheap on WHNF values, but a hot decode loop (huffman's `go`,
+      salsa's `lwGo`) pays it several times per iteration. Structured fix:
+      after clause 0's condition fails, rebind once
+      (`_wargN = __force(_wargN)`) before the remaining chain, in both
+      emitters. Corpus byte-diff + tracker canary as usual.
+
 - [ ] **tailloop declines a body whose pattern chain keeps the trailing
       `error("Non-exhaustive patterns")`** (coverage unproven — huffman's
       3-arm list match, basic's fn200), leaving bare TCO instead of a loop

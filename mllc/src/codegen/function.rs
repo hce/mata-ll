@@ -863,13 +863,26 @@ impl CodeGen {
                 body.extend(self.pattern_match_block(&params, &clauses).0);
             }
         } else {
+            // Same entry-force rule as the top-level multi-clause emitter:
+            // force a parameter at entry only when the FIRST clause
+            // scrutinizes it (then every path forces it — clause 0 is always
+            // tried first) or the local's demand row proves every path
+            // strict; a parameter scrutinized only by LATER clauses stays
+            // lazy and is forced inside those clauses' conditions by
+            // match_scrutinee. That is GHC's top-to-bottom, left-to-right
+            // laziness — a where-local `go [] _ = []` must return [] without
+            // forcing its second argument. (Forcing on ANY clause's scrutiny,
+            // as this once did, raised on `go [] (error …)`.)
+            let strict_row = self.local_strict_params.get(name).cloned();
             for j in 0..num_params {
-                let needs_force = clauses.iter().any(|c| {
+                let first_scrutinizes = clauses.first().is_some_and(|c| {
                     c.patterns.get(j).is_some_and(|pat| {
                         !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
                     })
                 });
-                if needs_force {
+                let is_strict = strict_row.as_ref()
+                    .is_some_and(|v| v.get(j).copied().unwrap_or(false));
+                if first_scrutinizes || is_strict {
                     body.push(Stmt::Assign(
                         format!("_warg{}", j),
                         Expr::force(Expr::name(format!("_warg{}", j))),

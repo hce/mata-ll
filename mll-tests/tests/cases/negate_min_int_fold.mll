@@ -1,3 +1,7 @@
+-- lua-compat-skip: luajit
+-- (the Int half needs 64-bit integers; LuaJIT numbers are doubles, so
+-- minBound-scale Int arithmetic is not representable there — same class
+-- of skip as even_odd_64bit / lbit_64bit_boundary)
 -- Test: negating the most negative machine integer at COMPILE TIME.
 -- The constant folder reduces `-(-9223372036854775807 - 1)`: the inner
 -- subtraction folds to i64::MIN, and its negation has no i64 result. The
