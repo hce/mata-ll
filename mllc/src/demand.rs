@@ -304,7 +304,8 @@ pub fn analyze(module: &TModule) -> DemandInfo {
         // environment (exactly what codegen's scoped call-site map holds).
         for func in &functions {
             for clause in &func.clauses {
-                let (locals, caps) = local_fn_demand(clause, &strict_params);
+                let local = local_fn_demand(clause_view(clause), &strict_params);
+                let (locals, caps) = (local.rows, local.captured);
                 let mut lnames: Vec<&String> = locals.keys().collect();
                 lnames.sort();
                 for n in lnames {
@@ -401,6 +402,14 @@ fn analyze_function(func: &TFunction, env: &HashMap<String, Vec<bool>>) -> Vec<b
 
 /// Analyze a single clause's parameter strictness.
 fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool>>) -> Vec<bool> {
+    analyze_equation(clause_view(clause), arity, env)
+}
+
+/// `analyze_clause` over a borrowed equation view — a top-level clause or a
+/// where-bound local function's equation (the local-function fixpoint
+/// analyzes those in place; it once deep-cloned every equation into a
+/// TClause per round to call this).
+fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<String, Vec<bool>>) -> Vec<bool> {
     // Where-bound local FUNCTIONS get real strictness rows and
     // captured-demand sets, visible only inside this clause (the extended
     // map is dropped when this returns, so a local row can never leak into
@@ -411,16 +420,12 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
     // outward half of the same story: `sumStrict n = go 0 0 where go's
     // guard is i > n` forces the CAPTURED n on every path, so sumStrict is
     // strict in n even though n is never an argument of the call.
-    let (local_rows, local_caps) = local_fn_demand(clause, env);
-    let env_ext: HashMap<String, Vec<bool>>;
-    let env = if local_rows.is_empty() {
-        env
-    } else {
-        let mut e = env.clone();
-        e.extend(local_rows);
-        env_ext = e;
-        &env_ext
-    };
+    let local = local_fn_demand(clause, env);
+    let local_caps = local.captured;
+    // The extended environment local_fn_demand converged on (the outer env
+    // plus the local rows) is exactly the one this clause is analyzed
+    // under; reuse it instead of cloning `env` a second time.
+    let env = local.env.as_ref().unwrap_or(env);
 
     let mut strict = vec![false; arity];
 
@@ -467,7 +472,7 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
     let close = |mut s: HashSet<String>| -> HashSet<String> {
         loop {
             let mut changed = false;
-            for b in &clause.where_binds {
+            for b in clause.where_binds {
                 if b.patterns.is_empty() && s.contains(&b.name) {
                     for v in demanded_vars_in(&b.body, env, &local_caps) {
                         if s.insert(v) {
@@ -482,9 +487,9 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
         }
     };
     let mut demanded = if clause.guards.is_empty() {
-        close(demanded_vars_in(clause.plain_body(), env, &local_caps))
+        close(demanded_vars_in(clause.body.expect("guard-free equation has a body"), env, &local_caps))
     } else {
-        demanded_guards_with(&clause.guards, env, &local_caps, &close)
+        demanded_guards_with(clause.guards, env, &local_caps, &close)
     };
     // (Both are Semantic-mode: parameter strictness must not over-claim.)
 
@@ -492,7 +497,7 @@ fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool
     // where go … = …` calls the LOCAL go), so demand on it — including the
     // bare "callee is demanded" entry every call contributes — must not
     // mark the parameter strict.
-    for b in &clause.where_binds {
+    for b in clause.where_binds {
         demanded.remove(&b.name);
     }
 
@@ -748,7 +753,24 @@ pub fn local_fn_strict_params(
     clause: &TClause,
     env: &HashMap<String, Vec<bool>>,
 ) -> HashMap<String, Vec<bool>> {
-    local_fn_demand(clause, env).0
+    local_fn_demand(clause_view(clause), env).rows
+}
+
+/// What `local_fn_demand` computes for one clause: the strictness rows of
+/// its where-bound local functions, their captured-demand sets, and — when
+/// there are any local functions — the outer environment extended by those
+/// rows (the map the fixpoint converged on), so the caller analyzing the
+/// clause body can use it as is.
+struct LocalFnDemand {
+    rows: HashMap<String, Vec<bool>>,
+    captured: CapturedEnv,
+    env: Option<HashMap<String, Vec<bool>>>,
+}
+
+impl LocalFnDemand {
+    fn empty() -> Self {
+        LocalFnDemand { rows: HashMap::new(), captured: CapturedEnv::new(), env: None }
+    }
 }
 
 /// Strict rows AND captured-demand sets for a clause's where-bound local
@@ -802,22 +824,22 @@ fn group_where_fn_equations(where_binds: &[TLocalDef]) -> Vec<(String, Vec<&TLoc
 }
 
 fn local_fn_demand(
-    clause: &TClause,
+    clause: TLocalDefLike<'_>,
     env: &HashMap<String, Vec<bool>>,
-) -> (HashMap<String, Vec<bool>>, CapturedEnv) {
-    let mut groups = group_where_fn_equations(&clause.where_binds);
+) -> LocalFnDemand {
+    let mut groups = group_where_fn_equations(clause.where_binds);
     if groups.is_empty() {
-        return (HashMap::new(), CapturedEnv::new());
+        return LocalFnDemand::empty();
     }
 
     // Names rebound anywhere in the clause (see the scoping note above).
     let mut rebound: HashSet<String> = HashSet::new();
-    if let Some(cb) = &clause.body { collect_rebound_names(cb, &mut rebound); }
-    for g in &clause.guards {
+    if let Some(cb) = clause.body { collect_rebound_names(cb, &mut rebound); }
+    for g in clause.guards {
         collect_rebound_names(&g.condition, &mut rebound);
         collect_rebound_names(&g.body, &mut rebound);
     }
-    for b in &clause.where_binds {
+    for b in clause.where_binds {
         collect_rebound_names(&b.body, &mut rebound);
         for p in &b.patterns {
             collect_pattern_vars(p, &mut rebound);
@@ -833,7 +855,7 @@ fn local_fn_demand(
                 ambiguous.insert(n.clone());
             }
         }
-        for b in &clause.where_binds {
+        for b in clause.where_binds {
             if b.patterns.is_empty() && seen.contains(b.name.as_str()) {
                 ambiguous.insert(b.name.clone());
             }
@@ -841,29 +863,20 @@ fn local_fn_demand(
     }
     groups.retain(|(n, _)| !rebound.contains(n) && !ambiguous.contains(n));
     if groups.is_empty() {
-        return (HashMap::new(), CapturedEnv::new());
+        return LocalFnDemand::empty();
     }
 
-    // Fixed clause views of each group's equations. Guards on where-binds
-    // were desugared to if/else by the parser, and a TLocalDef carries no
-    // nested where, so these clauses are guard- and where-free (which also
-    // bounds the analyze_clause -> local_fn_strict_params recursion at one
+    // Borrowed equation views of each group. Guards on where-binds were
+    // desugared to if/else by the parser, and a TLocalDef carries no nested
+    // where, so these equations are guard- and where-free (which also
+    // bounds the analyze_equation -> local_fn_demand recursion at one
     // level). Arity follows the FIRST equation, matching codegen's
     // num_params in gen_where_func_group_body.
-    let group_clauses: Vec<(String, usize, Vec<TClause>)> = groups
+    let group_clauses: Vec<(String, usize, Vec<TLocalDefLike<'_>>)> = groups
         .iter()
         .map(|(name, defs)| {
             let arity = defs[0].patterns.len();
-            let clauses = defs
-                .iter()
-                .map(|d| TClause {
-                    patterns: d.patterns.clone(),
-                    guards: vec![],
-                    body: Some(d.body.clone()),
-                    where_binds: vec![],
-                    span: None,
-                })
-                .collect();
+            let clauses = defs.iter().map(|d| local_def_view(d)).collect();
             (name.clone(), arity, clauses)
         })
         .collect();
@@ -880,7 +893,7 @@ fn local_fn_demand(
         for (name, arity, clauses) in &group_clauses {
             let mut row = vec![true; *arity];
             for c in clauses {
-                let cs = analyze_clause(c, *arity, &ext);
+                let cs = analyze_equation(*c, *arity, &ext);
                 for i in 0..*arity {
                     row[i] = row[i] && cs[i];
                 }
@@ -917,9 +930,9 @@ fn local_fn_demand(
         for (name, _, clauses) in &group_clauses {
             let mut set: Option<HashSet<String>> = None;
             for c in clauses {
-                let mut d = demanded_vars_in(c.plain_body(), &ext, &captured);
+                let mut d = demanded_vars_in(c.body.expect("local equation has a body"), &ext, &captured);
                 let mut bound = HashSet::new();
-                for p in &c.patterns {
+                for p in c.patterns {
                     collect_pattern_vars(p, &mut bound);
                 }
                 d.retain(|v| !bound.contains(v));
@@ -943,14 +956,11 @@ fn local_fn_demand(
         }
     }
 
-    let rows = group_clauses
-        .into_iter()
-        .map(|(name, _, _)| {
-            let row = ext.remove(&name).unwrap_or_default();
-            (name, row)
-        })
+    let rows: HashMap<String, Vec<bool>> = group_clauses
+        .iter()
+        .map(|(name, _, _)| (name.clone(), ext.get(name).cloned().unwrap_or_default()))
         .collect();
-    (rows, captured)
+    LocalFnDemand { rows, captured, env: Some(ext) }
 }
 
 /// Names bound by an inner construct anywhere inside `expr`: lambda
