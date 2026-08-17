@@ -104,6 +104,36 @@ impl Checker {
         self.wanted.clear();
         self.binder_types.clear();
         self.pattern_skolems.clear();
+        // Every clause of one function binds the same number of arguments
+        // (GHC: "Equations for 'f' have different numbers of arguments").
+        // Checked once, up front: the per-clause checker, the exhaustiveness
+        // walk (`clauses[i].patterns[0]`) and the demand analysis (a
+        // strictness row sized from the first clause) all rely on it.
+        if let Some(first) = clauses.first() {
+            let n = first.patterns.len();
+            if let Some(odd) = clauses.iter().find(|c| c.patterns.len() != n) {
+                let plural = |k: usize| if k == 1 { "argument" } else { "arguments" };
+                self.push_error_span(
+                    DiagnosticKind::Other(format!(
+                        "Equations for '{}' have different numbers of arguments: \
+                         the first equation binds {} {}, this one binds {} {}",
+                        name, n, plural(n), odd.patterns.len(), plural(odd.patterns.len()),
+                    )),
+                    format!("definition of '{}'", name),
+                    odd.span,
+                );
+                if let Some(diag) = self.errors.last_mut() {
+                    diag.notes.push(
+                        "the equations of a function are the rows of ONE pattern match, \
+                         so each must take every argument; move the extra arguments into \
+                         a lambda or a where-bound helper in every equation, or add the \
+                         missing patterns"
+                            .to_string(),
+                    );
+                }
+                return None;
+            }
+        }
         // The caller-visible signature, with each universally-quantified
         // variable renamed to a fresh FLEXIBLE unification variable. Patterns
         // and every downstream pass work on this, exactly as before — crucially,

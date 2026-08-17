@@ -357,6 +357,14 @@ fn analyze_function(func: &TFunction, env: &HashMap<String, Vec<bool>>) -> Vec<b
     }
 
     let arity = clauses[0].patterns.len();
+    // The strictness row is sized from the first clause and every clause
+    // writes `strict[i]` for its own pattern indices: the checker rejects
+    // functions whose clauses bind different numbers of arguments
+    // (check_function), so the row covers every clause.
+    debug_assert!(
+        clauses.iter().all(|c| c.patterns.len() == arity),
+        "demand: clauses with unequal arities reached the analysis"
+    );
     if arity == 0 {
         return vec![];
     }

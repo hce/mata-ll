@@ -1192,6 +1192,60 @@ main = getLine >>= \x y -> putStrLn "a" >> putStrLn (x <> show (y :: Int))
     expect_compile_error(source, &[], &["Cannot unify"]);
 }
 
+// The clauses of one function must all take the same number of arguments
+// (GHC: "Equations for 'f' have different numbers of arguments"). The
+// checker used to admit unequal arities and index the first clause's
+// pattern list by every clause (a panic for a shorter later clause), while
+// the demand analysis sized its strictness row from the first clause and
+// wrote past it for a longer later clause.
+#[test]
+fn clauses_with_different_arities_are_rejected() {
+    let shorter = r#"
+f :: Int -> Int -> Int
+f 0 y = y
+f x = \y -> x + y
+
+main :: IO ()
+main = putStrLn (show (f 1 2))
+"#;
+    expect_compile_error(shorter, &[], &[
+        "Equations for 'f' have different numbers of arguments",
+        "2 argument", "1 argument",
+        "at 4:",
+        "note:",
+    ]);
+
+    let longer = r#"
+g :: Int -> Int -> Int
+g 0 = \y -> y
+g x y = x + y
+
+main :: IO ()
+main = putStrLn (show (g 1 2))
+"#;
+    expect_compile_error(longer, &[], &[
+        "Equations for 'g' have different numbers of arguments",
+        "1 argument", "2 argument",
+        "at 4:",
+    ]);
+
+    // Instance methods go through the same check.
+    let method = r#"
+class Pick a where
+    pick :: a -> a -> a
+
+instance Pick Int where
+    pick 0 y = y
+    pick x = \_ -> x
+
+main :: IO ()
+main = putStrLn (show (pick (1 :: Int) 2))
+"#;
+    expect_compile_error(method, &[], &[
+        "Equations for 'pick_Int' have different numbers of arguments",
+    ]);
+}
+
 #[test]
 fn type_error_in_where_value_binding_rejected() {
     // A type error inside a `where` value binding must fail compilation with a
