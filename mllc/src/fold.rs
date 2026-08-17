@@ -73,51 +73,37 @@ fn resolved_method_to_op(name: &str) -> Option<&'static str> {
 
 // ── Expression traversal + folding ──────────────────────
 
+/// Fold one expression: children first (post-order, through
+/// `TExpr::map_children` — THE enumeration of a node's children, so a
+/// variant this pass has no rewrite for is still descended into; a
+/// hand-rolled walk here once ended in `_ => …` and never looked inside
+/// `DictMethod`, `OutgoingCallback` or `FfiMaybeArg`), then the local
+/// rewrite for the shapes that fold: an infix operator on literals, a
+/// resolved typeclass method applied to literals, negation of a literal,
+/// and `if` on a literal condition.
 fn fold_expr(expr: TExpr) -> TExpr {
-    let ty = expr.ty;
-    match expr.kind {
+    let TExpr { kind, ty } = expr.map_children(&mut fold_expr);
+    match kind {
         TExprKind::InfixApp { op, lhs, rhs } => {
-            let lhs = fold_expr(*lhs);
-            let rhs = fold_expr(*rhs);
             if let Some(folded) = try_fold_infix(&op, &lhs, &rhs, &ty) {
                 return folded;
             }
-            TExpr::new(TExprKind::InfixApp {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-            }, ty)
+            TExpr::new(TExprKind::InfixApp { op, lhs, rhs }, ty)
         }
-        TExprKind::Negate(inner) => {
-            let inner = fold_expr(*inner);
-            match unwrap_lit(&inner) {
-                Some(TLiteral::Integer(n)) =>
-                    TExpr::new(TExprKind::Lit(TLiteral::Integer(-n)), ty),
-                Some(TLiteral::Number(n)) =>
-                    TExpr::new(TExprKind::Lit(TLiteral::Number(-n)), ty),
-                _ => TExpr::new(TExprKind::Negate(Box::new(inner)), ty),
-            }
-        }
+        TExprKind::Negate(inner) => match unwrap_lit(&inner) {
+            Some(TLiteral::Integer(n)) =>
+                TExpr::new(TExprKind::Lit(TLiteral::Integer(-n)), ty),
+            Some(TLiteral::Number(n)) =>
+                TExpr::new(TExprKind::Lit(TLiteral::Number(-n)), ty),
+            _ => TExpr::new(TExprKind::Negate(inner), ty),
+        },
         TExprKind::If { cond, then_branch, else_branch } => {
-            let cond = fold_expr(*cond);
-            let then_branch = fold_expr(*then_branch);
-            let else_branch = fold_expr(*else_branch);
             if let Some(TLiteral::Bool(b)) = unwrap_lit(&cond) {
-                return if *b { then_branch } else { else_branch };
+                return if *b { *then_branch } else { *else_branch };
             }
-            TExpr::new(TExprKind::If {
-                cond: Box::new(cond),
-                then_branch: Box::new(then_branch),
-                else_branch: Box::new(else_branch),
-            }, ty)
-        }
-        TExprKind::Paren(inner) => {
-            let inner = fold_expr(*inner);
-            TExpr::new(TExprKind::Paren(Box::new(inner)), ty)
+            TExpr::new(TExprKind::If { cond, then_branch, else_branch }, ty)
         }
         TExprKind::App(f, a) => {
-            let f = fold_expr(*f);
-            let a = fold_expr(*a);
             // Recognize App(App(Var(method), lhs), rhs) from resolved typeclass methods
             if let TExprKind::App(ff, lhs) = &f.kind
                 && let TExprKind::Var(name) = &ff.kind
@@ -125,63 +111,9 @@ fn fold_expr(expr: TExpr) -> TExpr {
                         && let Some(folded) = try_fold_infix(op, lhs, &a, &ty) {
                             return folded;
                         }
-            TExpr::new(TExprKind::App(Box::new(f), Box::new(a)), ty)
+            TExpr::new(TExprKind::App(f, a), ty)
         }
-        TExprKind::Lambda { params, body } => {
-            TExpr::new(TExprKind::Lambda {
-                params,
-                body: Box::new(fold_expr(*body)),
-            }, ty)
-        }
-        TExprKind::Case { scrutinee, branches } => {
-            TExpr::new(TExprKind::Case {
-                scrutinee: Box::new(fold_expr(*scrutinee)),
-                branches: branches.into_iter().map(|b| TCaseBranch {
-                    pattern: b.pattern,
-                    guards: b.guards.into_iter().map(|g| TGuard {
-                        condition: fold_expr(g.condition),
-                        body: fold_expr(g.body),
-                    }).collect(),
-                    body: b.body.map(fold_expr),
-                }).collect(),
-            }, ty)
-        }
-        TExprKind::Let { binds, body } => {
-            TExpr::new(TExprKind::Let {
-                binds: binds.into_iter().map(fold_local).collect(),
-                body: Box::new(fold_expr(*body)),
-            }, ty)
-        }
-        TExprKind::Tuple(elems) => {
-            TExpr::new(TExprKind::Tuple(
-                elems.into_iter().map(fold_expr).collect(),
-            ), ty)
-        }
-        TExprKind::SpecCall { original, specialized, args } => {
-            TExpr::new(TExprKind::SpecCall {
-                original,
-                specialized,
-                args: args.into_iter().map(fold_expr).collect(),
-            }, ty)
-        }
-        TExprKind::DictCall { func_name, dict_args, value_args } => {
-            TExpr::new(TExprKind::DictCall {
-                func_name,
-                dict_args: dict_args.into_iter().map(fold_expr).collect(),
-                value_args: value_args.into_iter().map(fold_expr).collect(),
-            }, ty)
-        }
-        TExprKind::RecordUpdate { record, updates, num_fields } => {
-            TExpr::new(TExprKind::RecordUpdate {
-                record: Box::new(fold_expr(*record)),
-                updates: updates.into_iter().map(|(name, idx, val)| {
-                    (name, idx, fold_expr(val))
-                }).collect(),
-                num_fields,
-            }, ty)
-        }
-        // Leaves: Var, Con, Lit, OpFunc, DictAccess — nothing to fold
-        _ => TExpr::new(expr.kind, ty),
+        other => TExpr::new(other, ty),
     }
 }
 
