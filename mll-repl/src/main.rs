@@ -190,8 +190,9 @@ fn print_help() {
     println!("  /decls     Show accumulated declarations");
     println!("  /lua EXPR  Show compiled Lua for an expression");
     println!("  /source    Show the full source that would be compiled");
+    println!("  /drop      Remove the most recent declaration");
     println!("  /help      Show this help");
-    println!("  /quit      Exit");
+    println!("  /quit      Exit (also /exit, /q)");
 }
 
 fn main() {
@@ -304,11 +305,29 @@ fn show_lua(source: &str, lib_paths: &[String]) {
     }
 }
 
+/// The first `max` CHARACTERS of `s` on one line, with `...` when cut. Cut
+/// at a character boundary — a byte-index slice panicked on a declaration
+/// with a multibyte character at the cut (`byte index N is not a char
+/// boundary`), taking the session down on `/drop`.
 fn truncate(s: &str, max: usize) -> String {
     let one_line = s.replace('\n', " ");
-    if one_line.len() > max {
-        format!("{}...", &one_line[..max])
-    } else {
-        one_line
+    match one_line.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}...", &one_line[..cut]),
+        None => one_line,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::truncate;
+
+    #[test]
+    fn truncate_cuts_at_a_character_boundary() {
+        // 3 ASCII + a 2-byte character + more: cutting at 4 characters must
+        // not slice inside the multibyte character.
+        assert_eq!(truncate("abcé-rest", 4), "abcé...");
+        assert_eq!(truncate("é", 4), "é");
+        assert_eq!(truncate("line1\nline2", 20), "line1 line2");
+        assert_eq!(truncate("ααααα", 3), "ααα...");
     }
 }
