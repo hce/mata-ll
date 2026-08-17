@@ -53,6 +53,7 @@ mll_test!(negate_min_int_fold, "negate_min_int_fold.mll");
 mll_test!(where_clause_order_laziness, "where_clause_order_laziness.mll");
 mll_test!(inline_compose_non_strict, "inline_compose_non_strict.mll");
 mll_test!(st_modify_repeated_action, "st_modify_repeated_action.mll");
+mll_test!(bytestring_fold_nil_result, "bytestring_fold_nil_result.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
 mll_test!(num_user_instance, "num_user_instance.mll");
 mll_test!(integral_semantics, "integral_semantics.mll");

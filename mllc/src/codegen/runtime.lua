@@ -1633,12 +1633,17 @@ local __mll_bs; do
         end,
         function(f, s)                                                           -- [14] map
             f=F(f); s=F(s); local t = {}
-            for i = 1, #s do t[i] = sc(F(f)(sb(s, i))) end
+            for i = 1, #s do t[i] = sc(F(f(sb(s, i)))) end
             return table.concat(t)
         end,
         function(f, acc, s)                                                      -- [15] foldl
+            -- Compiled functions are N-ary: the step is called with both
+            -- arguments, and its result — nil included (a `Nothing`, a `()`,
+            -- an empty list at a polymorphic accumulator type) — IS the new
+            -- accumulator. (A "nil means curried, retry with one argument"
+            -- fallback once lived here; it could never be right.)
             f=F(f); acc=F(acc); s=F(s)
-            for i = 1, #s do local b=sb(s,i); local r=F(f)(acc,b); if r==nil then r=F(F(f)(acc))(b) end; acc=F(r) end
+            for i = 1, #s do acc = F(f(acc, sb(s, i))) end
             return acc
         end,
         function(a, b)                                                           -- [16] xor
@@ -1648,7 +1653,7 @@ local __mll_bs; do
         end,
         function(f, a, b)                                                        -- [17] zipwith
             f=F(f); a=F(a); b=F(b); local len=math.min(#a, #b); local t = {}
-            for i = 1, len do local ba,bb=sb(a,i),sb(b,i); local r=F(f)(ba,bb); if r==nil then r=F(F(f)(ba))(bb) end; t[i]=sc(F(r)) end
+            for i = 1, len do t[i] = sc(F(f(sb(a, i), sb(b, i)))) end
             return table.concat(t)
         end,
         function(s) return F(s) end,                                             -- [18] tostring
