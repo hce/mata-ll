@@ -27,7 +27,28 @@ fn desugar_decl(decl: &mut Decl) {
                 }
             }
         }
-        _ => {}
+        // Default method bodies are checked and emitted like any other
+        // clause (`check_function` over `default_clauses`), so they need the
+        // same desugaring — a `do` left here reaches the checker's
+        // "Do should be desugared" unreachable arm.
+        Decl::ClassDecl { methods, .. } => {
+            for method in methods {
+                if let Some(clauses) = &mut method.default_clauses {
+                    for clause in clauses {
+                        desugar_clause(clause);
+                    }
+                }
+            }
+        }
+        // Declarations without expression bodies.
+        Decl::TypeSig { .. }
+        | Decl::DataDef { .. }
+        | Decl::NewtypeDef { .. }
+        | Decl::ExportSig { .. }
+        | Decl::TypeFamily { .. }
+        | Decl::Import { .. }
+        | Decl::TypeAlias { .. }
+        | Decl::FixityDecl { .. } => {}
     }
 }
 
@@ -81,6 +102,14 @@ fn flatten_callee_lambda(app: Expr) -> Expr {
     args.into_iter().fold(head, |f, a| Expr::App(Box::new(f), Box::new(a)))
 }
 
+/// Desugar one expression tree. Only two shapes need pass-specific
+/// handling — a `do` block (rewritten to a bind chain) and an application
+/// (its callee lambda is flattened after the operands are desugared);
+/// every other node just recurses through `Expr::map_subexprs`, which is
+/// the single owner of "where do an `Expr`'s children live" (case-branch
+/// guards, tuple elements, record fields, do-statement bodies, …). A
+/// hand-copied walk here once skipped guards and tuples, so a `do` in a
+/// case-guard body or a tuple element reached the checker undesugared.
 fn desugar_expr(expr: Expr) -> Expr {
     match expr {
         Expr::Do(stmts) => desugar_do(stmts),
@@ -88,51 +117,7 @@ fn desugar_expr(expr: Expr) -> Expr {
             Box::new(desugar_expr(*f)),
             Box::new(desugar_expr(*a)),
         )),
-        Expr::Lambda { params, body } => Expr::Lambda {
-            params,
-            body: Box::new(desugar_expr(*body)),
-        },
-        Expr::InfixApp { op, lhs, rhs } => Expr::InfixApp {
-            op,
-            lhs: Box::new(desugar_expr(*lhs)),
-            rhs: Box::new(desugar_expr(*rhs)),
-        },
-        Expr::If { cond, then_branch, else_branch } => Expr::If {
-            cond: Box::new(desugar_expr(*cond)),
-            then_branch: Box::new(desugar_expr(*then_branch)),
-            else_branch: Box::new(desugar_expr(*else_branch)),
-        },
-        Expr::Case { scrutinee, branches } => Expr::Case {
-            scrutinee: Box::new(desugar_expr(*scrutinee)),
-            branches: branches.into_iter().map(|b| CaseBranch {
-                pattern: b.pattern,
-                guards: b.guards,
-                body: b.body.map(desugar_expr),
-            }).collect(),
-        },
-        Expr::Let { binds, body } => Expr::Let {
-            binds: binds.into_iter().map(|ld| LocalDef {
-                name: ld.name,
-                patterns: ld.patterns,
-                body: desugar_expr(ld.body),
-            }).collect(),
-            body: Box::new(desugar_expr(*body)),
-        },
-        // Transparent location marker: desugar the inner expression and keep
-        // the wrapper so the checker can still locate errors by statement.
-        Expr::Spanned(sp, e) => Expr::Spanned(sp, Box::new(desugar_expr(*e))),
-        Expr::Negate(e) => Expr::Negate(Box::new(desugar_expr(*e))),
-        Expr::Paren(e) => Expr::Paren(Box::new(desugar_expr(*e))),
-        Expr::Ascription(e, ty) => Expr::Ascription(Box::new(desugar_expr(*e)), ty),
-        Expr::RecordCon { constructor, fields } => Expr::RecordCon {
-            constructor,
-            fields: fields.into_iter().map(|(n, e)| (n, desugar_expr(e))).collect(),
-        },
-        Expr::RecordUpdate { expr, updates } => Expr::RecordUpdate {
-            expr: Box::new(desugar_expr(*expr)),
-            updates: updates.into_iter().map(|(n, e)| (n, desugar_expr(e))).collect(),
-        },
-        other => other,
+        other => other.map_subexprs(&mut desugar_expr),
     }
 }
 

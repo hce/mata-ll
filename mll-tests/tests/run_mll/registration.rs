@@ -41,6 +41,7 @@ mll_test!(show_ghc_parity, "show_ghc_parity.mll");
 mll_test!(prefix_minus, "prefix_minus.mll");
 mll_test!(default_methods, "default_methods.mll");
 mll_test!(default_methods_ops, "default_methods_ops.mll");
+mll_test!(do_in_nested_positions, "do_in_nested_positions.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
 mll_test!(num_user_instance, "num_user_instance.mll");
 mll_test!(integral_semantics, "integral_semantics.mll");
