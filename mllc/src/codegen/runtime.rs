@@ -133,7 +133,8 @@ pub(super) fn is_def_start(line: &str) -> bool {
     if line.starts_with("local ") {
         return true;
     }
-    // Global assignment `IDENT = …` (the FFI-boundary functions), but not `==`.
+    // Assignment `IDENT = …` to a forward-declared local (the FFI-boundary
+    // functions, declared together for mutual recursion), but not `==`.
     let name_len = line.bytes().take_while(|&b| b == b'_' || b.is_ascii_alphanumeric()).count();
     if name_len == 0 || line.as_bytes()[0].is_ascii_digit() {
         return false;
@@ -158,7 +159,7 @@ pub(super) fn provided_names(line: &str) -> Vec<String> {
             .filter(|s| is_ident(s))
             .collect();
     }
-    // Global assignment `IDENT = …`.
+    // Assignment `IDENT = …` to a forward-declared local.
     let name: String = l.chars().take_while(|c| *c == '_' || c.is_ascii_alphanumeric()).collect();
     if is_ident(&name) { vec![name] } else { vec![] }
 }

@@ -1497,6 +1497,22 @@ main = pure ()
     let run_eff: mlua::Function = module.get("runEffectful").unwrap();
     let r: i64 = run_eff.call(0).unwrap();
     assert_eq!(r, 60, "effectful outgoing callback fold");
+
+    // The runtime is a guest in the host's Lua state: nothing of it leaks
+    // into `_G`. The two callback wrappers this program pulls in were the
+    // only runtime symbols assigned without a `local` forward declaration
+    // (a strict-globals host would refuse to load such a module).
+    let mut leaked: Vec<String> = Vec::new();
+    for pair in lua.globals().pairs::<mlua::Value, mlua::Value>() {
+        let (k, _) = pair.unwrap();
+        if let mlua::Value::String(s) = k {
+            let name = s.to_str().unwrap().to_string();
+            if name.starts_with("__mll") || name.starts_with("__lua") {
+                leaked.push(name);
+            }
+        }
+    }
+    assert!(leaked.is_empty(), "runtime symbols leaked into _G: {:?}", leaked);
 }
 
 // A declared tuple result of a LuaIO function is Lua's multi-value return,

@@ -560,8 +560,11 @@ local function __mll_to_lua(x)
     return result
 end
 
--- Forward declarations for mutual recursion
-local __lua_to_mll, __mll_wrap_callback
+-- Forward declarations for mutual recursion. Every runtime symbol is a
+-- local of the emitted chunk: the runtime is a guest in the host's Lua
+-- state and leaks nothing into _G (a strict-globals host would refuse the
+-- module otherwise); the assignments below fill these declarations.
+local __lua_to_mll, __mll_wrap_callback, __mll_wrap_callback_out, __mll_wrap_callback_in
 
 -- Convert a Lua value to MLL representation at the FFI boundary.
 -- Lua arrays become cons lists, functions become wrapped callbacks.
