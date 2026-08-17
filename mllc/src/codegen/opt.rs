@@ -329,8 +329,15 @@ pub(super) fn stmt_diverges(s: &Stmt) -> bool {
     }
 }
 
+/// Does a statement list end in a diverging statement (a return, a raise,
+/// an if whose every arm diverges)? Takes the slice, so a caller holding a
+/// `Vec<Stmt>` need not wrap (and clone) it into a Block to ask.
+pub(super) fn stmts_diverge(stmts: &[Stmt]) -> bool {
+    stmts.last().is_some_and(stmt_diverges)
+}
+
 pub(super) fn block_diverges(b: &Block) -> bool {
-    b.0.last().is_some_and(stmt_diverges)
+    stmts_diverge(&b.0)
 }
 
 fn dead_branch_block(stmts: &mut Vec<Stmt>) {

@@ -389,7 +389,7 @@ fn convert(
             if body_has_site(stmts, &self_name, params) {
                 any_site = true;
             }
-            if !opt::block_diverges(&Block(stmts.clone())) {
+            if !opt::stmts_diverge(stmts) {
                 all_diverge = false;
             }
         }
@@ -804,7 +804,7 @@ fn unrewrite_run_tail_sites(
 /// can fall off (a diverging body's updates fall through to the loop end
 /// instead of jumping) — so it builds its own.
 fn build_loop_scaffold(ws: &[String], params: &[String], loop_stmts: Vec<Stmt>) -> Vec<Stmt> {
-    let falls_off = !opt::block_diverges(&Block(loop_stmts.clone()));
+    let falls_off = !opt::stmts_diverge(&loop_stmts);
     let mut inner: Vec<Stmt> = Vec::with_capacity(loop_stmts.len() + params.len() + 2);
     for (w, p) in ws.iter().zip(params.iter()) {
         inner.push(Stmt::Local(vec![w.clone()], Some(Expr::name(p.clone()))));

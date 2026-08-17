@@ -765,6 +765,8 @@ impl Block {
 /// currency of the passes' reverse self-checks and idempotence refutation.
 pub(super) fn render_stmts(stmts: &[Stmt]) -> String {
     let mut s = String::new();
-    Block(stmts.to_vec()).render(0, &mut s);
+    for st in stmts {
+        st.render_line(0, &mut s);
+    }
     s
 }
