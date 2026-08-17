@@ -14,6 +14,7 @@
 
 use crate::tir::*;
 use super::CodeGen;
+use super::function::VarsSnapshot;
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{is_builtin_op, sanitize_name};
 use super::util::{count_arrows, expr_references_name};
@@ -108,8 +109,7 @@ impl CodeGen {
                     (0..eta_count).map(|i| format!("_eta{}", i)).collect();
                 // Remove shadowed names from substitution
                 let mut inner_subst = subst.clone();
-                let saved_locals = self.local_vars.clone();
-                let saved_concrete = self.concrete_vars.clone();
+                let scope = VarsSnapshot::capture(self);
                 // A lambda parameter is NOT guaranteed forced (it may receive a
                 // thunk through a higher-order call), so drop it from
                 // concrete_vars — a same-named outer binding may be concrete —
@@ -140,8 +140,7 @@ impl CodeGen {
                     self.expr_subst_ast(inner_body, &inner_subst)
                 };
                 let out = Expr::Func(all_params, FuncBody::Block(Block(vec![Stmt::Return(ret)])));
-                self.local_vars = saved_locals;
-                self.concrete_vars = saved_concrete;
+                scope.restore(self);
                 out
             }
             TExprKind::App(_, _) => {

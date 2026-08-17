@@ -90,13 +90,29 @@ impl ScopeSnapshot {
         cg.local_demand_rows = self.local_demand_rows;
     }
 
-    /// Restores name visibility (`local_vars`) and concreteness
-    /// (`concrete_vars`) only. Used by expression-level scopes (guarded-case
-    /// closures, let-IIFEs, lambdas): these sites never reset the slot
-    /// counters, so locals declared inside the nested emission deliberately
-    /// stay counted toward the enclosing function's `_v` spill budget, and
-    /// any where-scope rows are restored by the pattern emitters themselves.
-    pub(super) fn restore_vars(self, cg: &mut CodeGen) {
+}
+
+/// Narrow snapshot of name visibility (`local_vars`) and concreteness
+/// (`concrete_vars`) — the pair every expression-level scope saves and
+/// restores (guarded-case closures, let-IIFEs, lambdas, do-block binder
+/// scopes, the inliner's lambdas, the where-group function bodies). These
+/// sites never reset the slot counters, so locals declared inside the
+/// nested emission deliberately stay counted toward the enclosing function's
+/// `_v` spill budget, and any where-scope rows are restored by the pattern
+/// emitters themselves. A full [`ScopeSnapshot`] at these per-node sites
+/// cloned five collections — two of them module-sized — to write back two;
+/// and two sites hand-rolled exactly this pair, the drift the snapshot types
+/// exist to prevent.
+pub(super) struct VarsSnapshot {
+    local_vars: std::collections::HashSet<String>,
+    concrete_vars: std::collections::HashSet<String>,
+}
+
+impl VarsSnapshot {
+    pub(super) fn capture(cg: &CodeGen) -> Self {
+        VarsSnapshot { local_vars: cg.local_vars.clone(), concrete_vars: cg.concrete_vars.clone() }
+    }
+    pub(super) fn restore(self, cg: &mut CodeGen) {
         cg.local_vars = self.local_vars;
         cg.concrete_vars = self.concrete_vars;
     }
@@ -827,7 +843,7 @@ impl CodeGen {
         // match_scrutinee do not re-force it. `_warg` names are shared by
         // every where-group, so the marks — and the parameter locals the
         // body registers — must not outlive this one.
-        let scope = ScopeSnapshot::capture(self);
+        let scope = VarsSnapshot::capture(self);
 
         if clauses.len() == 1 {
             let clause = &clauses[0];
@@ -892,7 +908,7 @@ impl CodeGen {
             }
             body.extend(self.pattern_match_block(&params, &clauses).0);
         }
-        scope.restore_vars(self);
+        scope.restore(self);
 
         stmts.push(Stmt::Function { target, params, body: Block(body) });
         stmts

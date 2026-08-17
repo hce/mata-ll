@@ -20,7 +20,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
-use super::function::{LocalVarsSnapshot, ScopeSnapshot};
+use super::function::{LocalVarsSnapshot, VarsSnapshot};
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
@@ -178,7 +178,7 @@ impl CodeGen {
                 // shared pattern-match emitter) so a branch whose pattern
                 // matches but whose guards all fail falls through to the next
                 // branch, exactly like function-clause guards.
-                let scope = ScopeSnapshot::capture(self);
+                let scope = VarsSnapshot::capture(self);
                 let mut stmts = Vec::new();
                 // Entry force, skipped when the argument emission below
                 // (expr_ast at the call parens) already yields WHNF.
@@ -196,7 +196,7 @@ impl CodeGen {
                 }).collect();
                 let b = self.pattern_match_block(&["_cg".to_string()], &clauses);
                 stmts.extend(b.0);
-                scope.restore_vars(self);
+                scope.restore(self);
                 let scrut = self.expr_ast(scrutinee);
                 Expr::call(
                     Expr::paren(Expr::Func(
@@ -271,7 +271,7 @@ impl CodeGen {
                 )
             }
             TExprKind::Let { binds, body } => {
-                let scope = ScopeSnapshot::capture(self);
+                let scope = VarsSnapshot::capture(self);
                 let mut stmts = Vec::new();
                 // Forward-declare all names before assigning, so let bindings
                 // can be self- and mutually recursive. Lua locals are not in
@@ -332,7 +332,7 @@ impl CodeGen {
                     Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(stmts)))),
                     vec![],
                 );
-                scope.restore_vars(self);
+                scope.restore(self);
                 out
             }
             TExprKind::Lambda { params, body } => {
@@ -345,7 +345,7 @@ impl CodeGen {
                 let eta_count = count_arrows(&expr.ty).saturating_sub(ps.len());
                 let eta_params: Vec<String> =
                     (0..eta_count).map(|i| format!("_eta{}", i)).collect();
-                let scope = ScopeSnapshot::capture(self);
+                let scope = VarsSnapshot::capture(self);
                 // A first-class lambda's result is not the enclosing
                 // function's result — no deep result demand inside.
                 let saved_result_demand =
@@ -382,7 +382,7 @@ impl CodeGen {
                     self.tail_ast(inner_body, false)
                 };
                 let out = Expr::Func(all_params, FuncBody::Block(Block(vec![Stmt::Return(ret)])));
-                scope.restore_vars(self);
+                scope.restore(self);
                 self.cur_result_demand = saved_result_demand;
                 out
             }

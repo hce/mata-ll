@@ -19,6 +19,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
+use super::function::VarsSnapshot;
 use super::lua::{Block, Expr, Stmt};
 use super::names::{sanitize_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
@@ -779,8 +780,7 @@ impl CodeGen {
                     // `__mll_run_tail`, whose extra application forced a
                     // thunk payload GHC never forces. Guard-bearing branches
                     // route through the guarded builder with the same tails.
-                    let saved_locals = self.local_vars.clone();
-                    let saved_concrete = self.concrete_vars.clone();
+                    let scope = VarsSnapshot::capture(self);
                     let (pre, decl) = self.declare_local_parts("_s");
                     if let Some(s) = pre {
                         stmts.push(s);
@@ -807,8 +807,7 @@ impl CodeGen {
                         Some(inside_action),
                     );
                     stmts.extend(b.0);
-                    self.local_vars = saved_locals;
-                    self.concrete_vars = saved_concrete;
+                    scope.restore(self);
                 }
                 _ => {
                     // Tail position: strip transparent parens so a wrapped call
