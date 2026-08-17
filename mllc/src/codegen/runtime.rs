@@ -6,10 +6,11 @@
 //! identifiers appearing in the body, closed transitively over inter-chunk
 //! references. References are read from raw chunk text (comments and
 //! strings included), so the emitted set only ever OVER-approximates — a
-//! real dependency is never dropped. If a referenced prelude name is still
-//! not provided by the emitted set, the whole prelude is emitted instead: a
-//! parser bug degrades to a larger file, never to broken (nil-global)
-//! output.
+//! real dependency is never dropped, and completeness of the emitted set
+//! is a consequence of the closure (asserted, see `ondemand_prelude`).
+//! The whole prelude is never emitted: it declares more top-level locals
+//! than Lua's 200-per-function limit, so as a "safety net" it would have
+//! been an unloadable chunk, not a larger file.
 
 /// One top-level runtime-prelude definition: the names it introduces and its
 /// full source text (including any leading comment and multi-line body).
@@ -24,9 +25,12 @@ struct PChunk {
 /// the reachable set is the transitive closure over inter-chunk references.
 /// References are read from raw chunk text (comments and strings included), so
 /// the closure only ever *over*-approximates — it never drops a real dependency.
-/// As a final guard, if any referenced prelude name is somehow not provided by
-/// the emitted set, fall back to the whole prelude: a parser bug degrades to a
-/// larger file, never to broken (nil-global) output.
+/// Completeness (every prelude name referenced by the body or by an emitted
+/// chunk is defined in the emitted set) follows from the closure — the same
+/// chunk texts feed both — and is asserted below. An earlier version fell
+/// back to the WHOLE prelude when the check failed; that text declares more
+/// top-level locals than Lua's 200-per-function limit, so the fallback would
+/// have been an unloadable chunk, not a safety net (see `prelude_*` tests).
 pub(super) fn ondemand_prelude(body: &str) -> String {
     let chunks = parse_prelude_chunks();
     let all_names: std::collections::HashSet<&str> =
@@ -74,13 +78,15 @@ pub(super) fn ondemand_prelude(body: &str) -> String {
         }
     }
 
-    // Safety net: every prelude name referenced by the body or by an emitted
-    // chunk must be defined in the emitted set. If not, the reachability logic
-    // is wrong — emit the full prelude rather than broken code.
-    let complete = idents(body).chain(idents(&out))
-        .filter(|t| all_names.contains(t))
-        .all(|t| provided.contains(t));
-    if complete { out } else { PRELUDE.to_string() }
+    // Every prelude name referenced by the body or by an emitted chunk is
+    // defined in the emitted set — by construction of the closure above.
+    debug_assert!(
+        idents(body).chain(idents(&out))
+            .filter(|t| all_names.contains(t))
+            .all(|t| provided.contains(t)),
+        "ondemand_prelude: the reachability closure left a referenced prelude name unprovided"
+    );
+    out
 }
 
 /// Split the prelude into top-level definition chunks. A chunk starts at a
@@ -217,3 +223,46 @@ static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     s.push_str(after);
     s
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The whole prelude cannot be a fallback: it declares more column-0
+    /// locals than Lua allows per function (200), so emitting it would
+    /// produce a chunk the host refuses to load ("too many local
+    /// variables"). This pins the fact that motivated dropping the fallback;
+    /// if the prelude ever shrinks below the limit the assertion says so and
+    /// the design note in `ondemand_prelude` can be revisited.
+    #[test]
+    fn prelude_exceeds_luas_local_limit() {
+        let locals: usize = PRELUDE
+            .lines()
+            .filter(|l| is_def_start(l) && l.starts_with("local "))
+            .map(|l| provided_names(l).len())
+            .sum();
+        assert!(locals > 200, "prelude declares {} top-level locals", locals);
+    }
+
+    /// Completeness of the on-demand subset for every possible root: each
+    /// prelude name, taken alone as the body's only reference, closes to a
+    /// set that provides every prelude name its chunks mention (the
+    /// debug_assert inside `ondemand_prelude` fires otherwise), and the
+    /// subset stays within the local limit.
+    #[test]
+    fn prelude_subset_is_complete_for_every_root() {
+        let chunks = parse_prelude_chunks();
+        let names: Vec<String> = chunks.iter().flat_map(|c| c.provides.iter().cloned()).collect();
+        assert!(!names.is_empty());
+        for name in &names {
+            let out = ondemand_prelude(name);
+            assert!(out.starts_with("-- MLL Runtime (on-demand subset)"), "root {}", name);
+            let locals: usize = out
+                .lines()
+                .filter(|l| is_def_start(l) && l.starts_with("local "))
+                .map(|l| provided_names(l).len())
+                .sum();
+            assert!(locals <= 200, "root {} pulls in {} top-level locals", name, locals);
+        }
+    }
+}
