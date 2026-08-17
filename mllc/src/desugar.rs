@@ -121,89 +121,62 @@ fn desugar_expr(expr: Expr) -> Expr {
     }
 }
 
+/// `do { s1; …; sn }` as a bind chain, built bottom-up from the last
+/// statement (iteratively, so a long block never recurses deeply). Owns its
+/// statements: each is moved into the chain, not cloned. The fresh names a
+/// pattern bind mints are indexed by the statement's position (`__tup_i`),
+/// unique within one block; nested blocks are separate calls and their
+/// lambdas shadow, so equal names cannot collide.
 fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
-    desugar_do_stmts(&stmts, 0)
-}
-
-fn desugar_do_stmts(stmts: &[DoStmt], idx: usize) -> Expr {
-    if idx >= stmts.len() {
+    let mut stmts = stmts.into_iter().enumerate().rev();
+    let Some((_, last)) = stmts.next() else {
         return Expr::Lit(Literal::Bool(false));
-    }
-
-    // Build bottom-up iteratively to avoid deep recursion.
-    // Start from the last statement (the result) and wrap backwards.
-    let last = stmts.len() - 1;
-    let mut result = match &stmts[last] {
-        DoStmt::Expr(expr) => desugar_expr(expr.clone()),
-        DoStmt::Bind { expr, .. } => desugar_expr(expr.clone()),
+    };
+    let mut result = match last {
+        DoStmt::Expr(expr) | DoStmt::Bind { expr, .. } | DoStmt::PatternBind { expr, .. } => {
+            desugar_expr(expr)
+        }
         // A trailing `let` group has no body to bind; a do-block cannot end in
         // `let`, but guard against it by desugaring the last binding's body.
-        DoStmt::DoLet { binds } => binds.last()
-            .map(|b| desugar_expr(b.body.clone()))
+        DoStmt::DoLet { binds } => binds
+            .into_iter()
+            .last()
+            .map(|b| desugar_expr(b.body))
             .unwrap_or(Expr::Lit(Literal::Bool(false))),
-        DoStmt::PatternBind { expr, .. } => desugar_expr(expr.clone()),
     };
 
-    for i in (idx..last).rev() {
-        match &stmts[i] {
-            DoStmt::Expr(expr) => {
-                let expr = desugar_expr(expr.clone());
-                result = Expr::InfixApp {
-                    op: ">>=".to_string(),
-                    lhs: Box::new(expr),
-                    rhs: Box::new(Expr::Lambda {
-                        params: vec!["_".to_string()],
-                        body: Box::new(result),
-                    }),
-                };
-            }
-            DoStmt::Bind { name, expr } => {
-                let expr = desugar_expr(expr.clone());
-                result = Expr::InfixApp {
-                    op: ">>=".to_string(),
-                    lhs: Box::new(expr),
-                    rhs: Box::new(Expr::Lambda {
-                        params: vec![name.clone()],
-                        body: Box::new(result),
-                    }),
-                };
-            }
+    let bind = |lhs: Expr, param: String, body: Expr| Expr::InfixApp {
+        op: ">>=".to_string(),
+        lhs: Box::new(lhs),
+        rhs: Box::new(Expr::Lambda { params: vec![param], body: Box::new(body) }),
+    };
+
+    for (i, stmt) in stmts {
+        result = match stmt {
+            DoStmt::Expr(expr) => bind(desugar_expr(expr), "_".to_string(), result),
+            DoStmt::Bind { name, expr } => bind(desugar_expr(expr), name, result),
             DoStmt::DoLet { binds } => {
                 // Emit the whole `let` group as ONE multi-bind `Expr::Let` so
                 // all bindings share a single mutually-recursive scope. Splitting
                 // it into nested single-bind Lets would make each binding see
                 // only its predecessors, breaking forward references.
-                let binds = binds.iter().map(|b| LocalDef {
-                    name: b.name.clone(),
-                    patterns: b.patterns.clone(),
-                    body: desugar_expr(b.body.clone()),
+                let binds = binds.into_iter().map(|b| LocalDef {
+                    name: b.name,
+                    patterns: b.patterns,
+                    body: desugar_expr(b.body),
                 }).collect();
-                result = Expr::Let {
-                    binds,
-                    body: Box::new(result),
-                };
+                Expr::Let { binds, body: Box::new(result) }
             }
             DoStmt::PatternBind { pattern, expr } => {
                 // (a, b) <- expr => expr >>= \__tup -> case __tup of { (a, b) -> rest }
-                let expr = desugar_expr(expr.clone());
                 let fresh = format!("__tup_{}", i);
-                result = Expr::InfixApp {
-                    op: ">>=".to_string(),
-                    lhs: Box::new(expr),
-                    rhs: Box::new(Expr::Lambda {
-                        params: vec![fresh.clone()],
-                        body: Box::new(Expr::Case {
-                            scrutinee: Box::new(Expr::Var(fresh)),
-                            branches: vec![CaseBranch {
-                                pattern: pattern.clone(),
-                                guards: vec![],
-                                body: Some(result),
-                            }],
-                        }),
-                    }),
+                let case = Expr::Case {
+                    scrutinee: Box::new(Expr::Var(fresh.clone())),
+                    branches: vec![CaseBranch { pattern, guards: vec![], body: Some(result) }],
                 };
+                bind(desugar_expr(expr), fresh, case)
             }
-        }
+        };
     }
     result
 }
