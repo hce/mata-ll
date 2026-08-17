@@ -472,9 +472,39 @@ impl Qual<'_> {
                     result: self.ty(&eq.result),
                 }).collect(),
             },
-            // Classes and instances are global — don't prefix.
-            other => other.clone(),
+            // Class and instance NAMES stay global (a qualified class name
+            // can't be written at a use site anyway), but their heads and
+            // bodies refer to the module's own types and values, which ARE
+            // prefixed — so an instance head names the prefixed type and
+            // its method bodies (and class default bodies) call the
+            // prefixed siblings.
+            Decl::InstanceDecl { class_name, target_type, context, methods } => Decl::InstanceDecl {
+                class_name: class_name.clone(),
+                target_type: self.ty(target_type),
+                context: context.iter().map(|c| self.constraint(c)).collect(),
+                methods: methods.iter().map(|m| InstanceMethod {
+                    name: m.name.clone(),
+                    clauses: m.clauses.iter().map(|c| self.clause(c)).collect(),
+                }).collect(),
+            },
+            Decl::ClassDecl { name, type_var, superclasses, methods } => Decl::ClassDecl {
+                name: name.clone(),
+                type_var: type_var.clone(),
+                superclasses: superclasses.clone(),
+                methods: methods.iter().map(|m| ClassMethod {
+                    name: m.name.clone(),
+                    ty: self.ty(&m.ty),
+                    default_clauses: m.default_clauses.as_ref().map(|cs| {
+                        cs.iter().map(|c| self.clause(c)).collect()
+                    }),
+                }).collect(),
+            },
+            Decl::Import { .. } | Decl::FixityDecl { .. } => decl.clone(),
         }
+    }
+
+    fn constraint(&self, c: &Constraint) -> Constraint {
+        Constraint { class_name: c.class_name.clone(), type_arg: self.ty(&c.type_arg) }
     }
 
     fn constructor(&self, c: &Constructor) -> Constructor {
@@ -650,9 +680,7 @@ impl Qual<'_> {
             },
             Type::Tuple(xs) => Type::Tuple(xs.iter().map(|x| self.ty(x)).collect()),
             Type::Constrained { constraints, ty } => Type::Constrained {
-                constraints: constraints.iter().map(|c| Constraint {
-                    class_name: c.class_name.clone(), type_arg: self.ty(&c.type_arg),
-                }).collect(),
+                constraints: constraints.iter().map(|c| self.constraint(c)).collect(),
                 ty: Box::new(self.ty(ty)),
             },
         }
@@ -676,40 +704,43 @@ fn collect_pattern_vars(p: &Pattern, out: &mut HashSet<String>) {
 /// `M.foo` parsed as the field-access shape `App(Var "foo", Con "M")`; where
 /// `M` is a known qualified alias, collapse it to `Var "M.foo"`.
 fn rewrite_qualified_uses_decl(decl: Decl, aliases: &HashSet<String>) -> Decl {
+    let clauses_of = |cs: Vec<Clause>| -> Vec<Clause> {
+        cs.into_iter().map(|c| rewrite_uses_clause(c, aliases)).collect()
+    };
     match decl {
-        Decl::FunDef { name, clauses } => Decl::FunDef {
-            name,
-            clauses: clauses.into_iter().map(|c| Clause {
-                patterns: c.patterns,
-                guards: c.guards.into_iter().map(|g| Guard {
-                    condition: rewrite_uses_expr(g.condition, aliases),
-                    body: rewrite_uses_expr(g.body, aliases),
-                }).collect(),
-                body: c.body.map(|b| rewrite_uses_expr(b, aliases)),
-                where_binds: c.where_binds.into_iter()
-                    .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
-                span: c.span,
-            }).collect(),
-        },
-        // Instance method bodies can also reference qualified imports.
+        Decl::FunDef { name, clauses } => Decl::FunDef { name, clauses: clauses_of(clauses) },
+        // Instance method bodies and class default bodies can also
+        // reference qualified imports.
         Decl::InstanceDecl { class_name, target_type, context, methods } => Decl::InstanceDecl {
             class_name, target_type, context,
             methods: methods.into_iter().map(|m| InstanceMethod {
                 name: m.name,
-                clauses: m.clauses.into_iter().map(|c| Clause {
-                    patterns: c.patterns,
-                    guards: c.guards.into_iter().map(|g| Guard {
-                        condition: rewrite_uses_expr(g.condition, aliases),
-                        body: rewrite_uses_expr(g.body, aliases),
-                    }).collect(),
-                    body: c.body.map(|b| rewrite_uses_expr(b, aliases)),
-                    where_binds: c.where_binds.into_iter()
-                        .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
-                    span: c.span,
-                }).collect(),
+                clauses: clauses_of(m.clauses),
+            }).collect(),
+        },
+        Decl::ClassDecl { name, type_var, superclasses, methods } => Decl::ClassDecl {
+            name, type_var, superclasses,
+            methods: methods.into_iter().map(|m| ClassMethod {
+                name: m.name,
+                ty: m.ty,
+                default_clauses: m.default_clauses.map(&clauses_of),
             }).collect(),
         },
         other => other,
+    }
+}
+
+fn rewrite_uses_clause(c: Clause, aliases: &HashSet<String>) -> Clause {
+    Clause {
+        patterns: c.patterns,
+        guards: c.guards.into_iter().map(|g| Guard {
+            condition: rewrite_uses_expr(g.condition, aliases),
+            body: rewrite_uses_expr(g.body, aliases),
+        }).collect(),
+        body: c.body.map(|b| rewrite_uses_expr(b, aliases)),
+        where_binds: c.where_binds.into_iter()
+            .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
+        span: c.span,
     }
 }
 

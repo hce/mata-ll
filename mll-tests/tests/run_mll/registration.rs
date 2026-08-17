@@ -44,6 +44,7 @@ mll_test!(default_methods_ops, "default_methods_ops.mll");
 mll_test!(do_in_nested_positions, "do_in_nested_positions.mll");
 mll_test!(empty_layout_blocks, "empty_layout_blocks.mll");
 mll_test!(do_let_tuple_group, "do_let_tuple_group.mll");
+mll_test!(qualified_import_instances, "qualified_import_instances.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
 mll_test!(num_user_instance, "num_user_instance.mll");
 mll_test!(integral_semantics, "integral_semantics.mll");
@@ -539,13 +540,15 @@ fn mll_case_registry_is_complete() {
 
     // Helper MODULES, not test programs: they have no `main` and exist only
     // to be imported by registered cases (diamond_import.mll, export_module.mll,
-    // import_hiding.mll, fixity_import.mll, and the module-visibility /
-    // imported-fixity compile-error tests). Legitimately unregistered.
+    // import_hiding.mll, fixity_import.mll, qualified_import_instances.mll,
+    // and the module-visibility / imported-fixity compile-error tests).
+    // Legitimately unregistered.
     const HELPER_MODULES: &[&str] = &[
         "DiamondLeaf.mll",
         "DiamondMid.mll",
         "ExportHelper.mll",
         "FixityOps.mll",
+        "QualShapes.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")
