@@ -2357,10 +2357,19 @@ impl Monomorphizer {
             .map(|(c, (_, p))| ((c.class_name.clone(), c.type_var.clone()), p.clone()))
             .collect();
 
+        // The dictform's own dictionary parameters are current while its
+        // bodies are rewritten — BOTH routing tables: the plain per-class
+        // parameters and the compound-constraint triples. An instance
+        // context is plain (`Class var`), so the dictform has no compound
+        // triples; leaving the ENCLOSING dict-passing function's triples in
+        // place (as this once did) would route a compound method use inside
+        // the instance body to a parameter that does not exist here.
         let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params.clone());
+        let saved_dict_by_arg = std::mem::take(&mut self.cur_dict_by_arg);
         for (base, dictform) in work {
             let Some(mut f) = self.poly_fns.get(&base).cloned() else {
                 self.cur_dict_params = saved_dict_params;
+                self.cur_dict_by_arg = saved_dict_by_arg;
                 return None;
             };
             f.name = dictform.clone();
@@ -2375,21 +2384,12 @@ impl Monomorphizer {
             f.dict_params = dict_params.clone();
             f.specialized = true;
             for clause in f.clauses.iter_mut() {
-                let body = clause.body.clone();
-                clause.body = body.map(|b| self.rewrite_dict_expr(b, "", &class_to_dict, &env));
-                clause.guards = clause.guards.clone().into_iter().map(|g| TGuard {
-                    condition: self.rewrite_dict_expr(g.condition, "", &class_to_dict, &env),
-                    body: self.rewrite_dict_expr(g.body, "", &class_to_dict, &env),
-                }).collect();
-                clause.where_binds = clause.where_binds.clone().into_iter().map(|wb| TLocalDef {
-                    name: wb.name,
-                    patterns: wb.patterns,
-                    body: self.rewrite_dict_expr(wb.body, "", &class_to_dict, &env),
-                }).collect();
+                clause.map_exprs(&mut |e| self.rewrite_dict_expr(e, "", &class_to_dict, &env));
             }
             self.generated.push(f);
         }
         self.cur_dict_params = saved_dict_params;
+        self.cur_dict_by_arg = saved_dict_by_arg;
         Some(names)
     }
 }
