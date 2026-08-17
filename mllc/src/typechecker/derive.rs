@@ -136,10 +136,7 @@ impl Checker {
         // a plain string. A single nullary constructor (`data T = T`) is the
         // degenerate one-variant case. Ordering (`Ord`/`Enum`/`Bounded`) still
         // follows declaration order; the tag is boundary-only.
-        let all_nullary = constructors.iter().all(|c| match &c.fields {
-            ConstructorFields::Positional(fs) => fs.is_empty(),
-            ConstructorFields::Named(fs) => fs.is_empty(),
-        });
+        let all_nullary = constructors.iter().all(|c| c.is_nullary());
         if all_nullary {
             // The effective tags become the wire values, so — exactly like the
             // record field keys below — each must be a non-empty string and no
@@ -228,13 +225,7 @@ impl Checker {
         type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
-        let tvars: Vec<TyVar> = type_vars.iter()
-            .map(|n| TyVar { name: n.clone(), id: u32::MAX })
-            .collect();
-        let result_type = tvars.iter().fold(
-            Ty::Con(type_name.to_string()),
-            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
-        );
+        let (_, result_type) = Self::data_result_type(type_name, type_vars);
 
         let mangled = format!("show_{}", type_name);
         let fn_ty = Ty::arrow(result_type.clone(), Ty::Con("String".into()));
@@ -379,13 +370,7 @@ impl Checker {
         type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
-        let tvars: Vec<TyVar> = type_vars.iter()
-            .map(|n| TyVar { name: n.clone(), id: u32::MAX })
-            .collect();
-        let result_type = tvars.iter().fold(
-            Ty::Con(type_name.to_string()),
-            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
-        );
+        let (_, result_type) = Self::data_result_type(type_name, type_vars);
 
         let mangled = format!("eq_{}", type_name);
         let fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], Ty::Con("Bool".into()));
@@ -505,13 +490,7 @@ impl Checker {
         type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
-        let tvars: Vec<TyVar> = type_vars.iter()
-            .map(|n| TyVar { name: n.clone(), id: u32::MAX })
-            .collect();
-        let result_type = tvars.iter().fold(
-            Ty::Con(type_name.to_string()),
-            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
-        );
+        let (_, result_type) = Self::data_result_type(type_name, type_vars);
         let bool_ty = Ty::Con("Bool".into());
         let fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], bool_ty.clone());
 
@@ -1745,13 +1724,7 @@ impl Checker {
             return vec![];
         }
 
-        let tvars: Vec<TyVar> = type_vars.iter()
-            .map(|n| TyVar { name: n.clone(), id: u32::MAX })
-            .collect();
-        let result_type = tvars.iter().fold(
-            Ty::Con(type_name.to_string()),
-            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
-        );
+        let (_, result_type) = Self::data_result_type(type_name, type_vars);
 
         // Rep type builders.
         let k1_t = |t: Ty| Ty::app(Ty::Con("K1".into()), t);
@@ -1807,10 +1780,7 @@ impl Checker {
             let ca_fn = format!("__meta_conArity_{}_{}", type_name, con.name);
             let cr_fn = format!("__meta_conIsRecord_{}_{}", type_name, con.name);
             let is_record = matches!(&con.fields, ConstructorFields::Named(fs) if !fs.is_empty());
-            let arity = match &con.fields {
-                ConstructorFields::Named(fs) => fs.len(),
-                ConstructorFields::Positional(fs) => fs.len(),
-            };
+            let arity = con.field_count();
             out_fns.push(self.meta_string_fn(&cn_fn, con.effective_tag()));
             out_fns.push(self.meta_int_fn(&ca_fn, arity as i64));
             out_fns.push(self.meta_bool_fn(&cr_fn, is_record));

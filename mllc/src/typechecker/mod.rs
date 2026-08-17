@@ -1851,12 +1851,24 @@ impl Checker {
         (constraints, args, cur, ex_vars)
     }
 
-    fn register_data_type(&mut self, name: &str, type_vars: &[String], constructors: &[Constructor]) {
-        self.register_kind(name, type_vars.len());
+    /// A data type's declared parameters as rigid (`id == u32::MAX`) type
+    /// variables, and its result type `T a b …` over them — the head every
+    /// constructor scheme, derived instance and newtype registration is
+    /// built on (once spelled as the same fold at eight sites).
+    pub(super) fn data_result_type(name: &str, type_vars: &[String]) -> (Vec<TyVar>, Ty) {
         let tvars: Vec<TyVar> = type_vars.iter()
             .map(|n| TyVar { name: n.clone(), id: u32::MAX })
             .collect();
-        let result_type = tvars.iter().fold(Ty::Con(name.to_string()), |acc, tv| Ty::app(acc, Ty::Var(tv.clone())));
+        let result_type = tvars.iter().fold(
+            Ty::Con(name.to_string()),
+            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
+        );
+        (tvars, result_type)
+    }
+
+    fn register_data_type(&mut self, name: &str, type_vars: &[String], constructors: &[Constructor]) {
+        self.register_kind(name, type_vars.len());
+        let (tvars, result_type) = Self::data_result_type(name, type_vars);
 
         // DataKinds: register the kinds of this type's promoted constructors.
         // A promotable data type (parameterless, non-GADT, non-existential —
@@ -1871,12 +1883,8 @@ impl Checker {
             let kind = if promotable {
                 self.promoted_constructor_kind(con, name)
             } else {
-                let field_count = match &con.fields {
-                    crate::ast::ConstructorFields::Positional(fs) => fs.len(),
-                    crate::ast::ConstructorFields::Named(fs) => fs.len(),
-                };
                 let mut kind = Kind::Type;
-                for _ in 0..field_count {
+                for _ in 0..con.field_count() {
                     kind = Kind::Arrow(Box::new(Kind::Type), Box::new(kind));
                 }
                 kind
@@ -2004,13 +2012,7 @@ impl Checker {
         // type: a newtype crosses AS its single field, a `data` type would only
         // cross as an internal tagged table.
         self.newtype_types.insert(name.to_string());
-        let tvars: Vec<TyVar> = type_vars.iter()
-            .map(|n| TyVar { name: n.clone(), id: u32::MAX })
-            .collect();
-        let result_type = tvars.iter().fold(
-            Ty::Con(name.to_string()),
-            |acc, tv| Ty::app(acc, Ty::Var(tv.clone())),
-        );
+        let (tvars, result_type) = Self::data_result_type(name, type_vars);
         let inner_ty = self.ast_type_to_ty(inner);
 
         // Register constructor: Name :: InnerType -> Name
@@ -2529,10 +2531,7 @@ impl Checker {
                 // not a name), so the rename would be silently meaningless —
                 // reject it instead.
                 let is_luadict_enum = deriving.iter().any(|c| c == "LuaDict")
-                    && constructors.iter().all(|c| match &c.fields {
-                        ConstructorFields::Positional(fs) => fs.is_empty(),
-                        ConstructorFields::Named(fs) => fs.is_empty(),
-                    });
+                    && constructors.iter().all(|c| c.is_nullary());
                 if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON") && !is_luadict_enum {
                     for con in constructors {
                         if let Some(ext) = &con.external_name {

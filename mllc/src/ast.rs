@@ -637,4 +637,22 @@ impl Constructor {
     pub fn effective_tag(&self) -> &str {
         self.external_name.as_deref().unwrap_or(&self.name)
     }
+
+    /// The number of fields as PARSED (positional or named). Empty for a
+    /// GADT-syntax constructor, whose fields live in `gadt_type` until the
+    /// typechecker registers it — after registration, read
+    /// `ConInfo::field_types` (the derives do, via `derived_field_tys`);
+    /// before it, or where a GADT constructor is rejected anyway, this is
+    /// the surface arity.
+    pub fn field_count(&self) -> usize {
+        match &self.fields {
+            ConstructorFields::Positional(fs) => fs.len(),
+            ConstructorFields::Named(fs) => fs.len(),
+        }
+    }
+
+    /// No parsed fields (see `field_count` for the GADT-syntax caveat).
+    pub fn is_nullary(&self) -> bool {
+        self.field_count() == 0
+    }
 }
