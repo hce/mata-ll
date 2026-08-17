@@ -565,6 +565,9 @@ end
 -- state and leaks nothing into _G (a strict-globals host would refuse the
 -- module otherwise); the assignments below fill these declarations.
 local __lua_to_mll, __mll_wrap_callback, __mll_wrap_callback_out, __mll_wrap_callback_in
+-- __mll_run is defined further down (with the runner protocol it documents)
+-- but the effectful callback wrapper above it runs actions through it.
+local __mll_run
 
 -- Convert a Lua value to MLL representation at the FFI boundary.
 -- Lua arrays become cons lists, functions become wrapped callbacks.
@@ -621,17 +624,10 @@ __mll_wrap_callback_out = function(f, n, descs, run_io, ret)
             args[i] = v
         end
         local r = __force(f)(__unpack(args, 1, n))
-        if run_io then
-            -- Run the effectful callback's action, unwrapping a pure box the
-            -- same way __mll_run does (a terminal `pure e` in the callback body
-            -- returns its result boxed, not forced/called).
-            if getmetatable(r) == __mll_pure_mt then r = r[1]
-            else
-                r = __force(r)
-                if getmetatable(r) == __mll_pure_mt then r = r[1]
-                elseif type(r) == "function" then r = __mll_unbox(r()) end
-            end
-        end
+        -- Run the effectful callback's action: __mll_run's dispatch (a
+        -- terminal `pure e` in the callback body returns its result boxed,
+        -- not forced/called).
+        if run_io then r = __mll_run(r) end
         if ret == true then return __mll_to_lua(r) end
         if ret then return __mll_arg_marshal(r, ret) end
         return r
@@ -694,7 +690,7 @@ end
 -- application, whose `__force` is exactly the pure-payload forcing GHC
 -- never performs, and whose argument position pins one stack frame per
 -- recursion level where the bare form is a Lua tail call.
-local function __mll_run(action)
+__mll_run = function(action)
     -- A pure action (`pure e`/`return e` that escaped its defining function)
     -- already carries its result — hand it back UNFORCED. This is the only way
     -- to distinguish "a thunk that computes which action to run" (force it to
@@ -1042,6 +1038,22 @@ local function engage(f, ...)
     if select('#', ...) > 0 then return __force(f)(...) else return __force(f) end
 end
 local function liftIO(action) return action end
+local function __mll_show_arg(s)
+    s = __force(s)
+    -- Parenthesize a derived-Show field at argument position: a constructor
+    -- application ("Con a b", "P {x = 1}") or a negative number, matching
+    -- GHC's showsPrec 11. A leading '-' can only come from a number
+    -- (strings are quoted, lists bracketed, constructors capitalized), and
+    -- GHC parenthesizes every negative numeric field — including
+    -- "-Infinity" and "-0.0" — so the bare '-' test is exact.
+    local c = string.byte(s, 1)
+    if c == nil then return s end
+    if (c >= 65 and c <= 90 and string.find(s, " ", 1, true))
+       or c == 45 then
+        return "(" .. s .. ")"
+    end
+    return s
+end
 local function show(x)
     x = __force(x)
     if type(x) == "number" then
@@ -1076,13 +1088,9 @@ local function show(x)
         -- GHC's showsPrec 11 (same rule as __mll_show_arg, inlined so the generic
         -- show does not depend on a helper defined later).
         if getmetatable(x) == __just_mt then
-            local inner = show(x[1])
-            local c = string.byte(inner, 1)
-            if c ~= nil and ((c >= 65 and c <= 90 and string.find(inner, " ", 1, true))
-               or c == 45) then
-                inner = "(" .. inner .. ")"
-            end
-            return "Just " .. inner
+            -- The payload at argument precedence (showsPrec 11), the same
+            -- rule the derived-Show fields use.
+            return "Just " .. __mll_show_arg(show(x[1]))
         end
         -- A non-empty list is exactly a cons cell, identified by __cons_mt.
         -- Tuples and constructor tables are plain tables; distinguishing by
@@ -1355,22 +1363,6 @@ local function __mll_maybe_eq(elem_eq, a, b)
     if a == nil or b == nil then return false end
     -- Both are Just wrappers; compare the unwrapped payloads.
     return elem_eq(a[1], b[1])
-end
-local function __mll_show_arg(s)
-    s = __force(s)
-    -- Parenthesize a derived-Show field at argument position: a constructor
-    -- application ("Con a b", "P {x = 1}") or a negative number, matching
-    -- GHC's showsPrec 11. A leading '-' can only come from a number
-    -- (strings are quoted, lists bracketed, constructors capitalized), and
-    -- GHC parenthesizes every negative numeric field — including
-    -- "-Infinity" and "-0.0" — so the bare '-' test is exact.
-    local c = string.byte(s, 1)
-    if c == nil then return s end
-    if (c >= 65 and c <= 90 and string.find(s, " ", 1, true))
-       or c == 45 then
-        return "(" .. s .. ")"
-    end
-    return s
 end
 local function __mll_show_maybe(elem_show, x)
     -- Type-directed Maybe show. `Nothing` is nil; `Just p` is a tagged wrapper
