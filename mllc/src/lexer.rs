@@ -202,8 +202,10 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                 col = 1;
                 continue;
             }
-            // Skip comment-only lines
-            if pos + 1 < chars.len() && chars[pos] == '-' && chars[pos + 1] == '-' {
+            // Skip comment-only lines (same test as the mid-line rule: a
+            // line starting with an operator such as `-->` or `--|` is a
+            // continuation line, not a comment)
+            if is_line_comment_start(&chars, pos) {
                 while pos < chars.len() && chars[pos] != '\n' {
                     pos += 1;
                 }
@@ -243,18 +245,16 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
         }
 
         // Line comment
-        if ch == '-' && pos + 1 < chars.len() && chars[pos + 1] == '-' {
-            // Make sure it's not an operator like ---
-            if pos + 2 >= chars.len() || !is_operator_char(chars[pos + 2]) || chars[pos + 2] == '-' {
-                while pos < chars.len() && chars[pos] != '\n' {
-                    pos += 1;
-                }
-                continue;
+        if is_line_comment_start(&chars, pos) {
+            while pos < chars.len() && chars[pos] != '\n' {
+                pos += 1;
             }
+            continue;
         }
 
         // Block comment {- ... -}
         if ch == '{' && pos + 1 < chars.len() && chars[pos + 1] == '-' {
+            let (open_line, open_col) = (line, col);
             pos += 2;
             col += 2;
             let mut depth = 1;
@@ -276,6 +276,21 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                     }
                     pos += 1;
                 }
+            }
+            if depth > 0 {
+                // Everything to the end of the file was swallowed as
+                // comment; the parser would report an unrelated "found end
+                // of file" far from the cause.
+                let mut diag = err_at(
+                    "Unterminated block comment: this `{-` has no matching `-}`",
+                    open_line,
+                    open_col,
+                );
+                diag.notes.push(
+                    "block comments nest, so every `{-` needs its own `-}`"
+                        .to_string(),
+                );
+                return Err(diag);
             }
             continue;
         }
@@ -541,6 +556,18 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
     });
 
     Ok(tokens)
+}
+
+/// Does a `--` line comment start at `pos`? Two dashes begin a comment
+/// unless they are the head of an operator symbol (`-->`, `--|`, `--.`);
+/// a run of three or more dashes is still a comment. One rule for both
+/// the line-start scan and the mid-line scan — they once differed, and a
+/// continuation line beginning with `-->` was dropped as a comment.
+fn is_line_comment_start(chars: &[char], pos: usize) -> bool {
+    pos + 1 < chars.len()
+        && chars[pos] == '-'
+        && chars[pos + 1] == '-'
+        && (pos + 2 >= chars.len() || !is_operator_char(chars[pos + 2]) || chars[pos + 2] == '-')
 }
 
 fn is_operator_char(c: char) -> bool {

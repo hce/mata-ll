@@ -3771,3 +3771,20 @@ fn thousand_element_list_literal_still_compiles_and_runs() {
         .exec()
         .expect("the 1200-element list program must run");
 }
+
+// An unterminated `{-` used to be accepted silently: the rest of the file
+// vanished into the comment and the parser reported an unrelated "found end
+// of file" far from the cause. It is a lexer error located at the opener.
+#[test]
+fn unterminated_block_comment_is_located_at_its_opener() {
+    let source = "main :: IO ()\nmain = putStrLn \"a\"\n  {- forgot to close {- nested -} this one\nfoo :: Int\nfoo = 1\n";
+    let msg = expect_compile_error(source, &[], &[
+        "Unterminated block comment",
+        "`{-`",
+        "`-}`",
+        "at 3:3",
+        "note:",
+        "nest",
+    ]);
+    assert!(!msg.contains("end of file"), "must not degrade to an EOF parse error: {}", msg);
+}

@@ -45,6 +45,7 @@ mll_test!(do_in_nested_positions, "do_in_nested_positions.mll");
 mll_test!(empty_layout_blocks, "empty_layout_blocks.mll");
 mll_test!(do_let_tuple_group, "do_let_tuple_group.mll");
 mll_test!(qualified_import_instances, "qualified_import_instances.mll");
+mll_test!(operator_line_start, "operator_line_start.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
 mll_test!(num_user_instance, "num_user_instance.mll");
 mll_test!(integral_semantics, "integral_semantics.mll");
