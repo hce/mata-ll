@@ -100,12 +100,6 @@ impl ScopeSnapshot {
         cg.local_vars = self.local_vars;
         cg.concrete_vars = self.concrete_vars;
     }
-
-    /// Restores `concrete_vars` only. Used by the where-group function-body
-    /// emitter to scope its `_warg` concreteness marks.
-    pub(super) fn restore_concrete_vars(self, cg: &mut CodeGen) {
-        cg.concrete_vars = self.concrete_vars;
-    }
 }
 
 /// Narrow snapshot for the per-BRANCH loop of the plain (guard-free)
@@ -831,7 +825,8 @@ impl CodeGen {
         // The `_wargN = __force(_wargN)` entry rebinds below leave the param
         // provably WHNF: mark it concrete so the clause conditions built by
         // match_scrutinee do not re-force it. `_warg` names are shared by
-        // every where-group, so the marks must not outlive this one.
+        // every where-group, so the marks — and the parameter locals the
+        // body registers — must not outlive this one.
         let scope = ScopeSnapshot::capture(self);
 
         if clauses.len() == 1 {
@@ -840,12 +835,18 @@ impl CodeGen {
                 matches!(p, TPattern::Var(_, _) | TPattern::Wildcard));
 
             if all_simple {
+                // Registered like every other binder (declare_local_parts),
+                // so a parameter that shadows a top-level function resolves
+                // to the parameter in the body — an unregistered `local v`
+                // left `Var v` on the global path, which for a name the
+                // module also defines at top level emitted that function's
+                // slot instead of the parameter.
                 for (j, pat) in clause.patterns.iter().enumerate() {
                     if let TPattern::Var(v, _) = pat {
-                        body.push(Stmt::Local(
-                            vec![sanitize_name(v)],
-                            Some(Expr::name(format!("_warg{}", j))),
-                        ));
+                        let sname = sanitize_name(v);
+                        let (pre, decl) = self.declare_local_parts(&sname);
+                        if let Some(s) = pre { body.push(s); }
+                        body.push(decl.stmt(Expr::name(format!("_warg{}", j))));
                     }
                 }
                 body.push(Stmt::Return(self.expr_ast(clause.plain_body())));
@@ -878,7 +879,7 @@ impl CodeGen {
             }
             body.extend(self.pattern_match_block(&params, &clauses).0);
         }
-        scope.restore_concrete_vars(self);
+        scope.restore_vars(self);
 
         stmts.push(Stmt::Function { target, params, body: Block(body) });
         stmts

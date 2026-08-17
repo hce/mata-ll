@@ -859,32 +859,54 @@ impl Monomorphizer {
         func
     }
 
-    fn mono_clause(&mut self, mut clause: TClause) -> TClause {
-        // Add clause pattern-bound variables to locals
-        let mut pat_vars = Vec::new();
-        for pat in &clause.patterns {
-            pat_vars.extend(Self::pattern_vars(pat));
-        }
-        let new_vars: Vec<_> = pat_vars.iter()
-            .filter(|n| !self.locals.contains(*n))
-            .cloned().collect();
-        for name in &pat_vars {
-            self.locals.insert(name.clone());
-        }
-        clause.body = clause.body.take().map(|b| self.mono_expr(b));
-        clause.guards = clause.guards.into_iter().map(|g| TGuard {
-            condition: self.mono_expr(g.condition),
-            body: self.mono_expr(g.body),
-        }).collect();
-        clause.where_binds = clause.where_binds.into_iter().map(|ld| TLocalDef {
-            name: ld.name,
-            patterns: ld.patterns,
-            body: self.mono_expr(ld.body),
-        }).collect();
-        for name in &new_vars {
+    /// Run `f` with `names` in the local scope, then take out the ones
+    /// that were not local before. The ONE shadowing discipline for every
+    /// binder — clause patterns, lambda parameters, case patterns, let/
+    /// where names and their own parameters, do-block binders: a name in
+    /// `locals` is never resolved as (or specialized from) a top-level
+    /// polymorphic function or class method of the same name. Binder
+    /// sites once each hand-rolled this, and the do-block spine and the
+    /// where-bindings had none, so `reverse <- getLine` or a where-bound
+    /// `reverse` was rewritten into a specialization of the GLOBAL.
+    fn with_locals<T>(
+        &mut self,
+        names: impl IntoIterator<Item = String>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let added: Vec<String> = names.into_iter().filter(|n| self.locals.insert(n.clone())).collect();
+        let result = f(self);
+        for name in &added {
             self.locals.remove(name);
         }
-        clause
+        result
+    }
+
+    /// Monomorphize a local function/value binding: its own parameters are
+    /// local inside its body (the binding's NAME is put in scope by the
+    /// caller, for the whole recursive group).
+    fn mono_local_def(&mut self, ld: TLocalDef) -> TLocalDef {
+        let params: Vec<String> = ld.patterns.iter().flat_map(Self::pattern_vars).collect();
+        let body = self.with_locals(params, |m| m.mono_expr(ld.body));
+        TLocalDef { name: ld.name, patterns: ld.patterns, body }
+    }
+
+    fn mono_clause(&mut self, mut clause: TClause) -> TClause {
+        // Clause pattern variables and where-bound names are local in the
+        // body, the guards and the where bodies (a where group is one
+        // recursive scope, like a let group).
+        let scope: Vec<String> = clause.patterns.iter().flat_map(Self::pattern_vars)
+            .chain(clause.where_binds.iter().map(|ld| ld.name.clone()))
+            .collect();
+        self.with_locals(scope, |m| {
+            clause.body = clause.body.take().map(|b| m.mono_expr(b));
+            clause.guards = clause.guards.into_iter().map(|g| TGuard {
+                condition: m.mono_expr(g.condition),
+                body: m.mono_expr(g.body),
+            }).collect();
+            clause.where_binds = clause.where_binds.into_iter()
+                .map(|ld| m.mono_local_def(ld)).collect();
+            clause
+        })
     }
 
     fn pattern_vars(pat: &TPattern) -> Vec<String> {
@@ -909,6 +931,14 @@ impl Monomorphizer {
 
         let mut spine: Vec<SpineFrame> = Vec::new();
         let mut current = expr;
+        // The binders the spine introduces (a bind's lambda parameters, a
+        // let group's names) scope over everything after them — the later
+        // statements' left-hand sides mono'd while walking down, and the
+        // terminal — so they enter `locals` as the walk passes them and
+        // leave together after the terminal (with_locals, unrolled across
+        // the loop). Each let binding's own parameters are scoped by
+        // mono_local_def.
+        let mut spine_locals: Vec<String> = Vec::new();
 
         loop {
             match &current.kind {
@@ -919,6 +949,11 @@ impl Monomorphizer {
                         if op == ">>="
                             && let TExprKind::Lambda { params, body } = rhs.kind {
                                 let lhs = self.mono_expr(*lhs);
+                                for (name, _) in &params {
+                                    if self.locals.insert(name.clone()) {
+                                        spine_locals.push(name.clone());
+                                    }
+                                }
                                 spine.push(SpineFrame::Bind {
                                     ty, op,
                                     lhs,
@@ -938,11 +973,14 @@ impl Monomorphizer {
                 TExprKind::Let { .. } if !spine.is_empty() => {
                     let ty = current.ty.clone();
                     if let TExprKind::Let { binds, body } = current.kind {
-                        let binds = binds.into_iter().map(|b| TLocalDef {
-                            name: b.name,
-                            patterns: b.patterns,
-                            body: self.mono_expr(b.body),
-                        }).collect();
+                        // Names first (a let group is one recursive scope),
+                        // then the bodies.
+                        for b in &binds {
+                            if self.locals.insert(b.name.clone()) {
+                                spine_locals.push(b.name.clone());
+                            }
+                        }
+                        let binds = binds.into_iter().map(|b| self.mono_local_def(b)).collect();
                         spine.push(SpineFrame::Let { ty, binds });
                         current = *body;
                         continue;
@@ -955,6 +993,9 @@ impl Monomorphizer {
 
         // Process terminal node normally
         let mut result = self.mono_expr_node(current);
+        for name in &spine_locals {
+            self.locals.remove(name);
+        }
 
         // Reconstruct spine bottom-up
         for frame in spine.into_iter().rev() {
@@ -1220,17 +1261,8 @@ impl Monomorphizer {
                 TExprKind::Negate(Box::new(inner))
             }
             TExprKind::Lambda { params, body } => {
-                let saved_locals: Vec<_> = params.iter()
-                    .filter(|(name, _)| !self.locals.contains(name))
-                    .map(|(name, _)| name.clone())
-                    .collect();
-                for (name, _) in &params {
-                    self.locals.insert(name.clone());
-                }
-                let body = Box::new(self.mono_expr(*body));
-                for name in &saved_locals {
-                    self.locals.remove(name);
-                }
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                let body = self.with_locals(names, |m| Box::new(m.mono_expr(*body)));
                 TExprKind::Lambda { params, body }
             }
             TExprKind::Case { scrutinee, branches } => {
@@ -1238,44 +1270,24 @@ impl Monomorphizer {
                     scrutinee: Box::new(self.mono_expr(*scrutinee)),
                     branches: branches.into_iter().map(|b| {
                         let pat_vars = Self::pattern_vars(&b.pattern);
-                        let new_vars: Vec<_> = pat_vars.iter()
-                            .filter(|n| !self.locals.contains(*n))
-                            .cloned().collect();
-                        for name in &pat_vars {
-                            self.locals.insert(name.clone());
-                        }
-                        let result = TCaseBranch {
+                        self.with_locals(pat_vars, |m| TCaseBranch {
                             pattern: b.pattern,
                             guards: b.guards.into_iter().map(|g| TGuard {
-                                condition: self.mono_expr(g.condition),
-                                body: self.mono_expr(g.body),
+                                condition: m.mono_expr(g.condition),
+                                body: m.mono_expr(g.body),
                             }).collect(),
-                            body: b.body.map(|bb| self.mono_expr(bb)),
-                        };
-                        for name in &new_vars {
-                            self.locals.remove(name);
-                        }
-                        result
+                            body: b.body.map(|bb| m.mono_expr(bb)),
+                        })
                     }).collect(),
                 }
             }
             TExprKind::Let { binds, body } => {
-                let new_names: Vec<_> = binds.iter()
-                    .filter(|b| !self.locals.contains(&b.name))
-                    .map(|b| b.name.clone())
-                    .collect();
-                for b in &binds {
-                    self.locals.insert(b.name.clone());
-                }
-                let binds = binds.into_iter().map(|b| TLocalDef {
-                    name: b.name, patterns: b.patterns,
-                    body: self.mono_expr(b.body),
-                }).collect();
-                let body = Box::new(self.mono_expr(*body));
-                for name in &new_names {
-                    self.locals.remove(name);
-                }
-                TExprKind::Let { binds, body }
+                let names: Vec<String> = binds.iter().map(|b| b.name.clone()).collect();
+                self.with_locals(names, |m| {
+                    let binds = binds.into_iter().map(|b| m.mono_local_def(b)).collect();
+                    let body = Box::new(m.mono_expr(*body));
+                    TExprKind::Let { binds, body }
+                })
             }
             // Numeric-literal overloading, GHC-faithful. A polymorphic integer
             // literal is `fromInteger (n :: Integer)`; a fractional literal is
