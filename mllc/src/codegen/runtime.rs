@@ -36,25 +36,17 @@ struct PChunk {
 /// top-level locals than Lua's 200-per-function limit, so the fallback would
 /// have been an unloadable chunk, not a safety net (see `prelude_*` tests).
 pub(super) fn ondemand_prelude(body: &str) -> String {
-    let chunks = parse_prelude_chunks();
-    let all_names: std::collections::HashSet<&str> =
-        chunks.iter().flat_map(|c| c.provides.iter().map(String::as_str)).collect();
-
-    // name -> chunks that provide it (a name may be forward-declared then
-    // assigned, so more than one chunk can provide it; include them all).
-    let mut providers: std::collections::HashMap<&str, Vec<usize>> = std::collections::HashMap::new();
-    for (i, c) in chunks.iter().enumerate() {
-        for n in &c.provides {
-            providers.entry(n.as_str()).or_default().push(i);
-        }
-    }
+    let index = &*CHUNK_INDEX;
+    let chunks = &index.chunks;
+    let all_names = &index.all_names;
+    let providers = &index.providers;
 
     // Roots: prelude names referenced by the generated body.
     let mut needed: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut work: Vec<&str> = Vec::new();
     for tok in idents(body) {
-        if all_names.contains(tok) && needed.insert(tok) {
-            work.push(tok);
+        if let Some(name) = all_names.get(tok) && needed.insert(*name) {
+            work.push(name);
         }
     }
     // Transitive closure over the references inside each providing chunk.
@@ -62,7 +54,7 @@ pub(super) fn ondemand_prelude(body: &str) -> String {
         if let Some(idxs) = providers.get(name) {
             for &i in idxs {
                 for dep in code_idents(&chunks[i].text) {
-                    if all_names.contains(dep) && needed.insert(dep) {
+                    if let Some(dep) = all_names.get(dep) && needed.insert(*dep) {
                         work.push(dep);
                     }
                 }
@@ -73,7 +65,7 @@ pub(super) fn ondemand_prelude(body: &str) -> String {
     // Assemble the reachable chunks in their original order.
     let mut out = String::from("-- MLL Runtime (on-demand subset)\n");
     let mut provided: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for c in &chunks {
+    for c in chunks {
         if c.provides.iter().any(|n| needed.contains(n.as_str())) {
             out.push_str(&c.text);
             for n in &c.provides {
@@ -92,6 +84,35 @@ pub(super) fn ondemand_prelude(body: &str) -> String {
     );
     out
 }
+
+/// The prelude's chunks with their name index, computed once per process:
+/// the chunk list, every provided name, and name → providing chunks (a name
+/// may be forward-declared then assigned, so more than one chunk can provide
+/// it; include them all). Deterministic and read-only, so sharing it across
+/// compiles is safe; it was once re-split from the prelude text on every
+/// compile — including every test-harness compile.
+struct ChunkIndex {
+    chunks: Vec<PChunk>,
+    all_names: std::collections::HashSet<&'static str>,
+    providers: std::collections::HashMap<&'static str, Vec<usize>>,
+}
+
+static CHUNK_INDEX: std::sync::LazyLock<ChunkIndex> = std::sync::LazyLock::new(|| {
+    let chunks = parse_prelude_chunks();
+    // The name keys borrow for as long as the index lives (the process):
+    // leaked once, so the borrows are 'static.
+    let mut all_names = std::collections::HashSet::new();
+    let mut providers: std::collections::HashMap<&'static str, Vec<usize>> =
+        std::collections::HashMap::new();
+    for (i, c) in chunks.iter().enumerate() {
+        for n in &c.provides {
+            let n: &'static str = Box::leak(n.clone().into_boxed_str());
+            all_names.insert(n);
+            providers.entry(n).or_default().push(i);
+        }
+    }
+    ChunkIndex { chunks, all_names, providers }
+});
 
 /// Split the prelude into top-level definition chunks. A chunk starts at a
 /// column-0 `local function`, `local …`, or `IDENT = …` line and runs until the
