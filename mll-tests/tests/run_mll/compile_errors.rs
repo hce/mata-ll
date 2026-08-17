@@ -1175,6 +1175,23 @@ main = do
     }
 }
 
+// `m >>= \x y -> …` is a type error (the continuation returns a function,
+// not an action). The bind-chain flattener used to accept ANY lambda as the
+// desugarer's one-parameter continuation and bind only its first parameter,
+// so `y` was silently dropped — resolving to an outer `y` here — and the
+// program compiled.
+#[test]
+fn bind_with_two_parameter_lambda_is_a_type_error() {
+    let source = r#"
+y :: Int
+y = 99
+
+main :: IO ()
+main = getLine >>= \x y -> putStrLn "a" >> putStrLn (x <> show (y :: Int))
+"#;
+    expect_compile_error(source, &[], &["Cannot unify"]);
+}
+
 #[test]
 fn type_error_in_where_value_binding_rejected() {
     // A type error inside a `where` value binding must fail compilation with a

@@ -1715,10 +1715,18 @@ impl Checker {
         }
     }
 
-    /// Check if an expression is part of a bind chain (from do-block desugaring).
+    /// Is `expr` the continuation of a bind chain, i.e. the ONE-parameter
+    /// lambda the do-block desugarer produces for `x <- m; rest` (or `\_ ->`
+    /// for `m; rest`), whose body is the next statement's `>>=`/`>>`? A
+    /// lambda with more parameters is a user-written continuation function
+    /// (`m >>= \x y -> …`) and is typed by the ordinary infix rule — the
+    /// flattener binds exactly one parameter per statement, so admitting a
+    /// two-parameter lambda here silently dropped its second parameter
+    /// (unbound, or resolving to an outer binder of the same name) where GHC
+    /// reports the type error.
     pub(super) fn is_bind_chain(&self, expr: &Expr) -> bool {
         match expr {
-            Expr::Lambda { body, .. } => {
+            Expr::Lambda { params, body } if params.len() == 1 => {
                 match body.as_ref() {
                     Expr::InfixApp { op, .. } if op == ">>=" || op == ">>" => true,
                     Expr::Let { body, .. } => matches!(body.as_ref(),
@@ -1746,8 +1754,13 @@ impl Checker {
         loop {
             match current {
                 Expr::InfixApp { op, lhs, rhs } if op == ">>=" || op == ">>" => {
-                    if let Expr::Lambda { params, body } = rhs.as_ref() {
-                        stmts.push(BindStmt::Bind { op, lhs, param: &params[0] });
+                    // A one-parameter lambda is the desugarer's continuation
+                    // (see is_bind_chain); anything else — including a
+                    // multi-parameter lambda — is the chain's terminal.
+                    if let Expr::Lambda { params, body } = rhs.as_ref()
+                        && let [param] = params.as_slice()
+                    {
+                        stmts.push(BindStmt::Bind { op, lhs, param });
                         current = body;
                         continue;
                     }
