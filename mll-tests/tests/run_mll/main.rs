@@ -1,8 +1,24 @@
 //! Test harness: discovers all .mll files in tests/cases/,
 //! compiles each with mllc, runs the result via mlua,
 //! and reports success/failure.
+//!
+//! A case checks itself with `assert`; a case may ALSO carry `-- expect:`
+//! lines, which are compared, in order, against what the program prints
+//! (`putStrLn`/`print`, i.e. Lua `print`), with `assert`'s success marker
+//! (a lone `.`) filtered out. Until 2026-08-17 those lines were
+//! documentation only — nothing compared them.
 
 use std::path::Path;
+
+/// The `-- expect:` lines of a case, in order (`-- expect: text` → `text`;
+/// `-- expect:` alone → an empty line).
+fn expected_lines(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|l| l.strip_prefix("-- expect:"))
+        .map(|rest| rest.strip_prefix(' ').unwrap_or(rest).to_string())
+        .collect()
+}
 
 fn run_mll_file(path: &Path, libs: &[&Path]) {
     let path = path.to_path_buf();
@@ -29,9 +45,42 @@ fn run_mll_file(path: &Path, libs: &[&Path]) {
                 };
 
             let lua = mlua::Lua::new();
+            let expected = expected_lines(&source);
+            let captured = lua.create_table().unwrap();
+            if !expected.is_empty() {
+                // Capture `print` (putStrLn/print compile to it) line by line.
+                let sink = captured.clone();
+                let print_fn = lua
+                    .create_function(move |_, args: mlua::Variadic<mlua::Value>| -> mlua::Result<()> {
+                        let parts: Vec<String> = args
+                            .iter()
+                            .map(|v| match v {
+                                mlua::Value::String(s) => Ok(s.to_str()?.to_string()),
+                                other => Ok(format!("{:?}", other)),
+                            })
+                            .collect::<mlua::Result<_>>()?;
+                        let n = sink.raw_len();
+                        sink.raw_set(n + 1, parts.join("\t"))?;
+                        Ok(())
+                    })
+                    .unwrap();
+                lua.globals().set("print", print_fn).unwrap();
+            }
             match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
                 Ok(()) => {}
                 Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
+            }
+            if !expected.is_empty() {
+                let printed: Vec<String> = captured
+                    .sequence_values::<String>()
+                    .collect::<mlua::Result<_>>()
+                    .unwrap();
+                let printed: Vec<String> = printed.into_iter().filter(|l| l != ".").collect();
+                assert_eq!(
+                    printed, expected,
+                    "{}: printed output (left) differs from its `-- expect:` lines (right)",
+                    path.display()
+                );
             }
         })
         .unwrap()
