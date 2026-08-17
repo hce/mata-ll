@@ -310,7 +310,7 @@ fn compile_impl(
     // Invariant check: every type-directed `show` must have resolved to a
     // specialized implementation at concrete structured types. A violation means
     // the compiler would emit known-wrong output, so fail loudly instead.
-    let violations = mono_pass.verify(&mono_module);
+    let violations = verify::check(&mono_module);
     if !violations.is_empty() {
         return Err(CompileError::Internal(violations));
     }

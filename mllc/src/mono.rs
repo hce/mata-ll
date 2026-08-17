@@ -311,12 +311,6 @@ impl Monomorphizer {
         }
     }
 
-    /// Check the post-monomorphization invariant: no type-directed class
-    /// method may remain type-erased at a concrete structured type.
-    pub fn verify(&self, module: &TModule) -> Vec<String> {
-        crate::verify::check(module, &self.class_methods)
-    }
-
     pub fn run(&mut self, mut module: TModule) -> TModule {
         // Collect polymorphic user-defined functions
         for func in &module.functions {
@@ -1295,10 +1289,9 @@ impl Monomorphizer {
             // The fractional path is unchanged (fromRational takes a Number).
             TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_))) => {
                 let is_frac = matches!(lit, TLiteral::Number(_));
-                let class = if is_frac { "Fractional" } else { "Num" };
                 let method = if is_frac { "fromRational" } else { "fromInteger" };
                 let lit_src_ty = if is_frac { "Number" } else { "Int" };
-                match self.numeric_literal_conversion(class, method, &ty) {
+                match self.numeric_literal_conversion(method, &ty) {
                     Some(conv_fn) => {
                         // An integer literal bound for a real fromInteger must
                         // arrive EXACT. Emitted as a bare Lua numeral it is read
@@ -1386,7 +1379,7 @@ impl Monomorphizer {
     /// the built-in Int/Number identity — return that function's name so a
     /// literal at `ty` can be wrapped in it. Int/Number (and anything not a
     /// concrete instance) return `None`: the raw literal is emitted as-is.
-    fn numeric_literal_conversion(&self, class: &str, method: &str, ty: &Ty) -> Option<String> {
+    fn numeric_literal_conversion(&self, method: &str, ty: &Ty) -> Option<String> {
         // Only concrete, fully-resolved types dispatch; a still-free variable is
         // left to defaulting (it should already be Int/Number by now).
         if !ty.free_vars().is_empty() || Self::contains_skolem(ty) {
@@ -1400,10 +1393,7 @@ impl Monomorphizer {
         // own conversion — materialise it.
         match mangled.as_str() {
             "fromInteger_Int" | "fromInteger_Number" | "fromRational_Number" => None,
-            other => {
-                let _ = class;
-                Some(other.to_string())
-            }
+            other => Some(other.to_string()),
         }
     }
 

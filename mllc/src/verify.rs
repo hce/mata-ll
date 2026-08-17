@@ -40,9 +40,8 @@ use crate::types::Ty;
 const TYPE_ERASED_SHOWS: &[&str] = &["show", "show_Maybe", "show_List_"];
 
 /// Check the module's invariants. Returns one message per violation; empty
-/// means the module is clean. `class_methods` confirms `show` is in fact a
-/// class method here (it always is once anything is shown).
-pub fn check(module: &TModule, _class_methods: &HashSet<String>) -> Vec<String> {
+/// means the module is clean.
+pub fn check(module: &TModule) -> Vec<String> {
     let erased: HashSet<&str> = TYPE_ERASED_SHOWS.iter().copied().collect();
     let mut v = Verifier { erased, violations: Vec::new() };
     for f in &module.functions {
@@ -158,36 +157,32 @@ mod tests {
         }
     }
 
-    fn cm() -> HashSet<String> {
-        ["show".to_string()].into_iter().collect()
-    }
-
     #[test]
     fn flags_type_erased_show_on_structured_concrete() {
         // bare `show` and the generic wrappers, at a concrete structured type
         for name in ["show", "show_Maybe", "show_List_"] {
             let m = module_with(show_call(name, Ty::list(Ty::Con("Int".into()))));
-            assert_eq!(check(&m, &cm()).len(), 1, "{name} on [Int] should flag");
+            assert_eq!(check(&m).len(), 1, "{name} on [Int] should flag");
         }
         // Maybe Int == App(Con Maybe, Int)
         let maybe_int = Ty::app(Ty::Con("Maybe".into()), Ty::Con("Int".into()));
         let m = module_with(show_call("show_Maybe", maybe_int));
-        assert_eq!(check(&m, &cm()).len(), 1, "show_Maybe on Maybe Int should flag");
+        assert_eq!(check(&m).len(), 1, "show_Maybe on Maybe Int should flag");
     }
 
     #[test]
     fn allows_resolved_and_primitive_and_polymorphic() {
         // A specialized show name is fine even on a structured type.
         let m = module_with(show_call("show_LInt", Ty::list(Ty::Con("Int".into()))));
-        assert!(check(&m, &cm()).is_empty(), "specialized show must not flag");
+        assert!(check(&m).is_empty(), "specialized show must not flag");
 
         // The generic `show` on a primitive is faithful — not flagged.
         let m = module_with(show_call("show", Ty::Con("Int".into())));
-        assert!(check(&m, &cm()).is_empty(), "primitive show must not flag");
+        assert!(check(&m).is_empty(), "primitive show must not flag");
 
         // A still-polymorphic argument is the legitimate fallback copy.
         let tv = Ty::Var(TyVar { name: "a".into(), id: u32::MAX });
         let m = module_with(show_call("show", Ty::list(tv)));
-        assert!(check(&m, &cm()).is_empty(), "polymorphic show must not flag");
+        assert!(check(&m).is_empty(), "polymorphic show must not flag");
     }
 }
