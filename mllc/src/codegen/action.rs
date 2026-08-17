@@ -225,6 +225,12 @@ impl CodeGen {
                 return Expr::call_named(runner, vec![e]);
             }
         }
+        // The fused ST-intrinsic classification, computed once: the earlier
+        // arms are structural on `expr.kind` (a literal/constructor/tuple, an
+        // IO SpecCall), so an expression they take is never a fused
+        // intrinsic and evaluating the classification up front changes no
+        // dispatch.
+        let fused_intrinsic = Self::st_intrinsic_fused(expr);
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => {
                 self.expr_ast(expr)
@@ -263,8 +269,8 @@ impl CodeGen {
             // the __mll_run dispatch. This path is only reached where an
             // action runs exactly once, in order, so this is safe by
             // construction. See st_intrinsic_fused.
-            _ if Self::st_intrinsic_fused(expr).is_some() => {
-                let (fused, fargs) = Self::st_intrinsic_fused(expr).unwrap();
+            _ if fused_intrinsic.is_some() => {
+                let (fused, fargs) = fused_intrinsic.unwrap();
                 // Per-argument strictness of the ST array intrinsics. These
                 // runtime helpers bypass demand analysis (they are not mata-ll
                 // functions), so their strict positions are stated here. An
