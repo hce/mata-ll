@@ -72,6 +72,15 @@ mod thunks;
 mod util;
 
 pub(crate) use names::is_lua_keyword;
+
+/// Would the emitter build this expression eagerly (bare + concrete) rather
+/// than as a memoizing thunk? The single home of that predicate
+/// (`CodeGen::is_cheap`), exposed for the split pass, which must agree with
+/// the emitter about which non-strict positions stay lazy — a hand-kept
+/// mirror there once drifted (it counted `^` as a Lua-native operator).
+pub(crate) fn is_cheap(e: &crate::tir::TExpr) -> bool {
+    CodeGen::is_cheap(e)
+}
 use runtime::ondemand_prelude;
 
 /// A freshly declared local's assignment target: a real `local name`

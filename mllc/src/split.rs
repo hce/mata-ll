@@ -35,6 +35,7 @@
 
 use crate::tir::*;
 use crate::types::Ty;
+use crate::codegen::is_cheap;
 
 /// Maximum expression nesting depth left inline. Anything deeper is split out.
 ///
@@ -273,11 +274,13 @@ fn is_control_op(op: &str) -> bool {
 }
 
 /// Per-operand strictness of a (non-control) infix operator: whether codegen
-/// forces that operand. Mirrors codegen's lowering.
+/// forces that operand. Mirrors codegen's lowering (`^` is NOT here: it is a
+/// Prelude function, emitted as an ordinary call whose arguments codegen does
+/// not force — see `codegen::is_builtin_op`).
 fn operand_strictness(op: &str, lhs_ty: &Ty, rhs_ty: &Ty) -> (bool, bool) {
     match op {
         // Arithmetic and comparison force both operands.
-        "+" | "-" | "*" | "/" | "%" | "^" | "div" | "mod" | "==" | "/=" | "~="
+        "+" | "-" | "*" | "/" | "%" | "div" | "mod" | "==" | "/=" | "~="
         | "<" | ">" | "<=" | ">=" => (true, true),
         // `<>`/`++` are strict only on strings/bytestrings (Lua `..`); on lists
         // they build a lazy-tailed append, so the operands stay non-strict.
@@ -293,51 +296,6 @@ fn is_string_type(ty: &Ty) -> bool {
     matches!(ty, Ty::Con(n) if n == "String" || n == "ByteString")
 }
 
-/// Whether codegen would emit this expression *eagerly* (bare + concrete)
-/// rather than as a memoizing thunk. Mirrors `codegen::Codegen::is_cheap` — a
-/// non-strict position may only be hoisted when this is false (stays lazy).
-fn is_cheap(e: &TExpr) -> bool {
-    match &e.kind {
-        TExprKind::Lit(_)
-        | TExprKind::Con(_)
-        | TExprKind::Var(_)
-        | TExprKind::Lambda { .. }
-        | TExprKind::OpFunc(_) => true,
-        TExprKind::Paren(inner) | TExprKind::Negate(inner) => is_cheap(inner),
-        TExprKind::Tuple(elems) => elems.iter().all(is_cheap),
-        TExprKind::InfixApp { op, lhs, rhs } => {
-            is_builtin_op(op) && is_cheap(lhs) && is_cheap(rhs)
-        }
-        TExprKind::App(func, arg) => {
-            if is_con_app(e) {
-                is_cheap(arg) && is_cheap(func)
-            } else {
-                false
-            }
-        }
-        TExprKind::If { cond, then_branch, else_branch } => {
-            is_cheap(cond) && is_cheap(then_branch) && is_cheap(else_branch)
-        }
-        _ => false,
-    }
-}
-
-/// Mirror of `codegen::is_builtin_op`.
-fn is_builtin_op(op: &str) -> bool {
-    matches!(op,
-        "+" | "-" | "*" | "/" | "%" | "^" | "==" | "/=" | "~="
-        | "<" | ">" | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ".." | "$" | "."
-        | "div" | "mod")
-}
-
-/// Mirror of `codegen::Codegen::is_con_app`.
-fn is_con_app(e: &TExpr) -> bool {
-    match &e.kind {
-        TExprKind::Con(_) => true,
-        TExprKind::App(func, _) => is_con_app(func),
-        _ => false,
-    }
-}
 
 /// Whether an expression may be named by a `let` binding without changing
 /// semantics or breaking a codegen shape assumption. Only pure values qualify.
