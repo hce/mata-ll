@@ -22,24 +22,16 @@ main = do
     let c = Circle 2
     let r = Rect 2 3
     -- Show instance (method body calls the sibling `render`)
-    putStrLn (show c)
-    putStrLn (show r)
+    assert (show c == "shape of area 12.0") "Show instance body calls prefixed sibling"
+    assert (show r == "shape of area 6.0") "Show instance on the second constructor"
     -- Eq instance on the qualified type
-    putStrLn (show (c == Circle 2))
-    putStrLn (show (r == Q.unit))
+    assert (c == Circle 2) "Eq instance attached to the prefixed type"
+    assert (not (r == Q.unit)) "Eq instance distinguishes values"
     -- class default method (body calls the sibling `label` and `render`);
     -- class names and methods stay global, like constructors
-    putStrLn (describe r)
-    putStrLn (label Q.unit)
+    assert (describe r == "described: shape of area 6.0") "class default calls prefixed sibling"
+    assert (label Q.unit == "shape of area 1.0") "instance method of the imported class"
     -- qualified value + type in a signature
-    putStrLn (show (Q.area r))
+    assert (Q.area r == 6) "qualified value"
     -- class default body using a qualified sibling
-    putStrLn (show (scaledMeasure r))
--- expect: shape of area 12
--- expect: shape of area 6
--- expect: True
--- expect: False
--- expect: described: shape of area 6
--- expect: shape of area 1
--- expect: 6
--- expect: 60
+    assert (scaledMeasure r == 60) "use-site rewrite reaches class default bodies"

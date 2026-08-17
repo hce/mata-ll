@@ -15,28 +15,18 @@ main = do
         c = a + b
         double x = x * 2
         (p, q) = (double c, c - 1)
-    putStrLn (show a)
-    putStrLn (show b)
-    putStrLn (show c)
-    putStrLn (show p)
-    putStrLn (show q)
+    assert (a == 3 && b == 4) "tuple binding"
+    assert (c == 7) "sibling simple binding sees the tuple's variables"
+    assert (p == 14 && q == 6) "sibling function + second tuple binding"
     -- A tuple binding whose right-hand side refers to a LATER sibling of
     -- the same group (Haskell 2010 letrec), and one whose pattern is only
     -- matched on demand.
     let (m, n) = (k + 1, k + 2)
         k = 10
         (_, lazyErr) = (0 :: Int, error "never forced" :: Int)
-    putStrLn (show (m + n))
-    putStrLn (show (fst (1 :: Int, lazyErr)))
+    assert (m + n == 23) "tuple RHS refers to a later sibling (letrec)"
+    assert (fst (1 :: Int, lazyErr) == 1) "unforced selector stays lazy"
     -- The statement after a `let` group, at the `let` line's own indent,
     -- is a statement — not a binding.
     let z = 5
-    putStrLn (show (z + 1))
--- expect: 3
--- expect: 4
--- expect: 7
--- expect: 14
--- expect: 6
--- expect: 23
--- expect: 1
--- expect: 6
+    assert (z + 1 == 6) "statement after the group"

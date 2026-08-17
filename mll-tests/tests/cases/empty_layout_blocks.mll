@@ -38,15 +38,9 @@ helper = twice
 
 main :: IO ()
 main = do
-    putStrLn (describe Unit)
-    putStrLn (tag Unit)
-    putStrLn (describe (7 :: Int))
-    putStrLn (tag (7 :: Int))
-    putStrLn (label 3)
-    putStrLn (show (helper 21))
--- expect: default description
--- expect: no tag
--- expect: int 7
--- expect: no tag
--- expect: label 3
--- expect: 42
+    assert (describe Unit == "default description") "all-defaulted instance: describe"
+    assert (tag Unit == "no tag") "all-defaulted instance: tag"
+    assert (describe (7 :: Int) == "int 7") "one-line instance body"
+    assert (tag (7 :: Int) == "no tag") "one-line instance keeps the other default"
+    assert (label 3 == "label 3") "declaration after a one-line instance is top level"
+    assert (helper 21 == 42) "declaration after a bare `where` is top level"

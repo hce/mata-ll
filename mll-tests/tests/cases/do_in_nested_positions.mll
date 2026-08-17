@@ -27,6 +27,29 @@ pairAct :: (Int, IO ())
 pairAct = (2, do putStrLn "in tuple"
                  putStrLn "second")
 
+-- The same three positions, returning values the checks below assert on.
+classify :: Int -> IO String
+classify n = case n of
+    m | m > 0 -> do
+            let s = "positive " <> show m
+            return s
+      | otherwise -> do
+            return "non-positive"
+
+class Named a where
+    nameOf :: a -> String
+    greeting :: a -> IO String
+    greeting x = do
+        let g = "hello " <> nameOf x
+        return g
+
+instance Named Cat where
+    nameOf _ = "cat"
+
+pairVal :: (Int, IO Int)
+pairVal = (2, do let x = 20
+                 return (x + 1))
+
 main :: IO ()
 main = do
     greet Cat
@@ -34,11 +57,11 @@ main = do
     report 0
     snd pairAct
     putStrLn (show (fst pairAct))
--- expect: hello
--- expect: cat
--- expect: positive
--- expect: 3
--- expect: non-positive
--- expect: in tuple
--- expect: second
--- expect: 2
+    p <- classify 3
+    assert (p == "positive 3") "do in a case-guard body"
+    q <- classify 0
+    assert (q == "non-positive") "do in the otherwise guard body"
+    g <- greeting Cat
+    assert (g == "hello cat") "do in a class default method"
+    v <- snd pairVal
+    assert (v == 21 && fst pairVal == 2) "do in a tuple element"
