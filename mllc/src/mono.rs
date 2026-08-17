@@ -885,7 +885,7 @@ impl Monomorphizer {
     /// local inside its body (the binding's NAME is put in scope by the
     /// caller, for the whole recursive group).
     fn mono_local_def(&mut self, ld: TLocalDef) -> TLocalDef {
-        let params: Vec<String> = ld.patterns.iter().flat_map(Self::pattern_vars).collect();
+        let params: Vec<String> = ld.patterns.iter().flat_map(TPattern::bound_vars).collect();
         let body = self.with_locals(params, |m| m.mono_expr(ld.body));
         TLocalDef { name: ld.name, patterns: ld.patterns, body }
     }
@@ -894,7 +894,7 @@ impl Monomorphizer {
         // Clause pattern variables and where-bound names are local in the
         // body, the guards and the where bodies (a where group is one
         // recursive scope, like a let group).
-        let scope: Vec<String> = clause.patterns.iter().flat_map(Self::pattern_vars)
+        let scope: Vec<String> = clause.patterns.iter().flat_map(TPattern::bound_vars)
             .chain(clause.where_binds.iter().map(|ld| ld.name.clone()))
             .collect();
         self.with_locals(scope, |m| {
@@ -907,18 +907,6 @@ impl Monomorphizer {
                 .map(|ld| m.mono_local_def(ld)).collect();
             clause
         })
-    }
-
-    fn pattern_vars(pat: &TPattern) -> Vec<String> {
-        match pat {
-            TPattern::Var(name, _) => vec![name.clone()],
-            TPattern::Wildcard | TPattern::LitPat(_) => vec![],
-            TPattern::Constructor { args, .. } => {
-                args.iter().flat_map(Self::pattern_vars).collect()
-            }
-            TPattern::Paren(p) => Self::pattern_vars(p),
-            TPattern::Tuple(ps) => ps.iter().flat_map(Self::pattern_vars).collect(),
-        }
     }
 
     fn mono_expr(&mut self, expr: TExpr) -> TExpr {
@@ -1269,7 +1257,7 @@ impl Monomorphizer {
                 TExprKind::Case {
                     scrutinee: Box::new(self.mono_expr(*scrutinee)),
                     branches: branches.into_iter().map(|b| {
-                        let pat_vars = Self::pattern_vars(&b.pattern);
+                        let pat_vars = b.pattern.bound_vars();
                         self.with_locals(pat_vars, |m| TCaseBranch {
                             pattern: b.pattern,
                             guards: b.guards.into_iter().map(|g| TGuard {

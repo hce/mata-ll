@@ -64,29 +64,18 @@ impl CodeGen {
                     let r = self.expr_subst_ast(rhs, subst);
                     return Expr::call_named("__mll_list_index", vec![l, r]);
                 }
-                if op == "$" {
-                    // return $ x / pure $ x in action context: just emit x
-                    if matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                        return self.expr_subst_ast(rhs, subst);
-                    }
-                    let callee = self.callee_subst_ast(lhs, subst);
-                    let arg = self.expr_subst_ast(rhs, subst);
-                    return Expr::call(callee, vec![Expr::thunk(arg)]);
-                }
-                if op == "." {
-                    // Mirror the expr_ast "." arm. Without this, `.` would
-                    // fall into the builtin-op branch below (is_builtin_op
-                    // lists it for cheapness) and be emitted as Lua infix
-                    // `a . b`, which is not a Lua operator.
-                    let f = self.callee_subst_ast(lhs, subst);
-                    let g = self.callee_subst_ast(rhs, subst);
-                    return Expr::paren(Expr::Func(
-                        vec!["_x".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::call(
-                            f,
-                            vec![Expr::call(g, vec![Expr::name("_x")])],
-                        ))]),
-                    ));
+                if op == "$" || op == "." {
+                    // `$` and `.` have dedicated emitters (dollar_infix_ast,
+                    // compose_infix_ast) whose laziness rules — suspend `g x`
+                    // for a non-strict `f`, the strictness row at the applied
+                    // position, partial-application closures, runtime-generic
+                    // adapters — a substituting twin re-derived incompletely:
+                    // the `.` twin built `f(g(_x))` with no suspension, so an
+                    // inlined `compose ignore add1` forced the bottom `ignore`
+                    // never demands. Substitute at the TIR level and let the
+                    // real emitter weigh the call-site expressions in place.
+                    let e = Self::subst_texpr(expr, subst);
+                    return self.expr_ast(&e);
                 }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
@@ -198,7 +187,89 @@ impl CodeGen {
                 }
                 Expr::Table(items)
             }
-            _ => self.expr_ast(expr),
+            // Every other shape (a `case` or `let` inside an inlined
+            // lambda's body, …): the substitution applied at the TIR level,
+            // then the ordinary emitter. Falling back to expr_ast on the
+            // UNsubstituted body — as this arm once did — left the
+            // parameter free (`mkPick x = \b -> case b of True -> x`
+            // inlined at `mkPick 7` read a nil `x`).
+            _ => {
+                let e = Self::subst_texpr(expr, subst);
+                self.expr_ast(&e)
+            }
+        }
+    }
+
+    /// The expression with every substituted parameter replaced by its
+    /// call-site expression, at the TIR level, so the ordinary emitter sees
+    /// (and weighs) the call-site expression exactly where the parameter
+    /// stood. Shadow-aware: a lambda parameter, a let name (or a let-bound
+    /// function's own parameters, in its body) or a case pattern variable
+    /// that rebinds a substituted name hides it in its scope.
+    fn subst_texpr(expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) -> TExpr {
+        if subst.is_empty() {
+            return expr.clone();
+        }
+        let hide = |names: &[String]| -> std::collections::HashMap<String, &TExpr> {
+            let mut inner = subst.clone();
+            for n in names { inner.remove(n); }
+            inner
+        };
+        match &expr.kind {
+            TExprKind::Var(name) => match subst.get(name.as_str()) {
+                Some(rep) => (*rep).clone(),
+                None => expr.clone(),
+            },
+            TExprKind::Lambda { params, body } => {
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                let inner = hide(&names);
+                TExpr::new(
+                    TExprKind::Lambda {
+                        params: params.clone(),
+                        body: Box::new(Self::subst_texpr(body, &inner)),
+                    },
+                    expr.ty.clone(),
+                )
+            }
+            TExprKind::Let { binds, body } => {
+                let names: Vec<String> = binds.iter().map(|b| b.name.clone()).collect();
+                let inner = hide(&names);
+                let binds = binds.iter().map(|b| {
+                    let mut own: Vec<String> = names.clone();
+                    for p in &b.patterns { own.extend(p.bound_vars()); }
+                    let bind_subst = hide(&own);
+                    TLocalDef {
+                        name: b.name.clone(),
+                        patterns: b.patterns.clone(),
+                        body: Self::subst_texpr(&b.body, &bind_subst),
+                    }
+                }).collect();
+                TExpr::new(
+                    TExprKind::Let { binds, body: Box::new(Self::subst_texpr(body, &inner)) },
+                    expr.ty.clone(),
+                )
+            }
+            TExprKind::Case { scrutinee, branches } => {
+                let branches = branches.iter().map(|b| {
+                    let inner = hide(&b.pattern.bound_vars());
+                    TCaseBranch {
+                        pattern: b.pattern.clone(),
+                        guards: b.guards.iter().map(|g| TGuard {
+                            condition: Self::subst_texpr(&g.condition, &inner),
+                            body: Self::subst_texpr(&g.body, &inner),
+                        }).collect(),
+                        body: b.body.as_ref().map(|e| Self::subst_texpr(e, &inner)),
+                    }
+                }).collect();
+                TExpr::new(
+                    TExprKind::Case {
+                        scrutinee: Box::new(Self::subst_texpr(scrutinee, subst)),
+                        branches,
+                    },
+                    expr.ty.clone(),
+                )
+            }
+            _ => expr.clone().map_children(&mut |c| Self::subst_texpr(&c, subst)),
         }
     }
 

@@ -1317,7 +1317,7 @@ fn demanded_vars_in(
     }
 }
 
-/// Collect all variable names bound by a pattern.
+/// The variable names bound by a pattern, as a set (`TPattern::for_each_var`).
 fn pattern_bound_vars(pat: &TPattern) -> HashSet<String> {
     let mut vars = HashSet::new();
     collect_pattern_vars(pat, &mut vars);
@@ -1325,17 +1325,7 @@ fn pattern_bound_vars(pat: &TPattern) -> HashSet<String> {
 }
 
 fn collect_pattern_vars(pat: &TPattern, vars: &mut HashSet<String>) {
-    match pat {
-        TPattern::Var(name, _) => { vars.insert(name.clone()); }
-        TPattern::Wildcard | TPattern::LitPat(_) => {}
-        TPattern::Constructor { args, .. } => {
-            for a in args { collect_pattern_vars(a, vars); }
-        }
-        TPattern::Paren(inner) => collect_pattern_vars(inner, vars),
-        TPattern::Tuple(elems) => {
-            for e in elems { collect_pattern_vars(e, vars); }
-        }
-    }
+    pat.for_each_var(&mut |v| { vars.insert(v.to_string()); });
 }
 
 // ════════════════════════════════════════════════════════════════════════

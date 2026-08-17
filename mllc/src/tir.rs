@@ -679,6 +679,32 @@ pub enum TPattern {
     Tuple(Vec<TPattern>),
 }
 
+impl TPattern {
+    /// Call `f` on every variable this pattern binds, in source order —
+    /// THE enumeration of a pattern's binders (the demand, mono and inline
+    /// walkers all need it; each once carried its own copy).
+    pub fn for_each_var(&self, f: &mut impl FnMut(&str)) {
+        match self {
+            TPattern::Var(name, _) => f(name),
+            TPattern::Wildcard | TPattern::LitPat(_) => {}
+            TPattern::Constructor { args, .. } => {
+                for a in args { a.for_each_var(f); }
+            }
+            TPattern::Paren(inner) => inner.for_each_var(f),
+            TPattern::Tuple(elems) => {
+                for e in elems { e.for_each_var(f); }
+            }
+        }
+    }
+
+    /// The variables this pattern binds, in source order.
+    pub fn bound_vars(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.for_each_var(&mut |v| out.push(v.to_string()));
+        out
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum TLiteral {
     Integer(i64),
