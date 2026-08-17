@@ -2119,56 +2119,81 @@ impl Checker {
     }
 
     /// Build the decoder expression (of type `Json -> Either String field_ty`)
-    /// for one field of a FromJSON-derived constructor. Resolution is
-    /// STRUCTURAL at derive time (mirroring derive_functor's fmap resolution):
-    /// mata-ll cannot register class instances on library/container types, so
-    /// primitives use the fromJSON* combinators, `[t]` and `Maybe t` route
-    /// through fromJSONList/fromJSONMaybe, and a field of another FromJSON
-    /// type calls that type's own `fromJSON_T` decoder — including self- and
-    /// mutually-recursive types, via the `fromjson_types` prescan.
-    /// `Err` carries (reason, note) for the rejection message.
+    /// for one field of a FromJSON-derived constructor. See
+    /// `json_field_codec` — the decoder and the encoder are ONE resolution
+    /// over the direction table, so everything the derived decoder can read
+    /// the derived encoder writes, and vice versa.
     pub(super) fn fromjson_field_decoder(&self, field_ty: &Ty) -> Result<TExpr, (String, String)> {
-        let dec_ty = Ty::arrow(Self::json_ty(), Self::estr_ty(field_ty));
+        self.json_field_codec(JsonDir::Decode, field_ty)
+    }
+
+    /// Build the encoder expression (of type `field_ty -> Json`) for one
+    /// field of a ToJSON-derived constructor (see `json_field_codec`).
+    pub(super) fn tojson_field_encoder(&self, field_ty: &Ty) -> Result<TExpr, (String, String)> {
+        self.json_field_codec(JsonDir::Encode, field_ty)
+    }
+
+    /// The codec expression for one field of a derived JSON instance, in
+    /// either direction. Resolution is STRUCTURAL at derive time (mirroring
+    /// derive_functor's fmap resolution): mata-ll cannot register class
+    /// instances on library/container types, so primitives use the
+    /// fromJSON*/toJSON* combinators, `[t]` and `Maybe t` route through the
+    /// List/Maybe combinators, and a field of another FromJSON/ToJSON type
+    /// calls that type's own `fromJSON_T`/`toJSON_T` codec — including self-
+    /// and mutually-recursive types, via the prescan sets. `Err` carries
+    /// (reason, note) for the rejection message. The two directions once
+    /// lived as a 55-line pair differing only in the direction's words.
+    fn json_field_codec(&self, dir: JsonDir, field_ty: &Ty) -> Result<TExpr, (String, String)> {
+        let codec_ty = dir.codec_ty(field_ty);
+        let comb = |name: &str, ty: Ty| Self::jx_var(&format!("{}{}", dir.prefix(), name), ty);
         match field_ty {
-            Ty::Con(n) if n == "Int" => Ok(Self::jx_var("fromJSONInt", dec_ty)),
-            Ty::Con(n) if n == "Integer" => Ok(Self::jx_var("fromJSONInteger", dec_ty)),
-            Ty::Con(n) if n == "Number" => Ok(Self::jx_var("fromJSONNumber", dec_ty)),
-            Ty::Con(n) if n == "String" => Ok(Self::jx_var("fromJSONString", dec_ty)),
-            Ty::Con(n) if n == "Bool" => Ok(Self::jx_var("fromJSONBool", dec_ty)),
-            Ty::Con(n) if n == "Json" => Ok(Self::jx_var("fromJSONValue", dec_ty)),
+            Ty::Con(n) if n == "Int" => Ok(comb("Int", codec_ty)),
+            Ty::Con(n) if n == "Integer" => Ok(comb("Integer", codec_ty)),
+            Ty::Con(n) if n == "Number" => Ok(comb("Number", codec_ty)),
+            Ty::Con(n) if n == "String" => Ok(comb("String", codec_ty)),
+            Ty::Con(n) if n == "Bool" => Ok(comb("Bool", codec_ty)),
+            Ty::Con(n) if n == "Json" => Ok(comb("Value", codec_ty)),
             Ty::List(elem) => {
-                let inner = self.fromjson_field_decoder(elem)?;
-                let list_fn_ty = Ty::arrow(inner.ty.clone(), dec_ty.clone());
-                Ok(Self::jx_app(Self::jx_var("fromJSONList", list_fn_ty), inner, dec_ty))
+                let inner = self.json_field_codec(dir, elem)?;
+                let list_fn_ty = Ty::arrow(inner.ty.clone(), codec_ty.clone());
+                Ok(Self::jx_app(comb("List", list_fn_ty), inner, codec_ty))
             }
             _ if Self::ty_maybe_inner(field_ty).is_some() => {
                 let inner_ty = Self::ty_maybe_inner(field_ty).unwrap();
-                let inner = self.fromjson_field_decoder(inner_ty)?;
-                let maybe_fn_ty = Ty::arrow(inner.ty.clone(), dec_ty.clone());
-                Ok(Self::jx_app(Self::jx_var("fromJSONMaybe", maybe_fn_ty), inner, dec_ty))
+                let inner = self.json_field_codec(dir, inner_ty)?;
+                let maybe_fn_ty = Ty::arrow(inner.ty.clone(), codec_ty.clone());
+                Ok(Self::jx_app(comb("Maybe", maybe_fn_ty), inner, codec_ty))
             }
             Ty::Con(n) => {
-                if self.fromjson_types.contains(n)
-                    || self.instances.contains_key(&("FromJSON".to_string(), InstHead::Con(n.clone()))) {
-                    Ok(Self::jx_var(&format!("fromJSON_{}", n), dec_ty))
+                let derived_here = match dir {
+                    JsonDir::Decode => self.fromjson_types.contains(n),
+                    JsonDir::Encode => self.tojson_types.contains(n),
+                };
+                if derived_here
+                    || self.instances.contains_key(&(dir.class().to_string(), InstHead::Con(n.clone()))) {
+                    Ok(Self::jx_var(&format!("{}_{}", dir.prefix(), n), codec_ty))
                 } else {
                     Err((
-                        format!("the type '{}' has no FromJSON instance", n),
-                        format!("every field of a derived decoder needs its own decoder; add `deriving (FromJSON)` to '{}' or write `instance FromJSON {}` in the module that defines it.", n, n),
+                        format!("the type '{}' has no {} instance", n, dir.class()),
+                        format!("every field of a derived {} needs its own {}; add `deriving ({})` to '{}' or write `instance {} {}` in the module that defines it.",
+                            dir.noun(), dir.noun(), dir.class(), n, dir.class(), n),
                     ))
                 }
             }
             Ty::Arrow(..) => Err((
                 "it is a function type".to_string(),
-                "a function has no JSON representation, so no decoder can produce one; store data instead of behavior, or write the FromJSON instance by hand for an encoding you define.".to_string(),
+                format!("a function has no JSON representation, so no {} can {} one; store data instead of behavior, or write the {} instance by hand for an encoding you define.",
+                    dir.noun(), dir.produce(), dir.class()),
             )),
             Ty::Tuple(_) => Err((
-                format!("the tuple type '{}' has no JSON decoding convention in mata-ll", field_ty),
-                "GHC's aeson decodes tuples from fixed-length arrays; mata-ll does not — wrap the tuple in a small record type deriving (FromJSON), which also gives the components names in the JSON.".to_string(),
+                format!("the tuple type '{}' has no JSON {} convention in mata-ll", field_ty, dir.gerund()),
+                format!("GHC's aeson {}; mata-ll does not — wrap the tuple in a small record type deriving ({}), which also gives the components names in the JSON.",
+                    dir.tuple_convention(), dir.class()),
             )),
             Ty::App(..) => Err((
                 format!("the type '{}' is parameterized", field_ty),
-                "a derived decoder resolves one concrete decoder per field at compile time, and mata-ll instances cannot cover a parameterized type at every instantiation; wrap the concrete instantiation in its own data type deriving (FromJSON).".to_string(),
+                format!("a derived {} resolves one concrete {} per field at compile time, and mata-ll instances cannot cover a parameterized type at every instantiation; wrap the concrete instantiation in its own data type deriving ({}).",
+                    dir.noun(), dir.noun(), dir.class()),
             )),
             Ty::IO(_) | Ty::LuaIO(..) => Err((
                 "it is an effectful action type".to_string(),
@@ -2176,11 +2201,12 @@ impl Checker {
             )),
             Ty::Var(v) => Err((
                 format!("its type is the type parameter '{}'", v.name),
-                "a type parameter has no decoder the compiler can pick at derive time.".to_string(),
+                format!("a type parameter has no {} the compiler can pick at derive time.", dir.noun()),
             )),
             other => Err((
-                format!("the type '{}' cannot be decoded from JSON", other),
-                "derived FromJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a FromJSON instance.".to_string(),
+                format!("the type '{}' cannot be {}", other, dir.past()),
+                format!("derived {} supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a {} instance.",
+                    dir.class(), dir.class()),
             )),
         }
     }
@@ -2406,6 +2432,57 @@ impl Checker {
         true
     }
 
+    /// The checks every derived JSON instance shares — the class and its
+    /// combinators in scope, no type parameters, no GADT/existential
+    /// constructors, valid keys/tags — reporting the first failure through
+    /// reject_derive. Returns whether the encoding is TAGGED (a multi-
+    /// constructor type, or a lone nullary constructor whose NAME is the
+    /// payload; the two directions must agree on this) and each
+    /// constructor's registered field types.
+    fn json_derive_preamble(
+        &mut self,
+        dir: JsonDir,
+        type_name: &str,
+        type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Option<(bool, Vec<Vec<Ty>>)> {
+        let class = dir.class();
+        // The class and every combinator the generated codec calls live in
+        // the JSON library module; without the import nothing can resolve.
+        if !self.classes.contains_key(class) || self.env.lookup(dir.scope_probe()).is_none() {
+            self.reject_derive(class, type_name,
+                &format!("the {} class and its {} combinators are not in scope", class, dir.noun()),
+                &format!("the {} class and the codec combinators the derived {} calls ({}) live in the JSON library module; add `import JSON` at the top of this file.",
+                    class, dir.noun(), dir.scope_examples()));
+            return None;
+        }
+        if !type_vars.is_empty() {
+            self.reject_derive(class, type_name,
+                &format!("'{}' has type parameters", type_name),
+                &format!("a derived {n} must pick one concrete {n} per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `{c} a` constraint on the instance; mata-ll does not derive constrained codecs, so derive {c} for concrete types only (wrap each instantiation you need in its own data type).",
+                    n = dir.noun(), c = class));
+            return None;
+        }
+        for con in constructors {
+            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
+                self.reject_derive(class, type_name,
+                    &format!("constructor '{}' is a GADT / existential constructor", con.name),
+                    &format!("{} must name every field's type to choose how to {} it, which GADT and existential constructors do not allow.",
+                        dir.a_noun(), dir.verb()));
+                return None;
+            }
+        }
+        let single_nullary = constructors.len() == 1 && self.derived_is_nullary(&constructors[0]);
+        let tagged = constructors.len() > 1 || single_nullary;
+        if !self.validate_json_keys(class, type_name, constructors, tagged) {
+            return None;
+        }
+        // Constructor field types as registered in pass 1.
+        let con_field_tys: Vec<Vec<Ty>> =
+            constructors.iter().map(|con| self.derived_field_tys(con)).collect();
+        Some((tagged, con_field_tys))
+    }
+
     /// Generate `fromJSON` for a data type: `fromJSON_T :: Json -> Either String T`
     /// built from the JSON module's decoder combinators, plus the FromJSON
     /// instance registration.
@@ -2438,44 +2515,11 @@ impl Checker {
         let reject = |checker: &mut Self, reason: String, note: &str| {
             checker.reject_derive("FromJSON", type_name, &reason, note);
         };
-
-        // The class and every combinator the generated decoder calls live in
-        // the JSON library module; without the import nothing can resolve.
-        if !self.classes.contains_key("FromJSON") || self.env.lookup("jContext").is_none() {
-            reject(self,
-                "the FromJSON class and its decoder combinators are not in scope".to_string(),
-                "the FromJSON class and the codec combinators the derived decoder calls (jContext, jFieldWith, …) live in the JSON library module; add `import JSON` at the top of this file.");
+        let Some((tagged, con_field_tys)) =
+            self.json_derive_preamble(JsonDir::Decode, type_name, type_vars, constructors)
+        else {
             return vec![];
-        }
-
-        if !type_vars.is_empty() {
-            reject(self,
-                format!("'{}' has type parameters", type_name),
-                "a derived decoder must pick one concrete decoder per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `FromJSON a` constraint on the instance; mata-ll does not derive constrained codecs, so derive FromJSON for concrete types only (wrap each instantiation you need in its own data type).");
-            return vec![];
-        }
-
-        for con in constructors {
-            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
-                reject(self,
-                    format!("constructor '{}' is a GADT / existential constructor", con.name),
-                    "a decoder must name every field's type to choose how to decode it, which GADT and existential constructors do not allow.");
-                return vec![];
-            }
-        }
-
-        // Tagged decoding applies to multi-constructor types, and to a lone
-        // nullary constructor (no fields to decode — the constructor NAME is
-        // the payload).
-        let single_nullary = constructors.len() == 1 && match &constructors[0].fields {
-            ConstructorFields::Positional(fs) => fs.is_empty(),
-            ConstructorFields::Named(fs) => fs.is_empty(),
         };
-        let tagged = constructors.len() > 1 || single_nullary;
-
-        if !self.validate_json_keys("FromJSON", type_name, constructors, tagged) {
-            return vec![];
-        }
 
         let result_ty = Ty::Con(type_name.to_string());
         let estr = Self::estr_ty(&result_ty);
@@ -2483,13 +2527,6 @@ impl Checker {
         let str_ty = Ty::Con("String".into());
         let bool_ty = Ty::Con("Bool".into());
         let mangled = format!("fromJSON_{}", type_name);
-
-        // Constructor field types as registered in pass 1.
-        let con_field_tys: Vec<Vec<Ty>> = constructors.iter().map(|con| {
-            self.constructors.get(self.resolve_con_name(&con.name))
-                .map(|ci| ci.field_types.clone())
-                .unwrap_or_default()
-        }).collect();
 
         let body_inner: TExpr = if tagged {
             // "'A', 'B' or 'C'" for the unknown-tag message — the effective
@@ -2762,73 +2799,6 @@ impl Checker {
         Self::jx_app(TExpr::new(TExprKind::Con("JArr".into()), con_ty), list, Self::json_ty())
     }
 
-    /// Build the encoder expression (of type `field_ty -> Json`) for one
-    /// field of a ToJSON-derived constructor — the exact mirror of
-    /// `fromjson_field_decoder`, so that everything the derived decoder can
-    /// read, the derived encoder writes (and vice versa). Resolution is
-    /// STRUCTURAL at derive time: primitives use the toJSON* combinators,
-    /// `[t]` and `Maybe t` route through toJSONList/toJSONMaybe, and a field
-    /// of another ToJSON type calls that type's own `toJSON_T` encoder —
-    /// including self- and mutually-recursive types, via the `tojson_types`
-    /// prescan. `Err` carries (reason, note) for the rejection message.
-    pub(super) fn tojson_field_encoder(&self, field_ty: &Ty) -> Result<TExpr, (String, String)> {
-        let enc_ty = Ty::arrow(field_ty.clone(), Self::json_ty());
-        match field_ty {
-            Ty::Con(n) if n == "Int" => Ok(Self::jx_var("toJSONInt", enc_ty)),
-            Ty::Con(n) if n == "Integer" => Ok(Self::jx_var("toJSONInteger", enc_ty)),
-            Ty::Con(n) if n == "Number" => Ok(Self::jx_var("toJSONNumber", enc_ty)),
-            Ty::Con(n) if n == "String" => Ok(Self::jx_var("toJSONString", enc_ty)),
-            Ty::Con(n) if n == "Bool" => Ok(Self::jx_var("toJSONBool", enc_ty)),
-            Ty::Con(n) if n == "Json" => Ok(Self::jx_var("toJSONValue", enc_ty)),
-            Ty::List(elem) => {
-                let inner = self.tojson_field_encoder(elem)?;
-                let list_fn_ty = Ty::arrow(inner.ty.clone(), enc_ty.clone());
-                Ok(Self::jx_app(Self::jx_var("toJSONList", list_fn_ty), inner, enc_ty))
-            }
-            _ if Self::ty_maybe_inner(field_ty).is_some() => {
-                let inner_ty = Self::ty_maybe_inner(field_ty).unwrap();
-                let inner = self.tojson_field_encoder(inner_ty)?;
-                let maybe_fn_ty = Ty::arrow(inner.ty.clone(), enc_ty.clone());
-                Ok(Self::jx_app(Self::jx_var("toJSONMaybe", maybe_fn_ty), inner, enc_ty))
-            }
-            Ty::Con(n) => {
-                if self.tojson_types.contains(n)
-                    || self.instances.contains_key(&("ToJSON".to_string(), InstHead::Con(n.clone()))) {
-                    Ok(Self::jx_var(&format!("toJSON_{}", n), enc_ty))
-                } else {
-                    Err((
-                        format!("the type '{}' has no ToJSON instance", n),
-                        format!("every field of a derived encoder needs its own encoder; add `deriving (ToJSON)` to '{}' or write `instance ToJSON {}` in the module that defines it.", n, n),
-                    ))
-                }
-            }
-            Ty::Arrow(..) => Err((
-                "it is a function type".to_string(),
-                "a function has no JSON representation, so no encoder can serialize one; store data instead of behavior, or write the ToJSON instance by hand for an encoding you define.".to_string(),
-            )),
-            Ty::Tuple(_) => Err((
-                format!("the tuple type '{}' has no JSON encoding convention in mata-ll", field_ty),
-                "GHC's aeson encodes tuples as fixed-length arrays; mata-ll does not — wrap the tuple in a small record type deriving (ToJSON), which also gives the components names in the JSON.".to_string(),
-            )),
-            Ty::App(..) => Err((
-                format!("the type '{}' is parameterized", field_ty),
-                "a derived encoder resolves one concrete encoder per field at compile time, and mata-ll instances cannot cover a parameterized type at every instantiation; wrap the concrete instantiation in its own data type deriving (ToJSON).".to_string(),
-            )),
-            Ty::IO(_) | Ty::LuaIO(..) => Err((
-                "it is an effectful action type".to_string(),
-                "an IO action has no JSON representation.".to_string(),
-            )),
-            Ty::Var(v) => Err((
-                format!("its type is the type parameter '{}'", v.name),
-                "a type parameter has no encoder the compiler can pick at derive time.".to_string(),
-            )),
-            other => Err((
-                format!("the type '{}' cannot be encoded to JSON", other),
-                "derived ToJSON supports Int, Number, String, Bool, Json, lists, Maybe, and types that themselves have a ToJSON instance.".to_string(),
-            )),
-        }
-    }
-
     /// Encode constructor argument #i: the resolved encoder applied to the
     /// pattern variable `_x{i}` the clause binds it to.
     pub(super) fn tojson_arg(&self, i: usize, fty: &Ty) -> Result<TExpr, (String, String)> {
@@ -2938,55 +2908,15 @@ impl Checker {
         let reject = |checker: &mut Self, reason: String, note: &str| {
             checker.reject_derive("ToJSON", type_name, &reason, note);
         };
-
-        // The class and every combinator the generated encoder calls live in
-        // the JSON library module; without the import nothing can resolve.
-        if !self.classes.contains_key("ToJSON") || self.env.lookup("toJSONList").is_none() {
-            reject(self,
-                "the ToJSON class and its encoder combinators are not in scope".to_string(),
-                "the ToJSON class and the codec combinators the derived encoder calls (toJSONList, toJSONMaybe, …) live in the JSON library module; add `import JSON` at the top of this file.");
+        let Some((tagged, con_field_tys)) =
+            self.json_derive_preamble(JsonDir::Encode, type_name, type_vars, constructors)
+        else {
             return vec![];
-        }
-
-        if !type_vars.is_empty() {
-            reject(self,
-                format!("'{}' has type parameters", type_name),
-                "a derived encoder must pick one concrete encoder per field at compile time, and a field whose type is a type parameter has none. GHC's aeson handles this with a `ToJSON a` constraint on the instance; mata-ll does not derive constrained codecs, so derive ToJSON for concrete types only (wrap each instantiation you need in its own data type).");
-            return vec![];
-        }
-
-        for con in constructors {
-            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
-                reject(self,
-                    format!("constructor '{}' is a GADT / existential constructor", con.name),
-                    "an encoder must name every field's type to choose how to encode it, which GADT and existential constructors do not allow.");
-                return vec![];
-            }
-        }
-
-        // Tagged encoding applies to multi-constructor types, and to a lone
-        // nullary constructor (no fields to encode — the constructor NAME is
-        // the payload). Must match derive_fromjson's decision exactly.
-        let single_nullary = constructors.len() == 1 && match &constructors[0].fields {
-            ConstructorFields::Positional(fs) => fs.is_empty(),
-            ConstructorFields::Named(fs) => fs.is_empty(),
         };
-        let tagged = constructors.len() > 1 || single_nullary;
-
-        if !self.validate_json_keys("ToJSON", type_name, constructors, tagged) {
-            return vec![];
-        }
 
         let result_ty = Ty::Con(type_name.to_string());
         let json = Self::json_ty();
         let mangled = format!("toJSON_{}", type_name);
-
-        // Constructor field types as registered in pass 1.
-        let con_field_tys: Vec<Vec<Ty>> = constructors.iter().map(|con| {
-            self.constructors.get(self.resolve_con_name(&con.name))
-                .map(|ci| ci.field_types.clone())
-                .unwrap_or_default()
-        }).collect();
 
         // One clause per constructor; report every unsupported field before
         // bailing out.
@@ -3032,5 +2962,65 @@ impl Checker {
             dict_params: vec![],
             derived_strict: false,
         }]
+    }
+}
+
+/// The two derived JSON codecs differ only in these words and types; the
+/// field-codec resolution and the derive preamble are written once over
+/// this table.
+#[derive(Clone, Copy)]
+enum JsonDir {
+    Decode,
+    Encode,
+}
+
+impl JsonDir {
+    fn class(self) -> &'static str {
+        match self { JsonDir::Decode => "FromJSON", JsonDir::Encode => "ToJSON" }
+    }
+    /// The combinator/function prefix: `fromJSONInt`, `toJSON_T`, ….
+    fn prefix(self) -> &'static str {
+        match self { JsonDir::Decode => "fromJSON", JsonDir::Encode => "toJSON" }
+    }
+    /// A decoder maps `Json -> Either String t`; an encoder `t -> Json`.
+    fn codec_ty(self, field_ty: &Ty) -> Ty {
+        match self {
+            JsonDir::Decode => Ty::arrow(Checker::json_ty(), Checker::estr_ty(field_ty)),
+            JsonDir::Encode => Ty::arrow(field_ty.clone(), Checker::json_ty()),
+        }
+    }
+    /// A library name whose presence shows the JSON module is imported.
+    fn scope_probe(self) -> &'static str {
+        match self { JsonDir::Decode => "jContext", JsonDir::Encode => "toJSONList" }
+    }
+    fn scope_examples(self) -> &'static str {
+        match self {
+            JsonDir::Decode => "jContext, jFieldWith, …",
+            JsonDir::Encode => "toJSONList, toJSONMaybe, …",
+        }
+    }
+    fn noun(self) -> &'static str {
+        match self { JsonDir::Decode => "decoder", JsonDir::Encode => "encoder" }
+    }
+    fn a_noun(self) -> &'static str {
+        match self { JsonDir::Decode => "a decoder", JsonDir::Encode => "an encoder" }
+    }
+    fn verb(self) -> &'static str {
+        match self { JsonDir::Decode => "decode", JsonDir::Encode => "encode" }
+    }
+    fn gerund(self) -> &'static str {
+        match self { JsonDir::Decode => "decoding", JsonDir::Encode => "encoding" }
+    }
+    fn produce(self) -> &'static str {
+        match self { JsonDir::Decode => "produce", JsonDir::Encode => "serialize" }
+    }
+    fn past(self) -> &'static str {
+        match self { JsonDir::Decode => "decoded from JSON", JsonDir::Encode => "encoded to JSON" }
+    }
+    fn tuple_convention(self) -> &'static str {
+        match self {
+            JsonDir::Decode => "decodes tuples from fixed-length arrays",
+            JsonDir::Encode => "encodes tuples as fixed-length arrays",
+        }
     }
 }
