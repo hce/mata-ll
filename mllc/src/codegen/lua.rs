@@ -760,3 +760,11 @@ impl Block {
         }
     }
 }
+
+/// The rendered text of a statement list at indent 0 — the byte-compare
+/// currency of the passes' reverse self-checks and idempotence refutation.
+pub(super) fn render_stmts(stmts: &[Stmt]) -> String {
+    let mut s = String::new();
+    Block(stmts.to_vec()).render(0, &mut s);
+    s
+}

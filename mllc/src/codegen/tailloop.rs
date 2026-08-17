@@ -99,7 +99,6 @@
 use std::collections::{HashMap, HashSet};
 
 use super::annot::{self, ScopeView, is_plain_ident};
-use super::loopcore;
 use super::lua::{Block, Expr, FnTarget, Stmt};
 use super::opt;
 
@@ -230,7 +229,25 @@ fn rewritable_site<'a>(e: &'a Expr, name: &SelfName, params: &[String]) -> Optio
 /// Is there at least one tail self-call to rewrite? A dry-run twin of
 /// `rewrite_tails` over the same positions.
 fn has_tail_self_call(stmts: &[Stmt], name: &SelfName, params: &[String]) -> bool {
-    loopcore::tail_position_has(stmts, &|e| rewritable_site(e, name, params).is_some())
+    tail_position_has(stmts, &|e| rewritable_site(e, name, params).is_some())
+}
+
+/// Does any statement-tree tail position — the last statement, or the last
+/// statement of a tail `if`/`elseif`/`else` arm or `do` block — hold a
+/// `return` whose operand satisfies `pred`? The dry-run twin of the loop
+/// passes' tail rewrites, over the same positions (ioloop's spliced-body
+/// gate uses it too).
+pub(super) fn tail_position_has(stmts: &[Stmt], pred: &impl Fn(&Expr) -> bool) -> bool {
+    match stmts.last() {
+        Some(Stmt::Return(e)) => pred(e),
+        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
+            tail_position_has(&then_b.0, pred)
+                || elseifs.iter().any(|(_, b)| tail_position_has(&b.0, pred))
+                || else_b.as_ref().is_some_and(|b| tail_position_has(&b.0, pred))
+        }
+        Some(Stmt::Do(b)) => tail_position_has(&b.0, pred),
+        _ => false,
+    }
 }
 
 /// Replace every tail self-call with the parameter update (and, in the

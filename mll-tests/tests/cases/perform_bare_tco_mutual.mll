@@ -9,7 +9,7 @@
 -- tail-call form — and the chain runs in constant stack with no loop pass
 -- involved (tailloop cannot loop it: it is not self-recursion;
 -- perform_bare_tco_mutual_unoptimized in the harness pins the same run
--- with tailloop/ioloop/performloop disabled). `done` is a bare-name action
+-- with tailloop/ioloop disabled). `done` is a bare-name action
 -- terminal as in perform_bare_tco_deep. `pong` is defined AFTER `ping`, so
 -- ping's body can only know pong's classification from the pre-pass, not
 -- from emission order.

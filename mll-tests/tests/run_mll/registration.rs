@@ -111,7 +111,7 @@ fn perform_bare_tco_deep_unoptimized() {
         let source = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
         let opts = mllc::CompileOptions {
-            disable_opt_passes: Some("tailloop,ioloop,performloop".into()),
+            disable_opt_passes: Some("tailloop,ioloop".into()),
             ..Default::default()
         };
         let lua_code =
@@ -140,7 +140,7 @@ fn perform_bare_tco_mutual_unoptimized() {
         let source = std::fs::read_to_string(path)
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
         let opts = mllc::CompileOptions {
-            disable_opt_passes: Some("tailloop,ioloop,performloop".into()),
+            disable_opt_passes: Some("tailloop,ioloop".into()),
             ..Default::default()
         };
         let lua_code =

@@ -143,20 +143,23 @@
 //!   forwarded through the runner chain.
 //!
 //! The other IO recursion shape — a single-clause function that PERFORMS at
-//! call time and recurses through `return __mll_run_tail(self(…))` at the
-//! OUTER body's tail — is out of scope here: its effects live in skeleton
-//! position, so the repeat-safe gate declines it. (That shape recurses one
-//! Lua frame per step today; converting it is a separate, simpler pass with
-//! a different equivalence argument.)
+//! call time and recurses at the OUTER body's tail — is out of scope here:
+//! its effects live in skeleton position, so the repeat-safe gate declines
+//! it. It needs no pass of its own: the emitter spells that saturated tail
+//! as a bare `return self(…)` (action.rs / direct_perform_fns), Lua's own
+//! tail call, and tailloop loops it like any pure self tail. (A dedicated
+//! pass, performloop, once converted the older `return
+//! __mll_run_tail(self(…))` spelling; it was retired 2026-08-17 once the
+//! emitter stopped producing that shape — see opt.rs.)
 
 use std::collections::{HashMap, HashSet};
 
 use super::annot::{self, ScopeView, is_plain_ident};
-use super::loopcore::{self, each_return, render_stmts, run_tail_self_args};
-use super::lua::{Block, Expr, FnTarget, FuncBody, Stmt};
+use super::lua::{Block, Expr, FnTarget, FuncBody, Stmt, render_stmts};
 use super::opt;
 use super::tailloop::{
     self, SelfName, rename_block, rename_blocked, self_qualifies, self_target,
+    tail_position_has,
 };
 
 pub(super) struct IoLoop;
@@ -193,16 +196,13 @@ fn closure_stmts(e: &Expr) -> Option<&Vec<Stmt>> {
 }
 
 // ---- Branch discovery ----
-// (`run_tail_self_args` — the exact-spelling runner-site predicate — and
-// `each_return` — the every-return visitor over the outer body — are
-// loopcore's, shared with performloop.)
 
 /// Does a spliced closure body have at least one rewritable tail self site?
 /// Tail positions of the CLOSURE body (last statement, tail `if` arms, `do`
 /// blocks) — a site inside a nested loop or literal re-enters the converted
 /// function instead, which is the same semantics.
 fn body_has_site(stmts: &[Stmt], name: &SelfName, params: &[String]) -> bool {
-    loopcore::tail_position_has(stmts, &|e| run_tail_self_args(e, name, params).is_some())
+    tail_position_has(stmts, &|e| run_tail_self_args(e, name, params).is_some())
 }
 
 // ---- The repeat-safe gate (see the module comment) ----
@@ -343,7 +343,7 @@ fn to_loop(stmts: Vec<Stmt>, name: &SelfName, params: &[String]) -> Vec<Stmt> {
                     // (`everywhere: false`): a spliced site is not in
                     // loop-body tail position in general, so the rewrite is
                     // always the goto shape (see the module comment).
-                    loopcore::rewrite_run_tail_sites(&mut body, name, params, false);
+                    rewrite_run_tail_sites(&mut body, name, params);
                     out.extend(body);
                 } else {
                     out.push(Stmt::Return(Expr::call_named("__mll_run_tail", vec![e])));
@@ -425,7 +425,7 @@ fn convert(
     rename_block(&mut loop_stmts, &map);
     let loop_stmts = to_loop(loop_stmts, &self_name, params);
 
-    let inner = loopcore::build_loop_scaffold(&ws, params, loop_stmts);
+    let inner = build_loop_scaffold(&ws, params, loop_stmts);
 
     // Locals budget, per scope: the outer body keeps its own locals plus
     // `_lp`; the loop closure is its own scope holding the copies, the
@@ -454,10 +454,10 @@ fn convert(
     // Self-check (debug/test builds): the conversion must be exactly
     // reversible — un-converting the constructed body must reproduce the
     // original (modulo the closure-spelling canonicalization `reverse`
-    // documents); `loopcore::reverse_check` does the byte-compare and the
+    // documents); `reverse_check` does the byte-compare and the
     // mismatch diagnostics.
     debug_assert!(
-        loopcore::reverse_check(
+        reverse_check(
             "ioloop",
             "original",
             &target.header_text(params),
@@ -524,7 +524,7 @@ fn reverse(
     }
     let [Stmt::WhileTrue(Block(inner))] = lbody.as_slice() else { return None };
     // Strip the per-iteration copies and the continue scaffolding.
-    let rest = loopcore::peel_loop_scaffold(inner, ws, params)?;
+    let rest = peel_loop_scaffold(inner, ws, params)?;
     let unmap: HashMap<String, String> =
         ws.iter().cloned().zip(params.iter().cloned()).collect();
     lockstep(skeleton, rest, name, params, lp, &unmap)
@@ -551,7 +551,7 @@ fn lockstep(
                     return None;
                 }
                 let mut spliced: Vec<Stmt> = l.cloned().collect();
-                loopcore::unrewrite_run_tail_sites(&mut spliced, name, params, false)?;
+                unrewrite_run_tail_sites(&mut spliced, name, params)?;
                 rename_block(&mut spliced, unmap);
                 out.push(Stmt::Return(Expr::Func(
                     vec![],
@@ -638,6 +638,237 @@ fn unrenames_to(l: &Expr, s: &Expr, unmap: &HashMap<String, String>) -> bool {
     let mut probe = vec![Stmt::Return(l.clone())];
     rename_block(&mut probe, unmap);
     render_stmts(&probe) == render_stmts(&[Stmt::Return(s.clone())])
+}
+
+// ---- Runner-site mechanics ----
+// The exact-spelling runner-site predicate, its rewrite/unrewrite pair, the
+// loop scaffold and its peel, and the reverse self-check plumbing. The
+// rewrite/unrewrite and build/peel pairs are one trusted implementation
+// each: the reverse self-check (transform, reverse, byte-compare the
+// rendered form) relies on them being exact inverses, so any change here is
+// exercised by every debug/test compile over the corpus.
+
+/// `__mll_run_tail(<e>)` in the exact spelling the emitter produces (one
+/// `Name` callee, one argument, no paren layers). Exactness keeps the
+/// reverse transform an inverse.
+fn run_tail_arg(e: &Expr) -> Option<&Expr> {
+    let Expr::Call(f, args) = e else { return None };
+    if matches!(f.as_ref(), Expr::Name(n) if n == "__mll_run_tail") && args.len() == 1 {
+        Some(&args[0])
+    } else {
+        None
+    }
+}
+
+/// `__mll_run_tail(<self>(e1..en))` — a rewritable runner site: both calls
+/// in the exact spelling the action emitter produces (no paren layers — a
+/// paren-wrapped form is left alone, which is correct either way: it stays
+/// a value branch). Strictness here keeps the reverse transform an exact
+/// inverse. The same zero-parameter exception as tailloop's
+/// `rewritable_site` applies: with no parameters there is no assignment to
+/// carry extra arguments' evaluation, and the kept runner return is sound
+/// either way.
+fn run_tail_self_args<'a>(
+    e: &'a Expr,
+    name: &SelfName,
+    params: &[String],
+) -> Option<&'a Vec<Expr>> {
+    let arg = run_tail_arg(e)?;
+    // The one spelling the emitter uses (`Name`, slot refs included);
+    // exactness keeps the reverse transform an inverse.
+    let Expr::Call(callee, call_args) = arg else { return None };
+    if !matches!(callee.as_ref(), Expr::Name(s) if s == name.spelling()) {
+        return None;
+    }
+    if params.is_empty() && !call_args.is_empty() {
+        return None;
+    }
+    Some(call_args)
+}
+
+/// Visit every `return` of a body (any depth of `if`/`do` nesting — guarded
+/// matches put returns in non-tail blocks). Nested function bodies' returns
+/// belong to those functions and are not visited.
+fn each_return(stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
+    for s in stmts {
+        match s {
+            Stmt::Return(e) => f(e),
+            Stmt::If { then_b, elseifs, else_b, .. } => {
+                each_return(&then_b.0, f);
+                for (_, b) in elseifs {
+                    each_return(&b.0, f);
+                }
+                if let Some(b) = else_b {
+                    each_return(&b.0, f);
+                }
+            }
+            Stmt::Do(b) => each_return(&b.0, f),
+            _ => {}
+        }
+    }
+}
+
+/// Replace `return __mll_run_tail(self(e…))` sites in a spliced closure
+/// BODY with the simultaneous parameter update and the jump to the loop's
+/// continue label. Always the goto shape: a rewritten site is not in
+/// loop-body tail position in general (see the module comment). The update
+/// is ONE multiple assignment in the call's argument order, over tailloop's
+/// simultaneity and evaluation-order arguments; with zero parameters there
+/// is no update, only the jump. Sites live only in the body's own tail
+/// positions (last statement, tail `if` arms, `do` blocks), so the walk
+/// descends only through the last statement.
+fn rewrite_run_tail_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String]) {
+    match stmts.last_mut() {
+        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
+            rewrite_run_tail_sites(&mut then_b.0, name, params);
+            for (_, b) in elseifs.iter_mut() {
+                rewrite_run_tail_sites(&mut b.0, name, params);
+            }
+            if let Some(b) = else_b.as_mut() {
+                rewrite_run_tail_sites(&mut b.0, name, params);
+            }
+        }
+        Some(Stmt::Do(b)) => rewrite_run_tail_sites(&mut b.0, name, params),
+        _ => {}
+    }
+    if matches!(stmts.last(), Some(Stmt::Return(e)) if run_tail_self_args(e, name, params).is_some())
+    {
+        let Some(Stmt::Return(Expr::Call(_, mut runner_args))) = stmts.pop() else {
+            unreachable!()
+        };
+        let Expr::Call(_, args) = runner_args.pop().expect("runner argument") else {
+            unreachable!()
+        };
+        if !params.is_empty() {
+            stmts.push(Stmt::MultiAssign(params.to_vec(), args));
+        }
+        stmts.push(Stmt::Goto("continue".into()));
+    }
+}
+
+/// Mirror of `rewrite_run_tail_sites`, over the same positions: a
+/// block-final `[…, params = args, goto continue]` (or a bare
+/// `[…, goto continue]` for a zero-parameter function) becomes the original
+/// `return __mll_run_tail(self(args))` again. Returns `None` when the tree
+/// does not have the exact produced shape — the self-check then fails
+/// loudly.
+fn unrewrite_run_tail_sites(
+    stmts: &mut Vec<Stmt>,
+    name: &SelfName,
+    params: &[String],
+) -> Option<()> {
+    match stmts.last_mut() {
+        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
+            unrewrite_run_tail_sites(&mut then_b.0, name, params)?;
+            for (_, b) in elseifs.iter_mut() {
+                unrewrite_run_tail_sites(&mut b.0, name, params)?;
+            }
+            if let Some(b) = else_b.as_mut() {
+                unrewrite_run_tail_sites(&mut b.0, name, params)?;
+            }
+        }
+        Some(Stmt::Do(b)) => unrewrite_run_tail_sites(&mut b.0, name, params)?,
+        _ => {}
+    }
+    if matches!(stmts.last(), Some(Stmt::Goto(l)) if l == "continue") {
+        stmts.pop();
+        let args = if params.is_empty() {
+            Vec::new()
+        } else {
+            let Some(Stmt::MultiAssign(lhs, args)) = stmts.pop() else { return None };
+            if lhs != params {
+                return None;
+            }
+            args
+        };
+        let self_call = Expr::call_named(name.spelling(), args);
+        stmts.push(Stmt::Return(Expr::call_named(
+            "__mll_run_tail",
+            vec![self_call],
+        )));
+    }
+    Some(())
+}
+
+/// The loop-body scaffold: per-iteration parameter copies `local _wN = pN`
+/// (fresh locals every iteration, so surviving closures and thunks capture
+/// their own iteration's values — recursion's semantics; tailloop's module
+/// comment carries the full argument), then the transformed body, then the
+/// continue scaffolding. When the body can fall off its end, `do return
+/// end` sits before the label so falling off exits the loop exactly like
+/// the original's fall-off did (see CONTINUE MECHANISM in the module
+/// comment); the `::continue::` label sits in end-of-block position, the
+/// one place Lua exempts from the no-jump-into-a-local's-scope rule.
+///
+/// tailloop's scaffold differs — its label is emitted only when the body
+/// can fall off (a diverging body's updates fall through to the loop end
+/// instead of jumping) — so it builds its own.
+fn build_loop_scaffold(ws: &[String], params: &[String], loop_stmts: Vec<Stmt>) -> Vec<Stmt> {
+    let falls_off = !opt::block_diverges(&Block(loop_stmts.clone()));
+    let mut inner: Vec<Stmt> = Vec::with_capacity(loop_stmts.len() + params.len() + 2);
+    for (w, p) in ws.iter().zip(params.iter()) {
+        inner.push(Stmt::Local(vec![w.clone()], Some(Expr::name(p.clone()))));
+    }
+    inner.extend(loop_stmts);
+    if falls_off {
+        inner.push(Stmt::Do(Block(vec![Stmt::ReturnNone])));
+    }
+    inner.push(Stmt::Label("continue".into()));
+    inner
+}
+
+/// Exact inverse of `build_loop_scaffold`, for the reverse self-check:
+/// strip the per-iteration copies and the continue scaffolding, returning
+/// the transformed body. `None` when the tree does not have the exact
+/// produced shape — the self-check then fails loudly.
+fn peel_loop_scaffold<'a>(inner: &'a [Stmt], ws: &[String], params: &[String]) -> Option<&'a [Stmt]> {
+    let mut rest = inner;
+    for (w, p) in ws.iter().zip(params.iter()) {
+        let (c, r) = rest.split_first()?;
+        let Stmt::Local(ns, Some(Expr::Name(src))) = c else { return None };
+        if ns != &vec![w.clone()] || src != p {
+            return None;
+        }
+        rest = r;
+    }
+    match rest {
+        [r @ .., Stmt::Do(guard), Stmt::Label(l)] if l == "continue" => {
+            let [Stmt::ReturnNone] = guard.0.as_slice() else { return None };
+            Some(r)
+        }
+        [r @ .., Stmt::Label(l)] if l == "continue" => Some(r),
+        _ => None,
+    }
+}
+
+/// The reverse self-check's comparison and diagnostics (debug/test builds;
+/// runs under `convert`'s `debug_assert!`): the conversion must be exactly
+/// reversible — un-converting the constructed body must reproduce `expect`,
+/// byte-for-byte in rendered form. This is the mechanical review every
+/// corpus conversion gets: a debug-build compile of a program re-derives
+/// and checks every conversion in it.
+fn reverse_check(
+    pass: &str,
+    expect_label: &str,
+    header: &str,
+    reversed: Option<Vec<Stmt>>,
+    expect: &[Stmt],
+) -> bool {
+    let expect = render_stmts(expect);
+    match reversed {
+        Some(r) if render_stmts(&r) == expect => true,
+        Some(r) => {
+            eprintln!(
+                "{pass} reverse mismatch for `{header}`:\n--- {expect_label}\n{expect}\n--- reversed\n{}",
+                render_stmts(&r)
+            );
+            false
+        }
+        None => {
+            eprintln!("{pass} reverse failed to parse own output for `{header}`");
+            false
+        }
+    }
 }
 
 #[cfg(test)]

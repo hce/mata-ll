@@ -3,36 +3,20 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Direct-perform bare tails, stages 2–3: interprocedural
-      classification, then performloop retirement.** Stage 1 (2026-07-28,
-      see Completed) fixed the direct-perform tail emission at the
-      generation site: SELF tails are bare Lua tail calls and case
-      terminals flatten, so the frame-per-step depth limit and the
-      runner's `pure`-payload forcing are gone for self-recursion — with
-      no loop pass needed. What remains is interprocedural: a tail call
-      to a DIFFERENT direct-perform function (`f`↔`g` mutual recursion,
-      sed's fn142↔fn143) still rides `__mll_run_tail`'s argument
-      position, one pinned frame per crossing. Stage 2: a module-level
-      classification pre-pass that records which emitted functions are
-      direct-perform, so any saturated tail call to a KNOWN
-      direct-perform module-local callee — not just self — emits bare;
-      that closes mutual recursion. Stage 3: retire performloop after a
-      corpus sweep confirms zero conversions on stage-2 output (stage 1
-      already measures zero conversions corpus-wide; the pass stays as a
-      backstop until the sweep is repeated over stage 2, and its
-      hand-built-tree unit tests keep pinning the old shapes until the
-      pass itself is deleted). Also worth taking along: tailloop declines
-      a body whose pattern chain keeps the trailing
-      `error("Non-exhaustive patterns")` (coverage unproven — huffman's
-      3-arm list match, basic's fn200), leaving bare TCO instead of a
-      loop; teaching the chain builder or tailloop that shape recovers
-      the loop form for those functions.
+- [ ] **tailloop declines a body whose pattern chain keeps the trailing
+      `error("Non-exhaustive patterns")`** (coverage unproven — huffman's
+      3-arm list match, basic's fn200), leaving bare TCO instead of a loop
+      for those functions; teaching the chain builder or tailloop that
+      shape recovers the loop form. Split off from the direct-perform
+      bare-tail item when its stages 2–3 completed (2026-08-17, see
+      Completed).
 
 - [ ] **Lua-AST optimization layer, structured-pass tier (remaining).**
       The foundation AND all three loop passes are COMPLETE (see
       Completed: annotation layer + engine + `__force`-collapse
-      peephole; self-tail-call → loop; IO self-loop conversion;
-      direct-perform IO self-loop conversion). Remaining, on the
+      peephole; self-tail-call → loop; IO self-loop conversion; the
+      direct-perform IO self-loop pass, since retired — its shape is now
+      a bare Lua tail call at emission). Remaining, on the
       same annotation/justification API: (1) loop-invariant /
       capture-free closure hoisting (syntactic backstop for the FNEW
       JIT-killer class). Later candidate: liveness-based local-slot
@@ -68,6 +52,71 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Direct-perform bare tails, stages 2–3: interprocedural
+      classification, performloop retired** (2026-08-17; codegen/
+      function.rs, module.rs, action.rs, mod.rs, opt.rs, ioloop.rs,
+      tailloop.rs, lua.rs). Stage 2: `direct_perform_arity` is ONE
+      predicate mirroring `function_stmts`' two direct-perform arms (the
+      nullary IO/LuaIO value arm and the single-clause simple-pattern IO
+      function arm; dict-taking, eta-expanded, ST, guarded and multi-
+      clause functions decline), and `module_stmts` seeds
+      `direct_perform_fns` (source name → saturating arity) from it over
+      every user and instance function BEFORE any body is emitted — so a
+      callee defined later in the file is known. `function_stmts` records
+      the arm it actually took and debug_asserts it against the map at
+      every exit, on BOTH sides (the `slot_always_whnf` discipline): a
+      predicted-but-not-emitted entry would drop the runner around an
+      unperformed action. Duplicate definitions of one name (a definition
+      reached along two import paths; the documented user-wins
+      redefinition) are classified once each: agreeing duplicates keep
+      the entry, disagreeing ones are excluded and exempt from the assert
+      (`direct_perform_conflicts`) — the corpus has both kinds (leafA,
+      publicFn, sum, replicate, fileLines). Emission: `action_run_ast`'s
+      `tail=true` arm returns a saturated call to ANY name in the map bare
+      — `return callee(...)`, or `callee()` for a nullary one — gated on
+      the TIR spine (Var head, exact arity, not shadowed by a local: the
+      same `local_vars` membership `lua_ref` resolves by) AND on the
+      emitted tree (the call chain's head must be the callee's own Lua
+      reference — an inlined body or adapter keeps the runner). Sound
+      context-free: the invariant is the CALLEE's (a direct-perform call
+      returns a value in the runners' range, on which `__mll_run_tail` is
+      the identity), and every forwarding position — a direct-perform
+      body's terminal, a first-class action closure's terminal, a
+      discarded effect statement — delivers its value to exactly one
+      consumer application; `direct_perform_self` (the stage-1 self-only
+      flag) is gone. Corpus 305 files: 197 differ, and a whole-file check
+      proves each is the baseline minus dropped forwarding runners only
+      (unwrap every `__mll_run_tail(…)` in both and they are byte-equal):
+      676 call sites + 79 nullary sites, every one around a `__mll_fn[N]`
+      slot — chiefly every tail call to a Prelude IO function (`putStrLn`,
+      `print`) and to user IO helpers, plus sed's fn142↔fn143 kind of
+      mutual recursion. New case perform_bare_tco_mutual (ping↔pong 2e6
+      deep, callee defined AFTER the caller, bare-name terminal;
+      GHC-oracle golden `42`; the harness twin runs it with tailloop and
+      ioloop disabled) — against the pre-change codegen it overflows at
+      ~250 000 levels, confirmed by running it with the change stashed.
+      Stage 3: two sweeps of the same corpus with `MLL_OPT_DISABLE=
+      performloop` were byte-identical to the enabled emission (the
+      control, `MLL_OPT_DISABLE=tailloop`, changes 96 files), so the pass
+      converts nothing on stage-2 output; performloop.rs (1032 lines) is
+      deleted with its opt registration, `Disable` field, knob name and
+      unit test. Its shape — `return __mll_run_tail(self(…))` — no longer
+      exists: a saturated self tail is a bare `return self(…)` that
+      tailloop loops, so the three performloop_* cases keep pinning the
+      behaviour (depth, dispatch order, the unforced `pure` payload) with
+      their comments rewritten to say what handles the shape now.
+      loopcore.rs, the mechanics module shared by ioloop and performloop,
+      is dissolved: the runner-site predicate, rewrite/unrewrite pair
+      (the `everywhere` flag only performloop used is gone), scaffold/peel
+      and reverse-check plumbing move into ioloop.rs; `tail_position_has`
+      into tailloop.rs (both passes use it); `render_stmts` into lua.rs
+      (opt.rs's idempotence refutation uses it too). One rider split off
+      as its own open item above: tailloop declining chains that keep the
+      trailing non-exhaustive raise. GHC goldens regenerated: 301 pinned /
+      54 excluded / 0 failed, every pre-existing golden byte-identical
+      (guarded_caf, left unpinned by the 2026-08-15 fix, gained its
+      oracle registration en route).
 
 - [x] **Generics substrate, stress-tested by JSON, shipped with native
       derives** (2026-08-04; commits `ccd466d` + `c61a643`).

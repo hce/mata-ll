@@ -85,22 +85,20 @@
 //! reasons, and because tailloop-converted pure helpers may sit inside the
 //! bodies it splices.
 //!
-//! Pass 7 — direct-perform IO self-loop conversion (performloop.rs), the
-//! structured tier's third pass: an IO/ST function that performs at call
-//! time and recurses through `return __mll_run_tail(<self>(…))` at the
-//! outer body's action tail (directly, or through the dispatch-IIFE /
-//! action-closure tree the emitter also produces) becomes a `while true`
-//! loop. The self call sits in the runner's argument position — not a Lua
-//! tail call — so the unconverted shape pins one frame per step and
-//! overflows at ~1e6 depth: this pass is a correctness fix, not just perf.
-//! It runs after ioloop: the shapes are disjoint by gating (ioloop needs
-//! branch-closure terminals, which performloop's terminal vocabulary
-//! declines), and running it last keeps ioloop's claim on anything both
-//! could ever match.
+//! (Retired: pass 7, the direct-perform IO self-loop conversion, formerly
+//! performloop.rs. It looped an IO function that performs at call time and
+//! recurses through `return __mll_run_tail(<self>(…))` — the self call in
+//! the runner's ARGUMENT position pinned one frame per step. The emitter
+//! no longer produces that shape: a saturated tail call to any
+//! direct-perform function — self or another — is a bare `return
+//! callee(…)`, Lua's own tail call (action.rs / direct_perform_fns), which
+//! runs in constant stack with no pass, and which tailloop loops when it is
+//! self-recursive. Retired 2026-08-17 after two corpus sweeps found zero
+//! conversions on the new emission — see doc/articles/TODO.md.)
 //!
 //! Per-pass toggles: `MLL_OPT_DISABLE` (read per `run` call) is a
 //! comma-separated list of pass names to skip — `parens`, `dead`, `iife`,
-//! `force`, `tailloop`, `ioloop`, `performloop`. A debugging aid for
+//! `force`, `tailloop`, `ioloop`. A debugging aid for
 //! isolating a pass's effect; unset (the default) runs everything, and an
 //! unrecognized name warns on stderr so a typo cannot silently disable
 //! nothing. `CompileOptions::disable_opt_passes` carries the same list
@@ -109,8 +107,7 @@
 
 use super::annot;
 use super::ioloop;
-use super::lua::{Block, Expr, FnTarget, FuncBody, Item, Stmt};
-use super::performloop;
+use super::lua::{Block, Expr, FnTarget, FuncBody, Item, Stmt, render_stmts};
 use super::tailloop;
 
 /// Which passes to skip; see the module comment.
@@ -122,7 +119,6 @@ pub(super) struct Disable {
     force: bool,
     tailloop: bool,
     ioloop: bool,
-    performloop: bool,
 }
 
 impl Disable {
@@ -151,11 +147,9 @@ impl Disable {
                 "force" => d.force = true,
                 "tailloop" => d.tailloop = true,
                 "ioloop" => d.ioloop = true,
-                "performloop" => d.performloop = true,
                 other => eprintln!(
                     "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
-                     (known: parens, dead, iife, force, tailloop, ioloop, \
-                     performloop)",
+                     (known: parens, dead, iife, force, tailloop, ioloop)",
                     other
                 ),
             }
@@ -207,16 +201,6 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
             engine = Some(fresh);
         }
     }
-    if !d.performloop {
-        // Structured tier, pass 7 (see the module comment). Same engine
-        // discipline; runs after ioloop so the two-level conversions keep
-        // their claim.
-        if let Some(fresh) =
-            annot::Engine::run_structured(stmts, &mut performloop::PerformLoop)
-        {
-            engine = Some(fresh);
-        }
-    }
     (engine, !d.force)
 }
 
@@ -263,7 +247,7 @@ fn expression_pass_idempotence(stmts: &[Stmt], d: &Disable) -> Vec<String> {
     if d.parens && d.dead && d.iife {
         return Vec::new();
     }
-    let before = super::loopcore::render_stmts(stmts);
+    let before = render_stmts(stmts);
     let mut again = stmts.to_vec();
     if !d.parens {
         normalize_parens_block(&mut again);
@@ -274,7 +258,7 @@ fn expression_pass_idempotence(stmts: &[Stmt], d: &Disable) -> Vec<String> {
     if !d.iife {
         flatten_iife_block(&mut again);
     }
-    let after = super::loopcore::render_stmts(&again);
+    let after = render_stmts(&again);
     if before == after {
         Vec::new()
     } else {
@@ -1063,44 +1047,6 @@ mod tests {
         assert!(
             matches!(&body.0[0], Stmt::If { .. }),
             "disabled pass must leave the two-level shape"
-        );
-    }
-
-    /// The performloop toggle: disabled leaves the direct-perform
-    /// recursion (the runner-argument self call); enabled (the default)
-    /// converts it and the refutation stays clean.
-    #[test]
-    fn performloop_toggle() {
-        let make = || {
-            vec![
-                Stmt::Local(vec!["__mll_fn".into()], Some(Expr::Table(vec![]))),
-                Stmt::Function {
-                    target: FnTarget::Slot(1),
-                    params: vec!["n".into()],
-                    body: Block(vec![Stmt::If {
-                        cond: Expr::name("n"),
-                        then_b: Block(vec![Stmt::Return(Expr::lit("nil"))]),
-                        elseifs: vec![],
-                        else_b: Some(Block(vec![Stmt::Return(Expr::call_named(
-                            "__mll_run_tail",
-                            vec![Expr::call_named("__mll_fn[1]", vec![Expr::lit("1")])],
-                        ))])),
-                    }]),
-                },
-            ]
-        };
-        let mut on = make();
-        let (engine, _) = run_with(&mut on, &Disable::default());
-        let Stmt::Function { body, .. } = &on[1] else { panic!("shape") };
-        assert!(matches!(body.0[0], Stmt::WhileTrue(_)), "enabled pass must convert");
-        assert!(engine.expect("engine").refute(&on, true).is_empty());
-
-        let mut off = make();
-        run_with(&mut off, &Disable { performloop: true, ..Disable::default() });
-        let Stmt::Function { body, .. } = &off[1] else { panic!("shape") };
-        assert!(
-            matches!(&body.0[0], Stmt::If { .. }),
-            "disabled pass must leave the direct-perform recursion"
         );
     }
 

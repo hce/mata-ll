@@ -31,6 +31,21 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A tail call from one IO function to another runs in constant
+  stack.** An IO function that performs at call time and ends by
+  calling a *different* such function (`ping n = … pong (n - 1)`,
+  `main = … putStrLn s`, sed's line loop through its helper) forwarded
+  the callee through the runner's argument position — one pinned Lua
+  frame per crossing, a stack overflow past ~250 000 mutual-recursion
+  levels. Only a call to the function *itself* had been emitted as a
+  bare Lua tail call. The compiler now classifies every such
+  "direct-perform" function module-wide before emitting any body, so a
+  saturated tail call to any of them — defined earlier or later in the
+  file — is a bare `return callee(...)`, which Lua's tail-call
+  elimination reclaims. Same effects, same forcing (the forwarding
+  runner was the identity on these results); 2e6-deep `ping`↔`pong`
+  now completes on PUC Lua and LuaJIT.
+
 - **A thunked top-level binding referenced before its own definition is
   now forced.** The module layout forward-declares every top-level name
   and seeded them all as "concrete" (safe to read without `__force`);
@@ -52,6 +67,18 @@ API of the `mllc` library crate.)
   A literal bound for a real `fromInteger` now routes through the
   exact `__mll_biglit` decimal pool past 2^53, on every host; machine
   `Int`/`Number` literals keep their documented host representation.
+
+### Removed
+
+- **The `performloop` optimization pass, and its `MLL_OPT_DISABLE`
+  name.** It looped the older `return __mll_run_tail(self(...))`
+  self-recursion shape, which the emitter stopped producing when
+  self tails became bare (0.1.6): two corpus sweeps with the pass
+  disabled were byte-identical to the enabled output. Its shape is
+  now a plain Lua tail call that the `tailloop` pass loops.
+  `MLL_OPT_DISABLE=performloop` is an unknown-pass warning from here
+  on; the known names are `parens`, `dead`, `iife`, `force`,
+  `tailloop`, `ioloop`.
 
 ## [0.1.6] - 2026-08-05
 
