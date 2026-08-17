@@ -968,75 +968,29 @@ fn local_fn_demand(
 /// `local_fn_strict_params` to drop rows whose bare-name keying would be
 /// ambiguous at some call site.
 fn collect_rebound_names(expr: &TExpr, out: &mut HashSet<String>) {
+    // The names THIS node binds; the children follow through for_each_child.
     match &expr.kind {
-        TExprKind::Var(_) | TExprKind::Lit(_) | TExprKind::Con(_)
-        | TExprKind::OpFunc(_) | TExprKind::DictAccess { .. } => {}
-        TExprKind::Lambda { params, body } => {
+        TExprKind::Lambda { params, .. } => {
             for (p, _) in params {
                 out.insert(p.clone());
             }
-            collect_rebound_names(body, out);
         }
-        TExprKind::App(f, a) => {
-            collect_rebound_names(f, out);
-            collect_rebound_names(a, out);
-        }
-        TExprKind::InfixApp { lhs, rhs, .. } => {
-            collect_rebound_names(lhs, out);
-            collect_rebound_names(rhs, out);
-        }
-        TExprKind::Negate(e) | TExprKind::Paren(e) => collect_rebound_names(e, out),
-        TExprKind::If { cond, then_branch, else_branch } => {
-            collect_rebound_names(cond, out);
-            collect_rebound_names(then_branch, out);
-            collect_rebound_names(else_branch, out);
-        }
-        TExprKind::Case { scrutinee, branches } => {
-            collect_rebound_names(scrutinee, out);
+        TExprKind::Case { branches, .. } => {
             for b in branches {
                 collect_pattern_vars(&b.pattern, out);
-                for g in &b.guards {
-                    collect_rebound_names(&g.condition, out);
-                    collect_rebound_names(&g.body, out);
-                }
-                if let Some(bb) = &b.body { collect_rebound_names(bb, out); }
             }
         }
-        TExprKind::Let { binds, body } => {
+        TExprKind::Let { binds, .. } => {
             for b in binds {
                 out.insert(b.name.clone());
                 for p in &b.patterns {
                     collect_pattern_vars(p, out);
                 }
-                collect_rebound_names(&b.body, out);
-            }
-            collect_rebound_names(body, out);
-        }
-        TExprKind::Tuple(elems) => {
-            for e in elems {
-                collect_rebound_names(e, out);
             }
         }
-        TExprKind::SpecCall { args, .. } => {
-            for a in args {
-                collect_rebound_names(a, out);
-            }
-        }
-        TExprKind::DictCall { dict_args, value_args, .. } => {
-            for a in dict_args.iter().chain(value_args.iter()) {
-                collect_rebound_names(a, out);
-            }
-        }
-        TExprKind::DictMethod { dict, .. } => collect_rebound_names(dict, out),
-        TExprKind::RecordUpdate { record, updates, .. } => {
-            collect_rebound_names(record, out);
-            for (_, _, e) in updates {
-                collect_rebound_names(e, out);
-            }
-        }
-        TExprKind::OutgoingCallback { callee, .. } => collect_rebound_names(callee, out),
-        TExprKind::FfiMaybeArg { value } => collect_rebound_names(value, out),
+        _ => {}
     }
+    expr.for_each_child(&mut |c| collect_rebound_names(c, out));
 }
 
 /// Arguments that codegen's `gen_arg` evaluates eagerly at *every* call site,
@@ -2582,6 +2536,8 @@ fn collect_fn_refs(
     refs: &mut HashMap<String, HashSet<NodeKey<'_>>>,
     poisoned: &mut HashSet<String>,
 ) {
+    // What THIS node contributes — a Var reference site, a SpecCall/DictCall
+    // that poisons its callee — then the children through for_each_child.
     match &expr.kind {
         TExprKind::Var(name) => {
             if fn_names.contains(name.as_str()) {
@@ -2590,71 +2546,20 @@ fn collect_fn_refs(
                     .insert(NodeKey::of(expr));
             }
         }
-        TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::OpFunc(_)
-        | TExprKind::DictAccess { .. } => {}
-        TExprKind::App(f, a) => {
-            collect_fn_refs(f, fn_names, refs, poisoned);
-            collect_fn_refs(a, fn_names, refs, poisoned);
-        }
-        TExprKind::Lambda { body, .. } => collect_fn_refs(body, fn_names, refs, poisoned),
-        TExprKind::InfixApp { lhs, rhs, .. } => {
-            collect_fn_refs(lhs, fn_names, refs, poisoned);
-            collect_fn_refs(rhs, fn_names, refs, poisoned);
-        }
-        TExprKind::Negate(e) | TExprKind::Paren(e) => collect_fn_refs(e, fn_names, refs, poisoned),
-        TExprKind::If { cond, then_branch, else_branch } => {
-            collect_fn_refs(cond, fn_names, refs, poisoned);
-            collect_fn_refs(then_branch, fn_names, refs, poisoned);
-            collect_fn_refs(else_branch, fn_names, refs, poisoned);
-        }
-        TExprKind::Case { scrutinee, branches } => {
-            collect_fn_refs(scrutinee, fn_names, refs, poisoned);
-            for b in branches {
-                for g in &b.guards {
-                    collect_fn_refs(&g.condition, fn_names, refs, poisoned);
-                    collect_fn_refs(&g.body, fn_names, refs, poisoned);
-                }
-                if let Some(bb) = &b.body { collect_fn_refs(bb, fn_names, refs, poisoned); }
-            }
-        }
-        TExprKind::Let { binds, body } => {
-            for b in binds {
-                collect_fn_refs(&b.body, fn_names, refs, poisoned);
-            }
-            collect_fn_refs(body, fn_names, refs, poisoned);
-        }
-        TExprKind::Tuple(elems) => {
-            for e in elems {
-                collect_fn_refs(e, fn_names, refs, poisoned);
-            }
-        }
-        TExprKind::SpecCall { original, specialized, args } => {
+        TExprKind::SpecCall { original, specialized, .. } => {
             if fn_names.contains(original.as_str()) {
                 poisoned.insert(original.clone());
             }
             if fn_names.contains(specialized.as_str()) {
                 poisoned.insert(specialized.clone());
             }
-            for a in args {
-                collect_fn_refs(a, fn_names, refs, poisoned);
-            }
         }
-        TExprKind::DictCall { func_name, dict_args, value_args } => {
+        TExprKind::DictCall { func_name, .. } => {
             if fn_names.contains(func_name.as_str()) {
                 poisoned.insert(func_name.clone());
             }
-            for a in dict_args.iter().chain(value_args.iter()) {
-                collect_fn_refs(a, fn_names, refs, poisoned);
-            }
         }
-        TExprKind::DictMethod { dict, .. } => collect_fn_refs(dict, fn_names, refs, poisoned),
-        TExprKind::RecordUpdate { record, updates, .. } => {
-            collect_fn_refs(record, fn_names, refs, poisoned);
-            for (_, _, e) in updates {
-                collect_fn_refs(e, fn_names, refs, poisoned);
-            }
-        }
-        TExprKind::OutgoingCallback { callee, .. } => collect_fn_refs(callee, fn_names, refs, poisoned),
-        TExprKind::FfiMaybeArg { value } => collect_fn_refs(value, fn_names, refs, poisoned),
+        _ => {}
     }
+    expr.for_each_child(&mut |c| collect_fn_refs(c, fn_names, refs, poisoned));
 }

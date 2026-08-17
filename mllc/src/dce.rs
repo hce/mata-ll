@@ -143,47 +143,29 @@ fn collect_pattern(p: &TPattern, refs: &mut HashSet<String>) {
 /// Collect every name an expression might reference. Over-collection is safe:
 /// names that aren't defined functions are filtered out by the caller.
 fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
+    // The names THIS node references (its children are walked below —
+    // `for_each_child` is the one enumeration of them).
     match &e.kind {
         TExprKind::Var(n) | TExprKind::Con(n) | TExprKind::OpFunc(n) => {
             refs.insert(n.clone());
         }
-        TExprKind::Lit(_) => {}
-        TExprKind::DictAccess { method_name, .. } => {
+        TExprKind::DictAccess { method_name, .. } | TExprKind::DictMethod { method_name, .. } => {
             refs.insert(method_name.clone());
         }
-        TExprKind::DictMethod { dict, method_name } => {
-            refs.insert(method_name.clone());
-            collect_expr(dict, refs);
-        }
-        TExprKind::App(a, b) => { collect_expr(a, refs); collect_expr(b, refs); }
-        TExprKind::Lambda { body, .. } => collect_expr(body, refs),
-        TExprKind::InfixApp { op, lhs, rhs } => {
+        TExprKind::InfixApp { op, .. } => {
             refs.insert(op.clone());
-            collect_expr(lhs, refs);
-            collect_expr(rhs, refs);
         }
-        TExprKind::Negate(x) | TExprKind::Paren(x) => collect_expr(x, refs),
-        TExprKind::If { cond, then_branch, else_branch } => {
-            collect_expr(cond, refs);
-            collect_expr(then_branch, refs);
-            collect_expr(else_branch, refs);
-        }
-        TExprKind::Case { scrutinee, branches } => {
-            collect_expr(scrutinee, refs);
+        TExprKind::Case { branches, .. } => {
             for b in branches {
                 collect_pattern(&b.pattern, refs);
-                for g in &b.guards { collect_expr(&g.condition, refs); collect_expr(&g.body, refs); }
-                if let Some(bb) = &b.body { collect_expr(bb, refs); }
             }
         }
-        TExprKind::Let { binds, body } => {
+        TExprKind::Let { binds, .. } => {
             for b in binds {
                 for p in &b.patterns { collect_pattern(p, refs); }
-                collect_expr(&b.body, refs);
             }
-            collect_expr(body, refs);
         }
-        TExprKind::SpecCall { original, specialized, args } => {
+        TExprKind::SpecCall { original, specialized, .. } => {
             refs.insert(original.clone());
             // `specialized` threads element functions inside a `helper:…`
             // string. Parse each format exactly the way its consumer
@@ -220,19 +202,20 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
                     }
                 }
             }
-            for a in args { collect_expr(a, refs); }
         }
-        TExprKind::Tuple(elems) => { for x in elems { collect_expr(x, refs); } }
-        TExprKind::DictCall { func_name, dict_args, value_args } => {
+        TExprKind::DictCall { func_name, .. } => {
             refs.insert(func_name.clone());
-            for a in dict_args { collect_expr(a, refs); }
-            for a in value_args { collect_expr(a, refs); }
         }
-        TExprKind::RecordUpdate { record, updates, .. } => {
-            collect_expr(record, refs);
-            for (_, _, val) in updates { collect_expr(val, refs); }
-        }
-        TExprKind::OutgoingCallback { callee, .. } => collect_expr(callee, refs),
-        TExprKind::FfiMaybeArg { value } => collect_expr(value, refs),
+        TExprKind::Lit(_)
+        | TExprKind::App(..)
+        | TExprKind::Lambda { .. }
+        | TExprKind::Negate(_)
+        | TExprKind::Paren(_)
+        | TExprKind::If { .. }
+        | TExprKind::Tuple(_)
+        | TExprKind::RecordUpdate { .. }
+        | TExprKind::OutgoingCallback { .. }
+        | TExprKind::FfiMaybeArg { .. } => {}
     }
+    e.for_each_child(&mut |c| collect_expr(c, refs));
 }

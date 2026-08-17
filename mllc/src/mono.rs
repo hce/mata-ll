@@ -1773,41 +1773,25 @@ impl Monomorphizer {
         }
     }
 
+    /// Every type variable occurring in an expression tree: each node's type,
+    /// the types carried by case-branch and let-bound patterns, and the
+    /// children through `for_each_child` (the hand-rolled walk this replaces
+    /// ended in `_ => {}` and skipped SpecCall/DictCall/DictMethod
+    /// arguments and the pattern types).
     fn collect_expr_vars(expr: &TExpr, vars: &mut Vec<TyVar>) {
         for v in expr.ty.free_vars() { if !vars.contains(&v) { vars.push(v); } }
         match &expr.kind {
-            TExprKind::App(f, a) => { Self::collect_expr_vars(f, vars); Self::collect_expr_vars(a, vars); }
-            TExprKind::InfixApp { lhs, rhs, .. } => { Self::collect_expr_vars(lhs, vars); Self::collect_expr_vars(rhs, vars); }
-            TExprKind::Lambda { body, .. } => Self::collect_expr_vars(body, vars),
-            TExprKind::If { cond, then_branch, else_branch } => {
-                Self::collect_expr_vars(cond, vars);
-                Self::collect_expr_vars(then_branch, vars);
-                Self::collect_expr_vars(else_branch, vars);
+            TExprKind::Case { branches, .. } => {
+                for b in branches { Self::collect_pattern_vars(&b.pattern, vars); }
             }
-            TExprKind::Case { scrutinee, branches } => {
-                Self::collect_expr_vars(scrutinee, vars);
-                for b in branches {
-                    for g in &b.guards {
-                        Self::collect_expr_vars(&g.condition, vars);
-                        Self::collect_expr_vars(&g.body, vars);
-                    }
-                    if let Some(bb) = &b.body { Self::collect_expr_vars(bb, vars); }
+            TExprKind::Let { binds, .. } => {
+                for b in binds {
+                    for p in &b.patterns { Self::collect_pattern_vars(p, vars); }
                 }
             }
-            TExprKind::Let { binds, body } => {
-                for b in binds { Self::collect_expr_vars(&b.body, vars); }
-                Self::collect_expr_vars(body, vars);
-            }
-            TExprKind::Negate(e) | TExprKind::Paren(e) => Self::collect_expr_vars(e, vars),
-            TExprKind::Tuple(es) => { for e in es { Self::collect_expr_vars(e, vars); } }
-            TExprKind::RecordUpdate { record, updates, .. } => {
-                Self::collect_expr_vars(record, vars);
-                for (_, _, e) in updates { Self::collect_expr_vars(e, vars); }
-            }
-            TExprKind::OutgoingCallback { callee, .. } => Self::collect_expr_vars(callee, vars),
-            TExprKind::FfiMaybeArg { value } => Self::collect_expr_vars(value, vars),
             _ => {}
         }
+        expr.for_each_child(&mut |c| Self::collect_expr_vars(c, vars));
     }
 
     /// Rewrite a function to use dictionary-passing.

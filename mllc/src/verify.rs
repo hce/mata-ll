@@ -104,41 +104,7 @@ impl Verifier {
             ));
         }
         // Recurse into every sub-expression.
-        match &e.kind {
-            TExprKind::Var(_) | TExprKind::Con(_) | TExprKind::Lit(_)
-            | TExprKind::OpFunc(_) | TExprKind::DictAccess { .. } => {}
-            TExprKind::DictMethod { dict, .. } => self.walk(dict, ctx),
-            TExprKind::App(a, b) => { self.walk(a, ctx); self.walk(b, ctx); }
-            TExprKind::Lambda { body, .. } => self.walk(body, ctx),
-            TExprKind::InfixApp { lhs, rhs, .. } => { self.walk(lhs, ctx); self.walk(rhs, ctx); }
-            TExprKind::Negate(x) | TExprKind::Paren(x) => self.walk(x, ctx),
-            TExprKind::If { cond, then_branch, else_branch } => {
-                self.walk(cond, ctx); self.walk(then_branch, ctx); self.walk(else_branch, ctx);
-            }
-            TExprKind::Case { scrutinee, branches } => {
-                self.walk(scrutinee, ctx);
-                for b in branches {
-                    for g in &b.guards { self.walk(&g.condition, ctx); self.walk(&g.body, ctx); }
-                    if let Some(bb) = &b.body { self.walk(bb, ctx); }
-                }
-            }
-            TExprKind::Let { binds, body } => {
-                for b in binds { self.walk(&b.body, ctx); }
-                self.walk(body, ctx);
-            }
-            TExprKind::SpecCall { args, .. } => { for a in args { self.walk(a, ctx); } }
-            TExprKind::Tuple(elems) => { for x in elems { self.walk(x, ctx); } }
-            TExprKind::DictCall { dict_args, value_args, .. } => {
-                for a in dict_args { self.walk(a, ctx); }
-                for a in value_args { self.walk(a, ctx); }
-            }
-            TExprKind::RecordUpdate { record, updates, .. } => {
-                self.walk(record, ctx);
-                for (_, _, val) in updates { self.walk(val, ctx); }
-            }
-            TExprKind::OutgoingCallback { callee, .. } => self.walk(callee, ctx),
-            TExprKind::FfiMaybeArg { value } => self.walk(value, ctx),
-        }
+        e.for_each_child(&mut |c| self.walk(c, ctx));
     }
 }
 

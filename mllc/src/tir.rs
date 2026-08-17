@@ -332,6 +332,79 @@ impl TExpr {
         TExpr { kind, ty }
     }
 
+    /// Read-only twin of [`map_children`](Self::map_children): `f` on every
+    /// direct child expression, same single-enumeration guarantee, for the
+    /// collector passes (verify, dce, demand's reference and rebinding scans,
+    /// mono's type-variable scan) that once each carried a hand-rolled copy
+    /// of the child list — one of which had drifted (`_ => {}`).
+    pub fn for_each_child(&self, f: &mut impl FnMut(&TExpr)) {
+        match &self.kind {
+            TExprKind::Var(_)
+            | TExprKind::Con(_)
+            | TExprKind::Lit(_)
+            | TExprKind::OpFunc(_)
+            | TExprKind::DictAccess { .. } => {}
+            TExprKind::App(a, b) => {
+                f(a);
+                f(b);
+            }
+            TExprKind::Lambda { body, .. } => f(body),
+            TExprKind::InfixApp { lhs, rhs, .. } => {
+                f(lhs);
+                f(rhs);
+            }
+            TExprKind::Negate(e) | TExprKind::Paren(e) => f(e),
+            TExprKind::If { cond, then_branch, else_branch } => {
+                f(cond);
+                f(then_branch);
+                f(else_branch);
+            }
+            TExprKind::Case { scrutinee, branches } => {
+                f(scrutinee);
+                for b in branches {
+                    for g in &b.guards {
+                        f(&g.condition);
+                        f(&g.body);
+                    }
+                    if let Some(bb) = &b.body { f(bb); }
+                }
+            }
+            TExprKind::Let { binds, body } => {
+                for b in binds {
+                    f(&b.body);
+                }
+                f(body);
+            }
+            TExprKind::SpecCall { args, .. } => {
+                for a in args {
+                    f(a);
+                }
+            }
+            TExprKind::Tuple(elems) => {
+                for e in elems {
+                    f(e);
+                }
+            }
+            TExprKind::DictMethod { dict, .. } => f(dict),
+            TExprKind::DictCall { dict_args, value_args, .. } => {
+                for a in dict_args {
+                    f(a);
+                }
+                for a in value_args {
+                    f(a);
+                }
+            }
+            TExprKind::RecordUpdate { record, updates, .. } => {
+                f(record);
+                for (_, _, e) in updates {
+                    f(e);
+                }
+            }
+            TExprKind::OutgoingCallback { callee, .. } => f(callee),
+            TExprKind::FfiMaybeArg { value } => f(value),
+        }
+    }
+
     /// In-place twin of [`map_children`](Self::map_children): `f` on every
     /// direct child expression, same single-enumeration guarantee.
     pub fn visit_children_mut(&mut self, f: &mut impl FnMut(&mut TExpr)) {
