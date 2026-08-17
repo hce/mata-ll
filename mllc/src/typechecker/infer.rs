@@ -124,7 +124,7 @@ impl Checker {
         // never skolemized. See `skolemize_sig_body_vars` / `check_clause`.
         let declared_context = self.fn_contexts.get(name).cloned().unwrap_or_default();
         let (sig_skolems, demote) =
-            self.skolemize_sig_body_vars(&fresh_ty, &declared_context);
+            self.skolemize_sig_body_vars(&fresh_ty, &declared_context, &renames);
 
         // Re-express this function's declared constraints over the freshened
         // signature variables (the `at_use` epoch), so a caller can match each

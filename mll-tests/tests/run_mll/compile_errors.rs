@@ -1143,6 +1143,38 @@ main = do
         "polymorphic Show-constrained function should compile");
 }
 
+// The classes a signature's context GUARANTEES for a variable are attached
+// to that variable's body skolem by exact freshened name. They were once
+// keyed by the fresh name with its id digits trimmed off, which misattributed
+// every digit-suffixed source variable (`Show t1 =>` looked up "t") and every
+// instance-method context (`instance Show a => Show (Tree a)` checks its
+// methods over already-fresh variables that never trimmed to a declared
+// name), so a use inside such a body that needs the given — a `show` of a
+// tuple mixing the variable with a numeric literal, whose defaulting asks
+// whether the skolem has the instance — reported "Ambiguous type".
+#[test]
+fn signature_givens_attach_to_digit_suffixed_and_instance_variables() {
+    let source = r#"
+data Tree a = Leaf | Node (Tree a) a (Tree a)
+
+instance Show a => Show (Tree a) where
+    show Leaf = "Leaf"
+    show (Node l x r) = "Node (" <> show l <> ") " <> show (x, 1) <> " (" <> show r <> ")"
+
+pairUp :: Show t1 => t1 -> String
+pairUp x = show (x, 1)
+
+main :: IO ()
+main = do
+    putStrLn (pairUp (True, "a"))
+    putStrLn (show (Node Leaf (5 :: Int) Leaf))
+"#;
+    match compile(source, Path::new("."), &[]) {
+        Ok(_) => {}
+        Err(e) => panic!("givens from `Show t1 =>` and the instance context must attach: {}", e),
+    }
+}
+
 #[test]
 fn type_error_in_where_value_binding_rejected() {
     // A type error inside a `where` value binding must fail compilation with a

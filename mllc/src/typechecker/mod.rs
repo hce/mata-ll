@@ -1290,27 +1290,41 @@ impl Checker {
         &mut self,
         fresh_ty: &Ty,
         declared_context: &FnContext,
+        renames: &HashMap<String, String>,
     ) -> (HashMap<TyVar, Ty>, HashMap<u32, Ty>) {
-        // The declared context re-expressed over the FRESHENED variable names,
-        // so a class can be matched to the fresh variable that carries it. A
-        // constraint whose variable is not freshened (an instance-method
-        // signature, already alpha-renamed) matches by its own name. A
+        // The declared context re-expressed over the FRESHENED variable
+        // names, keyed exactly: `renames` (source name → fresh name, from
+        // freshen_sig_type_mapped) maps a signature variable's constraint to
+        // the fresh variable that carries it; a constraint whose variable is
+        // not in `renames` was already fresh in the signature (an instance-
+        // method signature, alpha-renamed by check_instance, declares its
+        // context over those same names) and matches by its own name. A
         // compound constraint (`GEncode (Rep a)`) constrains no single
         // variable and provides no given (`declared_class_vars` skips it).
+        //
+        // An earlier version recovered the source name by trimming the id
+        // digits off the fresh name and keyed the givens by that: it
+        // misattributed every digit-suffixed source variable (`Show t1 =>`
+        // looked up "t") and every instance-method context (`_inst123` never
+        // trimmed to a declared name), leaving those skolems with no givens.
         let free: Vec<TyVar> = fresh_ty.free_vars();
-        let mut givens_for: HashMap<String, Vec<String>> = HashMap::new();
+        let mut givens_for: HashMap<&str, Vec<String>> = HashMap::new();
         for (cls, var) in declared_context.declared_class_vars() {
-            // `var` here is the SOURCE name; the freshened variable keeps
-            // the source name as a prefix, so match by trimming the id suffix is
-            // fragile. Instead map by exact source name against the fresh var's
-            // name prefix below.
-            givens_for.entry(var.to_string()).or_default().push(cls.to_string());
+            let fresh_name = renames.get(var).map(String::as_str).unwrap_or(var);
+            givens_for.entry(fresh_name).or_default().push(cls.to_string());
         }
-        // Recover each fresh variable's SOURCE name. `freshen_sig_type_mapped`
-        // builds a fresh name as `<source_name><id>` via `fresh_tyvar`, so the
-        // source name is the fresh name with its trailing id digits removed.
+        // The SOURCE name of a fresh variable, for display: the inverse
+        // rename when there is one; otherwise (an already-fresh instance
+        // variable) the name without its id digits — display only, never a
+        // lookup key.
+        let source_of: HashMap<&str, &str> = renames.iter()
+            .map(|(src, fresh)| (fresh.as_str(), src.as_str()))
+            .collect();
         let source_name = |fresh: &TyVar| -> String {
-            fresh.name.trim_end_matches(|ch: char| ch.is_ascii_digit()).to_string()
+            match source_of.get(fresh.name.as_str()) {
+                Some(src) => (*src).to_string(),
+                None => fresh.name.trim_end_matches(|ch: char| ch.is_ascii_digit()).to_string(),
+            }
         };
 
         let fn_name = self.current_fn.clone().unwrap_or_else(|| "this binding".to_string());
@@ -1324,7 +1338,7 @@ impl Checker {
             let sname = source_name(v);
             sig_skolems.insert(v.clone(), Ty::Skolem(sname.clone(), sk_id));
             demote.insert(sk_id, Ty::Var(v.clone()));
-            let givens = givens_for.get(&sname).cloned().unwrap_or_default();
+            let givens = givens_for.get(v.name.as_str()).cloned().unwrap_or_default();
             self.existential_skolems.insert(sk_id, ExSkolemInfo {
                 var: sname.clone(),
                 con: format!("the signature of '{}'", fn_name),
