@@ -1696,9 +1696,13 @@ local function __mll_ma_write(arr, idx, val)
     return function() __force(arr)[__force(idx) + 1] = __force(val) end
 end
 local function __mll_ma_modify(arr, idx, f)
+    -- The action may run more than once (a stored first-class action, a
+    -- list of actions traversed twice): every run must read the SAME
+    -- captured index. Rebinding the upvalue (`idx = __force(idx) + 1`)
+    -- made the second run modify index+1, the third index+2.
     return function()
-        arr = __force(arr); idx = __force(idx) + 1; f = __force(f)
-        arr[idx] = __force(f)(arr[idx])
+        local a, i = __force(arr), __force(idx) + 1
+        a[i] = __force(f)(a[i])
     end
 end
 local function __mll_ma_length(arr)
