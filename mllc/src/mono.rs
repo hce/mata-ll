@@ -317,7 +317,7 @@ impl Monomorphizer {
         crate::verify::check(module, &self.class_methods)
     }
 
-    pub fn run(&mut self, module: TModule) -> TModule {
+    pub fn run(&mut self, mut module: TModule) -> TModule {
         // Collect polymorphic user-defined functions
         for func in &module.functions {
             if self.is_polymorphic(&func.ty) && !self.builtins.contains(&func.name) {
@@ -334,14 +334,18 @@ impl Monomorphizer {
             }
         }
 
-        // Monomorphize instance methods too
-        let mut instance_fns: Vec<TFunction> = module.instance_fns.iter()
-            .map(|f| self.mono_function(f.clone()))
+        // Monomorphize instance methods too. The module is owned: its
+        // function vectors move through mono_function (they were once
+        // cloned out of the module first, once per function).
+        let mut instance_fns: Vec<TFunction> = std::mem::take(&mut module.instance_fns)
+            .into_iter()
+            .map(|f| self.mono_function(f))
             .collect();
 
         // Walk all functions to collect specialization demands
-        let functions: Vec<TFunction> = module.functions.iter()
-            .map(|f| self.mono_function(f.clone()))
+        let functions: Vec<TFunction> = std::mem::take(&mut module.functions)
+            .into_iter()
+            .map(|f| self.mono_function(f))
             .collect();
 
         // Keep all original functions (including polymorphic ones — they serve
@@ -392,14 +396,12 @@ impl Monomorphizer {
                     dict_fns.sort();
                     for name in &dict_fns {
                         rewritten.insert(name.clone());
-                        if let Some(pos) = result_fns.iter().position(|f| f.name == *name) {
-                            let mut func = result_fns[pos].clone();
-                            self.rewrite_dict_passing_fn(&mut func);
-                            result_fns[pos] = func;
-                        } else if let Some(pos) = instance_fns.iter().position(|f| f.name == *name) {
-                            let mut func = instance_fns[pos].clone();
-                            self.rewrite_dict_passing_fn(&mut func);
-                            instance_fns[pos] = func;
+                        // result_fns / instance_fns are locals, so the
+                        // rewrite works in place (no clone-and-write-back).
+                        if let Some(func) = result_fns.iter_mut().find(|f| f.name == *name) {
+                            self.rewrite_dict_passing_fn(func);
+                        } else if let Some(func) = instance_fns.iter_mut().find(|f| f.name == *name) {
+                            self.rewrite_dict_passing_fn(func);
                         }
                     }
                 }
@@ -413,22 +415,10 @@ impl Monomorphizer {
                 // the guards, so a dict-passing call in a guard condition was
                 // never rewritten.
                 for func in &mut result_fns {
-                    if self.dict_passing_fns.contains(&func.name) { continue; }
-                    for clause in &mut func.clauses {
-                        clause.map_exprs(&mut |e| {
-                            let e = self.revert_purged(e);
-                            self.rewrite_dict_call_sites(e)
-                        });
-                    }
+                    self.rewrite_non_dict_fn(func);
                 }
                 for func in &mut instance_fns {
-                    if self.dict_passing_fns.contains(&func.name) { continue; }
-                    for clause in &mut func.clauses {
-                        clause.map_exprs(&mut |e| {
-                            let e = self.revert_purged(e);
-                            self.rewrite_dict_call_sites(e)
-                        });
-                    }
+                    self.rewrite_non_dict_fn(func);
                 }
                 // (c) The rewrites may have generated new functions:
                 // dictionary-form instance methods and specializations
@@ -438,13 +428,7 @@ impl Monomorphizer {
                 while !self.generated.is_empty() {
                     let mut batch = std::mem::take(&mut self.generated);
                     for func in &mut batch {
-                        if self.dict_passing_fns.contains(&func.name) { continue; }
-                        for clause in &mut func.clauses {
-                            clause.map_exprs(&mut |e| {
-                                let e = self.revert_purged(e);
-                                self.rewrite_dict_call_sites(e)
-                            });
-                        }
+                        self.rewrite_non_dict_fn(func);
                     }
                     result_fns.append(&mut batch);
                 }
@@ -463,6 +447,26 @@ impl Monomorphizer {
             exports: module.exports,
             record_accessors: module.record_accessors,
             newtypes: module.newtypes,
+        }
+    }
+
+    /// The call-site half of the dictionary phase for a function that is NOT
+    /// itself dictionary-passing: revert references to purged
+    /// specializations, then rewrite calls to dict-passing functions.
+    /// Idempotent per function (DictCall nodes pass through untouched), so a
+    /// re-run after a new flag only converts the calls to the newly flagged
+    /// names. `TClause::map_exprs` covers body, guards AND where-binding
+    /// bodies — an earlier inlined copy of this loop skipped the guards, so a
+    /// dict-passing call in a guard condition was never rewritten.
+    fn rewrite_non_dict_fn(&mut self, func: &mut TFunction) {
+        if self.dict_passing_fns.contains(&func.name) {
+            return;
+        }
+        for clause in &mut func.clauses {
+            clause.map_exprs(&mut |e| {
+                let e = self.revert_purged(e);
+                self.rewrite_dict_call_sites(e)
+            });
         }
     }
 
