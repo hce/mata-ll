@@ -238,52 +238,77 @@ fn has_tail_self_call(stmts: &[Stmt], name: &SelfName, params: &[String]) -> boo
 /// passes' tail rewrites, over the same positions (ioloop's spliced-body
 /// gate uses it too).
 pub(super) fn tail_position_has(stmts: &[Stmt], pred: &impl Fn(&Expr) -> bool) -> bool {
-    match stmts.last() {
-        Some(Stmt::Return(e)) => pred(e),
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            tail_position_has(&then_b.0, pred)
-                || elseifs.iter().any(|(_, b)| tail_position_has(&b.0, pred))
-                || else_b.as_ref().is_some_and(|b| tail_position_has(&b.0, pred))
+    let mut found = false;
+    for_each_tail_block(stmts, &mut |b| {
+        if let Some(Stmt::Return(e)) = b.last() {
+            found = found || pred(e);
         }
-        Some(Stmt::Do(b)) => tail_position_has(&b.0, pred),
-        _ => false,
+    });
+    found
+}
+
+/// The statement-tree TAIL BLOCKS of a statement list: the list itself when
+/// its last statement is not a branch, otherwise (recursively) each arm of
+/// a last `if`/`elseif`/`else` and the body of a last `do`. `f` sees every
+/// innermost tail block — the places a function's own tail return can sit.
+/// One walk for the four passes' predicates and rewrites (tail_position_has,
+/// rewrite_tails, ioloop's rewrite/unrewrite of run-tail sites), which each
+/// once spelled the same descent.
+pub(super) fn for_each_tail_block(stmts: &[Stmt], f: &mut impl FnMut(&[Stmt])) {
+    match stmts.last() {
+        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
+            for_each_tail_block(&then_b.0, f);
+            for (_, b) in elseifs {
+                for_each_tail_block(&b.0, f);
+            }
+            if let Some(b) = else_b {
+                for_each_tail_block(&b.0, f);
+            }
+        }
+        Some(Stmt::Do(b)) => for_each_tail_block(&b.0, f),
+        _ => f(stmts),
+    }
+}
+
+/// Mutable twin of [`for_each_tail_block`].
+pub(super) fn for_each_tail_block_mut(stmts: &mut Vec<Stmt>, f: &mut impl FnMut(&mut Vec<Stmt>)) {
+    match stmts.last_mut() {
+        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
+            for_each_tail_block_mut(&mut then_b.0, f);
+            for (_, b) in elseifs.iter_mut() {
+                for_each_tail_block_mut(&mut b.0, f);
+            }
+            if let Some(b) = else_b.as_mut() {
+                for_each_tail_block_mut(&mut b.0, f);
+            }
+        }
+        Some(Stmt::Do(b)) => for_each_tail_block_mut(&mut b.0, f),
+        _ => f(stmts),
     }
 }
 
 /// Replace every tail self-call with the parameter update (and, in the
 /// goto shape, the jump to the loop's continue label).
 fn rewrite_tails(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String], with_goto: bool) {
-    match stmts.last_mut() {
-        Some(Stmt::Return(e)) => {
-            if rewritable_site(e, name, params).is_none() {
-                return;
-            }
-            let Some(Stmt::Return(mut e)) = stmts.pop() else { unreachable!() };
-            while let Expr::Paren(inner) = e {
-                e = *inner;
-            }
-            let Expr::Call(_, args) = e else { unreachable!() };
-            if !params.is_empty() {
-                stmts.push(Stmt::MultiAssign(params.to_vec(), args));
-            }
-            // Zero parameters: nothing to update — the site becomes bare
-            // fall-through (shape A) or just the goto (shape B).
-            if with_goto {
-                stmts.push(Stmt::Goto("continue".into()));
-            }
+    for_each_tail_block_mut(stmts, &mut |b| {
+        let Some(Stmt::Return(e)) = b.last() else { return };
+        if rewritable_site(e, name, params).is_none() {
+            return;
         }
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            rewrite_tails(&mut then_b.0, name, params, with_goto);
-            for (_, b) in elseifs.iter_mut() {
-                rewrite_tails(&mut b.0, name, params, with_goto);
-            }
-            if let Some(b) = else_b.as_mut() {
-                rewrite_tails(&mut b.0, name, params, with_goto);
-            }
+        let Some(Stmt::Return(mut e)) = b.pop() else { unreachable!() };
+        while let Expr::Paren(inner) = e {
+            e = *inner;
         }
-        Some(Stmt::Do(b)) => rewrite_tails(&mut b.0, name, params, with_goto),
-        _ => {}
-    }
+        let Expr::Call(_, args) = e else { unreachable!() };
+        if !params.is_empty() {
+            b.push(Stmt::MultiAssign(params.to_vec(), args));
+        }
+        // Zero parameters: nothing to update — the site becomes bare
+        // fall-through (shape A) or just the goto (shape B).
+        if with_goto {
+            b.push(Stmt::Goto("continue".into()));
+        }
+    });
 }
 
 // ---- Single-return proof (name-called functions) ----

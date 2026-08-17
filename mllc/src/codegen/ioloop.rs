@@ -717,32 +717,21 @@ fn each_return(stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
 /// positions (last statement, tail `if` arms, `do` blocks), so the walk
 /// descends only through the last statement.
 fn rewrite_run_tail_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String]) {
-    match stmts.last_mut() {
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            rewrite_run_tail_sites(&mut then_b.0, name, params);
-            for (_, b) in elseifs.iter_mut() {
-                rewrite_run_tail_sites(&mut b.0, name, params);
-            }
-            if let Some(b) = else_b.as_mut() {
-                rewrite_run_tail_sites(&mut b.0, name, params);
-            }
+    tailloop::for_each_tail_block_mut(stmts, &mut |b| {
+        if !matches!(b.last(), Some(Stmt::Return(e)) if run_tail_self_args(e, name, params).is_some()) {
+            return;
         }
-        Some(Stmt::Do(b)) => rewrite_run_tail_sites(&mut b.0, name, params),
-        _ => {}
-    }
-    if matches!(stmts.last(), Some(Stmt::Return(e)) if run_tail_self_args(e, name, params).is_some())
-    {
-        let Some(Stmt::Return(Expr::Call(_, mut runner_args))) = stmts.pop() else {
+        let Some(Stmt::Return(Expr::Call(_, mut runner_args))) = b.pop() else {
             unreachable!()
         };
         let Expr::Call(_, args) = runner_args.pop().expect("runner argument") else {
             unreachable!()
         };
         if !params.is_empty() {
-            stmts.push(Stmt::MultiAssign(params.to_vec(), args));
+            b.push(Stmt::MultiAssign(params.to_vec(), args));
         }
-        stmts.push(Stmt::Goto("continue".into()));
-    }
+        b.push(Stmt::Goto("continue".into()));
+    });
 }
 
 /// Mirror of `rewrite_run_tail_sites`, over the same positions: a
@@ -756,37 +745,27 @@ fn unrewrite_run_tail_sites(
     name: &SelfName,
     params: &[String],
 ) -> Option<()> {
-    match stmts.last_mut() {
-        Some(Stmt::If { then_b, elseifs, else_b, .. }) => {
-            unrewrite_run_tail_sites(&mut then_b.0, name, params)?;
-            for (_, b) in elseifs.iter_mut() {
-                unrewrite_run_tail_sites(&mut b.0, name, params)?;
-            }
-            if let Some(b) = else_b.as_mut() {
-                unrewrite_run_tail_sites(&mut b.0, name, params)?;
-            }
+    let mut ok = true;
+    tailloop::for_each_tail_block_mut(stmts, &mut |b| {
+        if !ok || !matches!(b.last(), Some(Stmt::Goto(l)) if l == "continue") {
+            return;
         }
-        Some(Stmt::Do(b)) => unrewrite_run_tail_sites(&mut b.0, name, params)?,
-        _ => {}
-    }
-    if matches!(stmts.last(), Some(Stmt::Goto(l)) if l == "continue") {
-        stmts.pop();
+        b.pop();
         let args = if params.is_empty() {
             Vec::new()
         } else {
-            let Some(Stmt::MultiAssign(lhs, args)) = stmts.pop() else { return None };
-            if lhs != params {
-                return None;
+            match b.pop() {
+                Some(Stmt::MultiAssign(lhs, args)) if lhs == params => args,
+                _ => {
+                    ok = false;
+                    return;
+                }
             }
-            args
         };
         let self_call = Expr::call_named(name.spelling(), args);
-        stmts.push(Stmt::Return(Expr::call_named(
-            "__mll_run_tail",
-            vec![self_call],
-        )));
-    }
-    Some(())
+        b.push(Stmt::Return(Expr::call_named("__mll_run_tail", vec![self_call])));
+    });
+    ok.then_some(())
 }
 
 /// The loop-body scaffold: per-iteration parameter copies `local _wN = pN`
