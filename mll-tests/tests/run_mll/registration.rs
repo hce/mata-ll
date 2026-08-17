@@ -49,6 +49,7 @@ mll_test!(operator_line_start, "operator_line_start.mll");
 mll_test!(block_closers, "block_closers.mll");
 mll_test!(gadt_syntax_derives, "gadt_syntax_derives.mll");
 mll_test!(local_shadows_poly_global, "local_shadows_poly_global.mll");
+mll_test!(negate_min_int_fold, "negate_min_int_fold.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
 mll_test!(num_user_instance, "num_user_instance.mll");
 mll_test!(integral_semantics, "integral_semantics.mll");

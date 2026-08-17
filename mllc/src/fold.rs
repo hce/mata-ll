@@ -90,8 +90,11 @@ fn fold_expr(expr: TExpr) -> TExpr {
             }
             TExpr::new(TExprKind::InfixApp { op, lhs, rhs }, ty)
         }
+        // Negating i64::MIN has no i64 result: like the binary folds, leave
+        // it unfolded for the runtime (an unchecked `-n` panicked in debug
+        // builds and wrapped in release, where an `Integer` promotes).
         TExprKind::Negate(inner) => match unwrap_lit(&inner) {
-            Some(TLiteral::Integer(n)) =>
+            Some(TLiteral::Integer(n)) if n.checked_neg().is_some() =>
                 TExpr::new(TExprKind::Lit(TLiteral::Integer(-n)), ty),
             Some(TLiteral::Number(n)) =>
                 TExpr::new(TExprKind::Lit(TLiteral::Number(-n)), ty),
