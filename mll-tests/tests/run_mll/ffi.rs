@@ -1499,6 +1499,51 @@ main = pure ()
     assert_eq!(r, 60, "effectful outgoing callback fold");
 }
 
+// A declared tuple result of a LuaIO function is Lua's multi-value return,
+// exactly as for LuaPure (`__mll_tup_ret`). The IO twin (`__mll_io_tup`)
+// was unreachable: its selector matched `Ty::App(Con "IO", Tuple)`, a shape
+// `Ty::app` normalizes to `Ty::IO(Tuple)` before it is ever inspected, so a
+// `LuaIO … (String, Int)` got the single-value `__mll_io` wrapper, which
+// truncates the host call to its FIRST return value.
+#[test]
+fn luaio_tuple_result_is_multi_return() {
+    let source = r#"
+getPairIO :: Int -> LuaIO "host.pairio" (String, Int)
+getTripleIO :: Int -> LuaIO "host.tripleio" (Int, Bool, String)
+
+expect :: Bool -> String -> IO ()
+expect True _ = pure ()
+expect False m = error m
+
+main :: IO ()
+main = do
+    (s, n) <- getPairIO 5
+    expect (s == "five") "first value of the IO multi-return"
+    expect (n == 5) "second value of the IO multi-return"
+    (a, b, c) <- getTripleIO 2
+    expect (a == 4 && b == True && c == "two") "three-value IO multi-return"
+    pure ()
+"#;
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        host = {}
+        function host.pairio(n) return "five", n end
+        function host.tripleio(n) return n * 2, true, "two" end
+        "#,
+    )
+    .exec()
+    .unwrap();
+    // No chunk argument: the standalone form runs `main`.
+    lua.load(&lua_code)
+        .set_name("luaio_tuple")
+        .exec()
+        .expect("main's expectations hold");
+}
+
 // --- FFI result decoding: shape mismatches must fail with localized errors.
 
 #[test]

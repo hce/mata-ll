@@ -2036,13 +2036,18 @@ impl Checker {
             })
             .collect();
 
-        // Check if return type is a tuple (multi-return from Lua)
+        // A declared tuple result is Lua's multi-value return. `IO (a, b)`
+        // is `Ty::IO(Tuple)` — `Ty::app` normalizes `App(Con "IO", t)` to
+        // `Ty::IO(t)` and `Type::LuaIO` maps through `Ty::io`, so an
+        // `App(Con "IO", …)` arm here can never match (it once was the only
+        // IO arm, leaving every LuaIO tuple result on the single-value
+        // wrapper, which truncates the host call to its first value).
         let tuple_arity = match &ret_ty {
             Ty::Tuple(elems) => Some(elems.len()),
-            // IO (Tuple ...) — unwrap IO wrapper
-            Ty::App(io, inner) if matches!(io.as_ref(), Ty::Con(c) if c == "IO") => {
-                if let Ty::Tuple(elems) = inner.as_ref() { Some(elems.len()) } else { None }
-            }
+            Ty::IO(inner) => match inner.as_ref() {
+                Ty::Tuple(elems) => Some(elems.len()),
+                _ => None,
+            },
             _ => None,
         };
 
