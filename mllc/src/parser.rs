@@ -384,16 +384,20 @@ impl Parser {
             return Err(errors);
         }
 
-        // Merge consecutive FunDef declarations with the same name
+        // Merge consecutive FunDef declarations with the same name (moving
+        // the clauses, not cloning them).
         let mut merged: Vec<Decl> = Vec::new();
         for decl in decls {
-            if let Decl::FunDef { name, clauses } = &decl
-                && let Some(Decl::FunDef { name: prev_name, clauses: prev_clauses }) = merged.last_mut()
-                    && prev_name == name {
-                        prev_clauses.extend(clauses.clone());
-                        continue;
+            match decl {
+                Decl::FunDef { name, clauses }
+                    if matches!(merged.last(), Some(Decl::FunDef { name: prev, .. }) if *prev == name) =>
+                {
+                    if let Some(Decl::FunDef { clauses: prev_clauses, .. }) = merged.last_mut() {
+                        prev_clauses.extend(clauses);
                     }
-            merged.push(decl);
+                }
+                other => merged.push(other),
+            }
         }
 
         Ok(Module { decls: merged, exports: module_exports, hidden: std::collections::HashSet::new() })

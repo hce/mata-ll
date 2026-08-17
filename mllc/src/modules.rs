@@ -231,8 +231,10 @@ impl ModuleLoader {
 
                     // Include ALL non-import declarations for compilation
                     // (exported functions may depend on internal helpers).
-                    // Track hidden names for typechecker enforcement.
-                    let all_decls: Vec<&Decl> = resolved.decls.iter()
+                    // Track hidden names for typechecker enforcement. The
+                    // resolved module is ours (one clone out of the cache
+                    // above); its declarations move into the import list.
+                    let all_decls: Vec<Decl> = resolved.decls.into_iter()
                         .filter(|d| !matches!(d, Decl::Import { .. }))
                         .collect();
 
@@ -259,9 +261,7 @@ impl ModuleLoader {
 
                     match items {
                         ImportItems::All => {
-                            for d in &all_decls {
-                                imported_decls.push((*d).clone());
-                            }
+                            imported_decls.extend(all_decls);
                         }
                         ImportItems::Specific(items) => {
                             // Include ALL declarations (internal helpers are
@@ -278,12 +278,12 @@ impl ModuleLoader {
                             for w in &wanted {
                                 visible_names.insert(w.clone());
                             }
-                            for d in &all_decls {
-                                imported_decls.push((*d).clone());
-                                if let Some(n) = decl_name(d)
+                            for d in all_decls {
+                                if let Some(n) = decl_name(&d)
                                     && !wanted.contains(&n) {
                                         hidden_names.insert(n);
                                     }
+                                imported_decls.push(d);
                             }
                         }
                         ImportItems::Hiding(items) => {
@@ -295,12 +295,12 @@ impl ModuleLoader {
                                 }
                             }).collect();
 
-                            for d in &all_decls {
-                                imported_decls.push((*d).clone());
-                                if let Some(n) = decl_name(d)
+                            for d in all_decls {
+                                if let Some(n) = decl_name(&d)
                                     && excluded.contains(&n) {
                                         hidden_names.insert(n);
                                     }
+                                imported_decls.push(d);
                             }
                         }
                         ImportItems::Qualified(alias) => {
@@ -406,7 +406,7 @@ struct ModuleNames {
     tys: HashSet<String>,
 }
 
-fn collect_module_names(decls: &[&Decl]) -> ModuleNames {
+fn collect_module_names(decls: &[Decl]) -> ModuleNames {
     let mut vals = HashSet::new();
     let mut tys = HashSet::new();
     for d in decls {
