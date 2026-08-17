@@ -1740,6 +1740,26 @@ fn is_string_list_mismatch(a: &Ty, b: &Ty) -> bool {
 
 impl Diagnostic {
     /// An optional mata-ll-specific explanation appended below the error.
+    /// A note computed from the kind's payload (unlike `hint`, which is a
+    /// fixed text per kind): the rigid-multiplicity explanation, printed in
+    /// the structured note position — it was once spliced into the message
+    /// with "\nnote:", ahead of the location line and unindented.
+    fn kind_note(&self) -> Option<&'static str> {
+        match &self.kind {
+            DiagnosticKind::MultiplicityMismatch(a, b) => {
+                let mut rigids = Vec::new();
+                a.collect_rigid_mults(&mut rigids);
+                b.collect_rigid_mults(&mut rigids);
+                (!rigids.is_empty()).then_some(
+                    "'%m ->' is a multiplicity VARIABLE from a signature — the caller \
+                     chooses whether it is '%1' or unrestricted, so inside this \
+                     definition it cannot be assumed to be either one",
+                )
+            }
+            _ => None,
+        }
+    }
+
     fn hint(&self) -> Option<&'static str> {
         match &self.kind {
             DiagnosticKind::Mismatch(a, b) | DiagnosticKind::RigidMismatch(a, b)
@@ -1830,9 +1850,6 @@ impl fmt::Display for Diagnostic {
                 b.collect_rigid_mults(&mut rigids);
                 write!(f, "Cannot match '{}' with '{}': the arrows disagree about how often the function may use its argument — '%1 ->' promises the argument is consumed exactly once, while a plain '->' makes no such promise, so the two function types are not interchangeable",
                     a.apply_subst(&s), b.apply_subst(&s))?;
-                if !rigids.is_empty() {
-                    write!(f, "\nnote: '%m ->' is a multiplicity VARIABLE from a signature — the caller chooses whether it is '%1' or unrestricted, so inside this definition it cannot be assumed to be either one")?
-                }
             }
             DiagnosticKind::OccursCheck(v, ty) => {
                 let vt = Ty::Var(v.clone());
@@ -1959,6 +1976,9 @@ impl fmt::Display for Diagnostic {
         }
         if let Some(hint) = self.hint() {
             write!(f, "\n  note: {}", hint)?;
+        }
+        if let Some(note) = self.kind_note() {
+            write!(f, "\n  note: {}", note)?;
         }
         for note in &self.notes {
             write!(f, "\n  note: {}", note)?;

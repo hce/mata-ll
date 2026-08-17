@@ -56,12 +56,10 @@ impl Checker {
     /// Report "Cannot derive 'class' for 'type': reason" with a `note:` —
     /// the one shape every derive's rejection takes.
     pub(super) fn reject_derive(&mut self, class: &str, type_name: &str, reason: &str, note: &str) {
-        self.push_error_ctx(
-            DiagnosticKind::Other(format!(
-                "Cannot derive '{}' for '{}': {}\nnote: {}",
-                class, type_name, reason, note,
-            )),
+        self.push_error_ctx_note(
+            DiagnosticKind::Other(format!("Cannot derive '{}' for '{}': {}", class, type_name, reason)),
             format!("data {}", type_name),
+            note,
         );
     }
 

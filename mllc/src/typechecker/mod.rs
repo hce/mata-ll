@@ -1355,6 +1355,18 @@ impl Checker {
         self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file: None, notes, baseline });
     }
 
+    /// `push_error_ctx` plus one explanatory `note:` line, carried as a
+    /// structured note (rendered after the location line, indented like every
+    /// other note) — not spliced into the message text with "\nnote:", which
+    /// printed the note BEFORE the `at file:line, in ctx` line and without the
+    /// indent the structured notes get.
+    pub(super) fn push_error_ctx_note(&mut self, kind: DiagnosticKind, ctx: String, note: impl Into<String>) {
+        self.push_error_ctx(kind, ctx);
+        if let Some(diag) = self.errors.last_mut() {
+            diag.notes.push(note.into());
+        }
+    }
+
     fn push_error_span(&mut self, kind: DiagnosticKind, ctx: String, span: Span) {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
@@ -1694,12 +1706,13 @@ impl Checker {
                     con_name,
                 )
             };
-            checker.push_error_ctx(
+            checker.push_error_ctx_note(
                 DiagnosticKind::Other(format!(
-                    "Duplicate data constructor '{}': it is already declared by '{}' {}\nnote: {}",
-                    con_name, other_type, where_other, note,
+                    "Duplicate data constructor '{}': it is already declared by '{}' {}",
+                    con_name, other_type, where_other,
                 )),
                 format!("data {}", type_name),
+                note,
             );
         };
 
@@ -2508,12 +2521,13 @@ impl Checker {
                         if let ConstructorFields::Named(fields) = &con.fields {
                             for field in fields {
                                 if let Some(key) = &field.external_key {
-                                    self.push_error_ctx(
+                                    self.push_error_ctx_note(
                                         DiagnosticKind::Other(format!(
-                                            "Field '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives none of LuaDict, ToJSON or FromJSON: the rename only changes the field's external name — the key in the runtime Lua table of a LuaDict record and the JSON object key of a derived ToJSON/FromJSON codec — and without one of those derivings there is nothing the rename could apply to\nnote: `as` field renaming is a mata-ll extension with no GHC equivalent; add `deriving (LuaDict)`, `deriving (ToJSON)` or `deriving (FromJSON)`, or drop the rename.",
+                                            "Field '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives none of LuaDict, ToJSON or FromJSON: the rename only changes the field's external name — the key in the runtime Lua table of a LuaDict record and the JSON object key of a derived ToJSON/FromJSON codec — and without one of those derivings there is nothing the rename could apply to",
                                             field.name, name, key, name,
                                         )),
                                         format!("data {}", name),
+                                        "`as` field renaming is a mata-ll extension with no GHC equivalent; add `deriving (LuaDict)`, `deriving (ToJSON)` or `deriving (FromJSON)`, or drop the rename.",
                                     );
                                 }
                             }
@@ -2535,12 +2549,13 @@ impl Checker {
                 if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON") && !is_luadict_enum {
                     for con in constructors {
                         if let Some(ext) = &con.external_name {
-                            self.push_error_ctx(
+                            self.push_error_ctx_note(
                                 DiagnosticKind::Other(format!(
-                                    "Constructor '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives neither ToJSON nor FromJSON, nor is it an all-nullary type deriving LuaDict: the rename only changes the constructor's external tag — the string a derived JSON codec, or a LuaDict string-enum, uses to tell the constructors apart — and without one of those there is nothing the rename could apply to\nnote: `as` constructor renaming is a mata-ll extension with no GHC equivalent; on a type with fields it never affects the Lua side (at the Lua boundary such a constructor is a positional integer tag, not a name). Add `deriving (ToJSON)` or `deriving (FromJSON)`, or make an all-nullary sum type `deriving (LuaDict)` so its constructors become Lua strings, or drop the rename.",
+                                    "Constructor '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives neither ToJSON nor FromJSON, nor is it an all-nullary type deriving LuaDict: the rename only changes the constructor's external tag — the string a derived JSON codec, or a LuaDict string-enum, uses to tell the constructors apart — and without one of those there is nothing the rename could apply to",
                                     con.name, name, ext, name,
                                 )),
                                 format!("data {}", name),
+                                "`as` constructor renaming is a mata-ll extension with no GHC equivalent; on a type with fields it never affects the Lua side (at the Lua boundary such a constructor is a positional integer tag, not a name). Add `deriving (ToJSON)` or `deriving (FromJSON)`, or make an all-nullary sum type `deriving (LuaDict)` so its constructors become Lua strings, or drop the rename.",
                             );
                         }
                     }

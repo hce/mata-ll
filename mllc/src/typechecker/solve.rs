@@ -506,11 +506,12 @@ impl Checker {
                                 format!("({})", t),
                             t => format!("{}", t),
                         };
-                        self.push_error_ctx(
+                        self.push_error_ctx_note(
                             DiagnosticKind::Other(format!(
-                                "Constraint '{} {}' in the instance context must apply the class to a plain type variable: the context names which of the instance head's type variables need their own instance, so a compound type has nothing to attach to here\nnote: GHC accepts compound context types with FlexibleContexts; mata-ll supports only the Haskell 2010 form `C a`.",
+                                "Constraint '{} {}' in the instance context must apply the class to a plain type variable: the context names which of the instance head's type variables need their own instance, so a compound type has nothing to attach to here",
                                 c.class_name, shown)),
                             ctx_str,
+                            "GHC accepts compound context types with FlexibleContexts; mata-ll supports only the Haskell 2010 form `C a`.",
                         );
                     }
                     continue;
@@ -635,19 +636,23 @@ impl Checker {
         // Reject it — GHC needs FlexibleInstances/OverlappingInstances for such
         // heads, which mata-ll does not have.
         if !Self::instance_head_general(&target_ty) {
-            self.push_error_ctx(
+            self.push_error_ctx_note(
                 DiagnosticKind::Other(format!(
                     "Instance head '{}' is too specific: an instance must be for a \
                      type constructor applied to DISTINCT type variables (e.g. \
                      '[a]', 'Maybe a', 'Pair a b'), not to concrete or repeated \
-                     type arguments\nnote: mata-ll resolves an instance by its head \
-                     constructor only, so '{}' would be indistinguishable from every \
-                     other argument choice at the same head and could silently \
-                     mis-dispatch. GHC accepts this only with FlexibleInstances / \
-                     OverlappingInstances, which mata-ll does not support.",
-                    ty_str, ty_str
+                     type arguments",
+                    ty_str
                 )),
                 format!("instance {} {}", class_name, ty_str),
+                format!(
+                    "mata-ll resolves an instance by its head constructor only, so '{}' \
+                     would be indistinguishable from every other argument choice at the \
+                     same head and could silently mis-dispatch. GHC accepts this only \
+                     with FlexibleInstances / OverlappingInstances, which mata-ll does \
+                     not support.",
+                    ty_str
+                ),
             );
             return vec![];
         }
@@ -663,16 +668,16 @@ impl Checker {
         if !self.checking_prelude
             && !self.checked_instance_heads.insert((class_name.to_string(), target_head.clone()))
         {
-            self.push_error_ctx(
+            self.push_error_ctx_note(
                 DiagnosticKind::Other(format!(
                     "Duplicate instance '{} {}': an instance for this class and head \
-                     constructor is already declared\nnote: mata-ll allows one \
-                     instance per (class, head constructor); two declarations that \
-                     share a head — a repeat, or overlapping heads like '[a]' and \
-                     '[Int]' — would mis-dispatch. Remove or merge one.",
+                     constructor is already declared",
                     class_name, ty_str
                 )),
                 format!("instance {} {}", class_name, ty_str),
+                "mata-ll allows one instance per (class, head constructor); two \
+                 declarations that share a head — a repeat, or overlapping heads like \
+                 '[a]' and '[Int]' — would mis-dispatch. Remove or merge one.",
             );
             return vec![];
         }
