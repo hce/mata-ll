@@ -126,7 +126,7 @@ impl CodeGen {
         // if_pure_bottom).
         for name in &[
             "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
-            "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_tail", "__mll_run_st", "__mll_perform",
+            "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_tail", "__mll_run_st",
             "__mll_ffi_decode",
             "not_", "engage", "liftIO", "show", "error_", "max", "min",
             "pure", "return_", "Just",

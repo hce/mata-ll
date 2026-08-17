@@ -8,7 +8,7 @@ local __cons_mt = {}
 -- generic `show`/`__mll_to_lua` can identify it as an upvalue.
 local __just_mt = {}
 -- Tags a suspended `pure`/`return` value — a "pure action" that has escaped its
--- defining function. `__mll_run` (and __mll_perform) unwrap it WITHOUT forcing
+-- defining function. `__mll_run` unwraps it WITHOUT forcing
 -- or calling the payload, so a `pure ⊥` bound across a function boundary does
 -- not raise until demanded, and a returned `pure <function>` is delivered as a
 -- value rather than mistaken for an action closure to invoke. See gen_action.
@@ -681,8 +681,8 @@ end
 -- ONE ROOT APPLICATION. A direct-perform function's result needs EXACTLY ONE
 -- consumer application: at most one pending closure-call, then at most one
 -- unbox — which is precisely what every consuming site (__mll_run,
--- __mll_perform, try_/catch_, the export and callback wrappers) applies to
--- a call result. The emitted terminal forms close the invariant
+-- try_/catch_, the export and callback wrappers) applies to a call
+-- result. The emitted terminal forms close the invariant
 -- inductively: a value / FFI / fused-intrinsic terminal IS the result (no
 -- pending work beyond the unbox's no-op); a `pure e` terminal is the bare
 -- value or its one `__mll_pure` box (gen_pure_action); a
@@ -723,14 +723,6 @@ local function __mll_run_tail(action)
     action = __force(action)
     if getmetatable(action) == __mll_pure_mt then return action end
     if type(action) == "function" then return action() else return action end
-end
--- Perform an IO action (normally a function closure; a pure action carries its
--- result and is returned unforced, exactly as in __mll_run)
-local function __mll_perform(action)
-    if getmetatable(action) == __mll_pure_mt then return action[1] end
-    action = __force(action)
-    if getmetatable(action) == __mll_pure_mt then return action[1] end
-    return __mll_unbox(action())
 end
 -- runST: run the state thread AND force its result to WHNF. Demanding
 -- `runST m` to WHNF is, in GHC, demanding the returned value to WHNF —

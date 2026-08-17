@@ -4,10 +4,13 @@
 //! marker) into one byte-identical text stream. `ondemand_prelude` emits only the prelude
 //! definitions reachable from the generated body: the roots are the prelude
 //! identifiers appearing in the body, closed transitively over inter-chunk
-//! references. References are read from raw chunk text (comments and
-//! strings included), so the emitted set only ever OVER-approximates — a
-//! real dependency is never dropped, and completeness of the emitted set
-//! is a consequence of the closure (asserted, see `ondemand_prelude`).
+//! references. References are read from chunk CODE text — every identifier
+//! outside a `--` line comment, strings included — so the emitted set only
+//! ever OVER-approximates a real dependency (a name in a string can be a
+//! `_G` lookup or an error message; a name in a comment cannot be a use,
+//! and once selected a dead helper for every IO program), and
+//! completeness of the emitted set is a consequence of the closure
+//! (asserted, see `ondemand_prelude`).
 //! The whole prelude is never emitted: it declares more top-level locals
 //! than Lua's 200-per-function limit, so as a "safety net" it would have
 //! been an unloadable chunk, not a larger file.
@@ -23,8 +26,9 @@ struct PChunk {
 ///
 /// Roots are the prelude identifiers that appear in the generated program;
 /// the reachable set is the transitive closure over inter-chunk references.
-/// References are read from raw chunk text (comments and strings included), so
-/// the closure only ever *over*-approximates — it never drops a real dependency.
+/// References are read from chunk code text (`code_idents`: comments
+/// stripped, strings kept), so the closure only ever *over*-approximates — it
+/// never drops a real dependency.
 /// Completeness (every prelude name referenced by the body or by an emitted
 /// chunk is defined in the emitted set) follows from the closure — the same
 /// chunk texts feed both — and is asserted below. An earlier version fell
@@ -57,7 +61,7 @@ pub(super) fn ondemand_prelude(body: &str) -> String {
     while let Some(name) = work.pop() {
         if let Some(idxs) = providers.get(name) {
             for &i in idxs {
-                for dep in idents(&chunks[i].text) {
+                for dep in code_idents(&chunks[i].text) {
                     if all_names.contains(dep) && needed.insert(dep) {
                         work.push(dep);
                     }
@@ -81,7 +85,7 @@ pub(super) fn ondemand_prelude(body: &str) -> String {
     // Every prelude name referenced by the body or by an emitted chunk is
     // defined in the emitted set — by construction of the closure above.
     debug_assert!(
-        idents(body).chain(idents(&out))
+        idents(body).chain(code_idents(&out))
             .filter(|t| all_names.contains(t))
             .all(|t| provided.contains(t)),
         "ondemand_prelude: the reachability closure left a referenced prelude name unprovided"
@@ -176,6 +180,20 @@ pub(super) fn is_ident(s: &str) -> bool {
         && cs.all(|c| c == '_' || c.is_ascii_alphanumeric())
 }
 
+/// `idents` over the CODE of a prelude chunk: each line up to its `--` line
+/// comment (the runtime uses no block comments and no `--` inside a string
+/// literal, which `prelude_has_no_dash_dash_in_strings` pins). A name that
+/// occurs only in a comment is documentation, not a dependency.
+pub(super) fn code_idents(s: &str) -> impl Iterator<Item = &str> {
+    s.lines().flat_map(|line| {
+        let code = match line.find("--") {
+            Some(i) => &line[..i],
+            None => line,
+        };
+        idents(code)
+    })
+}
+
 /// Every maximal `[A-Za-z0-9_]` run in `s` (a superset of the Lua identifiers).
 pub(super) fn idents(s: &str) -> impl Iterator<Item = &str> {
     let b = s.as_bytes();
@@ -242,6 +260,45 @@ mod tests {
             .map(|l| provided_names(l).len())
             .sum();
         assert!(locals > 200, "prelude declares {} top-level locals", locals);
+    }
+
+    /// `code_idents` cuts each line at its first `--`, which is only right
+    /// while the runtime keeps `--` out of string literals and uses no
+    /// block comments; a name after such a `--` would be dropped from the
+    /// dependency scan.
+    #[test]
+    fn prelude_has_no_dash_dash_in_strings() {
+        for (n, line) in PRELUDE.lines().enumerate() {
+            // Walk the line as Lua would: a `--` outside a string starts
+            // the comment (and must not open a block comment); a `--`
+            // inside a string would be cut by code_idents.
+            let cs: Vec<char> = line.chars().collect();
+            let mut i = 0;
+            let mut quote: Option<char> = None;
+            while i < cs.len() {
+                let c = cs[i];
+                match quote {
+                    Some(q) => {
+                        if c == '\\' { i += 2; continue; }
+                        if c == q { quote = None; }
+                        else if c == '-' && cs.get(i + 1) == Some(&'-') {
+                            panic!("prelude line {}: a `--` inside a string literal: {}", n + 1, line);
+                        }
+                    }
+                    None => {
+                        if c == '"' || c == '\'' { quote = Some(c); }
+                        else if c == '-' && cs.get(i + 1) == Some(&'-') {
+                            assert!(
+                                !(cs.get(i + 2) == Some(&'[') && cs.get(i + 3) == Some(&'[')),
+                                "prelude line {}: block comments are not scanned", n + 1
+                            );
+                            break;
+                        }
+                    }
+                }
+                i += 1;
+            }
+        }
     }
 
     /// Completeness of the on-demand subset for every possible root: each
