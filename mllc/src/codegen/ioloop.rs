@@ -339,10 +339,11 @@ fn to_loop(stmts: Vec<Stmt>, name: &SelfName, params: &[String]) -> Vec<Stmt> {
                         FuncBody::Inline(s) => s,
                         FuncBody::Block(Block(s)) => s,
                     };
-                    // Tail sites of the spliced closure body only
-                    // (`everywhere: false`): a spliced site is not in
-                    // loop-body tail position in general, so the rewrite is
-                    // always the goto shape (see the module comment).
+                    // Tail sites of the spliced closure body only — the
+                    // walk descends through the last statement: a spliced
+                    // site is not in loop-body tail position in general, so
+                    // the rewrite is always the goto shape (see the module
+                    // comment).
                     rewrite_run_tail_sites(&mut body, name, params);
                     out.extend(body);
                 } else {
@@ -458,8 +459,6 @@ fn convert(
     // mismatch diagnostics.
     debug_assert!(
         reverse_check(
-            "ioloop",
-            "original",
             &target.header_text(params),
             reverse(&out, &self_name, params, &ws, &lp),
             &canonical_closure_returns(&body.0),
@@ -847,25 +846,19 @@ fn peel_loop_scaffold<'a>(inner: &'a [Stmt], ws: &[String], params: &[String]) -
 /// byte-for-byte in rendered form. This is the mechanical review every
 /// corpus conversion gets: a debug-build compile of a program re-derives
 /// and checks every conversion in it.
-fn reverse_check(
-    pass: &str,
-    expect_label: &str,
-    header: &str,
-    reversed: Option<Vec<Stmt>>,
-    expect: &[Stmt],
-) -> bool {
+fn reverse_check(header: &str, reversed: Option<Vec<Stmt>>, expect: &[Stmt]) -> bool {
     let expect = render_stmts(expect);
     match reversed {
         Some(r) if render_stmts(&r) == expect => true,
         Some(r) => {
             eprintln!(
-                "{pass} reverse mismatch for `{header}`:\n--- {expect_label}\n{expect}\n--- reversed\n{}",
+                "ioloop reverse mismatch for `{header}`:\n--- original\n{expect}\n--- reversed\n{}",
                 render_stmts(&r)
             );
             false
         }
         None => {
-            eprintln!("{pass} reverse failed to parse own output for `{header}`");
+            eprintln!("ioloop reverse failed to parse own output for `{header}`");
             false
         }
     }
