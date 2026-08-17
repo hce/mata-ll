@@ -822,7 +822,27 @@ fn tail_rewrite_ok(s: &Stmt, strict: bool) -> bool {
                     None => !strict,
                 }
         }
-        _ => !strict && !matches!(s, Stmt::Raw(_)),
+        // Statements that may CONTAIN a `return` — a `do … end`, a loop, a
+        // function-value's table return — are never a tail position this
+        // rewrite handles: rewrite_tail_returns does not descend into them,
+        // so a return inside would come out of the ENCLOSING function after
+        // the splice. Control transfers and opaque text are not tolerated
+        // fall-through either. Named explicitly (no wildcard) so a Stmt
+        // variant added later must choose.
+        Stmt::Do(_)
+        | Stmt::WhileTrue(_)
+        | Stmt::ReturnTable(_)
+        | Stmt::Goto(_)
+        | Stmt::Label(_)
+        | Stmt::Raw(_) => false,
+        // Straight-line statements: tolerated fall-through only in the
+        // non-strict form (the fresh local stays nil on that path).
+        Stmt::Local(..)
+        | Stmt::Assign(..)
+        | Stmt::Expr(_)
+        | Stmt::AssignIf { .. }
+        | Stmt::MultiAssign(..)
+        | Stmt::Function { .. } => !strict,
     }
 }
 
@@ -993,6 +1013,29 @@ mod tests {
         ];
         run_with(&mut stmts, &Disable::default());
         assert!(matches!(&stmts[1], Stmt::Return(Expr::Name(n)) if n == "x"));
+    }
+
+    /// A tail `if` whose arm ends in a block that may contain a `return`
+    /// (`do … end`, a loop) is not a splice-able tail — rewrite_tail_returns
+    /// does not descend into it, so a return inside would escape the
+    /// enclosing function after the splice. Straight-line arm ends are
+    /// tolerated fall-through in the non-strict form only.
+    #[test]
+    fn tail_rewrite_declines_arms_ending_in_return_carrying_blocks() {
+        let tail_if = |last: Stmt| Stmt::If {
+            cond: Expr::name("c"),
+            then_b: Block(vec![Stmt::Return(Expr::lit("1"))]),
+            elseifs: vec![],
+            else_b: Some(Block(vec![last])),
+        };
+        let inner_return = || Block(vec![Stmt::Return(Expr::lit("2"))]);
+        for blocky in [Stmt::Do(inner_return()), Stmt::WhileTrue(inner_return())] {
+            assert!(!tail_rewrite_ok(&tail_if(blocky.clone()), false));
+            assert!(!tail_rewrite_ok(&tail_if(blocky), true));
+        }
+        let plain = Stmt::Local(vec!["y".into()], Some(Expr::lit("3")));
+        assert!(tail_rewrite_ok(&tail_if(plain.clone()), false));
+        assert!(!tail_rewrite_ok(&tail_if(plain), true));
     }
 
     /// A force the analysis cannot justify stays.
