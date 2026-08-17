@@ -192,30 +192,35 @@ pub enum Pattern {
     Tuple(Vec<Pattern>),
 }
 
-/// The variable names a pattern binds, in source order. Used by the
-/// pattern-binding desugar (`let (a, b) = e`) to synthesize one selector
-/// binding per variable.
-pub fn pattern_var_names(p: &Pattern) -> Vec<String> {
-    fn go(p: &Pattern, out: &mut Vec<String>) {
-        match p {
-            Pattern::Var(n) => out.push(n.clone()),
+impl Pattern {
+    /// Call `f` on every variable this pattern binds, in source order — THE
+    /// enumeration of a surface pattern's binders (the parser's tuple-let
+    /// selectors and the module resolver's scope tracking both need it; each
+    /// once carried its own walk).
+    pub fn for_each_var(&self, f: &mut impl FnMut(&str)) {
+        match self {
+            Pattern::Var(n) => f(n),
             Pattern::Wildcard | Pattern::LitPat(_) => {}
             Pattern::Constructor { args, .. } => {
                 for a in args {
-                    go(a, out);
+                    a.for_each_var(f);
                 }
             }
-            Pattern::Paren(inner) => go(inner, out),
+            Pattern::Paren(inner) => inner.for_each_var(f),
             Pattern::Tuple(elems) => {
                 for e in elems {
-                    go(e, out);
+                    e.for_each_var(f);
                 }
             }
         }
     }
-    let mut out = Vec::new();
-    go(p, &mut out);
-    out
+
+    /// The variables this pattern binds, in source order.
+    pub fn var_names(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        self.for_each_var(&mut |v| out.push(v.to_string()));
+        out
+    }
 }
 
 /// Expressions.

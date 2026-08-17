@@ -689,15 +689,7 @@ impl Qual<'_> {
 
 /// Collect the variable names bound by a pattern (for scope tracking).
 fn collect_pattern_vars(p: &Pattern, out: &mut HashSet<String>) {
-    match p {
-        Pattern::Var(n) => { out.insert(n.clone()); }
-        Pattern::Constructor { args, .. } => {
-            for a in args { collect_pattern_vars(a, out); }
-        }
-        Pattern::Paren(inner) => collect_pattern_vars(inner, out),
-        Pattern::Tuple(ps) => for p in ps { collect_pattern_vars(p, out); },
-        Pattern::Wildcard | Pattern::LitPat(_) => {}
-    }
+    p.for_each_var(&mut |v| { out.insert(v.to_string()); });
 }
 
 /// Rewrite qualified use-sites in one of the importing module's declarations.

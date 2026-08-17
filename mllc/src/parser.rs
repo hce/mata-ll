@@ -2398,7 +2398,7 @@ impl Parser {
                     let fresh = format!("__tup_{}", fresh_counter);
                     fresh_counter += 1;
                     binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
-                    for v in crate::ast::pattern_var_names(&pat) {
+                    for v in pat.var_names() {
                         binds.push(LocalDef {
                             name: v.clone(),
                             patterns: vec![],
