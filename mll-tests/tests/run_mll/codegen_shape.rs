@@ -218,10 +218,6 @@ main = print (loop 3 big + twice)
 /// there is semantics, not grouping.
 #[test]
 fn ffi_wrapper_keeps_truncating_paren() {
-    with_compiler_stack(ffi_wrapper_keeps_truncating_paren_impl)
-}
-
-fn ffi_wrapper_keeps_truncating_paren_impl() {
     let dir = Path::new("tests/cases");
     let ffi_source = "modf1 :: Number -> LuaPure \"math.modf\" Number\n\
                       main :: IO ()\n\
@@ -241,10 +237,6 @@ fn ffi_wrapper_keeps_truncating_paren_impl() {
 /// concrete; opt.rs pass 4 is the safety net).
 #[test]
 fn where_group_calls_not_forced() {
-    with_compiler_stack(where_group_calls_not_forced_impl)
-}
-
-fn where_group_calls_not_forced_impl() {
     let source = std::fs::read_to_string("tests/cases/where_group_mutual.mll")
         .expect("read where_group_mutual.mll");
     let lua = compile(&source, Path::new("tests/cases"), &[])

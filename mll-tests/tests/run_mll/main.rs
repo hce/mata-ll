@@ -21,73 +21,62 @@ fn expected_lines(source: &str) -> Vec<String> {
 }
 
 fn run_mll_file(path: &Path, libs: &[&Path]) {
-    let path = path.to_path_buf();
-    let libs: Vec<std::path::PathBuf> = libs.iter().map(|p| p.to_path_buf()).collect();
-    // Run on a thread with the same stack size as the mll CLI driver: the
-    // compiler's nesting-depth limit (mllc::MAX_NESTING_DEPTH) is calibrated
-    // against mllc::COMPILER_STACK_SIZE, so a smaller test stack would
-    // overflow on input the real compiler handles (or cleanly rejects).
-    let result = std::thread::Builder::new()
-        .stack_size(mllc::COMPILER_STACK_SIZE)
-        .spawn(move || {
-            let source = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
+    // On the compiler's calibrated stack (with_compiler_stack): the
+    // nesting-depth limit (mllc::MAX_NESTING_DEPTH) is calibrated against
+    // mllc::COMPILER_STACK_SIZE, so a smaller test stack would overflow on
+    // input the real compiler handles (or cleanly rejects).
+    with_compiler_stack(|| {
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
 
-            let source_dir = path.parent().unwrap_or(Path::new("."));
-            let lib_refs: Vec<&Path> = libs.iter().map(|p| p.as_path()).collect();
-            // The stamp-refutation twin of mllc::compile: same output, plus
-            // the emitted-Lua annotation check every corpus program should
-            // exercise (see verify::check_stamps).
-            let lua_code =
-                match mllc::compile_with_stamp_refutation(&source, source_dir, &lib_refs) {
-                    Ok(r) => r.lua_code,
-                    Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
-                };
+        let source_dir = path.parent().unwrap_or(Path::new("."));
+        // The stamp-refutation twin of mllc::compile: same output, plus
+        // the emitted-Lua annotation check every corpus program should
+        // exercise (see verify::check_stamps).
+        let lua_code = match mllc::compile_with_stamp_refutation(&source, source_dir, libs) {
+            Ok(r) => r.lua_code,
+            Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
+        };
 
-            let lua = mlua::Lua::new();
-            let expected = expected_lines(&source);
-            let captured = lua.create_table().unwrap();
-            if !expected.is_empty() {
-                // Capture `print` (putStrLn/print compile to it) line by line.
-                let sink = captured.clone();
-                let print_fn = lua
-                    .create_function(move |_, args: mlua::Variadic<mlua::Value>| -> mlua::Result<()> {
-                        let parts: Vec<String> = args
-                            .iter()
-                            .map(|v| match v {
-                                mlua::Value::String(s) => Ok(s.to_str()?.to_string()),
-                                other => Ok(format!("{:?}", other)),
-                            })
-                            .collect::<mlua::Result<_>>()?;
-                        let n = sink.raw_len();
-                        sink.raw_set(n + 1, parts.join("\t"))?;
-                        Ok(())
-                    })
-                    .unwrap();
-                lua.globals().set("print", print_fn).unwrap();
-            }
-            match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
-                Ok(()) => {}
-                Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
-            }
-            if !expected.is_empty() {
-                let printed: Vec<String> = captured
-                    .sequence_values::<String>()
-                    .collect::<mlua::Result<_>>()
-                    .unwrap();
-                let printed: Vec<String> = printed.into_iter().filter(|l| l != ".").collect();
-                assert_eq!(
-                    printed, expected,
-                    "{}: printed output (left) differs from its `-- expect:` lines (right)",
-                    path.display()
-                );
-            }
-        })
-        .unwrap()
-        .join();
-    if let Err(e) = result {
-        std::panic::resume_unwind(e);
-    }
+        let lua = mlua::Lua::new();
+        let expected = expected_lines(&source);
+        let captured = lua.create_table().unwrap();
+        if !expected.is_empty() {
+            // Capture `print` (putStrLn/print compile to it) line by line.
+            let sink = captured.clone();
+            let print_fn = lua
+                .create_function(move |_, args: mlua::Variadic<mlua::Value>| -> mlua::Result<()> {
+                    let parts: Vec<String> = args
+                        .iter()
+                        .map(|v| match v {
+                            mlua::Value::String(s) => Ok(s.to_str()?.to_string()),
+                            other => Ok(format!("{:?}", other)),
+                        })
+                        .collect::<mlua::Result<_>>()?;
+                    let n = sink.raw_len();
+                    sink.raw_set(n + 1, parts.join("\t"))?;
+                    Ok(())
+                })
+                .unwrap();
+            lua.globals().set("print", print_fn).unwrap();
+        }
+        match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
+            Ok(()) => {}
+            Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
+        }
+        if !expected.is_empty() {
+            let printed: Vec<String> = captured
+                .sequence_values::<String>()
+                .collect::<mlua::Result<_>>()
+                .unwrap();
+            let printed: Vec<String> = printed.into_iter().filter(|l| l != ".").collect();
+            assert_eq!(
+                printed, expected,
+                "{}: printed output (left) differs from its `-- expect:` lines (right)",
+                path.display()
+            );
+        }
+    })
 }
 
 /// Run `f` on a thread with the compiler's calibrated stack and hand its

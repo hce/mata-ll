@@ -48,42 +48,36 @@ return out
 /// the program wrote to stdout (via putStr/putStrLn/print).
 fn run_mll_capture_stdout(sub: &str, file: &str) -> Vec<u8> {
     let path = Path::new("tests").join(sub).join(file);
-    // Same stack size as the mll CLI driver (see run_mll_file).
-    let result = std::thread::Builder::new()
-        .stack_size(mllc::COMPILER_STACK_SIZE)
-        .spawn(move || {
-            let source = std::fs::read_to_string(&path)
-                .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
+    // On the compiler's calibrated stack (with_compiler_stack), compiling
+    // with mllc::compile directly — the harness `compile` wrapper would
+    // spawn a second calibrated-stack thread inside this one.
+    with_compiler_stack(|| {
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
 
-            let source_dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
-            let lib_path = Path::new("../lib").to_path_buf();
-            let lua_code = match compile(&source, &source_dir, &[&lib_path]) {
-                Ok(r) => r.lua_code,
-                Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
-            };
+        let source_dir = path.parent().unwrap_or(Path::new("."));
+        let lib_path = Path::new("../lib");
+        let lua_code = match mllc::compile(&source, source_dir, &[lib_path]) {
+            Ok(r) => r.lua_code,
+            Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
+        };
 
-            let lua = mlua::Lua::new();
-            let captured: mlua::Table = lua
-                .load(ORACLE_CAPTURE_PRELUDE)
-                .set_name("oracle capture prelude")
-                .eval()
-                .expect("capture prelude runs");
-            match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
-                Ok(()) => {}
-                Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
-            }
-            let mut out = Vec::new();
-            for frag in captured.sequence_values::<mlua::LuaString>() {
-                out.extend_from_slice(&frag.expect("output fragment").as_bytes());
-            }
-            out
-        })
-        .unwrap()
-        .join();
-    match result {
-        Ok(out) => out,
-        Err(e) => std::panic::resume_unwind(e),
-    }
+        let lua = mlua::Lua::new();
+        let captured: mlua::Table = lua
+            .load(ORACLE_CAPTURE_PRELUDE)
+            .set_name("oracle capture prelude")
+            .eval()
+            .expect("capture prelude runs");
+        match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
+            Ok(()) => {}
+            Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
+        }
+        let mut out = Vec::new();
+        for frag in captured.sequence_values::<mlua::LuaString>() {
+            out.extend_from_slice(&frag.expect("output fragment").as_bytes());
+        }
+        out
+    })
 }
 
 /// Compare one case's mata-ll output against the pinned GHC golden (or, for
