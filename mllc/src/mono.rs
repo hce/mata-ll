@@ -1871,7 +1871,7 @@ impl Monomorphizer {
                 return expr;
             }
             TExprKind::App(_, _) => {
-                let (head, _) = Self::collect_app_chain(&expr);
+                let head_name = Self::app_head_name(&expr);
                 // A call to the function itself, OR to any OTHER constrained
                 // polymorphic function at a still-polymorphic type. Both need
                 // dictionaries: the recursive call because that is the point
@@ -1887,13 +1887,12 @@ impl Monomorphizer {
                         && s.fn_constraints.get(name).is_some_and(|cs| !cs.is_empty())
                         && s.is_polymorphic(t)
                 };
-                if let TExprKind::Var(ref call_name) = head.kind
-                    && (call_name == func_name || general_callee(self, call_name, &ty)) {
-                        let call_name = call_name.clone();
+                if let Some(call_name) = head_name
+                    && (call_name == func_name || general_callee(self, &call_name, &ty)) {
                         if call_name != *func_name {
                             self.dict_passing_fns.insert(call_name.clone());
                         }
-                        let (_, args) = Self::collect_app_chain(&expr);
+                        let (_, args) = Self::split_app_chain(expr);
                         // The call may be at a CHANGED type — a recursion at
                         // `[a]`, a sibling at this instance's `C1 c f`. Bind
                         // the declared signature against the argument types
@@ -1971,15 +1970,43 @@ impl Monomorphizer {
     }
 
     /// Decompose nested App into (head_function, [arg1, arg2, ...])
-    fn collect_app_chain(expr: &TExpr) -> (&TExpr, Vec<TExpr>) {
-        let mut args = Vec::new();
+    /// The head of an application spine (`f` in `f a b c`), borrowed — the
+    /// test a rewrite makes BEFORE deciding to take the spine apart. (An
+    /// earlier version cloned every argument just to look at the head, and
+    /// again on the match; nested spines made that quadratic per pass.)
+    fn app_head(expr: &TExpr) -> &TExpr {
         let mut e = expr;
-        while let TExprKind::App(f, a) = &e.kind {
-            args.push(a.as_ref().clone());
+        while let TExprKind::App(f, _) = &e.kind {
             e = f.as_ref();
         }
-        args.reverse();
-        (e, args)
+        e
+    }
+
+    /// The name at the head of an application spine, if it is a variable.
+    fn app_head_name(expr: &TExpr) -> Option<String> {
+        match &Self::app_head(expr).kind {
+            TExprKind::Var(n) => Some(n.clone()),
+            _ => None,
+        }
+    }
+
+    /// Take an application spine apart, owning: the head and its arguments in
+    /// call order. No clones — the caller has decided to rebuild the call.
+    fn split_app_chain(expr: TExpr) -> (TExpr, Vec<TExpr>) {
+        let mut args = Vec::new();
+        let mut e = expr;
+        loop {
+            match e.kind {
+                TExprKind::App(f, a) => {
+                    args.push(*a);
+                    e = *f;
+                }
+                kind => {
+                    args.reverse();
+                    return (TExpr { kind, ty: e.ty }, args);
+                }
+            }
+        }
     }
 
     /// Rewrite call sites to dict-passing functions.
@@ -1987,12 +2014,12 @@ impl Monomorphizer {
         let ty = expr.ty.clone();
         match expr.kind {
             TExprKind::App(_, _) => {
-                let (head, _) = Self::collect_app_chain(&expr);
-                if let TExprKind::Var(ref call_name) = head.kind
-                    && self.dict_passing_fns.contains(call_name) && !self.is_polymorphic(&ty)
-                        && let Some(constraints) = self.fn_constraints.get(call_name).cloned() {
-                            let (_head, args) = Self::collect_app_chain(&expr);
-                            let poly_fn_ty = self.poly_fns.get(call_name).map(|f| f.ty.clone());
+                let head_name = Self::app_head_name(&expr);
+                if let Some(call_name) = head_name
+                    && self.dict_passing_fns.contains(&call_name) && !self.is_polymorphic(&ty)
+                        && let Some(constraints) = self.fn_constraints.get(&call_name).cloned() {
+                            let (_head, args) = Self::split_app_chain(expr);
+                            let poly_fn_ty = self.poly_fns.get(&call_name).map(|f| f.ty.clone());
                             let empty_c2d: HashMap<String, String> = HashMap::new();
                             let empty_env: HashMap<(String, String), String> = HashMap::new();
                             // For a COMPOUND constraint (`GEncode (Rep a)`) the
@@ -2003,7 +2030,7 @@ impl Monomorphizer {
                             // A plain `Class a` keeps the EXACT original path
                             // (resolve the variable, build) so nothing changes
                             // for existing dictionary-passing code.
-                            let arg_tys = self.fn_constraint_args.get(call_name).cloned();
+                            let arg_tys = self.fn_constraint_args.get(&call_name).cloned();
                             let mut subst: HashMap<String, Ty> = HashMap::new();
                             if arg_tys.is_some() && let Some(ft) = &poly_fn_ty {
                                 Self::match_fn_args(ft, &args, &mut subst);
