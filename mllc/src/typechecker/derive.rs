@@ -15,6 +15,23 @@ impl Checker {
         type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
+        // The six structural derives walk every constructor's fields by
+        // arity and match on the constructor's own type; a constructor with
+        // existential variables or a refined (GADT) result type has neither
+        // a plain arity nor an instance head that covers it — GHC rejects
+        // these too ("has existentials or constraints in its type").
+        if matches!(class, "Show" | "Eq" | "Ord" | "Enum" | "Bounded" | "Functor")
+            && let Some((con, why)) = self.non_vanilla_constructor(type_vars, constructors)
+        {
+            self.reject_derive(
+                class,
+                type_name,
+                &format!("constructor '{}' {}", con, why),
+                "a derived instance is one head `C (T a b …)` over plain fields; \
+                 write the instance by hand for this type",
+            );
+            return vec![];
+        }
         match class {
             "Show" => self.derive_show(type_name, type_vars, constructors),
             "Eq" => self.derive_eq(type_name, type_vars, constructors),
@@ -36,6 +53,71 @@ impl Checker {
         }
     }
 
+    /// Report "Cannot derive 'class' for 'type': reason" with a `note:` —
+    /// the one shape every derive's rejection takes.
+    pub(super) fn reject_derive(&mut self, class: &str, type_name: &str, reason: &str, note: &str) {
+        self.push_error_ctx(
+            DiagnosticKind::Other(format!(
+                "Cannot derive '{}' for '{}': {}\nnote: {}",
+                class, type_name, reason, note,
+            )),
+            format!("data {}", type_name),
+        );
+    }
+
+    /// The registered field types of a constructor — the arity every
+    /// derive walks and the types it matches on. Read from the constructor
+    /// registry, NOT from the parser's `Constructor::fields`: that list is
+    /// EMPTY for a GADT-syntax constructor (`Con :: a -> b -> T` keeps its
+    /// whole signature in `gadt_type`, and registration decomposes it), and
+    /// reading it made the derived Eq/Show/Ord of such a type ignore every
+    /// field. Empty for a constructor that failed to register.
+    fn derived_field_tys(&self, con: &Constructor) -> Vec<Ty> {
+        let key = self.resolve_con_name(&con.name);
+        self.constructors.get(key).map(|ci| ci.field_types.clone()).unwrap_or_default()
+    }
+
+    /// Nullary as registered (see `derived_field_tys`).
+    fn derived_is_nullary(&self, con: &Constructor) -> bool {
+        self.derived_field_tys(con).is_empty()
+    }
+
+    /// The first constructor a structural derive cannot cover, with the
+    /// reason: one with existential variables, or one whose result type is
+    /// not the data type applied to its own distinct parameters (a GADT
+    /// refinement such as `IntE :: Int -> Expr Int`).
+    fn non_vanilla_constructor(
+        &self,
+        type_vars: &[String],
+        constructors: &[Constructor],
+    ) -> Option<(String, &'static str)> {
+        for con in constructors {
+            let key = self.resolve_con_name(&con.name);
+            let Some(ci) = self.constructors.get(key) else { continue };
+            if !ci.existential_vars.is_empty() {
+                return Some((con.name.clone(), "has existential type variables"));
+            }
+            // Peel `T a b …` into its argument list.
+            let mut args = Vec::new();
+            let mut t = &ci.result_type;
+            while let Ty::App(f, a) = t {
+                args.push(a.as_ref());
+                t = f;
+            }
+            args.reverse();
+            let plain = args.len() == type_vars.len()
+                && args.iter().all(|a| matches!(a, Ty::Var(_)))
+                && {
+                    let mut seen = HashSet::new();
+                    args.iter().all(|a| match a { Ty::Var(v) => seen.insert(&v.name), _ => false })
+                };
+            if !plain {
+                return Some((con.name.clone(), "refines the result type (a GADT constructor)"));
+            }
+        }
+        None
+    }
+
     /// `LuaDict` is an intrinsic deriving: it generates no instance methods but
     /// changes the runtime layout so the value is a Lua table keyed by field
     /// name (`{width = …}`) instead of a positional array. That representation
@@ -44,13 +126,7 @@ impl Checker {
     /// with an explanation of *why* rather than a bare "cannot derive".
     pub(super) fn derive_luadict(&mut self, type_name: &str, constructors: &[Constructor]) {
         let reject = |checker: &mut Self, reason: String, note: &str| {
-            checker.push_error_ctx(
-                DiagnosticKind::Other(format!(
-                    "Cannot derive 'LuaDict' for '{}': {}\nnote: {}",
-                    type_name, reason, note,
-                )),
-                format!("data {}", type_name),
-            );
+            checker.reject_derive("LuaDict", type_name, &reason, note);
         };
 
         // Shape 1: an all-nullary sum type (every constructor has zero fields).
@@ -165,24 +241,17 @@ impl Checker {
 
         let mut clauses = Vec::new();
         for con in constructors {
-            let field_count = match &con.fields {
-                ConstructorFields::Positional(fs) => fs.len(),
-                ConstructorFields::Named(fs) => fs.len(),
-            };
+            // TIR references use the registered key (mangled when this local
+            // constructor shadows a Prelude/import one); the *displayed* name
+            // stays the source name the user wrote.
+            let con_key = self.resolve_con_name(&con.name).to_string();
+            let field_tys = self.derived_field_tys(con);
+            let field_count = field_tys.len();
 
             // Build patterns: Con p0 p1 p2 ...
             let param_names: Vec<String> = (0..field_count)
                 .map(|i| format!("_s{}", i))
                 .collect();
-
-            // TIR references use the registered key (mangled when this local
-            // constructor shadows a Prelude/import one); the *displayed* name
-            // stays the source name the user wrote.
-            let con_key = self.resolve_con_name(&con.name).to_string();
-            let con_info = self.constructors.get(&con_key).cloned();
-            let field_tys: Vec<Ty> = con_info.as_ref()
-                .map(|ci| ci.field_types.clone())
-                .unwrap_or_default();
 
             let patterns = vec![
                 TPattern::Constructor {
@@ -324,16 +393,9 @@ impl Checker {
         let mut clauses = Vec::new();
 
         for con in constructors {
-            let field_count = match &con.fields {
-                ConstructorFields::Positional(fs) => fs.len(),
-                ConstructorFields::Named(fs) => fs.len(),
-            };
-
             let con_key = self.resolve_con_name(&con.name).to_string();
-            let con_info = self.constructors.get(&con_key).cloned();
-            let field_tys: Vec<Ty> = con_info.as_ref()
-                .map(|ci| ci.field_types.clone())
-                .unwrap_or_default();
+            let field_tys = self.derived_field_tys(con);
+            let field_count = field_tys.len();
 
             let a_names: Vec<String> = (0..field_count).map(|i| format!("_a{}", i)).collect();
             let b_names: Vec<String> = (0..field_count).map(|i| format!("_b{}", i)).collect();
@@ -455,10 +517,7 @@ impl Checker {
 
         // For enums (no fields), use constructor index comparison.
         // Constructors earlier in the declaration are "less than" later ones.
-        let is_enum = constructors.iter().all(|c| match &c.fields {
-            ConstructorFields::Positional(fs) => fs.is_empty(),
-            ConstructorFields::Named(fs) => fs.is_empty(),
-        });
+        let is_enum = constructors.iter().all(|c| self.derived_is_nullary(c));
 
         let mut functions = Vec::new();
 
@@ -473,15 +532,9 @@ impl Checker {
         // per-field `==` in derive_eq). A nullary constructor is EQ to itself.
         let mut compare_clauses = Vec::new();
         for (i, con_a) in constructors.iter().enumerate() {
-            let fc_a = match &con_a.fields {
-                ConstructorFields::Positional(fs) => fs.len(),
-                ConstructorFields::Named(fs) => fs.len(),
-            };
+            let fc_a = self.derived_field_tys(con_a).len();
             for (j, con_b) in constructors.iter().enumerate() {
-                let fc_b = match &con_b.fields {
-                    ConstructorFields::Positional(fs) => fs.len(),
-                    ConstructorFields::Named(fs) => fs.len(),
-                };
+                let fc_b = self.derived_field_tys(con_b).len();
                 if i != j {
                     // Different constructors: index decides; fields are irrelevant.
                     let ord_con = if i < j { "LT" } else { "GT" };
@@ -722,14 +775,13 @@ impl Checker {
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
         // Enum can only be derived for simple enums (all constructors have 0 fields)
-        let is_enum = constructors.iter().all(|c| match &c.fields {
-            ConstructorFields::Positional(fs) => fs.is_empty(),
-            ConstructorFields::Named(fs) => fs.is_empty(),
-        });
-        if !is_enum {
-            self.push_error_ctx(
-                DiagnosticKind::Other(format!("Cannot derive Enum for '{}' — constructors must have no fields", type_name)),
-                format!("data {}", type_name),
+        let is_enum = constructors.iter().all(|c| self.derived_is_nullary(c));
+        if !is_enum || constructors.is_empty() {
+            self.reject_derive(
+                "Enum",
+                type_name,
+                "an enumeration is one or more constructors with no fields",
+                "fromEnum/toEnum number the constructors in declaration order; a constructor with fields has no single number, and an empty type has none to number",
             );
             return vec![];
         }
@@ -1166,10 +1218,7 @@ impl Checker {
         _type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
-        let is_enum = constructors.iter().all(|c| match &c.fields {
-            ConstructorFields::Positional(fs) => fs.is_empty(),
-            ConstructorFields::Named(fs) => fs.is_empty(),
-        });
+        let is_enum = constructors.iter().all(|c| self.derived_is_nullary(c));
         if !is_enum || constructors.is_empty() {
             self.push_error_ctx(
                 DiagnosticKind::Other(format!("Cannot derive Bounded for '{}' — must be a simple enum", type_name)),
@@ -1512,16 +1561,9 @@ impl Checker {
 
         let mut clauses = Vec::new();
         for con in constructors {
-            let field_count = match &con.fields {
-                ConstructorFields::Positional(fs) => fs.len(),
-                ConstructorFields::Named(fs) => fs.len(),
-            };
-
             let con_key = self.resolve_con_name(&con.name).to_string();
-            let con_info = self.constructors.get(&con_key).cloned();
-            let field_tys: Vec<Ty> = con_info.as_ref()
-                .map(|ci| ci.field_types.clone())
-                .unwrap_or_default();
+            let field_tys = self.derived_field_tys(con);
+            let field_count = field_tys.len();
 
             let param_names: Vec<String> = (0..field_count)
                 .map(|i| format!("_x{}", i))
@@ -2307,13 +2349,7 @@ impl Checker {
         tagged: bool,
     ) -> bool {
         let reject = |checker: &mut Self, reason: String, note: &str| {
-            checker.push_error_ctx(
-                DiagnosticKind::Other(format!(
-                    "Cannot derive '{}' for '{}': {}\nnote: {}",
-                    class, type_name, reason, note,
-                )),
-                format!("data {}", type_name),
-            );
+            checker.reject_derive(class, type_name, &reason, note);
         };
         if tagged {
             let mut seen_tags: HashMap<&str, &str> = HashMap::new();
@@ -2400,13 +2436,7 @@ impl Checker {
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
         let reject = |checker: &mut Self, reason: String, note: &str| {
-            checker.push_error_ctx(
-                DiagnosticKind::Other(format!(
-                    "Cannot derive 'FromJSON' for '{}': {}\nnote: {}",
-                    type_name, reason, note,
-                )),
-                format!("data {}", type_name),
-            );
+            checker.reject_derive("FromJSON", type_name, &reason, note);
         };
 
         // The class and every combinator the generated decoder calls live in
@@ -2906,13 +2936,7 @@ impl Checker {
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
         let reject = |checker: &mut Self, reason: String, note: &str| {
-            checker.push_error_ctx(
-                DiagnosticKind::Other(format!(
-                    "Cannot derive 'ToJSON' for '{}': {}\nnote: {}",
-                    type_name, reason, note,
-                )),
-                format!("data {}", type_name),
-            );
+            checker.reject_derive("ToJSON", type_name, &reason, note);
         };
 
         // The class and every combinator the generated encoder calls live in

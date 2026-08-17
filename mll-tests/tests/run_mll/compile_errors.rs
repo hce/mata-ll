@@ -3788,3 +3788,61 @@ fn unterminated_block_comment_is_located_at_its_opener() {
     ]);
     assert!(!msg.contains("end of file"), "must not degrade to an EOF parse error: {}", msg);
 }
+
+// The structural derives (Show/Eq/Ord/Enum/Bounded/Functor) cover one
+// instance head over plain fields. A constructor that refines the result
+// type (a real GADT) or hides an existential has no such head — GHC rejects
+// the derive too — so it is refused with the reason, instead of silently
+// producing an instance that ignores the fields (which is what happened
+// when the arity was read from the parser's empty GADT field list).
+#[test]
+fn derive_on_refined_gadt_constructor_is_rejected_with_reason() {
+    let source = r#"
+data Expr a where
+    IntE :: Int -> Expr Int
+    BoolE :: Bool -> Expr Bool
+    deriving (Eq)
+
+main :: IO ()
+main = putStrLn "unreachable"
+"#;
+    expect_compile_error(source, &[], &[
+        "Cannot derive 'Eq' for 'Expr'",
+        "'IntE'",
+        "refines the result type",
+        "note:",
+        "by hand",
+    ]);
+
+    let existential = r#"
+data Box where
+    MkBox :: forall a. a -> Box
+    deriving (Show)
+
+main :: IO ()
+main = putStrLn "unreachable"
+"#;
+    expect_compile_error(existential, &[], &[
+        "Cannot derive 'Show' for 'Box'",
+        "'MkBox'",
+        "existential",
+    ]);
+}
+
+// Enum on a type with no constructors used to index `constructors.last()`
+// on an empty list (a compiler panic); it is an ordinary rejection.
+#[test]
+fn derive_enum_on_empty_type_is_rejected() {
+    let source = r#"
+data Void where
+    deriving (Enum)
+
+main :: IO ()
+main = putStrLn "unreachable"
+"#;
+    expect_compile_error(source, &[], &[
+        "Cannot derive 'Enum' for 'Void'",
+        "one or more constructors",
+        "note:",
+    ]);
+}
