@@ -756,10 +756,6 @@ impl Subst {
         self.mults.remove(&id);
     }
 
-    pub fn size(&self) -> usize {
-        self.map.len()
-    }
-
     /// Compose two substitutions: apply self first, then other
     /// (other ∘ self)(t) = other(self(t))
     pub fn compose(&self, other: &Subst) -> Subst {

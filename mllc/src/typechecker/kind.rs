@@ -246,19 +246,17 @@ impl Checker {
                 }
                 if let Some(kind) = self.kinds.get(name) {
                     kind.clone()
-                } else if let Some((params, _)) = self.type_aliases.get(name) {
-                    // An alias registered outside this module's declarations
-                    // (only the builtin `Int` today): its kind was never
-                    // inferred, so approximate from its parameter count.
-                    let mut k = Kind::Type;
-                    for _ in 0..params.len() {
-                        k = Kind::arrow(Kind::Type, k);
-                    }
-                    k
                 } else {
                     // Undefined name — already reported by check_con_defined.
                     // A fresh kind variable lets the walk continue without a
-                    // cascade of follow-on kind errors.
+                    // cascade of follow-on kind errors. (Every alias and
+                    // family is in `kinds`: the checker runs once over the
+                    // merged module, and infer_declared_kinds registers each
+                    // declared name before any type is walked.)
+                    debug_assert!(
+                        !self.type_aliases.contains_key(name) && !self.type_families.contains_key(name),
+                        "'{name}' is an alias/family without a registered kind"
+                    );
                     kctx.fresh()
                 }
             }

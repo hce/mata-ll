@@ -201,8 +201,6 @@ impl TypeEnv {
         Some(entry.scheme)
     }
 
-    pub fn size(&self) -> usize { self.bindings.len() }
-
     pub fn lookup(&self, name: &str) -> Option<&Scheme> {
         self.bindings.get(name).map(|e| &e.scheme)
     }
@@ -1567,11 +1565,6 @@ impl Checker {
             Type::Paren(inner) => self.promote_field_kind(inner),
             _ => Kind::Type,
         }
-    }
-
-    /// Get the kind of a type constructor, or infer Type for unknowns.
-    pub fn kind_of(&self, name: &str) -> Kind {
-        self.kinds.get(name).cloned().unwrap_or(Kind::Type)
     }
 
     /// Check that a type-constructor reference names a type that exists.

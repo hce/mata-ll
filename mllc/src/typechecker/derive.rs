@@ -1946,7 +1946,6 @@ impl Checker {
         if n == 1 {
             return v;
         }
-        let sum_t = |a: Ty, b: Ty| Ty::app(Ty::app(Ty::Con(":+:".into()), a), b);
         if ci < n - 1 {
             // L1 into suffix[ci], then R1 up through suffix[ci-1] … suffix[0].
             let sty = suffix[ci].clone();
@@ -1962,7 +1961,6 @@ impl Checker {
                 v = app_e(con_e("R1", Ty::arrow(v.ty.clone(), ty.clone())), v, ty);
             }
         }
-        let _ = sum_t; // types come from `suffix`; helper kept for clarity
         v
     }
 
