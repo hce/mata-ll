@@ -299,7 +299,21 @@ fn compile_impl(
         return Err(CompileError::Type(errors));
     }
 
-    // Monomorphize
+    // The TIR pipeline, in dependency order:
+    //   mono      — resolves every class-polymorphic call to a specialization
+    //               (everything below assumes concrete types);
+    //   verify    — the invariant check on mono's OUTPUT, before any pass
+    //               rewrites it (a violation is a compiler bug, not input);
+    //   fold      — needs mono's concrete method names (`eq_Int`, …) to
+    //               recognise foldable operations;
+    //   split     — measures the FOLDED tree (folding shrinks chains it would
+    //               otherwise split) and must precede codegen, which emits
+    //               each body as one nested Lua expression;
+    //   dce       — after split so its reachability walk sees the final
+    //               call graph (split introduces no calls; the order is a
+    //               convention, not a dependency);
+    //   stamps    — refutes codegen's annotations over exactly the module
+    //               codegen will see, so it runs last before generation.
     let mut mono_pass = mono::Monomorphizer::new(&checker);
     let mono_module = mono_pass.run(tir_module);
 
@@ -421,8 +435,8 @@ fn no_host_surface_warning(header_exports: Option<&[String]>) -> types::Diagnost
 }
 
 /// One user top-level value definition that reuses a baseline-provided name
-/// (a Prelude definition or a compiler builtin). See `compile_with_options`
-/// for the rejection rules built on the two flags.
+/// (a Prelude definition or a compiler builtin). See `compile_impl` for the
+/// rejection rules built on the two flags.
 struct BaselineRedefinition {
     name: String,
     /// Where the user defined it: the first clause of their `FunDef`
