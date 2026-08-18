@@ -1873,17 +1873,10 @@ fn growing_type_family_is_bounded() {
     // A type family that grows its argument every step (Grow x = Grow (Maybe x))
     // must be bounded by reduction fuel and reported as divergent -- never hang
     // or stack-overflow the compiler. Charging fuel by reduced-type size bounds
-    // the work; the deep (but bounded) reduction still needs a large stack, so
-    // run it on a compiler-sized thread like the fixture runner does.
-    std::thread::Builder::new()
-        .stack_size(mllc::COMPILER_STACK_SIZE)
-        .spawn(|| {
-            let src = "type family Grow x where\n  Grow x = Grow (Maybe x)\nf :: Grow Int -> Int\nf _ = 0\nmain :: IO ()\nmain = putStrLn \"x\"\n";
-            expect_compile_error(src, &[], &["did not terminate"]);
-        })
-        .unwrap()
-        .join()
-        .unwrap();
+    // the work; the deep (but bounded) reduction still needs a large stack,
+    // which the harness `compile` (inside expect_compile_error) provides.
+    let src = "type family Grow x where\n  Grow x = Grow (Maybe x)\nf :: Grow Int -> Int\nf _ = 0\nmain :: IO ()\nmain = putStrLn \"x\"\n";
+    expect_compile_error(src, &[], &["did not terminate"]);
 }
 
 // --- Type-family definitions are validated at the definition (audit 18, 19).
