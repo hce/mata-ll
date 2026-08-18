@@ -320,11 +320,6 @@ impl CodeGen {
         }
     }
 
-    /// Build a function argument expression.
-    /// Cheap args (vars, literals, constructor applications) are built via
-    /// expr_ast which forces non-concrete variables. Expensive args for strict
-    /// positions are also built via expr_ast. Expensive args for non-strict
-    /// positions are wrapped in thunks to preserve non-strict semantics.
     /// Build a function-call argument, choosing eager or lazy evaluation by
     /// WEIGHING the benefit of eagerness against the risk to non-strict
     /// semantics. This is the single place that decision is made for call

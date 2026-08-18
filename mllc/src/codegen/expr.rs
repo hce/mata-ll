@@ -1561,8 +1561,6 @@ impl CodeGen {
         }
     }
 
-    /// Generate an expression with lazy cons tails for self-referencing definitions.
-    /// Cons operations wrap the tail in a thunk via __mll_lazy_cons.
     /// Is `expr` a cons application at its head (`x : xs`, either the infix
     /// form or `App(App(Con ":"), _)`)? A cons-headed self-referential CAF is
     /// built eagerly with a deferred tail (`expr_lazy_ast`); any other head is
@@ -1577,6 +1575,8 @@ impl CodeGen {
         }
     }
 
+    /// Generate an expression with lazy cons tails for a self-referencing
+    /// definition: each cons wraps its tail in a thunk via __mll_lazy_cons.
     pub(super) fn expr_lazy_ast(&mut self, expr: &TExpr) -> Expr {
         // Check for infix cons: x : rest
         if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind

@@ -25,17 +25,6 @@ use super::names::{sanitize_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
 impl CodeGen {
-    /// Emit an ST/IO action in a flattened bind chain.
-    /// Bare Var references to zero-arg IO/ST bindings are deferred functions
-    /// in Lua and need () to execute. Everything else self-evaluates.
-    /// Emit code that PERFORMS an IO/ST action (used inside bind chains).
-    /// Inlines known action patterns to avoid closure allocation:
-    /// - SpecCall __mll_io: → emit Lua call directly
-    /// - SpecCall for ST primitives → emit operation directly
-    /// - pure/return → emit the value
-    ///
-    /// Falls back to __force(expr)() for unknown actions.
-    ///
     /// Whether performing `action` yields a value already in WHNF (a forced
     /// value) rather than a possibly-suspended thunk. A `<-`-bound variable is
     /// marked `concrete` (read force-free downstream) only when this holds.
@@ -179,7 +168,15 @@ impl CodeGen {
         }
     }
 
-    /// Build an action in run-position. `tail` selects the runner: `false`
+    /// Build an action in run-position — the code that PERFORMS an IO/ST
+    /// action inside a flattened bind chain. Known action shapes are inlined
+    /// to avoid a closure allocation (an `__mll_io:` SpecCall becomes the
+    /// Lua call itself, ST primitives their operation, `pure`/`return` the
+    /// value); anything else goes through the runner, which forces the
+    /// action and calls it (a bare Var naming a zero-arg IO/ST binding is a
+    /// deferred function in Lua and needs the call to execute).
+    ///
+    /// `tail` selects the runner: `false`
     /// emits the CONSUMING `__mll_run` (bind RHSes, value positions — the
     /// result is inspected, so any pending pure box must be stripped);
     /// `true` emits the FORWARDING `__mll_run_tail` (a `return`-position

@@ -63,7 +63,6 @@ pub(super) fn subst_tyvars(ty: &Ty, map: &std::collections::HashMap<String, Ty>)
     }
 }
 
-/// Check if a TExpr references a given name anywhere
 /// Would evaluating `expr` eagerly (at module-load time) read another
 /// top-level binding's value? A top-level value binding with no params/where
 /// has no locals, so every variable it mentions is a global reference.
@@ -95,6 +94,7 @@ pub(super) fn expr_evaluates_global_ref(expr: &TExpr) -> bool {
     }
 }
 
+/// Does `expr` reference `name` anywhere (any depth, any position)?
 pub(super) fn expr_references_name(expr: &TExpr, name: &str) -> bool {
     match &expr.kind {
         TExprKind::Var(n) => n == name,

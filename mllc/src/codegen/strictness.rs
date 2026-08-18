@@ -17,8 +17,11 @@ use super::names::{is_builtin_op, sanitize_name};
 use super::util::{expr_references_name};
 
 impl CodeGen {
-    /// in accumulator patterns while preserving laziness for expensive
-    /// computations (user function calls).
+    /// Structural cheapness walk: is `expr` a small expression (variables,
+    /// literals, constructor applications, Lua-native operators over cheap
+    /// operands, …) that can be evaluated eagerly without allocating a
+    /// memoizing thunk — as opposed to an expensive computation such as a
+    /// user function call, which stays lazy?
     ///
     /// `var_ok` decides whether a variable reference counts as cheap. The
     /// structural walk is shared between two notions of cheapness:
@@ -60,6 +63,8 @@ impl CodeGen {
         }
     }
 
+    /// "Small to duplicate/evaluate": `is_cheap_with` with every variable
+    /// counted cheap (see there for the two notions).
     pub(super) fn is_cheap(expr: &TExpr) -> bool {
         Self::is_cheap_with(expr, &|_| true)
     }
