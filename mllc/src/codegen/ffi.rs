@@ -358,10 +358,8 @@ impl CodeGen {
     /// nothing can be checked for them, so they stay pass-through.
     pub(super) fn scalar_lua_type(ty: &Ty) -> Option<&'static str> {
         match con_name(ty) {
-            Some("Int") | Some("Number") | Some("Double") | Some("Float") => {
-                Some("number")
-            }
-            Some("String") | Some("Char") | Some("ByteString") => Some("string"),
+            Some("Int") | Some("Number") => Some("number"),
+            Some("String") | Some("ByteString") => Some("string"),
             Some("Bool") => Some("boolean"),
             _ => None,
         }

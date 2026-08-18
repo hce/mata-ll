@@ -1531,11 +1531,13 @@ fn unify_inner(t1: &Ty, t2: &Ty, fams: &TyFamilies) -> Result<Subst, DiagnosticK
             Ok(s1.compose(&s2))
         }
 
-        // Forall: instantiate the quantified variable and unify the body
+        // Forall: strip the quantifier and unify the body. The bound variable
+        // is a user-written variable (id = u32::MAX) and unifies like any
+        // other variable here — this arm does no skolemization. Rigidity is
+        // enforced where a rank-2 argument is CHECKED: infer.rs skolemizes the
+        // parameter's Forall before checking the argument against it, so an
+        // escaping variable is caught there, not by unification.
         (Ty::Forall(_v, inner), t) | (t, Ty::Forall(_v, inner)) => {
-            // The forall-bound variable is already a rigid skolem (id=MAX).
-            // Unify the body directly — the variable will unify with whatever
-            // the concrete type provides, enforcing that it can't escape.
             unify_tf(inner, t, fams)
         }
 

@@ -128,8 +128,7 @@ impl CodeGen {
             Ty::Unit | Ty::List(_) | Ty::Tuple(_) => true,
             Ty::Con(n) => matches!(
                 n.as_str(),
-                "Int" | "Word" | "Number" | "Double" | "Float"
-                    | "Bool" | "Char" | "String" | "Ordering"
+                "Int" | "Number" | "Bool" | "String" | "Ordering"
             ),
             _ => false,
         }

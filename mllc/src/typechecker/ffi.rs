@@ -85,9 +85,7 @@ impl BoundaryKind {
 /// (derived from `codegen::Codegen::scalar_lua_type`: numbers, strings,
 /// booleans). Keep in sync with that function.
 fn ffi_scalar_name(n: &str) -> bool {
-    matches!(n,
-        "Int" | "Number" | "Double" | "Float"
-        | "String" | "Char" | "ByteString" | "Bool")
+    matches!(n, "Int" | "Number" | "String" | "ByteString" | "Bool")
 }
 
 /// Peel `App(App(Con(H), a), b)` into `(Some("H"), [a, b])`; the argument-source
@@ -388,7 +386,7 @@ impl Checker {
     /// A type may cross ONLY if it has DEFINED marshalling behavior — a shape
     /// the host is meant to see, not an internal representation that happens to
     /// be a table. The allowed set:
-    ///   - scalars (Int/Number/Double/Float/String/Char/ByteString/Bool),
+    ///   - scalars (Int/Number/String/ByteString/Bool),
     ///     `()`, and the opaque `LuaUserData` interop handle;
     ///   - `[a]` iff `a` allowed; tuples iff every element allowed;
     ///   - `HashMap k v` iff `k` is a scalar Lua key and `v` is allowed;

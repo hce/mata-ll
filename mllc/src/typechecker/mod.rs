@@ -2797,10 +2797,6 @@ impl Checker {
     }
 }
 
-/// Extract FFI info from an AST type.
-/// Walks through Arrow types to find LuaPure/LuaIO at the return position.
-/// Returns (lua_function_name, is_io).
-/// Convert an operator symbol to a name safe for mangling.
 /// Classes whose list/tuple/Maybe instances mata-ll synthesizes structurally
 /// (mono generates them from the element instances). Ord is excluded — there is
 /// no list/tuple/Maybe ordering — as are Read and user classes.
@@ -2816,6 +2812,7 @@ fn is_structural_monad_class(class: &str) -> bool {
     matches!(class, "Functor" | "Applicative" | "Monad")
 }
 
+/// Convert an operator symbol to a name safe for mangling.
 fn op_to_name(op: &str) -> &str {
     match op {
         "<" => "lt",
@@ -2840,6 +2837,9 @@ enum FfiKind {
     IOCatch,
 }
 
+/// Extract FFI info from an AST type: walks through Arrow types to the
+/// LuaPure/LuaIO/… form at the return position and returns
+/// (lua_function_name, kind).
 fn extract_ffi_info(ty: &Type) -> Option<(String, FfiKind)> {
     match ty {
         Type::Arrow(_, b, _) => extract_ffi_info(b),

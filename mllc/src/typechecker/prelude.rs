@@ -283,8 +283,6 @@ impl Checker {
         // [] :: [a]
         self.env_scheme("[]", vec![a.clone()], Ty::list(ta.clone()));
 
-        // head, tail, take, zipWith, length, reverse are now in Prelude.mll
-
         // LuaFunction and engage
         let s = TyVar { name: "s".into(), id: u32::MAX };
         let ts = Ty::Var(s.clone());

@@ -531,7 +531,7 @@ impl Checker {
     /// Haskell, so a method body may use its own instance (a recursive `show`
     /// on `Tree a`) or one declared later in the module; checking bodies
     /// against an incomplete instance table would reject those. Mangled method
-    /// names are deterministic (`method_typestr`), so the full mapping is
+    /// names are deterministic (`<method>_<Display of the head type>`), so the full mapping is
     /// known before the bodies are checked; `check_instance` later re-registers
     /// the identical info. Silent by design: everything invalid (unknown
     /// class, headless target type, ill-formed context) is skipped here and
