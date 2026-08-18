@@ -2768,8 +2768,17 @@ fn prelude_benign_shadowing_still_compiles() {
 fn no_show_instance_for_function() {
     expect_compile_error("main :: IO ()\nmain = putStrLn (show (\\a b -> a + b))\n", &[], &[
         "No instance for 'Show (a -> a -> a)'",
-        "no Show/Eq/Ord instance",
+        "no Show, Eq or Ord instance",
     ]);
+    // The render/compare hint is specific to those classes: a missing Num
+    // instance for a function is a plain NoInstance, not a "no way to render
+    // or compare" explanation.
+    let msg = expect_compile_error(
+        "class Half a where\n  half :: a -> a\nmain :: IO ()\nmain = print (half (\\x -> x :: Int) 3)\n",
+        &[],
+        &["No instance for 'Half (Int -> Int)'"],
+    );
+    assert!(!msg.contains("render or compare"), "class-agnostic hint leaked:\n{msg}");
 }
 
 #[test]

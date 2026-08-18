@@ -1782,8 +1782,9 @@ impl Diagnostic {
                 if class == "Ord" && matches!(ty, Ty::Tuple(_) | Ty::List(_) | Ty::App(_, _)) =>
                 Some("mata-ll has no Ord instance for tuples, lists, or Maybe; compare their \
                       components individually."),
-            DiagnosticKind::NoInstance { ty: Ty::Arrow(..) | Ty::IO(_) | Ty::LuaIO(_, _), .. } =>
-                Some("functions and IO actions have no Show/Eq/Ord instance — there is no \
+            DiagnosticKind::NoInstance { class, ty: Ty::Arrow(..) | Ty::IO(_) | Ty::LuaIO(_, _) }
+                if matches!(class.as_str(), "Show" | "Eq" | "Ord") =>
+                Some("functions and IO actions have no Show, Eq or Ord instance — there is no \
                       way to render or compare them."),
             DiagnosticKind::MultiplicityMismatch(..) =>
                 Some("to pass a '%1' function where an ordinary one is expected, \
