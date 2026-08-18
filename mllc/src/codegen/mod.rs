@@ -39,11 +39,19 @@
 //! - strictness.rs — cheapness and demand predicates behind those decisions
 //! - action.rs — IO/ST actions: bind chains (`bind_chain_block`), pure
 //!   boxes, the two runners (`action_run_ast`)
-//! - inline.rs — substitution-based inlining twins of the builder paths
+//! - inline.rs — call-site inlining: TIR-level substitution of an inline
+//!   candidate's body, then the ordinary emitter
 //! - analysis.rs — whole-program call-site and inline-candidate analyses
 //! - ffi.rs — FFI marshalling and type-directed boundary decoding
 //! - names.rs — Lua identifier, keyword and string-literal helpers
-//! - opt.rs — AST optimization passes run on the finished statement list
+//! - opt.rs — the optimization pipeline over the finished statement list
+//!   (peepholes, paren normalization, forced-tail collapse, …)
+//! - annot.rs — the operational stamp lattice over the emitted tree, the
+//!   one analysis that derives stamps, and the rewrite engine that owns them
+//!   (opt.rs's passes act through it)
+//! - tailloop.rs — opt pass 5: self-tail-call → `while true` loop
+//! - ioloop.rs — opt pass 6: IO/ST self-recursion → loop, folding the
+//!   two-level dispatch/closure shape into one driver
 //! - util.rs — type- and TIR-shape helpers shared across the module
 //! - runtime.rs — the runtime prelude and its on-demand chunk selection
 

@@ -119,11 +119,12 @@ pub(super) enum Stmt {
     /// `do … end` — an irrefutable clause's independent block in the
     /// guarded pattern-match layout.
     Do(Block),
-    /// `while true do … end`. Deliberately condition-less: the only loop this
-    /// codegen emits is the self-tail-call conversion's driver (opt.rs pass 5),
-    /// which exits through `return`/`error`, never through the condition.
-    /// There is no `break` in the vocabulary, so control cannot pass this
-    /// statement normally — `stmt_diverges` relies on that.
+    /// `while true do … end`. Deliberately condition-less: the only loops
+    /// this codegen emits are the self-tail-call and IO self-loop drivers
+    /// (tailloop.rs / ioloop.rs, opt passes 5 and 6), which exit through
+    /// `return`/`error`, never through the condition. There is no `break` in
+    /// the vocabulary, so control cannot pass this statement normally —
+    /// `stmt_diverges` relies on that.
     WhileTrue(Block),
     /// `a, b = e1, e2` — simultaneous multiple assignment: Lua evaluates the
     /// whole RHS list before assigning any lvalue, which is what makes it the
