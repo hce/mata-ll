@@ -646,10 +646,10 @@ impl DemandLattice for DemandMap {
 /// rule) over-claimed: a variable read only by a later guard condition was
 /// forced at entry even when an earlier guard matched and GHC would never
 /// have touched it.
-fn guard_chain<S: DemandLattice>(
-    guards: &[TGuard],
-    cond_demand: &mut dyn FnMut(&TExpr) -> S,
-    body_demand: &mut dyn FnMut(&TExpr) -> S,
+fn guard_chain<'t, S: DemandLattice>(
+    guards: &'t [TGuard],
+    cond_demand: &mut dyn FnMut(&'t TExpr) -> S,
+    body_demand: &mut dyn FnMut(&'t TExpr) -> S,
 ) -> S {
     // Demand past the end of the chain: fallthrough demands nothing.
     let mut acc = S::default();
@@ -672,12 +672,12 @@ fn guard_chain<S: DemandLattice>(
 /// condition is `otherwise` (see `is_otherwise`), in which case the
 /// then-branch runs unconditionally and the dead else-branch is ignored.
 /// Same rule `guard_chain` applies to real guard chains.
-fn if_demand<S: DemandLattice>(
-    cond: &TExpr,
-    then_branch: &TExpr,
-    else_branch: &TExpr,
-    cond_demand: &mut dyn FnMut(&TExpr) -> S,
-    branch_demand: &mut dyn FnMut(&TExpr) -> S,
+fn if_demand<'t, S: DemandLattice>(
+    cond: &'t TExpr,
+    then_branch: &'t TExpr,
+    else_branch: &'t TExpr,
+    cond_demand: &mut dyn FnMut(&'t TExpr) -> S,
+    branch_demand: &mut dyn FnMut(&'t TExpr) -> S,
 ) -> S {
     if is_otherwise(cond) {
         return branch_demand(then_branch);
@@ -1564,16 +1564,16 @@ pub struct LocalRows {
     result_deep: Demand,
 }
 
-/// Records every fully-applied call-head visit: Var-node address →
-/// `(callee, joined result demand, fully applied)`.
 /// Identity of one TIR node: its address, branded with the lifetime of the
-/// tree borrow it came from. Only this module builds keys (the constructor
-/// is private), and only inside containers that carry the same brand.
+/// tree borrow it came from — `of` takes a `&'t TExpr`, so a key can only be
+/// minted from a borrow that lives as long as the brand. Only this module
+/// builds keys (the constructor is private), and only inside containers
+/// that carry the same brand.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NodeKey<'t>(usize, std::marker::PhantomData<&'t TExpr>);
 
 impl<'t> NodeKey<'t> {
-    fn of(node: &TExpr) -> Self {
+    fn of(node: &'t TExpr) -> Self {
         NodeKey(node as *const TExpr as usize, std::marker::PhantomData)
     }
 }
@@ -1601,20 +1601,22 @@ impl<'t, V> NodeMap<'t, V> {
     fn with_capacity(n: usize) -> Self {
         NodeMap { map: HashMap::with_capacity(n) }
     }
-    pub fn get(&self, node: &TExpr) -> Option<&V> {
+    pub fn get(&self, node: &'t TExpr) -> Option<&V> {
         self.map.get(&NodeKey::of(node))
     }
     fn get_key(&self, key: NodeKey<'t>) -> Option<&V> {
         self.map.get(&key)
     }
-    fn get_mut(&mut self, node: &TExpr) -> Option<&mut V> {
+    fn get_mut(&mut self, node: &'t TExpr) -> Option<&mut V> {
         self.map.get_mut(&NodeKey::of(node))
     }
-    fn insert(&mut self, node: &TExpr, v: V) {
+    fn insert(&mut self, node: &'t TExpr, v: V) {
         self.map.insert(NodeKey::of(node), v);
     }
 }
 
+/// Records every fully-applied call-head visit: Var node →
+/// `(callee, joined result demand, fully applied)`.
 type CallSites<'t> = NodeMap<'t, (String, Demand, bool)>;
 
 /// Everything the structured walker needs to look up. `'t` is the brand
@@ -1649,7 +1651,7 @@ impl<'a, 't> RowCx<'a, 't> {
         self.rows.run.get(name).cloned()
     }
 
-    fn record_site(&self, head: &TExpr, name: &str, rd: &Demand, full: bool) {
+    fn record_site(&self, head: &'t TExpr, name: &str, rd: &Demand, full: bool) {
         if let Some(sites) = self.sites
             && (self.rows.arity.contains_key(name) || self.locals.contains_key(name)) {
                 let mut sites = sites.borrow_mut();
@@ -1703,8 +1705,8 @@ fn pattern_demand(pat: &TPattern, body: &DemandMap) -> Option<Demand> {
 /// `run_pos` marks action-run position — the statement/terminal spots of a
 /// flattened bind chain, where an action-typed expression executes rather
 /// than being suspended.
-fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap {
-    let head = |e: &TExpr| demand_expr(cx, e, &Demand::Head, false);
+fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bool) -> DemandMap {
+    let head = |e: &'t TExpr| demand_expr(cx, e, &Demand::Head, false);
     match &expr.kind {
         TExprKind::Var(x) => {
             let mut m = DemandMap::new();
@@ -1799,8 +1801,8 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
             cond,
             then_branch,
             else_branch,
-            &mut |e: &TExpr| demand_expr(cx, e, &Demand::Head, false),
-            &mut |e: &TExpr| demand_expr(cx, e, rd, run_pos),
+            &mut |e: &'t TExpr| demand_expr(cx, e, &Demand::Head, false),
+            &mut |e: &'t TExpr| demand_expr(cx, e, rd, run_pos),
         ),
 
         TExprKind::Case { scrutinee, branches } => {
@@ -1887,11 +1889,11 @@ fn demand_expr(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMa
 /// Apply a callee's structured parameter row: each argument in a demanded
 /// position contributes its own demands under that position's demand.
 /// Shared by the prefix-application, SpecCall, and DictCall arms.
-fn apply_callee_row<'a>(
-    cx: &RowCx,
+fn apply_callee_row<'t>(
+    cx: &RowCx<'_, 't>,
     m: &mut DemandMap,
     row: &[Option<Demand>],
-    args: impl IntoIterator<Item = &'a TExpr>,
+    args: impl IntoIterator<Item = &'t TExpr>,
 ) {
     for (i, arg) in args.into_iter().enumerate() {
         if let Some(Some(d)) = row.get(i).map(|x| x.as_ref()) {
@@ -1905,10 +1907,10 @@ fn apply_callee_row<'a>(
 /// and the second — which IS the expression's result — carries the whole
 /// expression's demand. (The boolean analysis deliberately claims only the
 /// first operand; see the shared-rules section.)
-fn seq_demand_map(
-    cx: &RowCx,
-    first: &TExpr,
-    second: Option<&TExpr>,
+fn seq_demand_map<'t>(
+    cx: &RowCx<'_, 't>,
+    first: &'t TExpr,
+    second: Option<&'t TExpr>,
     rd: &Demand,
     run_pos: bool,
 ) -> DemandMap {
@@ -1923,7 +1925,7 @@ fn seq_demand_map(
 /// spellings: non-strict at WHNF; under a deeper result demand in run
 /// position, `e` receives that demand (forcing a field of the yielded
 /// value forces through `e`).
-fn pure_demand_map(cx: &RowCx, arg: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap {
+fn pure_demand_map<'t>(cx: &RowCx<'_, 't>, arg: &'t TExpr, rd: &Demand, run_pos: bool) -> DemandMap {
     if run_pos && *rd != Demand::Head {
         demand_expr(cx, arg, rd, false)
     } else {
@@ -1932,7 +1934,7 @@ fn pure_demand_map(cx: &RowCx, arg: &TExpr, rd: &Demand, run_pos: bool) -> Deman
 }
 
 /// Curried-application arm of `demand_expr`.
-fn demand_app(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap {
+fn demand_app<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bool) -> DemandMap {
     // Flatten f x y z, looking through parens around the head.
     let mut args_rev: Vec<&TExpr> = Vec::new();
     let mut f = expr;
@@ -2025,18 +2027,18 @@ fn demand_app(cx: &RowCx, expr: &TExpr, rd: &Demand, run_pos: bool) -> DemandMap
 
 /// Guard-chain variant of `demand_expr` — the chain rule itself lives in
 /// `guard_chain`.
-fn demand_guards_map(cx: &RowCx, guards: &[TGuard], rd: &Demand, run_pos: bool) -> DemandMap {
+fn demand_guards_map<'t>(cx: &RowCx<'_, 't>, guards: &'t [TGuard], rd: &Demand, run_pos: bool) -> DemandMap {
     guard_chain(
         guards,
-        &mut |c: &TExpr| demand_expr(cx, c, &Demand::Head, false),
-        &mut |b: &TExpr| demand_expr(cx, b, rd, run_pos),
+        &mut |c: &'t TExpr| demand_expr(cx, c, &Demand::Head, false),
+        &mut |b: &'t TExpr| demand_expr(cx, b, rd, run_pos),
     )
 }
 
 /// Demand map of one clause body under result demand `rd`, closed over the
 /// clause's where-bound VALUE definitions (a demanded where-binding's RHS
 /// demands fire too, exactly as codegen's demanded_bindings evaluates it).
-fn clause_demand_map(cx: &RowCx, clause: TLocalDefLike<'_>, rd: &Demand) -> DemandMap {
+fn clause_demand_map<'t>(cx: &RowCx<'_, 't>, clause: TLocalDefLike<'t>, rd: &Demand) -> DemandMap {
     let mut m = if clause.guards.is_empty() {
         let body = clause.body.expect("guard-free clause carries a body");
         demand_expr(cx, body, rd, true)
@@ -2051,7 +2053,7 @@ fn clause_demand_map(cx: &RowCx, clause: TLocalDefLike<'_>, rd: &Demand) -> Dema
 /// Per-parameter demands of one clause under result demand `rd`:
 /// pattern-match demands joined with the body's demands on pattern
 /// variables.
-fn clause_param_row(cx: &RowCx, clause: TLocalDefLike<'_>, arity: usize, rd: &Demand) -> Vec<Option<Demand>> {
+fn clause_param_row<'t>(cx: &RowCx<'_, 't>, clause: TLocalDefLike<'t>, arity: usize, rd: &Demand) -> Vec<Option<Demand>> {
     let m = clause_demand_map(cx, clause, rd);
     (0..arity)
         .map(|i| match clause.patterns.get(i) {
@@ -2119,9 +2121,9 @@ fn local_def_view(d: &TLocalDef) -> TLocalDefLike<'_> {
 
 /// Compute run/deep rows for a group of equations (a function) under the
 /// current environment.
-fn equations_rows(
-    cx: &RowCx,
-    eqs: &[&TLocalDefLike],
+fn equations_rows<'t>(
+    cx: &RowCx<'_, 't>,
+    eqs: &[&TLocalDefLike<'t>],
     arity: usize,
     result_deep: Option<&Demand>,
 ) -> (Vec<Option<Demand>>, Option<Vec<Option<Demand>>>) {
@@ -2210,7 +2212,7 @@ pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds
 /// arm, by `clause_demand_map` (a clause's where-bound values follow the
 /// same rule), and by `let_spine_maps`, which must reproduce the `Let` arm
 /// exactly.
-fn let_group_close(cx: &RowCx, binds: &[TLocalDef], m: &mut DemandMap) {
+fn let_group_close<'t>(cx: &RowCx<'_, 't>, binds: &'t [TLocalDef], m: &mut DemandMap) {
     let mut walked: HashMap<&str, Demand> = HashMap::new();
     loop {
         let mut changed = false;
@@ -2530,10 +2532,10 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
 /// Collect every reference to a known function name: Var nodes by address;
 /// SpecCall/DictCall references poison the callee (the walker does not
 /// classify them as deep sites).
-fn collect_fn_refs(
-    expr: &TExpr,
+fn collect_fn_refs<'t>(
+    expr: &'t TExpr,
     fn_names: &HashSet<&str>,
-    refs: &mut HashMap<String, HashSet<NodeKey<'_>>>,
+    refs: &mut HashMap<String, HashSet<NodeKey<'t>>>,
     poisoned: &mut HashSet<String>,
 ) {
     // What THIS node contributes — a Var reference site, a SpecCall/DictCall

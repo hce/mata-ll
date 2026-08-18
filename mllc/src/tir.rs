@@ -337,7 +337,7 @@ impl TExpr {
     /// collector passes (verify, dce, demand's reference and rebinding scans,
     /// mono's type-variable scan) that once each carried a hand-rolled copy
     /// of the child list — one of which had drifted (`_ => {}`).
-    pub fn for_each_child(&self, f: &mut impl FnMut(&TExpr)) {
+    pub fn for_each_child<'s>(&'s self, f: &mut impl FnMut(&'s TExpr)) {
         match &self.kind {
             TExprKind::Var(_)
             | TExprKind::Con(_)
