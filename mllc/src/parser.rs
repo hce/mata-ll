@@ -276,7 +276,12 @@ impl Parser {
         }
     }
 
-    /// Check if the current token is at or beyond a given indentation level
+    /// Parse a whole module: the optional `module … where` header, then
+    /// top-level declarations at column 0 (import decls, signatures, bindings,
+    /// data/newtype/class/instance/type-family/fixity decls). Consecutive
+    /// same-named clauses are merged into one FunDef; a declaration that fails to parse
+    /// is recorded and parsing resumes at the next column-0 declaration, so
+    /// every declaration's error is reported at once.
     fn parse_module(&mut self) -> Result<Module, Vec<Diagnostic>> {
         let mut decls = Vec::new();
         self.skip_indent();
@@ -2365,12 +2370,6 @@ impl Parser {
         Ok(func)
     }
 
-    /// Parse an atom optionally followed by one or more `.field` accesses.
-    /// `expr.field` desugars to `(field expr)`.
-    /// Only applies when `.` is adjacent to the preceding token (no space),
-    /// to distinguish from function composition `f . g`.
-    /// Parse list comprehension qualifiers: x <- xs, pred, y <- ys, ...
-    /// Supports pattern-matching generators: Ok x <- rs, (a, b) <- pairs, ...
     /// Parse the binding group after `let` — the `let` keyword already
     /// consumed — up to but NOT consuming the following `in` (a let-expression)
     /// or `,`/`]` (a list-comprehension `let` qualifier). Bindings are
@@ -2446,6 +2445,9 @@ impl Parser {
         Ok(binds)
     }
 
+    /// Parse list comprehension qualifiers: `x <- xs, pred, y <- ys, …`.
+    /// Supports pattern-matching generators (`Ok x <- rs`, `(a, b) <- pairs`)
+    /// and `let` qualifiers.
     fn parse_list_comprehension_quals(&mut self) -> PResult<Vec<ListCompQual>> {
         let mut quals = Vec::new();
         loop {
@@ -2570,6 +2572,10 @@ impl Parser {
         }
     }
 
+    /// Parse an atom optionally followed by one or more `.field` accesses.
+    /// `expr.field` desugars to `(field expr)`. Only applies when the `.` is
+    /// adjacent to the preceding token (no space) and followed by an
+    /// identifier, to distinguish it from function composition `f . g`.
     fn parse_expr_atom_dotted(&mut self) -> PResult<Expr> {
         let mut expr = self.parse_expr_atom()?;
 
@@ -3478,9 +3484,6 @@ impl Parser {
         Ok(lhs)
     }
 
-    /// Map a function binding's parameter patterns to plain lambda parameter
-    /// names (`let f x y = e` => `f = \x y -> e`). Non-variable patterns collapse
-    /// to a placeholder, matching the existing let-binding capability.
     /// Parameter names of a local function-form binding (`let f x y = e`,
     /// do-`let`). Local bindings support plain variable (or wildcard)
     /// parameters only; a pattern parameter is rejected here rather than
@@ -3693,15 +3696,15 @@ impl Parser {
     }
 }
 
-/// Operator precedence (left binding power, right binding power).
-/// Based on Haskell defaults.
-/// Convert (Assoc, prec 0-9) to Pratt binding powers (lp, rp).
 /// Minimum Pratt binding power for the operand of prefix minus: Haskell's
 /// `lexp6 -> - exp7` takes everything binding tighter than precedence 6, so
 /// the operand continues through operators with precedence >= 7 (left
 /// binding power >= 7*2) and stops at precedence 6 and below.
 const NEGATION_OPERAND_MIN_PREC: u8 = 14;
 
+/// Convert a Haskell fixity (Assoc, precedence 0-9) to Pratt binding powers
+/// (left, right): precedence doubled, with the associativity deciding which
+/// side binds one tighter.
 fn assoc_prec_to_binding(assoc: Assoc, prec: u8) -> (u8, u8) {
     let base = prec * 2;
     match assoc {
