@@ -38,7 +38,6 @@ pub enum Token {
     KwModule,
     Import,
     Qualified,
-    As,
     Data,
     Newtype,
     Class,
@@ -66,7 +65,6 @@ pub enum Token {
     FatArrow,    // =>
     DblColon,    // ::
     Backslash,   // \.
-    Dot,         // .
     Comma,       // ,
     Semicolon,   // ;
     Eq,          // =
@@ -109,7 +107,6 @@ impl fmt::Display for Token {
             Token::KwModule => "module",
             Token::Import => "import",
             Token::Qualified => "qualified",
-            Token::As => "as",
             Token::Data => "data",
             Token::Newtype => "newtype",
             Token::Class => "class",
@@ -135,7 +132,6 @@ impl fmt::Display for Token {
             Token::FatArrow => "=>",
             Token::DblColon => "::",
             Token::Backslash => "\\",
-            Token::Dot => ".",
             Token::Comma => ",",
             Token::Semicolon => ";",
             Token::Eq => "=",
@@ -179,7 +175,6 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
     while pos < chars.len() {
         // Track indentation at start of line
         if at_line_start {
-            let _indent_start = pos;
             let mut indent = 0;
             while pos < chars.len() && chars[pos] == ' ' {
                 indent += 1;
@@ -399,7 +394,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                 // matching GHC where an integer literal is an `Integer`.
                 let token = match s.parse::<i64>() {
                     Ok(n) => Token::IntLit(n),
-                    Err(_) => Token::BigIntLit(s.clone()),
+                    Err(_) => Token::BigIntLit(s),
                 };
                 tokens.push(Located {
                     token,
@@ -531,7 +526,6 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                     "=" => Token::Eq,
                     "|" => Token::Pipe,
                     "<-" => Token::Bind,
-                    "." => Token::Operator(".".to_string()),
                     _ => Token::Operator(op),
                 };
                 tokens.push(Located {

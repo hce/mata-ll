@@ -14,13 +14,6 @@ use crate::ast::*;
 use crate::lexer;
 use crate::parser;
 
-/// Resolved module with its declarations
-#[derive(Debug)]
-pub struct ResolvedModule {
-    pub path: PathBuf,
-    pub module: Module,
-}
-
 /// Module loader
 pub struct ModuleLoader {
     /// Search paths for modules

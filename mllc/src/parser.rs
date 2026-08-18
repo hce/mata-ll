@@ -28,7 +28,7 @@ struct ParentOp {
     assoc: Assoc,
 }
 
-pub struct Parser {
+struct Parser {
     tokens: Vec<Located>,
     pos: usize,
     /// Current line's indentation
