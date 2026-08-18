@@ -256,8 +256,8 @@ in the program's own module.
 ## Type operators
 
 Infix type operators whose names begin with `:` are supported, both in
-declarations (`data (:+:) a b = L1 a | R1 b`) and in use (`f :+: g`),
-grouping by their declared fixity. This exists chiefly for the generic
+declarations (`data (:+:) a b = L1 a | R1 b`) and in use (`f :+: g`, or
+the prefix `(:+:) f g`), grouping by their declared fixity. This exists chiefly for the generic
 representation combinators (`:+:`, `:*:`). Non-`:` type operators (a
 `TypeOperators`-style `data a + b`) are not supported.
 

@@ -2026,6 +2026,30 @@ fn operator_in_type_position_rejected() {
     expect_compile_error("g :: Int -> (<>)\ng x = x\nmain :: IO ()\nmain = pure ()\n", &[], &[
         "The operator '<>' cannot appear in a type",
     ]);
+
+    // Boundary: a ':'-leading operator IS a type operator (a type
+    // constructor, like `data (:+:) a b` declares), so its prefix spelling
+    // `(:+:) Int Bool` is the same type as the infix `Int :+: Bool` — GHC's
+    // TypeOperators reading — and the note must not claim otherwise.
+    let source = r#"
+infixr 5 :+:
+data (:+:) a b = L a | R b
+
+f :: (:+:) Int Bool -> Int
+f (L n) = n
+f (R _) = 0
+
+g :: Int :+: Bool -> Int
+g = f
+
+main :: IO ()
+main = assert (g (L 41) + f (R True) + 1 == 42) "prefix and infix spellings name one type"
+"#;
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("a prefix ':'-leading type operator is a type constructor")
+        .lua_code;
+    mlua::Lua::new().load(&lua_code).set_name("prefix_type_operator").exec()
+        .expect("every in-program assertion should pass");
 }
 
 // --- Kind system -----------------------------------------------------------

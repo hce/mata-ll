@@ -1875,12 +1875,22 @@ impl Parser {
                     self.advance();
                     return Ok(Type::Unit);
                 }
-                // An operator in type position, e.g. `f :: (+) -> Int`.
-                // This used to be silently parsed as the unit type, so the
-                // program compiled with a signature that meant something
-                // entirely different from what was written — reject it with
-                // an explanation instead.
                 if let Token::Operator(op) = self.peek().clone() {
+                    // A type operator in prefix form, `(:+:) f g` — the same
+                    // constructor the infix `f :+: g` spelling names (see
+                    // is_type_operator), exactly as `data (:+:) a b` declares it.
+                    if Self::is_type_operator(&op)
+                        && self.tokens.get(self.pos + 1).is_some_and(|t| t.token == Token::RightParen)
+                    {
+                        self.advance();
+                        self.advance();
+                        return Ok(Type::Con(op));
+                    }
+                    // Any other operator in type position, e.g. `f :: (+) -> Int`.
+                    // This used to be silently parsed as the unit type, so the
+                    // program compiled with a signature that meant something
+                    // entirely different from what was written — reject it with
+                    // an explanation instead.
                     let mut diag = self.err_here(format!(
                         "The operator '{}' cannot appear in a type: '({})' names a \
                          function (a value), and a type must be built from type names, \
@@ -1888,9 +1898,11 @@ impl Parser {
                         op, op
                     ));
                     diag.notes.push(
-                        "GHC can accept an operator in a type with the TypeOperators \
-                         extension; mata-ll has no type-level operators, so this is \
-                         always an error here"
+                        "GHC can accept any operator in a type with the TypeOperators \
+                         extension; in mata-ll only ':'-leading operators such as ':+:' \
+                         are type operators (they name type constructors, as ':'-leading \
+                         value operators name data constructors), so a value operator \
+                         is always an error here"
                             .to_string(),
                     );
                     return Err(diag);
