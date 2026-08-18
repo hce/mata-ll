@@ -50,24 +50,13 @@ main = do
     }
 }
 
-// Examples that should compile successfully
+// Every .mll under experiments/ compiles. (The former skip list — files
+// that "need a large stack" — predates the harness compiling on the
+// compiler's calibrated stack; nothing is skipped now.)
 #[test]
 fn examples_compile() {
     let lib_path = Path::new("../lib");
     let examples_dir = Path::new("../experiments");
-
-    // Examples expected to fail or skip
-    let expected_fail: Vec<&str> = vec![
-        "bench",              // show specialization gap on list display
-        "aestest",            // 256-element S-box lists need large stack (runs via mll compiler)
-        "bstest",             // needs large stack (runs via mll compiler)
-        "salsa",              // large literal lists need large stack (runs via mll compiler)
-        "Ed25519",            // large literal lists need large stack (runs via mll compiler)
-        "ed25519test",        // depends on Ed25519 which needs large stack
-        "metar",              // needs large stack (many nested parser combinators)
-        "match",              // experimental scratch file
-        "experiments",        // experimental scratch file
-    ];
 
     let mut failures = Vec::new();
     for entry in std::fs::read_dir(examples_dir).expect("Cannot read experiments/") {
@@ -77,9 +66,6 @@ fn examples_compile() {
             continue;
         }
         let stem = path.file_stem().unwrap().to_str().unwrap();
-        if expected_fail.contains(&stem) {
-            continue;
-        }
         let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
         let source_dir = path.parent().unwrap_or(Path::new("."));
