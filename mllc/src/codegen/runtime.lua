@@ -160,7 +160,7 @@ local function __mll_list_index(xs, n)
     xs = __force(xs)
     while n > 0 do
         if xs == nil then error("(!!): index too large") end
-        xs = __force(__mll_tail(xs))
+        xs = __mll_tail(xs)
         n = n - 1
     end
     if xs == nil then error("(!!): index too large") end
@@ -610,18 +610,18 @@ __mll_wrap_callback_out = function(f, n, descs, run_io, ret)
     return function(...)
         -- mata-ll functions are n-ary (all arguments at once), so collect the
         -- host's n positional arguments and apply them in a single call.
-        local args = {}
+        local args = {...}
         for i = 1, n do
-            local v = select(i, ...)
             local d = descs[i]
             if d then
+                local v = args[i]
                 if d.k == "func" then
                     if type(v) == "function" then v = __mll_wrap_callback(v) end
                 else
                     v = __mll_ffi_decode(d, v, "in an argument of a mata-ll callback", "argument")
                 end
+                args[i] = v
             end
-            args[i] = v
         end
         local r = __force(f)(__unpack(args, 1, n))
         -- Run the effectful callback's action: __mll_run's dispatch (a
@@ -645,12 +645,10 @@ end
 -- the raw value through). `root` locates decode errors.
 __mll_wrap_callback_in = function(f, n, out_descs, ret_desc, root)
     return function(...)
-        local args = {}
+        local args = {...}
         for i = 1, n do
-            local v = select(i, ...)
             local d = out_descs[i]
-            if d then v = __mll_arg_marshal(v, d) else v = __force(v) end
-            args[i] = v
+            if d then args[i] = __mll_arg_marshal(args[i], d) else args[i] = __force(args[i]) end
         end
         local r = f(__unpack(args, 1, n))
         if ret_desc then r = __mll_ffi_decode(ret_desc, r, root) end
@@ -1448,13 +1446,22 @@ end
 -- matches the mata-ll representation (a scalar/opaque element) -- pass it raw.
 local function __mll_iter(factory, decode_desc, root, ...)
     local iter = factory(...)
-    local function go()
-        local vals = {iter()}
-        if vals[1] == nil then return nil end
-        local val = #vals == 1 and vals[1] or vals
+    local go
+    -- `step` receives one iterator call's results as varargs, so a
+    -- single-value iterator (the common case) allocates nothing per element;
+    -- only a genuine multi-value yield is packed into a tuple table.
+    -- Trailing nils are ignored, as `#{iter()}` did: a yield of `k, nil` is
+    -- the single value k.
+    local function step(...)
+        local n = select('#', ...)
+        while n > 0 and select(n, ...) == nil do n = n - 1 end
+        if n == 0 or (...) == nil then return nil end
+        local val
+        if n == 1 then val = (...) else val = {...} end
         if decode_desc ~= nil then val = __mll_ffi_decode(decode_desc, val, root) end
         return __mll_lazy_cons(val, go)
     end
+    go = function() return step(iter()) end
     return go()
 end
 

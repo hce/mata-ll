@@ -544,6 +544,57 @@ main = do
 }
 
 #[test]
+fn lua_iterator_multi_value_yields_pack_into_tuples() {
+    // Each iterator step's RESULTS decide the element shape: a single value
+    // is the element itself, several values pack into a tuple (a pairs-style
+    // `k, v` iterator is a `[(k, v)]`), and trailing nils do not count (a
+    // `k, nil` step is the single value k). Iteration ends on a first-value
+    // nil, even when later values are non-nil (`nil, 5` is the end).
+    let src = r#"
+kvs    :: LuaIterator "kvs" [(Int, String)]
+sparse :: LuaIterator "sparse" [Int]
+
+main :: IO ()
+main = do
+    assert (kvs == [(1, "a"), (2, "b")]) "k, v steps pack into (k, v) tuples"
+    assert (sparse == [7, 8]) "a `k, nil` step is the single value k; `nil, x` ends the list"
+    putStrLn "ok"
+"#;
+    let lua_code = compile(src, Path::new("."), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(
+        r#"
+        function kvs()
+            local n = 0
+            return function()
+                n = n + 1
+                if n == 1 then return 1, "a" end
+                if n == 2 then return 2, "b" end
+                return nil
+            end
+        end
+        function sparse()
+            local n = 0
+            return function()
+                n = n + 1
+                if n == 1 then return 7, nil end
+                if n == 2 then return 8 end
+                return nil, 5
+            end
+        end
+        "#,
+    )
+    .exec()
+    .expect("define host iterator factories");
+    lua.load(&lua_code)
+        .set_name("iter_multi")
+        .exec()
+        .expect("multi-value steps are tuples; trailing nils are dropped");
+}
+
+#[test]
 fn ffi_export_pure_functions() {
     let source = r#"
 export add :: Int -> Int -> Int
