@@ -2851,6 +2851,81 @@ fn local_binding_pattern_parameter_is_diagnosed() {
     ]);
 }
 
+/// An as-pattern is reported at the '@' with the deviation note, in a
+/// function clause and in a case branch alike — not as a stray token later
+/// in the clause.
+#[test]
+fn as_pattern_is_diagnosed_where_written() {
+    let err = expect_compile_error(
+        "f :: [Int] -> [Int]\nf xs@(x:_) = x : xs\nf [] = []\nmain :: IO ()\nmain = print (f [1])\n",
+        &[],
+        &["As-patterns are not supported", "'xs@", "note:", "GHC accepts as-patterns"],
+    );
+    assert!(err.contains("2:5") || err.contains("line 2"), "located at the '@' on line 2:\n{err}");
+    expect_compile_error(
+        "main :: IO ()\nmain = case [1, 2] of\n    ys@(y:_) -> print (y : ys)\n    _ -> pure ()\n",
+        &[],
+        &["As-patterns are not supported", "'ys@"],
+    );
+}
+
+/// A newtype whose constructor is named differently from the type used to
+/// fail as "Unknown type 'MkRad'": the parser reads MkRad as the wrapped
+/// type. The error now says what mata-ll's newtype rule is.
+#[test]
+fn newtype_with_differently_named_constructor_is_diagnosed() {
+    expect_compile_error(
+        "newtype Rad = MkRad Double\nmain :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "'MkRad' is not a type",
+            "newtype Rad = Rad",
+            "the definition of newtype 'Rad'",
+            "note:",
+            "named freely",
+        ],
+    );
+    // Boundary: a wrapped type that IS a type is not confused with a
+    // constructor — the shorthand `newtype W = Maybe Int` stays accepted.
+    let src = "newtype W = Maybe Int\nunw :: W -> Maybe Int\nunw (W m) = m\nmain :: IO ()\nmain = assert (unw (W (Just 1)) == Just 1) \"shorthand over an applied type\"\n";
+    let lua_code = compile(src, Path::new("."), &[]).expect("shorthand newtype over an applied type").lua_code;
+    mlua::Lua::new().load(&lua_code).set_name("newtype_applied_shorthand").exec()
+        .expect("every in-program assertion should pass");
+}
+
+/// A lambda takes a sequence of atomic patterns, as in GHC: patterns and
+/// plain parameters mix in any order, each non-variable pattern is matched
+/// (left to right) in the body. Before this, `\(a, b) c ->` failed with
+/// "Expected lambda parameter" and `\x (a, b) ->` with "Expected ->".
+#[test]
+fn lambda_mixes_patterns_and_parameters() {
+    let src = r#"
+main :: IO ()
+main = do
+    assert ((\(a, b) c -> a + b + c) (1, 2) 3 == 6) "pattern then parameter"
+    assert ((\x (a, b) -> x * (a + b)) 2 (3, 4) == 14) "parameter then pattern"
+    assert ((\(Just a) [b] (c, _) -> a + b + c) (Just 1) [2] (3, 4) == 6) "three patterns"
+    assert ((\_ 0 -> "zero") 9 0 == "zero") "wildcard and literal"
+    assert (map (\(k, v) -> k + v) [(1, 2), (3, 4)] == [3, 7]) "single tuple pattern still works"
+"#;
+    let lua_code = compile(src, Path::new("."), &[]).expect("multi-pattern lambdas compile").lua_code;
+    mlua::Lua::new().load(&lua_code).set_name("lambda_patterns").exec()
+        .expect("every in-program assertion should pass");
+
+    // A failing match on the FIRST pattern is reported before the second is
+    // looked at, and a lambda-pattern failure is the lambda's error message.
+    let src = r#"
+main :: IO ()
+main = print ((\(Just a) (Just b) -> a + b) (Nothing :: Maybe Int) (error "second forced first"))
+"#;
+    let lua_code = compile(src, Path::new("."), &[]).expect("compiles").lua_code;
+    let err = mlua::Lua::new().load(&lua_code).set_name("lambda_partial").exec()
+        .expect_err("a non-matching lambda pattern raises");
+    let msg = err.to_string();
+    assert!(msg.contains("non-exhaustive lambda pattern"), "{msg}");
+    assert!(!msg.contains("second forced first"), "first pattern is matched first:\n{msg}");
+}
+
 #[test]
 fn type_error_locates_the_offending_statement() {
     // A type error must point at the statement/binding line that carries it,

@@ -387,10 +387,16 @@ double = \x -> x * 2
 add :: Int -> Int -> Int
 add = \a b -> a + b
 
--- Pattern matching in lambdas
+-- Pattern matching in lambdas: each parameter is a pattern
 fstOf :: (a, b) -> a
 fstOf = \(x, _) -> x
+
+addPair :: (Int, Int) -> Int -> Int
+addPair = \(a, b) c -> a + b + c
 \end{lstlisting}
+
+As-patterns (\texttt{xs@(x:\_)}) are not supported; bind the whole
+value and match it with \texttt{case}.
 
 \subsection{Operators}
 

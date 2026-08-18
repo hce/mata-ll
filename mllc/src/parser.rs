@@ -3231,66 +3231,70 @@ impl Parser {
         Ok(Expr::Do(stmts))
     }
 
-    /// A lambda: `\p1 p2 -> body`. Consumes the leading backslash.
+    /// A lambda: `\apat1 apat2 … -> body`, each parameter an atomic pattern
+    /// as in GHC (a variable, `_`, a literal, a nullary constructor, or a
+    /// parenthesised/bracketed pattern). Consumes the leading backslash.
+    ///
+    /// A variable or `_` is a lambda parameter as written. Any other pattern
+    /// binds a fresh parameter and matches it in the body: `\(Con x) y ->
+    /// e` becomes `\__lam1 y -> case __lam1 of { Con x -> e; _ -> error … }`;
+    /// several patterns nest their cases left to right, so a failing match
+    /// on an earlier parameter is reported before a later one is looked at.
     fn parse_lambda(&mut self) -> PResult<Expr> {
         self.advance();
-        // Check for pattern-matching lambda: \(Con x) -> body
-        // Desugars to \__arg -> case __arg of { pattern -> body }
-        if matches!(self.peek(), Token::LeftParen | Token::UpperIdent(_) | Token::LeftBracket) {
-            let save = self.checkpoint();
-            // Try parsing as pattern
-            if let Ok(pat) = self.parse_pattern()
-                && self.at(&Token::Arrow) {
-                    self.advance();
-                    let body = self.parse_expr()?;
-                    let mut branches = vec![CaseBranch {
-                        pattern: pat,
-                        guards: vec![],
-                        body: Some(body),
-                    }];
-                    // Add wildcard fallback for partial patterns
-                    branches.push(CaseBranch {
+        let mut pats = Vec::new();
+        while matches!(
+            self.peek(),
+            Token::Ident(_)
+                | Token::Underscore
+                | Token::LeftParen
+                | Token::LeftBracket
+                | Token::UpperIdent(_)
+                | Token::IntLit(_)
+                | Token::BigIntLit(_)
+                | Token::NumLit(_)
+                | Token::StrLit(_)
+        ) {
+            pats.push(self.parse_pattern_atom()?);
+        }
+        if pats.is_empty() {
+            return Err(self.err_here("Expected lambda parameter".to_string()));
+        }
+        self.expect(&Token::Arrow)?;
+        let mut body = self.parse_expr()?;
+
+        let mut params = Vec::with_capacity(pats.len());
+        let mut matched = Vec::new(); // (parameter name, pattern), in source order
+        for (i, pat) in pats.into_iter().enumerate() {
+            match pat {
+                Pattern::Var(n) => params.push(n),
+                Pattern::Wildcard => params.push("_".to_string()),
+                pat => {
+                    let name = format!("__lam{}", i + 1);
+                    params.push(name.clone());
+                    matched.push((name, pat));
+                }
+            }
+        }
+        // Wrap innermost-first so the first pattern's case ends up outermost.
+        for (name, pat) in matched.into_iter().rev() {
+            body = Expr::Case {
+                scrutinee: Box::new(Expr::Var(name)),
+                branches: vec![
+                    CaseBranch { pattern: pat, guards: vec![], body: Some(body) },
+                    // Wildcard fallback for a partial pattern.
+                    CaseBranch {
                         pattern: Pattern::Wildcard,
                         guards: vec![],
                         body: Some(Expr::App(
                             Box::new(Expr::Var("error".into())),
                             Box::new(Expr::Lit(Literal::Str(b"non-exhaustive lambda pattern".to_vec()))),
                         )),
-                    });
-                    return Ok(Expr::Lambda {
-                        params: vec!["__lam".to_string()],
-                        body: Box::new(Expr::Case {
-                            scrutinee: Box::new(Expr::Var("__lam".to_string())),
-                            branches,
-                        }),
-                    });
-                }
-            // Not a pattern lambda — backtrack
-            self.rewind(save);
+                    },
+                ],
+            };
         }
-        let mut params = Vec::new();
-        loop {
-            match self.peek().clone() {
-                Token::Ident(name) => {
-                    params.push(name);
-                    self.advance();
-                }
-                Token::Underscore => {
-                    params.push("_".to_string());
-                    self.advance();
-                }
-                _ => break,
-            }
-        }
-        if params.is_empty() {
-            return Err(self.err_here("Expected lambda parameter".to_string()));
-        }
-        self.expect(&Token::Arrow)?;
-        let body = self.parse_expr()?;
-        Ok(Expr::Lambda {
-            params,
-            body: Box::new(body),
-        })
+        Ok(Expr::Lambda { params, body: Box::new(body) })
     }
 
     /// A constructor atom: record construction `Con { f = v, ... }`
@@ -3561,6 +3565,20 @@ impl Parser {
         match self.peek().clone() {
             Token::Ident(name) => {
                 self.advance();
+                if self.at(&Token::At) {
+                    // `xs@(x:_)`: report the as-pattern where it is written
+                    // instead of failing on the '@' as an unexpected token
+                    // further along the clause.
+                    let mut diag = self.err_here(format!(
+                        "As-patterns are not supported: '{name}@…' would bind '{name}' to the \
+                         whole value while also matching its structure. Bind the whole value \
+                         and match it with 'case' in the body (or in a where clause)"
+                    ));
+                    diag.notes.push(
+                        "GHC accepts as-patterns; mata-ll does not support them yet".to_string(),
+                    );
+                    return Err(diag);
+                }
                 Ok(Pattern::Var(name))
             }
             Token::Underscore => {

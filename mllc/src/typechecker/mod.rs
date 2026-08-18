@@ -1583,14 +1583,19 @@ impl Checker {
     /// let through it would flow downstream as an opaque type and surface as a
     /// misleading error later (e.g. "no Show instance for 'Boolean'" when the
     /// real problem is that 'Boolean' does not exist).
-    fn check_con_defined(&mut self, name: &str, ctx: &str) {
-        if self.kinds.contains_key(name)
+    /// Does `name` denote something a type constructor position may hold: a
+    /// registered type (data/newtype/builtin kind), an alias, a type family, or a
+    /// type-level string literal (LuaImport names etc. parse as
+    /// `Con "\"…\""`; they are names, not type constructors)?
+    fn type_name_defined(&self, name: &str) -> bool {
+        self.kinds.contains_key(name)
             || self.type_aliases.contains_key(name)
             || self.type_families.contains_key(name)
-            // Type-level string literals (LuaImport names etc.) parse as
-            // `Con "\"…\""`; they are names, not type constructors.
             || name.starts_with('"')
-        {
+    }
+
+    fn check_con_defined(&mut self, name: &str, ctx: &str) {
+        if self.type_name_defined(name) {
             return;
         }
         if self.classes.contains_key(name) {
@@ -2362,12 +2367,36 @@ impl Checker {
                     }
                 }
                 Decl::NewtypeDef { name, type_vars, inner } => {
+                    let ctx = format!("the definition of newtype '{}'", name);
+                    // `newtype Rad = MkRad Double`: the parser reads MkRad as
+                    // the wrapped type's head (a newtype's constructor has
+                    // the type's own name in mata-ll, so a different name is
+                    // taken as a type). When that head names nothing at all,
+                    // it was almost certainly meant as the constructor — say
+                    // so, instead of an unknown-type error for 'MkRad'.
+                    let mut head = inner;
+                    while let Type::App(f, _) = head { head = f; }
+                    if let Type::Con(con) = head
+                        && con != name
+                        && !self.type_name_defined(con)
+                        && !self.classes.contains_key(con)
+                        && !self.constructors.contains_key(con)
+                    {
+                        self.push_error_ctx_note(
+                            DiagnosticKind::Other(format!(
+                                "'{con}' is not a type. In mata-ll a newtype's constructor has \
+                                 the type's name: write 'newtype {name} = {name} …' (the \
+                                 constructor may also be left out: 'newtype {name} = …')"
+                            )),
+                            ctx,
+                            "GHC lets a newtype constructor be named freely \
+                             ('newtype Rad = MkRad Double'); mata-ll does not support \
+                             that yet",
+                        );
+                        continue;
+                    }
                     let params = self.param_kind_seed(name, type_vars);
-                    self.check_constructor_kinds(
-                        &[inner],
-                        params,
-                        &format!("the definition of newtype '{}'", name),
-                    );
+                    self.check_constructor_kinds(&[inner], params, &ctx);
                 }
                 Decl::TypeAlias { name, params, ty } => {
                     self.check_alias_kinds(
