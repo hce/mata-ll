@@ -703,31 +703,7 @@ main = do
     print ([[1, 2], []] :: [[Int]])
     print (Nothing :: Maybe Int)
 "#;
-    let lua_code = compile(source, Path::new("."), &[])
-        .expect("should compile")
-        .lua_code;
-
-    // Capture `print` output instead of letting it hit stdout.
-    let lua = mlua::Lua::new();
-    let captured = lua.create_table().unwrap();
-    lua.globals().set("__captured", captured.clone()).unwrap();
-    let print_fn = lua
-        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
-            let line = s.to_str()?.to_string();
-            let t: mlua::Table = lua.globals().get("__captured")?;
-            let n = t.raw_len();
-            t.raw_set(n + 1, line)?;
-            Ok(())
-        })
-        .unwrap();
-    lua.globals().set("print", print_fn).unwrap();
-    lua.load(&lua_code).set_name("print_empty").exec()
-        .expect("should run");
-
-    let lines: Vec<String> = captured
-        .sequence_values::<String>()
-        .collect::<mlua::Result<_>>()
-        .unwrap();
+    let lines = run_capturing_lines(source, "print_empty");
     assert_eq!(lines, vec!["[]", "[[1,2],[]]", "Nothing"]);
 }
 
@@ -751,30 +727,7 @@ main = do
     print (P Red Green)
     print (MkB (0 - 5))
 "#;
-    let lua_code = compile(source, Path::new("."), &[])
-        .expect("should compile")
-        .lua_code;
-
-    let lua = mlua::Lua::new();
-    let captured = lua.create_table().unwrap();
-    lua.globals().set("__captured", captured.clone()).unwrap();
-    let print_fn = lua
-        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
-            let line = s.to_str()?.to_string();
-            let t: mlua::Table = lua.globals().get("__captured")?;
-            let n = t.raw_len();
-            t.raw_set(n + 1, line)?;
-            Ok(())
-        })
-        .unwrap();
-    lua.globals().set("print", print_fn).unwrap();
-    lua.load(&lua_code).set_name("derived_show").exec()
-        .expect("should run");
-
-    let lines: Vec<String> = captured
-        .sequence_values::<String>()
-        .collect::<mlua::Result<_>>()
-        .unwrap();
+    let lines = run_capturing_lines(source, "derived_show");
     assert_eq!(
         lines,
         vec![
@@ -801,30 +754,7 @@ main = do
     print [Just (1 :: Int), Nothing, Just 3]
     print (Just (Nothing :: Maybe Int))
 "#;
-    let lua_code = compile(source, Path::new("."), &[])
-        .expect("should compile")
-        .lua_code;
-
-    let lua = mlua::Lua::new();
-    let captured = lua.create_table().unwrap();
-    lua.globals().set("__captured", captured.clone()).unwrap();
-    let print_fn = lua
-        .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
-            let line = s.to_str()?.to_string();
-            let t: mlua::Table = lua.globals().get("__captured")?;
-            let n = t.raw_len();
-            t.raw_set(n + 1, line)?;
-            Ok(())
-        })
-        .unwrap();
-    lua.globals().set("print", print_fn).unwrap();
-    lua.load(&lua_code).set_name("show_maybe").exec()
-        .expect("should run");
-
-    let lines: Vec<String> = captured
-        .sequence_values::<String>()
-        .collect::<mlua::Result<_>>()
-        .unwrap();
+    let lines = run_capturing_lines(source, "show_maybe");
     assert_eq!(
         lines,
         vec![
@@ -838,26 +768,36 @@ main = do
     );
 }
 
-// Helper: compile + run, capturing `print`/`putStrLn` output lines.
-fn run_capturing_lines(source: &str, name: &str) -> Vec<String> {
-    let lua_code = compile(source, Path::new("."), &[])
-        .expect("should compile")
-        .lua_code;
+// A fresh Lua state whose `print` appends each line to the returned table
+// instead of writing to stdout; read the lines back with `captured_lines`.
+fn capturing_lua() -> (mlua::Lua, mlua::Table) {
     let lua = mlua::Lua::new();
     let captured = lua.create_table().unwrap();
     lua.globals().set("__captured", captured.clone()).unwrap();
     let print_fn = lua
         .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
-            let line = s.to_str()?.to_string();
             let t: mlua::Table = lua.globals().get("__captured")?;
             let n = t.raw_len();
-            t.raw_set(n + 1, line)?;
+            t.raw_set(n + 1, s.to_str()?.to_string())?;
             Ok(())
         })
         .unwrap();
     lua.globals().set("print", print_fn).unwrap();
-    lua.load(&lua_code).set_name(name).exec().expect("should run");
+    (lua, captured)
+}
+
+fn captured_lines(captured: &mlua::Table) -> Vec<String> {
     captured.sequence_values::<String>().collect::<mlua::Result<_>>().unwrap()
+}
+
+// Helper: compile + run, capturing `print`/`putStrLn` output lines.
+fn run_capturing_lines(source: &str, name: &str) -> Vec<String> {
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let (lua, captured) = capturing_lua();
+    lua.load(&lua_code).set_name(name).exec().expect("should run");
+    captured_lines(&captured)
 }
 
 #[test]
@@ -977,18 +917,7 @@ main = do
     // global (arg[0]=script, arg[1..]=CLI args) and the same args handed to the
     // chunk as varargs. `arg1` is arg[1]; `first_vararg` is the chunk's `...`.
     let run = |arg1: Option<&str>, first_vararg: &str| -> Vec<String> {
-        let lua = mlua::Lua::new();
-        let captured = lua.create_table().unwrap();
-        lua.globals().set("__captured", captured.clone()).unwrap();
-        let print_fn = lua
-            .create_function(|lua, s: mlua::LuaString| -> mlua::Result<()> {
-                let t: mlua::Table = lua.globals().get("__captured")?;
-                let n = t.raw_len();
-                t.raw_set(n + 1, s.to_str()?.to_string())?;
-                Ok(())
-            })
-            .unwrap();
-        lua.globals().set("print", print_fn).unwrap();
+        let (lua, captured) = capturing_lua();
         let arg_tbl = lua.create_table().unwrap();
         arg_tbl.raw_set(0, "prog.lua").unwrap();
         if let Some(a) = arg1 {
@@ -999,10 +928,7 @@ main = do
             .set_name("entrypoint")
             .call::<()>(first_vararg.to_string())
             .expect("chunk runs");
-        captured
-            .sequence_values::<String>()
-            .collect::<mlua::Result<_>>()
-            .unwrap()
+        captured_lines(&captured)
     };
 
     // Standalone with a CLI argument: first vararg == arg[1] == "alpha" → run.
