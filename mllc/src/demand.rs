@@ -693,16 +693,12 @@ fn if_demand<'t, S: DemandLattice>(
 // Boolean (semantic, whole-value) demand analysis — continued
 // ════════════════════════════════════════════════════════════════════════
 
-/// Compute demanded variables from a set of guards. The chain rule itself
-/// (right-to-left combine, `otherwise`) lives in `guard_chain`.
-pub fn demanded_guards(guards: &[TGuard], env: &HashMap<String, Vec<bool>>) -> HashSet<String> {
-    demanded_guards_with(guards, env, &CapturedEnv::new(), &|s| s)
-}
-
-/// `demanded_guards` with the in-scope captured-demand sets and a closure
-/// applied to every per-guard demand set BEFORE the chain combines them —
-/// the closure expands where-bound values so the guard intersection sees
-/// through them (see analyze_clause).
+/// Demanded variables of a guard chain (the chain rule itself —
+/// right-to-left combine, `otherwise` — lives in `guard_chain`), given the
+/// in-scope captured-demand sets and a closure applied to every per-guard
+/// demand set BEFORE the chain combines them — the closure expands
+/// where-bound values so the guard intersection sees through them (see
+/// analyze_clause).
 fn demanded_guards_with(
     guards: &[TGuard],
     env: &HashMap<String, Vec<bool>>,
@@ -1042,20 +1038,7 @@ fn arg_emitted_eagerly(expr: &TExpr) -> bool {
 /// name → (arity, the outer variables the local's body forces on every
 /// path). See `local_fn_demand` for how the sets are computed and the
 /// scoping rules that keep the name-keyed injection sound.
-pub type CapturedEnv = HashMap<String, (usize, HashSet<String>)>;
-
-/// Core analysis: returns the set of free variables that are guaranteed
-/// to be forced when `expr` is evaluated to WHNF.
-///
-/// `env` contains known strictness info for other functions, enabling
-/// cross-function demand propagation.
-///
-/// Also used by codegen to decide which let/where bindings may be
-/// evaluated eagerly: a binding demanded by the let body will be forced
-/// anyway, so evaluating it at binding time is sound (GHC's let-to-case).
-pub fn demanded_vars(expr: &TExpr, env: &HashMap<String, Vec<bool>>) -> HashSet<String> {
-    demanded_vars_in(expr, env, &CapturedEnv::new())
-}
+type CapturedEnv = HashMap<String, (usize, HashSet<String>)>;
 
 /// Demand every argument sitting in a strict position of the callee's
 /// boolean mask. Shared by the prefix-application, SpecCall, and DictCall
@@ -1073,10 +1056,13 @@ fn demand_strict_args<'a>(
     }
 }
 
-/// `demanded_vars` with the captured-demand sets of the where-bound local
-/// functions in scope. A demanded, SATURATED call to such a local runs its
-/// body, so the outer variables the body forces on every path are demanded
-/// at the call site too — that is the only place `captured` is consulted.
+/// Core boolean analysis: the set of free variables that are guaranteed to
+/// be forced when `expr` is evaluated to WHNF. `env` carries the known
+/// strictness rows of other functions (cross-function propagation);
+/// `captured` the captured-demand sets of the where-bound local functions
+/// in scope — a demanded, SATURATED call to such a local runs its body, so
+/// the outer variables the body forces on every path are demanded at the
+/// call site too (the only place `captured` is consulted).
 fn demanded_vars_in(
     expr: &TExpr,
     env: &HashMap<String, Vec<bool>>,
@@ -1507,7 +1493,7 @@ fn strip_action_ty(ty: &Ty) -> &Ty {
 /// tuples get all fields forced (recursively), lists get spine + elements.
 /// Everything else — including data constructors, whose fields the
 /// analysis does not track — is `Head`.
-pub fn deep_of_ty(ty: &Ty) -> Demand {
+fn deep_of_ty(ty: &Ty) -> Demand {
     match strip_action_ty(ty) {
         Ty::Tuple(ts) => Demand::Fields(ts.iter().map(|t| Some(deep_of_ty(t))).collect()),
         Ty::List(t) => Demand::Elems(Box::new(deep_of_ty(t))),
@@ -1570,7 +1556,7 @@ pub struct LocalRows {
 /// builds keys (the constructor is private), and only inside containers
 /// that carry the same brand.
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-pub struct NodeKey<'t>(usize, std::marker::PhantomData<&'t TExpr>);
+struct NodeKey<'t>(usize, std::marker::PhantomData<&'t TExpr>);
 
 impl<'t> NodeKey<'t> {
     fn of(node: &'t TExpr) -> Self {
