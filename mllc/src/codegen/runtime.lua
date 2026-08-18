@@ -374,9 +374,11 @@ local function __mll_ffi_decode(desc, v, root, dir)
         -- pattern-match it. The tags are the constructor order in Prelude.mll:
         -- AnyString {1}, AnyInt {2}, AnyNumber {3}, AnyBool {4}, AnyNull {5}.
         -- nil (an absent value) is AnyNull; a number splits on its subtype so a
-        -- whole number is AnyInt and a fractional/NaN/inf one is AnyNumber
-        -- (the same probe __mll_math_type uses: native math.type on Lua 5.3+, a
-        -- `% 1 == 0` fallback on double-only LuaJIT / 5.1-5.2).
+        -- whole number is AnyInt and a fractional/NaN/inf one is AnyNumber:
+        -- native math.type on Lua 5.3+, a `% 1 == 0` test on double-only
+        -- LuaJIT / 5.1-5.2. (Deliberately not __mll_math_type, whose
+        -- fallback answers 'float' for every number on those interpreters —
+        -- right for a subtype probe, wrong for classifying a host value.)
         if v == nil then return {5} end
         local t = type(v)
         if t == "string" then return {1, v}

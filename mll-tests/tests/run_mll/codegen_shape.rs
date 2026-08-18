@@ -603,9 +603,11 @@ fn prelude_is_emitted_on_demand() {
         .lua_code;
     assert!(uses_list_show.contains("__mll_show_list"), "list show must be present when used");
 
-    // The trimmed prelude must be strictly smaller than carrying everything.
-    assert!(trivial.len() < uses_list_show.len() + 20_000,
-        "on-demand prelude should track usage, not emit the whole runtime");
+    // The prelude tracks usage: the trivial program's output is smaller than
+    // the one that pulls in list show — not the whole runtime in both.
+    assert!(trivial.len() < uses_list_show.len(),
+        "on-demand prelude should track usage, not emit the whole runtime \
+         (trivial {} bytes vs list-show {} bytes)", trivial.len(), uses_list_show.len());
 }
 
 #[test]
