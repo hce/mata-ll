@@ -157,7 +157,7 @@ fn parse_prelude_chunks() -> Vec<PChunk> {
 }
 
 /// Is `line` the start of a top-level prelude definition (column 0)?
-pub(super) fn is_def_start(line: &str) -> bool {
+fn is_def_start(line: &str) -> bool {
     if line.starts_with([' ', '\t']) {
         return false;
     }
@@ -175,7 +175,7 @@ pub(super) fn is_def_start(line: &str) -> bool {
 }
 
 /// The names a definition line introduces.
-pub(super) fn provided_names(line: &str) -> Vec<String> {
+fn provided_names(line: &str) -> Vec<String> {
     let l = line.trim();
     if let Some(rest) = l.strip_prefix("local function ") {
         return vec![rest.chars().take_while(|c| *c == '_' || c.is_ascii_alphanumeric()).collect()];
@@ -195,7 +195,7 @@ pub(super) fn provided_names(line: &str) -> Vec<String> {
     if is_ident(&name) { vec![name] } else { vec![] }
 }
 
-pub(super) fn is_ident(s: &str) -> bool {
+fn is_ident(s: &str) -> bool {
     let mut cs = s.chars();
     matches!(cs.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())
         && cs.all(|c| c == '_' || c.is_ascii_alphanumeric())
@@ -205,7 +205,7 @@ pub(super) fn is_ident(s: &str) -> bool {
 /// comment (the runtime uses no block comments and no `--` inside a string
 /// literal, which `prelude_has_no_dash_dash_in_strings` pins). A name that
 /// occurs only in a comment is documentation, not a dependency.
-pub(super) fn code_idents(s: &str) -> impl Iterator<Item = &str> {
+fn code_idents(s: &str) -> impl Iterator<Item = &str> {
     s.lines().flat_map(|line| {
         let code = match line.find("--") {
             Some(i) => &line[..i],
@@ -216,7 +216,7 @@ pub(super) fn code_idents(s: &str) -> impl Iterator<Item = &str> {
 }
 
 /// Every maximal `[A-Za-z0-9_]` run in `s` (a superset of the Lua identifiers).
-pub(super) fn idents(s: &str) -> impl Iterator<Item = &str> {
+fn idents(s: &str) -> impl Iterator<Item = &str> {
     let b = s.as_bytes();
     let mut i = 0;
     std::iter::from_fn(move || {

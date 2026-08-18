@@ -197,7 +197,7 @@ fn self_call_args<'a>(e: &'a Expr, name: &SelfName) -> Option<&'a Vec<Expr>> {
     if is_self_ref(f, name) { Some(args) } else { None }
 }
 
-pub(super) fn is_self_ref(f: &Expr, name: &SelfName) -> bool {
+fn is_self_ref(f: &Expr, name: &SelfName) -> bool {
     match f {
         Expr::Name(s) => s == name.spelling(),
         // Defensive: the `__mll_fn[i]` spelling as an Index node (the

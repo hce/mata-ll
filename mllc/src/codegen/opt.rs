@@ -112,7 +112,7 @@ use super::tailloop;
 
 /// Which passes to skip; see the module comment.
 #[derive(Default)]
-pub(super) struct Disable {
+struct Disable {
     parens: bool,
     dead: bool,
     iife: bool,

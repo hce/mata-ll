@@ -24,7 +24,7 @@ impl CodeGen {
     /// Build an expression in function-call position.
     /// Variables known to be concrete (already forced) are emitted bare.
     /// Unknown variables are forced — they may be let-bound thunks.
-    pub(super) fn expr_raw_ast(&mut self, expr: &TExpr) -> Expr {
+    fn expr_raw_ast(&mut self, expr: &TExpr) -> Expr {
         if let TExprKind::Var(name) = &expr.kind {
             match name.as_str() {
                 "otherwise" => Expr::lit("true"),

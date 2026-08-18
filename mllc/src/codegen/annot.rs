@@ -705,7 +705,7 @@ fn parse_slot_suffix(s: &str) -> Option<(&str, usize)> {
 }
 
 /// `lhs` spells exactly `__mll_fn[<digits>]`.
-pub(super) fn is_slot_ref(lhs: &str) -> bool {
+fn is_slot_ref(lhs: &str) -> bool {
     lhs.strip_prefix("__mll_fn")
         .and_then(parse_slot_suffix)
         .is_some_and(|(slot, len)| slot.len() == len && len == lhs.len() - "__mll_fn".len())

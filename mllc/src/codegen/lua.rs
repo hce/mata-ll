@@ -194,7 +194,7 @@ impl FnTarget {
     /// Render the full header line up to and including the parameter list's
     /// closing paren — byte-identical to the pre-rendered header strings
     /// this node used to carry.
-    pub(super) fn render_header(&self, params: &[String], out: &mut String) {
+    fn render_header(&self, params: &[String], out: &mut String) {
         match self {
             FnTarget::LocalFn(n) => {
                 out.push_str("local function ");
