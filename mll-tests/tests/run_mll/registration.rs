@@ -109,19 +109,14 @@ mll_test!(if_pure_bottom, "if_pure_bottom.mll");
 mll_test!(first_class_pure_bottom, "first_class_pure_bottom.mll");
 mll_test!(perform_bare_tco_deep, "perform_bare_tco_deep.mll");
 
-/// Raw tail-call elimination alone must carry a deep direct-perform
-/// self-recursion: compile perform_bare_tco_deep.mll with every loop pass
-/// disabled — via `CompileOptions::disable_opt_passes`, which is
-/// per-compile and cannot race concurrently compiling tests the way
-/// mutating `MLL_OPT_DISABLE` would — and run the 2e6-deep
-/// bare-name-terminal case. This pins the bare `return self(...)`
-/// direct-perform self-tail emission (action.rs) independently of the
-/// tailloop conversion the normal build applies.
-#[test]
-fn perform_bare_tco_deep_unoptimized() {
+/// Compile a tests/cases/ program with every loop pass disabled — via
+/// `CompileOptions::disable_opt_passes`, which is per-compile and cannot
+/// race concurrently compiling tests the way mutating `MLL_OPT_DISABLE`
+/// would — and run it, so raw tail-call elimination alone must carry it.
+fn run_with_loop_passes_disabled(file: &str) {
     with_compiler_stack(|| {
-        let path = Path::new("tests/cases/perform_bare_tco_deep.mll");
-        let source = std::fs::read_to_string(path)
+        let path = Path::new("tests/cases").join(file);
+        let source = std::fs::read_to_string(&path)
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
         let opts = mllc::CompileOptions {
             disable_opt_passes: Some("tailloop,ioloop".into()),
@@ -129,14 +124,24 @@ fn perform_bare_tco_deep_unoptimized() {
         };
         let lua_code =
             mllc::compile_with_options(&source, Path::new("tests/cases"), &[], &opts)
-                .expect("perform_bare_tco_deep compiles")
+                .unwrap_or_else(|e| panic!("{} compiles: {}", file, e))
                 .lua_code;
         let lua = mlua::Lua::new();
         lua.load(&lua_code)
-            .set_name("perform_bare_tco_deep (loop passes disabled)")
+            .set_name(format!("{} (loop passes disabled)", file))
             .exec()
-            .expect("2e6-deep bare-TCO run in constant stack");
+            .unwrap_or_else(|e| panic!("{} runs in constant stack: {}", file, e));
     });
+}
+
+/// Raw tail-call elimination alone must carry a deep direct-perform
+/// self-recursion: the 2e6-deep bare-name-terminal case with every loop
+/// pass disabled. This pins the bare `return self(...)` direct-perform
+/// self-tail emission (action.rs) independently of the tailloop conversion
+/// the normal build applies.
+#[test]
+fn perform_bare_tco_deep_unoptimized() {
+    run_with_loop_passes_disabled("perform_bare_tco_deep.mll");
 }
 mll_test!(perform_bare_tco_mutual, "perform_bare_tco_mutual.mll");
 
@@ -148,24 +153,7 @@ mll_test!(perform_bare_tco_mutual, "perform_bare_tco_mutual.mll");
 /// emits the bare `return callee(...)` Lua tail call.
 #[test]
 fn perform_bare_tco_mutual_unoptimized() {
-    with_compiler_stack(|| {
-        let path = Path::new("tests/cases/perform_bare_tco_mutual.mll");
-        let source = std::fs::read_to_string(path)
-            .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
-        let opts = mllc::CompileOptions {
-            disable_opt_passes: Some("tailloop,ioloop".into()),
-            ..Default::default()
-        };
-        let lua_code =
-            mllc::compile_with_options(&source, Path::new("tests/cases"), &[], &opts)
-                .expect("perform_bare_tco_mutual compiles")
-                .lua_code;
-        let lua = mlua::Lua::new();
-        lua.load(&lua_code)
-            .set_name("perform_bare_tco_mutual (loop passes disabled)")
-            .exec()
-            .expect("2e6-deep mutual bare-TCO run in constant stack");
-    });
+    run_with_loop_passes_disabled("perform_bare_tco_mutual.mll");
 }
 mll_test!(seq_forms, "seq_forms.mll");
 mll_test!(self_referential_caf, "self_referential_caf.mll");
