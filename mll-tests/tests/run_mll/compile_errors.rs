@@ -1635,10 +1635,33 @@ main :: IO ()
 main = print (not True False)
 "#;
     let msg = expect_compile_error(source, &[], &[]);
-    assert!(
-        msg.contains("Too many arguments") || msg.contains("Cannot unify"),
-        "Expected arity error, got: {}", msg
-    );
+    assert!(msg.contains("Cannot unify"), "Expected arity error, got: {}", msg);
+}
+
+/// An equation binding more argument patterns than its signature has arrows
+/// is reported GHC-style, naming the function, the counts, and the declared
+/// type — not as a bare "Too many arguments".
+#[test]
+fn equation_with_more_arguments_than_its_type_is_diagnosed() {
+    expect_compile_error("f :: Int -> Int\nf x y = x\nmain :: IO ()\nmain = print (f 1)\n", &[], &[
+        "The equation for 'f' has 2 arguments, but its type 'Int -> Int' has only one argument",
+        "definition of 'f'",
+        "note:",
+        "consumes one arrow",
+    ]);
+    expect_compile_error("g :: Int\ng x = x\nmain :: IO ()\nmain = print g\n", &[], &[
+        "The equation for 'g' has one argument, but its type 'Int' has none",
+    ]);
+    // Several equations: plural, and the arity check precedes the per-clause
+    // consistency check only when the counts agree.
+    expect_compile_error("h :: a -> a\nh x y = x\nh a b = a\nmain :: IO ()\nmain = print (h 1)\n", &[], &[
+        "The equations for 'h' have 2 arguments, but its type 'a -> a' has only one argument",
+    ]);
+    // Boundary: the arity is read under a scoped `forall` (LuaIO's `s`), so
+    // an equation matching the arrows of a `forall s. … -> LuaIO s a`
+    // signature is not miscounted as having none.
+    let src = "import LIO (putStrLn)\n\nk :: forall s. Int -> LuaIO s Int\nk x = pure (x + 1)\n\nmain :: IO ()\nmain = putStrLn \"ok\"\n";
+    compile(src, Path::new("."), &[Path::new("../lib")]).expect("a forall-scoped signature's arrows count");
 }
 
 #[test]

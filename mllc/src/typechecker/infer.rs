@@ -133,6 +133,44 @@ impl Checker {
                 }
                 return None;
             }
+            // And that number may not exceed what the signature offers
+            // (GHC: "The equation(s) for 'f' have two arguments, but its
+            // type 'Int -> Int' has only one"). Checked here against the
+            // declared type, so the message can show the signature as
+            // written; check_clause's per-argument walk stays as the
+            // fallback for an arity hidden behind an unreduced type family.
+            let mut body = declared_ty;
+            while let Ty::Forall(_, inner) = body { body = inner; }
+            let arity = body.arrow_arity();
+            if n > arity {
+                let count = |k: usize| match k {
+                    0 => "none".to_string(),
+                    1 => "one argument".to_string(),
+                    k => format!("{k} arguments"),
+                };
+                self.push_error_span(
+                    DiagnosticKind::Other(format!(
+                        "The equation{} for '{}' {} {}, but its type '{}' has {}",
+                        if clauses.len() == 1 { "" } else { "s" },
+                        name,
+                        if clauses.len() == 1 { "has" } else { "have" },
+                        count(n),
+                        declared_ty,
+                        if arity == 0 { "none".to_string() } else { format!("only {}", count(arity)) },
+                    )),
+                    format!("definition of '{}'", name),
+                    first.span,
+                );
+                if let Some(diag) = self.errors.last_mut() {
+                    diag.notes.push(
+                        "each argument pattern on the left of '=' consumes one arrow of the \
+                         declared type; either add the missing arrows to the signature or \
+                         drop the extra patterns"
+                            .to_string(),
+                    );
+                }
+                return None;
+            }
         }
         // The caller-visible signature, with each universally-quantified
         // variable renamed to a fresh FLEXIBLE unification variable. Patterns
@@ -606,7 +644,19 @@ impl Checker {
                     remaining_ty = *ret_ty.clone();
                     tpatterns.push(tp);
                 }
-                _ => return Err(DiagnosticKind::Other("Too many arguments".into())),
+                // check_function has already matched the pattern count against
+                // the declared type's arrows; this is reached only when an
+                // arrow is hidden behind a type family application that did
+                // not reduce to a function type.
+                _ => return Err(DiagnosticKind::Other(format!(
+                    "The equation for '{}' has {} argument{}, but after {} the remaining \
+                     type '{}' is not a function type",
+                    self.current_fn.as_deref().unwrap_or("?"),
+                    clause.patterns.len(),
+                    if clause.patterns.len() == 1 { "" } else { "s" },
+                    match tpatterns.len() { 1 => "one".to_string(), k => k.to_string() },
+                    remaining_ty.apply_subst(&subst),
+                ))),
             }
         }
 
