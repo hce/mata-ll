@@ -1287,7 +1287,15 @@ fn demanded_vars_in(
 
             // If the body demands a let-bound variable, the variables
             // demanded by that binding's definition are also demanded.
+            // VALUE bindings only, mirroring let_group_close and
+            // analyze_equation's close: demanding a local FUNCTION means
+            // demanding the closure, which runs nothing — pulling in its
+            // body's demands (including its own parameter names) would
+            // over-claim strictness for a first-class reference.
             for bind in binds {
+                if !bind.patterns.is_empty() {
+                    continue;
+                }
                 if body_demanded.contains(&bind.name) {
                     body_demanded.extend(rec(&bind.body));
                 }
@@ -2699,4 +2707,79 @@ fn collect_fn_refs<'t>(
         _ => {}
     }
     expr.for_each_child(&mut |c| collect_fn_refs(c, fn_names, refs, poisoned));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Ty;
+
+    fn int() -> Ty {
+        Ty::Con("Int".into())
+    }
+
+    fn var(n: &str) -> TExpr {
+        TExpr::new(TExprKind::Var(n.into()), int())
+    }
+
+    /// A first-class reference to a let-bound local FUNCTION demands the
+    /// closure, not its body: the body's free variables (and its own
+    /// parameter names) must NOT enter the demanded set. Regression: the
+    /// boolean Let arm had no function-bind guard (unlike let_group_close
+    /// and analyze_equation's close), so `let g y = y + x in g` claimed
+    /// {x, y} and a caller was marked strict in them.
+    #[test]
+    fn let_function_bind_body_not_demanded_by_first_class_ref() {
+        let g_body = TExpr::new(
+            TExprKind::InfixApp {
+                op: "+".into(),
+                lhs: Box::new(var("y")),
+                rhs: Box::new(var("x")),
+            },
+            int(),
+        );
+        let expr = TExpr::new(
+            TExprKind::Let {
+                binds: vec![TLocalDef {
+                    name: "g".into(),
+                    patterns: vec![TPattern::Var("y".into(), int())],
+                    body: g_body,
+                }],
+                body: Box::new(var("g")),
+            },
+            int(),
+        );
+        let env = HashMap::new();
+        let captured = CapturedEnv::new();
+        let demanded = demanded_vars_in(&expr, &env, &captured, &|_| false);
+        assert!(
+            demanded.is_empty(),
+            "first-class local-fn ref must demand nothing, got {demanded:?}"
+        );
+    }
+
+    /// The value-bind closure still works: a demanded let-bound VALUE
+    /// pulls in its RHS's demands.
+    #[test]
+    fn let_value_bind_body_demanded() {
+        let expr = TExpr::new(
+            TExprKind::Let {
+                binds: vec![TLocalDef {
+                    name: "v".into(),
+                    patterns: vec![],
+                    body: var("x"),
+                }],
+                body: Box::new(var("v")),
+            },
+            int(),
+        );
+        let env = HashMap::new();
+        let captured = CapturedEnv::new();
+        let demanded = demanded_vars_in(&expr, &env, &captured, &|_| false);
+        assert_eq!(
+            demanded,
+            HashSet::from(["x".to_string()]),
+            "demanded value binding must pull in its RHS demands"
+        );
+    }
 }
