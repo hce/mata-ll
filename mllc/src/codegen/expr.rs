@@ -308,7 +308,19 @@ impl CodeGen {
                 );
                 for (i, bind) in binds.iter().enumerate() {
                     let sname = sanitize_name(&bind.name);
-                    if self.strict_binding_ok(bind, &demanded) && strict_binding_safe(binds, i) {
+                    if Self::is_nullary_action_type(&bind.body.ty) {
+                        // First-class action binding — mirror bind_chain_block's
+                        // Let arm: a re-performable closure, never a memoizing
+                        // thunk (a thunked action performs once and caches its
+                        // result; GHC performs it at every use). Its result is
+                        // not this expression's result.
+                        let saved_rd = std::mem::replace(
+                            &mut self.cur_result_demand, crate::demand::Demand::Head);
+                        let action = self.action_run_ast(&bind.body, false);
+                        self.cur_result_demand = saved_rd;
+                        stmts.push(Stmt::Assign(sname.clone(), Expr::inline_fn0(action)));
+                        self.concrete_vars.insert(sname);
+                    } else if self.strict_binding_ok(bind, &demanded) && strict_binding_safe(binds, i) {
                         let rhs = self.expr_ast(&bind.body);
                         stmts.push(Stmt::Assign(sname.clone(), rhs));
                         self.concrete_vars.insert(sname);

@@ -779,7 +779,15 @@ impl CodeGen {
         // action closure inside it must not inherit the deep result demand.
         let saved_rd =
             std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
-        let stmt = if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
+        let stmt = if Self::is_nullary_action_type(&bind.body.ty) {
+            // First-class action binding — mirror bind_chain_block's Let arm:
+            // emit a re-performable closure, never a memoizing thunk. A
+            // thunked `t = putStrLn "hi"` performs the effect on the first
+            // force and caches the unit result, so `t >> t` prints once;
+            // GHC performs the action at every use.
+            self.concrete_vars.insert(sname);
+            Stmt::Assign(lref, Expr::inline_fn0(self.action_run_ast(&bind.body, false)))
+        } else if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
             let rhs = self.expr_ast(&bind.body);
             self.concrete_vars.insert(sname);
             Stmt::Assign(lref, rhs)

@@ -180,6 +180,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_derive_functor_nested, "cases", "derive_functor_nested.mll"),
         (ghc_oracle_derive_ord, "cases", "derive_ord.mll"),
         (ghc_oracle_ord_max_min, "cases", "ord_max_min.mll"),
+        (ghc_oracle_action_value_bindings, "cases", "action_value_bindings.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),
