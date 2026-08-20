@@ -23,12 +23,82 @@ impl CodeGen {
         self.expr_ast(&e)
     }
 
+    /// Would substituting `subst` into `body` CAPTURE a variable?
+    /// `subst_texpr` is shadow-aware (a binder hides same-named entries of
+    /// the map in its scope) but performs no alpha-renaming, so an argument
+    /// expression whose variables collide with a binder inside the body
+    /// would be captured: inlining `add x = \y -> x + y` at `add y`
+    /// produced `\y -> y + y`. The check over-approximates on both sides
+    /// (every variable occurrence in the argument, every binder in the
+    /// body) — a false positive only declines an inline, and the call site
+    /// falls back to the ordinary call.
+    pub(super) fn subst_would_capture(
+        body: &TExpr,
+        subst: &std::collections::HashMap<String, &TExpr>,
+    ) -> bool {
+        let mut binders = std::collections::HashSet::new();
+        Self::collect_binders(body, &mut binders);
+        if binders.is_empty() {
+            return false;
+        }
+        let mut arg_vars = std::collections::HashSet::new();
+        for arg in subst.values() {
+            Self::collect_var_refs(arg, &mut arg_vars);
+        }
+        arg_vars.iter().any(|v| binders.contains(v))
+    }
+
+    /// Every variable occurrence in `expr` (an over-approximation of its
+    /// free variables: bound occurrences are included, which only widens
+    /// the capture check).
+    fn collect_var_refs(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
+        if let TExprKind::Var(name) = &expr.kind {
+            out.insert(name.clone());
+        }
+        expr.for_each_child(&mut |c| Self::collect_var_refs(c, out));
+    }
+
+    /// Every name bound ANYWHERE inside `expr` — lambda parameters, let
+    /// binding names, their function-form parameters, and case pattern
+    /// variables (the three TIR binder forms).
+    fn collect_binders(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
+        match &expr.kind {
+            TExprKind::Lambda { params, .. } => {
+                for (name, _) in params {
+                    out.insert(name.clone());
+                }
+            }
+            TExprKind::Let { binds, .. } => {
+                for b in binds {
+                    out.insert(b.name.clone());
+                    for p in &b.patterns {
+                        for v in p.bound_vars() {
+                            out.insert(v);
+                        }
+                    }
+                }
+            }
+            TExprKind::Case { branches, .. } => {
+                for b in branches {
+                    for v in b.pattern.bound_vars() {
+                        out.insert(v);
+                    }
+                }
+            }
+            _ => {}
+        }
+        expr.for_each_child(&mut |c| Self::collect_binders(c, out));
+    }
+
     /// The expression with every substituted parameter replaced by its
     /// call-site expression, at the TIR level, so the ordinary emitter sees
     /// (and weighs) the call-site expression exactly where the parameter
     /// stood. Shadow-aware: a lambda parameter, a let name (or a let-bound
     /// function's own parameters, in its body) or a case pattern variable
-    /// that rebinds a substituted name hides it in its scope.
+    /// that rebinds a substituted name hides it in its scope. NOT
+    /// capture-avoiding: the caller must decline substitutions whose
+    /// argument variables collide with body binders (subst_would_capture)
+    /// — there is no alpha-renaming here.
     fn subst_texpr(expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) -> TExpr {
         if subst.is_empty() {
             return expr.clone();

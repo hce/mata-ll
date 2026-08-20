@@ -243,6 +243,7 @@ mll_test!(quot_rem_fixity, "quot_rem_fixity.mll");
 mll_test!(dollar_stays_lazy, "dollar_stays_lazy.mll");
 mll_test!(guarded_clause_scope, "guarded_clause_scope.mll");
 mll_test!(local_shadows_specials, "local_shadows_specials.mll");
+mll_test!(inline_no_capture, "inline_no_capture.mll");
 mll_test!(rank2, "rank2.mll");
 
 // Stress tests

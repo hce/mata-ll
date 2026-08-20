@@ -896,6 +896,12 @@ impl CodeGen {
                     for (param, arg) in params.iter().zip(args.iter()) {
                         subst.insert(param.clone(), *arg);
                     }
+                    // Capture check: subst_texpr does not alpha-rename, so
+                    // an argument whose variables collide with a binder in
+                    // the body must not be inlined (see subst_would_capture).
+                    if Self::subst_would_capture(&body, &subst) {
+                        return None;
+                    }
                     let inlined = self.expr_subst_ast(&body, &subst);
                     return Some(Expr::paren(inlined));
                 }
