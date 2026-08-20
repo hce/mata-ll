@@ -39,8 +39,23 @@ impl CodeGen {
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap_with(inner, var_ok),
             TExprKind::Tuple(elems) => elems.iter().all(|e| Self::is_cheap_with(e, var_ok)),
             TExprKind::InfixApp { op, lhs, rhs } => {
+                // `$` IS application: `f $ x` calls f, so it is neither small
+                // to duplicate nor safe to evaluate eagerly — a possibly-⊥
+                // application must stay lazy exactly like the App arm below
+                // (an unused `where u = f $ 0` with a diverging `f` must
+                // never run; GHC does not touch it). It is listed in
+                // is_builtin_op for emission dispatch, which is a different
+                // question from cheapness. The one cheap `$` shape mirrors
+                // the App arm's constructor case: a constructor applied
+                // through `$` (`Just $ x`) is just table creation.
+                if op == "$" {
+                    return Self::is_con_app(lhs)
+                        && Self::is_cheap_with(lhs, var_ok)
+                        && Self::is_cheap_with(rhs, var_ok);
+                }
                 // Builtin ops (arithmetic, comparison, concat) are cheap
-                // if their operands are cheap
+                // if their operands are cheap. `.` stays: composition only
+                // BUILDS a closure — no operand is called.
                 is_builtin_op(op) && Self::is_cheap_with(lhs, var_ok) && Self::is_cheap_with(rhs, var_ok)
             }
             TExprKind::App(func, arg) => {
