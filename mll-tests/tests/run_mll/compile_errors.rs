@@ -25,6 +25,48 @@ main = putStrLn "\256"
     ]);
 }
 
+// Haskell 2010 puts `::` one grammar level above a section operand
+// (exp → infixexp [:: type]), so GHC parse-errors on `(+ 1 :: Int)`;
+// mata-ll used to accept it silently (the operand parse consumed the
+// ascription). Both section spellings must reject with the concrete
+// rewrite hint, and the parenthesized operand stays legal (the control).
+#[test]
+fn ascription_in_right_section_operand_is_rejected() {
+    let source = r#"
+main :: IO ()
+main = print (map (+ 1 :: Int) [1, 2])
+"#;
+    expect_compile_error(source, &[], &[
+        "section operand",
+        "'::' annotates a complete expression",
+        "note:",
+        "(+ (e :: T))",
+    ]);
+}
+
+#[test]
+fn ascription_in_backtick_right_section_operand_is_rejected() {
+    let source = r#"
+main :: IO ()
+main = print (map (`div` 2 :: Int) [4, 6])
+"#;
+    expect_compile_error(source, &[], &[
+        "section operand",
+        "note:",
+        "(`div` (e :: T))",
+    ]);
+}
+
+#[test]
+fn parenthesized_ascription_in_section_operand_is_accepted() {
+    let source = r#"
+main :: IO ()
+main = print (map (+ (1 :: Int)) [1, 2])
+"#;
+    compile(source, Path::new("."), &[])
+        .expect("parenthesized ascription operand must stay legal");
+}
+
 // A `[a]`-vs-`String` unification failure (e.g. `"a" ++ "b"`) is a
 // completeness gap, not a soundness violation — mata-ll's String is opaque,
 // not [Char] (decided 2026-07-22; see HASKDIFF.md, "Strings and ByteStrings").

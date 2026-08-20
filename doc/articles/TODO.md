@@ -25,14 +25,6 @@ MATA-LL TODO
       hardened hosts load text-only; `mlua`-based precompile covers the
       load-time case if ever wanted).
 
-- [ ] **`::` ascription inside a right-section operand is accepted; GHC
-      parse-errors.** Found 2026-07-27 during the section-precedence work:
-      mata-ll accepts `(+ 1 :: Int)` where GHC rejects the `::` in that
-      grammar position. Accept-only (no wrong grouping), separate grammar
-      production from the operand-precedence rule. Low priority; closing it
-      is an acceptance change, so it wants the same corpus-checked shape as
-      the precedence fix.
-
 - [ ] **Type-erased generic `show` cannot split Integer/Double on LuaJIT.**
       LuaJIT has no `math.type`, so the last-resort runtime-dispatch `show`
       path shows the double `1.0` as `1` there. Every type-directed path
@@ -44,7 +36,21 @@ MATA-LL TODO
 
 ## Completed
 
-- [x] **Loop-invariant closure hoisting — opt pass 7** (2026-08-20;
+- [x] **`::` ascription inside a right-section operand now parse-errors,
+      as in GHC** (2026-08-20; parser.rs). Both right-section spellings —
+      `(+ 1 :: Int)` and ``(`div` 2 :: Int)`` — went through `parse_expr`,
+      whose ascription tail silently consumed the `::`; Haskell 2010 puts
+      `::` one grammar level above a section operand (exp → infixexp
+      [:: type]), so GHC rejects the form (runghc-confirmed). The operand
+      now parses through `parse_right_section_operand` (the `infixexp`
+      level), and a trailing `::` is a located error explaining the
+      grammar level with a concrete rewrite note
+      (`parenthesize the annotated operand: '(+ (e :: T))'`). Left
+      sections already errored (their operand parse stops in front of
+      `::`). Acceptance change, corpus-checked: 0/454 files change, no
+      exit mismatches. Tests: compile_errors
+      ascription_in_{,backtick_}right_section_operand_is_rejected +
+      the parenthesized accept-side control.
       codegen/hoist.rs). A function literal evaluated at iteration level
       of a `while true` loop (directly in loop-body statements, not
       inside another literal) whose free names all resolve OUTSIDE the

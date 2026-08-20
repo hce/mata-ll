@@ -2185,6 +2185,43 @@ impl Parser {
     /// The error for prefix minus in the right operand of a precedence >= 6
     /// operator, matching GHC's rejection (GHC: "cannot mix ... and prefix
     /// minus in the same infix expression").
+    /// The operand of a right section, parsed at the `infixexp` level.
+    /// Haskell 2010 puts `::` one grammar level HIGHER (exp → infixexp
+    /// [:: type]), so a section operand can never carry an ascription —
+    /// GHC parse-errors on `(+ 1 :: Int)` — and this parser now agrees,
+    /// with the reason spelled out. (`parse_expr` would have consumed the
+    /// `::`, which is exactly how the form was accepted before.) Left
+    /// sections cannot reach the shape: their operand parse stops in
+    /// front of `::`, so the section test never sees a trailing operator.
+    /// `op_shown` is the operator as the user wrote it (backticks
+    /// included), for the error's concrete rewrite hint.
+    fn parse_right_section_operand(&mut self, op_shown: &str) -> PResult<Expr> {
+        // Mirrors `parse_expr` (leading layout skip, `expr_min_indent`)
+        // minus its ascription tail.
+        self.skip_newlines_and_indent();
+        let saved_expr_min_indent = self.expr_min_indent;
+        self.expr_min_indent = self.current_indent;
+        let expr = self.parse_expr_infix(0, None)?;
+        self.expr_min_indent = saved_expr_min_indent;
+        if self.at(&Token::DblColon) {
+            let loc = self.peek_loc();
+            let mut diag = Diagnostic::parse_at(
+                format!(
+                    "A section operand cannot carry a '::' type annotation: \
+                     '::' annotates a complete expression, and a section \
+                     operand is an operator argument one grammar level below \
+                     that, so '({op_shown} e :: T)' does not parse"
+                ),
+                Span::new(loc.line, loc.col),
+            );
+            diag.notes.push(format!(
+                "parenthesize the annotated operand: '({op_shown} (e :: T))'"
+            ));
+            return Err(Box::new(diag));
+        }
+        Ok(expr)
+    }
+
     fn prefix_minus_rhs_err(&self, parent: &ParentOp) -> Box<Diagnostic> {
         let d = op_display(&parent.op);
         let e = op_in_expr(&parent.op);
@@ -2797,7 +2834,7 @@ impl Parser {
                     let par = ParentOp { op: op.clone(), prec, assoc };
                     return Err(self.prefix_minus_rhs_err(&par));
                 }
-                let rhs = self.parse_expr()?;
+                let rhs = self.parse_right_section_operand(&op)?;
                 self.check_section_operand(
                     &op, assoc, prec, Assoc::Right, &rhs, op_span,
                 )?;
@@ -2837,7 +2874,7 @@ impl Parser {
                 let par = ParentOp { op: name.clone(), prec, assoc };
                 return Err(self.prefix_minus_rhs_err(&par));
             }
-            let rhs = self.parse_expr()?;
+            let rhs = self.parse_right_section_operand(&format!("`{}`", name))?;
             self.check_section_operand(
                 &name, assoc, prec, Assoc::Right, &rhs, op_span,
             )?;
