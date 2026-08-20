@@ -52,6 +52,8 @@
 //! - tailloop.rs — opt pass 5: self-tail-call → `while true` loop
 //! - ioloop.rs — opt pass 6: IO/ST self-recursion → loop, folding the
 //!   two-level dispatch/closure shape into one driver
+//! - hoist.rs — opt pass 7: loop-invariant closure hoisting (the FNEW
+//!   JIT-killer backstop)
 //! - util.rs — type- and TIR-shape helpers shared across the module
 //! - runtime.rs — the runtime prelude and its on-demand chunk selection
 
@@ -66,6 +68,7 @@ mod annot;
 mod expr;
 mod ffi;
 mod function;
+mod hoist;
 mod inline;
 mod ioloop;
 mod lua;

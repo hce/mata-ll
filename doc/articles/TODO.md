@@ -3,28 +3,27 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Lua-AST optimization layer, structured-pass tier (remaining).**
-      The foundation AND all three loop passes are COMPLETE (see
-      Completed: annotation layer + engine + `__force`-collapse
-      peephole; self-tail-call → loop; IO self-loop conversion; the
-      direct-perform IO self-loop pass, since retired — its shape is now
-      a bare Lua tail call at emission). Remaining, on the
-      same annotation/justification API: (1) loop-invariant /
-      capture-free closure hoisting (syntactic backstop for the FNEW
-      JIT-killer class). Later candidate: liveness-based local-slot
-      reuse. Per-pass verification discipline stays: corpus byte-diff
-      (empty or reviewed), tracker decode as the semantic + perf canary,
-      `codegen_is_deterministic` green, stamp refutation over the final
-      tree. The engine's known limit, accepted at design time: the
-      no-stale-annotations guarantee holds over the closed rewrite
-      vocabulary — a structured pass that needs a new rewrite form
-      carries an engine-side proof obligation (relocated bug surface,
-      not eliminated); the tail-call pass paid it (WhileTrue /
-      MultiAssign / ReturnNone / Goto / Label entered the vocabulary with
-      engine-owned validation). Bytecode generation was considered and
-      dropped 2026-07-27 (format unstable by design, hardened hosts load
-      text-only; `mlua`-based precompile covers the load-time case if
-      ever wanted).
+- [ ] **Lua-AST optimization layer: liveness-based local-slot reuse
+      (later candidate).** The structured-pass tier's planned passes are
+      all COMPLETE (see Completed: annotation layer + engine +
+      `__force`-collapse peephole; self-tail-call → loop; IO self-loop
+      conversion; loop-invariant closure hoisting; the direct-perform IO
+      self-loop pass, since retired — its shape is now a bare Lua tail
+      call at emission). Local-slot reuse was noted as a later candidate
+      when the tier was planned; take it up only if a real program hits
+      the `_v` spill in practice. Per-pass verification discipline
+      stays: corpus byte-diff (empty or reviewed), tracker decode as the
+      semantic + perf canary, `codegen_is_deterministic` green, stamp
+      refutation over the final tree. The engine's known limit, accepted
+      at design time: the no-stale-annotations guarantee holds over the
+      closed rewrite vocabulary — a structured pass that needs a new
+      rewrite form carries an engine-side proof obligation (relocated
+      bug surface, not eliminated); the tail-call pass paid it
+      (WhileTrue / MultiAssign / ReturnNone / Goto / Label entered the
+      vocabulary with engine-owned validation). Bytecode generation was
+      considered and dropped 2026-07-27 (format unstable by design,
+      hardened hosts load text-only; `mlua`-based precompile covers the
+      load-time case if ever wanted).
 
 - [ ] **`::` ascription inside a right-section operand is accepted; GHC
       parse-errors.** Found 2026-07-27 during the section-precedence work:
@@ -44,6 +43,30 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Loop-invariant closure hoisting — opt pass 7** (2026-08-20;
+      codegen/hoist.rs). A function literal evaluated at iteration level
+      of a `while true` loop (directly in loop-body statements, not
+      inside another literal) whose free names all resolve OUTSIDE the
+      loop hoists to `local _hN = function … end` immediately before the
+      loop; the use site reads `_hN`. One closure allocation instead of
+      one per iteration — the FNEW trace-abort backstop for LuaJIT. Sound
+      because Lua closures capture variable REFERENCES: with no free name
+      bound inside the loop, the hoisted closure captures exactly the
+      instances the per-iteration one did (assignments included), and
+      closure creation is pure and total, so only allocation identity
+      moves — unobservable (no function equality in the language or FFI).
+      `__thunk` calls are never hoisted (mutable memoization state);
+      per-iteration-bound captures, Raw statements in the loop, and the
+      LOCAL_LIMIT budget all decline. Runs after both loop passes, offered
+      through the same StructuredPass API; literal bodies (ioloop's `_lp`
+      driver) are walked as their own hoist scopes. Corpus sweep: 6 files
+      change, all reviewed sound (sed's per-iteration match callback,
+      aestest/zpr invariant-upvalue thunk bodies, tracker's constant exit
+      closures, integer_bignum's literal-zero thunk, performloop_deep's
+      error thunk). Unit tests pin the hoist, the per-iteration-capture
+      block, the Raw block, iteration-level-only collection, and the
+      thunk-wrapper rule. `MLL_OPT_DISABLE=hoist` toggles it.
 
 - [x] **Chains that keep their non-exhaustive fall-off now convert to
       loops** (2026-08-20; codegen/pattern.rs, tailloop.rs, opt.rs). Two

@@ -85,7 +85,15 @@
 //! reasons, and because tailloop-converted pure helpers may sit inside the
 //! bodies it splices.
 //!
-//! (Retired: pass 7, the direct-perform IO self-loop conversion, formerly
+//! Pass 7 — loop-invariant closure hoisting (hoist.rs), the structured
+//! tier's third pass: a function literal evaluated at iteration level of a
+//! `while true` loop whose free names all resolve OUTSIDE the loop hoists
+//! to a `local _hN = function … end` immediately before the loop, and the
+//! literal's position reads `_hN` — one closure allocation instead of one
+//! per iteration, and no FNEW on LuaJIT's trace. It runs after both loop
+//! passes because it hoists out of exactly the loops they build.
+//!
+//! (Retired: the direct-perform IO self-loop conversion, formerly
 //! performloop.rs. It looped an IO function that performs at call time and
 //! recurses through `return __mll_run_tail(<self>(…))` — the self call in
 //! the runner's ARGUMENT position pinned one frame per step. The emitter
@@ -98,7 +106,7 @@
 //!
 //! Per-pass toggles: `MLL_OPT_DISABLE` (read per `run` call) is a
 //! comma-separated list of pass names to skip — `parens`, `dead`, `iife`,
-//! `force`, `tailloop`, `ioloop`. A debugging aid for
+//! `force`, `tailloop`, `ioloop`, `hoist`. A debugging aid for
 //! isolating a pass's effect; unset (the default) runs everything, and an
 //! unrecognized name warns on stderr so a typo cannot silently disable
 //! nothing. `CompileOptions::disable_opt_passes` carries the same list
@@ -106,6 +114,7 @@
 //! can pin unoptimized emission without mutating process-global state.
 
 use super::annot;
+use super::hoist;
 use super::ioloop;
 use super::lua::{Block, Expr, FnTarget, FuncBody, Item, Stmt, render_stmts};
 use super::tailloop;
@@ -119,6 +128,7 @@ struct Disable {
     force: bool,
     tailloop: bool,
     ioloop: bool,
+    hoist: bool,
 }
 
 impl Disable {
@@ -146,10 +156,11 @@ impl Disable {
                 "iife" => d.iife = true,
                 "force" => d.force = true,
                 "tailloop" => d.tailloop = true,
+                "hoist" => d.hoist = true,
                 "ioloop" => d.ioloop = true,
                 other => eprintln!(
                     "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
-                     (known: parens, dead, iife, force, tailloop, ioloop)",
+                     (known: parens, dead, iife, force, tailloop, ioloop, hoist)",
                     other
                 ),
             }
@@ -198,6 +209,13 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
         // discipline as tailloop: a rewrite invalidates everything, so the
         // recomputed engine replaces whichever one came before.
         if let Some(fresh) = annot::Engine::run_structured(stmts, &mut ioloop::IoLoop) {
+            engine = Some(fresh);
+        }
+    }
+    if !d.hoist {
+        // Structured tier, pass 7 (see the module comment): hoists out of
+        // exactly the loops passes 5 and 6 built, so it runs after both.
+        if let Some(fresh) = annot::Engine::run_structured(stmts, &mut hoist::HoistClosures) {
             engine = Some(fresh);
         }
     }
