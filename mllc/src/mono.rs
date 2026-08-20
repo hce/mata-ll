@@ -1767,6 +1767,7 @@ impl Monomorphizer {
                 for a in args { Self::collect_pattern_vars(a, vars); }
             }
             TPattern::Paren(p) => Self::collect_pattern_vars(p, vars),
+            TPattern::As(_, p) => Self::collect_pattern_vars(p, vars),
             TPattern::Tuple(ps) => { for p in ps { Self::collect_pattern_vars(p, vars); } }
             _ => {}
         }

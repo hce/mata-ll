@@ -332,6 +332,10 @@ mll_test!(lazy_index_laziness_contract, "lazy_index_laziness_contract.mll");
 // GHC clause-order laziness, and blocked splits keep per-use forcing
 mll_test!(later_clause_force_once, "later_clause_force_once.mll");
 
+// As-patterns: `xs@p` binds the whole value while matching `p`; forces
+// exactly when `p` forces, clause-order laziness preserved
+mll_test!(as_patterns, "as_patterns.mll");
+
 // Finding 2: folder and runtime agree on floor-semantics div/mod for every
 // sign combination (lit / run / agree triples), plus edge and larger
 // operands, the div/mod identity law, and the divisor-sign mod-range law

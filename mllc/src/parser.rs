@@ -3606,18 +3606,14 @@ impl Parser {
             Token::Ident(name) => {
                 self.advance();
                 if self.at(&Token::At) {
-                    // `xs@(x:_)`: report the as-pattern where it is written
-                    // instead of failing on the '@' as an unexpected token
-                    // further along the clause.
-                    let mut diag = self.err_here(format!(
-                        "As-patterns are not supported: '{name}@…' would bind '{name}' to the \
-                         whole value while also matching its structure. Bind the whole value \
-                         and match it with 'case' in the body (or in a where clause)"
-                    ));
-                    diag.notes.push(
-                        "GHC accepts as-patterns; mata-ll does not support them yet".to_string(),
-                    );
-                    return Err(diag);
+                    // As-pattern `xs@(x:_)` (Haskell 2010 §3.17: apat →
+                    // var [@ apat]): bind the variable to the whole value
+                    // AND match the inner pattern against it. The inner
+                    // pattern is an atom, exactly as in GHC — `xs@Just y`
+                    // is a parse error there and here; write `xs@(Just y)`.
+                    self.advance();
+                    let inner = self.parse_pattern_atom()?;
+                    return Ok(Pattern::As(name, Box::new(inner)));
                 }
                 Ok(Pattern::Var(name))
             }

@@ -157,6 +157,7 @@ macro_rules! for_each_ghc_oracle_case {
     ($cb:ident) => {
         $cb! {
         (ghc_oracle_action_result_whnf, "cases", "action_result_whnf.mll"),
+        (ghc_oracle_as_patterns, "cases", "as_patterns.mll"),
         (ghc_oracle_basics, "cases", "basics.mll"),
         (ghc_oracle_bind_first_class, "cases", "bind_first_class.mll"),
         (ghc_oracle_block_closers, "cases", "block_closers.mll"),

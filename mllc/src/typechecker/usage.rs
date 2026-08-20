@@ -404,10 +404,42 @@ struct LinearInfo {
 /// a linear value with `_` drops that part unconsumed, which exactly-once
 /// rejects (a `LitPat` is fine: it forces the matched scalar to compare it,
 /// which IS its consumption).
+/// Does this pattern contain an as-pattern anywhere? The linear checker
+/// rejects those outright: `xs@(a, b)` binds the whole value AND its
+/// parts, and per-binder exactly-once counting cannot see that the
+/// binders alias (consuming `xs` and `a` would consume part of the value
+/// twice while counting each binder once). GHC's -XLinearTypes rejects
+/// the form on a '%1' argument for the same reason.
+fn pattern_has_as(p: &TPattern) -> bool {
+    match p {
+        TPattern::As(..) => true,
+        TPattern::Var(..) | TPattern::Wildcard | TPattern::LitPat(_) => false,
+        TPattern::Paren(inner) => pattern_has_as(inner),
+        TPattern::Constructor { args, .. } => args.iter().any(pattern_has_as),
+        TPattern::Tuple(elems) => elems.iter().any(pattern_has_as),
+    }
+}
+
+/// The scrutinee type of an as-pattern's whole-value binder, recovered
+/// from the inner pattern where it carries one (a `Var`'s annotation);
+/// `Ty::Unit` otherwise — only the `()`-exemption reads it, and an
+/// as-pattern never reaches linear tracking (see `pattern_has_as`).
+fn inner_ty_of(p: &TPattern) -> Ty {
+    match p {
+        TPattern::Var(_, ty) => ty.clone(),
+        TPattern::Paren(inner) | TPattern::As(_, inner) => inner_ty_of(inner),
+        _ => Ty::Unit,
+    }
+}
+
 fn pattern_has_wildcard(p: &TPattern) -> bool {
     match p {
         TPattern::Wildcard => true,
         TPattern::Var(..) | TPattern::LitPat(_) => false,
+        // As-pattern: the outer binder holds the whole value, but a `_`
+        // inside still stands for a part the inner match discards — keep
+        // the conservative rejection (linear code should bind the part).
+        TPattern::As(_, inner) => pattern_has_wildcard(inner),
         TPattern::Paren(inner) => pattern_has_wildcard(inner),
         TPattern::Constructor { args, .. } => args.iter().any(pattern_has_wildcard),
         TPattern::Tuple(elems) => elems.iter().any(pattern_has_wildcard),
@@ -421,6 +453,17 @@ fn pattern_has_wildcard(p: &TPattern) -> bool {
 fn pattern_binders(p: &TPattern, direct: bool, out: &mut Vec<(String, Ty, bool)>) {
     match p {
         TPattern::Var(n, ty) => out.push((n.clone(), ty.clone(), direct)),
+        // As-pattern: the outer name binds the whole value (it carries the
+        // pattern's `direct` flag), the inner binders alias parts of it.
+        // The per-binder counting below cannot express that aliasing, so
+        // every LINEAR driver site rejects a pattern containing an
+        // as-pattern (`pattern_has_as`) — GHC's -XLinearTypes likewise
+        // makes the whole-value binder unrestricted, which a '%1' argument
+        // cannot supply.
+        TPattern::As(n, inner) => {
+            out.push((n.clone(), inner_ty_of(inner), direct));
+            pattern_binders(inner, false, out);
+        }
         TPattern::Wildcard | TPattern::LitPat(_) => {}
         TPattern::Paren(inner) => pattern_binders(inner, direct, out),
         TPattern::Constructor { args, .. } => {
@@ -766,6 +809,24 @@ impl<'a> UsageCk<'a> {
                 let taint_src = self.taint_source(&u_s);
                 let mut alts: Vec<Usage> = Vec::with_capacity(branches.len());
                 for br in branches {
+                    if let Some((src, _)) = &taint_src
+                        && pattern_has_as(&br.pattern)
+                    {
+                        let ai = self.linear.get(src).cloned();
+                        if let Some(ai) = ai {
+                            self.viols.push(Violation {
+                                name: src.clone(),
+                                origin: ai.origin,
+                                cause: None,
+                                kind: ViolKind::PathDrop(
+                                    "an as-pattern ('x@…') in this case \
+                                     pattern binds the whole value AND its \
+                                     parts, so exactly-once consumption has \
+                                     no single meaning; bind one or the \
+                                     other".to_string()),
+                            });
+                        }
+                    }
                     if let Some((src, _)) = &taint_src
                         && pattern_has_wildcard(&br.pattern)
                     {
@@ -1317,7 +1378,10 @@ impl<'a> UsageCk<'a> {
         let param_factors: Vec<ParamFactor> = b.patterns.iter().zip(&per_param)
             .map(|(p, names)| {
                 let base = ParamFactor {
-                    factor: Factor::Once,
+                    // An as-pattern aliases the whole value and its parts;
+                    // per-binder counts cannot see that, so claim
+                    // unrestricted use — a linear caller then rejects.
+                    factor: if pattern_has_as(p) { Factor::Any } else { Factor::Once },
                     may_drop: pattern_has_wildcard(p),
                 };
                 names.iter().fold(base, |acc, n| {
@@ -1737,6 +1801,18 @@ impl Checker {
                     _ => None,
                 };
                 if let Some((bound, origin)) = tracked {
+                    if pattern_has_as(pat) {
+                        walker.viols.push(Violation {
+                            name: "@".to_string(),
+                            origin: origin.clone(),
+                            cause: None,
+                            kind: ViolKind::Unused(
+                                "an as-pattern ('x@…') on this argument \
+                                 binds the whole value AND its parts, so \
+                                 exactly-once consumption has no single \
+                                 meaning; bind one or the other".to_string()),
+                        });
+                    }
                     if pattern_has_wildcard(pat) {
                         walker.viols.push(Violation {
                             name: "_".to_string(),

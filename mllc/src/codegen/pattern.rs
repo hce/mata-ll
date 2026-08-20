@@ -364,10 +364,14 @@ impl CodeGen {
     fn clauses_cover_all_constructors(&self, clauses: &[TClause]) -> bool {
         fn strip(p: &TPattern) -> &TPattern {
             let mut p = p;
-            while let TPattern::Paren(inner) = p {
-                p = inner;
+            loop {
+                match p {
+                    TPattern::Paren(inner) => p = inner,
+                    // `xs@p` covers exactly what `p` covers.
+                    TPattern::As(_, inner) => p = inner,
+                    _ => return p,
+                }
             }
-            p
         }
         fn irrefutable(p: &TPattern) -> bool {
             matches!(strip(p), TPattern::Var(..) | TPattern::Wildcard)
@@ -440,13 +444,12 @@ impl CodeGen {
 
     /// A sub-pattern that inspects its value (matches a tag, compares a
     /// literal, or destructures further) needs that value forced first;
-    /// a Var/Wildcard just binds/ignores it and can stay lazy.
+    /// a Var/Wildcard just binds/ignores it — and an as-pattern forces
+    /// exactly when its inner pattern does — so those can stay lazy.
+    /// Delegates to the TIR-level predicate (`TPattern::forces_scrutinee`),
+    /// the one definition of the question.
     pub(super) fn pattern_inspects_value(pattern: &TPattern) -> bool {
-        match pattern {
-            TPattern::Var(..) | TPattern::Wildcard => false,
-            TPattern::Paren(inner) => Self::pattern_inspects_value(inner),
-            _ => true,
-        }
+        pattern.forces_scrutinee()
     }
 
     /// Build an indexing path into a field, forcing it when the sub-pattern
@@ -479,9 +482,7 @@ impl CodeGen {
     /// earlier clause never forces it. An irrefutable pattern (Var/Wildcard)
     /// binds lazily and must stay the raw (unforced) param.
     pub(super) fn match_scrutinee(&self, param: &str, pat: &TPattern) -> Expr {
-        if matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
-            || self.concrete_vars.contains(param)
-        {
+        if !pat.forces_scrutinee() || self.concrete_vars.contains(param) {
             Expr::name(param)
         } else {
             Expr::force(Expr::name(param))
@@ -491,6 +492,16 @@ impl CodeGen {
     pub(super) fn collect_pattern_conditions(&self, scrutinee: &Expr, pattern: &TPattern, conditions: &mut Vec<Expr>, bindings: &mut Vec<(String, Expr)>) {
         match pattern {
             TPattern::Var(name, _) => { bindings.push((sanitize_name(name), scrutinee.clone())); }
+            // As-pattern: bind the WHOLE scrutinee to the name, then match
+            // the inner pattern against the same scrutinee. The scrutinee
+            // expression already carries the right forcing — the caller
+            // built it from `pattern_inspects_value(As …)`, which is the
+            // inner pattern's answer — so `xs@(x:rest)` binds the forced
+            // cell and `xs@ys` stays lazy.
+            TPattern::As(name, inner) => {
+                bindings.push((sanitize_name(name), scrutinee.clone()));
+                self.collect_pattern_conditions(scrutinee, inner, conditions, bindings);
+            }
             TPattern::Wildcard => {}
             TPattern::LitPat(lit) => {
                 // An integer literal pattern is Num-polymorphic: the scrutinee

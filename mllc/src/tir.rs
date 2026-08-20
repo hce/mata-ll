@@ -550,6 +550,7 @@ impl TPattern {
             },
             TPattern::Paren(p) => TPattern::Paren(Box::new(p.apply_subst(subst))),
             TPattern::Tuple(ps) => TPattern::Tuple(ps.into_iter().map(|p| p.apply_subst(subst)).collect()),
+            TPattern::As(n, p) => TPattern::As(n, Box::new(p.apply_subst(subst))),
             other => other, // Wildcard, LitPat
         }
     }
@@ -561,6 +562,7 @@ impl TPattern {
             TPattern::Var(_, ty) => *ty = ty.demote_skolems(demote),
             TPattern::Constructor { args, .. } => { for p in args.iter_mut() { p.demote_skolems(demote); } }
             TPattern::Paren(p) => p.demote_skolems(demote),
+            TPattern::As(_, p) => p.demote_skolems(demote),
             TPattern::Tuple(ps) => { for p in ps.iter_mut() { p.demote_skolems(demote); } }
             _ => {} // Wildcard, LitPat carry no type
         }
@@ -808,15 +810,51 @@ pub enum TPattern {
     LitPat(TLiteral),
     Paren(Box<TPattern>),
     Tuple(Vec<TPattern>),
+    /// As-pattern: `xs@(x : rest)` — binds the name to the whole scrutinee
+    /// while also matching the inner pattern against it. Forces exactly
+    /// when the inner pattern forces (the name alone binds lazily).
+    As(String, Box<TPattern>),
 }
 
 impl TPattern {
+    /// Does matching this pattern force its scrutinee to WHNF? `Var` and
+    /// `Wildcard` bind lazily, `Paren` is transparent, an as-pattern
+    /// forces exactly when its inner pattern does, and everything else
+    /// inspects the value (constructor tag, literal compare, deeper
+    /// destructuring). THE strictness question every emitter and analysis
+    /// asks of a pattern — GHC's top-to-bottom, left-to-right laziness
+    /// turns on it.
+    pub fn forces_scrutinee(&self) -> bool {
+        match self {
+            TPattern::Var(..) | TPattern::Wildcard => false,
+            TPattern::Paren(inner) => inner.forces_scrutinee(),
+            TPattern::As(_, inner) => inner.forces_scrutinee(),
+            TPattern::Constructor { .. } | TPattern::LitPat(_) | TPattern::Tuple(_) => true,
+        }
+    }
+
+    /// The name this pattern binds to the WHOLE value — a `Var`'s name or
+    /// an as-pattern's outer binder (`Paren`-transparent); `None` for
+    /// anything that only destructures.
+    pub fn top_binder(&self) -> Option<&str> {
+        match self {
+            TPattern::Var(n, _) => Some(n),
+            TPattern::As(n, _) => Some(n),
+            TPattern::Paren(inner) => inner.top_binder(),
+            _ => None,
+        }
+    }
+
     /// Call `f` on every variable this pattern binds, in source order —
     /// THE enumeration of a pattern's binders (the demand, mono and inline
     /// walkers all need it; each once carried its own copy).
     pub fn for_each_var(&self, f: &mut impl FnMut(&str)) {
         match self {
             TPattern::Var(name, _) => f(name),
+            TPattern::As(name, inner) => {
+                f(name);
+                inner.for_each_var(f);
+            }
             TPattern::Wildcard | TPattern::LitPat(_) => {}
             TPattern::Constructor { args, .. } => {
                 for a in args { a.for_each_var(f); }

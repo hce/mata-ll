@@ -190,6 +190,9 @@ pub enum Pattern {
     Paren(Box<Pattern>),
     /// Tuple pattern: `(x, y, z)`
     Tuple(Vec<Pattern>),
+    /// As-pattern: `xs@(x : rest)` — binds `xs` to the whole value while
+    /// also matching the inner pattern against it.
+    As(String, Box<Pattern>),
 }
 
 impl Pattern {
@@ -211,6 +214,10 @@ impl Pattern {
                 for e in elems {
                     e.for_each_var(f);
                 }
+            }
+            Pattern::As(n, inner) => {
+                f(n);
+                inner.for_each_var(f);
             }
         }
     }

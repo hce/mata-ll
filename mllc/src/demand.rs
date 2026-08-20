@@ -434,31 +434,12 @@ fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<Strin
     let mut param_names: Vec<Option<String>> = Vec::with_capacity(arity);
 
     for (i, pat) in clause.patterns.iter().enumerate() {
-        match pat {
-            TPattern::Var(name, _) => {
-                param_names.push(Some(name.clone()));
-                // Not strict from pattern alone — depends on body usage.
-            }
-            TPattern::Wildcard => {
-                param_names.push(None);
-                // Wildcard is never strict.
-            }
-            TPattern::Constructor { .. } | TPattern::LitPat(_) | TPattern::Tuple(_) => {
-                param_names.push(None);
-                // Pattern matching forces evaluation.
-                strict[i] = true;
-            }
-            TPattern::Paren(inner) => {
-                match inner.as_ref() {
-                    TPattern::Var(name, _) => {
-                        param_names.push(Some(name.clone()));
-                    }
-                    _ => {
-                        param_names.push(None);
-                        strict[i] = true;
-                    }
-                }
-            }
+        // A whole-value binder (Var, as-pattern) names the parameter for the
+        // body-usage analysis; a pattern that inspects the value forces it
+        // (an as-pattern does both — `xs@(x:rest)` names AND forces).
+        param_names.push(pat.top_binder().map(str::to_string));
+        if pat.forces_scrutinee() {
+            strict[i] = true;
         }
     }
 
@@ -1663,6 +1644,13 @@ impl<'a, 't> RowCx<'a, 't> {
 fn pattern_demand(pat: &TPattern, body: &DemandMap) -> Option<Demand> {
     match pat {
         TPattern::Var(name, _) => body.get(name).cloned(),
+        // As-pattern: the match places the inner pattern's demand; when the
+        // inner pattern proves nothing, the body's demand on the whole-value
+        // binder applies. (Taking one of the two is an under-approximation —
+        // always sound for a demand.)
+        TPattern::As(name, inner) => {
+            pattern_demand(inner, body).or_else(|| body.get(name).cloned())
+        }
         TPattern::Wildcard => None,
         TPattern::LitPat(_) => Some(Demand::Head),
         TPattern::Paren(inner) => pattern_demand(inner, body),

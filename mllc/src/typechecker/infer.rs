@@ -88,6 +88,11 @@ impl Checker {
             Pattern::Paren(inner) => {
                 self.collect_pattern_info(inner, seen, type_name, has_literal);
             }
+            // `xs@p` matches exactly when `p` matches; the binder adds
+            // nothing to coverage.
+            Pattern::As(_, inner) => {
+                self.collect_pattern_info(inner, seen, type_name, has_literal);
+            }
             Pattern::Tuple(_) => {
                 // Tuples are always exhaustive (single constructor)
                 if !seen.contains(&"*".to_string()) {
@@ -1085,6 +1090,18 @@ impl Checker {
                 Ok((TPattern::Var(name.clone(), expected.clone()), Subst::empty()))
             }
             Pattern::Wildcard => Ok((TPattern::Wildcard, Subst::empty())),
+            // As-pattern `xs@p`: the binder holds the WHOLE scrutinee, so it
+            // binds at the expected type exactly like a Var (rank-2 scheme
+            // conversion and the ambiguity record included), and the inner
+            // pattern is checked against the same type — its substitution is
+            // the result (the binder's type refines through it when applied).
+            Pattern::As(name, inner) => {
+                let scheme = Self::forall_to_scheme(expected);
+                env.insert(name.clone(), scheme);
+                self.binder_types.push(expected.clone());
+                let (tinner, s) = self.check_pattern(inner, expected, env)?;
+                Ok((TPattern::As(name.clone(), Box::new(tinner)), s))
+            }
             Pattern::LitPat(lit) => {
                 match lit {
                     // A numeric literal pattern is Num-polymorphic like the

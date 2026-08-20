@@ -572,7 +572,7 @@ impl CodeGen {
                 // Force only args that are destructured
                 for (i, p) in params.iter().enumerate() {
                     if i < clause.patterns.len()
-                        && !matches!(&clause.patterns[i], TPattern::Var(_, _) | TPattern::Wildcard)
+                        && clause.patterns[i].forces_scrutinee()
                     {
                         body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
                         self.concrete_vars.insert(p.clone());
@@ -622,9 +622,7 @@ impl CodeGen {
             // laziness: `zip [] _` must return `[]` without forcing the
             // second argument.
             let needs_force = clauses.first().is_some_and(|c| {
-                c.patterns.get(i).is_some_and(|pat| {
-                    !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
-                })
+                c.patterns.get(i).is_some_and(TPattern::forces_scrutinee)
             });
             // Demand analysis proves EVERY path through every clause (guard
             // chains included, sequenced right-to-left) forces this param,
@@ -871,7 +869,7 @@ impl CodeGen {
                 body.push(Stmt::Return(self.expr_ast(clause.plain_body())));
             } else {
                 for (j, pat) in clause.patterns.iter().enumerate() {
-                    if !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard) {
+                    if pat.forces_scrutinee() {
                         body.push(Stmt::Assign(
                             format!("_warg{}", j),
                             Expr::force(Expr::name(format!("_warg{}", j))),
@@ -896,9 +894,7 @@ impl CodeGen {
             let strict_row = self.local_strict_params.get(name).cloned();
             for j in 0..num_params {
                 let first_scrutinizes = clauses.first().is_some_and(|c| {
-                    c.patterns.get(j).is_some_and(|pat| {
-                        !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
-                    })
+                    c.patterns.get(j).is_some_and(TPattern::forces_scrutinee)
                 });
                 let is_strict = strict_row.as_ref()
                     .is_some_and(|v| v.get(j).copied().unwrap_or(false));

@@ -2925,24 +2925,6 @@ fn local_binding_pattern_parameter_is_diagnosed() {
     ]);
 }
 
-/// An as-pattern is reported at the '@' with the deviation note, in a
-/// function clause and in a case branch alike — not as a stray token later
-/// in the clause.
-#[test]
-fn as_pattern_is_diagnosed_where_written() {
-    let err = expect_compile_error(
-        "f :: [Int] -> [Int]\nf xs@(x:_) = x : xs\nf [] = []\nmain :: IO ()\nmain = print (f [1])\n",
-        &[],
-        &["As-patterns are not supported", "'xs@", "note:", "GHC accepts as-patterns"],
-    );
-    assert!(err.contains("2:5") || err.contains("line 2"), "located at the '@' on line 2:\n{err}");
-    expect_compile_error(
-        "main :: IO ()\nmain = case [1, 2] of\n    ys@(y:_) -> print (y : ys)\n    _ -> pure ()\n",
-        &[],
-        &["As-patterns are not supported", "'ys@"],
-    );
-}
-
 /// A newtype whose constructor is named differently from the type used to
 /// fail as "Unknown type 'MkRad'": the parser reads MkRad as the wrapped
 /// type. The error now says what mata-ll's newtype rule is.

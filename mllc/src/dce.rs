@@ -139,6 +139,7 @@ fn collect_pattern(p: &TPattern, refs: &mut HashSet<String>) {
             }
         }
         TPattern::Paren(inner) => collect_pattern(inner, refs),
+        TPattern::As(_, inner) => collect_pattern(inner, refs),
         TPattern::Tuple(elems) => {
             for e in elems {
                 collect_pattern(e, refs);
