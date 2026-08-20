@@ -2,8 +2,7 @@
 name = "mll-repl"
 version = "0.1.6"
 edition = "2024"
-# Not published to crates.io (for now): it's an internal/dev tool, and it pulls
-# in a heavier vendored-luajit build than the published CLI needs.
+# Not published to crates.io (for now): it's an internal/dev tool.
 publish = false
 description = "Interactive REPL for mata-ll, a Haskell subset that compiles to Lua."
 license = "MIT"
@@ -16,4 +15,11 @@ unsafe_code = "forbid"
 [dependencies]
 # path for in-workspace builds; version used when published (mllc publishes first).
 mllc = { path = "../mllc", version = "0.1.6" }
-mlua = { version = "0.12", features = ["luajit", "vendored"] }
+# Lua 5.4, matching the mll CLI's embedded runner (and mll-tests): the
+# REPL must evaluate with the same number semantics as `mll -r` — the
+# old vendored-LuaJIT host had doubles-only integers, so 64-bit
+# arithmetic quietly diverged between the two front-ends. One mlua
+# feature across the workspace also lets `cargo test --workspace` run
+# without excluding this crate (mlua forbids mixing interpreters in one
+# build).
+mlua = { version = "0.12", features = ["lua54", "vendored"] }

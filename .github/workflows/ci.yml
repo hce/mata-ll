@@ -30,7 +30,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run tests
-        run: cargo test --workspace --exclude mll-repl
+        run: cargo test --workspace
 
   lua-compat:
     needs: test
