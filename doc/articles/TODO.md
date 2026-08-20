@@ -25,16 +25,23 @@ MATA-LL TODO
       hardened hosts load text-only; `mlua`-based precompile covers the
       load-time case if ever wanted).
 
-- [ ] **Type-erased generic `show` cannot split Integer/Double on LuaJIT.**
-      LuaJIT has no `math.type`, so the last-resort runtime-dispatch `show`
-      path shows the double `1.0` as `1` there. Every type-directed path
-      (`show_Number`, `show_Integer`, containers with known element types —
-      i.e. everything realistic code reaches) is exact on every interpreter.
-      Options if it ever matters: carry a type tag into the generic path, or
-      accept and document as an interpreter limitation alongside the
-      existing 64-bit LuaJIT skips.
-
 ## Completed
+
+- [x] **Type-erased generic `show` cannot split Integer/Double on LuaJIT —
+      accepted and documented** (2026-08-20; CAVEATS.md, "Int overflow
+      wraps silently"). LuaJIT has no `math.type` and every number is a
+      double, so the last-resort runtime-dispatch `show` (reached only
+      when neither specialization nor dictionary passing resolved the
+      type — mono's `resolve_show_for` fallback) shows the double `1.0`
+      as `1` there. Every type-directed path (`show_Number`,
+      `show_Integer`, derived instances, containers with known element
+      types — everything realistic code reaches) is exact on every
+      interpreter, and on Lua 5.3+ even the erased path splits on the
+      native subtype. The type-tag option was rejected: the two values
+      are IDENTICAL on LuaJIT, so a tag means boxing scalars — the same
+      representation change the always-boxed-Integer decision already
+      ruled out for type-erased distinctions. Documented alongside the
+      other doubles-only limits (2^53 precision, approximate big `div`).
 
 - [x] **`::` ascription inside a right-section operand now parse-errors,
       as in GHC** (2026-08-20; parser.rs). Both right-section spellings —

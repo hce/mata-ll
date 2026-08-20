@@ -64,6 +64,20 @@ at runtime. If you need to detect overflow, check the bounds manually.
 On LuaJIT, integers are represented as doubles, so precision is lost beyond
 2^53.
 
+A second consequence of LuaJIT's doubles-only representation: the
+LAST-RESORT type-erased `show` — the runtime dispatch used only when the
+compiler cannot resolve a type at all (a genuinely polymorphic position
+that neither specialization nor dictionary passing reached) — cannot tell
+`1 :: Int` from `1.0 :: Double` there, because the two are the same Lua
+value and LuaJIT has no `math.type`. It prints the whole double
+integer-style: `1`, not `1.0`. Every type-directed path — `show` at a
+known type, derived instances, containers with known element types, i.e.
+everything realistic code reaches — is exact on every interpreter, and on
+Lua 5.3+ even the erased path splits correctly on the native integer
+subtype. This is the host's number representation, not recoverable by
+dispatch; carrying a type tag would mean boxing scalars on LuaJIT, the
+representation change the Integer design already rejected.
+
 `div` and `mod` follow Haskell's floor semantics and raise a plain
 "divide by zero" error on a zero divisor, on every host. On Lua 5.3+ they
 use native integer floor division (`//`) and are exact over the full 64-bit
