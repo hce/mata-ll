@@ -79,22 +79,9 @@ fn run_mll_file(path: &Path, libs: &[&Path]) {
     })
 }
 
-/// Run `f` on a thread with the compiler's calibrated stack and hand its
-/// value back; a panic in `f` resumes on the caller. Scoped, so `f` may
-/// borrow from the enclosing test.
-fn with_compiler_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
-    std::thread::scope(|s| {
-        match std::thread::Builder::new()
-            .stack_size(mllc::COMPILER_STACK_SIZE)
-            .spawn_scoped(s, f)
-            .expect("Failed to spawn compiler thread")
-            .join()
-        {
-            Ok(v) => v,
-            Err(e) => std::panic::resume_unwind(e),
-        }
-    })
-}
+// Every compile in this harness runs on the compiler's calibrated stack
+// through this (imported so the submodules' `use super::*` picks it up).
+use mllc::with_compiler_stack;
 
 /// `mllc::compile`, on the compiler's calibrated stack. EVERY compile in this
 /// harness must run on such a stack (via this, `run_mll_file`, or

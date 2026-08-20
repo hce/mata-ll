@@ -49,6 +49,35 @@ pub const COMPILER_STACK_SIZE: usize = 2 * 1024 * 1024 * 1024; // 2 GiB
 /// still compiles with 6x headroom.
 pub const MAX_NESTING_DEPTH: usize = 6000;
 
+/// Run `f` on a thread with the compiler's calibrated stack
+/// ([`COMPILER_STACK_SIZE`]) and hand its value back; a panic in `f`
+/// resumes on the caller. Scoped, so `f` may borrow from the enclosing
+/// frame. This is THE way to call `compile`/`compile_with_options` from a
+/// front-end — the depth limit assumes the calibrated stack, and a default
+/// thread overflows on inputs the limit admits. (The one caller that
+/// cannot use it is a long-running worker that must be watched WHILE it
+/// runs, e.g. the parser fuzzer's watchdog — that shape keeps its own
+/// spawn with the same stack size.)
+pub fn with_compiler_stack<T: Send>(f: impl FnOnce() -> T + Send) -> T {
+    std::thread::scope(|s| {
+        match std::thread::Builder::new()
+            .stack_size(COMPILER_STACK_SIZE)
+            .spawn_scoped(s, f)
+            .expect("failed to spawn compiler thread")
+            .join()
+        {
+            Ok(v) => v,
+            Err(e) => std::panic::resume_unwind(e),
+        }
+    })
+}
+
+/// The full git commit hash the compiler was built from, "unknown" when
+/// git or the checkout was unavailable at build time (a crates.io tarball
+/// build). The same value codegen stamps into every compiled module as
+/// `__MLLC_COMMIT`; front-ends display it instead of capturing their own.
+pub const GIT_COMMIT: &str = env!("MLLC_GIT_COMMIT");
+
 /// Result of compilation
 pub struct CompileResult {
     pub lua_code: String,
@@ -558,15 +587,10 @@ mod section_offset_tests {
     use super::*;
     use std::path::Path;
 
-    /// Like every front-end, run `compile` on a thread with the compiler's
-    /// calibrated stack (see `COMPILER_STACK_SIZE`).
-    fn compile_on_stack(source: &'static str) -> Result<CompileResult, CompileError> {
-        std::thread::Builder::new()
-            .stack_size(COMPILER_STACK_SIZE)
-            .spawn(move || compile(source, Path::new("."), &[]))
-            .expect("failed to spawn compiler thread")
-            .join()
-            .expect("compiler thread panicked")
+    /// Like every front-end, run `compile` on the compiler's calibrated
+    /// stack (see `with_compiler_stack`).
+    fn compile_on_stack(source: &str) -> Result<CompileResult, CompileError> {
+        with_compiler_stack(|| compile(source, Path::new("."), &[]))
     }
 
     /// The section offsets published on `CompileResult` are what the REPL's

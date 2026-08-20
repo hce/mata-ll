@@ -1,27 +1,16 @@
 use std::io::{self, BufRead, Write};
 use std::path::Path;
 
-/// `mllc::compile` on a thread with the compiler's calibrated stack. The
-/// nesting-depth limit is calibrated against `mllc::COMPILER_STACK_SIZE`
-/// (see there): every compile in this front-end must run on such a thread,
-/// or input the mll CLI handles could overflow here.
+/// `mllc::compile` on the compiler's calibrated stack
+/// (`mllc::with_compiler_stack`): every compile in this front-end must run
+/// on such a thread, or input the mll CLI handles could overflow here.
 fn compile_on_compiler_stack(
     source: &str,
     lib_paths: &[String],
 ) -> Result<mllc::CompileResult, mllc::CompileError> {
-    std::thread::scope(|s| {
-        match std::thread::Builder::new()
-            .stack_size(mllc::COMPILER_STACK_SIZE)
-            .spawn_scoped(s, || {
-                let lib_refs: Vec<&Path> = lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
-                mllc::compile(source, Path::new("."), &lib_refs)
-            })
-            .expect("Failed to spawn compiler thread")
-            .join()
-        {
-            Ok(v) => v,
-            Err(e) => std::panic::resume_unwind(e),
-        }
+    mllc::with_compiler_stack(|| {
+        let lib_refs: Vec<&Path> = lib_paths.iter().map(|p| Path::new(p.as_str())).collect();
+        mllc::compile(source, Path::new("."), &lib_refs)
     })
 }
 

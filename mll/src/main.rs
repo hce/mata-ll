@@ -2,21 +2,30 @@ use clap::{Parser, ValueEnum};
 use std::path::Path;
 
 /// Printed by -v/--version. clap prefixes the first line with the binary
-/// name ("mll"), so the string starts mid-sentence. GIT_COMMIT is set by
-/// build.rs at build time ("unknown" when git or .git is unavailable).
-const VERSION_INFO: &str = concat!(
-    "— the mata-ll compiler and runner\n",
-    "\n",
-    "MIT License: free and open-source software, provided \"as is\",\n",
-    "without warranty of any kind.\n",
-    "Copyright (c) 2026 Hans-Christian Esperer\n",
-    "\n",
-    "version:    ",
-    env!("CARGO_PKG_VERSION"),
-    "\n",
-    "git commit: ",
-    env!("GIT_COMMIT"),
-);
+/// name ("mll"), so the string starts mid-sentence. The commit is
+/// `mllc::GIT_COMMIT` — the full hash mllc's build script captured, the
+/// same value codegen stamps into every emitted module ("unknown" when
+/// git or .git was unavailable at build time), so the binary and its
+/// output can never disagree about provenance.
+fn version_info() -> &'static str {
+    // clap's version attribute wants &'static str (the crate's "string"
+    // feature is off); the text is built once and lives for the process.
+    static INFO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    INFO.get_or_init(|| {
+        format!(
+            "— the mata-ll compiler and runner\n\
+             \n\
+             MIT License: free and open-source software, provided \"as is\",\n\
+             without warranty of any kind.\n\
+             Copyright (c) 2026 Hans-Christian Esperer\n\
+             \n\
+             version:    {}\n\
+             git commit: {}",
+            env!("CARGO_PKG_VERSION"),
+            mllc::GIT_COMMIT,
+        )
+    })
+}
 
 /// How to embed the original .mll source into the emitted .lua.
 #[derive(Clone, Copy, PartialEq, ValueEnum)]
@@ -38,8 +47,8 @@ enum EmbedSourceArg {
     // field below. ArgAction::Version exits before required-argument
     // checking, so `mll -v` works without a source file.
     disable_version_flag = true,
-    version = VERSION_INFO,
-    long_version = VERSION_INFO,
+    version = version_info(),
+    long_version = version_info(),
 )]
 struct Cli {
     /// The .mll source file to compile (with --recompile: a previously
@@ -84,22 +93,14 @@ struct Cli {
 fn main() {
     let cli = Cli::parse();
 
-    // Run compilation on a thread with a large stack to handle deeply
-    // nested ASTs (e.g. list literals desugar into nested cons
-    // applications, each requiring a stack frame during type inference).
-    // The size is defined next to mllc::MAX_NESTING_DEPTH: the two are
-    // calibrated together so that input nested up to the depth limit
-    // compiles (or is cleanly diagnosed) instead of overflowing the stack.
-    let builder = std::thread::Builder::new()
-        .stack_size(mllc::COMPILER_STACK_SIZE);
-    let handler = builder.spawn(move || {
-        run_compiler(cli);
-    }).expect("Failed to spawn compiler thread");
-
-    if let Err(e) = handler.join() {
-        eprintln!("Compiler panicked: {:?}", e);
-        std::process::exit(1);
-    }
+    // Run compilation on the compiler's calibrated stack (deeply nested
+    // ASTs — e.g. list literals desugaring into cons chains — need one
+    // inference frame per level; mllc::COMPILER_STACK_SIZE and
+    // mllc::MAX_NESTING_DEPTH are sized together so input up to the depth
+    // limit compiles or is cleanly diagnosed instead of overflowing). A
+    // compiler panic (an ICE) resumes here and exits through the standard
+    // panic path — the thread's hook has already printed the message.
+    mllc::with_compiler_stack(move || run_compiler(cli));
 }
 
 fn run_compiler(cli: Cli) {
