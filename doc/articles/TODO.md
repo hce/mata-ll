@@ -3,19 +3,6 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **Force-once for parameters scrutinized only by LATER clauses.** Both
-      multi-clause emitters (top-level `function_stmts`, where-group
-      `where_func_group_body_stmts`, aligned 2026-08-17) force a parameter
-      at entry only when the FIRST clause scrutinizes it — GHC clause-order
-      laziness (`go [] _ = []` must not force `_`) — so a parameter matched
-      only by later clauses is forced inside those clauses' conditions,
-      once per use (`__force(_warg0) ~= nil and __mll_tail(__force(_warg0))
-      …`). Cheap on WHNF values, but a hot decode loop (huffman's `go`,
-      salsa's `lwGo`) pays it several times per iteration. Structured fix:
-      after clause 0's condition fails, rebind once
-      (`_wargN = __force(_wargN)`) before the remaining chain, in both
-      emitters. Corpus byte-diff + tracker canary as usual.
-
 - [ ] **tailloop declines a body whose pattern chain keeps the trailing
       `error("Non-exhaustive patterns")`** (coverage unproven — huffman's
       3-arm list match, basic's fn200), leaving bare TCO instead of a loop
@@ -65,6 +52,27 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Force-once for parameters scrutinized only by LATER clauses**
+      (2026-08-20; codegen/pattern.rs). The chain builder
+      (`pattern_match_block`, shared by both multi-clause emitters) now
+      splits the if/elseif chain when the next clause provably forces a
+      so-far-untouched parameter first on every continuation
+      (`later_clause_force_col`: no earlier clause inspects the column,
+      the columns left of it in the split clause are irrefutable, and the
+      column contributes at least one condition — a single-constructor or
+      bare-newtype pattern contributes none and does not qualify). The
+      remaining clauses move into the chain's `else` behind ONE
+      `p = __force(p)` rebind with the param marked concrete, so their
+      conditions and bindings read the bare name; GHC clause-order
+      laziness is untouched because the hoisted force replays exactly the
+      force the next clause's condition would have performed first. A
+      remainder that is constructor-exhaustive keeps its `else` form (and
+      sheds the trailing non-exhaustive error). salsa's lwGo went from
+      four list re-forces per iteration to one; huffman's go from three.
+      Corpus sweep: 19/453 files change, every hunk the split shape.
+      Tests: later_clause_force_once (case + GHC-oracle golden),
+      codegen_shape::later_clause_param_forced_once_at_split.
 
 - [x] **Direct-perform bare tails, stages 2–3: interprocedural
       classification, performloop retired** (2026-08-17; codegen/
