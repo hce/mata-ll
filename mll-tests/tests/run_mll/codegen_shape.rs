@@ -296,6 +296,42 @@ main = putStrLn (show (loadWords [1, 2, 3, 4, 5, 6, 7, 8]))
     );
 }
 
+/// A clause chain that KEEPS its non-exhaustive fall-off (literal-headed
+/// cons defeats the coverage proof) must still convert to a loop: the
+/// fall-off is the chain's `else` arm — not a trailing statement, which
+/// kept every clause `return` out of statement-tree tail position — and a
+/// `return error_(…)` fall-off clause passes the single-return proof
+/// (error_ never returns at all). huffman's go was declined on both counts.
+#[test]
+fn tailloop_converts_chain_with_error_fall_off() {
+    let source = r#"
+walk :: Int -> [Int] -> Int
+walk n bits = go n bits
+  where
+    go acc (0 : rest) = go acc rest
+    go acc (b : rest) = go (acc + b) rest
+    go _ [] = error "walk: ran out"
+
+main :: IO ()
+main = putStrLn (show (walk 0 [1, 0, 2, 0, 3]))
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    assert!(
+        lua.contains("while true do"),
+        "error-fall-off chain must convert to a loop: {lua}"
+    );
+    assert!(
+        lua.contains("_warg0, _warg1 = "),
+        "tail self-calls must become the loop's parameter update: {lua}"
+    );
+    assert!(
+        lua.contains(r#"return error_("walk: ran out")"#),
+        "the error clause stays a plain raising return: {lua}"
+    );
+}
+
 /// Constructor-level DCE: a `data` definition none of whose constructors is
 /// constructed (`Con`) or matched (pattern) by live code contributes NOTHING
 /// to the emitted Lua. Checked two ways: (1) adding a dead user `data`

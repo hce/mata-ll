@@ -1,7 +1,8 @@
 //! Pattern-match compilation: clause conditions, field bindings, guards.
 //!
 //! `pattern_match_block` compiles guard-free clauses into one `Stmt::If`
-//! chain (with the non-exhaustive error after it); any guard-bearing match
+//! chain (with the non-exhaustive error as its `else` arm, keeping every
+//! clause return in statement-tree tail position); any guard-bearing match
 //! is dispatched to `pattern_match_guarded_block_tails`, which emits each clause
 //! as an independent block (`Stmt::If` for a refutable pattern, `Stmt::Do`
 //! for an irrefutable one) so a clause whose pattern matches but whose
@@ -205,10 +206,19 @@ impl CodeGen {
         let mut stmts = Vec::new();
         match chain {
             Some((cond, then_b)) => {
+                // The non-exhaustive fall-off is the chain's `else` arm, not
+                // a statement after the `if`: with it inside, every clause
+                // `return` sits in statement-tree tail position, so the loop
+                // passes (tailloop, ioloop) can rewrite chains that keep
+                // their fall-off — a trailing statement kept huffman's go
+                // and basic's fn200 on bare TCO instead of a loop.
+                let else_b = if fell_through {
+                    debug_assert!(else_b.is_none(), "fall-off with an else arm");
+                    Some(Block(vec![Self::non_exhaustive_stmt()]))
+                } else {
+                    else_b
+                };
                 stmts.push(Stmt::If { cond, then_b, elseifs, else_b });
-                if fell_through {
-                    stmts.push(Self::non_exhaustive_stmt());
-                }
             }
             None => {
                 // First clause irrefutable: its body is the whole match.

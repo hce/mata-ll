@@ -332,7 +332,20 @@ fn single_return_stmt(s: &Stmt, name: &SelfName) -> bool {
             match e {
                 // A paren already truncates whatever is inside to one value.
                 _ if truncated => true,
-                Expr::Call(f, _) => opt::single_return_callee(f) || is_self_ref(f, name),
+                // `error_` — the runtime raise helper Haskell's `error`
+                // sanitizes to — never returns at all, so a `return
+                // error_(…)` yields one value vacuously. The name cannot
+                // denote anything multi-return: a user function spelled
+                // `error_` compiles to a `__mll_fn` slot or a where-local
+                // (both single-return by construction), and FFI call sites
+                // emit the HOST spelling, never the Haskell name. Without
+                // this arm the proof declined exactly the chains whose
+                // fall-off arm is a user `error` call (huffman's go).
+                Expr::Call(f, _) => {
+                    opt::single_return_callee(f)
+                        || is_self_ref(f, name)
+                        || matches!(&**f, Expr::Name(n) if n == "error_")
+                }
                 Expr::Method(..) | Expr::Raw(_) => false,
                 _ => true,
             }

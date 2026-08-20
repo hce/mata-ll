@@ -397,8 +397,11 @@ fn dead_branch_stmt(stmt: &mut Stmt) {
             *stmt = Stmt::Do(then_b);
             return;
         }
-        // (2) Complement collapse: `if C … elseif ¬C …` → if/else.
-        if elseifs.len() == 1 && else_b.is_none() && complement_conds(cond, &elseifs[0].0) {
+        // (2) Complement collapse: `if C … elseif ¬C …` → if/else. Exactly
+        // one of C/¬C holds (`==` vs `~=` over identical operands), so an
+        // existing `else` arm — the chain builder's non-exhaustive
+        // fall-off — is unreachable and drops with the test.
+        if elseifs.len() == 1 && complement_conds(cond, &elseifs[0].0) {
             let (_, b) = elseifs.pop().expect("one elseif");
             *else_b = Some(b);
         }

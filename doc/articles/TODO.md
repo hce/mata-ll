@@ -3,14 +3,6 @@ MATA-LL TODO
 
 ## Planned — top priority
 
-- [ ] **tailloop declines a body whose pattern chain keeps the trailing
-      `error("Non-exhaustive patterns")`** (coverage unproven — huffman's
-      3-arm list match, basic's fn200), leaving bare TCO instead of a loop
-      for those functions; teaching the chain builder or tailloop that
-      shape recovers the loop form. Split off from the direct-perform
-      bare-tail item when its stages 2–3 completed (2026-08-17, see
-      Completed).
-
 - [ ] **Lua-AST optimization layer, structured-pass tier (remaining).**
       The foundation AND all three loop passes are COMPLETE (see
       Completed: annotation layer + engine + `__force`-collapse
@@ -52,6 +44,27 @@ MATA-LL TODO
       existing 64-bit LuaJIT skips.
 
 ## Completed
+
+- [x] **Chains that keep their non-exhaustive fall-off now convert to
+      loops** (2026-08-20; codegen/pattern.rs, tailloop.rs, opt.rs). Two
+      causes, both fixed at the root. (1) The chain builder emitted
+      `error("Non-exhaustive patterns")` as a statement AFTER the `if`
+      chain, so no clause `return` sat in statement-tree tail position and
+      tailloop/ioloop found nothing to rewrite; the fall-off is now the
+      chain's `else` arm (semantically identical — the arm raises).
+      (2) A fall-off CLAUSE whose body is a user `error` call emitted
+      `return error_(…)`, which failed tailloop's single-return proof;
+      `error_` never returns at all — vacuously single-valued, and the
+      name cannot denote anything multi-return (a user function spelled
+      `error_` compiles to a slot or where-local, FFI call sites emit the
+      host spelling) — so the proof accepts it. The complement-collapse
+      peephole (`if C … elseif ¬C …` → if/else) now also fires with an
+      `else` arm present: exactly one of C/¬C holds, so the old arm — the
+      relocated fall-off — is unreachable and drops with the test,
+      keeping those chains byte-identical to before. Corpus sweep:
+      358/453 files change shape (the fall-off move), 33 gain loops
+      (sed +8, huffman +3, basic +3 — decodeSyms' go now a goto-free
+      loop). Test: codegen_shape::tailloop_converts_chain_with_error_fall_off.
 
 - [x] **Force-once for parameters scrutinized only by LATER clauses**
       (2026-08-20; codegen/pattern.rs). The chain builder
