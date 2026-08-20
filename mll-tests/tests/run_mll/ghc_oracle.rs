@@ -187,6 +187,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_local_shadows_specials, "cases", "local_shadows_specials.mll"),
         (ghc_oracle_inline_no_capture, "cases", "inline_no_capture.mll"),
         (ghc_oracle_demand_shadowing, "cases", "demand_shadowing.mll"),
+        (ghc_oracle_seq_action_value, "cases", "seq_action_value.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),

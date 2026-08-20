@@ -245,6 +245,7 @@ mll_test!(guarded_clause_scope, "guarded_clause_scope.mll");
 mll_test!(local_shadows_specials, "local_shadows_specials.mll");
 mll_test!(inline_no_capture, "inline_no_capture.mll");
 mll_test!(demand_shadowing, "demand_shadowing.mll");
+mll_test!(seq_action_value, "seq_action_value.mll");
 mll_test!(rank2, "rank2.mll");
 
 // Stress tests

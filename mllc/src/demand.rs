@@ -1120,8 +1120,30 @@ fn demand_strict_args<'a>(
 ) {
     for (i, arg) in args.into_iter().enumerate() {
         if mask.get(i).copied().unwrap_or(false) {
-            s.extend(rec(arg));
+            // A strict position forces the argument to WHNF only. For an
+            // ACTION value, WHNF is the built (suspended) closure —
+            // nothing inside the chain is forced, so it contributes no
+            // demands (see whnf_only_demands).
+            s.extend(whnf_only_demands(arg, rec));
         }
+    }
+}
+
+/// The demand contribution of forcing `e` to WHNF in a position that does
+/// NOT run it: for an action-typed expression the WHNF is a suspended
+/// closure (the emitter defers the whole chain), so `seq`-ing or
+/// strictly-passing an action value forces none of its interior — GHC
+/// agrees (`act \`seq\` pure 42` never runs act). Everything else forces
+/// normally. The clause-body walk stays un-gated: rows model demand when
+/// the function RUNS, and a body-position chain does run.
+fn whnf_only_demands(
+    e: &TExpr,
+    rec: &dyn Fn(&TExpr) -> HashSet<String>,
+) -> HashSet<String> {
+    if is_action_value_ty(&e.ty) {
+        HashSet::new()
+    } else {
+        rec(e)
     }
 }
 
@@ -1176,7 +1198,7 @@ fn demanded_vars_in(
             // second operand too; see the shared-rules section.)
             if let TExprKind::Var(name) = &f.kind
                 && name == "seq" && !shadowed("seq") && !args_rev.is_empty() {
-                    s.extend(rec(args_rev[0]));
+                    s.extend(whnf_only_demands(args_rev[0], &rec));
                 }
 
             // Cross-function propagation: if callee is a known function
@@ -1228,8 +1250,8 @@ fn demanded_vars_in(
                 Some(OpOperands::Neither) => HashSet::new(),
                 None => match op.as_str() {
                     // Backtick `a `seq` b`: same rule as prefix `seq a b`
-                    // (see the App arm above — first operand only).
-                    "seq" => rec(lhs),
+                    // (see the App arm above — first operand only, WHNF).
+                    "seq" => whnf_only_demands(lhs, &rec),
                     // Monadic bind/sequence forces both actions.
                     ">>=" | ">>" => {
                         let mut s = rec(lhs);
@@ -1257,7 +1279,9 @@ fn demanded_vars_in(
         ),
 
         TExprKind::Case { scrutinee, branches } => {
-            let mut s = rec(scrutinee);
+            // Scrutinizing forces to WHNF only (an action-typed scrutinee
+            // yields its suspended closure).
+            let mut s = whnf_only_demands(scrutinee, &rec);
             if !branches.is_empty() {
                 // Intersect demanded vars across all branches
                 // (minus variables bound by each branch's pattern).
@@ -1863,6 +1887,12 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
             // continuation runs (an earlier raise only replaces one ⊥ with
             // another). The bound variable's demand in the continuation IS
             // the result demand placed on the left action.
+            // OUTSIDE run position the chain is SUSPENDED by the emitter
+            // (a deferred closure, same as demand_app's `suspended` gate):
+            // a seq'd or strictly-passed chain value is only built, so no
+            // interior demand fires — GHC never runs `act` in
+            // `act `seq` pure 42`.
+            ">>=" | ">>" if is_action_value_ty(&expr.ty) && !run_pos => DemandMap::new(),
             ">>=" => {
                 if let TExprKind::Lambda { params, body } = &rhs.kind {
                     let mut rest = demand_expr(cx, body, rd, run_pos);
