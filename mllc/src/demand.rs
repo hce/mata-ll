@@ -109,6 +109,8 @@ const PRIMITIVE_BINOP_METHODS: &[&str] = &[
     "ord_gt__Int", "ord_gt__Number", "ord_gt__String", "ord_gt__ByteString",
     "ord_le__Int", "ord_le__Number", "ord_le__String", "ord_le__ByteString",
     "ord_ge__Int", "ord_ge__Number", "ord_ge__String", "ord_ge__ByteString",
+    "ord_max__Int", "ord_max__Number", "ord_max__String", "ord_max__ByteString",
+    "ord_min__Int", "ord_min__Number", "ord_min__String", "ord_min__ByteString",
     "semigroup_String",
 ];
 
@@ -147,8 +149,6 @@ const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("show_HashMap", &[true]),
     ("not", &[true]),         // return not __force(x)
     ("error", &[true]),       // error(__force(msg)) — forces before raising
-    ("max", &[true, true]),   // math.max(__force(a), __force(b))
-    ("min", &[true, true]),   // math.min(__force(a), __force(b))
     ("head", &[true]),        // __mll_head forces the cell (l = __force(l))
     ("tail", &[true]),        // __mll_tail forces the cell (l = __force(l))
     ("map", &[true, true]),

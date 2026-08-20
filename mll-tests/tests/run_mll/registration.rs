@@ -237,6 +237,7 @@ mll_test!(monoid_mappend_default, "monoid_mappend_default.mll");
 mll_test!(source_class_nullary, "source_class_nullary.mll");
 mll_test!(derive_eq, "derive_eq.mll");
 mll_test!(derive_ord, "derive_ord.mll");
+mll_test!(ord_max_min, "ord_max_min.mll");
 mll_test!(rank2, "rank2.mll");
 
 // Stress tests

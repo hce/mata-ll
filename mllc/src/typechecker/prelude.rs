@@ -224,9 +224,11 @@ impl Checker {
             self.env_scheme(name, vars, ty);
         }
 
-        for name in &["max", "min"] {
-            self.env_scheme(name, vec![a.clone()], Ty::fun(&[ta.clone(), ta.clone()], ta.clone()));
-        }
+        // `max`/`min` are Ord class methods (registered with the Ord class
+        // below), like `compare` — NOT unconstrained builtins: an
+        // unconstrained `forall a. a -> a -> a` lowered to math.max/min
+        // typechecks at every type and then crashes at runtime on anything
+        // that is not a Lua number (String, Bool, boxed Integer).
         // Arithmetic operators are the methods of the numeric classes
         // registered further below (Num for + - *, Fractional for /). Their
         // env schemes are `forall a. a -> a -> a`; the Num/Fractional class
@@ -578,12 +580,16 @@ impl Checker {
         let cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
         // `compare` is an Ord method returning Ordering (defined in the prelude).
         let compare_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Ordering".into()));
+        // `max`/`min` return the class type itself, not Bool.
+        let sel_ty = Ty::fun(&[ta.clone(), ta.clone()], ta.clone());
         self.register_builtin_class("Ord", "a", &["Eq"], vec![
             ("<", cmp_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
             (">", cmp_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
             ("<=", cmp_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
             (">=", cmp_ty, Some(vec![a.clone()]), vec![("Ord", "a")]),
             ("compare", compare_ty, Some(vec![a.clone()]), vec![("Ord", "a")]),
+            ("max", sel_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
+            ("min", sel_ty, Some(vec![a.clone()]), vec![("Ord", "a")]),
         ]);
 
         // Ord instances for base types
@@ -591,8 +597,10 @@ impl Checker {
             let mut fns: Vec<(String, String)> = ["<", ">", "<=", ">="].iter()
                 .map(|op| (op.to_string(), format!("ord_{}__{}", op_to_name(op), type_name)))
                 .collect();
-            // Every base Ord type has a `compare` runtime helper.
-            fns.push(("compare".to_string(), format!("ord_compare__{}", type_name)));
+            // Every base Ord type has `compare`/`max`/`min` runtime helpers.
+            for m in &["compare", "max", "min"] {
+                fns.push((m.to_string(), format!("ord_{}__{}", m, type_name)));
+            }
             self.register_builtin_instance("Ord", Ty::Con(type_name.to_string()), &fns);
         }
 
@@ -757,6 +765,7 @@ impl Checker {
         self.register_builtin_instance("Ord", Ty::Unit, &[
             ("<", "ord_lt__Unit"), (">", "ord_gt__Unit"),
             ("<=", "ord_le__Unit"), (">=", "ord_ge__Unit"),
-            ("compare", "ord_compare__Unit")]);
+            ("compare", "ord_compare__Unit"),
+            ("max", "ord_max__Unit"), ("min", "ord_min__Unit")]);
     }
 }

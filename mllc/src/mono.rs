@@ -171,7 +171,7 @@ impl Monomorphizer {
         // Only mark as builtin functions that DON'T have user-defined instances
         for name in &[
             "putStrLn", "++", "$", ".", "id", "const",
-            "flip", "not", "error", "sqrt", "otherwise", "max", "min",
+            "flip", "not", "error", "sqrt", "otherwise",
             "+", "-", "*", "/", "==", "/=", "<", ">", "<=", ">=",
             // foldr/foldl are Foldable class methods and length carries a
             // Foldable constraint (all dispatched/specialized), so none of

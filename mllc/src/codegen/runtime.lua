@@ -1112,8 +1112,20 @@ local function show(x)
 end
 local undefined = __thunk(function() error("Prelude.undefined", 0) end)
 local function error_(msg) error(__force(msg)) end
-local function max(a, b) return math.max(__force(a), __force(b)) end
-local function min(a, b) return math.min(__force(a), __force(b)) end
+-- Ord `max`/`min` instance methods. GHC's defaults are
+--   max x y = if x <= y then y else x
+--   min x y = if x <= y then x else y
+-- (ties return max's SECOND argument and min's FIRST) — the if-form is kept
+-- rather than math.max/math.min so the tie side and the NaN behavior match
+-- GHC exactly (math.max's NaN result is platform-defined).
+local function ord_max__Int(a, b) a = __force(a); b = __force(b); if a <= b then return b else return a end end
+local function ord_min__Int(a, b) a = __force(a); b = __force(b); if a <= b then return a else return b end end
+local function ord_max__Number(a, b) a = __force(a); b = __force(b); if a <= b then return b else return a end end
+local function ord_min__Number(a, b) a = __force(a); b = __force(b); if a <= b then return a else return b end end
+local function ord_max__String(a, b) a = __force(a); b = __force(b); if a <= b then return b else return a end end
+local function ord_min__String(a, b) a = __force(a); b = __force(b); if a <= b then return a else return b end end
+local function ord_max__ByteString(a, b) a = __force(a); b = __force(b); if a <= b then return b else return a end end
+local function ord_min__ByteString(a, b) a = __force(a); b = __force(b); if a <= b then return a else return b end end
 local function pure(x) return function() return x end end
 local function return_(x) return function() return x end end
 -- Maybe: `Just x` is a metatable-tagged one-element wrapper (tag __just_mt,
@@ -1147,6 +1159,8 @@ local function ord_gt__Unit(a, b) return false end
 local function ord_le__Unit(a, b) return true end
 local function ord_ge__Unit(a, b) return true end
 local function ord_compare__Unit(a, b) return 2 end
+local function ord_max__Unit(a, b) __force(a); return __force(b) end
+local function ord_min__Unit(a, b) local r = __force(a); __force(b); return r end
 local function __mll_eq(a, b) a = __force(a); b = __force(b); return a == b end
 local function ord_lt__Int(a, b) a = __force(a); b = __force(b); return a < b end
 local function ord_lt__Number(a, b) a = __force(a); b = __force(b); return a < b end

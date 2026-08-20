@@ -729,12 +729,79 @@ impl Checker {
             });
         }
 
+        // max/min, derived from `compare` like the relational ops so the
+        // lexicographic ordering stays the single source of truth. GHC's
+        // default bodies are
+        //   max x y = if x <= y then y else x   -- tie: SECOND argument
+        //   min x y = if x <= y then x else y   -- tie: FIRST argument
+        // which in Ordering terms is: max is `_a` exactly on GT, min is `_b`
+        // exactly on GT.
+        let sel_ty = Ty::fun(&[result_type.clone(), result_type.clone()], result_type.clone());
+        for (method, on_gt, otherwise) in &[("max", "_a", "_b"), ("min", "_b", "_a")] {
+            let mangled = format!("ord_{}__{}", method, type_name);
+            let cmp_call = TExpr::new(
+                TExprKind::App(
+                    Box::new(TExpr::new(
+                        TExprKind::App(
+                            Box::new(TExpr::new(
+                                TExprKind::Var(compare_name.clone()),
+                                compare_fn_ty.clone(),
+                            )),
+                            Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
+                        ),
+                        Ty::fun(std::slice::from_ref(&result_type), ordering_ty.clone()),
+                    )),
+                    Box::new(TExpr::new(TExprKind::Var("_b".into()), result_type.clone())),
+                ),
+                ordering_ty.clone(),
+            );
+            functions.push(TFunction {
+                name: mangled,
+                ty: sel_ty.clone(),
+                clauses: vec![TClause {
+                    span: None,
+                    patterns: vec![
+                        TPattern::Var("_a".into(), result_type.clone()),
+                        TPattern::Var("_b".into(), result_type.clone()),
+                    ],
+                    guards: vec![],
+                    body: Some(TExpr::new(
+                        TExprKind::Case {
+                            scrutinee: Box::new(cmp_call),
+                            branches: vec![
+                                TCaseBranch {
+                                    pattern: TPattern::Constructor { name: "GT".into(), args: vec![] },
+                                    guards: vec![],
+                                    body: Some(TExpr::new(TExprKind::Var((*on_gt).into()), result_type.clone())),
+                                },
+                                TCaseBranch {
+                                    pattern: TPattern::Wildcard,
+                                    guards: vec![],
+                                    body: Some(TExpr::new(TExprKind::Var((*otherwise).into()), result_type.clone())),
+                                },
+                            ],
+                        },
+                        result_type.clone(),
+                    )),
+                    where_binds: vec![],
+                }],
+                specialized: false,
+                dict_params: vec![],
+                // Strict in both operands: the body immediately scrutinizes
+                // `compare _a _b`, whose derived implementation forces both —
+                // exactly GHC's `if x <= y then ...` strictness.
+                derived_strict: true,
+            });
+        }
+
         // Register the Ord instance
         let mut method_fns = HashMap::new();
         for (op, op_name) in &[("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")] {
             method_fns.insert(op.to_string(), format!("ord_{}__{}", op_name, type_name));
         }
         method_fns.insert("compare".to_string(), format!("ord_compare__{}", type_name));
+        method_fns.insert("max".to_string(), format!("ord_max__{}", type_name));
+        method_fns.insert("min".to_string(), format!("ord_min__{}", type_name));
         self.register_instance(InstanceInfo {
             class_name: "Ord".to_string(),
             target_type: result_type,

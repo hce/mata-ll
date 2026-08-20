@@ -132,3 +132,7 @@ main = do
     assert (compare (bsFromString "abd") (bsFromString "abc") == GT) "bs compare GT"
     assert (compare (bsFromString "abc") (bsFromString "abc") == EQ) "bs compare EQ"
     assert (bsEmpty < bsFromString "a") "bs empty lt"
+    -- max/min are Ord methods; ByteString dispatches to ord_max__/ord_min__
+    assert (max (bsFromString "abc") (bsFromString "abd") == bsFromString "abd") "bs max"
+    assert (min (bsFromString "abc") (bsFromString "abd") == bsFromString "abc") "bs min"
+    assert (max bsEmpty (bsFromString "a") == bsFromString "a") "bs max empty"

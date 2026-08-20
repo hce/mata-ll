@@ -318,6 +318,9 @@ local function ord_lt__Integer(a, b) return __int_cmp(__force(a), __force(b)) < 
 local function ord_gt__Integer(a, b) return __int_cmp(__force(a), __force(b)) > 0 end
 local function ord_le__Integer(a, b) return __int_cmp(__force(a), __force(b)) <= 0 end
 local function ord_ge__Integer(a, b) return __int_cmp(__force(a), __force(b)) >= 0 end
+-- GHC default bodies: ties return max's second argument, min's first.
+local function ord_max__Integer(a, b) a = __force(a); b = __force(b); if __int_cmp(a, b) <= 0 then return b else return a end end
+local function ord_min__Integer(a, b) a = __force(a); b = __force(b); if __int_cmp(a, b) <= 0 then return a else return b end end
 local function ord_compare__Integer(a, b)
     local c = __int_cmp(__force(a), __force(b))
     if c < 0 then return 1 elseif c > 0 then return 3 else return 2 end
