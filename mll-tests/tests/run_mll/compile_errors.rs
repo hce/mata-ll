@@ -2925,21 +2925,60 @@ fn local_binding_pattern_parameter_is_diagnosed() {
     ]);
 }
 
-/// A newtype whose constructor is named differently from the type used to
-/// fail as "Unknown type 'MkRad'": the parser reads MkRad as the wrapped
-/// type. The error now says what mata-ll's newtype rule is.
+/// A freely named newtype constructor (`newtype Rad = MkRad Double`) is
+/// Haskell and now compiles; the boundaries around the resolution stay
+/// diagnosed: an unknown head with no field or two fields cannot be a
+/// newtype constructor, deriving is limited to the structural classes,
+/// and the record form takes exactly one selector. The mata-ll shorthand
+/// over a KNOWN type (`newtype W = Maybe Int`) keeps its old reading.
 #[test]
-fn newtype_with_differently_named_constructor_is_diagnosed() {
+fn newtype_constructor_resolution_boundaries() {
     expect_compile_error(
-        "newtype Rad = MkRad Double\nmain :: IO ()\nmain = pure ()\n",
+        "newtype Rad = MkRad
+main :: IO ()
+main = pure ()
+",
         &[],
         &[
             "'MkRad' is not a type",
-            "newtype Rad = Rad",
+            "would have no field",
             "the definition of newtype 'Rad'",
             "note:",
             "named freely",
         ],
+    );
+    expect_compile_error(
+        "newtype Rad = MkRad Int Int
+main :: IO ()
+main = pure ()
+",
+        &[],
+        &[
+            "'MkRad' is not a type",
+            "2 fields",
+            "exactly one field",
+        ],
+    );
+    expect_compile_error(
+        "newtype Age = Age Int deriving (LuaDict)
+main :: IO ()
+main = pure ()
+",
+        &[],
+        &[
+            "Cannot derive 'LuaDict' for newtype 'Age'",
+            "Show, Eq and Ord",
+            "note:",
+            "wrapped type at runtime",
+        ],
+    );
+    expect_compile_error(
+        "newtype P = P { a :: Int, b :: Int }
+main :: IO ()
+main = pure ()
+",
+        &[],
+        &["exactly one field", "one selector"],
     );
     // Boundary: a wrapped type that IS a type is not confused with a
     // constructor — the shorthand `newtype W = Maybe Int` stays accepted.

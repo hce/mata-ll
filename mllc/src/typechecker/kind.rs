@@ -806,9 +806,32 @@ impl Checker {
                         }
                     }
                 }
-                Decl::NewtypeDef { name, type_vars, inner } => {
+                Decl::NewtypeDef { name, type_vars, con_name, inner, .. } => {
                     kctx.begin_scope(self.param_kind_seed(name, type_vars));
-                    let ki = self.infer_type_kind(inner, &mut kctx, "");
+                    // The freely named constructor form (`newtype Rad =
+                    // MkRad Double`, con_name unsettled) kind-checks its
+                    // WRAPPED type only: the unknown one-argument head is
+                    // the constructor, not a type. Mirrors
+                    // resolve_newtype_shorthand, which runs after this pass
+                    // over the kind table this loop's seeding pass filled.
+                    let mut target = inner;
+                    if con_name.is_none() {
+                        let mut head = inner;
+                        let mut args: Vec<&Type> = Vec::new();
+                        while let Type::App(f, a) = head {
+                            args.push(a);
+                            head = f;
+                        }
+                        if let Type::Con(h) = head
+                            && args.len() == 1
+                            && !self.kinds.contains_key(h)
+                            && !self.type_aliases.contains_key(h)
+                            && !self.type_families.contains_key(h)
+                        {
+                            target = args[0];
+                        }
+                    }
+                    let ki = self.infer_type_kind(target, &mut kctx, "");
                     let _ = kctx.unify(&ki, &Kind::Type);
                 }
                 Decl::TypeAlias { name, params, ty } => {

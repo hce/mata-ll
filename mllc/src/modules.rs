@@ -451,8 +451,15 @@ impl Qual<'_> {
                 constructors: constructors.iter().map(|c| self.constructor(c)).collect(),
                 deriving: deriving.clone(),
             },
-            Decl::NewtypeDef { name, type_vars, inner } => Decl::NewtypeDef {
-                name: self.q(name), type_vars: type_vars.clone(), inner: self.ty(inner),
+            Decl::NewtypeDef { name, type_vars, con_name, field, inner, deriving } => Decl::NewtypeDef {
+                name: self.q(name),
+                type_vars: type_vars.clone(),
+                // The constructor and selector are values, not sibling type
+                // references; the deriving classes are global names.
+                con_name: con_name.clone(),
+                field: field.clone(),
+                inner: self.ty(inner),
+                deriving: deriving.clone(),
             },
             Decl::TypeAlias { name, params, ty } => Decl::TypeAlias {
                 name: self.q(name), params: params.clone(), ty: self.ty(ty),

@@ -273,6 +273,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_nested_calls, "cases", "nested_calls.mll"),
         (ghc_oracle_nested_eq, "cases", "nested_eq.mll"),
         (ghc_oracle_nested_just_pattern, "cases", "nested_just_pattern.mll"),
+        (ghc_oracle_newtype_forms, "cases", "newtype_forms.mll"),
         (ghc_oracle_non_exhaustive_live, "cases", "non_exhaustive_live.mll"),
         (ghc_oracle_non_strict, "cases", "non_strict.mll"),
         (ghc_oracle_num_polymorphic, "cases", "num_polymorphic.mll"),

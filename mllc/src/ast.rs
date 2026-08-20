@@ -52,7 +52,19 @@ pub enum Decl {
     NewtypeDef {
         name: String,
         type_vars: Vec<String>,
+        /// The constructor name when the source settles it — the type's own
+        /// name (`newtype W = W …`) or the record form's constructor. `None`
+        /// for `newtype N = <type>`, where the typechecker decides between
+        /// the mata-ll shorthand (a known wrapped type: `newtype Age = Int`)
+        /// and the Haskell form with a free constructor name
+        /// (`newtype Rad = MkRad Double` — `MkRad` is no type, so it is the
+        /// constructor); the parser cannot know the type names.
+        con_name: Option<String>,
+        /// The record-form selector (`newtype Age = Age { unAge :: Int }`):
+        /// an identity accessor is generated for it.
+        field: Option<String>,
         inner: Type,
+        deriving: Vec<String>,
     },
     /// Typeclass declaration: `class Eq a => Ord a where compare :: a -> a -> Int`
     ClassDecl {

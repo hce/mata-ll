@@ -31,6 +31,7 @@ mll_test!(data_types, "data_types.mll");
 mll_test!(records, "records.mll");
 mll_test!(luadict, "luadict.mll");
 mll_test!(newtypes, "newtypes.mll");
+mll_test!(newtype_forms, "newtype_forms.mll");
 mll_test!(typeclasses, "typeclasses.mll");
 mll_test!(superclass, "superclass.mll");
 mll_test!(superclass_context, "superclass_context.mll");

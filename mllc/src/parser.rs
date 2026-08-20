@@ -730,18 +730,58 @@ impl Parser {
         }
 
         self.expect(&Token::Eq)?;
-        // Skip optional constructor name (Haskell-style: newtype Rad = Rad Number)
-        // MLL newtypes always use the type name as the constructor name.
-        if let Token::UpperIdent(con) = self.peek()
-            && *con == name {
+        // The constructor forms the parser can settle itself: the type's own
+        // name (`newtype W = W (Maybe Int)`, Haskell's common spelling) and
+        // the record form under ANY constructor name
+        // (`newtype Age = MkAge { unAge :: Int }`). A freely named
+        // constructor WITHOUT braces (`newtype Rad = MkRad Double`) is
+        // parsed as a type application here and resolved by the typechecker,
+        // which knows the type names — see `register_newtype`'s shorthand
+        // resolution. Everything else is the mata-ll shorthand
+        // `newtype N = <type>` (constructor = type name).
+        let mut con_name = None;
+        let mut field = None;
+        let inner;
+        let braced_con = matches!(self.peek(), Token::UpperIdent(_))
+            && self.pos + 1 < self.tokens.len()
+            && self.tokens[self.pos + 1].token == Token::LeftBrace;
+        if let Token::UpperIdent(con) = self.peek().clone()
+            && (con == name || braced_con)
+        {
+            self.advance();
+            con_name = Some(con);
+            if self.at(&Token::LeftBrace) {
+                // Record form: exactly one selector (a newtype has exactly
+                // one field).
                 self.advance();
+                let sel = self.expect_ident()?;
+                self.expect(&Token::DblColon)?;
+                inner = self.parse_type()?;
+                if self.at(&Token::Comma) {
+                    return Err(self.err_here(format!(
+                        "A newtype has exactly one field, so 'newtype {} = \
+                         {} {{ … }}' can declare only one selector",
+                        name,
+                        con_name.as_deref().unwrap_or(&name),
+                    )));
+                }
+                self.expect(&Token::RightBrace)?;
+                field = Some(sel);
+            } else {
+                inner = self.parse_type()?;
             }
-        let inner = self.parse_type()?;
+        } else {
+            inner = self.parse_type()?;
+        }
+        let deriving = self.parse_deriving()?;
 
         Ok(Decl::NewtypeDef {
             name,
             type_vars,
+            con_name,
+            field,
             inner,
+            deriving,
         })
     }
 

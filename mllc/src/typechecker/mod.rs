@@ -531,6 +531,11 @@ pub struct Checker {
     /// newtype and a single-constructor-single-field `data` are otherwise
     /// indistinguishable in `constructors`.
     newtype_types: HashSet<String>,
+    /// Resolved newtype shape per TYPE name: (registered constructor key,
+    /// wrapped AST type). Written by `register_newtype` — including the
+    /// shorthand-vs-free-constructor resolution — and read by the newtype
+    /// list handed to codegen, the selector generation and deriving.
+    newtype_shapes: HashMap<String, (String, Type)>,
     /// User-defined type families: name -> equations (AST form). Reduced
     /// eagerly on CONCRETE arguments during `ast_type_to_ty`.
     type_families: HashMap<String, Vec<TypeFamilyEq>>,
@@ -699,6 +704,7 @@ impl Checker {
             record_fields: HashMap::new(),
             luadict_types: HashSet::new(),
             newtype_types: HashSet::new(),
+            newtype_shapes: HashMap::new(),
             type_families: HashMap::new(),
             ty_families: TyFamilies::new(),
             tf_lowering: false,
@@ -2011,23 +2017,92 @@ impl Checker {
         }
     }
 
-    /// Register a newtype as a zero-cost wrapper.
-    /// `newtype Age = Int` creates constructor `Age :: Int -> Age`
-    /// that is the identity function at runtime.
-    fn register_newtype(&mut self, name: &str, type_vars: &[String], inner: &Type) {
+    /// Split a `newtype N = <type>` right-hand side the parser could not
+    /// settle: `Age = Int` is the mata-ll shorthand (a known wrapped type,
+    /// constructor = type name), while `Rad = MkRad Double` is Haskell's
+    /// freely named constructor — `MkRad` is no known type, so it is the
+    /// constructor and `Double` the wrapped type. Declared kinds are all
+    /// registered before pass 1 (`infer_declared_kinds`), so "known type"
+    /// is answerable here: the kind table, an alias, or a type family.
+    fn resolve_newtype_shorthand<'t>(
+        &mut self,
+        name: &str,
+        inner: &'t Type,
+    ) -> (String, &'t Type) {
+        // Peel the application spine: `MkRad Double` is App(Con MkRad, Double).
+        let mut head = inner;
+        let mut args: Vec<&Type> = Vec::new();
+        while let Type::App(f, a) = head {
+            args.push(a);
+            head = f;
+        }
+        if let Type::Con(h) = head
+            && !self.kinds.contains_key(h)
+            && !self.type_aliases.contains_key(h)
+            && !self.type_families.contains_key(h)
+        {
+            // Unknown head: the Haskell reading, a constructor named `h`.
+            match args.len() {
+                1 => return (h.clone(), args[0]),
+                0 => self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "'{h}' is not a type, and as a constructor it would have no field: a newtype wraps exactly one type",
+ )),
+ format!("the definition of newtype '{name}'"),
+ format!("write 'newtype {name} = {h} <type>' (the constructor may be named freely), or wrap an existing type"),
+ ),
+ _ => self.push_error_ctx_note(
+ DiagnosticKind::Other(format!(
+ "'{h}' is not a type, and as a constructor it would have {} fields: a newtype wraps exactly one type",
+                        args.len(),
+                    )),
+                    format!("the definition of newtype '{name}'"),
+                    "a newtype constructor takes exactly one field; parenthesize an applied wrapped type, or use 'data'",
+                ),
+            }
+        }
+        // Known head (or a variable/arrow/...): the shorthand — the whole
+        // right-hand side is the wrapped type, constructor = type name.
+        (name.to_string(), inner)
+    }
+
+    /// Register a newtype as a zero-cost wrapper: the constructor —
+    /// `newtype Age = Int` gives `Age :: Int -> Age`, `newtype Rad =
+    /// MkRad Double` gives `MkRad :: Double -> Rad` — is the identity
+    /// function at runtime, and the record form's selector is an identity
+    /// accessor (generated in `process_deriving`, where TFunctions exist).
+    fn register_newtype(
+        &mut self,
+        name: &str,
+        type_vars: &[String],
+        con_name: Option<&str>,
+        inner: &Type,
+    ) {
         self.register_kind(name, type_vars.len());
         // Record that this name is a newtype (a transparent, zero-cost wrapper)
         // so the FFI boundary check can distinguish it from a same-shaped `data`
         // type: a newtype crosses AS its single field, a `data` type would only
         // cross as an internal tagged table.
         self.newtype_types.insert(name.to_string());
+        let (con_name, inner) = match con_name {
+            Some(c) => (c.to_string(), inner),
+            None => self.resolve_newtype_shorthand(name, inner),
+        };
         let (tvars, result_type) = Self::data_result_type(name, type_vars);
         let inner_ty = self.ast_type_to_ty(inner);
 
-        // Register constructor: Name :: InnerType -> Name
-        // The constructor shares the flat namespace with data constructors,
-        // so it goes through the same duplicate/shadowing claim.
-        let Some(con_key) = self.claim_constructor_name(name, name, 1, 1) else { return };
+        // Register the constructor: Con :: InnerType -> Name.
+        // It shares the flat namespace with data constructors, so it goes
+        // through the same duplicate/shadowing claim.
+        let Some(con_key) = self.claim_constructor_name(&con_name, name, 1, 1) else { return };
+        // The resolved shape, keyed by type name: the TModule newtype list
+        // (codegen's transparency test is by CONSTRUCTOR key), the selector
+        // generation and the deriving pass all read it instead of
+        // re-deriving the split from the declaration.
+        self.newtype_shapes.insert(
+            name.to_string(),
+            (con_key.clone(), inner.clone()),
+        );
         self.constructors.insert(con_key.clone(), ConInfo {
             type_name: name.to_string(),
             variant_index: 1,
@@ -2266,8 +2341,8 @@ impl Checker {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
                     self.register_data_type(name, type_vars, constructors);
                 }
-                Decl::NewtypeDef { name, type_vars, inner } => {
-                    self.register_newtype(name, type_vars, inner);
+                Decl::NewtypeDef { name, type_vars, con_name, inner, .. } => {
+                    self.register_newtype(name, type_vars, con_name.as_deref(), inner);
                 }
                 _ => {}
             }
@@ -2359,37 +2434,18 @@ impl Checker {
                         self.check_constructor_kinds(&field_types, params, &ctx);
                     }
                 }
-                Decl::NewtypeDef { name, type_vars, inner } => {
+                Decl::NewtypeDef { name, type_vars, .. } => {
                     let ctx = format!("the definition of newtype '{}'", name);
-                    // `newtype Rad = MkRad Double`: the parser reads MkRad as
-                    // the wrapped type's head (a newtype's constructor has
-                    // the type's own name in mata-ll, so a different name is
-                    // taken as a type). When that head names nothing at all,
-                    // it was almost certainly meant as the constructor — say
-                    // so, instead of an unknown-type error for 'MkRad'.
-                    let mut head = inner;
-                    while let Type::App(f, _) = head { head = f; }
-                    if let Type::Con(con) = head
-                        && con != name
-                        && !self.type_name_defined(con)
-                        && !self.classes.contains_key(con)
-                        && !self.constructors.contains_key(con)
-                    {
-                        self.push_error_ctx_note(
-                            DiagnosticKind::Other(format!(
-                                "'{con}' is not a type. In mata-ll a newtype's constructor has \
-                                 the type's name: write 'newtype {name} = {name} …' (the \
-                                 constructor may also be left out: 'newtype {name} = …')"
-                            )),
-                            ctx,
-                            "GHC lets a newtype constructor be named freely \
-                             ('newtype Rad = MkRad Double'); mata-ll does not support \
-                             that yet",
-                        );
+                    // Validate the RESOLVED wrapped type: `newtype Rad =
+                    // MkRad Double` settled to constructor MkRad wrapping
+                    // Double in registration (resolve_newtype_shorthand), so
+                    // the head that is no type is never validated as one.
+                    // A registration that failed already reported.
+                    let Some((_, inner)) = self.newtype_shapes.get(name).cloned() else {
                         continue;
-                    }
+                    };
                     let params = self.param_kind_seed(name, type_vars);
-                    self.check_constructor_kinds(&[inner], params, &ctx);
+                    self.check_constructor_kinds(&[&inner], params, &ctx);
                 }
                 Decl::TypeAlias { name, params, ty } => {
                     self.check_alias_kinds(
@@ -2583,6 +2639,93 @@ impl Checker {
                 for class in deriving {
                     let derived = self.derive_instance(class, name, type_vars, constructors);
                     instance_fns.extend(derived);
+                }
+            }
+            if let Decl::NewtypeDef { name, type_vars, field, inner, deriving, .. } = decl {
+                let Some((con_key, _)) = self.newtype_shapes.get(name).cloned() else {
+                    continue; // registration failed and reported
+                };
+                // Record-form selector: an identity accessor, emitted as
+                // `sel (C x) = x` — well-typed TIR whose constructor match
+                // codegen's newtype transparency erases, so the compiled
+                // function IS the identity (and DCE drops it when unused).
+                if let Some(sel) = field {
+                    let inner_ty = self.ast_type_to_ty(inner);
+                    let (tvars, result_type) = Self::data_result_type(name, type_vars);
+                    let sel_ty = Ty::arrow(result_type, inner_ty.clone());
+                    self.env.insert(sel.clone(), Scheme {
+                        vars: tvars,
+                        mult_vars: vec![],
+                        ty: sel_ty.clone(),
+                    });
+                    instance_fns.push(TFunction {
+                        name: sel.clone(),
+                        ty: sel_ty,
+                        clauses: vec![TClause {
+                            span: None,
+                            patterns: vec![TPattern::Constructor {
+                                name: con_key.clone(),
+                                args: vec![TPattern::Var("_nw".to_string(), inner_ty.clone())],
+                            }],
+                            guards: vec![],
+                            body: Some(TExpr::new(
+                                TExprKind::Var("_nw".to_string()),
+                                inner_ty,
+                            )),
+                            where_binds: vec![],
+                        }],
+                        specialized: false,
+                        dict_params: vec![],
+                        derived_strict: false,
+                    });
+                }
+                // Deriving on a newtype: the structural derives over a
+                // synthetic single-constructor shape. Show prints the
+                // constructor (`MkRad 1.5`) exactly like GHC's stock
+                // newtype deriving; Eq/Ord compare through the wrapper
+                // (which codegen erases). The boundary/codec classes are
+                // out: a newtype IS its wrapped type at runtime, so LuaDict
+                // and the JSON codecs have no wrapper to lay out.
+                for class in deriving {
+                    match class.as_str() {
+                        "Show" | "Eq" | "Ord" => {
+                            // The record form derives with its named field,
+                            // so Show prints GHC's record syntax
+                            // (`Age {unAge = 7}`); the plain forms print
+                            // `MkRad 1.5`, exactly like stock deriving.
+                            let fields = match field {
+                                Some(sel) => ConstructorFields::Named(vec![RecordField {
+                                    name: sel.clone(),
+                                    external_key: None,
+                                    ty: inner.clone(),
+                                }]),
+                                None => ConstructorFields::Positional(vec![inner.clone()]),
+                            };
+                            let con = Constructor {
+                                name: con_key.clone(),
+                                external_name: None,
+                                fields,
+                                gadt_type: None,
+                                existential_vars: vec![],
+                                existential_constraints: vec![],
+                            };
+                            let derived = self.derive_instance(
+                                class, name, type_vars, std::slice::from_ref(&con));
+                            instance_fns.extend(derived);
+                        }
+                        other => self.push_error_ctx_note(
+                            DiagnosticKind::Other(format!(
+                                "Cannot derive '{other}' for newtype '{name}': \
+ newtypes derive Show, Eq and Ord \
+ (structurally, like GHC's stock deriving)",
+                            )),
+                            format!("newtype {name}"),
+                            "a newtype is its wrapped type at runtime, so the \
+ boundary and codec derivings (LuaDict, ToJSON, \
+ FromJSON) have no wrapper to lay out; derive them \
+ on a `data` record instead",
+                        ),
+                    }
                 }
             }
         }
@@ -2780,18 +2923,14 @@ impl Checker {
         (has_main, exports, constrained_exports)
     }
 
-    /// The newtype list carries the *registered* constructor keys: a local
-    /// newtype whose constructor shadows a non-local constructor is known
-    /// to codegen (which elides it as an identity function) only under its
-    /// mangled key.
+    /// The newtype list carries the *registered* constructor keys (from
+    /// `newtype_shapes`, so a freely named or shadow-mangled constructor is
+    /// known to codegen — which elides it as an identity function — under
+    /// exactly the key pattern matches and construction sites resolve to).
     fn collect_newtype_keys(&self, module: &Module) -> Vec<String> {
-        module.decls.iter().enumerate().filter_map(|(decl_idx, d)| {
+        module.decls.iter().filter_map(|d| {
             if let Decl::NewtypeDef { name, .. } = d {
-                if decl_idx >= self.local_decl_start
-                    && let Some(key) = self.local_con_renames.get(name) {
-                        return Some(key.clone());
-                    }
-                Some(name.clone())
+                self.newtype_shapes.get(name).map(|(key, _)| key.clone())
             } else { None }
         }).collect()
     }

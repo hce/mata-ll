@@ -1,0 +1,12 @@
+3.0
+42
+Age {unAge = 7}
+.
+.
+.
+Tag "hi"
+.
+MkBoxed [1,2]
+.
+.
+newtype forms ok
