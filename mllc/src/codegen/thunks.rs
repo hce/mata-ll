@@ -27,6 +27,17 @@ impl CodeGen {
     fn expr_raw_ast(&mut self, expr: &TExpr) -> Expr {
         if let TExprKind::Var(name) = &expr.kind {
             match name.as_str() {
+                // A local binder shadows every special name (see the
+                // expr_ast Var arm): fall to the ordinary variable path.
+                _ if self.is_local_shadowed(name) => {
+                    let sname = sanitize_name(name);
+                    let lref = self.lua_ref(&sname);
+                    if self.concrete_vars.contains(&sname) {
+                        Expr::name(lref)
+                    } else {
+                        Expr::force(Expr::name(lref))
+                    }
+                }
                 "otherwise" => Expr::lit("true"),
                 // First-class / partially-applied `seq` as a callee resolves to
                 // the runtime primitive (see the expr_ast Var arm).

@@ -184,6 +184,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_quot_rem_fixity, "cases", "quot_rem_fixity.mll"),
         (ghc_oracle_dollar_stays_lazy, "cases", "dollar_stays_lazy.mll"),
         (ghc_oracle_guarded_clause_scope, "cases", "guarded_clause_scope.mll"),
+        (ghc_oracle_local_shadows_specials, "cases", "local_shadows_specials.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),

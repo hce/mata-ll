@@ -53,7 +53,20 @@ impl CodeGen {
     fn expr_ast_inner(&mut self, expr: &TExpr) -> Expr {
         match &expr.kind {
             TExprKind::Var(name) => {
+                // Every special name below can be SHADOWED by a local binder
+                // (a parameter or pattern variable named `seq`, `div`,
+                // `otherwise`, … is legal Haskell); the guards route a
+                // shadowed name through the ordinary variable path.
                 match name.as_str() {
+                    _ if self.is_local_shadowed(name) => {
+                        let sname = sanitize_name(name);
+                        let lref = self.lua_ref(&sname);
+                        if self.concrete_vars.contains(&sname) {
+                            Expr::name(lref)
+                        } else {
+                            Expr::force(Expr::name(lref))
+                        }
+                    }
                     "otherwise" => Expr::lit("true"),
                     // A first-class / partially-applied `seq` (e.g. `foldr seq
                     // z`, `map (seq x) ys`, `let g = seq x`) resolves to the
@@ -672,6 +685,7 @@ impl CodeGen {
     /// thunk-wrap the whole projection (see arg_ast).
     fn try_record_accessor_app(&mut self, func: &TExpr, arg: &TExpr) -> Option<Expr> {
         if let TExprKind::Var(name) = &func.kind
+            && !self.is_local_shadowed(name)
             && let Some(&idx) = self.record_accessors.get(&sanitize_name(name)) {
                 // A LuaDict field is keyed by name; a plain record field
                 // by position.
@@ -765,7 +779,7 @@ impl CodeGen {
     fn try_seq_prefix_app(&mut self, func: &TExpr, arg: &TExpr) -> Option<Expr> {
         if let TExprKind::App(seq_f, seq_a) = &func.kind
             && let TExprKind::Var(name) = &seq_f.kind
-                && name == "seq" {
+                && name == "seq" && !self.is_local_shadowed(name) {
                     return Some(self.seq_inline_ast(seq_a, arg));
                 }
         None
@@ -794,7 +808,8 @@ impl CodeGen {
     /// the one consuming unbox and the payload stays untouched.
     fn try_pure_app(&mut self, func: &TExpr, arg: &TExpr) -> Option<Expr> {
         if let TExprKind::Var(name) = &func.kind
-            && (name == "return" || name == "pure") {
+            && (name == "return" || name == "pure")
+            && !self.is_local_shadowed(name) {
                 let payload = self.pure_action_ast(arg);
                 return Some(Expr::paren(Expr::inline_fn0(payload)));
             }
@@ -820,6 +835,9 @@ impl CodeGen {
     /// so that errors are deferred into pcall rather than crashing eagerly.
     fn try_exception_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
         if let TExprKind::Var(name) = &f.kind {
+            if self.is_local_shadowed(name) {
+                return None;
+            }
             if name == "try" && args.len() == 1 {
                 let action = self.action_run_ast(args[0], false);
                 return Some(Expr::call_named("try_", vec![Expr::inline_fn0(action)]));
@@ -844,6 +862,9 @@ impl CodeGen {
     fn try_primitive_method_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
         if args.len() == 2
             && let TExprKind::Var(name) = &f.kind {
+                if self.is_local_shadowed(name) {
+                    return None;
+                }
                 if let Some(op) = primitive_method_lua_op(name) {
                     let l = self.forced_ast(args[0]);
                     let r = self.forced_ast(args[1]);
@@ -865,6 +886,7 @@ impl CodeGen {
     /// exactly once.
     fn try_inline_call(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
         if let TExprKind::Var(name) = &f.kind
+            && !self.is_local_shadowed(name)
             && let Some((params, body, occ_counts)) = self.inline_fns.get(name)
                 && args.len() == params.len()
                 && args.iter().zip(occ_counts.iter())

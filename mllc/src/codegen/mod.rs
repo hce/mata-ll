@@ -338,6 +338,19 @@ impl CodeGen {
         self.newtypes.iter().any(|n| n == name)
     }
 
+    /// True when `name` (SOURCE spelling) is bound by an enclosing local
+    /// binder — a parameter, pattern variable, or let/where binding. A local
+    /// binding shadows every special-name and fast-path meaning of the name
+    /// (`seq`/`div`/`pure`/`try`/`otherwise`/…, record accessors, inline
+    /// candidates, primitive-method inlining): emission must then go through
+    /// the ordinary variable path, exactly as `lua_ref` resolves references.
+    /// TIR keeps source binder names, so shadowing is real at this stage
+    /// (runtime_generic_adapter and direct_perform_callee_arity already
+    /// gate on the same membership).
+    fn is_local_shadowed(&self, name: &str) -> bool {
+        self.local_vars.contains(&names::sanitize_name(name))
+    }
+
     /// Resolve a sanitized name to its Lua reference.
     /// Forward-declared names use __mll_fn[N], others use the name directly.
     fn lua_ref(&self, lua_name: &str) -> String {
