@@ -3805,6 +3805,12 @@ fn default_operator_fixity(op: &str) -> (Assoc, u8) {
         "<>" => (Assoc::Right, 6),
         "+" | "-" => (Assoc::Left, 6),
         "*" | "/" => (Assoc::Left, 7),
+        // GHC Prelude: infixl 7 `div`, `mod`, `quot`, `rem`. Declared in
+        // Prelude.mll too; listed here so the grouping survives even where
+        // the Prelude fixity scan is not in effect. Without this they fell
+        // to the infixl 9 default and `4 * 5 \`rem\` 3` regrouped silently
+        // (8 instead of GHC's 2).
+        "div" | "mod" | "quot" | "rem" => (Assoc::Left, 7),
         "^" => (Assoc::Right, 8),
         "." => (Assoc::Right, 9),
         "!!" => (Assoc::Left, 9),

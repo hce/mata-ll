@@ -239,6 +239,7 @@ mll_test!(derive_eq, "derive_eq.mll");
 mll_test!(derive_ord, "derive_ord.mll");
 mll_test!(ord_max_min, "ord_max_min.mll");
 mll_test!(action_value_bindings, "action_value_bindings.mll");
+mll_test!(quot_rem_fixity, "quot_rem_fixity.mll");
 mll_test!(rank2, "rank2.mll");
 
 // Stress tests

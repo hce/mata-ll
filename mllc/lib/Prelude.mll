@@ -450,7 +450,7 @@ powAcc b k acc =
 -- Fixities of the named (backtick) operators, matching the GHC Prelude.
 -- div, mod, and seq are compiler builtins; their fixities live here so they
 -- reach every module like the rest of the Prelude interface.
-infixl 7 `div`, `mod`
+infixl 7 `div`, `mod`, `quot`, `rem`
 infix  4 `elem`
 infixr 0 `seq`
 
