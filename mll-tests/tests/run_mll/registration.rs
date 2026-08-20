@@ -241,6 +241,7 @@ mll_test!(ord_max_min, "ord_max_min.mll");
 mll_test!(action_value_bindings, "action_value_bindings.mll");
 mll_test!(quot_rem_fixity, "quot_rem_fixity.mll");
 mll_test!(dollar_stays_lazy, "dollar_stays_lazy.mll");
+mll_test!(guarded_clause_scope, "guarded_clause_scope.mll");
 mll_test!(rank2, "rank2.mll");
 
 // Stress tests

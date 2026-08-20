@@ -138,29 +138,6 @@ impl LocalVarsSnapshot {
     }
 }
 
-/// Narrow snapshot for the per-clause loop of the guarded independent-block
-/// pattern emitter: a clause's where-scope rows (installed by
-/// where_binds_stmts) must not leak into the next clause's independent
-/// block, and nothing else is restored between clauses. The full snapshot
-/// cloned five collections per clause to write back these two maps.
-pub(super) struct RowsSnapshot {
-    local_strict_params: std::collections::HashMap<String, Vec<bool>>,
-    local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
-}
-
-impl RowsSnapshot {
-    pub(super) fn capture(cg: &CodeGen) -> Self {
-        RowsSnapshot {
-            local_strict_params: cg.local_strict_params.clone(),
-            local_demand_rows: cg.local_demand_rows.clone(),
-        }
-    }
-    pub(super) fn restore(self, cg: &mut CodeGen) {
-        cg.local_strict_params = self.local_strict_params;
-        cg.local_demand_rows = self.local_demand_rows;
-    }
-}
-
 impl CodeGen {
     /// Will this binding's slot hold a directly-usable (WHNF) value from the
     /// moment it is assigned — i.e. never a thunk? Seeds `concrete_vars` at

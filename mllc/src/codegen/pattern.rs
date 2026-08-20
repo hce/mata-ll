@@ -22,7 +22,7 @@
 
 use crate::tir::*;
 use super::CodeGen;
-use super::function::{RowsSnapshot, ScopeSnapshot};
+use super::function::ScopeSnapshot;
 use super::lua::{Block, Expr, Stmt};
 use super::names::{lua_field_index, lua_number_literal, lua_quoted_string, sanitize_name};
 
@@ -305,9 +305,16 @@ impl CodeGen {
     ) -> Block {
         let mut stmts = Vec::new();
         for clause in clauses {
-            // A clause's where-scope rows (installed by where_binds_stmts)
-            // must not leak into the next clause's independent block.
-            let scope = RowsSnapshot::capture(self);
+            // Each clause is an independent Lua block, so nothing a clause
+            // binds may leak into its siblings — the full scope (local_vars,
+            // concrete_vars, spill state), not just the where-scope rows.
+            // With only the rows restored, clause 1's pattern locals stayed
+            // in `local_vars`: a later clause's reference to a same-named
+            // TOP-LEVEL function then resolved to the bare (nil) name
+            // instead of its `__mll_fn` slot, and a same-named where-binding
+            // skipped its forward declaration and assigned a global. Mirrors
+            // match_chain_block's per-clause ScopeSnapshot.
+            let scope = ScopeSnapshot::capture(self);
             let mut conditions = Vec::new();
             let mut bindings = Vec::new();
             for (pi, pat) in clause.patterns.iter().enumerate() {
