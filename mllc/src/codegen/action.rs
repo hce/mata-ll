@@ -115,9 +115,12 @@ impl CodeGen {
     pub(super) fn ty_never_lua_function(ty: &Ty) -> bool {
         match ty {
             Ty::Unit | Ty::List(_) | Ty::Tuple(_) => true,
+            // Integer is the always-boxed bignum (a table under __int_mt —
+            // see runtime_integer.lua); ByteString is a Lua string. Neither
+            // WHNF is ever a Lua function, so both may escape bare.
             Ty::Con(n) => matches!(
                 n.as_str(),
-                "Int" | "Number" | "Bool" | "String" | "Ordering"
+                "Int" | "Number" | "Bool" | "String" | "Ordering" | "Integer" | "ByteString"
             ),
             _ => false,
         }

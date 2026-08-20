@@ -47,6 +47,7 @@ excluded_reason() {
         cases/any_type)                  echo "builtin Any (Lua dynamic value carrier)";;
         cases/any_ffi_marshal)           echo "LuaPure FFI declarations marshalling the builtin Any";;
         cases/bytestring)                echo "ByteString builtins (Lua byte strings)";;
+        cases/pure_scalar_bare_escape)   echo "ByteString builtins (Lua byte strings)";;
         cases/bytestring_u64_sign_bit)   echo "ByteString + Lua 64-bit wrap-around semantics";;
         cases/caf_forward_reference)     echo "imports LString (Lua string FFI)";;
         cases/constructor_as_rename)     echo "'as \"name\"' constructor-rename syntax (JSON FFI, not Haskell)";;

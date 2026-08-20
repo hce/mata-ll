@@ -332,6 +332,32 @@ main = putStrLn (show (walk 0 [1, 0, 2, 0, 3]))
     );
 }
 
+/// A cheap `pure e` payload of a never-a-Lua-function type escapes BARE
+/// to the caller's __mll_run — Integer (boxed bignum table) and ByteString
+/// (a Lua string) are on that list (ty_never_lua_function), so the
+/// terminal below returns the parameter, not an __mll_pure box.
+#[test]
+fn pure_bytestring_param_escapes_bare() {
+    let source = r#"
+passBack :: ByteString -> IO ByteString
+passBack b = do
+    let n = bsLength b
+    if n > 0 then pure b else pure b
+
+main :: IO ()
+main = do
+    b <- passBack (bsReplicate 3 65)
+    print (bsLength b)
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    assert!(
+        !lua.contains("__mll_pure(b)"),
+        "a cheap ByteString pure payload must escape bare: {lua}"
+    );
+}
+
 /// Constructor-level DCE: a `data` definition none of whose constructors is
 /// constructed (`Con`) or matched (pattern) by live code contributes NOTHING
 /// to the emitted Lua. Checked two ways: (1) adding a dead user `data`

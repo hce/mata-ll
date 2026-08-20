@@ -106,6 +106,9 @@ mll_test!(performloop_deep, "performloop_deep.mll");
 mll_test!(performloop_dispatch, "performloop_dispatch.mll");
 mll_test!(performloop_pure_bottom, "performloop_pure_bottom.mll");
 mll_test!(case_pure_bottom, "case_pure_bottom.mll");
+// Integer/ByteString joined ty_never_lua_function: a cheap pure payload of
+// those types escapes bare (no __mll_pure box) — must be indistinguishable
+mll_test!(pure_scalar_bare_escape, "pure_scalar_bare_escape.mll");
 mll_test!(if_pure_bottom, "if_pure_bottom.mll");
 mll_test!(first_class_pure_bottom, "first_class_pure_bottom.mll");
 mll_test!(perform_bare_tco_deep, "perform_bare_tco_deep.mll");
