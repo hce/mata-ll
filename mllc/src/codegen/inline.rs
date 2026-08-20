@@ -36,6 +36,15 @@ impl CodeGen {
         body: &TExpr,
         subst: &std::collections::HashMap<String, &TExpr>,
     ) -> bool {
+        // A parameter used as a backtick OPERATOR (`10 \`div\` x` under a
+        // parameter named div) is not substitutable at all: an InfixApp op
+        // is a string, not a Var node, so the substituted body would keep
+        // the operator's builtin lowering instead of calling the argument.
+        let mut op_uses = std::collections::HashSet::new();
+        Self::collect_infix_op_uses(body, &mut op_uses);
+        if subst.keys().any(|p| op_uses.contains(p)) {
+            return true;
+        }
         let mut binders = std::collections::HashSet::new();
         Self::collect_binders(body, &mut binders);
         if binders.is_empty() {
@@ -46,6 +55,16 @@ impl CodeGen {
             Self::collect_var_refs(arg, &mut arg_vars);
         }
         arg_vars.iter().any(|v| binders.contains(v))
+    }
+
+    /// Every identifier-shaped InfixApp operator used in `expr` (backtick
+    /// operators — symbolic ones cannot collide with parameter names).
+    fn collect_infix_op_uses(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
+        if let TExprKind::InfixApp { op, .. } = &expr.kind
+            && op.starts_with(|c: char| c.is_alphabetic() || c == '_') {
+                out.insert(op.clone());
+            }
+        expr.for_each_child(&mut |c| Self::collect_infix_op_uses(c, out));
     }
 
     /// Every variable occurrence in `expr` (an over-approximation of its

@@ -135,7 +135,43 @@ impl CodeGen {
 
                 self.general_call_ast(expr, f, &args)
             }
-            TExprKind::InfixApp { op, lhs, rhs } => match op.as_str() {
+            TExprKind::InfixApp { op, lhs, rhs } => {
+                // A backtick operator is an ordinary identifier; a local
+                // binder shadowing it (a parameter named `div`, `seq`, …)
+                // makes this a CALL to that local value — the builtin
+                // lowerings below (native arithmetic, seq inline, __mll_*)
+                // must not fire. Rebuild the application spine and emit
+                // through the ordinary call path: every callee fast-path
+                // declines on shadowed names (is_local_shadowed), so the
+                // call gets the generic convention, arguments staying as
+                // lazy as any other unknown-callee call site.
+                if op.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                    && self.is_local_shadowed(op)
+                {
+                    let fn_ty = crate::types::Ty::fun(
+                        &[lhs.ty.clone(), rhs.ty.clone()],
+                        expr.ty.clone(),
+                    );
+                    let partial_ty = crate::types::Ty::fun(
+                        std::slice::from_ref(&rhs.ty),
+                        expr.ty.clone(),
+                    );
+                    let call = TExpr::new(
+                        TExprKind::App(
+                            Box::new(TExpr::new(
+                                TExprKind::App(
+                                    Box::new(TExpr::new(TExprKind::Var(op.clone()), fn_ty)),
+                                    lhs.clone(),
+                                ),
+                                partial_ty,
+                            )),
+                            rhs.clone(),
+                        ),
+                        expr.ty.clone(),
+                    );
+                    return self.expr_ast(&call);
+                }
+                match op.as_str() {
                 "div" | "mod" | "quot" | "rem" => self.intdiv_infix_ast(op, lhs, rhs),
                 "++" => {
                     let l = self.expr_ast(lhs);
@@ -167,7 +203,8 @@ impl CodeGen {
                 }
                 "." => self.compose_infix_ast(expr, lhs, rhs),
                 _ => self.operator_infix_ast(op, lhs, rhs),
-            },
+            }
+            }
             TExprKind::Negate(inner) => Expr::paren(Expr::neg(self.expr_ast(inner))),
             TExprKind::If { cond, then_branch, else_branch } => {
                 let cond_e = self.expr_ast(cond);
@@ -316,6 +353,7 @@ impl CodeGen {
                         &self.demand_info.rows,
                         &self.local_demand_rows,
                         &|n| self.inline_fns.contains_key(n),
+                        &|n| self.is_local_shadowed(n),
                         &crate::demand::Demand::Head,
                     ),
                 );
@@ -915,11 +953,22 @@ impl CodeGen {
     fn general_call_ast(&mut self, expr: &TExpr, f: &TExpr, args: &[&TExpr]) -> Expr {
         // Look up callee's demand info for call-site strictness
         // decisions. A where-bound local function shadows a
-        // same-named top-level one, so its scoped row wins.
+        // same-named top-level one, so its scoped row wins — and any
+        // OTHER local binder (parameter, pattern variable) shadowing the
+        // name means the callee is an unknown local: no row applies, the
+        // arguments stay as lazy as the unknown callee demands (i.e. not
+        // at all). local_strict_params entries are themselves locals, so
+        // they are consulted first, before the shadow test.
         let callee_strict = if let TExprKind::Var(name) = &f.kind {
             self.local_strict_params.get(name)
-                .or_else(|| self.demand_info.strict_params.get(name))
                 .cloned()
+                .or_else(|| {
+                    if self.is_local_shadowed(name) {
+                        None
+                    } else {
+                        self.demand_info.strict_params.get(name).cloned()
+                    }
+                })
         } else {
             None
         };

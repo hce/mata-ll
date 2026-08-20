@@ -101,7 +101,11 @@ impl CodeGen {
     /// binding group).
     pub(super) fn is_cheap_to_force(&self, expr: &TExpr) -> bool {
         Self::is_cheap_with(expr, &|name| {
-            name == "otherwise" || self.concrete_vars.contains(&sanitize_name(name))
+            // Prelude `otherwise` is the literal `true` — unless a local
+            // binder shadows it, in which case it is an ordinary (possibly
+            // thunked) variable like any other.
+            (name == "otherwise" && !self.is_local_shadowed(name))
+                || self.concrete_vars.contains(&sanitize_name(name))
         }) && !Self::contains_trapping_op(expr)
     }
 
@@ -173,6 +177,7 @@ impl CodeGen {
                                 &self.demand_info.rows,
                                 &self.local_demand_rows,
                                 &inlined,
+                                &|n| self.is_local_shadowed(n),
                                 &d,
                             );
                             crate::demand::map_join(&mut demanded, m);
@@ -205,6 +210,7 @@ impl CodeGen {
         env.extend(crate::demand::local_fn_rows(
             &self.demand_info.rows,
             &inlined,
+            &|n| self.is_local_shadowed(n),
             &clause.where_binds,
         ));
         env
@@ -227,6 +233,7 @@ impl CodeGen {
                 &self.demand_info.rows,
                 &locals,
                 &inlined,
+                &|n| self.is_local_shadowed(n),
                 &self.cur_result_demand,
             )
         } else {
@@ -235,6 +242,7 @@ impl CodeGen {
                 &self.demand_info.rows,
                 &locals,
                 &inlined,
+                &|n| self.is_local_shadowed(n),
                 &self.cur_result_demand,
             )
         }

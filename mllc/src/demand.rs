@@ -304,7 +304,7 @@ pub fn analyze(module: &TModule) -> DemandInfo {
         // environment (exactly what codegen's scoped call-site map holds).
         for func in &functions {
             for clause in &func.clauses {
-                let local = local_fn_demand(clause_view(clause), &strict_params);
+                let local = local_fn_demand(clause_view(clause), &strict_params, &|_| false);
                 let (locals, caps) = (local.rows, local.captured);
                 let mut lnames: Vec<&String> = locals.keys().collect();
                 lnames.sort();
@@ -402,14 +402,53 @@ fn analyze_function(func: &TFunction, env: &HashMap<String, Vec<bool>>) -> Vec<b
 
 /// Analyze a single clause's parameter strictness.
 fn analyze_clause(clause: &TClause, arity: usize, env: &HashMap<String, Vec<bool>>) -> Vec<bool> {
-    analyze_equation(clause_view(clause), arity, env)
+    analyze_equation(clause_view(clause), arity, env, &|_| false)
+}
+
+/// The clause-wide shadowed-name over-approximation: every name bound by
+/// the clause's own patterns, by a where binding (VALUE names and every
+/// where-bind's parameters — surviving function GROUP names stay visible,
+/// their local rows are the intentional lookups; the caller adds the
+/// DROPPED group names), or by any inner binder (lambda, case, let —
+/// `collect_rebound_names`). A name in this set may refer to a local at
+/// some site in the clause, so name-keyed cross-function rules are
+/// suppressed for it clause-wide (see [`Shadowed`]). The precision cost is
+/// the same clause-wide over-approximation the local-row `rebound` filter
+/// already accepts.
+fn clause_shadowed_names(clause: &TLocalDefLike<'_>) -> HashSet<String> {
+    let mut s = HashSet::new();
+    for p in clause.patterns {
+        collect_pattern_vars(p, &mut s);
+    }
+    if let Some(b) = clause.body {
+        collect_rebound_names(b, &mut s);
+    }
+    for g in clause.guards {
+        collect_rebound_names(&g.condition, &mut s);
+        collect_rebound_names(&g.body, &mut s);
+    }
+    for b in clause.where_binds {
+        if b.patterns.is_empty() {
+            s.insert(b.name.clone());
+        }
+        for p in &b.patterns {
+            collect_pattern_vars(p, &mut s);
+        }
+        collect_rebound_names(&b.body, &mut s);
+    }
+    s
 }
 
 /// `analyze_clause` over a borrowed equation view — a top-level clause or a
 /// where-bound local function's equation (the local-function fixpoint
 /// analyzes those in place; it once deep-cloned every equation into a
 /// TClause per round to call this).
-fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<String, Vec<bool>>) -> Vec<bool> {
+fn analyze_equation(
+    clause: TLocalDefLike<'_>,
+    arity: usize,
+    env: &HashMap<String, Vec<bool>>,
+    parent_shadowed: Shadowed,
+) -> Vec<bool> {
     // Where-bound local FUNCTIONS get real strictness rows and
     // captured-demand sets, visible only inside this clause (the extended
     // map is dropped when this returns, so a local row can never leak into
@@ -420,12 +459,35 @@ fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<Strin
     // outward half of the same story: `sumStrict n = go 0 0 where go's
     // guard is i > n` forces the CAPTURED n on every path, so sumStrict is
     // strict in n even though n is never an argument of the call.
-    let local = local_fn_demand(clause, env);
+    let local = local_fn_demand(clause, env, parent_shadowed);
     let local_caps = local.captured;
     // The extended environment local_fn_demand converged on (the outer env
     // plus the local rows) is exactly the one this clause is analyzed
     // under; reuse it instead of cloning `env` a second time.
     let env = local.env.as_ref().unwrap_or(env);
+
+    // The clause-wide shadowed set: the clause's own binders plus every
+    // where-bound FUNCTION name whose group was dropped by the local-row
+    // scope filter (rebound/ambiguous — such a name has no row in the
+    // extended env, so an unsuppressed lookup would hit a same-named
+    // GLOBAL's row while the call targets the local).
+    let mut own_shadowed = clause_shadowed_names(&clause);
+    for b in clause.where_binds {
+        if !b.patterns.is_empty() && !local.rows.contains_key(&b.name) {
+            own_shadowed.insert(b.name.clone());
+        }
+    }
+    // A name with a SURVIVING local row is exempt: its row (in the
+    // extended env) is the intentional lookup, and the local-row scope
+    // filter already dropped every ambiguous case. Without the exemption,
+    // codegen's ambient predicate — whose local_vars contains the where-fn
+    // names themselves — would suppress exactly the rows this machinery
+    // exists to apply (a where-group accumulator loop went lazy and
+    // thunk-chained to a stack overflow).
+    let shadowed = |n: &str| {
+        (own_shadowed.contains(n) || parent_shadowed(n)) && !local.rows.contains_key(n)
+    };
+    let shadowed: Shadowed = &shadowed;
 
     let mut strict = vec![false; arity];
 
@@ -455,7 +517,7 @@ fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<Strin
             let mut changed = false;
             for b in clause.where_binds {
                 if b.patterns.is_empty() && s.contains(&b.name) {
-                    for v in demanded_vars_in(&b.body, env, &local_caps) {
+                    for v in demanded_vars_in(&b.body, env, &local_caps, shadowed) {
                         if s.insert(v) {
                             changed = true;
                         }
@@ -468,9 +530,9 @@ fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<Strin
         }
     };
     let mut demanded = if clause.guards.is_empty() {
-        close(demanded_vars_in(clause.body.expect("guard-free equation has a body"), env, &local_caps))
+        close(demanded_vars_in(clause.body.expect("guard-free equation has a body"), env, &local_caps, shadowed))
     } else {
-        demanded_guards_with(clause.guards, env, &local_caps, &close)
+        demanded_guards_with(clause.guards, env, &local_caps, shadowed, &close)
     };
     // (Both are Semantic-mode: parameter strictness must not over-claim.)
 
@@ -523,6 +585,17 @@ fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<Strin
 // and the if/`otherwise` rule. The combinators are generic over the two
 // demand summaries via `DemandLattice`.
 
+/// A locally-bound-name predicate: true when the name may refer to a local
+/// binder at some site in the scope under analysis, so every name-keyed
+/// cross-function rule (env/row lookups, `seq`/`pure`/`return`/`otherwise`
+/// special arms, backtick operators) must be suppressed for it — the name
+/// no longer reliably means the global. Suppression only UNDER-claims
+/// demand, which is always sound (a missed strictness keeps a value lazy).
+/// Scoping uses the same clause-wide over-approximation as the local-row
+/// `rebound` filter (see `local_fn_demand`); codegen entry points pass
+/// their live `local_vars` membership instead.
+type Shadowed<'a> = &'a dyn Fn(&str) -> bool;
+
 /// A guard or `if` condition that is literally `otherwise` — constant
 /// true. The parser desugars the final guard of a where-bound function
 /// into `if otherwise then b else error "non-exhaustive guards"`, and
@@ -530,9 +603,11 @@ fn analyze_equation(clause: TLocalDefLike<'_>, arity: usize, env: &HashMap<Strin
 /// guard body) runs unconditionally at that point, so the dead
 /// alternative must not water down its demands. Without this rule a
 /// guarded local accumulator loop loses its recursive-branch demand and
-/// stays lazy.
-fn is_otherwise(cond: &TExpr) -> bool {
-    matches!(&cond.kind, TExprKind::Var(n) if n == "otherwise")
+/// stays lazy. A LOCAL binder named `otherwise` (legal Haskell) defeats
+/// the rule: the condition is then an ordinary variable that may be
+/// False, so the else/fallthrough alternative is live.
+fn is_otherwise(cond: &TExpr, shadowed: Shadowed) -> bool {
+    matches!(&cond.kind, TExprKind::Var(n) if n == "otherwise") && !shadowed("otherwise")
 }
 
 /// Operand strictness of an infix operator, for the operators whose rule
@@ -629,6 +704,7 @@ impl DemandLattice for DemandMap {
 /// have touched it.
 fn guard_chain<'t, S: DemandLattice>(
     guards: &'t [TGuard],
+    shadowed: Shadowed,
     cond_demand: &mut dyn FnMut(&'t TExpr) -> S,
     body_demand: &mut dyn FnMut(&'t TExpr) -> S,
 ) -> S {
@@ -636,7 +712,7 @@ fn guard_chain<'t, S: DemandLattice>(
     let mut acc = S::default();
     for g in guards.iter().rev() {
         let body_d = body_demand(&g.body);
-        acc = if is_otherwise(&g.condition) {
+        acc = if is_otherwise(&g.condition, shadowed) {
             // Condition is `true`: the body runs unconditionally here.
             body_d
         } else {
@@ -657,10 +733,11 @@ fn if_demand<'t, S: DemandLattice>(
     cond: &'t TExpr,
     then_branch: &'t TExpr,
     else_branch: &'t TExpr,
+    shadowed: Shadowed,
     cond_demand: &mut dyn FnMut(&'t TExpr) -> S,
     branch_demand: &mut dyn FnMut(&'t TExpr) -> S,
 ) -> S {
-    if is_otherwise(cond) {
+    if is_otherwise(cond, shadowed) {
         return branch_demand(then_branch);
     }
     let mut s = cond_demand(cond);
@@ -684,12 +761,14 @@ fn demanded_guards_with(
     guards: &[TGuard],
     env: &HashMap<String, Vec<bool>>,
     captured: &CapturedEnv,
+    shadowed: Shadowed,
     close: &dyn Fn(HashSet<String>) -> HashSet<String>,
 ) -> HashSet<String> {
     guard_chain(
         guards,
-        &mut |c: &TExpr| close(demanded_vars_in(c, env, captured)),
-        &mut |b: &TExpr| close(demanded_vars_in(b, env, captured)),
+        shadowed,
+        &mut |c: &TExpr| close(demanded_vars_in(c, env, captured, shadowed)),
+        &mut |b: &TExpr| close(demanded_vars_in(b, env, captured, shadowed)),
     )
 }
 
@@ -729,8 +808,9 @@ fn demanded_guards_with(
 pub fn local_fn_strict_params(
     clause: &TClause,
     env: &HashMap<String, Vec<bool>>,
+    shadowed: Shadowed,
 ) -> HashMap<String, Vec<bool>> {
-    local_fn_demand(clause_view(clause), env).rows
+    local_fn_demand(clause_view(clause), env, shadowed).rows
 }
 
 /// What `local_fn_demand` computes for one clause: the strictness rows of
@@ -803,6 +883,7 @@ fn group_where_fn_equations(where_binds: &[TLocalDef]) -> Vec<(String, Vec<&TLoc
 fn local_fn_demand(
     clause: TLocalDefLike<'_>,
     env: &HashMap<String, Vec<bool>>,
+    parent_shadowed: Shadowed,
 ) -> LocalFnDemand {
     let mut groups = group_where_fn_equations(clause.where_binds);
     if groups.is_empty() {
@@ -865,12 +946,19 @@ fn local_fn_demand(
     for (name, arity, _) in &group_clauses {
         ext.insert(name.clone(), vec![true; *arity]);
     }
+    // The surviving group names are exempt from the ambient shadowing:
+    // their rows in `ext` ARE the intentional lookups (codegen's ambient
+    // predicate claims these very names, since where-fn names are locals).
+    let group_names: HashSet<&str> =
+        group_clauses.iter().map(|(n, _, _)| n.as_str()).collect();
+    let group_shadowed = |n: &str| parent_shadowed(n) && !group_names.contains(n);
+    let group_shadowed: Shadowed = &group_shadowed;
     loop {
         let mut changed = false;
         for (name, arity, clauses) in &group_clauses {
             let mut row = vec![true; *arity];
             for c in clauses {
-                let cs = analyze_equation(*c, *arity, &ext);
+                let cs = analyze_equation(*c, *arity, &ext, group_shadowed);
                 for i in 0..*arity {
                     row[i] = row[i] && cs[i];
                 }
@@ -907,7 +995,7 @@ fn local_fn_demand(
         for (name, _, clauses) in &group_clauses {
             let mut set: Option<HashSet<String>> = None;
             for c in clauses {
-                let mut d = demanded_vars_in(c.body.expect("local equation has a body"), &ext, &captured);
+                let mut d = demanded_vars_in(c.body.expect("local equation has a body"), &ext, &captured, group_shadowed);
                 let mut bound = HashSet::new();
                 for p in c.patterns {
                     collect_pattern_vars(p, &mut bound);
@@ -1048,8 +1136,9 @@ fn demanded_vars_in(
     expr: &TExpr,
     env: &HashMap<String, Vec<bool>>,
     captured: &CapturedEnv,
+    shadowed: Shadowed,
 ) -> HashSet<String> {
-    let rec = |e: &TExpr| demanded_vars_in(e, env, captured);
+    let rec = |e: &TExpr| demanded_vars_in(e, env, captured, shadowed);
     match &expr.kind {
         TExprKind::Var(x) => {
             let mut s = HashSet::new();
@@ -1086,13 +1175,16 @@ fn demanded_vars_in(
             // inline lowering exactly. (The structured analysis claims the
             // second operand too; see the shared-rules section.)
             if let TExprKind::Var(name) = &f.kind
-                && name == "seq" && !args_rev.is_empty() {
+                && name == "seq" && !shadowed("seq") && !args_rev.is_empty() {
                     s.extend(rec(args_rev[0]));
                 }
 
             // Cross-function propagation: if callee is a known function
             // and is strict in position i, demand that argument's vars.
+            // A shadowed callee name may be a local of unknown strictness:
+            // no row applies (under-claim, safe).
             if let TExprKind::Var(name) = &f.kind
+                && !shadowed(name)
                 && let Some(callee_strict) = env.get(name) {
                     demand_strict_args(&mut s, callee_strict, args_rev.iter().copied(), &rec);
                 }
@@ -1106,6 +1198,7 @@ fn demanded_vars_in(
             // too. Gated on SATURATION: a partial application only builds
             // a closure and forces none of the body's captures.
             if let TExprKind::Var(name) = &f.kind
+                && !shadowed(name)
                 && let Some((arity, caps)) = captured.get(name)
                     && args_rev.len() >= *arity {
                         s.extend(caps.iter().cloned());
@@ -1115,6 +1208,16 @@ fn demanded_vars_in(
         }
 
         TExprKind::InfixApp { op, lhs, rhs } => {
+            // A backtick operator is an ordinary identifier; when a local
+            // binder shadows it (`` a `div` b `` under a parameter named
+            // div), the call targets an unknown local function — claim only
+            // the callee name itself, like the App arm does for unknown
+            // callees.
+            if op.starts_with(|c: char| c.is_alphabetic() || c == '_') && shadowed(op) {
+                let mut s = HashSet::new();
+                s.insert(op.clone());
+                return s;
+            }
             match shared_op_operands(op, lhs) {
                 Some(OpOperands::Both) => {
                     let mut s = rec(lhs);
@@ -1148,6 +1251,7 @@ fn demanded_vars_in(
             cond,
             then_branch,
             else_branch,
+            shadowed,
             &mut |e: &TExpr| rec(e),
             &mut |e: &TExpr| rec(e),
         ),
@@ -1161,7 +1265,7 @@ fn demanded_vars_in(
                     let body_demanded = if b.guards.is_empty() {
                         rec(b.plain_body())
                     } else {
-                        demanded_guards_with(&b.guards, env, captured, &|s| s)
+                        demanded_guards_with(&b.guards, env, captured, shadowed, &|s| s)
                     };
                     let bound = pattern_bound_vars(&b.pattern);
                     // Remove locally bound names.
@@ -1594,6 +1698,12 @@ struct RowCx<'a, 't> {
     rows: &'a Rows,
     locals: &'a HashMap<String, LocalRows>,
     inlined: &'a dyn Fn(&str) -> bool,
+    /// Locally-bound-name predicate (see [`Shadowed`]): row lookups and
+    /// special-name arms are suppressed for names it claims. Module-level
+    /// constructors pass `&|_| false` (clause_demand_map adds each
+    /// clause's own binders); codegen entry points pass their live
+    /// local_vars membership.
+    shadowed: Shadowed<'a>,
     /// When present, records every fully-applied call-head visit.
     sites: Option<&'a std::cell::RefCell<CallSites<'t>>>,
 }
@@ -1709,10 +1819,21 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
         TExprKind::App(_, _) => demand_app(cx, expr, rd, run_pos),
 
         TExprKind::InfixApp { op, lhs, rhs } => match op.as_str() {
+            // A backtick operator shadowed by a local binder targets an
+            // unknown local function: claim only the callee name (mirrors
+            // the boolean arm and demand_app's unknown-callee rule).
+            op2 if op2.starts_with(|c: char| c.is_alphabetic() || c == '_')
+                && (cx.shadowed)(op2) => {
+                let mut m = DemandMap::new();
+                map_join_one(&mut m, op2, Demand::Head);
+                m
+            }
             // `return $ x` / `pure $ x` — see `pure_demand_map`. Any other
             // `f $ x` resolves through the shared table (Lhs: the function
-            // is forced, the argument thunked).
-            "$" if matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") => {
+            // is forced, the argument thunked). A shadowed `pure`/`return`
+            // is an ordinary local call.
+            "$" if matches!(&lhs.kind, TExprKind::Var(n)
+                if (n == "pure" || n == "return") && !(cx.shadowed)(n)) => {
                 pure_demand_map(cx, rhs, rd, run_pos)
             }
             // Cons under an element demand: the head is an element and the
@@ -1775,6 +1896,7 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
             cond,
             then_branch,
             else_branch,
+            cx.shadowed,
             &mut |e: &'t TExpr| demand_expr(cx, e, &Demand::Head, false),
             &mut |e: &'t TExpr| demand_expr(cx, e, rd, run_pos),
         ),
@@ -1932,7 +2054,9 @@ fn demand_app<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: boo
     };
 
     // `seq a b` — see `seq_demand_map`; the callee name itself is demanded.
-    if fname == Some("seq") {
+    // Shadowed specials are ordinary local calls (fall through to the
+    // generic path, whose row lookups are suppressed below).
+    if fname == Some("seq") && !(cx.shadowed)("seq") {
         if let Some(a) = args.first() {
             let second = if args.len() == 2 { Some(args[1]) } else { None };
             map_join(&mut m, seq_demand_map(cx, a, second, rd, run_pos));
@@ -1942,7 +2066,8 @@ fn demand_app<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: boo
     }
 
     // `return e` / `pure e` — see `pure_demand_map`.
-    if let (Some(name @ ("return" | "pure")), 1) = (fname, args.len()) {
+    if let (Some(name @ ("return" | "pure")), 1) = (fname, args.len())
+        && !(cx.shadowed)(name) {
         map_join(&mut m, pure_demand_map(cx, args[0], rd, run_pos));
         map_join_one(&mut m, name, Demand::Head);
         return m;
@@ -1966,7 +2091,14 @@ fn demand_app<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: boo
     // The function expression itself is demanded.
     map_join(&mut m, demand_expr(cx, f, &Demand::Head, false));
 
-    if let Some(name) = fname {
+    // Row lookups and site recording are name-keyed: a shadowed callee
+    // name may be a local of unknown strictness, so no row applies (and
+    // recording the site would attribute it to the global). EXEMPT: a name
+    // with an installed LOCAL row — those maps are scope-managed by their
+    // installer (clause_local_rows / where_binds_stmts), and the ambient
+    // predicate's local_vars contains the where-fn names themselves.
+    if let Some(name) = fname
+        && (cx.locals.contains_key(name) || !(cx.shadowed)(name)) {
         let full = cx.rows.arity.get(name).is_some_and(|a| *a == args.len());
         cx.record_site(f, name, if suspended { &Demand::Head } else { rd }, full);
         if !suspended {
@@ -1987,7 +2119,7 @@ fn demand_app<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: boo
     // their reads happen when the call is emitted — except for inlined
     // callees (substitution, not gen_arg) and suspended actions.
     if !suspended {
-        let skip = fname.is_some_and(|n| (cx.inlined)(n));
+        let skip = fname.is_some_and(|n| (cx.inlined)(n) && !(cx.shadowed)(n));
         if !skip {
             for arg in &args {
                 if arg_emitted_eagerly(arg) {
@@ -2005,6 +2137,7 @@ fn demand_app<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: boo
 fn demand_guards_map<'t>(cx: &RowCx<'_, 't>, guards: &'t [TGuard], rd: &Demand, run_pos: bool) -> DemandMap {
     guard_chain(
         guards,
+        cx.shadowed,
         &mut |c: &'t TExpr| demand_expr(cx, c, &Demand::Head, false),
         &mut |b: &'t TExpr| demand_expr(cx, b, rd, run_pos),
     )
@@ -2014,6 +2147,20 @@ fn demand_guards_map<'t>(cx: &RowCx<'_, 't>, guards: &'t [TGuard], rd: &Demand, 
 /// clause's where-bound VALUE definitions (a demanded where-binding's RHS
 /// demands fire too, exactly as codegen's demanded_bindings evaluates it).
 fn clause_demand_map<'t>(cx: &RowCx<'_, 't>, clause: TLocalDefLike<'t>, rd: &Demand) -> DemandMap {
+    // The clause's own binders extend the ambient shadowed predicate for
+    // the whole walk (same clause-wide over-approximation as the boolean
+    // analysis): where-fn names keep their cx.locals rows, except those
+    // WITHOUT a row (dropped by the local-row scope filter), whose calls
+    // must not hit a same-named global's row.
+    let mut own = clause_shadowed_names(&clause);
+    for b in clause.where_binds {
+        if !b.patterns.is_empty() && !cx.locals.contains_key(&b.name) {
+            own.insert(b.name.clone());
+        }
+    }
+    let ambient = cx.shadowed;
+    let shadowed = move |n: &str| own.contains(n) || ambient(n);
+    let cx = &RowCx { shadowed: &shadowed, ..*cx };
     let mut m = if clause.guards.is_empty() {
         let body = clause.body.expect("guard-free clause carries a body");
         demand_expr(cx, body, rd, true)
@@ -2128,7 +2275,7 @@ fn equations_rows<'t>(
 /// because codegen threads the same rows into `demanded_map` /
 /// `demanded_map_guards` (via its scoped `local_demand_rows` map), so the
 /// demanded-binding decision sees exactly what the rows analysis saw.
-pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds: &[TLocalDef]) -> HashMap<String, LocalRows> {
+pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, shadowed: Shadowed, where_binds: &[TLocalDef]) -> HashMap<String, LocalRows> {
     let groups = group_where_fn_equations(where_binds);
     if groups.is_empty() {
         return HashMap::new();
@@ -2154,7 +2301,7 @@ pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, where_binds
             let view_refs: Vec<&TLocalDefLike> = views.iter().collect();
             let result_deep = locals[name.as_str()].result_deep.clone();
             let rd_opt = if result_deep != Demand::Head { Some(result_deep.clone()) } else { None };
-            let cx = RowCx { rows: cx_rows, locals: &locals, inlined, sites: None };
+            let cx = RowCx { rows: cx_rows, locals: &locals, inlined, shadowed, sites: None };
             let (run, deep) = equations_rows(&cx, &view_refs, arity, rd_opt.as_ref());
             let entry = locals.get(name.as_str()).unwrap();
             // Meet with the previous rows: keeps the iteration strictly
@@ -2236,12 +2383,13 @@ pub fn let_spine_maps<'t>(
     rows: &Rows,
     locals: &HashMap<String, LocalRows>,
     inlined: &dyn Fn(&str) -> bool,
+    shadowed: Shadowed,
     rd: &Demand,
 ) -> Option<NodeMap<'t, DemandMap>> {
     if !matches!(expr.kind, TExprKind::Let { .. }) {
         return None;
     }
-    let cx = RowCx { rows, locals, inlined, sites: None };
+    let cx = RowCx { rows, locals, inlined, shadowed, sites: None };
     // Collect the spine top-down.
     let mut spine: Vec<&TExpr> = Vec::new();
     let mut cur = expr;
@@ -2274,9 +2422,10 @@ pub fn demanded_map(
     rows: &Rows,
     locals: &HashMap<String, LocalRows>,
     inlined: &dyn Fn(&str) -> bool,
+    shadowed: Shadowed,
     rd: &Demand,
 ) -> DemandMap {
-    let cx = RowCx { rows, locals, inlined, sites: None };
+    let cx = RowCx { rows, locals, inlined, shadowed, sites: None };
     demand_expr(&cx, expr, rd, true)
 }
 
@@ -2286,9 +2435,10 @@ pub fn demanded_map_guards(
     rows: &Rows,
     locals: &HashMap<String, LocalRows>,
     inlined: &dyn Fn(&str) -> bool,
+    shadowed: Shadowed,
     rd: &Demand,
 ) -> DemandMap {
-    let cx = RowCx { rows, locals, inlined, sites: None };
+    let cx = RowCx { rows, locals, inlined, shadowed, sites: None };
     demand_guards_map(&cx, guards, rd, true)
 }
 
@@ -2393,9 +2543,11 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
             };
             for func in members {
                 for clause in &func.clauses {
-                    // Each clause gets its own where scope.
-                    let locals = local_fn_rows(&rows, &inlined, &clause.where_binds);
-                    let cx = RowCx { rows: &rows, locals: &locals, inlined: &inlined, sites: None };
+                    // Each clause gets its own where scope. Module level:
+                    // no ambient shadowing (clause_demand_map adds each
+                    // clause's own binders).
+                    let locals = local_fn_rows(&rows, &inlined, &|_| false, &clause.where_binds);
+                    let cx = RowCx { rows: &rows, locals: &locals, inlined: &inlined, shadowed: &|_| false, sites: None };
                     let view = clause_view(clause);
                     let eqs = [&view];
                     let (r, d) = equations_rows(&cx, &eqs, arity, rdeep.as_ref());
@@ -2464,14 +2616,16 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
             }
             let rd = rows.result_demand(&func.name);
             for clause in &func.clauses {
-                let locals = local_fn_rows(&rows, &inlined, &clause.where_binds);
-                let cx = RowCx { rows: &rows, locals: &locals, inlined: &inlined, sites: Some(&sites) };
+                let locals = local_fn_rows(&rows, &inlined, &|_| false, &clause.where_binds);
+                let cx = RowCx { rows: &rows, locals: &locals, inlined: &inlined, shadowed: &|_| false, sites: Some(&sites) };
                 // Clause body + where-value closure (records sites).
                 let _ = clause_demand_map(&cx, clause_view(clause), &rd);
-                // Local function bodies run with unknown result demand.
+                // Local function bodies run with unknown result demand
+                // (through clause_demand_map so each equation's own
+                // binders extend the shadowed predicate).
                 for b in &clause.where_binds {
                     if !b.patterns.is_empty() {
-                        let _ = demand_expr(&cx, &b.body, &Demand::Head, true);
+                        let _ = clause_demand_map(&cx, local_def_view(b), &Demand::Head);
                     }
                 }
             }

@@ -707,7 +707,7 @@ impl CodeGen {
             self.local_strict_params.remove(&b.name);
         }
         let local_rows =
-            crate::demand::local_fn_strict_params(clause, &self.demand_info.strict_params);
+            crate::demand::local_fn_strict_params(clause, &self.demand_info.strict_params, &|n| self.is_local_shadowed(n));
         self.local_strict_params.extend(local_rows);
         // Structured twin: install the clause's demand rows before the
         // demanded_bindings closure below, so a sibling RHS that routes

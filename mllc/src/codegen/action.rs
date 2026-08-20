@@ -687,6 +687,7 @@ impl CodeGen {
                             &self.demand_info.rows,
                             &self.local_demand_rows,
                             &|n| self.inline_fns.contains_key(n),
+                            &|n| self.is_local_shadowed(n),
                             &self.cur_result_demand,
                         ) {
                             // The spine starts at `expr` (a Let), so `body`
@@ -700,6 +701,7 @@ impl CodeGen {
                         &self.demand_info.rows,
                         &self.local_demand_rows,
                         &|n| self.inline_fns.contains_key(n),
+                        &|n| self.is_local_shadowed(n),
                         &self.cur_result_demand,
                     ));
                     let demanded = self.demanded_bindings(binds, seed);
