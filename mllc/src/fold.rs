@@ -15,6 +15,14 @@ use crate::types::Ty;
 // ── Module / function / clause traversal ────────────────
 
 pub fn fold_module(mut module: TModule) -> TModule {
+    // Pass-order witness: folding recognizes mono's concrete method names
+    // (`eq_Int`, …), so it must see monomorphized bodies.
+    debug_assert_eq!(
+        module.passes_run.last(),
+        Some(&"mono"),
+        "fold must run directly on mono's output"
+    );
+    module.passes_run.push("fold");
     module.functions = module.functions.into_iter().map(fold_function).collect();
     module.instance_fns = module.instance_fns.into_iter().map(fold_function).collect();
     module

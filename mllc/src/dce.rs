@@ -36,6 +36,14 @@ use crate::tir::*;
 
 /// Drop functions and instance methods not reachable from `main`/exports.
 pub fn eliminate(mut module: TModule) -> TModule {
+    // Pass-order witness: DCE's reachability walk must see the final call
+    // graph, after fold and split.
+    debug_assert_eq!(
+        module.passes_run.last(),
+        Some(&"split"),
+        "dce must run on the split module"
+    );
+    module.passes_run.push("dce");
     // Out-edges for every function in the universe (functions + instance_fns).
     let mut edges: HashMap<String, HashSet<String>> = HashMap::new();
     for f in module.functions.iter().chain(module.instance_fns.iter()) {

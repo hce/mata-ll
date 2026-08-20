@@ -51,6 +51,14 @@ const MAX_DEPTH: usize = 40;
 /// Rewrite every function/CAF body so no emitted Lua expression nests beyond
 /// `MAX_DEPTH`.
 pub fn split_module(mut module: TModule) -> TModule {
+    // Pass-order witness: split measures the FOLDED tree (folding shrinks
+    // chains it would otherwise split).
+    debug_assert_eq!(
+        module.passes_run.last(),
+        Some(&"fold"),
+        "split must run on the folded module"
+    );
+    module.passes_run.push("split");
     for f in module.functions.iter_mut() {
         split_function(f);
     }

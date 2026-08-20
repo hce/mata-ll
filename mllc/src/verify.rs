@@ -42,6 +42,13 @@ const TYPE_ERASED_SHOWS: &[&str] = &["show", "show_Maybe", "show_List_"];
 /// Check the module's invariants. Returns one message per violation; empty
 /// means the module is clean.
 pub fn check(module: &TModule) -> Vec<String> {
+    // Pass-order witness: the invariant is checked on mono's OUTPUT,
+    // before any pass rewrites it.
+    debug_assert_eq!(
+        module.passes_run,
+        ["mono"],
+        "verify::check must run directly on mono's output"
+    );
     let erased: HashSet<&str> = TYPE_ERASED_SHOWS.iter().copied().collect();
     let mut v = Verifier { erased, violations: Vec::new() };
     for f in &module.functions {
@@ -65,6 +72,13 @@ pub fn check(module: &TModule) -> Vec<String> {
 /// text. The check itself lives beside the Lua AST it walks
 /// (`codegen::annot::Engine::refute`); this is its crate-facing entry.
 pub fn check_stamps(module: &TModule) -> Vec<String> {
+    // Pass-order witness: the refutation must see exactly the module
+    // codegen will see, after every TIR pass.
+    debug_assert_eq!(
+        module.passes_run,
+        ["mono", "fold", "split", "dce"],
+        "verify::check_stamps must run on the final (post-dce) module"
+    );
     crate::codegen::stamp_violations(module)
 }
 
@@ -154,6 +168,7 @@ mod tests {
             exports: vec![],
             record_accessors: vec![],
             newtypes: vec![],
+            passes_run: vec!["mono"],
         }
     }
 

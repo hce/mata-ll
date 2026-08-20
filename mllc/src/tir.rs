@@ -27,6 +27,12 @@ pub struct TModule {
     pub record_accessors: Vec<(String, usize)>,
     /// Newtype names (zero-cost wrappers, constructor = identity)
     pub newtypes: Vec<String>,
+    /// TIR pass-order witnesses: each pass records itself here and
+    /// debug_asserts its prerequisite ran (the dependency order
+    /// compile_impl's pipeline comment states — mono, fold, split, dce; the
+    /// two verify checks and codegen assert without recording). A reorder
+    /// fails its first debug run instead of miscompiling quietly.
+    pub passes_run: Vec<&'static str>,
 }
 
 #[derive(Debug, Clone)]

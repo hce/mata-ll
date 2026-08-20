@@ -432,6 +432,10 @@ impl Monomorphizer {
             }
         }
 
+        debug_assert!(
+            module.passes_run.is_empty(),
+            "mono must run first on the typechecker's TModule (pass-order witness)"
+        );
         TModule {
             data_defs: module.data_defs,
             dropped_data_defs: module.dropped_data_defs,
@@ -441,6 +445,7 @@ impl Monomorphizer {
             exports: module.exports,
             record_accessors: module.record_accessors,
             newtypes: module.newtypes,
+            passes_run: vec!["mono"],
         }
     }
 

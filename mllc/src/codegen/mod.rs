@@ -500,6 +500,13 @@ pub(crate) fn generate(
     embed_source: Option<(EmbedMode, &str)>,
     opt_disable: Option<&str>,
 ) -> Result<GeneratedLua, String> {
+    // Pass-order witness (see TModule::passes_run): codegen consumes the
+    // fully processed module — monomorphized, folded, split, DCE'd.
+    debug_assert_eq!(
+        module.passes_run,
+        ["mono", "fold", "split", "dce"],
+        "codegen must run on the final TIR module"
+    );
     let mut cg = CodeGen::new();
     cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
     cg.demand_info = crate::demand::analyze(module);
