@@ -1835,14 +1835,15 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
             let mut m = DemandMap::new();
             // Tuple projection: the argument's projected field carries the
             // whole expression's demand.
-            if let Some(idx) = specialized.strip_prefix("__mll_tup_get:")
-                && let Ok(idx) = idx.parse::<usize>()
-                    && idx >= 1 && args.len() == 1 {
-                        let mut fields: Vec<Option<Demand>> = vec![None; idx];
-                        fields[idx - 1] = Some(rd.clone());
-                        map_join(&mut m, demand_expr(cx, &args[0], &Demand::Fields(fields), false));
-                        return m;
-                    }
+            if let SpecKind::TupGet(idx) = specialized
+                && *idx >= 1
+                && args.len() == 1
+            {
+                let mut fields: Vec<Option<Demand>> = vec![None; *idx];
+                fields[*idx - 1] = Some(rd.clone());
+                map_join(&mut m, demand_expr(cx, &args[0], &Demand::Fields(fields), false));
+                return m;
+            }
             if let Some(row) = cx.callee_row(original, &Demand::Head) {
                 apply_callee_row(cx, &mut m, &row, args.iter());
             }
@@ -2538,8 +2539,14 @@ fn collect_fn_refs<'t>(
             if fn_names.contains(original.as_str()) {
                 poisoned.insert(original.clone());
             }
-            if fn_names.contains(specialized.as_str()) {
-                poisoned.insert(specialized.clone());
+            // Only the bare-host form can spell a tracked name directly
+            // (the string protocol's other payloads carried a helper
+            // prefix, so the old whole-string comparison never matched
+            // them — preserved exactly by the typed match).
+            if let SpecKind::Host(name) = specialized
+                && fn_names.contains(name.as_str())
+            {
+                poisoned.insert(name.clone());
             }
         }
         TExprKind::DictCall { func_name, .. } => {

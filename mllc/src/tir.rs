@@ -617,6 +617,56 @@ impl TClause {
     }
 }
 
+/// What a `SpecCall` dispatches to. Previously a `helper:payload` STRING
+/// protocol, encoded in mono / the typechecker's FFI lowering / derive and
+/// re-parsed independently by codegen, DCE and demand analysis — fragile
+/// because an embedded function name may itself contain ':' (an instance
+/// method of a type operator, `gFields_:*: a b_…`), so every parser had to
+/// split exactly the way its encoder joined. The typed vocabulary makes
+/// the payloads unmistakable; nothing parses anything.
+///
+/// Host-name convention (`Host`, `Io`, `IoTup`, `TupRet`, `Iter`, `Try`,
+/// `Pcall`, `IoPcall`): the string is the host function exactly as the
+/// FFI declaration spelled it — a bare or dotted path (`string.rep`), or
+/// `:method` for a method call on the first argument. Codegen keeps that
+/// one-character dispatch; it is a property of host names, not of this
+/// encoding.
+#[derive(Debug, Clone)]
+pub enum SpecKind {
+    /// Pure single-return FFI: `host(args…)`, result type-decoded.
+    Host(String),
+    /// IO FFI: the call wrapped as an action closure.
+    Io(String),
+    /// IO FFI with an N-value multi-return packed into a tuple table.
+    IoTup { arity: usize, host: String },
+    /// Pure FFI with an N-value multi-return packed into a tuple table.
+    TupRet { arity: usize, host: String },
+    /// LuaIterator FFI: drain the host iterator into a list.
+    Iter(String),
+    /// LuaTry / LuaCatch / LuaIOCatch FFI: pcall-captured host call.
+    Try(String),
+    Pcall(String),
+    IoPcall(String),
+    /// A Lua constant path (`math.pi`) — read, not called.
+    Const(String),
+    /// Runtime element-wise helpers, threading one element function
+    /// (a mata-ll function name, `lua_ref`-resolved at emission).
+    ListEq(String),
+    MaybeEq(String),
+    ShowList(String),
+    ShowMaybe(String),
+    /// Tuple `==`: one eq function per element, in element order.
+    TupleEq(Vec<String>),
+    /// Derived tuple-show projection: force field `idx` (1-based).
+    TupGet(usize),
+    /// Dictionary table literal `{ m = impl, … }` for a concrete instance.
+    Dict { class: String, methods: Vec<(String, String)> },
+    /// Constructed dictionary for a parameterized instance: each method is
+    /// the dictionary-form implementation partially applied to the context
+    /// dictionaries, which arrive as the call's args.
+    DictCtor { class: String, methods: Vec<(String, String)> },
+}
+
 #[derive(Debug, Clone)]
 pub enum TExprKind {
     Var(String),
@@ -648,11 +698,13 @@ pub enum TExprKind {
     },
     Paren(Box<TExpr>),
     OpFunc(String),
-    /// A call to a specific monomorphized specialization.
-    /// Original name + mangled specialized name.
+    /// A call to a runtime helper, an FFI lowering, or a synthesized
+    /// dictionary — the typed dispatch (`SpecKind`) plus the source-level
+    /// name it stands for (`original`, what DCE keeps live and demand
+    /// analysis keys rows by).
     SpecCall {
         original: String,
-        specialized: String,
+        specialized: SpecKind,
         args: Vec<TExpr>,
     },
     Tuple(Vec<TExpr>),

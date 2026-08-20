@@ -66,7 +66,7 @@ impl CodeGen {
                     && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
                 self.is_cheap_to_force(rhs),
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => true,
-            TExprKind::SpecCall { specialized, .. } if specialized.starts_with("__mll_io:") => true,
+            TExprKind::SpecCall { specialized: SpecKind::Io(_), .. } => true,
             _ if Self::st_intrinsic_fused(a).is_some() => true,
             _ => false,
         }
@@ -232,8 +232,8 @@ impl CodeGen {
                 self.expr_ast(expr)
             }
             // IO SpecCall: inline the Lua call directly (skip closure)
-            TExprKind::SpecCall { specialized, args, .. } if specialized.starts_with("__mll_io:") => {
-                let lua_func = &specialized["__mll_io:".len()..];
+            TExprKind::SpecCall { specialized: SpecKind::Io(host), args, .. } => {
+                let lua_func = host.as_str();
                 // Type-directed decode of the FFI result: the host's raw Lua
                 // value (arrays, dicts, nested records) is converted into the
                 // mata-ll representation before it reaches mata-ll code.

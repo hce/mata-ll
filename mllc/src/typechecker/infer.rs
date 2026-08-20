@@ -2061,7 +2061,7 @@ impl Checker {
             let body = TExpr::new(
                 TExprKind::SpecCall {
                     original: name.to_string(),
-                    specialized: format!("__mll_const:{}", lua_name),
+                    specialized: SpecKind::Const(lua_name.to_string()),
                     args: vec![],
                 },
                 ret_ty.clone(),
@@ -2145,18 +2145,20 @@ impl Checker {
         };
 
         let specialized = match ffi_kind {
-            FfiKind::Iterator => format!("__mll_iter:{}", lua_name),
-            FfiKind::Try => format!("__mll_try:{}", lua_name),
-            FfiKind::Catch => format!("__mll_pcall:{}", lua_name),
-            FfiKind::IOCatch => format!("__mll_iopcall:{}", lua_name),
-            FfiKind::IO if tuple_arity.is_some() => {
-                format!("__mll_io_tup:{}:{}", tuple_arity.unwrap(), lua_name)
-            }
-            FfiKind::IO => format!("__mll_io:{}", lua_name),
-            _ if tuple_arity.is_some() => {
-                format!("__mll_tup_ret:{}:{}", tuple_arity.unwrap(), lua_name)
-            }
-            _ => lua_name.to_string(),
+            FfiKind::Iterator => SpecKind::Iter(lua_name.to_string()),
+            FfiKind::Try => SpecKind::Try(lua_name.to_string()),
+            FfiKind::Catch => SpecKind::Pcall(lua_name.to_string()),
+            FfiKind::IOCatch => SpecKind::IoPcall(lua_name.to_string()),
+            FfiKind::IO if tuple_arity.is_some() => SpecKind::IoTup {
+                arity: tuple_arity.unwrap(),
+                host: lua_name.to_string(),
+            },
+            FfiKind::IO => SpecKind::Io(lua_name.to_string()),
+            _ if tuple_arity.is_some() => SpecKind::TupRet {
+                arity: tuple_arity.unwrap(),
+                host: lua_name.to_string(),
+            },
+            _ => SpecKind::Host(lua_name.to_string()),
         };
 
         let body = TExpr::new(

@@ -1318,7 +1318,7 @@ impl Checker {
                     let proj = TExpr::new(
                         TExprKind::SpecCall {
                             original: format!("_t_{}", i),
-                            specialized: format!("__mll_tup_get:{}", i + 1),
+                            specialized: SpecKind::TupGet(i + 1),
                             args: vec![value.clone()],
                         },
                         ety.clone(),

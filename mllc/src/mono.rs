@@ -1427,7 +1427,7 @@ impl Monomorphizer {
         ty: &Ty,
         param_names: &[&str],
         result_ty: Ty,
-        build_spec: impl FnOnce(&mut Self) -> String,
+        build_spec: impl FnOnce(&mut Self) -> SpecKind,
     ) -> String {
         let mangled = match self.memo_or_mangle(method, base, ty) {
             Ok(existing) => return existing,
@@ -1492,7 +1492,7 @@ impl Monomorphizer {
                 let names: Vec<String> = elem_tys.iter()
                     .map(|et| slf.resolve_elem_eq(et))
                     .collect();
-                format!("__mll_tuple_eq:{}:{}", elem_tys.len(), names.join(","))
+                SpecKind::TupleEq(names)
             })
     }
 
@@ -1500,7 +1500,7 @@ impl Monomorphizer {
         let list_ty = Ty::List(Box::new(elem_ty.clone()));
         let elem_ty = elem_ty.clone();
         self.synthetic_spec_fn("==", "eq", &list_ty, &["_a", "_b"], Ty::Con("Bool".into()),
-            move |slf| format!("__mll_list_eq:{}", slf.resolve_elem_eq(&elem_ty)))
+            move |slf| SpecKind::ListEq(slf.resolve_elem_eq(&elem_ty)))
     }
 
     fn is_maybe_type(ty: &Ty) -> bool {
@@ -1519,29 +1519,33 @@ impl Monomorphizer {
         let maybe_ty = Ty::app(Ty::Con("Maybe".into()), inner_ty.clone());
         let inner_ty = inner_ty.clone();
         self.synthetic_spec_fn("==", "eq", &maybe_ty, &["_a", "_b"], Ty::Con("Bool".into()),
-            move |slf| format!("__mll_maybe_eq:{}", slf.resolve_elem_eq(&inner_ty)))
+            move |slf| SpecKind::MaybeEq(slf.resolve_elem_eq(&inner_ty)))
     }
 
     fn generate_container_show(&mut self, ty: &Ty) -> Option<String> {
         match ty {
             Ty::List(elem_ty) =>
-                Some(self.generate_threaded_show(ty, elem_ty, "__mll_show_list")),
+                Some(self.generate_threaded_show(ty, elem_ty, SpecKind::ShowList)),
             // Maybe is type-directed: Just x and x share a runtime rep, so the
             // element show plus the type recover the structure (nil == Nothing).
             Ty::App(f, elem_ty) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") =>
-                Some(self.generate_threaded_show(ty, elem_ty, "__mll_show_maybe")),
+                Some(self.generate_threaded_show(ty, elem_ty, SpecKind::ShowMaybe)),
             _ => None,
         }
     }
 
     /// Generate a `show` wrapper that threads the element show into a runtime
-    /// helper (`__mll_show_list` / `__mll_show_maybe`). Shared by the container
-    /// arms above so list and Maybe stay in lockstep.
-    fn generate_threaded_show(&mut self, ty: &Ty, elem_ty: &Ty, runtime_fn: &str) -> String {
+    /// helper (`make` is `SpecKind::ShowList` / `SpecKind::ShowMaybe`).
+    /// Shared by the container arms above so list and Maybe stay in lockstep.
+    fn generate_threaded_show(
+        &mut self,
+        ty: &Ty,
+        elem_ty: &Ty,
+        make: fn(String) -> SpecKind,
+    ) -> String {
         let elem_ty = elem_ty.clone();
-        let runtime_fn = runtime_fn.to_string();
         self.synthetic_spec_fn("show", "show", ty, &["_x"], Ty::Con("String".into()),
-            move |slf| format!("{}:{}", runtime_fn, slf.resolve_show_for(&elem_ty)))
+            move |slf| make(slf.resolve_show_for(&elem_ty)))
     }
 
     /// Resolve the show function name for a given type.
@@ -1588,7 +1592,7 @@ impl Monomorphizer {
             let field_access = TExpr::new(
                 TExprKind::SpecCall {
                     original: format!("_t_{}", i),
-                    specialized: format!("__mll_tup_get:{}", i + 1),
+                    specialized: SpecKind::TupGet(i + 1),
                     args: vec![TExpr::new(TExprKind::Var(param_name.clone()), tuple_ty.clone())],
                 },
                 elem_tys[i].clone(),
@@ -2127,9 +2131,12 @@ impl Monomorphizer {
                     self.instance_methods.get(&(method_name.clone(), h)).cloned()
                 }))
                 .unwrap_or_else(|| method_name.clone());
-            method_impls.push(format!("{}={}", method_name, impl_name));
+            method_impls.push((method_name.clone(), impl_name));
         }
-        let spec = format!("__mll_dict:{}:{}", class_name, method_impls.join(","));
+        let spec = SpecKind::Dict {
+            class: class_name.to_string(),
+            methods: method_impls,
+        };
         TExpr::new(
             TExprKind::SpecCall {
                 original: format!("__dict_{}", class_name),
@@ -2290,14 +2297,10 @@ impl Monomorphizer {
                     sub_dicts.push(self.build_dict_expr(
                         &c.class_name, &sub_ty, class_to_dict, env));
                 }
-                let spec = format!(
-                    "__mll_dictc:{}:{}",
-                    class_name,
-                    methods.iter()
-                        .map(|(m, f)| format!("{}={}", m, f))
-                        .collect::<Vec<_>>()
-                        .join(","),
-                );
+                let spec = SpecKind::DictCtor {
+                    class: class_name.to_string(),
+                    methods: methods.clone(),
+                };
                 return TExpr::new(
                     TExprKind::SpecCall {
                         original: format!("__dict_{}", class_name),

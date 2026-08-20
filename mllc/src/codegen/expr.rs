@@ -1205,67 +1205,43 @@ impl CodeGen {
         }
     }
 
-    /// Decompose a counted spec payload `N:payload` — the encoding the
-    /// monomorphizer and FFI lowering use for tuple specs
-    /// (`__mll_tuple_eq:N:eqs`, `__mll_tup_ret:N:fn`, `__mll_io_tup:N:fn`).
-    /// A malformed payload is an ENCODER bug (the spec strings are built in
-    /// mono.rs / the typechecker's FFI lowering), so fail naming the spec
-    /// instead of unwrapping bare with no context.
-    fn counted_spec<'s>(kind: &str, rest: &'s str) -> (usize, &'s str) {
-        let (n, payload) = rest.split_once(':').unwrap_or_else(|| {
-            panic!("malformed {kind} spec {rest:?}: missing count separator (encoder bug)")
-        });
-        let n = n.parse().unwrap_or_else(|_| {
-            panic!("malformed {kind} spec {rest:?}: non-numeric count (encoder bug)")
-        });
-        (n, payload)
-    }
-
     /// The SpecCall arms of the expression walk, split out only to keep
-    /// `expr_ast_inner` readable. Same arm-for-arm structure as before.
-    fn spec_call_ast(&mut self, specialized: &str, args: &[TExpr], expr: &TExpr) -> Expr {
-        if let Some(rest) = specialized.strip_prefix("__mll_dict:") {
-            // Dictionary table literal: { method1 = impl1, method2 = impl2 }
-            let parts: Vec<&str> = rest.splitn(2, ':').collect();
-            let methods = if parts.len() > 1 { parts[1] } else { "" };
-            let mut items = Vec::new();
-            for entry in methods.split(',') {
-                if entry.is_empty() { continue; }
-                let kv: Vec<&str> = entry.splitn(2, '=').collect();
-                if kv.len() == 2 {
-                    let sv = sanitize_name(kv[1]);
+    /// `expr_ast_inner` readable — one arm per `SpecKind` variant (the
+    /// former `helper:payload` string protocol, now typed in tir.rs).
+    fn spec_call_ast(&mut self, specialized: &SpecKind, args: &[TExpr], expr: &TExpr) -> Expr {
+        match specialized {
+            SpecKind::Dict { methods, .. } => {
+                // Dictionary table literal: { method1 = impl1, method2 = impl2 }
+                let mut items = Vec::new();
+                for (m, f) in methods {
+                    let sv = sanitize_name(f);
                     items.push(Item::KV(
-                        format!("{} = ", sanitize_name(kv[0])),
+                        format!("{} = ", sanitize_name(m)),
                         Expr::name(self.lua_ref(&sv)),
                     ));
                 }
+                Expr::TableSpaced(items)
             }
-            Expr::TableSpaced(items)
-        } else if let Some(rest) = specialized.strip_prefix("__mll_dictc:") {
-            // A CONSTRUCTED dictionary for a parameterized instance
-            // (`instance C a => C [a]`): each method is the instance's
-            // dictionary-form implementation partially applied to the
-            // context's dictionaries, which arrive as `args` (one per
-            // context constraint, in declaration order). Emits
-            //   (function(__cd1, …) return { m = function(...)
-            //       return impl(__cd1, …, ...) end, … } end)(<dicts>)
-            let parts: Vec<&str> = rest.splitn(2, ':').collect();
-            let methods = if parts.len() > 1 { parts[1] } else { "" };
-            let n_dicts = args.len();
-            let dict_params: Vec<String> =
-                (0..n_dicts).map(|i| format!("__cd{}", i + 1)).collect();
-            let mut items = Vec::new();
-            for entry in methods.split(',') {
-                if entry.is_empty() { continue; }
-                let kv: Vec<&str> = entry.splitn(2, '=').collect();
-                if kv.len() == 2 {
-                    let sv = sanitize_name(kv[1]);
+            SpecKind::DictCtor { methods, .. } => {
+                // A CONSTRUCTED dictionary for a parameterized instance
+                // (`instance C a => C [a]`): each method is the instance's
+                // dictionary-form implementation partially applied to the
+                // context's dictionaries, which arrive as `args` (one per
+                // context constraint, in declaration order). Emits
+                //   (function(__cd1, …) return { m = function(...)
+                //       return impl(__cd1, …, ...) end, … } end)(<dicts>)
+                let n_dicts = args.len();
+                let dict_params: Vec<String> =
+                    (0..n_dicts).map(|i| format!("__cd{}", i + 1)).collect();
+                let mut items = Vec::new();
+                for (m, f) in methods {
+                    let sv = sanitize_name(f);
                     let impl_ref = self.lua_ref(&sv);
                     let mut impl_args: Vec<Expr> =
                         dict_params.iter().map(|p| Expr::name(p.clone())).collect();
                     impl_args.push(Expr::name("..."));
                     items.push(Item::KV(
-                        format!("{} = ", sanitize_name(kv[0])),
+                        format!("{} = ", sanitize_name(m)),
                         Expr::Func(
                             vec!["...".into()],
                             FuncBody::Inline(vec![Stmt::Return(Expr::call_named(
@@ -1274,289 +1250,305 @@ impl CodeGen {
                         ),
                     ));
                 }
-            }
-            let mut cargs = Vec::new();
-            for a in args {
-                cargs.push(self.expr_ast(a));
-            }
-            Expr::call(
-                Expr::paren(Expr::Func(
-                    dict_params,
-                    FuncBody::Inline(vec![Stmt::Return(Expr::TableSpaced(items))]),
-                )),
-                cargs,
-            )
-        } else if let Some(elem_eq) = specialized.strip_prefix("__mll_list_eq:") {
-            // List eq: recursive element-wise comparison
-            let eq_ref = self.lua_ref(elem_eq);
-            let a0 = self.expr_ast(&args[0]);
-            let a1 = self.expr_ast(&args[1]);
-            Expr::call_named("__mll_list_eq", vec![Expr::name(eq_ref), a0, a1])
-        } else if let Some(elem_eq) = specialized.strip_prefix("__mll_maybe_eq:") {
-            // Maybe eq: Nothing==Nothing, Just a == Just b iff a==b
-            let eq_ref = self.lua_ref(elem_eq);
-            let a0 = self.expr_ast(&args[0]);
-            let a1 = self.expr_ast(&args[1]);
-            Expr::call_named("__mll_maybe_eq", vec![Expr::name(eq_ref), a0, a1])
-        } else if let Some(rest) = specialized.strip_prefix("__mll_tuple_eq:") {
-            // Tuple eq: compare element-wise
-            // Format: __mll_tuple_eq:N:eq_E1,eq_E2,...
-            let (n, payload) = Self::counted_spec("__mll_tuple_eq", rest);
-            let eq_fns: Vec<&str> = payload.split(',').collect();
-            let mut acc: Option<Expr> = None;
-            for (i, eq_fn) in eq_fns.iter().enumerate().take(n) {
-                let eq_ref = self.lua_ref(eq_fn);
-                // Indexing base: the tuple cell must be WHNF, but a
-                // concrete variable / already-forcing emission needs
-                // no extra wrapper (see forced_prefix_ast).
-                let l = self.forced_prefix_ast(&args[0]);
-                let r = self.forced_prefix_ast(&args[1]);
-                let cmp = Expr::call_named(
-                    &eq_ref,
-                    vec![
-                        Expr::index(l, format!("[{}]", i + 1)),
-                        Expr::index(r, format!("[{}]", i + 1)),
-                    ],
-                );
-                acc = Some(match acc {
-                    None => cmp,
-                    Some(prev) => Expr::binop("and", prev, cmp),
-                });
-            }
-            Expr::paren(acc.unwrap_or_else(|| Expr::raw("")))
-        } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_list:") {
-            // Specialized list show: iterate with element show function
-            let show_ref = self.lua_ref(elem_show);
-            let a0 = self.expr_ast(&args[0]);
-            Expr::call_named("__mll_show_list", vec![Expr::name(show_ref), a0])
-        } else if let Some(elem_show) = specialized.strip_prefix("__mll_show_maybe:") {
-            // Specialized Maybe show: type-directed, so Just/Nothing are
-            // recovered from the element type (nil == Nothing).
-            let show_ref = self.lua_ref(elem_show);
-            let a0 = self.expr_ast(&args[0]);
-            Expr::call_named("__mll_show_maybe", vec![Expr::name(show_ref), a0])
-        } else if let Some(lua_name) = specialized.strip_prefix("__mll_const:") {
-            // Constant access: math.pi (no function call)
-            Expr::name(lua_name)
-        } else if let Some(idx) = specialized.strip_prefix("__mll_tup_get:") {
-            // Tuple field access for the derived tuple `show`: force
-            // BOTH the tuple cell (outer `__force`) AND the projected
-            // field (inner `__force`). This is a value-consumer — the
-            // field is handed to `show_E`, which itself forces only one
-            // layer, so a now-lazily-built tuple field (a thunk) must be
-            // forced to WHNF here or `show` renders the raw thunk table.
-            // (Tuple `==` does the same via its `__force(a)[i]` inline;
-            // this projection is otherwise the sole `__mll_tup_get`
-            // consumer, generated only by generate_tuple_show.)
-            let base = self.forced_prefix_ast(&args[0]);
-            Expr::force(Expr::index(base, format!("[{}]", idx)))
-        } else if let Some(rest) = specialized.strip_prefix("__mll_tup_ret:") {
-            // Multi-return FFI: pack Lua multiple returns into a tuple table
-            // Format: __mll_tup_ret:N:lua_func
-            let (n, lua_func) = Self::counted_spec("__mll_tup_ret", rest);
-            let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
-            let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
-            // Decode the packed tuple like every other FFI result: a
-            // missing or wrong-typed return value fails with a clear
-            // localized error, and structured elements (lists, Maybe,
-            // records) are converted to the mata-ll representation.
-            let decode = self.ffi_decode_desc(&expr.ty);
-            let tuple = Expr::Table(
-                vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
-            );
-            let ret = match &decode {
-                Some(desc) => Expr::call_named(
-                    "__mll_ffi_decode",
-                    vec![
-                        Expr::raw(desc.clone()),
-                        tuple,
-                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                    ],
-                ),
-                None => tuple,
-            };
-            Expr::call(
-                Expr::paren(Expr::Func(
-                    vec![],
-                    FuncBody::Inline(vec![
-                        Stmt::Local(vars, Some(call)),
-                        Stmt::Return(ret),
-                    ]),
-                )),
-                vec![],
-            )
-        } else if let Some(lua_func) = specialized.strip_prefix("__mll_iter:") {
-            // Iterator FFI: the result type is a list `[element]` (see the
-            // LuaIterator reduction). Each iterator step yields one
-            // `element`, which must be decoded the same way an ordinary
-            // FFI result is — a list element becomes a cons list, a Maybe
-            // is wrapped, a structured element is validated. Without this,
-            // a structured element (a list, chiefly) was stored as a raw
-            // Lua value, so `show`/any consumer failed later with a
-            // baffling "raw value" error. A scalar/opaque element needs
-            // no descriptor (`nil`), keeping the common iterator's exact
-            // old codegen.
-            let elem_desc = match &expr.ty {
-                Ty::List(elem) =>
-                    self.ffi_decode_desc_inner(elem, &mut Vec::new(), None).map(|d| d.0),
-                _ => None,
-            };
-            let desc_args = |elem_desc: &Option<String>| -> Vec<Expr> {
-                match elem_desc {
-                    Some(desc) => vec![
-                        Expr::raw(desc.clone()),
-                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                    ],
-                    None => vec![Expr::lit("nil"), Expr::lit("nil")],
+                let mut cargs = Vec::new();
+                for a in args {
+                    cargs.push(self.expr_ast(a));
                 }
-            };
-            // __mll_iter(factory, decode_desc, root, arg0, arg1, ...)
-            if let Some(method) = lua_func.strip_prefix(':') {
-                // Method-form iterator (`LuaIterator ":gmatch" [...]`):
-                // the factory is a method on the first argument. A
-                // method name is not a Lua expression, so bind the
-                // receiver once and pass the method function with the
-                // receiver as the factory's first argument
-                // (`__recv.m(__recv, ...)` ≡ `__recv:m(...)`).
-                let recv = self.forced_ast(&args[0]);
-                let mut iter_args = vec![Expr::name(format!("__recv.{}", method))];
-                iter_args.extend(desc_args(&elem_desc));
-                iter_args.push(Expr::name("__recv"));
-                iter_args.extend(self.ffi_args_ast(&args[1..]));
+                Expr::call(
+                    Expr::paren(Expr::Func(
+                        dict_params,
+                        FuncBody::Inline(vec![Stmt::Return(Expr::TableSpaced(items))]),
+                    )),
+                    cargs,
+                )
+            }
+            SpecKind::ListEq(elem_eq) => {
+                // List eq: recursive element-wise comparison
+                let eq_ref = self.lua_ref(elem_eq);
+                let a0 = self.expr_ast(&args[0]);
+                let a1 = self.expr_ast(&args[1]);
+                Expr::call_named("__mll_list_eq", vec![Expr::name(eq_ref), a0, a1])
+            }
+            SpecKind::MaybeEq(elem_eq) => {
+                // Maybe eq: Nothing==Nothing, Just a == Just b iff a==b
+                let eq_ref = self.lua_ref(elem_eq);
+                let a0 = self.expr_ast(&args[0]);
+                let a1 = self.expr_ast(&args[1]);
+                Expr::call_named("__mll_maybe_eq", vec![Expr::name(eq_ref), a0, a1])
+            }
+            SpecKind::TupleEq(eq_fns) => {
+                // Tuple eq: compare element-wise
+                let mut acc: Option<Expr> = None;
+                for (i, eq_fn) in eq_fns.iter().enumerate() {
+                    let eq_ref = self.lua_ref(eq_fn);
+                    // Indexing base: the tuple cell must be WHNF, but a
+                    // concrete variable / already-forcing emission needs
+                    // no extra wrapper (see forced_prefix_ast).
+                    let l = self.forced_prefix_ast(&args[0]);
+                    let r = self.forced_prefix_ast(&args[1]);
+                    let cmp = Expr::call_named(
+                        &eq_ref,
+                        vec![
+                            Expr::index(l, format!("[{}]", i + 1)),
+                            Expr::index(r, format!("[{}]", i + 1)),
+                        ],
+                    );
+                    acc = Some(match acc {
+                        None => cmp,
+                        Some(prev) => Expr::binop("and", prev, cmp),
+                    });
+                }
+                Expr::paren(acc.unwrap_or_else(|| Expr::raw("")))
+            }
+            SpecKind::ShowList(elem_show) => {
+                // Specialized list show: iterate with element show function
+                let show_ref = self.lua_ref(elem_show);
+                let a0 = self.expr_ast(&args[0]);
+                Expr::call_named("__mll_show_list", vec![Expr::name(show_ref), a0])
+            }
+            SpecKind::ShowMaybe(elem_show) => {
+                // Specialized Maybe show: type-directed, so Just/Nothing are
+                // recovered from the element type (nil == Nothing).
+                let show_ref = self.lua_ref(elem_show);
+                let a0 = self.expr_ast(&args[0]);
+                Expr::call_named("__mll_show_maybe", vec![Expr::name(show_ref), a0])
+            }
+            SpecKind::Const(lua_name) => {
+                // Constant access: math.pi (no function call)
+                Expr::name(lua_name.as_str())
+            }
+            SpecKind::TupGet(idx) => {
+                // Tuple field access for the derived tuple `show`: force
+                // BOTH the tuple cell (outer `__force`) AND the projected
+                // field (inner `__force`). This is a value-consumer — the
+                // field is handed to `show_E`, which itself forces only one
+                // layer, so a now-lazily-built tuple field (a thunk) must be
+                // forced to WHNF here or `show` renders the raw thunk table.
+                // (Tuple `==` does the same via its `__force(a)[i]` inline;
+                // this projection is otherwise the sole `__mll_tup_get`
+                // consumer, generated only by generate_tuple_show.)
+                let base = self.forced_prefix_ast(&args[0]);
+                Expr::force(Expr::index(base, format!("[{}]", idx)))
+            }
+            SpecKind::TupRet { arity, host } => {
+                // Multi-return FFI: pack Lua multiple returns into a tuple table
+                let lua_func = host.as_str();
+                let vars: Vec<String> = (0..*arity).map(|i| format!("_r{}", i)).collect();
+                let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
+                // Decode the packed tuple like every other FFI result: a
+                // missing or wrong-typed return value fails with a clear
+                // localized error, and structured elements (lists, Maybe,
+                // records) are converted to the mata-ll representation.
+                let decode = self.ffi_decode_desc(&expr.ty);
+                let tuple = Expr::Table(
+                    vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
+                );
+                let ret = match &decode {
+                    Some(desc) => Expr::call_named(
+                        "__mll_ffi_decode",
+                        vec![
+                            Expr::raw(desc.clone()),
+                            tuple,
+                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                        ],
+                    ),
+                    None => tuple,
+                };
                 Expr::call(
                     Expr::paren(Expr::Func(
                         vec![],
                         FuncBody::Inline(vec![
-                            Stmt::Local(vec!["__recv".into()], Some(recv)),
-                            Stmt::Return(Expr::call_named("__mll_iter", iter_args)),
+                            Stmt::Local(vars, Some(call)),
+                            Stmt::Return(ret),
                         ]),
                     )),
                     vec![],
                 )
-            } else {
-                let mut iter_args = vec![Expr::name(lua_func)];
-                iter_args.extend(desc_args(&elem_desc));
-                iter_args.extend(self.ffi_args_ast(args));
-                Expr::call_named("__mll_iter", iter_args)
             }
-        } else if let Some(lua_func) = specialized.strip_prefix("__mll_try:") {
-            // Try FFI: wrap the (val, err) convention in Either via
-            // __mll_try. The SUCCESS payload crosses the FFI boundary
-            // like any other result, so it carries the same
-            // type-directed decode descriptor (a raw Lua array where
-            // [Int] was declared must become a cons list, not be
-            // walked as a cons cell later).
-            let desc = self.ffi_catch_decode_desc(&expr.ty);
-            let desc_str = desc.as_deref().unwrap_or("false").to_string();
-            let root = Self::ffi_root_name(lua_func);
-            let call = if let Some(method) = lua_func.strip_prefix(':') {
-                // Method call try: handle:method(args)
+            SpecKind::Iter(host) => {
+                // Iterator FFI: the result type is a list `[element]` (see the
+                // LuaIterator reduction). Each iterator step yields one
+                // `element`, which must be decoded the same way an ordinary
+                // FFI result is — a list element becomes a cons list, a Maybe
+                // is wrapped, a structured element is validated. Without this,
+                // a structured element (a list, chiefly) was stored as a raw
+                // Lua value, so `show`/any consumer failed later with a
+                // baffling "raw value" error. A scalar/opaque element needs
+                // no descriptor (`nil`), keeping the common iterator's exact
+                // old codegen.
+                let lua_func = host.as_str();
+                let elem_desc = match &expr.ty {
+                    Ty::List(elem) =>
+                        self.ffi_decode_desc_inner(elem, &mut Vec::new(), None).map(|d| d.0),
+                    _ => None,
+                };
+                let desc_args = |elem_desc: &Option<String>| -> Vec<Expr> {
+                    match elem_desc {
+                        Some(desc) => vec![
+                            Expr::raw(desc.clone()),
+                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                        ],
+                        None => vec![Expr::lit("nil"), Expr::lit("nil")],
+                    }
+                };
+                // __mll_iter(factory, decode_desc, root, arg0, arg1, ...)
+                if let Some(method) = lua_func.strip_prefix(':') {
+                    // Method-form iterator (`LuaIterator ":gmatch" [...]`):
+                    // the factory is a method on the first argument. A
+                    // method name is not a Lua expression, so bind the
+                    // receiver once and pass the method function with the
+                    // receiver as the factory's first argument
+                    // (`__recv.m(__recv, ...)` ≡ `__recv:m(...)`).
+                    let recv = self.forced_ast(&args[0]);
+                    let mut iter_args = vec![Expr::name(format!("__recv.{}", method))];
+                    iter_args.extend(desc_args(&elem_desc));
+                    iter_args.push(Expr::name("__recv"));
+                    iter_args.extend(self.ffi_args_ast(&args[1..]));
+                    Expr::call(
+                        Expr::paren(Expr::Func(
+                            vec![],
+                            FuncBody::Inline(vec![
+                                Stmt::Local(vec!["__recv".into()], Some(recv)),
+                                Stmt::Return(Expr::call_named("__mll_iter", iter_args)),
+                            ]),
+                        )),
+                        vec![],
+                    )
+                } else {
+                    let mut iter_args = vec![Expr::name(lua_func)];
+                    iter_args.extend(desc_args(&elem_desc));
+                    iter_args.extend(self.ffi_args_ast(args));
+                    Expr::call_named("__mll_iter", iter_args)
+                }
+            }
+            SpecKind::Try(host) => {
+                // Try FFI: wrap the (val, err) convention in Either via
+                // __mll_try. The SUCCESS payload crosses the FFI boundary
+                // like any other result, so it carries the same
+                // type-directed decode descriptor (a raw Lua array where
+                // [Int] was declared must become a cons list, not be
+                // walked as a cons cell later).
+                let lua_func = host.as_str();
+                let desc = self.ffi_catch_decode_desc(&expr.ty);
+                let desc_str = desc.as_deref().unwrap_or("false").to_string();
+                let root = Self::ffi_root_name(lua_func);
+                let call = if let Some(method) = lua_func.strip_prefix(':') {
+                    // Method call try: handle:method(args)
+                    let recv = self.forced_prefix_ast(&args[0]);
+                    let margs = self.ffi_args_ast(&args[1..]);
+                    Expr::method(recv, method, margs)
+                } else {
+                    // Global function try
+                    Expr::call_named(lua_func, self.ffi_args_ast(args))
+                };
+                Expr::call_named(
+                    "__mll_try",
+                    vec![Expr::raw(desc_str), Expr::raw(format!("{:?}", root)), call],
+                )
+            }
+            SpecKind::Pcall(host) => {
+                // LuaCatch: pure call under pcall, result Either String a.
+                let desc = self.ffi_catch_decode_desc(&expr.ty);
+                self.pcall_call_ast(host, &desc, args)
+            }
+            SpecKind::IoPcall(host) => {
+                // LuaIOCatch: same pcall capture, deferred as an IO action thunk.
+                // Zero-arg still needs a wrapper: the value IS the action.
+                let desc = self.ffi_catch_decode_desc(&expr.ty);
+                let call = self.pcall_call_ast(host, &desc, args);
+                Expr::inline_fn0(call)
+            }
+            SpecKind::Io(host) => {
+                // IO FFI: wrap in action thunk — only performed by >>= / >>
+                // Zero-arg IO (e.g., os.clock): emit raw call without closure wrapper,
+                // since the function definition already wraps in function()...end.
+                let lua_func = host.as_str();
+                let needs_wrapper = !args.is_empty();
+                // Type-directed decode of the FFI result (see action_run_ast).
+                let decode = self.ffi_decode_desc(&expr.ty);
+                let call = if let Some(method) = lua_func.strip_prefix(':') {
+                    // Method call IO: handle:method(args)
+                    let recv = self.forced_prefix_ast(&args[0]);
+                    let margs = self.ffi_args_ast(&args[1..]);
+                    Expr::method(recv, method, margs)
+                } else {
+                    Expr::call_named(lua_func, self.ffi_args_ast(args))
+                };
+                let inner = match &decode {
+                    Some(desc) => Expr::call_named(
+                        "__mll_ffi_decode",
+                        vec![
+                            Expr::raw(desc.clone()),
+                            call,
+                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                        ],
+                    ),
+                    // The declared result is ONE value (multi-return IO uses the
+                    // IoTup arm): truncate the raw host call so extra
+                    // return values cannot spread.
+                    None => Expr::paren(call),
+                };
+                if needs_wrapper { Expr::inline_fn0(inner) } else { inner }
+            }
+            SpecKind::IoTup { arity, host } => {
+                // IO FFI with multi-return: wrap in action thunk
+                let lua_func = host.as_str();
+                let vars: Vec<String> = (0..*arity).map(|i| format!("_r{}", i)).collect();
+                let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
+                // Decode the packed tuple (see the TupRet arm).
+                let decode = self.ffi_decode_desc(&expr.ty);
+                let tuple = Expr::Table(
+                    vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
+                );
+                let ret = match &decode {
+                    Some(desc) => Expr::call_named(
+                        "__mll_ffi_decode",
+                        vec![
+                            Expr::raw(desc.clone()),
+                            tuple,
+                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
+                        ],
+                    ),
+                    None => tuple,
+                };
+                Expr::Func(
+                    vec![],
+                    FuncBody::Inline(vec![Stmt::Local(vars, Some(call)), Stmt::Return(ret)]),
+                )
+            }
+            SpecKind::Host(host) if host.starts_with(':') => {
+                // Method call FFI: arg0:method(arg1, arg2, ...)
+                // The declared result is ONE value; parenthesize so a
+                // multi-returning host method cannot spread extra values into
+                // whatever position this call lands in.
+                let method = &host[1..];
                 let recv = self.forced_prefix_ast(&args[0]);
                 let margs = self.ffi_args_ast(&args[1..]);
-                Expr::method(recv, method, margs)
-            } else {
-                // Global function try
-                Expr::call_named(lua_func, self.ffi_args_ast(args))
-            };
-            Expr::call_named(
-                "__mll_try",
-                vec![Expr::raw(desc_str), Expr::raw(format!("{:?}", root)), call],
-            )
-        } else if let Some(lua_func) = specialized.strip_prefix("__mll_pcall:") {
-            // LuaCatch: pure call under pcall, result Either String a.
-            let desc = self.ffi_catch_decode_desc(&expr.ty);
-            self.pcall_call_ast(lua_func, &desc, args)
-        } else if let Some(lua_func) = specialized.strip_prefix("__mll_iopcall:") {
-            // LuaIOCatch: same pcall capture, deferred as an IO action thunk.
-            // Zero-arg still needs a wrapper: the value IS the action.
-            let desc = self.ffi_catch_decode_desc(&expr.ty);
-            let call = self.pcall_call_ast(lua_func, &desc, args);
-            Expr::inline_fn0(call)
-        } else if let Some(method) = specialized.strip_prefix(':') {
-            // Method call FFI: arg0:method(arg1, arg2, ...)
-            // The declared result is ONE value; parenthesize so a
-            // multi-returning host method cannot spread extra values into
-            // whatever position this call lands in.
-            let recv = self.forced_prefix_ast(&args[0]);
-            let margs = self.ffi_args_ast(&args[1..]);
-            Expr::paren(Expr::method(recv, method, margs))
-        } else if let Some(lua_func) = specialized.strip_prefix("__mll_io:") {
-            // IO FFI: wrap in action thunk — only performed by >>= / >>
-            // Zero-arg IO (e.g., os.clock): emit raw call without closure wrapper,
-            // since the function definition already wraps in function()...end.
-            let needs_wrapper = !args.is_empty();
-            // Type-directed decode of the FFI result (see action_run_ast).
-            let decode = self.ffi_decode_desc(&expr.ty);
-            let call = if let Some(method) = lua_func.strip_prefix(':') {
-                // Method call IO: handle:method(args)
-                let recv = self.forced_prefix_ast(&args[0]);
-                let margs = self.ffi_args_ast(&args[1..]);
-                Expr::method(recv, method, margs)
-            } else {
-                Expr::call_named(lua_func, self.ffi_args_ast(args))
-            };
-            let inner = match &decode {
-                Some(desc) => Expr::call_named(
-                    "__mll_ffi_decode",
-                    vec![
-                        Expr::raw(desc.clone()),
-                        call,
-                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                    ],
-                ),
-                // The declared result is ONE value (multi-return IO uses the
-                // __mll_io_tup arm): truncate the raw host call so extra
-                // return values cannot spread.
-                None => Expr::paren(call),
-            };
-            if needs_wrapper { Expr::inline_fn0(inner) } else { inner }
-        } else if let Some(rest) = specialized.strip_prefix("__mll_io_tup:") {
-            // IO FFI with multi-return: wrap in action thunk
-            let (n, lua_func) = Self::counted_spec("__mll_io_tup", rest);
-            let vars: Vec<String> = (0..n).map(|i| format!("_r{}", i)).collect();
-            let call = Expr::call_named(lua_func, self.ffi_args_ast(args));
-            // Decode the packed tuple (see the __mll_tup_ret arm).
-            let decode = self.ffi_decode_desc(&expr.ty);
-            let tuple = Expr::Table(
-                vars.iter().map(|v| Item::Pos(Expr::name(v.clone()))).collect(),
-            );
-            let ret = match &decode {
-                Some(desc) => Expr::call_named(
-                    "__mll_ffi_decode",
-                    vec![
-                        Expr::raw(desc.clone()),
-                        tuple,
-                        Expr::raw(format!("{:?}", Self::ffi_root_name(lua_func))),
-                    ],
-                ),
-                None => tuple,
-            };
-            Expr::Func(
-                vec![],
-                FuncBody::Inline(vec![Stmt::Local(vars, Some(call)), Stmt::Return(ret)]),
-            )
-        } else {
-            // Regular (pure) FFI: lua_func(arg0, arg1, ...)
-            // Type-directed decode of the result, symmetric with the IO
-            // arms above: e.g. a `Maybe a` result from the host must be
-            // wrapped into the tagged `Just`/`Nothing` representation.
-            let decode = self.ffi_decode_desc(&expr.ty);
-            let call = Expr::call_named(specialized, self.ffi_args_ast(args));
-            match &decode {
-                Some(desc) => Expr::call_named(
-                    "__mll_ffi_decode",
-                    vec![
-                        Expr::raw(desc.clone()),
-                        call,
-                        Expr::raw(format!("{:?}", Self::ffi_root_name(specialized))),
-                    ],
-                ),
-                // The declared result is ONE value (multi-return uses the
-                // __mll_tup_ret arm): truncate the raw host call so extra
-                // return values cannot spread — this is also what makes
-                // compiled-function references provably single-return for
-                // the paren-normalization pass (opt.rs).
-                None => Expr::paren(call),
+                Expr::paren(Expr::method(recv, method, margs))
+            }
+            SpecKind::Host(host) => {
+                // Regular (pure) FFI: lua_func(arg0, arg1, ...)
+                // Type-directed decode of the result, symmetric with the IO
+                // arms above: e.g. a `Maybe a` result from the host must be
+                // wrapped into the tagged `Just`/`Nothing` representation.
+                let decode = self.ffi_decode_desc(&expr.ty);
+                let call = Expr::call_named(host, self.ffi_args_ast(args));
+                match &decode {
+                    Some(desc) => Expr::call_named(
+                        "__mll_ffi_decode",
+                        vec![
+                            Expr::raw(desc.clone()),
+                            call,
+                            Expr::raw(format!("{:?}", Self::ffi_root_name(host))),
+                        ],
+                    ),
+                    // The declared result is ONE value (multi-return uses the
+                    // TupRet arm): truncate the raw host call so extra
+                    // return values cannot spread — this is also what makes
+                    // compiled-function references provably single-return for
+                    // the paren-normalization pass (opt.rs).
+                    None => Expr::paren(call),
+                }
             }
         }
     }
