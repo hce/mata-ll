@@ -614,10 +614,13 @@ impl CodeGen {
             // Force at entry ONLY if the FIRST clause scrutinizes this arg — it
             // is then forced on every path (clause 0 is always tried first). An
             // arg scrutinized only by LATER clauses stays lazy and is forced
-            // inside those clauses' conditions (an `elseif` reached only after
-            // clause 0 fails), so a matching earlier clause never forces it.
-            // This is GHC's top-to-bottom, left-to-right laziness: `zip [] _`
-            // must return `[]` without forcing the second argument.
+            // once earlier clauses have failed — by a single rebind at the
+            // chain split when the next clause provably forces it first
+            // (see later_clause_force_col), per use inside the clause
+            // conditions otherwise — so a matching earlier clause never
+            // forces it. This is GHC's top-to-bottom, left-to-right
+            // laziness: `zip [] _` must return `[]` without forcing the
+            // second argument.
             let needs_force = clauses.first().is_some_and(|c| {
                 c.patterns.get(i).is_some_and(|pat| {
                     !matches!(pat, TPattern::Var(_, _) | TPattern::Wildcard)
@@ -884,8 +887,9 @@ impl CodeGen {
             // scrutinizes it (then every path forces it — clause 0 is always
             // tried first) or the local's demand row proves every path
             // strict; a parameter scrutinized only by LATER clauses stays
-            // lazy and is forced inside those clauses' conditions by
-            // match_scrutinee. That is GHC's top-to-bottom, left-to-right
+            // lazy and is forced after earlier clauses fail — a single
+            // chain-split rebind when sound (later_clause_force_col), else
+            // per use via match_scrutinee. That is GHC's top-to-bottom, left-to-right
             // laziness — a where-local `go [] _ = []` must return [] without
             // forcing its second argument. (Forcing on ANY clause's scrutiny,
             // as this once did, raised on `go [] (error …)`.)

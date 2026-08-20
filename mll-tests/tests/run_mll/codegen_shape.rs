@@ -259,6 +259,43 @@ fn where_group_calls_not_forced() {
     }
 }
 
+/// A parameter scrutinized only by LATER clauses is forced ONCE at the
+/// chain split (`_wargN = __force(_wargN)` in the first clause's `else`),
+/// not per use inside the later clauses' conditions: a deep cons pattern
+/// paid one `__force` per spine step per attempt (salsa's lwGo re-forced
+/// its list four times per iteration; huffman's go, its tree thrice).
+#[test]
+fn later_clause_param_forced_once_at_split() {
+    let source = r#"
+loadWords :: [Int] -> [Int]
+loadWords bs = lw bs 0
+  where
+    lw _ 16 = []
+    lw (b0 : b1 : b2 : b3 : rest) n = (b0 + b1 + b2 + b3) : lw rest (n + 1)
+    lw _ _ = []
+
+main :: IO ()
+main = putStrLn (show (loadWords [1, 2, 3, 4, 5, 6, 7, 8]))
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    // Exactly one force of the list param: the split rebind itself. The
+    // deep-cons clause condition and its bindings read the bare name.
+    let forces: Vec<&str> = lua
+        .lines()
+        .filter(|l| l.contains("__force(_warg0)"))
+        .collect();
+    assert!(
+        forces.len() == 1 && forces[0].trim_start().starts_with("_warg0 = __force(_warg0)"),
+        "list param must be forced exactly once, at the split rebind: {lua}"
+    );
+    assert!(
+        lua.contains("__mll_tail(_warg0)"),
+        "the split clause's condition must read the rebound param bare: {lua}"
+    );
+}
+
 /// Constructor-level DCE: a `data` definition none of whose constructors is
 /// constructed (`Con`) or matched (pattern) by live code contributes NOTHING
 /// to the emitted Lua. Checked two ways: (1) adding a dead user `data`

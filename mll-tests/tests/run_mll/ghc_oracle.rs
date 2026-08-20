@@ -233,6 +233,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_kinds_hkt, "cases", "kinds_hkt.mll"),
         (ghc_oracle_lambdas, "cases", "lambdas.mll"),
         (ghc_oracle_lazy_cheap_bindings, "cases", "lazy_cheap_bindings.mll"),
+        (ghc_oracle_later_clause_force_once, "cases", "later_clause_force_once.mll"),
         (ghc_oracle_lazy_head_projection, "cases", "lazy_head_projection.mll"),
         (ghc_oracle_lazy_index_laziness_contract, "cases", "lazy_index_laziness_contract.mll"),
         (ghc_oracle_lazy_index_thunk_leak, "cases", "lazy_index_thunk_leak.mll"),

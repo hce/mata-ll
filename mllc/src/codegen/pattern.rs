@@ -106,17 +106,50 @@ impl CodeGen {
         if clauses.iter().any(|c| !c.guards.is_empty()) {
             return self.pattern_match_guarded_block_tails(params, clauses, tails);
         }
+        self.match_chain_block(params, clauses, 0, tails)
+    }
+
+    /// The if/elseif chain over `clauses[start..]` (`start` is nonzero only
+    /// in the force-once recursion below). When a split point proves a
+    /// so-far-untouched parameter is forced on every continuation
+    /// (`later_clause_force_col`), the remaining clauses move into the
+    /// chain's `else` behind a single `p = __force(p)` rebind and the param
+    /// is marked concrete, so their conditions read the bare name instead
+    /// of re-forcing per use (a deep cons pattern paid one `__force` per
+    /// spine step per attempt).
+    fn match_chain_block(
+        &mut self,
+        params: &[String],
+        clauses: &[TClause],
+        start: usize,
+        tails: Option<bool>,
+    ) -> Block {
         // When the clauses cover every constructor of the scrutinized type,
         // the last clause's condition is implied by every earlier one failing:
         // emit it as `else` and skip the non-exhaustive error. Only this
         // TIR-facing layer can prove coverage — it has the constructor totals.
-        let exhaustive = self.clauses_cover_all_constructors(clauses);
+        let exhaustive = self.clauses_cover_all_constructors(&clauses[start..]);
         let mut chain: Option<(Expr, Block)> = None;
         let mut elseifs: Vec<(Expr, Block)> = Vec::new();
         let mut else_b: Option<Block> = None;
         let mut direct: Option<Vec<Stmt>> = None;
         let mut fell_through = true;
-        for (i, clause) in clauses.iter().enumerate() {
+        for (i, clause) in clauses.iter().enumerate().skip(start) {
+            if chain.is_some()
+                && let Some(k) = self.later_clause_force_col(params, clauses, i)
+            {
+                let pname = params[k].clone();
+                let mut bs = vec![Stmt::Assign(
+                    pname.clone(),
+                    Expr::force(Expr::name(pname.clone())),
+                )];
+                self.concrete_vars.insert(pname);
+                bs.extend(self.match_chain_block(params, clauses, i, tails).0);
+                else_b = Some(Block(bs));
+                // The nested chain carries its own non-exhaustive fall-off.
+                fell_through = false;
+                break;
+            }
             // Each clause is an independent Lua branch (if/elseif … then … end),
             // so its locals must not leak into sibling clauses. Without this,
             // a name bound in one clause stays in `local_vars` and a later
@@ -140,7 +173,7 @@ impl CodeGen {
                 // early exit (the enclosing function restores its own scope).
                 let mut bs = self.clause_intro_stmts(clause, &bindings);
                 bs.extend(self.match_tail_stmts(clause.plain_body(), tails));
-                if i > 0 {
+                if i > start {
                     else_b = Some(Block(bs));
                 } else {
                     direct = Some(bs);
@@ -183,6 +216,65 @@ impl CodeGen {
             }
         }
         Block(stmts)
+    }
+
+    /// After every clause before `p` has failed, may the chain force
+    /// parameter column k ONCE (`params[k] = __force(params[k])`) without
+    /// changing which thunks GHC's match order evaluates? Sound exactly
+    /// when, for some k:
+    ///
+    ///   - no clause before `p` inspects column k (a matching earlier
+    ///     clause must never force it — GHC clause-order laziness), and
+    ///     the param is not already WHNF (entry-forced / call-site-cheap);
+    ///   - in clause `p`, every column left of k is irrefutable, and
+    ///     column k's pattern contributes at least one test to the clause
+    ///     condition (a single-constructor or bare-newtype pattern
+    ///     contributes none — its force happens in the clause BODY's
+    ///     bindings, which a failing later column skips).
+    ///
+    /// Then clause p's condition — the first thing evaluated on every path
+    /// out of the split, its column-k tests leading because the columns
+    /// left of k contribute nothing — forces k before anything else is
+    /// observable, so hoisting that force to the split point reorders no
+    /// evaluation. At most one column qualifies per split: a second one
+    /// would sit right of the first, whose tests refute "every column left
+    /// of k is irrefutable".
+    fn later_clause_force_col(
+        &self,
+        params: &[String],
+        clauses: &[TClause],
+        p: usize,
+    ) -> Option<usize> {
+        let clause = &clauses[p];
+        'col: for (k, pat) in clause.patterns.iter().enumerate() {
+            if !Self::pattern_inspects_value(pat) {
+                continue;
+            }
+            let Some(pname) = params.get(k) else { continue };
+            if self.concrete_vars.contains(pname) {
+                continue;
+            }
+            if clause.patterns[..k].iter().any(Self::pattern_inspects_value) {
+                continue;
+            }
+            for c in &clauses[..p] {
+                if c.patterns.get(k).is_some_and(Self::pattern_inspects_value) {
+                    continue 'col;
+                }
+            }
+            // Column k must contribute a condition, and every condition a
+            // pattern contributes reads a path rooted at the (forced)
+            // scrutinee — so the first of them forces the param.
+            let scrut = Expr::force(Expr::name(pname.clone()));
+            let mut conds = Vec::new();
+            let mut binds = Vec::new();
+            self.collect_pattern_conditions(&scrut, pat, &mut conds, &mut binds);
+            if conds.is_empty() {
+                continue;
+            }
+            return Some(k);
+        }
+        None
     }
 
     /// Pattern match where at least one clause carries guards. Each clause is
