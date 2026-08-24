@@ -16,25 +16,50 @@
 //!   literal CAF, `abc = 17`) substitutes into its use sites;
 //! - a saturated call to a top-level function whose body is total
 //!   arithmetic over its parameters (`def x = x + 1`), with every
-//!   argument a literal, beta-reduces and folds (`def 5` → `6`).
+//!   argument a literal, beta-reduces and folds (`def 5` → `6`);
+//! - a saturated call that did NOT fold to a literal but whose every
+//!   argument is a literal SPLICES the callee's body in place of the
+//!   call (`print 23` → `putStrLn (show_Int 23)`), for a restricted
+//!   candidate class (see `collect_splice_fns`);
+//! - `show` of a scalar literal, at the natives whose output is fully
+//!   determined at compile time, becomes the shown string
+//!   (`show_Int 23` → `"23"` — see `try_fold_show`).
 //!
 //! Each round can expose new folds for the next (`ghi = abc + def 5`
 //! folds to `23` once `abc` has propagated and `def 5` has reduced, and
 //! `ghi` is then itself a literal CAF for ITS users), so the module is
-//! re-folded until nothing changes.  Termination: every rewrite either
-//! replaces a non-literal node with a literal or drops nodes (the `if`
-//! fold), and no rewrite introduces a non-literal node, so the count of
-//! non-literal nodes strictly decreases on every changed round.
+//! re-folded until nothing changes.  Termination: the literal folds
+//! replace a non-literal node with a literal or drop nodes (the `if`
+//! fold) and introduce no non-literal node, so their count of
+//! non-literal nodes strictly decreases; splicing DOES introduce nodes,
+//! but the splice candidates form an acyclic reference graph by
+//! construction (`collect_splice_fns` prunes every candidate that can
+//! reach itself through other candidates), so each spliced body only
+//! contains splice opportunities of strictly smaller graph height.
+//! The two measures compose lexicographically: (multiset of candidate
+//! heights of the module's remaining candidate references, non-literal
+//! node count) decreases on every rewrite.
 //!
-//! Bottom-preservation is inherited from the literal folds: a call is
-//! replaced only when the substituted body folds ALL THE WAY to a
-//! literal, and the folds decline every partial case — a trapping
-//! `div`/`mod` by literal zero, `i64` overflow, an `if` whose condition
-//! did not fold — leaving the original expression for the runtime.
-//! Candidate bodies are restricted to binder-free arithmetic shapes
-//! (literals, parameters, operators, negation, parens, `if`), so
-//! parameter substitution cannot capture, and a body that can reach
-//! `error`/`undefined` (an App) is never a candidate in the first place.
+//! Bottom-preservation:
+//! - The arithmetic beta-reduction replaces a call only when the
+//!   substituted body folds ALL THE WAY to a literal, and the folds
+//!   decline every partial case — a trapping `div`/`mod` by literal
+//!   zero, `i64` overflow, an `if` whose condition did not fold —
+//!   leaving the original expression for the runtime.  Its candidate
+//!   bodies are binder-free arithmetic shapes, so substitution cannot
+//!   capture.
+//! - The splice is exact beta-reduction with VALUE arguments: a literal
+//!   is never bottom, costs nothing to re-evaluate, and contains no
+//!   variables, so substituting it at zero, one, or many occurrences —
+//!   in any evaluation position, including a re-performed action body —
+//!   changes neither bottom placement nor sharing.  The spliced body
+//!   itself is emitted where the call stood, so anything it may raise
+//!   (`overZero x = x div 0` spliced at `overZero 7`) still raises
+//!   exactly when the call's result would have been demanded.  The
+//!   remaining hazards are scope-shaped and each has a decline:
+//!   parameter-as-backtick-operator, a call-site local shadowing a free
+//!   name of the body, and body binders shadowing parameters (handled
+//!   inside `subst_literals`).
 
 use std::collections::HashMap;
 
@@ -62,6 +87,7 @@ pub fn fold_module(mut module: TModule) -> TModule {
         let mut folder = Folder {
             cafs: collect_literal_cafs(&module.functions),
             fns: collect_arith_fns(&module.functions),
+            splices: collect_splice_fns(&module.functions),
             shadow: Vec::new(),
             changed: false,
         };
@@ -165,29 +191,247 @@ fn arith_only_body(expr: &TExpr, params: &[String]) -> bool {
     }
 }
 
-/// Substitute literals for parameters in an `arith_only_body` clone.
-/// No binders can occur (checked by `arith_only_body`), so the walk is
-/// capture-free by construction.
+/// Body-size ceiling for splice candidates, in TIR nodes.  Splicing
+/// copies the body to every qualifying call site, so a size cap bounds
+/// the code growth the pass can cause; the cap is generous for the
+/// shapes the splice exists to collapse (wrapper functions like
+/// `print x = putStrLn (show x)` and FFI shims, a handful of nodes
+/// each) and small enough that no site gains a screenful of code.
+const SPLICE_MAX_NODES: usize = 32;
+
+/// A splice candidate: parameter names, per-parameter occurrence counts
+/// (Var occurrences in the body — used to decline duplicating a LARGE
+/// string literal), the body clone, and the body's free names (every
+/// Var and identifier-shaped infix operator that is not a parameter —
+/// an over-approximation that also includes body-local bound names,
+/// which only widens the call-site shadow check below).
+struct SpliceFn {
+    params: Vec<String>,
+    occ: Vec<usize>,
+    body: TExpr,
+    free: std::collections::HashSet<String>,
+}
+
+/// Splice candidates: one clause, all-`Var` patterns, no guards, no
+/// `where`, no dictionary parameters, fully monomorphic types
+/// (signature AND every body annotation — codegen decisions like
+/// action-ness read the annotations, so a body typed at a type
+/// variable must not be transplanted into a concrete context), body
+/// within `SPLICE_MAX_NODES`, and no parameter used as a backtick
+/// operator (an `InfixApp` op is a string, not a `Var` node, so it has
+/// no substitution site).  Finally the set is pruned to an ACYCLIC
+/// reference graph — a least fixpoint from the leaves; any candidate
+/// that can reach itself through other candidates never enters — which
+/// is the splice's termination argument (see the module header).
+fn collect_splice_fns(functions: &[TFunction]) -> HashMap<String, SpliceFn> {
+    let mut cands: HashMap<String, SpliceFn> = HashMap::new();
+    for f in functions {
+        if !f.dict_params.is_empty() || f.clauses.len() != 1 {
+            continue;
+        }
+        let c = &f.clauses[0];
+        if c.patterns.is_empty() || !c.guards.is_empty() || !c.where_binds.is_empty() {
+            continue;
+        }
+        let mut params = Vec::with_capacity(c.patterns.len());
+        if !c.patterns.iter().all(|p| match p {
+            TPattern::Var(n, _) => {
+                params.push(n.clone());
+                true
+            }
+            _ => false,
+        }) {
+            continue;
+        }
+        let Some(body) = &c.body else { continue };
+        if !ty_is_monomorphic(&f.ty) || !expr_types_monomorphic(body) {
+            continue;
+        }
+        if expr_node_count(body) > SPLICE_MAX_NODES {
+            continue;
+        }
+        let mut ops = std::collections::HashSet::new();
+        collect_infix_ops(body, &mut ops);
+        if params.iter().any(|p| ops.contains(p)) {
+            continue;
+        }
+        let mut free = std::collections::HashSet::new();
+        collect_var_reads(body, &mut free);
+        free.extend(ops);
+        for p in &params {
+            free.remove(p);
+        }
+        let occ = params
+            .iter()
+            .map(|p| count_var_occurrences(body, p))
+            .collect();
+        cands.insert(f.name.clone(), SpliceFn { params, occ, body: body.clone(), free });
+    }
+    // Acyclicity pruning: grow the safe set from candidates whose
+    // candidate references are all already safe.  A candidate on a
+    // reference cycle (including a self-reference) never qualifies.
+    let mut safe: std::collections::HashSet<String> = std::collections::HashSet::new();
+    loop {
+        let mut grew = false;
+        for (name, sf) in &cands {
+            if !safe.contains(name)
+                && sf.free.iter().all(|n| !cands.contains_key(n) || safe.contains(n))
+            {
+                safe.insert(name.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
+    cands.retain(|n, _| safe.contains(n));
+    cands
+}
+
+/// No type variable, `forall`, or skolem anywhere in the type.  The
+/// `LuaIO` scope parameter is exempt: it is a PHANTOM (`LuaIO s a`)
+/// that never reaches a value position, so it does not make an FFI
+/// wrapper's type polymorphic.
+fn ty_is_monomorphic(ty: &Ty) -> bool {
+    match ty {
+        Ty::Var(_) | Ty::Forall(..) | Ty::Skolem(..) => false,
+        Ty::Con(_) | Ty::Unit | Ty::Promoted(_) => true,
+        Ty::Arrow(a, b, _) | Ty::App(a, b) => ty_is_monomorphic(a) && ty_is_monomorphic(b),
+        Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) => ty_is_monomorphic(a),
+        Ty::Tuple(elems) => elems.iter().all(ty_is_monomorphic),
+    }
+}
+
+/// Every node's type annotation in `expr` is monomorphic.
+fn expr_types_monomorphic(expr: &TExpr) -> bool {
+    if !ty_is_monomorphic(&expr.ty) {
+        return false;
+    }
+    let mut ok = true;
+    expr.for_each_child(&mut |c| {
+        if ok && !expr_types_monomorphic(c) {
+            ok = false;
+        }
+    });
+    ok
+}
+
+fn expr_node_count(expr: &TExpr) -> usize {
+    let mut n = 1;
+    expr.for_each_child(&mut |c| n += expr_node_count(c));
+    n
+}
+
+fn count_var_occurrences(expr: &TExpr, name: &str) -> usize {
+    let mut n = usize::from(matches!(&expr.kind, TExprKind::Var(v) if v == name));
+    expr.for_each_child(&mut |c| n += count_var_occurrences(c, name));
+    n
+}
+
+/// Every `Var` name read anywhere in `expr` (bound occurrences
+/// included — the callers only widen a conservative check with them).
+fn collect_var_reads(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
+    if let TExprKind::Var(n) = &expr.kind {
+        out.insert(n.clone());
+    }
+    expr.for_each_child(&mut |c| collect_var_reads(c, out));
+}
+
+/// Every identifier-shaped `InfixApp` operator in `expr` (backtick
+/// operators — symbolic operators cannot collide with a name).
+fn collect_infix_ops(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
+    if let TExprKind::InfixApp { op, .. } = &expr.kind
+        && op.starts_with(|ch: char| ch.is_alphabetic() || ch == '_')
+    {
+        out.insert(op.clone());
+    }
+    expr.for_each_child(&mut |c| collect_infix_ops(c, out));
+}
+
+/// Substitute literals for parameters, shadow-aware: a lambda
+/// parameter, a `let` name (or a `let`-bound function's own
+/// parameters, in its body) or a `case` pattern variable that rebinds
+/// a substituted name hides it in its scope.  A literal contains no
+/// variables, so the walk cannot CAPTURE — shadow removal is the whole
+/// scope story.  (The arithmetic beta-reduction path also comes
+/// through here; its binder-free bodies never reach the scope arms.)
 fn subst_literals(expr: TExpr, env: &HashMap<&str, &TLiteral>) -> TExpr {
+    if env.is_empty() {
+        return expr;
+    }
     let TExpr { kind, ty } = expr;
     let kind = match kind {
         TExprKind::Var(n) => match env.get(n.as_str()) {
             Some(lit) => TExprKind::Lit((*lit).clone()),
             None => TExprKind::Var(n),
         },
-        TExprKind::Paren(inner) => TExprKind::Paren(Box::new(subst_literals(*inner, env))),
-        TExprKind::Negate(inner) => TExprKind::Negate(Box::new(subst_literals(*inner, env))),
-        TExprKind::InfixApp { op, lhs, rhs } => TExprKind::InfixApp {
-            op,
-            lhs: Box::new(subst_literals(*lhs, env)),
-            rhs: Box::new(subst_literals(*rhs, env)),
-        },
-        TExprKind::If { cond, then_branch, else_branch } => TExprKind::If {
-            cond: Box::new(subst_literals(*cond, env)),
-            then_branch: Box::new(subst_literals(*then_branch, env)),
-            else_branch: Box::new(subst_literals(*else_branch, env)),
-        },
-        other => other,
+        TExprKind::Lambda { params, body } => {
+            let mut inner = env.clone();
+            for (p, _) in &params {
+                inner.remove(p.as_str());
+            }
+            TExprKind::Lambda {
+                params,
+                body: Box::new(subst_literals(*body, &inner)),
+            }
+        }
+        TExprKind::Let { binds, body } => {
+            // `let` is recursive: every bind's name is hidden in every
+            // bind's body and in the let-body.
+            let mut inner = env.clone();
+            for b in &binds {
+                inner.remove(b.name.as_str());
+            }
+            let binds = binds
+                .into_iter()
+                .map(|b| {
+                    let mut own = inner.clone();
+                    for p in &b.patterns {
+                        for v in p.bound_vars() {
+                            own.remove(v.as_str());
+                        }
+                    }
+                    TLocalDef {
+                        name: b.name,
+                        patterns: b.patterns,
+                        body: subst_literals(b.body, &own),
+                    }
+                })
+                .collect();
+            TExprKind::Let {
+                binds,
+                body: Box::new(subst_literals(*body, &inner)),
+            }
+        }
+        TExprKind::Case { scrutinee, branches } => {
+            let scrutinee = Box::new(subst_literals(*scrutinee, env));
+            let branches = branches
+                .into_iter()
+                .map(|b| {
+                    let mut inner = env.clone();
+                    for v in b.pattern.bound_vars() {
+                        inner.remove(v.as_str());
+                    }
+                    TCaseBranch {
+                        pattern: b.pattern,
+                        guards: b
+                            .guards
+                            .into_iter()
+                            .map(|g| TGuard {
+                                condition: subst_literals(g.condition, &inner),
+                                body: subst_literals(g.body, &inner),
+                            })
+                            .collect(),
+                        body: b.body.map(|e| subst_literals(e, &inner)),
+                    }
+                })
+                .collect();
+            TExprKind::Case { scrutinee, branches }
+        }
+        other => {
+            return TExpr::new(other, ty).map_children(&mut |c| subst_literals(c, env));
+        }
     };
     TExpr::new(kind, ty)
 }
@@ -232,6 +476,7 @@ fn resolved_method_to_op(name: &str) -> Option<&'static str> {
 struct Folder {
     cafs: HashMap<String, TLiteral>,
     fns: HashMap<String, (Vec<String>, TExpr)>,
+    splices: HashMap<String, SpliceFn>,
     /// Names bound by enclosing local binders (clause parameters, `where`
     /// binds and their parameters, lambda parameters, `let` binds, `case`
     /// patterns).  A shadowed name is an ordinary local — never the
@@ -393,6 +638,14 @@ impl Folder {
                 TExpr::new(TExprKind::If { cond, then_branch, else_branch }, ty)
             }
             TExprKind::App(f, a) => {
+                // show of a scalar literal, at the natives whose output is
+                // fully compile-time-determined
+                if let TExprKind::Var(name) = &f.kind
+                    && !self.is_shadowed(name)
+                        && let Some(folded) = try_fold_show(name, &a, &ty) {
+                            self.changed = true;
+                            return folded;
+                        }
                 // Recognize App(App(Var(method), lhs), rhs) from resolved typeclass methods
                 if let TExprKind::App(ff, lhs) = &f.kind
                     && let TExprKind::Var(name) = &ff.kind
@@ -405,6 +658,15 @@ impl Folder {
                 if let Some(folded) = self.try_fold_call(&app) {
                     self.changed = true;
                     return folded;
+                }
+                if let Some(spliced) = self.try_splice_call(&app) {
+                    // The spliced body is fresh at this site: fold it in
+                    // place so the round finishes what it started (a chain
+                    // `print 23` → `putStrLn (show_Int 23)` → `putStrLn
+                    // "23"` → the FFI SpecCall completes here, not one
+                    // fixpoint round per link).  Terminates by the acyclic
+                    // candidate graph (see collect_splice_fns).
+                    return self.fold_expr(spliced);
                 }
                 app
             }
@@ -456,6 +718,87 @@ impl Folder {
             _ => None,
         }
     }
+
+    /// Splice a saturated all-literal-argument call to a splice
+    /// candidate: exact beta-reduction (see the module header for why a
+    /// literal argument makes this sound in every position), used where
+    /// `try_fold_call` did not produce a literal — it collapses wrapper
+    /// chains like `print 23` → `putStrLn (show_Int 23)` so constant
+    /// programs finish their work at compile time.  Declines when a
+    /// call-site local shadows a free name of the body: the spliced
+    /// occurrence would be rerouted to the local (both by name-keyed
+    /// codegen rules and by plain lexical scope), which the call never
+    /// was.
+    fn try_splice_call(&mut self, expr: &TExpr) -> Option<TExpr> {
+        let mut args_rev = Vec::new();
+        let mut head = expr;
+        while let TExprKind::App(f, a) = &head.kind {
+            args_rev.push(a.as_ref());
+            head = f;
+        }
+        let TExprKind::Var(name) = &head.kind else { return None };
+        if self.is_shadowed(name) {
+            return None;
+        }
+        let spliced = {
+            let sf = self.splices.get(name.as_str())?;
+            if args_rev.len() != sf.params.len() {
+                return None;
+            }
+            let mut env: HashMap<&str, &TLiteral> = HashMap::new();
+            for ((p, occ), a) in sf.params.iter().zip(&sf.occ).zip(args_rev.iter().rev()) {
+                let lit = unwrap_lit(a)?;
+                // A large string is shared through the call today;
+                // substituting it at several occurrences would duplicate
+                // the bytes (same reasoning as STR_PROPAGATE_MAX).
+                if let TLiteral::Str(s) = lit
+                    && s.len() > STR_PROPAGATE_MAX && *occ > 1 {
+                        return None;
+                    }
+                env.insert(p.as_str(), lit);
+            }
+            if sf.free.iter().any(|n| self.is_shadowed(n)) {
+                return None;
+            }
+            let mut s = subst_literals(sf.body.clone(), &env);
+            // Keep the use-site annotation on the root (they agree after
+            // monomorphization — candidates are fully monomorphic).
+            s.ty = expr.ty.clone();
+            s
+        };
+        self.changed = true;
+        Some(spliced)
+    }
+}
+
+/// Compile-time `show` of a scalar literal, for the natives whose
+/// output this pass can reproduce byte-for-byte:
+///
+/// - `show_Int` on an integer literal within ±2^53.  Lua 5.3+ holds an
+///   `Int` as a native integer and shows every i64 exactly, but LuaJIT
+///   holds it as a DOUBLE, so a larger literal already rounds when the
+///   emitted Lua is loaded — folding it here would print the exact
+///   value where the LuaJIT runtime prints the rounded one, making the
+///   fold observable on one target.  Within 2^53 every target agrees
+///   with the fold exactly.
+/// - `show_Bool` on a boolean literal.
+///
+/// `show_Number` is deliberately NOT folded: its runtime is the
+/// Burger–Dybvig port in runtime.lua, and a Rust twin would have to
+/// match it digit-for-digit forever — a drift risk with nothing on the
+/// other side of the scale.  `show_String` (quote-and-escape) is not
+/// folded for the same reason, and `show_Unit` ignores its argument at
+/// runtime, so there is nothing to gain there either.
+fn try_fold_show(name: &str, arg: &TExpr, ty: &Ty) -> Option<TExpr> {
+    let shown: String = match (name, unwrap_lit(arg)?) {
+        ("show_Int", TLiteral::Integer(n)) if n.unsigned_abs() <= (1u64 << 53) => n.to_string(),
+        ("show_Bool", TLiteral::Bool(b)) => String::from(if *b { "True" } else { "False" }),
+        _ => return None,
+    };
+    Some(TExpr::new(
+        TExprKind::Lit(TLiteral::Str(shown.into_bytes())),
+        ty.clone(),
+    ))
 }
 
 // ── Constant folding logic ──────────────────────────────

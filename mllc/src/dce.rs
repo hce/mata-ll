@@ -174,8 +174,14 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
                 for p in &b.patterns { collect_pattern(p, refs); }
             }
         }
-        TExprKind::SpecCall { original, specialized, .. } => {
-            refs.insert(original.clone());
+        TExprKind::SpecCall { specialized, .. } => {
+            // `original` is NOT a reference: no emitter reads it (emission
+            // comes entirely from `specialized`), so it keeps nothing
+            // live.  Rooting it used to be invisible — a SpecCall only
+            // occurred inside its own wrapper's body, where `original` is
+            // that same wrapper — but the fold pass now splices FFI
+            // wrapper bodies to call sites, and the spliced SpecCall must
+            // not retain the dead wrapper it came from.
             // The variants that thread mata-ll functions keep them live;
             // the FFI kinds carry Lua host names — nothing to keep live.
             match specialized {

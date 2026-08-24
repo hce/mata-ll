@@ -233,15 +233,33 @@ main = print (loop 3 big + twice)
 #[test]
 fn ffi_wrapper_keeps_truncating_paren() {
     let dir = Path::new("tests/cases");
+    // A non-literal argument (the do-local `x` — fold propagates only
+    // top-level CAFs) keeps the call out of the fold's splice, so the
+    // wrapper survives to probe its own body shape.
     let ffi_source = "modf1 :: Number -> LuaPure \"math.modf\" Number\n\
                       main :: IO ()\n\
-                      main = assert (modf1 3.75 == 3.0) \"t\"\n";
+                      main = do\n\
+                      \x20   let x = 3.75\n\
+                      \x20   assert (modf1 x == 3.0) \"t\"\n";
     let lua = compile(ffi_source, dir, &[])
         .expect("ffi probe must compile")
         .lua_code;
     assert!(
         lua.contains("return (math.modf(_ffi0))"),
         "FFI wrapper must keep the truncating paren around the raw host call: {lua}"
+    );
+    // A literal argument splices the wrapper's SpecCall to the call site;
+    // the truncating paren must ride along (the site is a single-value
+    // position built from the same emission arm, but pin it explicitly).
+    let spliced_source = "modf1 :: Number -> LuaPure \"math.modf\" Number\n\
+                          main :: IO ()\n\
+                          main = assert (modf1 3.75 == 3.0) \"t\"\n";
+    let lua2 = compile(spliced_source, dir, &[])
+        .expect("ffi probe must compile")
+        .lua_code;
+    assert!(
+        lua2.contains("((math.modf(3.75)))"),
+        "spliced FFI call must keep the truncating paren around the raw host call: {lua2}"
     );
 }
 
@@ -681,6 +699,51 @@ main = print ghi
             "folded ingredient `{ingredient}` must not survive to emission: {lua}"
         );
     }
+}
+
+/// A fully constant program collapses at compile time: the fold splices
+/// the wrapper chain (`print` → `putStrLn (show x)` → the FFI call) at
+/// the literal call site and folds `show` of the Int literal to its
+/// string, so `main` performs the host `print` on the shown constant
+/// directly.  Nothing of the chain survives: no `show_Int` call (and
+/// hence no Burger–Dybvig double formatter in the on-demand prelude),
+/// no FFI wrapper slot (the spliced SpecCall must not retain its dead
+/// origin through DCE), no boxed argument marshalling.
+#[test]
+fn constant_program_collapses_to_direct_print() {
+    let source = r#"
+abc :: Int
+abc = 17
+
+def :: Int -> Int
+def x = x + 1
+
+ghi :: Int
+ghi = abc + def 5
+
+main :: IO ()
+main = print ghi
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    assert!(
+        lua.contains(r#"print("23")"#),
+        "main must perform the host print on the folded, shown constant: {lua}"
+    );
+    for leftover in ["show_Int", "__mll_show_double", "_ffi0"] {
+        assert!(
+            !lua.contains(leftover),
+            "the collapsed chain must leave no `{leftover}` behind: {lua}"
+        );
+    }
+    // Exactly one emitted function: main. The print@Int specialization and
+    // the putStrLn FFI wrapper are dead after the splice.
+    assert_eq!(
+        lua.matches("__mll_fn[").count(),
+        2, // main's definition + the entry-point call
+        "only the main slot may survive (one definition, one entry call): {lua}"
+    );
 }
 
 /// The boundaries of the cross-binding folds: anything that could change
