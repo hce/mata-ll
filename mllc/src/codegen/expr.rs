@@ -230,13 +230,24 @@ impl CodeGen {
                 // branch, exactly like function-clause guards.
                 let scope = VarsSnapshot::capture(self);
                 let mut stmts = Vec::new();
-                // Entry force, skipped when the argument emission below
-                // (expr_ast at the call parens) already yields WHNF.
-                if !self.expr_yields_whnf(scrutinee) {
-                    stmts.push(Stmt::Assign("_cg".into(), Expr::force(Expr::name("_cg"))));
+                // Entry-force only when the FIRST clause's pattern inspects
+                // the value: an irrefutable first pattern (`case e of r | g …`)
+                // must bind `e` unevaluated — its guards force the binding
+                // only if they use it, and a LATER refutable clause forces
+                // per-clause through match_scrutinee (which `_cg` staying
+                // non-concrete keeps honest). When the first pattern forces,
+                // the single entry force stands in for the per-clause ones
+                // and `_cg` is concrete from here on.
+                let first_forces = branches
+                    .first()
+                    .is_none_or(|b| b.pattern.forces_scrutinee());
+                if first_forces {
+                    if !self.expr_yields_whnf(scrutinee) {
+                        stmts.push(Stmt::Assign("_cg".into(), Expr::force(Expr::name("_cg"))));
+                    }
+                    self.concrete_vars.insert("_cg".to_string());
                 }
                 self.local_vars.insert("_cg".to_string());
-                self.concrete_vars.insert("_cg".to_string());
                 let clauses: Vec<TClause> = branches.iter().map(|b| TClause {
                     span: None,
                     patterns: vec![b.pattern.clone()],
@@ -247,7 +258,13 @@ impl CodeGen {
                 let b = self.pattern_match_block(&["_cg".to_string()], &clauses);
                 stmts.extend(b.0);
                 scope.restore(self);
-                let scrut = self.expr_ast(scrutinee);
+                // The call argument mirrors the entry decision: a lazy entry
+                // needs the raw suspension, not expr_ast's forced value.
+                let scrut = if first_forces {
+                    self.expr_ast(scrutinee)
+                } else {
+                    self.arg_ast(scrutinee, false)
+                };
                 Expr::call(
                     Expr::paren(Expr::Func(
                         vec!["_cg".into()],
@@ -257,7 +274,24 @@ impl CodeGen {
                 )
             }
             TExprKind::Case { scrutinee, branches } => {
-                let scrut_stmt = Stmt::Local(vec!["_s".into()], Some(self.forced_ast(scrutinee)));
+                // The entry force is keyed on the FIRST pattern: GHC matches
+                // top-to-bottom, and an irrefutable first pattern (`case e of
+                // r -> …`) selects its branch without inspecting `e` at all —
+                // the scrutinee binds as an unevaluated thunk and later
+                // branches are unreachable (the branch loop below stops at the
+                // first unconditioned branch), so nothing ever indexes the raw
+                // `_s`. Bound names are not marked concrete, so uses force.
+                // An empty `case` (EmptyCase) keeps the force: GHC's
+                // `case e of {}` evaluates `e`.
+                let first_forces = branches
+                    .first()
+                    .is_none_or(|b| b.pattern.forces_scrutinee());
+                let scrut = if first_forces {
+                    self.forced_ast(scrutinee)
+                } else {
+                    self.arg_ast(scrutinee, false)
+                };
+                let scrut_stmt = Stmt::Local(vec!["_s".into()], Some(scrut));
                 // Assemble the branch loop's if/elseif chain structurally:
                 // the first conditioned branch opens the `if`, later ones are
                 // `elseif`s, an unconditioned branch past the first becomes the

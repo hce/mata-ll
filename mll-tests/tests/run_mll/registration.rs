@@ -212,6 +212,7 @@ mll_test!(record_update_lazy, "record_update_lazy.mll");
 mll_test!(where_local_no_leak, "where_local_no_leak.mll");
 mll_test!(caf_trap_lazy, "caf_trap_lazy.mll");
 mll_test!(const_propagation, "const_propagation.mll");
+mll_test!(case_irrefutable_lazy, "case_irrefutable_lazy.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");

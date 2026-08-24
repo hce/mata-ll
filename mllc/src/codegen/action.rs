@@ -792,12 +792,26 @@ impl CodeGen {
                     if let Some(s) = pre {
                         stmts.push(s);
                     }
-                    let scrut_e = self.forced_ast(scrutinee);
+                    // Same first-pattern keying as the value-position arms:
+                    // an irrefutable first pattern binds the scrutinee
+                    // unevaluated (GHC never touches it), and `_s` stays
+                    // non-concrete so a later refutable clause forces
+                    // per-clause through match_scrutinee.
+                    let first_forces = branches
+                        .first()
+                        .is_none_or(|b| b.pattern.forces_scrutinee());
+                    let scrut_e = if first_forces {
+                        self.forced_ast(scrutinee)
+                    } else {
+                        self.arg_ast(scrutinee, false)
+                    };
                     stmts.push(decl.stmt(scrut_e));
-                    // The scrutinee local is forced above: mark it concrete so
-                    // match_scrutinee does not re-force it per clause.
                     let sref = self.lua_ref("_s");
-                    self.concrete_vars.insert(sref.clone());
+                    if first_forces {
+                        // The scrutinee local is forced above: mark it concrete
+                        // so match_scrutinee does not re-force it per clause.
+                        self.concrete_vars.insert(sref.clone());
+                    }
                     let clauses: Vec<TClause> = branches
                         .iter()
                         .map(|b| TClause {

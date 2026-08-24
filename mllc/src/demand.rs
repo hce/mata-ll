@@ -1279,26 +1279,42 @@ fn demanded_vars_in(
         ),
 
         TExprKind::Case { scrutinee, branches } => {
-            // Scrutinizing forces to WHNF only (an action-typed scrutinee
-            // yields its suspended closure).
-            let mut s = whnf_only_demands(scrutinee, &rec);
-            if !branches.is_empty() {
-                // Intersect demanded vars across all branches
-                // (minus variables bound by each branch's pattern).
-                let mut branch_iter = branches.iter().map(|b| {
-                    let body_demanded = if b.guards.is_empty() {
-                        rec(b.plain_body())
-                    } else {
-                        demanded_guards_with(&b.guards, env, captured, shadowed, &|s| s)
-                    };
-                    let bound = pattern_bound_vars(&b.pattern);
-                    // Remove locally bound names.
-                    body_demanded.difference(&bound).cloned().collect::<HashSet<_>>()
-                });
-                if let Some(first) = branch_iter.next() {
-                    let intersection = branch_iter.fold(first, |acc, s| &acc & &s);
-                    s.extend(intersection);
-                }
+            // Per-branch demand sets, plus whether the branch demands one of
+            // its own pattern binders (for an irrefutable pattern every
+            // binder aliases the WHOLE scrutinee, so demanding one forces it).
+            let branch_data: Vec<(HashSet<String>, bool)> = branches.iter().map(|b| {
+                let body_demanded = if b.guards.is_empty() {
+                    rec(b.plain_body())
+                } else {
+                    demanded_guards_with(&b.guards, env, captured, shadowed, &|s| s)
+                };
+                let bound = pattern_bound_vars(&b.pattern);
+                let demands_binding = !body_demanded.is_disjoint(&bound);
+                (
+                    body_demanded.difference(&bound).cloned().collect::<HashSet<_>>(),
+                    demands_binding,
+                )
+            }).collect();
+            // The scrutinee's demand is keyed on the FIRST pattern, exactly
+            // like codegen's entry force: an irrefutable first pattern binds
+            // the scrutinee UNEVALUATED (later branches are unreachable), so
+            // scrutinizing forces nothing — unless the selected branch's own
+            // body demands the binding, which forces the alias. When the
+            // first pattern inspects the value, scrutinizing forces to WHNF
+            // only (an action-typed scrutinee yields its suspended closure).
+            let first_forces = branches
+                .first()
+                .is_none_or(|b| b.pattern.forces_scrutinee());
+            let mut s = if first_forces || branch_data.first().is_some_and(|(_, db)| *db) {
+                whnf_only_demands(scrutinee, &rec)
+            } else {
+                HashSet::new()
+            };
+            // Intersect demanded vars across all branches.
+            let mut branch_iter = branch_data.into_iter().map(|(set, _)| set);
+            if let Some(first) = branch_iter.next() {
+                let intersection = branch_iter.fold(first, |acc, s| &acc & &s);
+                s.extend(intersection);
             }
             s
         }
@@ -1938,7 +1954,6 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
         ),
 
         TExprKind::Case { scrutinee, branches } => {
-            let mut m = head(scrutinee);
             // The variable scrutinized (if any) receives whatever demand
             // the branch patterns place on it beyond WHNF.
             let scrut_var = {
@@ -1949,7 +1964,7 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
                     _ => None,
                 }
             };
-            let mut branch_maps = branches.iter().map(|b| {
+            let branch_data: Vec<(DemandMap, Option<Demand>)> = branches.iter().map(|b| {
                 let mut bm = if b.guards.is_empty() {
                     demand_expr(cx, b.plain_body(), rd, run_pos)
                 } else {
@@ -1959,11 +1974,27 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
                 for v in pattern_bound_vars(&b.pattern) {
                     bm.remove(&v);
                 }
-                if let (Some(v), Some(d)) = (&scrut_var, pat_d) {
-                    map_join_one(&mut bm, v, d);
+                if let (Some(v), Some(d)) = (&scrut_var, &pat_d) {
+                    map_join_one(&mut bm, v, d.clone());
                 }
-                bm
-            });
+                (bm, pat_d)
+            }).collect();
+            // Keyed on the FIRST pattern like codegen's entry force: an
+            // irrefutable first pattern binds the scrutinee UNEVALUATED, so
+            // its computation runs only if the selected branch's body demands
+            // the binding — and then exactly to the degree the body does
+            // (pattern_demand). A forcing first pattern scrutinizes at entry.
+            let first_forces = branches
+                .first()
+                .is_none_or(|b| b.pattern.forces_scrutinee());
+            let mut m = if first_forces {
+                head(scrutinee)
+            } else if let Some((_, Some(d))) = branch_data.first() {
+                demand_expr(cx, scrutinee, d, false)
+            } else {
+                DemandMap::new()
+            };
+            let mut branch_maps = branch_data.into_iter().map(|(bm, _)| bm);
             if let Some(first) = branch_maps.next() {
                 let isect = branch_maps.fold(first, |acc, bm| map_meet(&acc, &bm));
                 map_join(&mut m, isect);
