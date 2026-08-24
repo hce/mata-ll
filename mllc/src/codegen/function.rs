@@ -177,6 +177,7 @@ impl CodeGen {
         }
         first.where_binds.is_empty()
             && Self::is_cheap(first_body)
+            && !Self::contains_trapping_op(first_body)
             && !expr_evaluates_global_ref(first_body)
     }
 
@@ -409,6 +410,7 @@ impl CodeGen {
                     is_concrete = false;
                 }
             } else if clauses[0].where_binds.is_empty() && Self::is_cheap(clauses[0].plain_body())
+                && !Self::contains_trapping_op(clauses[0].plain_body())
                 && !expr_evaluates_global_ref(clauses[0].plain_body()) {
                 // Cheap value binding that does not eagerly dereference another
                 // top-level binding — safe to evaluate eagerly at module load.
@@ -416,6 +418,9 @@ impl CodeGen {
                 // (possibly defined later in the file) falls through to the
                 // thunk branch below, deferring the read past module load when
                 // the slot is still nil.
+                // A trapping op (a literal zero divisor the folds declined)
+                // must NOT run at load: the CAF is ⊥, and GHC raises it only
+                // if the binding is ever demanded — so it stays a thunk.
                 let rhs = self.expr_ast(clauses[0].plain_body());
                 stmts.push(self.var_decl_stmt(&lua_name, rhs));
                 is_concrete = true;
