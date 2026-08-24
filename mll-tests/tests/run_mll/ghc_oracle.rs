@@ -189,6 +189,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_demand_shadowing, "cases", "demand_shadowing.mll"),
         (ghc_oracle_seq_action_value, "cases", "seq_action_value.mll"),
         (ghc_oracle_record_update_lazy, "cases", "record_update_lazy.mll"),
+        (ghc_oracle_where_local_no_leak, "cases", "where_local_no_leak.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),

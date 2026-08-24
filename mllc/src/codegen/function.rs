@@ -348,6 +348,15 @@ impl CodeGen {
                 // IIFEs.
                 let target = self.fn_target(&lua_name);
                 let demanded = self.clause_demanded(&clauses[0]);
+                // The where-locals live inside the emitted Lua function only.
+                // Contain their registration: this arm ends in
+                // restore_keeping_locals (the BINDING's module-scope name must
+                // persist), which would otherwise keep the where names in
+                // local_vars forever — and a where name that collides with a
+                // top-level binding would then shadow that binding's fn_table
+                // slot in every LATER emission (`lua_ref` emitted the bare
+                // name, a nil global).
+                let where_scope = VarsSnapshot::capture(self);
                 let mut body = self.where_binds_stmts(&clauses[0], demanded);
                 // Direct-perform: the emitted function's body IS the action,
                 // so a saturated tail call to it (from its own body or any
@@ -360,6 +369,7 @@ impl CodeGen {
                     emitted_direct_perform = Some(0);
                 }
                 body.extend(self.bind_chain_block(clauses[0].plain_body(), true).0);
+                where_scope.restore(self);
                 stmts.push(Stmt::Function { target, params: Vec::new(), body: Block(body) });
                 is_concrete = true;
             } else if expr_references_name(clauses[0].plain_body(), &func.name) {
@@ -415,10 +425,15 @@ impl CodeGen {
                 stmts.push(self.var_decl_stmt(&lua_name, Expr::thunk(rhs)));
                 is_concrete = false;
             } else {
-                // Value binding with where clause — wrap in thunked IIFE to scope the locals
+                // Value binding with where clause — wrap in thunked IIFE to scope the locals.
+                // Same containment as the IO arm above: the where names are
+                // locals of the IIFE, not of the module scope this arm's
+                // restore_keeping_locals preserves.
+                let where_scope = VarsSnapshot::capture(self);
                 let demanded = self.clause_demanded(&clauses[0]);
                 let mut body = self.where_binds_stmts(&clauses[0], demanded);
                 body.push(Stmt::Return(self.expr_ast(clauses[0].plain_body())));
+                where_scope.restore(self);
                 let thunk = Expr::call_named(
                     "__thunk",
                     vec![Expr::Func(vec![], FuncBody::Block(Block(body)))],

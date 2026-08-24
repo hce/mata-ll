@@ -209,6 +209,7 @@ mll_test!(export_module, "export_module.mll");
 mll_test!(import_hiding, "import_hiding.mll");
 mll_test!(record_update, "record_update.mll");
 mll_test!(record_update_lazy, "record_update_lazy.mll");
+mll_test!(where_local_no_leak, "where_local_no_leak.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
