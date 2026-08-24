@@ -68,7 +68,15 @@ main = do
 /// (e.g. the tracker mixer) must not gain an allocation or an indirection.
 #[test]
 fn numeric_classes_erased_at_concrete_types() {
+    // `opaque` is a FOLD BARRIER: its body contains a call, so the TIR
+    // constant folder neither beta-reduces it nor sees literal arguments
+    // at the probed call sites — the arithmetic bodies must survive to
+    // codegen (all-literal calls would fold to literals and the bodies
+    // would be dead code).
     let source = r#"
+opaque :: a -> a
+opaque v = if length [] == 0 then v else v
+
 hot :: Int -> Int -> Int
 hot a b = a * b + a - b
 
@@ -80,9 +88,9 @@ flr a b = (a `div` b) + (a `mod` b)
 
 main :: IO ()
 main = do
-  putStrLn (show (hot 3 4))
-  putStrLn (show (frac 3.0 4.0))
-  putStrLn (show (flr 17 5))
+  putStrLn (show (hot (opaque 3) 4))
+  putStrLn (show (frac (opaque 3.0) 4.0))
+  putStrLn (show (flr (opaque 17) 5))
 "#;
     let lua = compile(source, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
@@ -117,7 +125,13 @@ main = do
 /// the argument was emitted.
 #[test]
 fn inlining_preserves_argument_sharing() {
+    // `opaque` is a FOLD BARRIER (see numeric_classes_erased_at_concrete_types):
+    // without it the all-literal probe calls constant-fold at TIR level and
+    // never reach the call-site inliner under test.
     let source = r#"
+opaque :: a -> a
+opaque v = if length [] == 0 then v else v
+
 sq :: Int -> Int
 sq x = x * x
 
@@ -127,9 +141,9 @@ probe n = n + 1
 main :: IO ()
 main = do
   let y = 6
-  putStrLn (show (sq (probe 90001)))
+  putStrLn (show (sq (opaque 90001)))
   putStrLn (show (sq y))
-  putStrLn (show (probe (probe 80002)))
+  putStrLn (show (probe (opaque 80002)))
 "#;
     let lua = compile(source, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
@@ -635,6 +649,80 @@ fn header_only_root_module_warns_instead_of_silent_empty_output() {
 
 /// The generic form of the same warning: a bare library (no module header at
 /// all) compiled as the root also has nothing to run or call.
+/// Cross-binding constant folding (fold.rs fixpoint): a literal CAF
+/// propagates into its use sites, a saturated call to a total-arithmetic
+/// function on literal arguments beta-reduces, and the folded binding is
+/// itself a literal CAF for ITS users — so `ghi` reaches `main` as the
+/// literal result and abc/def/ghi are dead code. Distinctive literals
+/// (absent from the runtime prelude) mark the fold: the result value must
+/// appear, the ingredients must not.
+#[test]
+fn cross_binding_constants_fold_to_literals() {
+    let source = r#"
+abc :: Int
+abc = 41001
+
+def :: Int -> Int
+def x = x + 1002
+
+ghi :: Int
+ghi = abc + def 40000
+
+main :: IO ()
+main = print ghi
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    assert!(lua.contains("82003"), "ghi must fold to the literal 82003: {lua}");
+    for ingredient in ["41001", "1002", "40000"] {
+        assert!(
+            !lua.contains(ingredient),
+            "folded ingredient `{ingredient}` must not survive to emission: {lua}"
+        );
+    }
+}
+
+/// The boundaries of the cross-binding folds: anything that could change
+/// runtime-observable behavior is declined. A trapping literal divisor
+/// stays a runtime `__mll_div` (raising only when demanded), and a local
+/// binder masks a top-level candidate of the same name (the local runs).
+#[test]
+fn cross_binding_folding_declines_traps_and_shadowed_names() {
+    let source = r#"
+overZero :: Int -> Int
+overZero x = x `div` 0
+
+kept :: Int
+kept = overZero 90071
+
+shadowedFn :: Int
+shadowedFn = bump 45013
+  where bump y = y * 2
+
+bump :: Int -> Int
+bump y = y + 1
+
+main :: IO ()
+main = do
+    print shadowedFn
+    print (if shadowedFn > 0 then 0 else kept)
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    // The trap is left for the runtime: the division core survives and the
+    // call was not replaced by any literal.
+    assert!(lua.contains("__mll_div("), "literal zero divisor must stay on __mll_div: {lua}");
+    assert!(lua.contains("90071"), "the declined call's argument must survive: {lua}");
+    // The where-bound `bump` masks the top-level candidate: the call is
+    // declined (the LOCAL bump computes at runtime, so the argument
+    // survives) and the top-level body's result (45013 + 1 = 45014) is
+    // never folded in through the local binder.
+    assert!(lua.contains("45013"), "the masked call's argument must survive: {lua}");
+    assert!(!lua.contains("45014"), "top-level bump must not fold through the local binder: {lua}");
+}
+
 #[test]
 fn bare_library_root_warns_with_generic_guidance() {
     let src = "addup :: Int -> Int -> Int\naddup a b = a + b\n";
