@@ -63,6 +63,11 @@ main = do
     assert (d.width == 100) "update changes width"
     assert (d.height == 25) "update keeps height"
     assert (d.title == "hi") "update keeps title"
+    -- update fields are lazy in the LuaDict (pairs-copy) branch too:
+    -- the bottom field is suspended, the others still read
+    let db = c { width = error "boom" }
+    assert (db.height == 25) "lazy update: sibling reads past bottom field"
+    assert (db.title == "hi") "lazy update: title reads past bottom field"
     -- derived Eq and Show work over the named layout
     assert (c == c) "derived Eq reflexive"
     assert (not (c == d)) "derived Eq distinguishes"

@@ -608,7 +608,16 @@ impl CodeGen {
                             .get(&sanitize_name(fname))
                             .cloned()
                             .unwrap_or_else(|| fname.clone());
-                        let rhs = self.expr_ast(val);
+                        // An update field is a lazy position, exactly like a
+                        // constructor field: `r { a = e }` forces `r` (to
+                        // copy it) but never `e` (GHC builds the new record
+                        // with the field bound to the unevaluated thunk;
+                        // `r { a = undefined }` then selecting `b` is fine).
+                        // Consumers force on read — accessors wrap the
+                        // projection in __force, pattern matching forces via
+                        // field_path, and the FFI boundary deep-forces
+                        // through __mll_arg_marshal.
+                        let rhs = self.arg_ast(val, false);
                         stmts.push(Stmt::Assign(format!("_u{}", lua_field_index(&key)), rhs));
                     }
                     stmts.push(Stmt::Return(Expr::name("_u")));
@@ -628,7 +637,10 @@ impl CodeGen {
                     Stmt::Local(vec!["_u".into()], Some(Expr::Table(copy_items))),
                 ];
                 for (_, idx, val) in updates {
-                    let rhs = self.expr_ast(val);
+                    // Lazy position, same as the LuaDict branch above: the
+                    // update expression is suspended, not run, when the new
+                    // record is built.
+                    let rhs = self.arg_ast(val, false);
                     stmts.push(Stmt::Assign(format!("_u[{}]", idx), rhs));
                 }
                 stmts.push(Stmt::Return(Expr::name("_u")));

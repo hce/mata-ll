@@ -1361,14 +1361,12 @@ fn demanded_vars_in(
             HashSet::new()
         }
 
-        TExprKind::RecordUpdate { record, updates, .. } => {
-            // Codegen copies the record and assigns the update expressions
-            // eagerly (gen_expr), so both count in either mode.
-            let mut s = rec(record);
-            for (_, _, e) in updates {
-                s.extend(rec(e));
-            }
-            s
+        TExprKind::RecordUpdate { record, updates: _, .. } => {
+            // Codegen forces the record to copy it, but the update fields are
+            // lazy positions (arg_ast(val, false), like constructor fields):
+            // `r { a = e }` suspends `e`, so nothing inside the updates is
+            // forced when the new record is built.
+            rec(record)
         }
 
         TExprKind::OutgoingCallback { callee, .. } => {
@@ -2008,12 +2006,12 @@ fn demand_expr<'t>(cx: &RowCx<'_, 't>, expr: &'t TExpr, rd: &Demand, run_pos: bo
 
         TExprKind::DictMethod { dict, .. } => head(dict),
 
-        TExprKind::RecordUpdate { record, updates, .. } => {
-            let mut m = head(record);
-            for (_, _, e) in updates {
-                map_join(&mut m, head(e));
-            }
-            m
+        TExprKind::RecordUpdate { record, updates: _, .. } => {
+            // The record is forced (copied); the update fields are suspended
+            // (arg_ast(val, false)), so they contribute no demand here. Field
+            // demand surfaces only when a consumer forces the field, and this
+            // analysis has no per-field record rows to route that through.
+            head(record)
         }
 
         TExprKind::OutgoingCallback { callee, .. } => head(callee),
