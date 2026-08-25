@@ -63,6 +63,19 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A bare negative literal is not a pattern ATOM (Haskell 2010: apat has
+// no negative literal), so `f (Just -1)` is a parse error like GHC's;
+// the parenthesized `Just (-1)` and whole-pattern case-branch forms are
+// pinned by negative_pattern_parens.mll.
+#[test]
+fn bare_negative_in_pattern_atom_position_is_rejected() {
+    expect_compile_error(
+        "f :: Maybe Int -> Int\nf (Just -1) = 0\nf _ = 1\n\nmain :: IO ()\nmain = print (f Nothing)\n",
+        &[],
+        &["Expected ')', found '-'"],
+    );
+}
+
 // The BINDING guard-qualifier forms of Haskell 2010 §3.13 introduce
 // names the Guard AST (one Bool condition) cannot carry; they are
 // rejected with a rewrite hint instead of the bare "Expected '='" they

@@ -3831,10 +3831,13 @@ impl Parser {
         ) {
             return true;
         }
-        if let Token::Operator(op) = self.peek()
-            && op == "-" && self.pos + 1 < self.tokens.len() {
-                return matches!(self.tokens[self.pos + 1].token, Token::IntLit(_) | Token::NumLit(_));
-            }
+        // No bare `-` arm: Haskell 2010's apat has no negative literal —
+        // a negative pattern in atom position must be parenthesized
+        // (`f (-1) = …`, `Just (-1)`), and treating `-N` as an atom start
+        // made `f (Just -1)` parse where GHC parse-errors. The
+        // parenthesized form reaches parse_pattern_atom_inner's negative
+        // arm through the paren, and a whole-pattern `-1` (a case branch)
+        // never consults this predicate.
         false
     }
 
