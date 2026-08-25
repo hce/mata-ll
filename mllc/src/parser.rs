@@ -883,6 +883,36 @@ impl Parser {
         }
     }
 
+    /// The infix method-definition tail: the already-consumed identifier
+    /// was the LEFT OPERAND (`x <> y = …` or ``x `op` y = …``) and the
+    /// operator is the method actually being defined. Mirrors
+    /// parse_value_decl's top-level infix branch; class and instance
+    /// bodies used to lack it, so the spelling the top level accepts died
+    /// there with "Expected '='".
+    fn parse_infix_method_clause(&mut self, left_name: String) -> PResult<(String, Clause)> {
+        let loc = self.peek_loc();
+        let span = Span::new(loc.line, loc.col);
+        let saved_block = self.block_indent;
+        self.block_indent = self.current_indent;
+        let left = Pattern::Var(left_name);
+        let op = match self.peek().clone() {
+            Token::Operator(op) => {
+                self.advance();
+                op
+            }
+            Token::Backtick => {
+                self.advance();
+                let f = self.expect_ident()?;
+                self.expect(&Token::Backtick)?;
+                f
+            }
+            _ => unreachable!("caller checked for Operator/Backtick"),
+        };
+        let right = self.parse_pattern_atom()?;
+        let clause = self.finish_clause(vec![left, right], span, saved_block)?;
+        Ok((op, clause))
+    }
+
     fn parse_class_decl(&mut self) -> PResult<Vec<Decl>> {
         // The declaration's own indent is the enclosing layout context of
         // its `where` block (see `open_layout_block`).
@@ -983,8 +1013,10 @@ impl Parser {
             // default method clause. Could be an operator like (+) :: ...
             let Some(name) = self.parse_method_name("class method")? else { break };
 
-            // A `::` after the name makes it a type signature; anything
-            // else is a default method clause — `parse_clause` picks up
+            // A `::` after the name makes it a type signature; an operator
+            // (or backtick) makes it the INFIX definition form (`x <> y =
+            // …` — the identifier was the left operand); anything else is
+            // a prefix default method clause — `parse_clause` picks up
             // right after the already-consumed name, exactly like a
             // top-level function clause.
             if self.at(&Token::DblColon) {
@@ -992,7 +1024,12 @@ impl Parser {
                 let ty = self.parse_type()?;
                 methods.push(ClassMethod { name, ty, default_clauses: None });
             } else {
-                let clause = self.parse_clause()?;
+                let (name, clause) =
+                    if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
+                        self.parse_infix_method_clause(name)?
+                    } else {
+                        (name.clone(), self.parse_clause()?)
+                    };
 
                 // Attach to the matching method signature
                 if let Some(m) = methods.iter_mut().find(|m| m.name == name) {
@@ -1056,8 +1093,15 @@ impl Parser {
 
             let Some(name) = self.parse_method_name("instance method")? else { break };
 
-            // Collect all clauses for this method
-            let clause = self.parse_clause()?;
+            // Collect all clauses for this method. An operator (or
+            // backtick) after the identifier is the INFIX definition form
+            // (`x <> y = …` — the identifier was the left operand).
+            let (name, clause) =
+                if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
+                    self.parse_infix_method_clause(name)?
+                } else {
+                    (name, self.parse_clause()?)
+                };
 
             // Check if there's an existing method we should add a clause to
             if let Some(existing) = methods.iter_mut().find(|m: &&mut InstanceMethod| m.name == name) {
