@@ -81,11 +81,26 @@ find :: (a -> Bool) -> [a] -> Maybe a
 find _ [] = Nothing
 find p (x:xs) = if p x then Just x else find p xs
 
+-- Stable bottom-up merge sort, like GHC's Data.List.sortBy: elements
+-- comparing EQ keep their input order (merge takes from the LEFT run on
+-- EQ), each comparison calls cmp once, and the pass structure is
+-- O(n log n) on every input.  (The previous quicksort was unstable —
+-- EQ-to-pivot elements moved in front of the pivot — quadratic on
+-- sorted input, and called cmp up to three times per element.)
 sortBy :: (a -> a -> Ordering) -> [a] -> [a]
-sortBy _ [] = []
-sortBy cmp (x:xs) = let less = filter (\y -> cmp y x == LT || cmp y x == EQ) xs
-                        greater = filter (\y -> cmp y x == GT) xs
-                    in append (sortBy cmp less) (x : sortBy cmp greater)
+sortBy cmp list = go (map (\x -> [x]) list)
+  where
+    go [] = []
+    go (r : rs) = case rs of
+        [] -> r
+        _ -> go (mergePairs (r : rs))
+    mergePairs (a : b : rest) = merge a b : mergePairs rest
+    mergePairs rs = rs
+    merge [] bs = bs
+    merge (a : rest) [] = a : rest
+    merge (a : as) (b : bs) = if cmp a b == GT
+        then b : merge (a : as) bs
+        else a : merge as (b : bs)
 
 foldl' :: (b -> a -> b) -> b -> [a] -> b
 foldl' _ acc [] = acc
