@@ -230,6 +230,7 @@ mll_test!(guard_qualifier_lists, "guard_qualifier_lists.mll");
 mll_test!(where_tuple_binding, "where_tuple_binding.mll");
 mll_test!(negative_pattern_parens, "negative_pattern_parens.mll");
 mll_test!(dash_run_operators, "dash_run_operators.mll");
+mll_test!(underscore_names_no_capture, "underscore_names_no_capture.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");

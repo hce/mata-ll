@@ -208,6 +208,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_where_tuple_binding, "cases", "where_tuple_binding.mll"),
         (ghc_oracle_negative_pattern_parens, "cases", "negative_pattern_parens.mll"),
         (ghc_oracle_dash_run_operators, "cases", "dash_run_operators.mll"),
+        (ghc_oracle_underscore_names_no_capture, "cases", "underscore_names_no_capture.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),

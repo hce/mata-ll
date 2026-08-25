@@ -63,6 +63,26 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// The '__' identifier prefix is the compiler's fresh-name namespace
+// (__lamN, __tup_N, __compN, __sec): desugaring substitutes those names
+// without renaming, so a same-spelled user binder would be silently
+// captured. mata-ll reserves the prefix loudly (GHC doesn't need to —
+// its desugarer renames); single-underscore names stay ordinary
+// (accept side: underscore_names_no_capture.mll).
+#[test]
+fn double_underscore_identifiers_are_reserved() {
+    expect_compile_error(
+        "f :: Int -> Int\nf __sec = __sec + 1\n\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &[
+            "reserved for compiler-generated names",
+            "'__sec'",
+            "note:",
+            "silently captured",
+        ],
+    );
+}
+
 // An operator line at the enclosing block's item column is the block's
 // NEXT item (GHC's layout inserts a `;` there), not a continuation of
 // the previous expression. Regression: the continuation check keyed to

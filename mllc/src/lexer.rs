@@ -549,6 +549,34 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                 "False" => Token::UpperIdent("False".to_string()),
                 "_" => Token::Underscore,
                 _ => {
+                    // The double-underscore prefix is the compiler's fresh-name
+                    // namespace (__lamN, __tup_N, __compN, __sec, …): desugaring
+                    // substitutes those names without renaming, so a user binder
+                    // spelled the same way would be silently captured
+                    // (`f __sec = (__sec +)` once desugared to
+                    // `\__sec -> __sec + __sec`). GHC never reserves source
+                    // names because its desugarer renames — mata-ll reserves
+                    // the prefix instead and says so loudly.
+                    if word.starts_with("__") {
+                        let mut diag = err_at(
+                            format!(
+                                "Identifiers starting with '__' are reserved \
+                                 for compiler-generated names: '{}'",
+                                word
+                            ),
+                            tok_line, tok_col,
+                        );
+                        diag.notes.push(
+                            "desugaring creates '__'-prefixed helper names \
+                             (lambda-pattern binders, tuple-binding scrutinees, \
+                             section operands) and substitutes them without \
+                             renaming, so a user name spelled the same way \
+                             would be silently captured; use a single leading \
+                             underscore or another name"
+                                .to_string(),
+                        );
+                        return Err(diag);
+                    }
                     if word.starts_with(|c: char| c.is_uppercase()) {
                         Token::UpperIdent(word)
                     } else {

@@ -3069,10 +3069,10 @@ impl Parser {
                 )?;
                 self.expect(&Token::RightParen)?;
                 return Ok(Expr::Lambda {
-                    params: vec!["_sec".into()],
+                    params: vec!["__sec".into()],
                     body: Box::new(Expr::InfixApp {
                         op,
-                        lhs: Box::new(Expr::Var("_sec".into())),
+                        lhs: Box::new(Expr::Var("__sec".into())),
                         rhs: Box::new(rhs),
                     }),
                 });
@@ -3109,10 +3109,10 @@ impl Parser {
             )?;
             self.expect(&Token::RightParen)?;
             return Ok(Expr::Lambda {
-                params: vec!["_sec".into()],
+                params: vec!["__sec".into()],
                 body: Box::new(Expr::InfixApp {
                     op: name,
-                    lhs: Box::new(Expr::Var("_sec".into())),
+                    lhs: Box::new(Expr::Var("__sec".into())),
                     rhs: Box::new(rhs),
                 }),
             });
@@ -3171,11 +3171,11 @@ impl Parser {
                     self.advance(); // consume )
                     self.expr_min_indent = saved_expr_min_indent;
                     return Ok(Expr::Lambda {
-                        params: vec!["_sec".into()],
+                        params: vec!["__sec".into()],
                         body: Box::new(Expr::InfixApp {
                             op,
                             lhs: Box::new(expr),
-                            rhs: Box::new(Expr::Var("_sec".into())),
+                            rhs: Box::new(Expr::Var("__sec".into())),
                         }),
                     });
                 }
@@ -3204,11 +3204,11 @@ impl Parser {
                         self.advance(); // consume )
                         self.expr_min_indent = saved_expr_min_indent;
                         return Ok(Expr::Lambda {
-                            params: vec!["_sec".into()],
+                            params: vec!["__sec".into()],
                             body: Box::new(Expr::InfixApp {
                                 op: name,
                                 lhs: Box::new(expr),
-                                rhs: Box::new(Expr::Var("_sec".into())),
+                                rhs: Box::new(Expr::Var("__sec".into())),
                             }),
                         });
                     }
