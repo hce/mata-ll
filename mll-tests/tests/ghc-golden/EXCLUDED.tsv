@@ -1,0 +1,66 @@
+cases/AliasCtor	helper module (twinned for import, no main)
+cases/DiamondLeaf	helper module (twinned for import, no main)
+cases/DiamondMid	helper module (twinned for import, no main)
+cases/ExportHelper	helper module (twinned for import, no main)
+cases/FixityOps	helper module (twinned for import, no main)
+cases/MergeNames	helper module (twinned for import, no main)
+cases/OpQualDefs	helper module (twinned for import, no main)
+cases/OpsExports	helper module (twinned for import, no main)
+cases/QualShapes	helper module for qualified twins (Q77 seam)
+cases/alias_ctor_collision	alias/constructor collision: documented deviation + Q77 seam
+cases/any_ffi_marshal	LuaPure FFI declarations marshalling the builtin Any
+cases/any_type	builtin Any (Lua dynamic value carrier)
+cases/bytestring	ByteString builtins (Lua byte strings)
+cases/bytestring_fold_nil_result	ByteString builtins (Lua byte strings)
+cases/bytestring_u64_sign_bit	ByteString + Lua 64-bit wrap-around semantics
+cases/caf_forward_reference	imports LString (Lua string FFI)
+cases/constructor_as_rename	'as "name"' constructor-rename syntax (JSON FFI, not Haskell)
+cases/constructor_shadowing	redefines Just/Nothing constructors (Prelude shadowing)
+cases/constructor_shadowing_json	JSON FFI library
+cases/derive_fromjson	JSON FFI library
+cases/derive_generic	mata-ll Generics substrate (Data.Generics is not GHC's)
+cases/derive_tojson	JSON FFI library
+cases/error_forces_message	imports LString (Lua string FFI)
+cases/exitvalue_prelude	ExitValue/exit (Lua process control)
+cases/export_module	'export' keyword (Lua module export)
+cases/ffi	FFI declarations
+cases/ffi_constructed_values	FFI declarations
+cases/ffi_maybe_args	FFI declarations
+cases/ffi_multi_return	LuaPure FFI declarations (math.modf multi-return)
+cases/ffi_strictness	FFI declarations
+cases/gadt_syntax_generic_json	Generics substrate + JSON FFI library
+cases/generic_json	Generics substrate + JSON FFI library
+cases/generic_json_decode	Generics substrate + JSON FFI library
+cases/generic_json_many	Generics substrate + JSON FFI library
+cases/getline	reads stdin; LuaUserData FFI
+cases/hashmap	HashMap builtins (Lua tables)
+cases/import_merge	qualified import: twin module resolution gap (Q77 seam)
+cases/integer_json	Generics substrate + JSON FFI library
+cases/json_codec	JSON FFI library
+cases/lbit_64bit_boundary	LBit (Lua bit-op semantics, deliberately not Data.Bits)
+cases/lbit_strict_primitive_arg	LBit (Lua bit-op semantics)
+cases/lib_data_map	mata-ll Data.Map API (values/mapPairs/...) is its own library, not containers
+cases/lib_json	JSON FFI library
+cases/lib_lbit	LBit (Lua bit-op semantics)
+cases/lib_liolinear	LIOLinear file FFI + linear types
+cases/lib_lmath	LMath FFI (Lua math library)
+cases/lib_los	LOS FFI (clock/env/tmpname: host-dependent)
+cases/lib_lstring	LString FFI (Lua string library)
+cases/lib_regex	Regex FFI (Lua patterns)
+cases/linear_affine_basic	GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar
+cases/linear_mult_poly	GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar
+cases/lua_iterator_method	LuaIterator FFI
+cases/lua_keywords	record fields named after Lua keywords collide with Prelude.until under GHC
+cases/luacatch	LuaCatch FFI
+cases/luadict	LuaDict FFI
+cases/newtypes	'newtype Age = Int' implicit-constructor sugar is not Haskell
+cases/num_user_instance	GHC's fromInteger :: Integer -> a can't feed Z5's Int field (mata-ll has no Integer)
+cases/poly_recursion_user_class	contains a LuaPure FFI declaration
+cases/pure_scalar_bare_escape	ByteString builtins (Lua byte strings)
+cases/purehashmap	LuaPure hash FFI
+cases/qualified_import_instances	qualified import: twin module resolution gap (Q77 seam)
+cases/qualified_operator_module	qualified import: twin module resolution gap (Q77 seam)
+cases/readline	LIO.readLine (Lua io FFI)
+cases/string_escapes	imports LString (Lua string FFI)
+cases/superclass	redefines the Eq/Ord classes (mata-ll builtin shadowing)
+ghc/ghc_regr005	HashMap builtins (Lua tables)

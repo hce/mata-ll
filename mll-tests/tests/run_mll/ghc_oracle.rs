@@ -557,6 +557,49 @@ fn ghc_oracle_registry_is_complete() {
         );
     }
 
+    // Every corpus FILE is either goldened or listed in the exclusion
+    // manifest with a recorded reason (Q77): a case must never silently
+    // lose its stdout comparison. The manifest is written by
+    // regenerate-ghc-goldens.sh from its excluded_reason table and is the
+    // machine-readable authority lua-compat.sh consults before allowing
+    // its missing-golden self-asserting fallback.
+    let manifest = std::fs::read_to_string("tests/ghc-golden/EXCLUDED.tsv")
+        .expect("tests/ghc-golden/EXCLUDED.tsv (run mll-tests/regenerate-ghc-goldens.sh)");
+    let excluded: BTreeSet<String> = manifest
+        .lines()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.split('\t').next().unwrap().to_string())
+        .collect();
+    for path in &excluded {
+        assert!(
+            Path::new(&format!("tests/{path}.mll")).exists(),
+            "EXCLUDED.tsv lists {path} but tests/{path}.mll does not exist \
+             (stale row; re-run mll-tests/regenerate-ghc-goldens.sh)"
+        );
+    }
+    for sub in ["cases", "ghc"] {
+        for entry in std::fs::read_dir(format!("tests/{sub}")).expect("corpus dir") {
+            let name = entry.expect("entry").file_name().to_string_lossy().into_owned();
+            let Some(stem) = name.strip_suffix(".mll") else { continue };
+            let key = format!("{sub}/{stem}");
+            let has_golden =
+                Path::new(&format!("tests/ghc-golden/{sub}/{stem}.stdout")).exists();
+            let listed = excluded.contains(&key);
+            assert!(
+                has_golden || listed,
+                "{key}: neither goldened nor listed in EXCLUDED.tsv — its \
+                 stdout comparison would be silently lost. Run \
+                 mll-tests/regenerate-ghc-goldens.sh (it pins the golden or \
+                 records the exclusion)."
+            );
+            assert!(
+                !(has_golden && listed),
+                "{key}: both goldened and excluded — the manifest or the \
+                 exclusion table is stale; re-run regenerate-ghc-goldens.sh"
+            );
+        }
+    }
+
     // Every pinned divergence has a golden and a DIVERGENCES.md entry.
     let divergences_md = std::fs::read_to_string("tests/ghc-golden/DIVERGENCES.md")
         .expect("tests/ghc-golden/DIVERGENCES.md exists");

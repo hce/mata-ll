@@ -47,6 +47,7 @@ excluded_reason() {
         cases/any_type)                  echo "builtin Any (Lua dynamic value carrier)";;
         cases/any_ffi_marshal)           echo "LuaPure FFI declarations marshalling the builtin Any";;
         cases/bytestring)                echo "ByteString builtins (Lua byte strings)";;
+        cases/bytestring_fold_nil_result) echo "ByteString builtins (Lua byte strings)";;
         cases/pure_scalar_bare_escape)   echo "ByteString builtins (Lua byte strings)";;
         cases/bytestring_u64_sign_bit)   echo "ByteString + Lua 64-bit wrap-around semantics";;
         cases/caf_forward_reference)     echo "imports LString (Lua string FFI)";;
@@ -129,6 +130,11 @@ excluded_reason() {
         # known Q77 seam: the runghc twin cannot find qualified-imported
         # sibling modules). Lift this exclusion when Q77 fixes the seam.
         cases/qualified_operator_module) echo "qualified import: twin module resolution gap (Q77 seam)";;
+        cases/qualified_import_instances) echo "qualified import: twin module resolution gap (Q77 seam)";;
+        # A helper the qualified twins import; its own twin cannot be built
+        # until the Q77 seam is fixed, so it is recorded here rather than in
+        # the helper loop.
+        cases/QualShapes)                echo "helper module for qualified twins (Q77 seam)";;
 
         *) : ;;
     esac
@@ -219,6 +225,15 @@ done
 rm -rf "$gold/cases" "$gold/ghc"
 mkdir -p "$gold/cases" "$gold/ghc"
 
+# Machine-readable exclusion manifest (committed): "path<TAB>reason" per
+# excluded case, regenerated with the goldens. lua-compat.sh consults it
+# so a MISSING golden that is not listed here fails loudly instead of
+# silently demoting to an exit-0 check, and the oracle-coverage registry
+# test (ghc_oracle.rs) asserts every corpus file is either goldened or
+# listed. The excluded_reason table above stays the single authority.
+manifest=$gold/EXCLUDED.tsv
+: > "$manifest"
+
 total=0; pinned=0; skipped=0; failed=0
 failures=""
 
@@ -229,6 +244,7 @@ for sub in cases ghc; do
         reason=$(excluded_reason "$sub/$name")
         if [ -n "$reason" ]; then
             skipped=$((skipped + 1))
+            printf '%s\t%s\n' "$sub/$name" "$reason" >> "$manifest"
             continue
         fi
         hs=$gen/${sub}_${name}.hs

@@ -118,8 +118,18 @@ for src in "$GHC_DIR"/*.mll; do
     golden="$GOLDEN_DIR/ghc/$name.stdout"
     divergent="$GOLDEN_DIR/divergent/ghc/$name.stdout"
     if [ ! -f "$golden" ]; then
-        # Outside the oracle's domain (regenerate-ghc-goldens.sh lists why,
-        # e.g. HashMap builtins): the case runs self-asserting, like tests/cases.
+        # Only a case LISTED in the exclusion manifest (written by
+        # regenerate-ghc-goldens.sh from its excluded_reason table) may run
+        # without a golden — self-asserting, like tests/cases. An UNLISTED
+        # missing golden used to silently demote to this exit-0 check, so a
+        # deleted or never-pinned golden lost its stdout comparison without
+        # any gate noticing.
+        if ! grep -q "^ghc/$name	" "$GOLDEN_DIR/EXCLUDED.tsv" 2>/dev/null; then
+            echo "FAIL ghc/$name: no golden and not listed in EXCLUDED.tsv (run regenerate-ghc-goldens.sh)"
+            failures=$((failures + 1))
+            rm -f "$lua_file"
+            continue
+        fi
         if "$LUA" "$lua_file" >/dev/null 2>&1 </dev/null; then
             passed=$((passed + 1))
         else
