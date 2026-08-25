@@ -431,7 +431,7 @@ impl Checker {
 
         let span = clauses.first().map(|c| c.span).unwrap_or_default();
         self.discharge_wanted_constraints(
-            name, span, &final_ty, &declared_cvars, &overall_subst, &demote);
+            name, span, &final_ty, &declared_cvars, &overall_subst, &demote, &renames);
         // Check exhaustiveness of first argument patterns
         if !clauses.is_empty() && !clauses[0].patterns.is_empty() {
             let first_patterns: Vec<&Pattern> = clauses.iter()
@@ -513,6 +513,7 @@ impl Checker {
         declared_cvars: &[(String, TyVar)],
         overall_subst: &Subst,
         demote: &HashMap<u32, Ty>,
+        renames: &HashMap<String, String>,
     ) {
         let type_vars = final_ty.free_vars();
         // A set, not a Vec: with one binder per statement (a long do-block of
@@ -581,8 +582,29 @@ impl Checker {
                                 .free_vars().contains(&v)
                     });
                     if !provided {
+                        // Report the variable under the SOURCE spelling the
+                        // signature wrote: `v` carries the freshened name
+                        // (`<source><id>`), and the display fallback's
+                        // digit-trim mangles user names that themselves end
+                        // in digits (`t1` freshens to `t1519`, trims to
+                        // `t`). The freshening map inverts exactly.
+                        let shown = renames.iter()
+                            .find(|(_, fresh)| fresh.as_str() == v.name)
+                            .map(|(src, _)| TyVar { name: src.clone(), id: v.id })
+                            .unwrap_or_else(|| {
+                                // Not in the freshening map (already fresh
+                                // in the signature — an alpha-renamed
+                                // instance-method variable): strip the
+                                // appended id digits here, where the name
+                                // is KNOWN to be freshened. The display
+                                // prints verbatim.
+                                let trimmed = v.name
+                                    .trim_end_matches(|c: char| c.is_ascii_digit());
+                                let name = if trimmed.is_empty() { "a" } else { trimmed };
+                                TyVar { name: name.to_string(), id: v.id }
+                            });
                         self.push_error_span(
-                            DiagnosticKind::MissingContextConstraint { class: rc, ty: Ty::Var(v) },
+                            DiagnosticKind::MissingContextConstraint { class: rc, ty: Ty::Var(shown) },
                             format!("definition of '{}'", name),
                             span,
                         );

@@ -1889,11 +1889,14 @@ impl fmt::Display for Diagnostic {
                     paren_ty(&ty.apply_subst(&s)), class)?
             }
             DiagnosticKind::MissingContextConstraint { class, ty } => {
-                // Show the signature variable's written name: a freshened rigid
-                // variable is `<name><id>` (e.g. `a519`), so trim the trailing id
-                // digits back to what the user wrote (`a`).
+                // Verbatim: the construction site already carries the
+                // signature's SOURCE spelling (mapped back through the
+                // freshening renames, or digit-trimmed there for the
+                // alpha-renamed instance-method case). Trimming HERE
+                // mangled user variables that themselves end in digits
+                // (`t1` displayed as `t`).
                 let v = match ty {
-                    Ty::Var(tv) => tv.name.trim_end_matches(|c: char| c.is_ascii_digit()).to_string(),
+                    Ty::Var(tv) => tv.name.clone(),
                     other => format!("{}", other),
                 };
                 let v = if v.is_empty() { "a".to_string() } else { v };

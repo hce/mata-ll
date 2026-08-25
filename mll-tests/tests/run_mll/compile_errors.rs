@@ -448,6 +448,23 @@ main = print (f MkInt)
 // the emitted Lua arithmetic. (The accept side — print (), () == () —
 // is pinned by the tuple_instance corpus case.)
 #[test]
+fn missing_context_shows_digit_suffixed_variable_verbatim(){
+    // The missing-context diagnostic used to digit-trim the DISPLAYED
+    // variable to undo freshening ("t1519" → "t"), which also mangled
+    // user variables that themselves end in digits: a signature over `t1`
+    // reported "Show t" (Q84). The source spelling is now carried in the
+    // diagnostic.
+    let source = r#"
+add :: t1 -> String
+add x = show x
+
+main :: IO ()
+main = putStrLn (add (1 :: Int))
+"#;
+    expect_compile_error(source, &[], &["Show t1", "(Show t1) => "]);
+}
+
+#[test]
 fn parameterized_deriving_generic_is_rejected_with_reason() {
     // The Generic substrate is concrete-only (HASKDIFF): without the gate,
     // `data Pair a = … deriving Generic` surfaced as an internal-looking
