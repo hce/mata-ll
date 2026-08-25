@@ -414,15 +414,13 @@ enumFromThenToHelper_Integer x step m =
     then if x > m then [] else x : enumFromThenToHelper_Integer (x + step) step m
     else if x < m then [] else x : enumFromThenToHelper_Integer (x + step) step m
 
--- Read instances
-read_Int :: String -> Int
-read_Int s = ffi_tonumber s
+-- Read instances: validating runtime parsers (GHC's grammar per type;
+-- failure raises "Prelude.read: no parse" exactly like GHC).
+read_Int :: String -> LuaPure "__mll_read_int" Int
 
-read_Number :: String -> Number
-read_Number s = ffi_tonumber_float s
+read_Number :: String -> LuaPure "__mll_read_number" Number
 
-read_Bool :: String -> Bool
-read_Bool s = if s == "True" then True else False
+read_Bool :: String -> LuaPure "__mll_read_bool" Bool
 
 read_String :: String -> String
 read_String s = s

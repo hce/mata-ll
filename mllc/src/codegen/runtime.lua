@@ -1141,6 +1141,41 @@ local minBound_Int = math.mininteger or (-2^63)
 local maxBound_Int = math.maxinteger or (2^63 - 1)
 local minBound_Bool = false
 local maxBound_Bool = true
+-- Read parsing (GHC parity). A read trims surrounding space and one
+-- layer of parentheses; anything the type's grammar does not cover
+-- raises GHC's exact "Prelude.read: no parse" (a catchable error).
+-- The old readers accepted garbage: tonumber let read @Int return a
+-- FRACTION ("3.5") or nil ("junk"), and read @Bool mapped everything
+-- that was not "True" to False.
+local function __mll_read_trim(s)
+    s = string.gsub(s, "^%s+", "")
+    s = string.gsub(s, "%s+$", "")
+    if string.byte(s, 1) == 40 and string.byte(s, #s) == 41 then
+        s = string.gsub(string.gsub(s, "^%(%s*", ""), "%s*%)$", "")
+    end
+    return s
+end
+local function __mll_read_int(s)
+    s = __mll_read_trim(__force(s))
+    if not string.match(s, "^%-?%d+$") then error("Prelude.read: no parse") end
+    return tonumber(s)
+end
+local function __mll_read_number(s)
+    s = __mll_read_trim(__force(s))
+    if not (string.match(s, "^%-?%d+$")
+        or string.match(s, "^%-?%d+%.%d+$")
+        or string.match(s, "^%-?%d+[eE][%+%-]?%d+$")
+        or string.match(s, "^%-?%d+%.%d+[eE][%+%-]?%d+$")) then
+        error("Prelude.read: no parse")
+    end
+    return tonumber(s) + 0.0
+end
+local function __mll_read_bool(s)
+    s = __mll_read_trim(__force(s))
+    if s == "True" then return true end
+    if s == "False" then return false end
+    error("Prelude.read: no parse")
+end
 local function show_Int(x) return __mll_show_integer(__force(x)) end
 -- Type-directed Double show: a Number-typed value may be held as a native
 -- integer (integer-valued arithmetic on Lua 5.3+, every LuaJIT number), so

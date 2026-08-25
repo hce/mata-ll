@@ -333,6 +333,10 @@ local function read_Integer(s)
     s = string.gsub(s, "^%s+", "")
     s = string.gsub(s, "%s+$", "")
     if string.byte(s, 1) == 40 then s = string.gsub(string.gsub(s, "^%(%s*", ""), "%s*%)$", "") end
+    -- Validate BEFORE parsing: __int_from_decimal is the fast path for
+    -- pre-validated literals and maps any byte through byte-48, so
+    -- garbage ("12x", "") silently became a number. GHC: no parse.
+    if not string.match(s, "^[%+%-]?%d+$") then error("Prelude.read: no parse") end
     return __int_from_decimal(s)
 end
 -- toInteger @Int: lift a machine Int to an Integer (bignum).
