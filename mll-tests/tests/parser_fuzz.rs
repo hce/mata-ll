@@ -8,7 +8,12 @@
 //! and dedicated probes hugging `mllc::MAX_NESTING_DEPTH` from both sides.
 //! The property under test: `mllc::compile` either accepts or rejects with
 //! a Diagnostic — it never panics, never aborts (stack overflow), and never
-//! hangs (a watchdog enforces a per-input timeout).
+//! hangs (a watchdog enforces a per-input timeout). A sampled input that
+//! compiles is additionally EXECUTED under mlua: the emitted Lua may raise
+//! mata-ll's own error() paths, but never a Lua-level type crash
+//! ("attempt to …") — that would be emitted-code corruption. A generator
+//! of TYPE-CORRECT programs (which would fuzz the backend far harder than
+//! the mostly-ill-typed random modules here) remains open infra work.
 //!
 //! Everything is deterministic and offline. Each input is derived from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
@@ -356,7 +361,25 @@ fn fuzz_run(count: u64) {
                 // ~30 s in debug at 3000 lets; measured and reported, not a
                 // parser property).
                 if i % 25 == 0 && i % 97 != 96 {
-                    let _ = mllc::compile(&src, Path::new("."), &[]);
+                    // A sampled input that COMPILES also runs (F22): the
+                    // emitted Lua may raise mata-ll's own error() paths
+                    // (Non-exhaustive, divide by zero, user `error` — a
+                    // random program earns those), but a Lua-LEVEL crash
+                    // ("attempt to index/call/perform arithmetic on …")
+                    // is emitted-code corruption, the runtime-side bug
+                    // class nothing else fuzzes. The per-input watchdog
+                    // covers a looping program like a hanging compile.
+                    if let Ok(r) = mllc::compile(&src, Path::new("."), &[]) {
+                        let lua = mlua::Lua::new();
+                        if let Err(e) = lua.load(&r.lua_code).set_name("fuzz").exec() {
+                            let msg = format!("{e}");
+                            assert!(
+                                !msg.contains("attempt to "),
+                                "emitted Lua crashed at the Lua level on input {i} \
+                                 (seed {BATCH_SEED:#x}):\n{msg}\nsource:\n{src}"
+                            );
+                        }
+                    }
                 }
                 tx.send(i).expect("watchdog alive");
             }
