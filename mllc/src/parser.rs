@@ -1614,11 +1614,19 @@ impl Parser {
             body
         } else {
             Expr::Lambda {
-                params: self.lambda_param_names(patterns)?,
+                params: self.lambda_param_names(patterns.clone())?,
                 body: Box::new(body),
             }
         };
-        Ok(LocalDef { name, patterns: vec![], body })
+        // The patterns are KEPT on the LocalDef (the body is still the
+        // desugared lambda): they are the syntactic function-binding
+        // marker. Inference deliberately does NOT use it to exempt
+        // function bindings from the monomorphism restriction — see the
+        // HASKDIFF.md section and the comment in infer_let_group — but
+        // the module rewriter scopes their names, and the marker is the
+        // honest record of what the user wrote. The emitted TIR bind
+        // stays patternless.
+        Ok(LocalDef { name, patterns, body })
     }
 
     fn parse_where(&mut self) -> PResult<Vec<LocalDef>> {

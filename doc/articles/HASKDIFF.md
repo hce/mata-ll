@@ -155,6 +155,26 @@ type signatures on every top-level definition:
     -- mata-ll: the line below does not compile without the signature above
     double x = x * 2
 
+## The monomorphism restriction also covers let-bound functions
+
+GHC's monomorphism restriction exempts bindings with argument patterns:
+in GHC, `let f x = x + 1` generalizes with its `Num` constraint and can
+be used at `Int` and `Double` in one expression. mata-ll keeps such a
+binding monomorphic, exactly like `let n = 1`:
+
+    -- GHC: compiles (f is Num a => a -> a)
+    -- mata-ll: the second use is a type error (f was pinned to Int)
+    let f x = x + 1
+    print (f (1 :: Int))
+    print (f 1.5)
+
+The reason is representational: a mata-ll `let` binding is one Lua
+closure, and a class-polymorphic local would need one specialization
+per use — which monomorphization performs only for top-level
+functions. Bind at the top level (with a signature) when you need
+class-polymorphic reuse; parametric locals without class constraints
+(`let g y = [y]`) generalize fine.
+
 ## Import renaming requires `qualified`
 
 mata-ll supports `import Module`, `import Module (foo, bar)`,

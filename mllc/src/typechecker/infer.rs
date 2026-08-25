@@ -1100,6 +1100,17 @@ impl Checker {
         for fresh in &fresh_tys {
             let bind_ty = fresh.apply_subst(&subst);
             let mut scheme = self.generalize(&env, &bind_ty);
+            // DELIBERATE DEVIATION (documented in HASKDIFF.md): the
+            // restriction applies to let-bound FUNCTIONS too, where GHC
+            // exempts bindings with argument patterns (`let f x = x + 1`
+            // generalizes there, usable at Int AND Number). A mata-ll
+            // let-local is ONE Lua closure — a class-polymorphic local
+            // would need per-use specialization, which monomorphization
+            // performs only for top-level functions; generalizing here
+            // typechecks and then MISCOMPILES (the shared closure's class
+            // method resolves for one instantiation and crashes on the
+            // other — confirmed by repro during round-3 Q37). Bind at the
+            // top level for class-polymorphic reuse.
             scheme.vars.retain(|v| !is_constrained(self, v));
             schemes.push(scheme);
         }
