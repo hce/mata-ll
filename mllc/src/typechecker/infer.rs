@@ -9,59 +9,307 @@ impl Checker {
     // --- Exhaustiveness checking ---
 
     /// Check if a list of patterns exhaustively covers a data type.
-    /// Returns a list of missing constructor names, or empty if exhaustive.
+    /// Returns rendered witnesses of missing cases, or empty if exhaustive
+    /// (or undecidable — see `missing_witnesses`).
     /// When `scrutinee_ty` is provided, GADT constructors whose return type
     /// cannot unify with it are excluded (they are unreachable).
     pub(super) fn check_exhaustiveness(&self, patterns: &[&Pattern], scrutinee_ty: Option<&Ty>) -> Vec<String> {
-        // Collect constructor names, unwrapping parens, checking for catch-alls
-        let mut seen_constructors: Vec<String> = Vec::new();
-        let mut type_name: Option<String> = None;
-        let mut has_literal = false;
+        let rows: Vec<Vec<PatCell<'_>>> = patterns.iter()
+            .map(|p| vec![PatCell::P(p)])
+            .collect();
+        self.check_exhaustiveness_matrix(&rows, &[scrutinee_ty.cloned()])
+    }
 
-        for p in patterns {
-            self.collect_pattern_info(p, &mut seen_constructors, &mut type_name, &mut has_literal);
+    /// Matrix (all-columns) entry: `rows` are the clauses' pattern rows,
+    /// `col_tys` the per-column scrutinee types where known. Returns each
+    /// missing-case witness as one rendered row ("Nothing", "True _",
+    /// "Just (Leaf _)").
+    pub(super) fn check_exhaustiveness_matrix(
+        &self,
+        rows: &[Vec<PatCell<'_>>],
+        col_tys: &[Option<Ty>],
+    ) -> Vec<String> {
+        self.missing_witnesses(rows, col_tys, WITNESS_CAP)
+            .into_iter()
+            .map(|w| {
+                let row: Vec<String> = w.into_iter().map(|c| c.text).collect();
+                row.join(" ")
+            })
+            .collect()
+    }
+
+    /// Maranget-style usefulness of the all-wildcard row against `rows`:
+    /// the returned witnesses (capped at `cap`) are value shapes no row
+    /// matches — i.e. the match is NOT exhaustive. An empty result means
+    /// covered, or coverage was UNDECIDABLE: a non-Bool literal heads an
+    /// infinite domain (`f 0 = …; f 1 = …` can never be proven complete),
+    /// and mata-ll's NonExhaustive is a hard ERROR where GHC only warns —
+    /// so an undecidable column errs toward accepting: every row is kept
+    /// (as if the column matched anything) and checking continues in the
+    /// remaining columns. Guards are the callers' business: a guarded row
+    /// is counted as covering (its fall-off is a deliberate runtime
+    /// error — see non_exhaustive_live.mll).
+    ///
+    /// Bool literal patterns ARE decidable — `True`/`False` parse as
+    /// literals but form a two-constructor domain, and the old
+    /// top-constructor checker's literal bail left every Bool match
+    /// unchecked (F4). Tuples recurse into their components, constructor
+    /// arguments are checked recursively, and every clause column
+    /// participates (the old checker looked at column 0 only).
+    fn missing_witnesses(
+        &self,
+        rows: &[Vec<PatCell<'_>>],
+        col_tys: &[Option<Ty>],
+        cap: usize,
+    ) -> Vec<Vec<Witness>> {
+        if cap == 0 {
+            return Vec::new();
+        }
+        if col_tys.is_empty() {
+            // Width 0: the wildcard row is useful iff no row remains.
+            return if rows.is_empty() { vec![vec![]] } else { Vec::new() };
+        }
+        let rest_tys = &col_tys[1..];
+        let heads: Vec<Head<'_>> = rows.iter().map(|r| self.cell_head(r[0])).collect();
+
+        // Undecidable column: keep every row (over-approximate coverage —
+        // sound for a hard error) and continue right of it.
+        if heads.iter().any(|h| matches!(h, Head::OtherLit)) {
+            let sub: Vec<Vec<PatCell<'_>>> = rows.iter().map(|r| r[1..].to_vec()).collect();
+            return prepend_witness(
+                self.missing_witnesses(&sub, rest_tys, cap),
+                Witness::atomic("_"),
+            );
         }
 
-        // If any pattern is a catch-all (variable/wildcard found), it's exhaustive
-        if seen_constructors.contains(&"*".to_string()) { return vec![]; }
-
-        // If we have literals, we can't check exhaustiveness
-        if has_literal { return vec![]; }
-
-        // If we have no constructors, nothing to check
-        let type_name = match type_name {
-            Some(t) => t,
-            None => return vec![],
-        };
-
-        // Find all constructors for this type, filtering out GADT-unreachable ones
-        let all_constructors: Vec<String> = self.constructors.iter()
-            .filter(|(_, info)| info.type_name == type_name)
-            .filter(|(_, info)| {
-                // A constructor is excluded only when its result type is
-                // definitely APART from the scrutinee type (gadt_reachable),
-                // not when unification fails: a RIGID scrutinee index (the
-                // skolem of `f :: G b -> …`) refuses to unify with every
-                // indexed result type, which silently dropped REQUIRED
-                // cases — the match compiled non-exhaustive and crashed at
-                // runtime. The caller chooses `b`, so every constructor
-                // whose index b could be instantiated to is reachable.
-                if let Some(sty) = scrutinee_ty {
-                    self.gadt_reachable(&info.result_type, sty)
-                } else {
-                    true
+        // Tuple column: one constructor, positional components.
+        if let Some(arity) = heads.iter().find_map(|h| match h {
+            Head::Tup(ps) => Some(ps.len()),
+            _ => None,
+        }) {
+            let comp_tys: Vec<Option<Ty>> = match col_tys[0].as_ref() {
+                Some(Ty::Tuple(ts)) if ts.len() == arity =>
+                    ts.iter().map(|t| Some(t.clone())).collect(),
+                _ => vec![None; arity],
+            };
+            let mut sub_tys = comp_tys;
+            sub_tys.extend(rest_tys.iter().cloned());
+            let mut sub_rows: Vec<Vec<PatCell<'_>>> = Vec::new();
+            for r in rows {
+                match self.cell_head(r[0]) {
+                    Head::Tup(ps) if ps.len() == arity => {
+                        let mut row: Vec<PatCell<'_>> =
+                            ps.iter().map(PatCell::P).collect();
+                        row.extend_from_slice(&r[1..]);
+                        sub_rows.push(row);
+                    }
+                    Head::Wild => {
+                        let mut row = vec![PatCell::Wild; arity];
+                        row.extend_from_slice(&r[1..]);
+                        sub_rows.push(row);
+                    }
+                    _ => {}
                 }
-            })
-            .map(|(name, _)| name.clone())
-            .collect();
+            }
+            return self.missing_witnesses(&sub_rows, &sub_tys, cap)
+                .into_iter()
+                .map(|mut w| {
+                    let comps: Vec<Witness> = w.drain(..arity).collect();
+                    let text = format!(
+                        "({})",
+                        comps.iter().map(|c| c.text.as_str())
+                            .collect::<Vec<_>>().join(", ")
+                    );
+                    let mut row = vec![Witness::atomic(text)];
+                    row.append(&mut w);
+                    row
+                })
+                .collect();
+        }
 
-        // Return missing ones. Constructor keys are internal (a shadowing
-        // local constructor is registered under a mangled key); report the
-        // source name the user wrote.
-        all_constructors.into_iter()
-            .filter(|c| !seen_constructors.contains(c))
-            .map(|c| c.strip_suffix(super::SHADOW_SUFFIX).unwrap_or(&c).to_string())
-            .collect()
+        // Bool column: True/False are a complete two-constructor domain.
+        if heads.iter().any(|h| matches!(h, Head::BoolLit(_))) {
+            let mut out = Vec::new();
+            for want in [true, false] {
+                let sub_rows: Vec<Vec<PatCell<'_>>> = rows.iter().zip(&heads)
+                    .filter(|(_, h)| matches!(h, Head::BoolLit(b) if *b == want)
+                        || matches!(h, Head::Wild))
+                    .map(|(r, _)| r[1..].to_vec())
+                    .collect();
+                let name = if want { "True" } else { "False" };
+                out.extend(prepend_witness(
+                    self.missing_witnesses(&sub_rows, rest_tys, cap - out.len()),
+                    Witness::atomic(name),
+                ));
+                if out.len() >= cap {
+                    break;
+                }
+            }
+            return out;
+        }
+
+        // Constructor column.
+        let first_con = heads.iter().find_map(|h| match h {
+            Head::Con(key, _) => Some(key.clone()),
+            _ => None,
+        });
+        if let Some(key0) = first_con
+            && let Some(info0) = self.constructors.get(&key0)
+        {
+            let type_name = info0.type_name.clone();
+            // All constructors of the column's type, GADT-filtered against
+            // the column type when known: a constructor is excluded only
+            // when its result type is definitely APART from the scrutinee
+            // type (gadt_reachable), not when unification fails — a RIGID
+            // scrutinee index (the skolem of `f :: G b -> …`) refuses to
+            // unify with every indexed result type, which silently dropped
+            // REQUIRED cases. The caller chooses `b`, so every constructor
+            // whose index b could be instantiated to is reachable.
+            let all: Vec<(String, ConInfo)> = self.constructors.iter()
+                .filter(|(_, info)| info.type_name == type_name)
+                .filter(|(_, info)| match col_tys[0].as_ref() {
+                    Some(sty) => self.gadt_reachable(&info.result_type, sty),
+                    None => true,
+                })
+                .map(|(n, i)| (n.clone(), i.clone()))
+                .collect();
+            let seen: Vec<&str> = heads.iter().filter_map(|h| match h {
+                Head::Con(k, _) => Some(k.as_str()),
+                _ => None,
+            }).collect();
+            // An INDEX-REFINED type (a GADT whose constructors return
+            // different indices — `VNil :: Vec Z a` vs `VCons :: Vec (S n)
+            // a`): matching one constructor refines the index, which can
+            // rule out constructors in nested positions and in SIBLING
+            // columns sharing the index (`vzip VNil VNil`). Deciding that
+            // requires propagating type refinement through specialization —
+            // a full GADT coverage engine. NonExhaustive is a hard error,
+            // so short of that engine a SEEN constructor of such a type
+            // counts as covering without recursion (never a false
+            // rejection); MISSING constructors are still reported, filtered
+            // by the column type as before (gadt_exhaustive_rigid).
+            // Computed over ALL of the type's constructors, not the
+            // column-filtered set — the filter can leave a single survivor
+            // (`Vec ('S ('S n))` keeps only VCons), which says nothing
+            // about whether the TYPE refines its index.
+            let peers: Vec<&ConInfo> = self.constructors.values()
+                .filter(|info| info.type_name == type_name)
+                .collect();
+            let index_refined = peers.iter().enumerate().any(|(i, a)| {
+                peers.iter().skip(i + 1).any(|b| {
+                    !self.gadt_reachable(&a.result_type, &b.result_type)
+                })
+            });
+            let mut out = Vec::new();
+            for (ckey, cinfo) in &all {
+                if out.len() >= cap {
+                    break;
+                }
+                let arity = cinfo.field_types.len();
+                if seen.contains(&ckey.as_str()) {
+                    if index_refined {
+                        continue;
+                    }
+                    // Specialize by this constructor and recurse into its
+                    // arguments. A field type participates only when it is
+                    // CLOSED — an open field (`a` in `Just a`) offers no
+                    // GADT filtering, and its column's constructor set is
+                    // recovered from the patterns themselves.
+                    let mut sub_tys: Vec<Option<Ty>> = cinfo.field_types.iter()
+                        .map(|t| if t.free_vars().is_empty() { Some(t.clone()) } else { None })
+                        .collect();
+                    sub_tys.extend(rest_tys.iter().cloned());
+                    let mut sub_rows: Vec<Vec<PatCell<'_>>> = Vec::new();
+                    for r in rows {
+                        match self.cell_head(r[0]) {
+                            Head::Con(k, args) if k == *ckey => {
+                                // A constructor written with fewer args
+                                // than fields is an arity error reported
+                                // elsewhere; pad to keep the matrix
+                                // rectangular.
+                                let mut row: Vec<PatCell<'_>> =
+                                    args.iter().map(PatCell::P).collect();
+                                row.resize(arity, PatCell::Wild);
+                                row.truncate(arity);
+                                row.extend_from_slice(&r[1..]);
+                                sub_rows.push(row);
+                            }
+                            Head::Wild => {
+                                let mut row = vec![PatCell::Wild; arity];
+                                row.extend_from_slice(&r[1..]);
+                                sub_rows.push(row);
+                            }
+                            _ => {}
+                        }
+                    }
+                    let sub = self.missing_witnesses(&sub_rows, &sub_tys, cap - out.len());
+                    out.extend(sub.into_iter().map(|mut w| {
+                        let args: Vec<Witness> = w.drain(..arity).collect();
+                        let mut row = vec![Witness::of_con(source_con_name(ckey), &args)];
+                        row.append(&mut w);
+                        row
+                    }));
+                } else {
+                    // Missing constructor: it is a real witness head only
+                    // if the default matrix (rows that match ANY value of
+                    // this column) fails to cover the rest.
+                    let sub_rows: Vec<Vec<PatCell<'_>>> = rows.iter().zip(&heads)
+                        .filter(|(_, h)| matches!(h, Head::Wild))
+                        .map(|(r, _)| r[1..].to_vec())
+                        .collect();
+                    let sub = self.missing_witnesses(&sub_rows, rest_tys, cap - out.len());
+                    out.extend(sub.into_iter().map(|mut w| {
+                        let args = vec![Witness::atomic("_"); arity];
+                        let mut row = vec![Witness::of_con(source_con_name(ckey), &args)];
+                        row.append(&mut w);
+                        row
+                    }));
+                }
+            }
+            return out;
+        }
+
+        // All-wildcard column: drop it.
+        let sub_rows: Vec<Vec<PatCell<'_>>> = rows.iter().zip(&heads)
+            .filter(|(_, h)| matches!(h, Head::Wild))
+            .map(|(r, _)| r[1..].to_vec())
+            .collect();
+        prepend_witness(
+            self.missing_witnesses(&sub_rows, rest_tys, cap),
+            Witness::atomic("_"),
+        )
+    }
+
+    /// The head shape of a matrix cell, stripping `Paren`/`As` (an
+    /// as-pattern matches exactly when its inner pattern matches; the
+    /// binder adds nothing to coverage).
+    fn cell_head<'a>(&self, cell: PatCell<'a>) -> Head<'a> {
+        let mut p = match cell {
+            PatCell::Wild => return Head::Wild,
+            PatCell::P(p) => p,
+        };
+        loop {
+            match p {
+                Pattern::Paren(inner) | Pattern::As(_, inner) => p = inner.as_ref(),
+                Pattern::Var(_) | Pattern::Wildcard => return Head::Wild,
+                Pattern::Constructor { name, args } => {
+                    // Track by registered key so a shadowing local
+                    // constructor is compared against its own type's
+                    // variants, not the shadowed one. An unregistered name
+                    // is an error reported elsewhere; count it as a
+                    // catch-all so no spurious second error follows.
+                    let key = self.resolve_con_name(name);
+                    return if self.constructors.contains_key(key) {
+                        Head::Con(key.to_string(), args)
+                    } else {
+                        Head::Wild
+                    };
+                }
+                Pattern::Tuple(ps) => return Head::Tup(ps),
+                Pattern::LitPat(Literal::Bool(b)) => return Head::BoolLit(*b),
+                Pattern::LitPat(_) => return Head::OtherLit,
+            }
+        }
     }
 
     /// Could a GADT constructor's result type and the scrutinee type be
@@ -111,49 +359,83 @@ impl Checker {
         }
     }
 
-    /// Recursively collect pattern info, unwrapping Paren wrappers.
-    pub(super) fn collect_pattern_info(
-        &self,
-        pattern: &Pattern,
-        seen: &mut Vec<String>,
-        type_name: &mut Option<String>,
-        has_literal: &mut bool,
-    ) {
-        match pattern {
-            Pattern::Var(_) | Pattern::Wildcard => {
-                // Use a sentinel to indicate catch-all
-                if !seen.contains(&"*".to_string()) {
-                    seen.push("*".to_string());
-                }
-            }
-            Pattern::Constructor { name, .. } => {
-                // Track by registered key so a shadowing local constructor is
-                // compared against its own type's variants, not the shadowed one.
-                let key = self.resolve_con_name(name);
-                if let Some(info) = self.constructors.get(key) {
-                    *type_name = Some(info.type_name.clone());
-                    if !seen.iter().any(|s| s == key) {
-                        seen.push(key.to_string());
-                    }
-                }
-            }
-            Pattern::LitPat(_) => { *has_literal = true; }
-            Pattern::Paren(inner) => {
-                self.collect_pattern_info(inner, seen, type_name, has_literal);
-            }
-            // `xs@p` matches exactly when `p` matches; the binder adds
-            // nothing to coverage.
-            Pattern::As(_, inner) => {
-                self.collect_pattern_info(inner, seen, type_name, has_literal);
-            }
-            Pattern::Tuple(_) => {
-                // Tuples are always exhaustive (single constructor)
-                if !seen.contains(&"*".to_string()) {
-                    seen.push("*".to_string());
-                }
+}
+
+/// Witness cap per match: enough to show the shape of what is missing
+/// without exploding on wide types.
+const WITNESS_CAP: usize = 4;
+
+/// A cell of the coverage matrix: a borrowed source pattern, or a
+/// synthetic wildcard introduced when specialization expands a catch-all
+/// row into a constructor's argument columns.
+#[derive(Clone, Copy)]
+pub(super) enum PatCell<'a> {
+    P(&'a Pattern),
+    Wild,
+}
+
+/// The head shape of a matrix cell after stripping `Paren`/`As`.
+enum Head<'a> {
+    Wild,
+    /// Registered constructor key + its argument patterns.
+    Con(String, &'a [Pattern]),
+    Tup(&'a [Pattern]),
+    BoolLit(bool),
+    /// A non-Bool literal: infinite domain, undecidable column.
+    OtherLit,
+}
+
+/// A rendered missing-case witness cell, tracking whether it needs parens
+/// when nested as a constructor argument.
+#[derive(Clone)]
+struct Witness {
+    text: String,
+    atomic: bool,
+}
+
+impl Witness {
+    fn atomic(text: impl Into<String>) -> Self {
+        Witness { text: text.into(), atomic: true }
+    }
+
+    fn of_con(name: &str, args: &[Witness]) -> Self {
+        if args.is_empty() {
+            return Witness::atomic(name);
+        }
+        let mut text = String::from(name);
+        for a in args {
+            text.push(' ');
+            if a.atomic {
+                text.push_str(&a.text);
+            } else {
+                text.push('(');
+                text.push_str(&a.text);
+                text.push(')');
             }
         }
+        Witness { text, atomic: false }
     }
+}
+
+/// Prepend `w` to every witness row.
+fn prepend_witness(rows: Vec<Vec<Witness>>, w: Witness) -> Vec<Vec<Witness>> {
+    rows.into_iter()
+        .map(|mut r| {
+            let mut row = vec![w.clone()];
+            row.append(&mut r);
+            row
+        })
+        .collect()
+}
+
+/// Constructor keys are internal (a shadowing local constructor is
+/// registered under a mangled key); witnesses report the source name the
+/// user wrote.
+fn source_con_name(key: &str) -> &str {
+    key.strip_suffix(SHADOW_SUFFIX).unwrap_or(key)
+}
+
+impl Checker {
 
     // --- Function checking ---
 
@@ -432,21 +714,34 @@ impl Checker {
         let span = clauses.first().map(|c| c.span).unwrap_or_default();
         self.discharge_wanted_constraints(
             name, span, &final_ty, &declared_cvars, &overall_subst, &demote, &renames);
-        // Check exhaustiveness of first argument patterns
+        // Check exhaustiveness of the clauses' pattern matrix — every
+        // argument column, not just the first (F4). Only rows of the
+        // common arity participate (an arity mismatch is its own error).
         if !clauses.is_empty() && !clauses[0].patterns.is_empty() {
-            let first_patterns: Vec<&Pattern> = clauses.iter()
-                .map(|c| &c.patterns[0])
+            let width = clauses[0].patterns.len();
+            let rows: Vec<Vec<PatCell<'_>>> = clauses.iter()
+                .filter(|c| c.patterns.len() == width)
+                .map(|c| c.patterns.iter().map(PatCell::P).collect())
                 .collect();
-            // Extract the first argument type for GADT-aware exhaustiveness —
-            // from the DECLARED signature (fresh_ty), not the checked
-            // final_ty: a GADT clause's pattern refines the signature's
-            // index variable through the clause substitution (`f :: G b ->
-            // Int; f MkInt = 1` leaves final_ty at `G Int -> Int`), and
-            // exhaustiveness against the refined index dropped every
-            // constructor of the OTHER indices — the caller chooses `b`,
-            // so the declared type is the set of values that can arrive.
-            let first_arg_ty = if let Ty::Arrow(a, _, _) = &fresh_ty { Some(a.as_ref()) } else { None };
-            let missing = self.check_exhaustiveness(&first_patterns, first_arg_ty);
+            // Argument types for GADT-aware exhaustiveness — from the
+            // DECLARED signature (fresh_ty), not the checked final_ty: a
+            // GADT clause's pattern refines the signature's index variable
+            // through the clause substitution (`f :: G b -> Int; f MkInt =
+            // 1` leaves final_ty at `G Int -> Int`), and exhaustiveness
+            // against the refined index dropped every constructor of the
+            // OTHER indices — the caller chooses `b`, so the declared type
+            // is the set of values that can arrive.
+            let mut col_tys: Vec<Option<Ty>> = Vec::with_capacity(width);
+            let mut t = &fresh_ty;
+            for _ in 0..width {
+                if let Ty::Arrow(a, to, _) = t {
+                    col_tys.push(Some(a.as_ref().clone()));
+                    t = to.as_ref();
+                } else {
+                    col_tys.push(None);
+                }
+            }
+            let missing = self.check_exhaustiveness_matrix(&rows, &col_tys);
             if !missing.is_empty() {
                 self.push_error_span(
                     DiagnosticKind::NonExhaustive(format!(

@@ -2332,6 +2332,71 @@ main = putStrLn (describeRed Red)
     expect_compile_error(source, &[], &["Non-exhaustive"]);
 }
 
+/// F4: `True`/`False` parse as literal patterns, and the old checker's
+/// literal bail left every Bool match unchecked — a missing arm compiled
+/// to a runtime fallthrough. Bool literals form a complete two-constructor
+/// domain, so the gap is a compile error like any other constructor gap.
+#[test]
+fn non_exhaustive_bool_rejected() {
+    let source = r#"
+f :: Bool -> Int
+f True = 1
+
+main :: IO ()
+main = print (f True)
+"#;
+    expect_compile_error(source, &[], &["Non-exhaustive", "'f'", "False"]);
+}
+
+/// F4: tuple patterns counted as unconditional catch-alls; the matrix
+/// checker recurses into the components and names the missing combination.
+#[test]
+fn non_exhaustive_tuple_rejected() {
+    let source = r#"
+data C = R | G | B
+
+f :: (Bool, C) -> Int
+f (True, _) = 1
+f (False, R) = 2
+
+main :: IO ()
+main = print (f (True, G))
+"#;
+    expect_compile_error(source, &[], &["Non-exhaustive", "'f'", "(False, G)"]);
+}
+
+/// F4: constructor arguments were discarded, so nothing nested was ever
+/// checked. The witness renders the nested gap.
+#[test]
+fn non_exhaustive_nested_rejected() {
+    let source = r#"
+f :: Maybe Bool -> Int
+f Nothing = 0
+f (Just True) = 1
+
+main :: IO ()
+main = print (f Nothing)
+"#;
+    expect_compile_error(source, &[], &["Non-exhaustive", "'f'", "Just False"]);
+}
+
+/// F4: only column 0 of a multi-clause function was examined; a gap in a
+/// later argument column is a gap like any other.
+#[test]
+fn non_exhaustive_second_column_rejected() {
+    let source = r#"
+data C = R | G | B
+
+f :: Int -> C -> Int
+f n R = n
+f n G = n + 1
+
+main :: IO ()
+main = print (f 1 R)
+"#;
+    expect_compile_error(source, &[], &["Non-exhaustive", "'f'", "_ B"]);
+}
+
 #[test]
 fn duplicate_instance_rejected() {
     // Two Show instances for the same local type.

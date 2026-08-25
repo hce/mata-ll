@@ -43,13 +43,29 @@ chain that overflows when finally forced — pass the accumulator directly
 ## Non-exhaustive patterns are rejected at compile time (mostly)
 
 When a case expression or function definition doesn't cover all constructors,
-the compiler rejects it with a hard error naming the gap:
+the compiler rejects it with a hard error naming a witness of the gap:
 
     Type error: Non-exhaustive patterns in 'name': missing patterns for Blue
 
-Only gaps the exhaustiveness checker cannot see — a guard chain with no
-always-true fallback, or certain nested patterns — compile to a runtime
-fallthrough that calls:
+The check is matrix-based: every argument column of a function's clauses
+participates, tuples are checked component-wise, constructor arguments are
+checked recursively, and `True`/`False` count as the two constructors of
+`Bool` (GHC merely warns in all of these positions; mata-ll rejects).
+
+Gaps the checker deliberately does NOT reject — they compile to a runtime
+fallthrough:
+
+  - a guard chain with no always-true fallback (`f n | n < 0 = …` with no
+    `otherwise`) — the fall-off is your stated intent;
+  - matches decided by numeric, string, or char literals (`f 0 = …;
+    f 1 = …`) — an infinite domain can never be proven covered, and a hard
+    error would reject legal Haskell;
+  - coverage that depends on GADT index refinement in nested patterns or
+    across linked columns (`vzip VNil VNil = …`) — matched constructors of
+    an index-refined type are trusted; only top-level missing constructors
+    (filtered by the scrutinee's index) are still reported.
+
+The runtime fallthrough calls:
 
     error("Non-exhaustive patterns")
 
