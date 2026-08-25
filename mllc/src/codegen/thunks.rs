@@ -331,44 +331,6 @@ impl CodeGen {
         }
     }
 
-    /// Build a function-call argument, choosing eager or lazy evaluation by
-    /// WEIGHING the benefit of eagerness against the risk to non-strict
-    /// semantics. This is the single place that decision is made for call
-    /// arguments; it replaced an earlier ad-hoc "cheap argument" heuristic.
-    ///
-    /// The weighing has two sides:
-    ///
-    ///   * LAZINESS weight — dominated by one term: if evaluating the argument
-    ///     *now* could force a suspended, possibly-⊥ computation (`error`,
-    ///     `undefined`, non-termination, or a trapping `div`/`mod`) that the
-    ///     callee is not guaranteed to demand, the laziness weight is MAXIMAL.
-    ///     Bottom always outweighs any eagerness benefit. Non-strict semantics
-    ///     then *requires* the value be suspended, so it is thunked (or passed
-    ///     as an already-suspended reference) and forced only if the callee
-    ///     actually demands it. This is what makes
-    ///     `g _ = 42 ;  g (error "boom")   ==>  42`
-    ///     rather than raising "boom": `g` never forces its argument, so the
-    ///     `error` thunk is never run.
-    ///
-    ///   * EAGERNESS weight — the saved thunk allocation (and the saved force
-    ///     on use). It can only win when the laziness weight is *not* maximal,
-    ///     i.e. the argument is provably total at this point: a literal, a
-    ///     provably-WHNF (`concrete_vars`) variable, a constructor or tuple of
-    ///     such, non-trapping arithmetic over such, etc. — exactly
-    ///     `is_cheap_to_force`. Evaluating such an argument now cannot raise or
-    ///     diverge where the callee would not, so eager is always the win.
-    ///
-    /// `strict` short-circuits the weighing: demand analysis has proven the
-    /// callee forces this position on every path, so the callee would run the
-    /// same ⊥ anyway — eager evaluation cannot change the observable result and
-    /// the eagerness weight wins outright.
-    ///
-    /// Consistency with the callee: a parameter is only marked "always cheap"
-    /// (callee skips `__force` and treats it as a value — see
-    /// `analyze_call_sites`) when *every* call site passes an argument from the
-    /// context-free floor of `is_cheap_to_force`, which is a subset of what the
-    /// eager branch below accepts. So whenever the callee assumes a value, this
-    /// function has indeed passed one.
     /// Build `seq a b` inline: force `a` to WHNF, then return `b`. Shared by the
     /// prefix `seq a b` and backtick `a `seq` b` forms so the two cannot
     /// diverge. Semantically identical to the runtime `__mll_seq(a, b)` that
@@ -407,6 +369,44 @@ impl CodeGen {
         )
     }
 
+    /// Build a function-call argument, choosing eager or lazy evaluation by
+    /// WEIGHING the benefit of eagerness against the risk to non-strict
+    /// semantics. This is the single place that decision is made for call
+    /// arguments; it replaced an earlier ad-hoc "cheap argument" heuristic.
+    ///
+    /// The weighing has two sides:
+    ///
+    ///   * LAZINESS weight — dominated by one term: if evaluating the argument
+    ///     *now* could force a suspended, possibly-⊥ computation (`error`,
+    ///     `undefined`, non-termination, or a trapping `div`/`mod`) that the
+    ///     callee is not guaranteed to demand, the laziness weight is MAXIMAL.
+    ///     Bottom always outweighs any eagerness benefit. Non-strict semantics
+    ///     then *requires* the value be suspended, so it is thunked (or passed
+    ///     as an already-suspended reference) and forced only if the callee
+    ///     actually demands it. This is what makes
+    ///     `g _ = 42 ;  g (error "boom")   ==>  42`
+    ///     rather than raising "boom": `g` never forces its argument, so the
+    ///     `error` thunk is never run.
+    ///
+    ///   * EAGERNESS weight — the saved thunk allocation (and the saved force
+    ///     on use). It can only win when the laziness weight is *not* maximal,
+    ///     i.e. the argument is provably total at this point: a literal, a
+    ///     provably-WHNF (`concrete_vars`) variable, a constructor or tuple of
+    ///     such, non-trapping arithmetic over such, etc. — exactly
+    ///     `is_cheap_to_force`. Evaluating such an argument now cannot raise or
+    ///     diverge where the callee would not, so eager is always the win.
+    ///
+    /// `strict` short-circuits the weighing: demand analysis has proven the
+    /// callee forces this position on every path, so the callee would run the
+    /// same ⊥ anyway — eager evaluation cannot change the observable result and
+    /// the eagerness weight wins outright.
+    ///
+    /// Consistency with the callee: a parameter is only marked "always cheap"
+    /// (callee skips `__force` and treats it as a value — see
+    /// `analyze_call_sites`) when *every* call site passes an argument from the
+    /// context-free floor of `is_cheap_to_force`, which is a subset of what the
+    /// eager branch below accepts. So whenever the callee assumes a value, this
+    /// function has indeed passed one.
     pub(super) fn arg_ast(&mut self, expr: &TExpr, strict: bool) -> Expr {
         // An argument is never the current function's result: a first-class
         // action closure emitted inside it must not inherit the deep result
