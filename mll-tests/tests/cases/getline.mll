@@ -57,16 +57,16 @@ main = do
     r3 <- try getLine
     case r3 of
         Right _  -> error "getLine at end of input should raise"
-        Left msg -> do
-            ok <- containsStr msg "Prelude.getLine: end of input"
-            assert ok "EOF raises the Prelude.getLine: end of input error"
-            bad <- containsStr msg "concatenate"
-            assert (not bad) "EOF error is not the raw nil-concatenation Lua crash"
+        Left msg ->
+            -- Verbatim since Q78 (error_ raises at level 0 — no Lua
+            -- source-position prefix).
+            assert (msg == "Prelude.getLine: end of input")
+                "EOF raises exactly the Prelude.getLine error"
 
     -- catch also captures it, and the handler receives the message.
     v <- catch getLine (\e -> pure e)
-    ok2 <- containsStr v "Prelude.getLine: end of input"
-    assert ok2 "catch handler receives the EOF error message"
+    assert (v == "Prelude.getLine: end of input")
+        "catch handler receives the exact EOF error message"
 
     removeFile path
     putStrLn "ok"

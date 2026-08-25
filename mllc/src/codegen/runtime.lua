@@ -1134,7 +1134,10 @@ local function show(x)
     else return tostring(x) end
 end
 local undefined = __thunk(function() error("Prelude.undefined", 0) end)
-local function error_(msg) error(__force(msg)) end
+-- Level 0: no "file:line:" position prefix on the raised message. GHC's
+-- `error "boom"` delivers "boom" to a catcher; level 1 prefixed every
+-- caught message with THIS function's own runtime line.
+local function error_(msg) error(__force(msg), 0) end
 -- Ord `max`/`min` instance methods. GHC's defaults are
 --   max x y = if x <= y then y else x
 --   min x y = if x <= y then x else y
