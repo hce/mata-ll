@@ -376,9 +376,17 @@ impl CodeGen {
         let eta_count = type_arity.saturating_sub(pat_arity);
 
         if clauses.len() == 1 && clauses[0].patterns.is_empty() && clauses[0].guards.is_empty()
-            && eta_count == 0 {
+            && eta_count == 0 && func.dict_params.is_empty() {
             // A genuine value binding: no parameters and the type has no
-            // outstanding arrows to eta-expand. A point-free *function* alias
+            // outstanding arrows to eta-expand — and no DICTIONARY
+            // parameters: a parameterized instance's dictform for a
+            // NULLARY method (`def = [def]` in the `[a]` instance) has
+            // empty patterns but takes its context's dictionaries, and
+            // this arm once emitted it as a CAF thunk with the dictionary
+            // parameter left as a free (nil) global (F23). With dict
+            // params it falls through to the function branch, which emits
+            // a real function over them.
+            // A point-free *function* alias
             // (`f = g`, where the type still has arrows so eta_count > 0) is
             // NOT handled here — it falls through to the function branch, which
             // eta-expands it into a real callable that looks the referent up at

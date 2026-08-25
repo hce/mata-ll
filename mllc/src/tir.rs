@@ -672,7 +672,14 @@ pub enum SpecKind {
     /// Constructed dictionary for a parameterized instance: each method is
     /// the dictionary-form implementation partially applied to the context
     /// dictionaries, which arrive as the call's args.
-    DictCtor { class: String, methods: Vec<(String, String)> },
+    /// Constructed dictionary for a parameterized instance. Each method is
+    /// (class method name, dictform implementation name, VALUE arity):
+    /// arity > 0 emits a closure over the context dictionaries; arity 0 is
+    /// a nullary method (`def`, `mempty`-likes) whose field must hold the
+    /// VALUE — built by calling the dictform with the dictionaries at
+    /// construction time — because every dictionary consumer reads nullary
+    /// fields as values (static dictionaries store the resolved CAF), F23.
+    DictCtor { class: String, methods: Vec<(String, String, usize)> },
 }
 
 #[derive(Debug, Clone)]

@@ -1413,15 +1413,31 @@ impl CodeGen {
                 // context constraint, in declaration order). Emits
                 //   (function(__cd1, …) return { m = function(...)
                 //       return impl(__cd1, …, ...) end, … } end)(<dicts>)
+                // A NULLARY method's field holds the VALUE — the dictform
+                // called with the dictionaries at construction time —
+                // because every consumer reads nullary fields as values
+                // (static dictionaries store the resolved CAF; a wrapper
+                // function here flowed a callable where `[def]` was
+                // expected, F23). The construction is eager: a bottom
+                // nullary method raises when the dictionary is built, one
+                // use earlier than GHC — dictionaries are total
+                // constructions everywhere else in this backend too.
                 let n_dicts = args.len();
                 let dict_params: Vec<String> =
                     (0..n_dicts).map(|i| format!("__cd{}", i + 1)).collect();
                 let mut items = Vec::new();
-                for (m, f) in methods {
+                for (m, f, arity) in methods {
                     let sv = sanitize_name(f);
                     let impl_ref = self.lua_ref(&sv);
                     let mut impl_args: Vec<Expr> =
                         dict_params.iter().map(|p| Expr::name(p.clone())).collect();
+                    if *arity == 0 {
+                        items.push(Item::KV(
+                            format!("{} = ", sanitize_name(m)),
+                            Expr::call_named(&impl_ref, impl_args),
+                        ));
+                        continue;
+                    }
                     impl_args.push(Expr::name("..."));
                     items.push(Item::KV(
                         format!("{} = ", sanitize_name(m)),

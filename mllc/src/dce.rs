@@ -185,8 +185,13 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
             // The variants that thread mata-ll functions keep them live;
             // the FFI kinds carry Lua host names — nothing to keep live.
             match specialized {
-                SpecKind::Dict { methods, .. } | SpecKind::DictCtor { methods, .. } => {
+                SpecKind::Dict { methods, .. } => {
                     for (_, impl_name) in methods {
+                        refs.insert(impl_name.clone());
+                    }
+                }
+                SpecKind::DictCtor { methods, .. } => {
+                    for (_, impl_name, _) in methods {
                         refs.insert(impl_name.clone());
                     }
                 }

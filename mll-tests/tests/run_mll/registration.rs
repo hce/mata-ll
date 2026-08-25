@@ -177,6 +177,8 @@ mll_test!(dict_result_position, "dict_result_position.mll");
 // F6e probe (kept as a pin): partial application of a dict-passing
 // function inside its own dictionary-form body saturates correctly.
 mll_test!(dict_partial_self, "dict_partial_self.mll");
+// F23: nullary class methods through parameterized-instance dictforms.
+mll_test!(dict_nullary_method, "dict_nullary_method.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
 mll_test!(tuples, "tuples.mll");
