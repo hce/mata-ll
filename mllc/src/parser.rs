@@ -2671,6 +2671,14 @@ impl Parser {
             }
             if self.pos + 1 < self.tokens.len()
                 && let Token::Ident(_) = &self.tokens[self.pos + 1].token {
+                    // The identifier must hug the dot on the RIGHT too
+                    // (OverloadedRecordDot's rule): `negate. abs` is the
+                    // composition `negate . abs`, not the field access
+                    // `abs negate` it used to silently parse as.
+                    let ident_tok = &self.tokens[self.pos + 1];
+                    if ident_tok.line != dot_tok.line || ident_tok.col != dot_tok.col + 1 {
+                        break;
+                    }
                     self.advance(); // consume '.'
                     if let Token::Ident(field) = self.peek().clone() {
                         self.advance(); // consume field name
