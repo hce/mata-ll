@@ -127,6 +127,21 @@ impl Checker {
             checker.reject_derive("LuaDict", type_name, &reason, note);
         };
 
+        // GADT-syntax and existential constructors are rejected up front,
+        // for EVERY shape: the parser-level nullary test below reads
+        // ConstructorFields, which is EMPTY for a GADT-syntax constructor
+        // (`Con :: a -> T` keeps its whole signature in gadt_type), so a
+        // FIELDED GADT constructor used to pass the all-nullary test and
+        // register as a string enum with an undefined runtime layout.
+        for con in constructors {
+            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
+                reject(self,
+                    format!("'{}' is a GADT / existential constructor", con.name),
+                    "LuaDict keys the table by record field name, which GADT and existential constructors do not provide.");
+                return;
+            }
+        }
+
         // Shape 1: an all-nullary sum type (every constructor has zero fields).
         // Its runtime value at the Lua boundary is the constructor's string tag
         // — the `as "tag"` rename when present, the constructor name otherwise —
@@ -134,7 +149,8 @@ impl Checker {
         // a plain string. A single nullary constructor (`data T = T`) is the
         // degenerate one-variant case. Ordering (`Ord`/`Enum`/`Bounded`) still
         // follows declaration order; the tag is boundary-only.
-        let all_nullary = constructors.iter().all(|c| c.is_nullary());
+        // Nullary AS REGISTERED (derived_is_nullary), not as parsed.
+        let all_nullary = constructors.iter().all(|c| self.derived_is_nullary(c));
         if all_nullary {
             // The effective tags become the wire values, so — exactly like the
             // record field keys below — each must be a non-empty string and no
@@ -170,14 +186,8 @@ impl Checker {
             return;
         }
 
+        // (GADT/existential shapes were rejected up front, for every arm.)
         let con = &constructors[0];
-        if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
-            reject(self,
-                format!("'{}' is a GADT / existential constructor", con.name),
-                "LuaDict keys the table by record field name, which GADT and existential constructors do not provide.");
-            return;
-        }
-
         match &con.fields {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
                 // Validate the *effective* Lua keys (the `as "key"` rename when

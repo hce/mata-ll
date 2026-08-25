@@ -63,6 +63,23 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A GADT-syntax constructor keeps its fields in gadt_type, so the
+// parser-level nullary test saw zero fields and a FIELDED GADT
+// constructor passed LuaDict's all-nullary check — registering the
+// type as a string enum with an undefined runtime layout. GADT and
+// existential shapes now reject up front, for every LuaDict shape.
+#[test]
+fn luadict_rejects_gadt_syntax_constructors() {
+    expect_compile_error(
+        "data T where\n    MkA :: Int -> T\n    MkB :: T\n    deriving (LuaDict)\n\nmain :: IO ()\nmain = putStrLn \"x\"\n",
+        &[],
+        &[
+            "Cannot derive 'LuaDict' for 'T'",
+            "GADT / existential constructor",
+        ],
+    );
+}
+
 // A class context inside a higher-rank ARGUMENT type is rejected with
 // an honest unsupported-diagnostic: the lowering erases nested contexts,
 // so the rank-2 skolem carried no givens and a body use failed with a
