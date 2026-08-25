@@ -63,6 +63,32 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A first-class operator section `(+)` / `(`div`)` is a use of the
+// operator: its class constraints must be emitted on the instantiation.
+// Regression: the OpFunc arm called bare `instantiate` (no
+// emit_use_constraints), so `zipWith (+) [True] [False]` typechecked
+// and crashed in the emitted Lua arithmetic. The control pins the
+// accept side at a legal numeric use.
+#[test]
+fn op_section_at_non_num_type_is_rejected() {
+    let source = r#"
+main :: IO ()
+main = print (zipWith (+) [True] [False])
+"#;
+    expect_compile_error(source, &[], &["No instance", "Num", "Bool"]);
+}
+
+#[test]
+fn op_section_at_numeric_type_stays_accepted() {
+    let source = r#"
+main :: IO ()
+main = do
+    print (zipWith (+) [1, 2] [30, 40])
+    print (foldr (`div`) 2 [1000, 8])
+"#;
+    compile(source, Path::new("."), &[]).expect("numeric operator sections must stay legal");
+}
+
 // Haskell 2010 puts `::` one grammar level above a section operand
 // (exp → infixexp [:: type]), so GHC parse-errors on `(+ 1 :: Int)`;
 // mata-ll used to accept it silently (the operand parse consumed the

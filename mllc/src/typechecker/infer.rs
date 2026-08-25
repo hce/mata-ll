@@ -1664,7 +1664,14 @@ impl Checker {
             }
             Expr::OpFunc(op) => {
                 if let Some(scheme) = env.lookup(op) {
-                    let ty = self.instantiate(scheme);
+                    let scheme = scheme.clone();
+                    // A first-class operator section is a USE of the operator
+                    // like any Var: its class constraints must be emitted on
+                    // the instantiation, or `zipWith (+) [True] [False]`
+                    // typechecks (the bare instantiate dropped the Num
+                    // context) and crashes in the emitted Lua arithmetic.
+                    let (ty, inst_map) = self.instantiate_with_map(&scheme);
+                    self.emit_use_constraints(op, &inst_map);
                     Ok((TExpr::new(TExprKind::OpFunc(op.clone()), ty.clone()), ty, Subst::empty()))
                 } else {
                     Err(DiagnosticKind::UnboundVariable(format!("({})", op)))
