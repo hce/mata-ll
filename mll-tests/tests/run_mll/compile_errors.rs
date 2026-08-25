@@ -448,6 +448,22 @@ main = print (f MkInt)
 // the emitted Lua arithmetic. (The accept side — print (), () == () —
 // is pinned by the tuple_instance corpus case.)
 #[test]
+fn qualified_import_without_as_explains_the_alias_requirement() {
+    // GHC allows `import qualified M` (qualifying by the module's own
+    // name); mata-ll requires the alias — the message now says so and
+    // shows the spelling (Q90).
+    expect_compile_error(
+        "import qualified AliasCtor
+
+main :: IO ()
+main = pure ()
+",
+        &[],
+        &["Expected 'as' in qualified import", "import qualified M as M"],
+    );
+}
+
+#[test]
 fn char_literal_gets_the_no_char_explanation() {
     // `'a'` used to die with the generic "Unexpected character" though
     // no-Char is documented policy (Q88): the dedicated error explains the

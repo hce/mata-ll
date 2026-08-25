@@ -182,6 +182,20 @@ impl Parser {
         self.peek() == tok
     }
 
+    /// Skip an export entry's optional constructor sub-spec `(..)` (or an
+    /// explicit constructor list) — `T(..)`, `(:+:)(..)`. The contents are
+    /// not recorded: mata-ll's export lists control visibility per name,
+    /// and the sub-spec's constructors travel with the type.
+    fn skip_export_subspec(&mut self) {
+        if self.at(&Token::LeftParen) {
+            self.advance();
+            while !self.at(&Token::RightParen) && !self.at_eof() {
+                self.advance();
+            }
+            if self.at(&Token::RightParen) { self.advance(); }
+        }
+    }
+
     fn at_eof(&self) -> bool {
         matches!(self.peek(), Token::EOF)
     }
@@ -307,13 +321,7 @@ impl Parser {
                         Token::UpperIdent(n) => {
                             exports.push(n); self.advance();
                             // Skip optional (..) for Type(..)
-                            if self.at(&Token::LeftParen) {
-                                self.advance();
-                                while !self.at(&Token::RightParen) && !self.at_eof() {
-                                    self.advance();
-                                }
-                                if self.at(&Token::RightParen) { self.advance(); }
-                            }
+                            self.skip_export_subspec();
                         }
                         Token::Operator(op) => { exports.push(op); self.advance(); }
                         // Parenthesized operator export, GHC style:
@@ -328,13 +336,7 @@ impl Parser {
                             // A type operator can carry its constructors:
                             // `(:+:)(..)` exports the type and everything it
                             // declares, exactly like `T(..)`.
-                            if self.at(&Token::LeftParen) {
-                                self.advance();
-                                while !self.at(&Token::RightParen) && !self.at_eof() {
-                                    self.advance();
-                                }
-                                if self.at(&Token::RightParen) { self.advance(); }
-                            }
+                            self.skip_export_subspec();
                         }
                         other => {
                             let mut diag = self.err_here(format!(
@@ -819,7 +821,19 @@ impl Parser {
             // 'as' is not a keyword — check for Ident("as")
             match self.peek().clone() {
                 Token::Ident(ref s) if s == "as" => { self.advance(); }
-                _ => return Err(self.err_here("Expected 'as' in qualified import".to_string())),
+                _ => {
+                    let mut diag = self.err_here(
+                        "Expected 'as' in qualified import".to_string());
+                    diag.notes.push(
+                        "mata-ll requires an explicit alias: write \
+                         `import qualified M as M`. GHC lets the bare form \
+                         qualify by the module's own (possibly dotted) name; \
+                         here every qualified reference goes through the one \
+                         declared alias, so the alias is mandatory."
+                            .to_string(),
+                    );
+                    return Err(diag);
+                }
             }
             let alias = self.expect_upper_ident()?;
             return Ok(Decl::Import {
