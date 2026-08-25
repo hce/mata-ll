@@ -55,8 +55,20 @@ fi
 LUA_VERSION=$("$LUA" -v 2>&1 | head -1)
 echo "$LUA_VERSION: ${AUDIO_MS}ms audio decoded in ${ELAPSED_MS}ms (${RATIO}x realtime)"
 
-# Fail if slower than 0.5x realtime (generous threshold for CI)
-if [ "$ELAPSED_MS" -gt 0 ] && [ "$((AUDIO_MS * 10 / ELAPSED_MS))" -lt 5 ]; then
-    echo "FAIL: decode rate below 0.5x realtime"
+# Fail below MLL_PERF_MIN_X10 tenths-of-realtime (default 5 = 0.5x).
+#
+# The default stays generous ON PURPOSE (F21): CI runner speeds vary too
+# much for a tight absolute threshold to stay honest — a wrong tightening
+# turns machine variance into flaky red, and this canary's job in CI is
+# confirming the tracker still RUNS at plausible speed, not measuring.
+# The calibrated gate is the LOCAL run: on the reference machine the
+# tracker holds 5.0-5.4x realtime, and the quality-round process enforces
+# that band (run with MLL_PERF_MIN_X10=50; a first read below the band
+# under load deserves a rerun before it counts). Tightening the CI
+# default needs collected runner timings — set MLL_PERF_MIN_X10 in the
+# workflow once a baseline exists.
+MIN_X10=${MLL_PERF_MIN_X10:-5}
+if [ "$ELAPSED_MS" -gt 0 ] && [ "$((AUDIO_MS * 10 / ELAPSED_MS))" -lt "$MIN_X10" ]; then
+    echo "FAIL: decode rate below ${MIN_X10} tenths of realtime (threshold ${MIN_X10}/10 x)"
     exit 1
 fi
