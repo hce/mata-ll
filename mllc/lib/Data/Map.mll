@@ -95,7 +95,7 @@ listAppend [] ys = ys
 listAppend (x:xs) ys = x : listAppend xs ys
 
 intersection :: (Eq k, Hashable k) => Map k v -> Map k v -> Map k v
-intersection m1 m2 = filter (\_ -> True) (fromList (filterByKeys (keys m2) (toList m1)))
+intersection m1 m2 = fromList (filterByKeys (keys m2) (toList m1))
 
 filterByKeys :: Eq k => [k] -> [(k, v)] -> [(k, v)]
 filterByKeys _ [] = []
