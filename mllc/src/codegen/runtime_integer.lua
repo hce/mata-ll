@@ -180,9 +180,14 @@ end
 local __integer_mt = {
     __is_integer = true,
     __tostring = __int_tostring,
+    -- __eq needs no coercion: Lua invokes it only when BOTH operands are
+    -- tables, so a plain number can never reach it. __lt/__le DO fire on a
+    -- mixed table/number pair, and __int_cmp indexes both operands — the
+    -- same leaked-machine-number sources the arithmetic metamethods coerce
+    -- against crashed a comparison with "attempt to index a number" (F10).
     __eq = function(a, b) return __int_cmp(a, b) == 0 end,
-    __lt = function(a, b) return __int_cmp(a, b) < 0 end,
-    __le = function(a, b) return __int_cmp(a, b) <= 0 end,
+    __lt = function(a, b) return __int_cmp(__int_coerce(a), __int_coerce(b)) < 0 end,
+    __le = function(a, b) return __int_cmp(__int_coerce(a), __int_coerce(b)) <= 0 end,
     __add = function(a, b) return add_Integer(__int_coerce(a), __int_coerce(b)) end,
     __sub = function(a, b) return sub_Integer(__int_coerce(a), __int_coerce(b)) end,
     __mul = function(a, b) return mul_Integer(__int_coerce(a), __int_coerce(b)) end,

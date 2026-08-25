@@ -927,3 +927,36 @@ main = do
         "main must not run when the module is require()d"
     );
 }
+
+/// F10: the Integer metatable's __lt/__le must coerce a plain-number
+/// operand exactly as the arithmetic metamethods do — Lua fires them on a
+/// mixed table/number pair, and __int_cmp indexes both operands, so a
+/// leaked machine number crashed the comparison while `v + 5` worked.
+/// (__eq is exempt: Lua invokes it only when both operands are tables.)
+/// The probe splices before the entry point so the runtime's file-locals
+/// (fromInteger_Integer) are still in scope.
+#[test]
+fn integer_comparison_metamethods_coerce_numbers() {
+    let source = r#"
+main :: IO ()
+main = print (50000000000000000000 :: Integer)
+"#;
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("integer program compiles")
+        .lua_code;
+    let cut = lua_code.find("-- Entry point")
+        .expect("entry point marker present");
+    let mut probed = lua_code[..cut].to_string();
+    probed.push_str(r#"
+local v = fromInteger_Integer(7)
+assert((v + 5) == fromInteger_Integer(12), "coerced add")
+assert(v < 8, "lt with number rhs")
+assert(not (v <= 5), "le with number rhs")
+assert(5 < v, "lt with number lhs")
+assert(v <= 7, "le equal with number rhs")
+assert(v < fromInteger_Integer(9), "lt between Integers still works")
+"#);
+    let lua = mlua::Lua::new();
+    lua.load(&probed).set_name("integer_cmp_coerce").exec()
+        .expect("mixed-operand Integer comparisons must coerce, not crash");
+}
