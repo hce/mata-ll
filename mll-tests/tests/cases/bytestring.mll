@@ -79,6 +79,15 @@ main = do
     assert (bsIndex xored 1 == 255) "xor 00^ff = ff"
     assert (bsIndex xored 2 == 255) "xor aa^55 = ff"
 
+    -- XOR truncates to the shorter operand (F9: iterating the longer one
+    -- read nil bytes into the bitwise op and crashed)
+    let u1 = bsPack [1, 2, 3, 4]
+    let u2 = bsPack [255, 255]
+    assert (bsLength (bsXor u1 u2) == 2) "xor truncates (long, short)"
+    assert (bsLength (bsXor u2 u1) == 2) "xor truncates (short, long)"
+    assert (bsIndex (bsXor u1 u2) 0 == 254) "xor 01^ff = fe"
+    assert (bsIndex (bsXor u1 u2) 1 == 253) "xor 02^ff = fd"
+
     -- ZipWith: add corresponding bytes
     let z1 = bsPack [1, 2, 3]
     let z2 = bsPack [10, 20, 30]

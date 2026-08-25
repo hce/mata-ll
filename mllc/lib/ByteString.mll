@@ -31,6 +31,7 @@
 --   bsMap       :: (Int -> Int) -> ByteString -> ByteString
 --   bsFoldl     :: (a -> Int -> a) -> a -> ByteString -> a
 --   bsXor       :: ByteString -> ByteString -> ByteString
+--                  (result is as long as the SHORTER operand, like bsZipWith)
 --   bsZipWith   :: (Int -> Int -> Int) -> ByteString -> ByteString -> ByteString
 --
 -- Conversion:
