@@ -107,7 +107,6 @@ pub enum Token {
 
     // Layout
     Indent(usize),  // indentation level at start of line
-    Newline,
 
     EOF,
 }
@@ -174,7 +173,6 @@ impl fmt::Display for Token {
             Token::Indent(n) => {
                 return write!(f, "start of a new line (indentation {})", n)
             }
-            Token::Newline => return write!(f, "end of line"),
             Token::EOF => return write!(f, "end of file"),
         };
         write!(f, "'{}'", spelled)
@@ -686,13 +684,13 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
     // to layout — GHC's algorithm never sees them — but a stray Indent
     // pair broke the operator-continuation check ("Unexpected token '+' at
     // top level"). Drop every Indent that introduces no token on its line:
-    // its successor is another Indent, a Newline, or the end of the stream.
+    // its successor is another Indent or the end of the stream.
     let mut cleaned: Vec<Located> = Vec::with_capacity(tokens.len());
     for (i, t) in tokens.iter().enumerate() {
         if matches!(t.token, Token::Indent(_))
             && matches!(
                 tokens.get(i + 1).map(|n| &n.token),
-                None | Some(Token::Indent(_)) | Some(Token::Newline) | Some(Token::EOF)
+                None | Some(Token::Indent(_)) | Some(Token::EOF)
             )
         {
             continue;

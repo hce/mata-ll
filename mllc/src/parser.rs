@@ -200,9 +200,6 @@ impl Parser {
                     self.current_indent = *n;
                     self.advance();
                 }
-                Token::Newline => {
-                    self.advance();
-                }
                 _ => break,
             }
         }
@@ -750,7 +747,7 @@ impl Parser {
         let braced_con = matches!(self.peek(), Token::UpperIdent(_)) && {
             let mut j = self.pos + 1;
             while j < self.tokens.len()
-                && matches!(self.tokens[j].token, Token::Newline | Token::Indent(_))
+                && matches!(self.tokens[j].token, Token::Indent(_))
             {
                 j += 1;
             }
@@ -2616,7 +2613,7 @@ impl Parser {
             // statement). The block-column check alone keeps siblings from being
             // grabbed, so this works even for a function whose first argument is
             // on the next line (e.g. inside explicit brackets).
-            if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
+            if matches!(self.peek(), Token::Indent(_)) {
                 let save_pos = self.checkpoint();
                 self.skip_newlines_and_indent();
                 if self.current_indent > self.block_indent
@@ -2887,7 +2884,7 @@ impl Parser {
         // the next binding), never to this expression.
         loop {
             let save_pos = self.checkpoint();
-            if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
+            if matches!(self.peek(), Token::Indent(_)) {
                 self.skip_newlines_and_indent();
                 if !(self.at(&Token::LeftBrace)
                     && self.current_indent > self.block_indent)
@@ -3631,7 +3628,7 @@ impl Parser {
             // block column the brace would belong to a sibling
             // item, so `Foo` stays a bare constructor and the
             // position is restored.
-            if matches!(self.peek(), Token::Newline | Token::Indent(_)) {
+            if matches!(self.peek(), Token::Indent(_)) {
                 let save_pos = self.checkpoint();
                 self.skip_newlines_and_indent();
                 if !(self.at(&Token::LeftBrace)
