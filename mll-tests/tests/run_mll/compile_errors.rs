@@ -2380,6 +2380,23 @@ main = print (f Nothing)
     expect_compile_error(source, &[], &["Non-exhaustive", "'f'", "Just False"]);
 }
 
+/// F8's error-shape twin: `r { rx = 3 } - 1` without a Num instance must
+/// fail as the SUBTRACTION it is ("No instance for 'Num R'"), not as the
+/// record value applied to a negative literal ("Cannot unify … a -> b").
+#[test]
+fn record_brace_minus_is_subtraction() {
+    let source = r#"
+data R = R { rx :: Int }
+
+wrong :: R -> R
+wrong r = r { rx = 3 } - 1
+
+main :: IO ()
+main = print (rx (wrong (R { rx = 0 })))
+"#;
+    expect_compile_error(source, &[], &["No instance", "Num R"]);
+}
+
 /// F4: only column 0 of a multi-clause function was examined; a gap in a
 /// later argument column is a gap like any other.
 #[test]

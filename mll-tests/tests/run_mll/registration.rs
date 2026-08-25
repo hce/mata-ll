@@ -328,6 +328,8 @@ mll_test!(diamond_instances, "diamond_instances.mll");
 mll_test!(exhaustiveness_matrix, "exhaustiveness_matrix.mll");
 // F5: multi-line import lists (plain, hiding, and closing-paren-on-its-own-line).
 mll_test!(multi_line_imports, "multi_line_imports.mll");
+// F8: `-` after a record brace is subtraction, not a negative-literal arg.
+mll_test!(record_brace_minus, "record_brace_minus.mll");
 mll_test!(unit_type, "unit_type.mll");
 // Instance-evidence resolution regressions (structured instance identity,
 // deterministic class-variable dispatch, exact-identity specialization purge)

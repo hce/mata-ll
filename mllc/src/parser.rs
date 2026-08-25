@@ -3015,14 +3015,17 @@ impl Parser {
     }
 
     /// Check if a `-` at the current position should be treated as a negative literal prefix.
-    /// Returns true when `-` is NOT preceded by an expression-ending token (number, ident, `)`, `]`).
+    /// Returns true when `-` is NOT preceded by an expression-ending token
+    /// (number, ident, `)`, `]`, `}` — a record construction/update ends in
+    /// a brace, so `R { rx = 3 } - 1` is subtraction, not the record
+    /// applied to `-1`, F8).
     fn is_neg_literal_context(&self) -> bool {
         if self.pos == 0 { return true; }
         let prev = &self.tokens[self.pos - 1].token;
         !matches!(prev,
             Token::IntLit(_) | Token::BigIntLit(_) | Token::NumLit(_) | Token::StrLit(_)
             | Token::Ident(_) | Token::UpperIdent(_)
-            | Token::RightParen | Token::RightBracket)
+            | Token::RightParen | Token::RightBracket | Token::RightBrace)
     }
 
     // Depth-guard wrapper: the grammar rule itself is in `parse_expr_atom_inner`.
