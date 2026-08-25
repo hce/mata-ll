@@ -3236,6 +3236,7 @@ impl Parser {
     /// A `do` block: layout-driven statement list with `let`, `pat <-`,
     /// `_ <-`, named binds and bare expressions. Consumes the `do`.
     fn parse_do_block(&mut self) -> PResult<Expr> {
+        let do_loc = self.peek_loc().clone();
         self.advance();
         let mut stmts = Vec::new();
         let saved_block = self.block_indent;
@@ -3311,6 +3312,46 @@ impl Parser {
         }
 
         self.block_indent = saved_block;
+
+        // GHC's rule (Haskell 2010 §3.14): a `do` block has at least one
+        // statement, and its LAST statement is an expression — it is the
+        // block's result. The other endings used to slip through to the
+        // desugarer, which had to invent a meaning: an empty block became
+        // the literal False, and a trailing `let x = action` desugared to
+        // the binding's right-hand side — silently RUNNING the action the
+        // let only meant to name.
+        match stmts.last() {
+            None => {
+                return Err(Box::new(Diagnostic::parse_at(
+                    "Empty 'do' block: a 'do' block needs at least one \
+                     statement, and its last statement must be an expression \
+                     (it is the block's result)"
+                        .to_string(),
+                    Span::new(do_loc.line, do_loc.col),
+                )));
+            }
+            Some(DoStmt::DoLet { .. }) => {
+                return Err(Box::new(Diagnostic::parse_at(
+                    "The last statement in a 'do' block must be an \
+                     expression, not 'let': a 'let' only names values for \
+                     the statements after it. To run the bound action, \
+                     write the expression itself as the final statement"
+                        .to_string(),
+                    Span::new(do_loc.line, do_loc.col),
+                )));
+            }
+            Some(DoStmt::Bind { .. } | DoStmt::PatternBind { .. }) => {
+                return Err(Box::new(Diagnostic::parse_at(
+                    "The last statement in a 'do' block must be an \
+                     expression, not a '<-' bind: the bound name would have \
+                     no statement to be used in. To run the action and \
+                     discard its result, write the expression alone"
+                        .to_string(),
+                    Span::new(do_loc.line, do_loc.col),
+                )));
+            }
+            Some(DoStmt::Expr(_)) => {}
+        }
         Ok(Expr::Do(stmts))
     }
 

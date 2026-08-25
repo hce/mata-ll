@@ -63,6 +63,31 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// GHC's rule (Haskell 2010 §3.14): a `do` block has at least one
+// statement and ENDS in an expression. Regression: the lax parser let
+// the other endings reach the desugarer, which invented meanings — an
+// empty `do` became the literal False, and a trailing `let x = action`
+// desugared to the binding's right-hand side, silently RUNNING the
+// action it only meant to name. A trailing `<-` bind is rejected for
+// the same reason GHC rejects it.
+#[test]
+fn do_block_bad_endings_are_rejected() {
+    expect_compile_error("main :: IO ()\nmain = do\n", &[], &[
+        "Empty 'do' block",
+        "last statement must be an expression",
+    ]);
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n    putStrLn \"a\"\n    let x = putStrLn \"b\"\n",
+        &[],
+        &["must be an expression, not 'let'", "only names values"],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n    x <- getLine\n",
+        &[],
+        &["must be an expression, not a '<-' bind", "discard its result"],
+    );
+}
+
 // Repeated imports of one module merge their visibility (pinned on the
 // accept side by import_merge.mll); a LONE Specific list must still hide
 // everything it doesn't request — the merge rule is "hidden iff every
