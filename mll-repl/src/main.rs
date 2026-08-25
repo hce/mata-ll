@@ -34,15 +34,16 @@ impl ReplState {
         self.decls.clear();
     }
 
-    /// Build the full program for one interpretation of the input:
-    /// as a new top-level declaration, or as an expression to print.
-    fn source_for(&self, input: &str, as_decl: bool) -> String {
-        if as_decl {
-            let mut all_decls = self.decls.clone();
-            all_decls.push(input.to_string());
-            build_source(&all_decls, None)
-        } else {
-            build_source(&self.decls, Some(input))
+    /// Build the full program for one interpretation of the input.
+    fn source_for(&self, input: &str, interp: Interp) -> String {
+        match interp {
+            Interp::Decl => {
+                let mut all_decls = self.decls.clone();
+                all_decls.push(input.to_string());
+                build_source(&all_decls, None)
+            }
+            Interp::ExprShow => build_source(&self.decls, Some(input)),
+            Interp::ExprRun => build_source_run(&self.decls, input),
         }
     }
 
@@ -69,8 +70,18 @@ impl ReplState {
         let decl_first = looks_like_declaration(trimmed);
         let mut first_err: Option<mllc::CompileError> = None;
 
-        for as_decl in [decl_first, !decl_first] {
-            let source = self.source_for(trimmed, as_decl);
+        // ExprRun is the IO-action interpretation (`putStrLn "hi"` at the
+        // prompt): the show-wrapper cannot type an action (no Show (IO a)),
+        // so a third wrapping executes it and discards the result (F17;
+        // GHCi additionally prints a Show-able result — not attempted
+        // here). It comes after ExprShow so plain values keep printing.
+        let order = if decl_first {
+            [Interp::Decl, Interp::ExprShow, Interp::ExprRun]
+        } else {
+            [Interp::ExprShow, Interp::ExprRun, Interp::Decl]
+        };
+        for interp in order {
+            let source = self.source_for(trimmed, interp);
 
             // Compile. Caught rather than resumed: a compiler panic must not
             // take the REPL session down with it. A panic is a compiler bug,
@@ -99,7 +110,7 @@ impl ReplState {
             match lua.load(&compile_result.lua_code).set_name("repl").exec() {
                 Ok(()) => {
                     // If it was a declaration, persist it
-                    if as_decl {
+                    if matches!(interp, Interp::Decl) {
                         self.decls.push(trimmed.to_string());
                     }
                 }
@@ -115,6 +126,17 @@ impl ReplState {
         eprintln!("{}", first_err.expect("both interpretations tried"));
         true
     }
+}
+
+/// One way to read a REPL line — see the order chosen in `eval`.
+#[derive(Clone, Copy)]
+enum Interp {
+    /// A new top-level declaration.
+    Decl,
+    /// An expression, shown and printed.
+    ExprShow,
+    /// An IO action, executed for its effects (result discarded).
+    ExprRun,
 }
 
 /// Syntactic shape test: does this input look like a top-level declaration?
@@ -168,6 +190,20 @@ fn build_source(decls: &[String], expr: Option<&str>) -> String {
     source
 }
 
+/// Build a source that RUNS the input as an IO action, discarding its
+/// result: `main = (e) >> pure ()`.
+fn build_source_run(decls: &[String], expr: &str) -> String {
+    let mut source = String::new();
+    for d in decls {
+        source.push_str(d);
+        source.push('\n');
+        source.push('\n');
+    }
+    source.push_str("main :: IO ()\n");
+    source.push_str(&format!("main = ({}) >> pure ()\n", expr));
+    source
+}
+
 fn print_help() {
     println!("mata-ll REPL (debug)");
     println!();
@@ -196,11 +232,24 @@ fn main() {
 
     loop {
         print!("mll> ");
-        stdout.flush().unwrap();
+        // A closed stdout (the REPL's output piped somewhere that went
+        // away) is an exit condition, not a panic (F17).
+        if stdout.flush().is_err() {
+            break;
+        }
 
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line).unwrap() == 0 {
-            break; // EOF
+        match stdin.lock().read_line(&mut line) {
+            Ok(0) => break, // EOF
+            Ok(_) => {}
+            // Non-UTF-8 (or otherwise failing) stdin: read_line reports
+            // InvalidData and may have consumed an unspecified amount, so
+            // the stream cannot be resumed reliably — end the session
+            // cleanly instead of panicking (F17).
+            Err(e) => {
+                eprintln!("stdin error: {e}");
+                break;
+            }
         }
 
         // Multi-line continuation: lines ending with \\
@@ -211,13 +260,19 @@ fn main() {
             line.push('\n');
 
             print!("...> ");
-            stdout.flush().unwrap();
-
-            let mut cont = String::new();
-            if stdin.lock().read_line(&mut cont).unwrap() == 0 {
+            if stdout.flush().is_err() {
                 break;
             }
-            line.push_str(&cont);
+
+            let mut cont = String::new();
+            match stdin.lock().read_line(&mut cont) {
+                Ok(0) => break,
+                Ok(_) => line.push_str(&cont),
+                Err(e) => {
+                    eprintln!("stdin error: {e}");
+                    break;
+                }
+            }
         }
 
         let trimmed = line.trim();
@@ -318,5 +373,35 @@ mod tests {
         assert_eq!(truncate("é", 4), "é");
         assert_eq!(truncate("line1\nline2", 20), "line1 line2");
         assert_eq!(truncate("ααααα", 3), "ααα...");
+    }
+}
+
+#[cfg(test)]
+mod repl_action_tests {
+    use super::*;
+
+    /// F17: an IO action at the prompt executes (the show-wrapper cannot
+    /// type it); a plain value still prints via show; a declaration still
+    /// accumulates. eval returning true = the input was consumed without
+    /// panicking; the printed output goes to the test's stdout.
+    #[test]
+    fn eval_handles_values_actions_and_decls() {
+        let mut st = ReplState::new(vec![]);
+        assert!(st.eval("2 + 3"), "plain value evaluates");
+        assert!(st.eval("putStrLn \"side effect\""), "IO action executes");
+        assert!(
+            st.eval("double :: Int -> Int\ndouble x = x * 2"),
+            "declaration accumulates"
+        );
+        assert_eq!(st.decls.len(), 1, "declaration persisted");
+        assert!(st.eval("double 21"), "uses the accumulated declaration");
+        assert_eq!(st.decls.len(), 1, "expression did not accumulate");
+    }
+
+    #[test]
+    fn run_wrapper_shape() {
+        let src = build_source_run(&["x :: Int".into()], "putStrLn \"hi\"");
+        assert!(src.contains("main = (putStrLn \"hi\") >> pure ()"), "{src}");
+        assert!(src.starts_with("x :: Int\n"), "{src}");
     }
 }
