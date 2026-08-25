@@ -575,6 +575,24 @@ impl Qual<'_> {
                     Expr::OpFunc(n.clone())
                 }
             }
+            // An InfixApp's op is a NAME too — a sibling operator (`a <+> b`)
+            // or a sibling function used backtick-infix (`a `combine` b`).
+            // Their DEFINITIONS are prefixed like every value, so in-module
+            // infix uses must follow; this arm was missing, and the uniform
+            // descent below only visits subEXPRESSIONS, so the op stayed
+            // bare and resolved to nothing ("undefined '<+>'").
+            Expr::InfixApp { op, lhs, rhs } => {
+                let op = if !bound.contains(op) && self.names.vals.contains(op) {
+                    self.q(op)
+                } else {
+                    op.clone()
+                };
+                Expr::InfixApp {
+                    op,
+                    lhs: Box::new(self.expr(lhs, bound)),
+                    rhs: Box::new(self.expr(rhs, bound)),
+                }
+            }
             // Ascriptions carry a type; the generic descent visits only
             // expressions, and sibling type names need qualifying too.
             Expr::Ascription(x, t) =>

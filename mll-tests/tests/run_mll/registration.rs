@@ -219,6 +219,7 @@ mll_test!(functor_forward_ref, "functor_forward_ref.mll");
 mll_test!(gadt_exhaustive_rigid, "gadt_exhaustive_rigid.mll");
 mll_test!(gadt_unnamed_universal, "gadt_unnamed_universal.mll");
 mll_test!(radix_literals, "radix_literals.mll");
+mll_test!(qualified_operator_module, "qualified_operator_module.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
@@ -579,6 +580,7 @@ fn mll_case_registry_is_complete() {
         "ExportHelper.mll",
         "FixityOps.mll",
         "QualShapes.mll",
+        "OpQualDefs.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")
