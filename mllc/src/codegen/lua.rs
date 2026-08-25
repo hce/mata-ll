@@ -636,7 +636,18 @@ impl Stmt {
     /// indent prefix and trailing newline included.
     pub(super) fn render_line(&self, ind: usize, out: &mut String) {
         pad(ind, out);
+        let start = out.len();
         self.render(ind, out);
+        // A statement whose rendering begins with `(` — an IIFE
+        // expression-statement, a Raw line — would otherwise parse as a
+        // CALL CONTINUATION of the previous statement's trailing
+        // expression: since Lua 5.2 `f()\n(g)(x)` is one call chain,
+        // silently, with no ambiguity error. The `;` separator pins the
+        // statement boundary (a leading `;` is itself a legal empty
+        // statement, so this is safe even for the first line).
+        if out.as_bytes().get(start) == Some(&b'(') {
+            out.insert(start, ';');
+        }
         out.push('\n');
     }
 
@@ -770,4 +781,35 @@ pub(super) fn render_stmts(stmts: &[Stmt]) -> String {
         st.render_line(0, &mut s);
     }
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A statement rendering that begins with `(` — an IIFE
+    /// expression-statement — must be pinned with a `;` separator: since
+    /// Lua 5.2, `f()` followed by `(g)(x)` on the next line parses as ONE
+    /// call chain, silently, with no ambiguity error (Q81).
+    #[test]
+    fn paren_led_statement_gets_a_separator() {
+        let stmts = vec![
+            Stmt::Local(
+                vec!["x".into()],
+                Some(Expr::call(Expr::name("f"), vec![])),
+            ),
+            Stmt::Expr(Expr::call(
+                Expr::paren(Expr::Func(
+                    vec![],
+                    FuncBody::Inline(vec![Stmt::Return(Expr::lit("1"))]),
+                )),
+                vec![],
+            )),
+        ];
+        let out = render_stmts(&stmts);
+        assert!(
+            out.contains("\n;("),
+            "paren-led statement must be `;`-pinned:\n{out}"
+        );
+    }
 }
