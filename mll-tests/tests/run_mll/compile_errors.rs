@@ -63,6 +63,31 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// An ascription's type variables are RIGID: `(5 :: a)` claims the
+// expression has EVERY type `a`, which only a genuinely polymorphic
+// expression satisfies — GHC rejects it. Regression: the variables were
+// freshened FLEXIBLE, so the literal unified with `a` and numeric
+// defaulting accepted it. Deliberate approximation (noted in the fix):
+// the skolem persists, so a polymorphic ascribed value stays rigid
+// downstream — `(Nothing :: Maybe a) == (Nothing :: Maybe Int)` is
+// rejected here where GHC re-generalizes.
+#[test]
+fn ascription_variables_are_rigid() {
+    expect_compile_error("main :: IO ()\nmain = print (5 :: a)\n", &[], &[
+        "No instance",
+        "note:",
+        "rigid type variable",
+    ]);
+    // The accept side: genuinely polymorphic expressions satisfy a
+    // variable ascription.
+    compile(
+        "main :: IO ()\nmain = print (length ([] :: [a]))\n",
+        Path::new("."),
+        &[],
+    )
+    .expect("a polymorphic expression must satisfy a variable ascription");
+}
+
 // sanitize_name is not injective (`f'` -> f_prime): two distinct source
 // names that sanitize alike shared one fn-table slot, and the
 // last-emitted definition silently served both names (confirmed: both

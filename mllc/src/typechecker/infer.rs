@@ -1745,6 +1745,36 @@ impl Checker {
                 self.check_type_kind(declared_ty, "a type ascription");
                 let expected = self.ast_type_to_ty(declared_ty);
                 let expected = self.freshen_sig_type(&expected);
+                // An ascription's type variables are RIGID: `(5 :: a)`
+                // claims the expression has EVERY type `a`, which only a
+                // genuinely polymorphic expression satisfies — GHC rejects
+                // it (`a` is universally quantified at the ascription).
+                // Freshening them flexible let the variable unify with the
+                // literal's type and numeric defaulting then accepted it.
+                // Each variable becomes a skolem with no givens, so a class
+                // wanted landing on it fails with the rigid-variable
+                // provenance note. (The skolem persists — a polymorphic
+                // ascribed value stays rigid downstream, a deliberate
+                // approximation noted in the regression test.)
+                let mut sk_map = HashMap::new();
+                for v in expected.free_vars() {
+                    let sk_id = self.next_var;
+                    self.next_var += 1;
+                    // Display by the SOURCE name (trim the freshener's id
+                    // digits) so the diagnostic prints what the user wrote.
+                    let sname = v.name.trim_end_matches(|ch: char| ch.is_ascii_digit()).to_string();
+                    sk_map.insert(v.clone(), Ty::Skolem(sname.clone(), sk_id));
+                    self.existential_skolems.insert(sk_id, ExSkolemInfo {
+                        var: sname,
+                        con: "a type ascription".to_string(),
+                        givens: vec![],
+                        origin: SkolemOrigin::Signature {
+                            fn_name: self.current_fn.clone()
+                                .unwrap_or_else(|| "this expression".to_string()),
+                        },
+                    });
+                }
+                let expected = expected.apply_subst(&Subst::from_map(sk_map));
                 let (te, inferred, subst) = self.infer_expr(inner, env)?;
                 let s = self.unify(&inferred, &expected)?;
                 let final_ty = inferred.apply_subst(&s);
