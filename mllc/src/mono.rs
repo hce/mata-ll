@@ -1646,11 +1646,41 @@ impl Monomorphizer {
     /// Rewrite every reference to a purged specialization back to the original
     /// function name (see `purged_specs`).
     fn revert_purged(&self, expr: TExpr) -> TExpr {
-        let expr = if let TExprKind::Var(name) = expr.kind {
-            let name = self.purged_specs.get(&name).cloned().unwrap_or(name);
-            TExpr { kind: TExprKind::Var(name), ty: expr.ty }
-        } else {
-            expr
+        let expr = match expr.kind {
+            TExprKind::Var(name) => {
+                let name = self.purged_specs.get(&name).cloned().unwrap_or(name);
+                TExpr { kind: TExprKind::Var(name), ty: expr.ty }
+            }
+            // The threading SpecKind payloads carry function-name STRINGS
+            // too (a list/Maybe eq or show's element function, a dict
+            // table's method impls); a purged specialization left there
+            // named a never-emitted function — a nil lua_ref at runtime.
+            // Rewrite them through the same mapping as Var references.
+            TExprKind::SpecCall { original, mut specialized, args } => {
+                let fix = |n: &mut String| {
+                    if let Some(orig) = self.purged_specs.get(n) {
+                        *n = orig.clone();
+                    }
+                };
+                match &mut specialized {
+                    SpecKind::ListEq(n)
+                    | SpecKind::MaybeEq(n)
+                    | SpecKind::ShowList(n)
+                    | SpecKind::ShowMaybe(n) => fix(n),
+                    SpecKind::TupleEq(ns) => ns.iter_mut().for_each(&mut { fix }),
+                    SpecKind::Dict { methods, .. } | SpecKind::DictCtor { methods, .. } => {
+                        for (_, impl_name) in methods.iter_mut() {
+                            fix(impl_name);
+                        }
+                    }
+                    _ => {}
+                }
+                TExpr {
+                    kind: TExprKind::SpecCall { original, specialized, args },
+                    ty: expr.ty,
+                }
+            }
+            other => TExpr { kind: other, ty: expr.ty },
         };
         expr.map_children(&mut |c| self.revert_purged(c))
     }
