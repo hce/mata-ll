@@ -136,3 +136,23 @@ main = do
     assert (max (bsFromString "abc") (bsFromString "abd") == bsFromString "abd") "bs max"
     assert (min (bsFromString "abc") (bsFromString "abd") == bsFromString "abc") "bs min"
     assert (max bsEmpty (bsFromString "a") == bsFromString "a") "bs max empty"
+
+    -- Bounds checks (round-3 Q55): out-of-range accessors raise a NAMED
+    -- error immediately instead of returning nil and crashing far away
+    -- as "arithmetic on nil"
+    let failed r = case r of
+            Left _ -> True
+            Right _ -> False
+    rIx <- try (pure (bsIndex (bsFromString "ab") 2) >>= \v -> print v)
+    assert (failed rIx) "bsIndex past the end raises"
+    rIxN <- try (pure (bsIndex (bsFromString "ab") (-1)) >>= \v -> print v)
+    assert (failed rIxN) "bsIndex negative raises"
+    rHd <- try (pure (bsHead bsEmpty) >>= \v -> print v)
+    assert (failed rHd) "bsHead of empty raises"
+    rU16 <- try (pure (bsGetU16LE (bsFromString "a") 0) >>= \v -> print v)
+    assert (failed rU16) "bsGetU16LE past the end raises"
+    rU32 <- try (pure (bsGetU32LE (bsFromString "abc") 0) >>= \v -> print v)
+    assert (failed rU32) "bsGetU32LE past the end raises"
+    -- in-range accept side unchanged
+    assert (bsIndex (bsFromString "ab") 1 == 98) "bsIndex in range"
+    assert (bsGetU16LE (bsFromString "ab") 0 == 25185) "bsGetU16LE in range"

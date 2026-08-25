@@ -1687,13 +1687,19 @@ local __mll_bs; do
     local sb, sc, sr, ss = string.byte, string.char, string.rep, string.sub
     __mll_bs = {
         function(s) return #F(s) end,                                           -- [1] length
-        function(s, i) return sb(F(s), F(i) + 1) end,                          -- [2] index
+        function(s, i)                                                          -- [2] index
+            -- Bounds-checked (declared total -> Int): out of range used to
+            -- return NIL and crash far away as "arithmetic on nil".
+            s=F(s); i=F(i)
+            if i < 0 or i >= #s then error("bsIndex: index out of range") end
+            return sb(s, i + 1)
+        end,
         function(s, i, len) s=F(s); i=F(i); len=F(len); return ss(s, i+1, i+len) end, -- [3] sub
         function(b) return sc(F(b)) end,                                        -- [4] singleton
         function(a, b) return F(a) .. F(b) end,                                -- [5] concat
         function(s) return #F(s) == 0 end,                                      -- [6] null
-        function(s) return sb(F(s), 1) end,                                     -- [7] head
-        function(s) return ss(F(s), 2) end,                                     -- [8] tail
+        function(s) s=F(s); if #s == 0 then error("bsHead: empty ByteString") end return sb(s, 1) end, -- [7] head
+        function(s) s=F(s); if #s == 0 then error("bsTail: empty ByteString") end return ss(s, 2) end, -- [8] tail
         function(b, s) return sc(F(b)) .. F(s) end,                             -- [9] cons
         function(s, b) return F(s) .. sc(F(b)) end,                             -- [10] snoc
         function(n, b) return sr(sc(F(b)), F(n)) end,                           -- [11] replicate
@@ -1735,16 +1741,24 @@ local __mll_bs; do
         function(s) return F(s) end,                                             -- [18] tostring
         function(s) return F(s) end,                                             -- [19] fromstring
         function(s, i)                                                           -- [20] getU16LE
-            s=F(s); i=F(i)+1; local lo,hi=sb(s,i),sb(s,i+1); return lo+hi*256
+            s=F(s); i=F(i)
+            if i < 0 or i + 2 > #s then error("bsGetU16LE: index out of range") end
+            i=i+1; local lo,hi=sb(s,i),sb(s,i+1); return lo+hi*256
         end,
         function(s, i)                                                           -- [21] getU32LE
-            s=F(s); i=F(i)+1; local a,b,c,d=sb(s,i),sb(s,i+1),sb(s,i+2),sb(s,i+3); return a+b*256+c*65536+d*16777216
+            s=F(s); i=F(i)
+            if i < 0 or i + 4 > #s then error("bsGetU32LE: index out of range") end
+            i=i+1; local a,b,c,d=sb(s,i),sb(s,i+1),sb(s,i+2),sb(s,i+3); return a+b*256+c*65536+d*16777216
         end,
         function(s, i)                                                           -- [22] getI8 (signed)
-            s=F(s); local v=sb(s,F(i)+1); if v>=128 then return v-256 else return v end
+            s=F(s); i=F(i)
+            if i < 0 or i >= #s then error("bsGetI8: index out of range") end
+            local v=sb(s,i+1); if v>=128 then return v-256 else return v end
         end,
         function(s, i)                                                           -- [23] getI16LE (signed)
-            s=F(s); i=F(i)+1; local v=sb(s,i)+sb(s,i+1)*256; if v>=32768 then return v-65536 else return v end
+            s=F(s); i=F(i)
+            if i < 0 or i + 2 > #s then error("bsGetI16LE: index out of range") end
+            i=i+1; local v=sb(s,i)+sb(s,i+1)*256; if v>=32768 then return v-65536 else return v end
         end,
         function(v)                                                              -- [24] putI16LE (signed int to 2-byte BS)
             v=F(v); if v<0 then v=v+65536 end; return sc(v%256, math.floor(v/256)%256)
