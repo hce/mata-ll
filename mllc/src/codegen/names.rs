@@ -212,6 +212,23 @@ pub(super) fn sanitize_name(name: &str) -> String {
             if is_lua_keyword(&s) {
                 s.push('_');
             }
+            // Single-leading-underscore names are mangled into a namespace
+            // disjoint from the emitter's own temporaries (_s, _cg, _r, _u,
+            // _arg0, _warg0, _ffi0, _v spills, …): a user binding spelled
+            // like a temp shared its emitted name with whatever temporary
+            // the surrounding emission introduced, with nothing enforcing
+            // disjointness. "_usr" cannot collide back — no temporary
+            // starts with it — and the mapping is injective ("_usr" + name)
+            // and applied uniformly at binding and use (derive-generated
+            // single-underscore TIR binders like `_nw` mangle consistently
+            // on both sides too). The `__` namespace is EXEMPT: it is
+            // lexer-reserved from source, so a `__` name here is a
+            // compiler-minted reference — possibly to a runtime helper
+            // (`__mll_show_arg`) whose definition lives in runtime.lua text
+            // and never passes through this function.
+            if s.starts_with('_') && !s.starts_with("__") {
+                s.insert_str(0, "_usr");
+            }
             s
         }
     }

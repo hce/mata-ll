@@ -245,7 +245,7 @@ fn ffi_wrapper_keeps_truncating_paren() {
         .expect("ffi probe must compile")
         .lua_code;
     assert!(
-        lua.contains("return (math.modf(_ffi0))"),
+        lua.contains("return (math.modf(__ffi0))"),
         "FFI wrapper must keep the truncating paren around the raw host call: {lua}"
     );
     // A literal argument splices the wrapper's SpecCall to the call site;

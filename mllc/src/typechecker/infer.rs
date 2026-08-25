@@ -2174,7 +2174,10 @@ impl Checker {
 
         // Generate parameter names and patterns
         let params: Vec<(String, Ty)> = arg_types.iter().enumerate()
-            .map(|(i, t)| (format!("_ffi{}", i), t.clone()))
+            // `__ffi` puts the minted wrapper parameters in the compiler's
+            // reserved `__` namespace: lexer-rejected in source, exempt from
+            // sanitize_name's user-underscore mangling.
+            .map(|(i, t)| (format!("__ffi{}", i), t.clone()))
             .collect();
 
         let patterns: Vec<TPattern> = params.iter()
