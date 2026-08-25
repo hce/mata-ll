@@ -1134,6 +1134,13 @@ local function return_(x) return function() return x end end
 -- `Nothing` stays nil.
 local function Just(x) return setmetatable({x}, __just_mt) end
 local Nothing = nil
+-- Bounded Int / Bounded Bool (GHC parity). On Lua 5.3+ the Int bounds are
+-- exact native integers; LuaJIT has only doubles, so maxBound_Int rounds
+-- to 2^63 there — the same degradation every Int past 2^53 already has.
+local minBound_Int = math.mininteger or (-2^63)
+local maxBound_Int = math.maxinteger or (2^63 - 1)
+local minBound_Bool = false
+local maxBound_Bool = true
 local function show_Int(x) return __mll_show_integer(__force(x)) end
 -- Type-directed Double show: a Number-typed value may be held as a native
 -- integer (integer-valued arithmetic on Lua 5.3+, every LuaJIT number), so

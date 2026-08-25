@@ -1263,10 +1263,64 @@ impl Checker {
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
         let is_enum = constructors.iter().all(|c| self.derived_is_nullary(c));
+        // GHC's rule: Bounded derives for an ENUM (min/max are the first
+        // and last constructors) OR a SINGLE-CONSTRUCTOR product (min/max
+        // apply the constructor to each field's own minBound/maxBound).
+        // The product path used to be rejected ("must be a simple enum").
+        if constructors.len() == 1 && !is_enum {
+            let con = &constructors[0];
+            let field_tys = self.derived_field_tys(con);
+            let con_key = self.resolve_con_name(&con.name).to_string();
+            let result_type = Ty::Con(type_name.to_string());
+            let mut functions = Vec::new();
+            for (method, mangled) in [("minBound", format!("minBound_{}", type_name)),
+                                      ("maxBound", format!("maxBound_{}", type_name))] {
+                // Con applied to one `minBound`/`maxBound` per field, each
+                // annotated at the field's type so monomorphization
+                // resolves the method there (and rejects a field type
+                // with no Bounded instance, as GHC's derived context does).
+                let mut body = TExpr::new(TExprKind::Con(con_key.clone()), result_type.clone());
+                for fty in &field_tys {
+                    let bound = TExpr::new(TExprKind::Var(method.to_string()), fty.clone());
+                    body = TExpr::new(
+                        TExprKind::App(Box::new(body), Box::new(bound)),
+                        result_type.clone(),
+                    );
+                }
+                functions.push(TFunction {
+                    name: mangled,
+                    ty: result_type.clone(),
+                    clauses: vec![TClause {
+                        span: None,
+                        patterns: vec![],
+                        guards: vec![],
+                        body: Some(body),
+                        where_binds: vec![],
+                    }],
+                    specialized: false,
+                    dict_params: vec![],
+                    derived_strict: false,
+                });
+            }
+            let mut method_fns = HashMap::new();
+            method_fns.insert("minBound".to_string(), format!("minBound_{}", type_name));
+            method_fns.insert("maxBound".to_string(), format!("maxBound_{}", type_name));
+            self.register_instance(InstanceInfo {
+                class_name: "Bounded".to_string(),
+                target_type: Ty::Con(type_name.to_string()),
+                method_fns,
+                context: None,
+            });
+            return functions;
+        }
         if !is_enum || constructors.is_empty() {
-            self.push_error_ctx(
-                DiagnosticKind::Other(format!("Cannot derive Bounded for '{}' — must be a simple enum", type_name)),
-                format!("data {}", type_name),
+            self.reject_derive(
+                "Bounded", type_name,
+                "it is neither an enumeration nor a single-constructor product",
+                "GHC's rule (Haskell 2010 §11.1): Bounded derives for a type \
+                 whose constructors are all nullary (minBound/maxBound are the \
+                 first and last constructors) or for a type with exactly one \
+                 constructor whose every field is itself Bounded",
             );
             return vec![];
         }

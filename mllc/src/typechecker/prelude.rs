@@ -533,6 +533,15 @@ impl Checker {
             ("minBound", min_bound_ty, Some(vec![a.clone()]), vec![]),
             ("maxBound", max_bound_ty, Some(vec![a.clone()]), vec![]),
         ]);
+        // Bounded Int / Bounded Bool (GHC parity); runtime constants in
+        // runtime.lua (minBound_Int is math.mininteger on 5.3+, the
+        // closest double on LuaJIT).
+        self.register_builtin_instance("Bounded", Ty::Con("Int".to_string()), &[
+            ("minBound", "minBound_Int"), ("maxBound", "maxBound_Int"),
+        ]);
+        self.register_builtin_instance("Bounded", Ty::Con("Bool".to_string()), &[
+            ("minBound", "minBound_Bool"), ("maxBound", "maxBound_Bool"),
+        ]);
 
         // Class constraints carried by the built-in class methods (the
         // constraint field of each registration below, and of the numeric

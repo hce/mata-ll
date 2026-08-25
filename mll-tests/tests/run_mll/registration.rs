@@ -232,6 +232,7 @@ mll_test!(negative_pattern_parens, "negative_pattern_parens.mll");
 mll_test!(dash_run_operators, "dash_run_operators.mll");
 mll_test!(underscore_names_no_capture, "underscore_names_no_capture.mll");
 mll_test!(temp_named_bindings, "temp_named_bindings.mll");
+mll_test!(bounded_product, "bounded_product.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");

@@ -130,6 +130,7 @@ impl CodeGen {
             "__mll_ffi_decode",
             "not_", "engage", "liftIO", "show", "error_",
             "pure", "return_", "Just",
+            "minBound_Int", "maxBound_Int", "minBound_Bool", "maxBound_Bool",
             "show_Int", "show_Number", "show_String", "show_Bool",
             "show_List_", "show_Maybe", "show_ByteString", "show_HashMap",
             "show_Unit",
