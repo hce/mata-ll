@@ -449,10 +449,25 @@ enum Ctx {
     Prefix,
 }
 
+/// The show family is a CLOSED set: the single-return helpers defined in
+/// runtime.lua / runtime_integer.lua text. Every other show-spelled name
+/// reaching a callee position is emitted through an `__mll_fn` slot — or
+/// is a HOST FFI callee, which may multi-return.
+const SHOW_HELPERS: [&str; 11] = [
+    "show", "show_Int", "show_Number", "show_String", "show_Bool",
+    "show_List_", "show_Maybe", "show_Unit", "show_HashMap",
+    "show_ByteString", "show_Integer",
+];
+
 /// Callees whose calls provably return exactly one value: the runtime
 /// helpers (all single-return except the excluded forwarders), the show
 /// family, and compiled-function slots. Everything else — host FFI names
-/// in particular — may multi-return.
+/// in particular — may multi-return. The show test is the exact helper
+/// set, NOT a prefix: a prefix match also claimed host FFI callees
+/// ("showPicker"), and shedding the truncating paren around one in a
+/// spread position (return operand, last argument) forwards a
+/// multi-returning host's extra values into the consumer
+/// (ffi_multi_return.mll pins the truncation contract).
 pub(super) fn single_return_callee(f: &Expr) -> bool {
     match f {
         Expr::Name(n) => {
@@ -464,7 +479,7 @@ pub(super) fn single_return_callee(f: &Expr) -> bool {
                     && n != "__mll_opt_tail"
                     && n != "__mll_run_tail"
                     && n != "__mll_seq")
-                || n.starts_with("show")
+                || SHOW_HELPERS.contains(&n.as_str())
         }
         Expr::Index(base, _) => matches!(base.as_ref(), Expr::Name(b) if b == "__mll_fn"),
         _ => false,
@@ -1025,6 +1040,36 @@ fn try_splice_value(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn show_prefixed_host_callee_keeps_truncating_paren() {
+        // `return (showPicker(x))` — a HOST FFI callee that merely SPELLS
+        // like the show family. The paren truncates a multi-returning
+        // host to one value; only the closed runtime show-helper set may
+        // shed it in spread position (Q66).
+        let host = || {
+            vec![Stmt::Return(Expr::paren(Expr::call(
+                Expr::name("showPicker"),
+                vec![Expr::name("x")],
+            )))]
+        };
+        let mut stmts = host();
+        run_with(&mut stmts, &Disable::default());
+        assert!(
+            matches!(&stmts[0], Stmt::Return(Expr::Paren(_))),
+            "host callee must keep the truncating paren"
+        );
+        // The genuine runtime helper is single-return: its paren sheds.
+        let mut stmts = vec![Stmt::Return(Expr::paren(Expr::call(
+            Expr::name("show_Int"),
+            vec![Expr::name("x")],
+        )))];
+        run_with(&mut stmts, &Disable::default());
+        assert!(
+            matches!(&stmts[0], Stmt::Return(Expr::Call(..))),
+            "runtime show helper may shed"
+        );
+    }
 
     #[test]
     fn value_splice_declines_prefix_redeclaring_the_target() {
