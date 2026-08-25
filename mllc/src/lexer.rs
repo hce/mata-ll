@@ -676,6 +676,26 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                     end_col: col,
                 });
             }
+            '\'' => {
+                // A `'` here is neither a promoted-constructor tick (handled
+                // above) nor part of an identifier (`f'` consumes its primes
+                // in the ident path): the author is almost certainly writing
+                // a character literal, which mata-ll does not have.
+                let mut diag = err_at(
+                    "Character literal: mata-ll has no Char type",
+                    line, col,
+                );
+                diag.notes.push(
+                    "String is the opaque Lua string (a byte array), not \
+                     [Char], so there is no character type to give a literal \
+                     like 'a'. Use a one-character string (\"a\"), or the \
+                     LString byte functions (strByte s i / strChar b) to work \
+                     with individual bytes. See HASKDIFF.md, \"Strings and \
+                     ByteStrings\"."
+                        .to_string(),
+                );
+                return Err(diag);
+            }
             _ => {
                 return Err(err_at(
                     format!("Unexpected character '{}'", ch),

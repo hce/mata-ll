@@ -448,6 +448,20 @@ main = print (f MkInt)
 // the emitted Lua arithmetic. (The accept side — print (), () == () —
 // is pinned by the tuple_instance corpus case.)
 #[test]
+fn char_literal_gets_the_no_char_explanation() {
+    // `'a'` used to die with the generic "Unexpected character" though
+    // no-Char is documented policy (Q88): the dedicated error explains the
+    // policy and points at the alternatives. Primed identifiers (f') and
+    // promoted constructors ('Just) are unaffected (pinned by their own
+    // cases).
+    expect_compile_error(
+        "main :: IO ()\nmain = print 'a'\n",
+        &[],
+        &["no Char type", "one-character string", "strByte"],
+    );
+}
+
+#[test]
 fn list_instance_context_failure_gets_the_explanation() {
     // A context-carrying LIST instance failing on its element must get the
     // instance-chain note, exactly like App heads and tuples (the gate was
