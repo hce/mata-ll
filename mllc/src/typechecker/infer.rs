@@ -410,10 +410,10 @@ impl Checker {
         // this binding (never in its signature type) and are constrained solely
         // by standard classes including at least one numeric class. Without this,
         // an in-expression literal like `show 5` would be reported ambiguous.
-        // The chosen default (Int first, then Number for Double) is folded
-        // into `overall_subst` BEFORE it is applied to the TIR clauses, so the
-        // literal nodes carry the concrete type codegen ultimately emits
-        // (Integer first, then Number for Double).
+        // The chosen default (Integer first, then Number for Double) is
+        // folded into `overall_subst` BEFORE it is applied to the TIR
+        // clauses, so the literal nodes carry the concrete type codegen
+        // ultimately emits.
         {
             let default_subst = self.compute_numeric_defaults(&fresh_ty, &overall_subst);
             if !default_subst.is_type_empty() {
@@ -1384,7 +1384,7 @@ impl Checker {
                 // `Fractional a => a` (via `fromRational`). We give the literal a
                 // fresh type variable and emit the corresponding wanted; the
                 // variable is later unified with the surrounding concrete type,
-                // or resolved by defaulting (Int, then Number) if it stays
+                // or resolved by defaulting (Integer, then Number) if it stays
                 // free. The TIR keeps the raw literal — at a concrete Int or
                 // Number type `fromInteger`/`fromRational` is the identity and is
                 // erased in codegen; only a user Num type materialises the call
