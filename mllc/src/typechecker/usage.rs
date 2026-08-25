@@ -1052,8 +1052,22 @@ impl<'a> UsageCk<'a> {
         }
         let mut u = Usage::new();
         let mut bodies: Vec<Usage> = Vec::with_capacity(guards.len());
-        for g in guards {
-            add_usage(&mut u, self.expr_usage(&g.condition));
+        for (i, g) in guards.iter().enumerate() {
+            let cu = self.expr_usage(&g.condition);
+            // A later guard's condition runs only when every earlier guard
+            // FAILED: on the path where an earlier guard matches it is
+            // skipped, so a %1 value consumed only there is consumed zero
+            // times on that path. Charging it sequentially counted the use
+            // unconditionally — an ACCEPT-direction hole in a module that
+            // otherwise deviates reject-only.
+            if i > 0 {
+                self.flag_skippable(
+                    &cu,
+                    "a later guard's condition, which is skipped when an \
+                     earlier guard matches",
+                );
+            }
+            add_usage(&mut u, cu);
             bodies.push(self.expr_usage(&g.body));
         }
         let joined = self.join_alternatives(bodies, "guard alternatives");

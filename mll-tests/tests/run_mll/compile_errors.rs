@@ -63,6 +63,27 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A %1 value consumed only in a LATER guard's condition is consumed
+// zero times on the path where an earlier guard matches — a leak the
+// sequential guard accounting silently accepted (the one
+// accept-direction hole in a module that otherwise deviates
+// reject-only). The control pins guard-0 conditions still counting.
+#[test]
+fn linear_use_in_later_guard_condition_is_rejected() {
+    expect_compile_error(
+        "data Token = Token Int\n\nuseOnce :: Token %1 -> Int\nuseOnce (Token n) = n * 2\n\nleaky :: Token %1 -> Int -> Int\nleaky t flag\n    | flag > 0 = 0\n    | useOnce t > 5 = 1\n    | otherwise = 2\n\nmain :: IO ()\nmain = print (leaky (Token 3) 1)\n",
+        &[],
+        &[
+            "'t' must be consumed exactly once",
+            "later guard's condition",
+            "skipped when an earlier guard matches",
+        ],
+    );
+    let control = "data Token = Token Int\n\nuseOnce :: Token %1 -> Int\nuseOnce (Token n) = n * 2\n\nok :: Token %1 -> Int\nok t\n    | useOnce t > 5 = 1\n    | otherwise = 2\n\nmain :: IO ()\nmain = print (ok (Token 9))\n";
+    compile(control, Path::new("."), &[])
+        .expect("consumption in the FIRST guard's condition runs on every path and stays legal");
+}
+
 // A GADT-syntax constructor keeps its fields in gadt_type, so the
 // parser-level nullary test saw zero fields and a FIELDED GADT
 // constructor passed LuaDict's all-nullary check — registering the
