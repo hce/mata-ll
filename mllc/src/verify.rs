@@ -116,6 +116,41 @@ impl Verifier {
                 name, arg.ty, ctx
             ));
         }
+        // `show $ x` applies through the operator, not an App node; `f . show`
+        // hands the erased show to composition, which applies it to the
+        // composition's argument. Both escape the App shape above (Q92).
+        if let TExprKind::InfixApp { op, lhs, rhs } = &e.kind {
+            if op == "$"
+                && let TExprKind::Var(name) = &lhs.kind
+                && self.erased.contains(name.as_str())
+                && is_lossy_concrete(&rhs.ty)
+            {
+                self.violations.push(format!(
+                    "internal: type-erased '{}' applied via '$' at concrete type '{}' in '{}' \
+                     — monomorphization should have resolved a specialized show",
+                    name, rhs.ty, ctx
+                ));
+            }
+            if op == "." {
+                // In `f . show` at `a -> c`, show's argument type is the
+                // composition's own argument type; in `show . g`, it is g's
+                // result — both sit inside the composition's TYPE, not on a
+                // sibling node, so flag an erased name composed at a lossy
+                // ARGUMENT/RESULT position via the operand's own fn type.
+                for side in [lhs, rhs] {
+                    if let TExprKind::Var(name) = &side.kind
+                        && self.erased.contains(name.as_str())
+                        && matches!(&side.ty, Ty::Arrow(from, _, _) if is_lossy_concrete(from))
+                    {
+                        self.violations.push(format!(
+                            "internal: type-erased '{}' composed at concrete argument type '{}' in '{}' \
+                             — monomorphization should have resolved a specialized show",
+                            name, side.ty, ctx
+                        ));
+                    }
+                }
+            }
+        }
         // Recurse into every sub-expression.
         e.for_each_child(&mut |c| self.walk(c, ctx));
     }
@@ -170,6 +205,41 @@ mod tests {
             newtypes: vec![],
             passes_run: vec!["mono"],
         }
+    }
+
+    #[test]
+    fn flags_type_erased_show_through_dollar_and_compose() {
+        // `show $ x` applies through the operator node; `f . show` hands the
+        // erased show to composition — both escaped the App-only walker (Q92).
+        let arg_ty = Ty::list(Ty::Con("Int".into()));
+        let dollar = TExpr::new(
+            TExprKind::InfixApp {
+                op: "$".into(),
+                lhs: Box::new(TExpr::new(
+                    TExprKind::Var("show".into()),
+                    Ty::arrow(arg_ty.clone(), Ty::Con("String".into())),
+                )),
+                rhs: Box::new(TExpr::new(TExprKind::Var("x".into()), arg_ty.clone())),
+            },
+            Ty::Con("String".into()),
+        );
+        assert_eq!(check(&module_with(dollar)).len(), 1, "show $ [Int] should flag");
+
+        let compose = TExpr::new(
+            TExprKind::InfixApp {
+                op: ".".into(),
+                lhs: Box::new(TExpr::new(
+                    TExprKind::Var("g".into()),
+                    Ty::arrow(Ty::Con("String".into()), Ty::Con("Int".into())),
+                )),
+                rhs: Box::new(TExpr::new(
+                    TExprKind::Var("show".into()),
+                    Ty::arrow(arg_ty.clone(), Ty::Con("String".into())),
+                )),
+            },
+            Ty::arrow(arg_ty, Ty::Con("Int".into())),
+        );
+        assert_eq!(check(&module_with(compose)).len(), 1, "g . show at [Int] should flag");
     }
 
     #[test]
