@@ -1639,10 +1639,49 @@ impl Parser {
         };
         self.block_indent = where_indent;
 
+        let mut fresh_counter = 0usize;
         loop {
             self.skip_newlines_and_indent();
             if self.at_eof() || self.current_indent < where_indent {
                 break;
+            }
+            // Tuple pattern binding `(a, b) = expr`: the same lazy-selector
+            // desugar as parse_let_binds — one fresh binding for the
+            // scrutinee plus one selector binding per pattern variable, all
+            // in the same recursive group, so the variables are in scope
+            // for siblings and the match happens on first demand. A where
+            // block used to break out of its loop on the '(' and the
+            // binding died far away as "Expected operator".
+            if matches!(self.peek(), Token::LeftParen) {
+                let save = self.checkpoint();
+                match self.parse_pattern_atom() {
+                    Ok(pat @ Pattern::Tuple(_)) if self.at(&Token::Eq) => {
+                        self.advance(); // consume '='
+                        let rhs = self.parse_stmt_expr()?;
+                        let fresh = format!("__wtup_{}", fresh_counter);
+                        fresh_counter += 1;
+                        binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
+                        for v in pat.var_names() {
+                            binds.push(LocalDef {
+                                name: v.clone(),
+                                patterns: vec![],
+                                body: Expr::Case {
+                                    scrutinee: Box::new(Expr::Var(fresh.clone())),
+                                    branches: vec![CaseBranch {
+                                        pattern: pat.clone(),
+                                        guards: vec![],
+                                        body: Some(Expr::Var(v)),
+                                    }],
+                                },
+                            });
+                        }
+                        continue;
+                    }
+                    _ => {
+                        self.rewind(save);
+                        break;
+                    }
+                }
             }
             if !matches!(self.peek(), Token::Ident(_)) {
                 break;
