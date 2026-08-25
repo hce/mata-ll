@@ -961,6 +961,15 @@ fn try_splice_value(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> bool
             introduced.extend(names.iter().cloned());
         }
     }
+    // The Lvalue forms write the target BY NAME after the spliced prefix
+    // (the final assignment, or the rewritten tail returns): a prefix that
+    // itself declares the target's name captures those writes (`x = x`),
+    // and the outer target — possibly already captured by an EARLIER
+    // closure the suffix check below cannot see — is never assigned. The
+    // Fresh tail-if form has the analogous body-token bail above.
+    if matches!(target, Target::Lvalue(_)) && introduced.contains(&lhs_name) {
+        return false;
+    }
     if !introduced.is_empty() {
         let suffix_toks = stmts_tokens(&stmts[i + 1..]);
         if introduced.iter().any(|n| suffix_toks.contains(n)) {
@@ -1016,6 +1025,52 @@ fn try_splice_value(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> bool
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn value_splice_declines_prefix_redeclaring_the_target() {
+        // `x = (function() local x; x = 5; return x + 1 end)()` — the
+        // IIFE's prefix declares the TARGET's own name. Splicing emits
+        // `local x; x = 5; x = x + 1`: every write lands on the
+        // introduced local, and the outer x — here captured by an
+        // EARLIER closure the suffix-token bail cannot see — is never
+        // assigned (stays nil). The Lvalue form must decline when the
+        // prefix introduces the target's name; the Fresh tail-if form
+        // already had the analogous body-token bail (Q65).
+        let mut stmts = vec![
+            Stmt::Local(vec!["x".into()], None),
+            Stmt::Local(
+                vec!["cap".into()],
+                Some(Expr::Func(
+                    vec![],
+                    FuncBody::Inline(vec![Stmt::Return(Expr::name("x"))]),
+                )),
+            ),
+            Stmt::Assign(
+                "x".into(),
+                Expr::call(
+                    Expr::paren(Expr::Func(
+                        vec![],
+                        FuncBody::Block(Block(vec![
+                            Stmt::Local(vec!["x".into()], None),
+                            Stmt::Assign("x".into(), Expr::lit("5")),
+                            Stmt::Return(Expr::binop(
+                                "+",
+                                Expr::name("x"),
+                                Expr::lit("1"),
+                            )),
+                        ])),
+                    )),
+                    vec![],
+                ),
+            ),
+            Stmt::Return(Expr::call(Expr::name("cap"), vec![])),
+        ];
+        let mut budget = 100;
+        assert!(
+            !try_splice_value(&mut stmts, 2, &mut budget),
+            "prefix redeclaring the assignment target must bail"
+        );
+    }
 
     #[test]
     fn force_collapse_toggle() {
