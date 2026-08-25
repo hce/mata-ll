@@ -1528,13 +1528,66 @@ impl Parser {
         let mut guards = Vec::new();
         while self.at(&Token::Pipe) {
             self.advance();
-            let condition = self.parse_expr()?;
+            let mut condition = self.parse_guard_qualifier()?;
+            // Haskell 2010 §3.13: a guard is a comma-separated qualifier
+            // list; the guard succeeds when every qualifier holds. Boolean
+            // qualifiers desugar to `&&` (short-circuit left-to-right, the
+            // same order and laziness as sequential qualifier checking).
+            // These used to die with a bare "Expected '='".
+            while self.at(&Token::Comma) {
+                self.advance();
+                let next = self.parse_guard_qualifier()?;
+                condition = Expr::InfixApp {
+                    op: "&&".to_string(),
+                    lhs: Box::new(condition),
+                    rhs: Box::new(next),
+                };
+            }
             self.expect(sep)?;
             let body = self.parse_stmt_expr()?;
             guards.push(Guard { condition, body });
             self.skip_newlines_and_indent();
         }
         Ok(guards)
+    }
+
+    /// One guard qualifier: a boolean expression. The two BINDING qualifier
+    /// forms of Haskell 2010 §3.13 — pattern guards (`Just v <- m`) and
+    /// `let` qualifiers — introduce names whose scope is the rest of the
+    /// guard and its body, which the Guard AST (one Bool condition) cannot
+    /// carry; they are rejected with a rewrite hint instead of the bare
+    /// "Expected '='" they used to die with.
+    fn parse_guard_qualifier(&mut self) -> PResult<Expr> {
+        let loc = self.peek_loc().clone();
+        if self.at(&Token::Let) {
+            let mut diag = Diagnostic::parse_at(
+                "'let' qualifiers in guards are not supported",
+                Span::new(loc.line, loc.col),
+            );
+            diag.notes.push(
+                "a 'let' inside a guard (Haskell 2010 §3.13) binds names for the \
+                 rest of the guard and its body; bind the name in a 'where' \
+                 clause or a 'let … in …' around the right-hand side instead"
+                    .to_string(),
+            );
+            return Err(Box::new(diag));
+        }
+        let expr = self.parse_expr()?;
+        if self.at(&Token::Bind) {
+            let mut diag = Diagnostic::parse_at(
+                "pattern guards ('pat <- expr' inside a guard) are not supported",
+                Span::new(loc.line, loc.col),
+            );
+            diag.notes.push(
+                "a pattern guard (Haskell 2010 §3.13) matches a pattern against an \
+                 expression and falls through to the next guard when it fails; \
+                 rewrite with a 'case' expression in the right-hand side, or a \
+                 'Maybe'-returning helper checked with a boolean guard"
+                    .to_string(),
+            );
+            return Err(Box::new(diag));
+        }
+        Ok(expr)
     }
 
     /// The head of one binding-group entry: `name [patterns]`. Shared by

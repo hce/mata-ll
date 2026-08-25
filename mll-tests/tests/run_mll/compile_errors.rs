@@ -63,6 +63,35 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// The BINDING guard-qualifier forms of Haskell 2010 §3.13 introduce
+// names the Guard AST (one Bool condition) cannot carry; they are
+// rejected with a rewrite hint instead of the bare "Expected '='" they
+// used to die with. (Comma-separated boolean qualifiers are implemented
+// — pinned by guard_qualifier_lists.mll.)
+#[test]
+fn binding_guard_qualifiers_are_rejected_with_hints() {
+    expect_compile_error(
+        "f :: Maybe Int -> Int\nf m | Just v <- m = v\n    | otherwise = 0\n\nmain :: IO ()\nmain = print (f (Just 3))\n",
+        &[],
+        &[
+            "pattern guards",
+            "not supported",
+            "note:",
+            "falls through to the next guard",
+            "'case' expression",
+        ],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf x | let y = x * 2, y > 3 = y\n    | otherwise = 0\n\nmain :: IO ()\nmain = print (f 5)\n",
+        &[],
+        &[
+            "'let' qualifiers in guards",
+            "note:",
+            "'where' clause",
+        ],
+    );
+}
+
 // The hiding list accepts operator items too, and a hidden operator is
 // rejected on use like any hidden name (accept side: import_operator_list
 // corpus case).
