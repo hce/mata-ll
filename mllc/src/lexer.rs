@@ -681,10 +681,20 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
 /// the line-start scan and the mid-line scan — they once differed, and a
 /// continuation line beginning with `-->` was dropped as a comment.
 fn is_line_comment_start(chars: &[char], pos: usize) -> bool {
-    pos + 1 < chars.len()
-        && chars[pos] == '-'
-        && chars[pos + 1] == '-'
-        && (pos + 2 >= chars.len() || !is_operator_char(chars[pos + 2]) || chars[pos + 2] == '-')
+    if !(pos + 1 < chars.len() && chars[pos] == '-' && chars[pos + 1] == '-') {
+        return false;
+    }
+    // Haskell 2010 §2.3: a run of two or more dashes opens a comment only
+    // when the character after the WHOLE run is not a symbol character —
+    // `-->` and `--->` are operator tokens, while `--`, `---`, `--- text`
+    // are comments. The old check looked at one character past the first
+    // two dashes and treated any further dash as "still a comment", so
+    // `--->` swallowed the rest of the line.
+    let mut j = pos;
+    while j < chars.len() && chars[j] == '-' {
+        j += 1;
+    }
+    j >= chars.len() || !is_operator_char(chars[j])
 }
 
 fn is_operator_char(c: char) -> bool {
