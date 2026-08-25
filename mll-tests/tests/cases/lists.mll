@@ -17,3 +17,12 @@ main = do
     assert (length (take 2 [10, 20, 30]) == 2) "length (take 2 ...) should be 2"
     assert (head (reverse [1, 2, 3]) == 3) "head (reverse [1,2,3]) should be 3"
     assert (head (zipWith (+) [1, 2] [10, 20]) == 11) "zipWith (+) should work"
+
+    -- (!!) with a negative index raises (GHC "Prelude.!!: negative
+    -- index"); it used to fall through the walk loop and return the
+    -- FIRST element (round-3 Q53)
+    rNeg <- try (pure ([10, 20] !! (-1)) >>= \v -> print v)
+    assert (case rNeg of
+        Left _ -> True
+        Right _ -> False) "negative list index raises"
+    assert ([10, 20, 30] !! 1 == 20) "positive index unchanged"

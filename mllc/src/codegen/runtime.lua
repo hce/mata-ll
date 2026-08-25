@@ -157,6 +157,9 @@ end
 
 local function __mll_list_index(xs, n)
     n = __force(n)
+    -- GHC's Prelude raises before touching the list; a negative index
+    -- used to fall straight through the walk loop and return element 0.
+    if n < 0 then error("Prelude.!!: negative index") end
     xs = __force(xs)
     while n > 0 do
         if xs == nil then error("(!!): index too large") end
