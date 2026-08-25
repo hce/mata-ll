@@ -41,12 +41,26 @@ pub const SOURCE_VAR: &str = "__SOURCE_CODE";
 const BEGIN_WORD: &str = "MLL-EMBEDDED-SOURCE-BEGIN";
 const END_WORD: &str = "MLL-EMBEDDED-SOURCE-END";
 
-/// Smallest long-bracket level (>= 1) whose closing sequence `]=…=]` does not
-/// occur in `source`. Level 0 (`]]`) is never used — it is too common in
-/// ordinary code to be a useful delimiter.
+/// Smallest long-bracket level (>= 1) whose closing sequence `]=…=]` neither
+/// occurs in `source` nor forms ACROSS the boundary where the closer is
+/// appended directly after the source. The var form has no framing newline
+/// before its closer, so a source ending in `]=` (no trailing newline) would
+/// fuse with a level-1 closer `]=]` into an earlier `]=]` starting inside
+/// the source — Lua terminates the string there and chokes on the leftover
+/// `=]`, and textual extraction truncates the same way. Both are covered by
+/// one test: the closer's FIRST occurrence in `source ++ closer` must be the
+/// appended closer itself. (For any source tail `]=^k` only the level n == k
+/// can fuse, so the search always terminates.) Level 0 (`]]`) is never used —
+/// it is too common in ordinary code to be a useful delimiter.
 fn bracket_level(source: &str) -> usize {
     (1..)
-        .find(|&n| !source.contains(&format!("]{}]", "=".repeat(n))))
+        .find(|&n| {
+            let closer = format!("]{}]", "=".repeat(n));
+            let mut framed = String::with_capacity(source.len() + closer.len());
+            framed.push_str(source);
+            framed.push_str(&closer);
+            framed.find(&closer) == Some(source.len())
+        })
         .unwrap()
 }
 
@@ -178,6 +192,24 @@ mod tests {
                 let block = embed_block(source, mode);
                 let (out, _) = extract_source(&block).expect("block should extract");
                 assert_eq!(out, source, "source {:?} mode {:?}", source, mode);
+            }
+        }
+    }
+
+    #[test]
+    fn closer_prefix_tails_do_not_fuse() {
+        // A source ENDING in a closing-bracket prefix, with no trailing
+        // newline, must not fuse with the appended closer into an earlier
+        // close: the var form appends `]=*]` directly after the source, so
+        // `-- ]=` + `]=]` used to read as `]=]` two bytes early — emitted
+        // Lua with a dangling `=]` (syntax error) and truncated extraction.
+        for tail in ["]", "]=", "]==", "]===", "] =]=", "]=] x ]=", "]]"] {
+            let source = format!("main = pure () -- {tail}");
+            for mode in [EmbedMode::Comments, EmbedMode::Var] {
+                let block = embed_block(&source, mode);
+                let (out, found) = extract_source(&block).expect("block should extract");
+                assert_eq!(out, source, "tail {:?} mode {:?}", tail, mode);
+                assert_eq!(found, mode);
             }
         }
     }
