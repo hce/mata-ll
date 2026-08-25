@@ -1606,12 +1606,17 @@ impl Checker {
                 let mut tbranches = Vec::new();
 
                 for branch in branches {
-                    let mut branch_env = env.apply_subst(&subst);
+                    // Cow fast path (see `TypeEnv::applied`): the whole env
+                    // is rebuilt only when the accumulated substitution
+                    // actually touches it — `to_mut` clones on first
+                    // pattern binding, so branch-local bindings still never
+                    // leak into the next branch's env.
+                    let mut branch_env = env.applied(&subst);
                     let scrut_ty = scrut_ty.apply_subst(&subst);
                     // Any existential skolem this branch's pattern mints must
                     // stay inside the branch; snapshot to check that below.
                     let skolems_before = self.pattern_skolems.len();
-                    let (tp, pat_subst) = self.check_pattern(&branch.pattern, &scrut_ty, &mut branch_env)?;
+                    let (tp, pat_subst) = self.check_pattern(&branch.pattern, &scrut_ty, branch_env.to_mut())?;
                     subst = subst.compose(&pat_subst);
 
                     // A branch may carry guards (`pat | g1 -> e1 | g2 -> e2`).
