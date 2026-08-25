@@ -1180,8 +1180,15 @@ impl Monomorphizer {
                                 ty: ty.clone(),
                             };
                             return TExpr {
+                                // SOURCE spelling ("not"): sanitize renames
+                                // it to Lua's not_ at emission. Emitting the
+                                // sanitized name here disagreed with every
+                                // name-keyed table (demand rows key "not"),
+                                // so the strictness row never applied — a
+                                // harmless under-claim, but a standing
+                                // spelling mismatch.
                                 kind: TExprKind::App(
-                                    Box::new(TExpr::new(TExprKind::Var("not_".to_string()), Ty::Unit)),
+                                    Box::new(TExpr::new(TExprKind::Var("not".to_string()), Ty::Unit)),
                                     Box::new(eq_call),
                                 ),
                                 ty,
