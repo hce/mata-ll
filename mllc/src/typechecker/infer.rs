@@ -1472,6 +1472,12 @@ impl Checker {
             }
             Expr::Negate(inner) => {
                 let (te, ty, s) = self.infer_expr(inner, env)?;
+                // Unary minus is GHC's `negate`, a Num method: `-x` at a
+                // non-Num type must be rejected here (No instance for
+                // `Num Bool`), not crash in the emitted Lua arithmetic.
+                // Same wanted the numeric-literal arms push; an unresolved
+                // inner type flows into numeric defaulting like theirs.
+                self.wanted.push(("Num".to_string(), ty.clone()));
                 Ok((TExpr::new(TExprKind::Negate(Box::new(te)), ty.clone()), ty, s))
             }
             Expr::Lambda { params, body } => {

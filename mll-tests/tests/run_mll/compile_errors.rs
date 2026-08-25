@@ -25,6 +25,44 @@ main = putStrLn "\256"
     ]);
 }
 
+// Unary minus is GHC's `negate`, a Num method: `-x` at a non-Num type
+// must be a compile-time "No instance" (GHC-87110 shape), not a Lua
+// runtime arithmetic error. Regression: the Negate inference arm emitted
+// no Num wanted at all, so `f :: Bool -> Bool; f x = -x` compiled and
+// crashed at the first call. The controls pin the accept side: negation
+// at the concrete numeric types and under defaulting stays legal.
+#[test]
+fn negate_at_non_num_type_is_rejected() {
+    let source = r#"
+f :: Bool -> Bool
+f x = -x
+
+main :: IO ()
+main = print (f True)
+"#;
+    expect_compile_error(source, &[], &["No instance", "Num", "Bool"]);
+}
+
+#[test]
+fn negate_at_numeric_types_stays_accepted() {
+    let source = r#"
+negI :: Int -> Int
+negI x = -x
+
+negN :: Number -> Number
+negN x = -x
+
+main :: IO ()
+main = do
+    print (negI 3)
+    print (negN 2.5)
+    -- unannotated local: the Num wanted flows into numeric defaulting
+    let negD y = -y
+    print (negD 7)
+"#;
+    compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
+}
+
 // Haskell 2010 puts `::` one grammar level above a section operand
 // (exp → infixexp [:: type]), so GHC parse-errors on `(+ 1 :: Int)`;
 // mata-ll used to accept it silently (the operand parse consumed the
