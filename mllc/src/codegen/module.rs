@@ -149,6 +149,8 @@ impl CodeGen {
             "ord_max__ByteString", "ord_max__Unit",
             "ord_min__Int", "ord_min__Number", "ord_min__String",
             "ord_min__ByteString", "ord_min__Unit",
+            "__mll_bool_n", "ord_lt__Bool", "ord_gt__Bool", "ord_le__Bool",
+            "ord_ge__Bool", "ord_compare__Bool", "ord_max__Bool", "ord_min__Bool",
             "head", "tail", "map", "filter", "take", "drop", "zipWith",
             "foldr", "foldl",
             "__mll_hashstr", "hashmap_empty", "hashmap_insert", "hashmap_lookup",

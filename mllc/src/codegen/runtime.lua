@@ -1166,6 +1166,19 @@ local function ord_gt__Unit(a, b) return false end
 local function ord_le__Unit(a, b) return true end
 local function ord_ge__Unit(a, b) return true end
 local function ord_compare__Unit(a, b) return 2 end
+-- Ord Bool (GHC parity: False < True). Lua cannot `<` booleans, so
+-- compare through 0/1.
+local function __mll_bool_n(x) if __force(x) then return 1 else return 0 end end
+local function ord_lt__Bool(a, b) return __mll_bool_n(a) < __mll_bool_n(b) end
+local function ord_gt__Bool(a, b) return __mll_bool_n(a) > __mll_bool_n(b) end
+local function ord_le__Bool(a, b) return __mll_bool_n(a) <= __mll_bool_n(b) end
+local function ord_ge__Bool(a, b) return __mll_bool_n(a) >= __mll_bool_n(b) end
+local function ord_compare__Bool(a, b)
+    local x, y = __mll_bool_n(a), __mll_bool_n(b)
+    if x < y then return 1 elseif y < x then return 3 else return 2 end
+end
+local function ord_max__Bool(a, b) if __mll_bool_n(a) <= __mll_bool_n(b) then return __force(b) else return __force(a) end end
+local function ord_min__Bool(a, b) if __mll_bool_n(a) <= __mll_bool_n(b) then return __force(a) else return __force(b) end end
 local function ord_max__Unit(a, b) __force(a); return __force(b) end
 local function ord_min__Unit(a, b) local r = __force(a); __force(b); return r end
 local function __mll_eq(a, b) a = __force(a); b = __force(b); return a == b end

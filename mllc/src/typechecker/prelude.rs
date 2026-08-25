@@ -602,7 +602,8 @@ impl Checker {
         ]);
 
         // Ord instances for base types
-        for type_name in &["Int", "Integer", "Number", "String", "ByteString"] {
+        // Bool included: GHC has Ord Bool (False < True); it was missing.
+        for type_name in &["Int", "Integer", "Number", "String", "ByteString", "Bool"] {
             let mut fns: Vec<(String, String)> = ["<", ">", "<=", ">="].iter()
                 .map(|op| (op.to_string(), format!("ord_{}__{}", op_to_name(op), type_name)))
                 .collect();
