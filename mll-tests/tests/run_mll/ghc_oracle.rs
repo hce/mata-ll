@@ -218,6 +218,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ord_bool, "cases", "ord_bool.mll"),
         (ghc_oracle_num_sign_edges, "cases", "num_sign_edges.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
+        (ghc_oracle_diamond_instances, "cases", "diamond_instances.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_dict_passing_first_class, "cases", "dict_passing_first_class.mll"),
         (ghc_oracle_dict_structural_eq, "cases", "dict_structural_eq.mll"),

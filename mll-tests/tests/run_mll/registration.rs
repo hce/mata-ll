@@ -320,6 +320,9 @@ mll_test!(pointfree_caf, "pointfree_caf.mll");
 mll_test!(value_forward_alias, "value_forward_alias.mll");
 mll_test!(clause_local_scope, "clause_local_scope.mll");
 mll_test!(diamond_import, "diamond_import.mll");
+// F3: an instance in a diamond's shared module must not trip the
+// duplicate-instance check (the merge dedups by origin module).
+mll_test!(diamond_instances, "diamond_instances.mll");
 mll_test!(unit_type, "unit_type.mll");
 // Instance-evidence resolution regressions (structured instance identity,
 // deterministic class-variable dispatch, exact-identity specialization purge)
@@ -618,6 +621,9 @@ fn mll_case_registry_is_complete() {
     const HELPER_MODULES: &[&str] = &[
         "DiamondLeaf.mll",
         "DiamondMid.mll",
+        "DiamondShared.mll",
+        "DiamondWest.mll",
+        "DiamondEast.mll",
         "ExportHelper.mll",
         "FixityOps.mll",
         "QualShapes.mll",

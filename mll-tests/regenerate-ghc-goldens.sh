@@ -113,6 +113,9 @@ excluded_reason() {
         # -- helper modules, not runnable cases -------------------------------
         cases/DiamondLeaf)               echo "helper module (twinned for import, no main)";;
         cases/DiamondMid)                echo "helper module (twinned for import, no main)";;
+        cases/DiamondShared)             echo "helper module (twinned for import, no main)";;
+        cases/DiamondWest)               echo "helper module (twinned for import, no main)";;
+        cases/DiamondEast)               echo "helper module (twinned for import, no main)";;
         cases/ExportHelper)              echo "helper module (twinned for import, no main)";;
         cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
         cases/OpQualDefs)                echo "helper module (twinned for import, no main)";;
@@ -217,7 +220,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid ExportHelper FixityOps OpsExports; do
+for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

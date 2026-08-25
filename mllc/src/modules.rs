@@ -182,8 +182,19 @@ impl ModuleLoader {
     /// Process all imports in a module, returning merged declarations.
     /// The imported declarations are prepended to the module's own declarations.
     pub fn resolve_imports(&mut self, module: &Module) -> Result<Module, String> {
+        // "//root" is not a legal module name, so the entry module's own
+        // span can never collide with an imported module's key.
+        self.resolve_imports_keyed(module, "//root")
+    }
+
+    fn resolve_imports_keyed(&mut self, module: &Module, own_key: &str) -> Result<Module, String> {
         let mut imported_decls: Vec<Decl> = Vec::new();
         let mut own_decls: Vec<Decl> = Vec::new();
+        // Provenance of imported_decls (see Module::origin_spans) and the
+        // module keys already merged: a diamond's shared module arrives
+        // through every path, and must contribute its declarations once.
+        let mut out_spans: Vec<(String, usize)> = Vec::new();
+        let mut merged_origins: HashSet<String> = HashSet::new();
         // Import declarations grouped per module, in first-appearance order.
         // GHC MERGES repeated imports — each one contributes visibility
         // (`import M (a)` + `import M (b)` makes both visible; qualified
@@ -236,11 +247,11 @@ impl ModuleLoader {
                 self.resolved.get(key).unwrap().clone()
             } else if self.in_progress.contains(key) {
                 // Cycle: treat as a module with no declarations
-                Module { decls: Vec::new(), exports: None, hidden: HashSet::new() }
+                Module { decls: Vec::new(), exports: None, hidden: HashSet::new(), origin_spans: Vec::new() }
             } else {
                 self.in_progress.insert(key.clone());
                 let imported = self.load_module(module_path)?.clone();
-                let r = self.resolve_imports(&imported)?;
+                let r = self.resolve_imports_keyed(&imported, key)?;
                 self.in_progress.remove(key);
                 self.resolved.insert(key.clone(), r.clone());
                 r
@@ -251,9 +262,21 @@ impl ModuleLoader {
             // Track hidden names for typechecker enforcement. The
             // resolved module is ours (one clone out of the cache
             // above); its declarations move into the import list.
+            let child_spans = resolved.origin_spans;
             let all_decls: Vec<Decl> = resolved.decls.into_iter()
                 .filter(|d| !matches!(d, Decl::Import { .. }))
                 .collect();
+            // The child's provenance spans, when they cover its
+            // declaration list exactly (a resolved module always does; a
+            // raw one — no spans — counts as one span of its own).
+            let child_spans: Vec<(String, usize)> =
+                if child_spans.iter().map(|(_, n)| n).sum::<usize>() == all_decls.len()
+                    && !child_spans.is_empty()
+                {
+                    child_spans
+                } else {
+                    vec![(key.clone(), all_decls.len())]
+                };
 
             // Compute hidden names: names the module itself defines but
             // does not export. Only the module's OWN declarations count
@@ -322,13 +345,31 @@ impl ModuleLoader {
                         ImportItems::Qualified(_) => unreachable!("split above"),
                     })
                 };
-                for d in &all_decls {
-                    if let Some(n) = decl_name(d)
-                        && hidden_by_all(&n) {
-                            hidden_names.insert(n);
+                // The hidden bookkeeping is name-based and runs over EVERY
+                // declaration; the decl push dedups by origin module — a
+                // span whose module was already merged through an earlier
+                // import edge contributes nothing (its declarations are
+                // identical; a second copy tripped the duplicate-instance
+                // check and re-checked/re-generated every function).
+                let mut idx = 0;
+                for (okey, len) in &child_spans {
+                    let slice = &all_decls[idx..idx + len];
+                    idx += len;
+                    let fresh = merged_origins.insert(okey.clone());
+                    for d in slice {
+                        if let Some(n) = decl_name(d)
+                            && hidden_by_all(&n) {
+                                hidden_names.insert(n);
+                            }
+                        if fresh {
+                            imported_decls.push(d.clone());
                         }
-                    imported_decls.push(d.clone());
+                    }
+                    if fresh {
+                        out_spans.push((okey.clone(), *len));
+                    }
                 }
+                debug_assert_eq!(idx, all_decls.len(), "origin spans cover the decl list");
             }
             for alias in aliases {
                 // Prefix every declaration to `alias.name` AND rewrite
@@ -411,9 +452,12 @@ impl ModuleLoader {
             }
         }
 
-        // Merge: imported first, then own
+        // Merge: imported first, then own. The own span is keyed by this
+        // module's import key so a PARENT merging this resolved module can
+        // recognize these declarations when they also arrive via a sibling.
+        out_spans.push((own_key.to_string(), own_decls.len()));
         imported_decls.extend(own_decls);
-        Ok(Module { decls: imported_decls, exports: None, hidden: hidden_names })
+        Ok(Module { decls: imported_decls, exports: None, hidden: hidden_names, origin_spans: out_spans })
     }
 
     /// Flag unqualified imports that redefine an existing name *with an

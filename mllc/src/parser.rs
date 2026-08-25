@@ -404,7 +404,7 @@ impl Parser {
             }
         }
 
-        Ok(Module { decls: merged, exports: module_exports, hidden: std::collections::HashSet::new() })
+        Ok(Module { decls: merged, exports: module_exports, hidden: std::collections::HashSet::new(), origin_spans: Vec::new() })
     }
 
     /// True when `tok` can begin a top-level declaration — the resync points

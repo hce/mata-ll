@@ -266,6 +266,7 @@ fn compile_impl(
             .collect(),
         exports: None,
         hidden,
+        origin_spans: Vec::new(),
     };
     let local_start = module.decls.len() - own_count;
 

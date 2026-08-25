@@ -26,6 +26,15 @@ pub struct Module {
     /// Names imported but hidden (from modules with export lists).
     /// The typechecker rejects direct references to these.
     pub hidden: std::collections::HashSet<String>,
+    /// Provenance of `decls` after import resolution: ordered
+    /// (module_key, decl_count) spans covering the whole list, one span
+    /// per source module. resolve_imports uses them to merge each
+    /// transitive module's declarations exactly ONCE into a parent — a
+    /// diamond `Root -> {B, C} -> D` used to receive D twice, so any
+    /// instance in D spuriously tripped the duplicate-instance check and
+    /// every shared function was checked and generated per import edge.
+    /// Empty on a freshly parsed (unresolved) module.
+    pub origin_spans: Vec<(String, usize)>,
 }
 
 /// Top-level declarations.
