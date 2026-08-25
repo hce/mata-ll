@@ -3390,10 +3390,25 @@ main = pure ()
         &[],
         &["exactly one field", "one selector"],
     );
-    // Boundary: a wrapped type that IS a type is not confused with a
-    // constructor — the shorthand `newtype W = Maybe Int` stays accepted.
-    let src = "newtype W = Maybe Int\nunw :: W -> Maybe Int\nunw (W m) = m\nmain :: IO ()\nmain = assert (unw (W (Just 1)) == Just 1) \"shorthand over an applied type\"\n";
-    let lua_code = compile(src, Path::new("."), &[]).expect("shorthand newtype over an applied type").lua_code;
+    // Boundary MOVED by round-3 Q41: a KNOWN type applied to one
+    // argument is ambiguous (GHC reads a constructor named like the
+    // type — separate namespaces; the shorthand would wrap the applied
+    // type), and silently taking the shorthand miscompiled the GHC
+    // reading. It now rejects with both spellings; the PARENTHESIZED
+    // form is the unambiguous shorthand and stays accepted.
+    expect_compile_error(
+        "newtype W = Maybe Int\nmain :: IO ()\nmain = pure ()\n",
+        &[],
+        &[
+            "'Maybe' names a type",
+            "ambiguous",
+            "separate namespaces",
+            "note:",
+            "parenthesize it",
+        ],
+    );
+    let src = "newtype W = (Maybe Int)\nunw :: W -> Maybe Int\nunw (W m) = m\nmain :: IO ()\nmain = assert (unw (W (Just 1)) == Just 1) \"parenthesized shorthand over an applied type\"\n";
+    let lua_code = compile(src, Path::new("."), &[]).expect("parenthesized shorthand newtype over an applied type").lua_code;
     mlua::Lua::new().load(&lua_code).set_name("newtype_applied_shorthand").exec()
         .expect("every in-program assertion should pass");
 }

@@ -2116,6 +2116,33 @@ impl Checker {
                 ),
             }
         }
+        // A KNOWN type applied to exactly one argument is AMBIGUOUS: GHC's
+        // namespaces make `newtype W = Pair Int` a constructor named
+        // `Pair` with an Int field, while the mata-ll shorthand reading
+        // wraps the TYPE `Pair Int`. Silently taking the shorthand
+        // miscompiled the GHC reading (the "constructor" the user named
+        // never existed, and pattern matches on it failed downstream).
+        // Never reinterpret silently: reject with both spellings.
+        if let Type::Con(h) = head
+            && args.len() == 1
+        {
+            let h = h.clone();
+            self.push_error_ctx_note(
+                DiagnosticKind::Other(format!(
+                    "'{h}' names a type, so 'newtype {name} = {h} …' is ambiguous: \
+                     in Haskell it declares a CONSTRUCTOR named '{h}' (types and \
+                     constructors live in separate namespaces), while the mata-ll \
+                     shorthand would wrap the TYPE '{h} …'",
+                )),
+                format!("the definition of newtype '{name}'"),
+                format!(
+                    "for the constructor reading, pick a name that is not a type \
+                     (e.g. 'newtype {name} = Mk{name} <type>'); for the shorthand \
+                     that wraps the applied type, parenthesize it: \
+                     'newtype {name} = ({h} <arg>)'",
+                ),
+            );
+        }
         // Known head (or a variable/arrow/...): the shorthand — the whole
         // right-hand side is the wrapped type, constructor = type name.
         (name.to_string(), inner)
