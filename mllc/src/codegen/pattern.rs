@@ -671,8 +671,6 @@ impl CodeGen {
         }
     }
 
-    /// Returns true if an expression is cheap enough that thunking it would
-    /// cost more than evaluating it eagerly. This prevents thunk chain buildup
     /// Collect elements of a literal list (cons chain ending in nil).
     /// Returns Some(vec![elem1, elem2, ...]) if the list has >= 8 literal elements,
     /// None otherwise (let normal cons generation handle short lists).
