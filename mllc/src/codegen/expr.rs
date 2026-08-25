@@ -368,18 +368,22 @@ impl CodeGen {
                 // would bind the inner `x` to an outer/global. See
                 // where_binds_stmts for the same rationale.
                 {
+                    // Through the spill machinery (declare_local_fwd_stmts),
+                    // like where_binds_stmts: a bulk `local a, b, …` bypassed
+                    // the local budget, so a group past ~200 bindings emitted
+                    // invalid Lua ("too many local variables") instead of
+                    // spilling into the scope's _v table. Registration in
+                    // local_vars (so references resolve to these bindings,
+                    // not a same-named top-level or prelude function) and in
+                    // var_slots (so spilled references render as slots)
+                    // happens inside the declare.
                     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-                    let names: Vec<String> = binds.iter()
-                        .map(|b| sanitize_name(&b.name))
-                        .filter(|n| seen.insert(n.clone()))
-                        .collect();
-                    if !names.is_empty() {
-                        stmts.push(Stmt::Local(names.clone(), None));
+                    for b in binds.iter() {
+                        let n = sanitize_name(&b.name);
+                        if seen.insert(n.clone()) {
+                            stmts.extend(self.declare_local_fwd_stmts(&n));
+                        }
                     }
-                    // Register the names as locals so references in the bodies
-                    // resolve to these bindings, not a same-named top-level or
-                    // prelude function (e.g. a let-bound `sum` or `last`).
-                    for n in &names { self.local_vars.insert(n.clone()); }
                 }
                 // Bindings demanded by the let body may be evaluated eagerly
                 // even when they read suspended values (see demanded_bindings).
@@ -398,6 +402,9 @@ impl CodeGen {
                 );
                 for (i, bind) in binds.iter().enumerate() {
                     let sname = sanitize_name(&bind.name);
+                    // The assignment target may be a spill slot (`_vN[k]`)
+                    // when the group overflowed the local budget.
+                    let lval = self.local_lvalue(&sname);
                     if Self::is_nullary_action_type(&bind.body.ty) {
                         // First-class action binding — mirror bind_chain_block's
                         // Let arm: a re-performable closure, never a memoizing
@@ -408,11 +415,11 @@ impl CodeGen {
                             &mut self.cur_result_demand, crate::demand::Demand::Head);
                         let action = self.action_run_ast(&bind.body, false);
                         self.cur_result_demand = saved_rd;
-                        stmts.push(Stmt::Assign(sname.clone(), Expr::inline_fn0(action)));
+                        stmts.push(Stmt::Assign(lval, Expr::inline_fn0(action)));
                         self.concrete_vars.insert(sname);
                     } else if self.strict_binding_ok(bind, &demanded) && strict_binding_safe(binds, i) {
                         let rhs = self.expr_ast(&bind.body);
-                        stmts.push(Stmt::Assign(sname.clone(), rhs));
+                        stmts.push(Stmt::Assign(lval, rhs));
                         self.concrete_vars.insert(sname);
                     } else {
                         // Thunked: must not stay marked concrete (a same-named
@@ -422,10 +429,10 @@ impl CodeGen {
                             // Bare-variable RHS: share the existing
                             // thunk-or-value (see bare_var_alias).
                             let rhs = self.lazy_ref_ast(v);
-                            stmts.push(Stmt::Assign(sname, rhs));
+                            stmts.push(Stmt::Assign(lval, rhs));
                         } else {
                             let rhs = self.expr_ast(&bind.body);
-                            stmts.push(Stmt::Assign(sname, Expr::thunk(rhs)));
+                            stmts.push(Stmt::Assign(lval, Expr::thunk(rhs)));
                         }
                     }
                 }
