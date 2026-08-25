@@ -445,6 +445,27 @@ main = print (f MkInt)
 // the emitted Lua arithmetic. (The accept side — print (), () == () —
 // is pinned by the tuple_instance corpus case.)
 #[test]
+fn parameterized_deriving_generic_is_rejected_with_reason() {
+    // The Generic substrate is concrete-only (HASKDIFF): without the gate,
+    // `data Pair a = … deriving Generic` surfaced as an internal-looking
+    // "Cannot unify 'Rep a' with 'D1 __Meta_D_…'" at the first from/to
+    // use (Q73). The rejection must explain the limit and the workaround.
+    let source = r#"
+import Data.Generics
+
+data Pair a = MkPair a a deriving (Eq, Generic)
+
+main :: IO ()
+main = print (to (from (MkPair (1 :: Int) 2)) == MkPair 1 2)
+"#;
+    expect_compile_error(
+        source,
+        &[Path::new("../lib")],
+        &["Cannot derive 'Generic' for 'Pair'", "type parameters", "concrete-only"],
+    );
+}
+
+#[test]
 fn duplicate_class_method_across_classes_is_rejected() {
     // Two classes declaring the same method name (Q68): the second
     // registration used to overwrite the first's scheme in env while

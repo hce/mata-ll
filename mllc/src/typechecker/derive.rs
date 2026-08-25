@@ -1845,6 +1845,26 @@ impl Checker {
             );
             return vec![];
         }
+        // The substrate is concrete-only (HASKDIFF, "Generics"): the Rep
+        // family and the derived from/to are indexed by the bare type
+        // constructor, so a parameterized type has no representation to
+        // derive. Without this gate the failure surfaced downstream as an
+        // internal-looking unification error ("Cannot unify 'Rep a' with
+        // 'D1 __Meta_D_…'") at the first from/to use.
+        if !type_vars.is_empty() {
+            self.reject_derive(
+                "Generic",
+                type_name,
+                "the type has type parameters",
+                "mata-ll's Generic substrate is concrete-only: Rep and \
+                 from/to are indexed by the type constructor alone, so a \
+                 parameterized type has no derivable representation (see \
+                 HASKDIFF, \"Generics\"). Derive Generic for concrete \
+                 instantiations (e.g. a newtype of the applied type) \
+                 instead.",
+            );
+            return vec![];
+        }
         for con in constructors {
             if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
                 self.push_error_ctx(
