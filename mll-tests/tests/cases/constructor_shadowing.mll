@@ -45,6 +45,10 @@ data PairT = PairT Int Int deriving (Eq, Ord)
 -- shadows Either's Left, which the Prelude itself pattern-matches internally.
 newtype Left = Int
 
+-- Nothing shadows Maybe's constructor; stock-derived Show/Eq must
+-- display and compare under the SOURCE name
+newtype MyN = Nothing Int deriving (Show, Eq)
+
 main :: IO ()
 main = do
     -- Err at tag 1 (crashes on the bug: pattern dispatch used ExitValue's tag 2)
@@ -78,5 +82,11 @@ main = do
     -- newtype shadow of Either's Left: identity wrapper still elides
     let w = Left 9
     assert (case w of Left n -> n == 9) "shadowing newtype unwraps"
+
+    -- a SHADOWING newtype constructor's derived Show prints the SOURCE
+    -- name (regression: the derive received the registry key and
+    -- printed the mangled `Err__mll_shadow 5`)
+    assert (show (Nothing 5) == "Nothing 5") "shadowing newtype derived Show prints source name"
+    assert (Nothing 3 == Nothing 3) "shadowing newtype derived Eq"
 
     putStrLn "ok"

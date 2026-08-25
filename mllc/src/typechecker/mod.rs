@@ -2802,8 +2802,19 @@ impl Checker {
                                 }]),
                                 None => ConstructorFields::Positional(vec![inner.clone()]),
                             };
+                            // The synthetic Constructor carries the SOURCE
+                            // name: derive_instance resolves the registry
+                            // key itself (resolve_con_name) for its
+                            // patterns and DISPLAYS the name as written.
+                            // Passing the registry key made a shadowing
+                            // constructor's derived Show print the mangled
+                            // key (`Err__mll_shadow 5`).
+                            let source_name = con_key
+                                .strip_suffix(SHADOW_SUFFIX)
+                                .unwrap_or(&con_key)
+                                .to_string();
                             let con = Constructor {
-                                name: con_key.clone(),
+                                name: source_name,
                                 external_name: None,
                                 fields,
                                 gadt_type: None,
