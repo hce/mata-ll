@@ -59,6 +59,8 @@
 //! single-assignment to a stamped producer under the same qualification
 //! rules that pass used (one binding site, or a parameter/forward-declaration
 //! rebind with exactly one assignment; never a name mentioned in Raw text).
+//! Env-miss plain-name reads carry the metatable-free-_ENV axiom (see the
+//! `Expr::Name` arm of `derive`).
 
 use super::lua::{Block, Expr, FnTarget, Item, Stmt};
 use std::collections::{HashMap, HashSet};
@@ -1341,6 +1343,17 @@ impl Walker<'_> {
             // qualified single-assignment locals. Non-identifier spellings
             // (`_v[3]`, `math.pi`) go through table indexing, which may hit
             // metamethods: no claims.
+            //
+            // THE METATABLE-FREE-_ENV AXIOM: for a plain name NOT in scope
+            // (env miss — a genuine global read, `_ENV.name` in Lua terms)
+            // the pure/!may_trap claim additionally rests on the chunk's
+            // _ENV having no metatable: a host that gives the globals table
+            // an __index metamethod could make the read raise or
+            // side-effect. Emitted chunks never install one, but an
+            // embedding host owns _ENV. No pass currently exploits
+            // !may_trap on an env-miss name; any future consumer must
+            // either keep tolerating this axiom (and say so at its site)
+            // or narrow the claim to scope-proven names.
             Expr::Name(s) => StampNode::leaf(if is_plain_ident(s) {
                 match env.get(s) {
                     Some(st) => Stamp::name_read(st.shape()),
