@@ -63,6 +63,26 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// Repeated imports of one module merge their visibility (pinned on the
+// accept side by import_merge.mll); a LONE Specific list must still hide
+// everything it doesn't request — the merge rule is "hidden iff every
+// unqualified import form hides it", and with one form that reduces to
+// the old behavior.
+#[test]
+fn single_specific_import_still_hides_unrequested_names() {
+    let source = "import MergeNames (alpha)\n\
+                  main :: IO ()\n\
+                  main = print beta\n";
+    let msg = match compile(source, Path::new("tests/cases"), &[]) {
+        Err(e) => format!("{}", e),
+        Ok(_) => panic!("expected beta to stay hidden behind the specific import list"),
+    };
+    assert!(
+        msg.contains("'beta' is not exported"),
+        "expected a hidden-name error for beta: {msg}"
+    );
+}
+
 // A digit of the wrong base directly after a radix literal (`0o18`,
 // `0b102`) can only be a mistake: lexing it as two adjacent numbers
 // would surface as an application and a baffling type error, so it is

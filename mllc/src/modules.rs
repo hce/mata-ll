@@ -174,7 +174,26 @@ impl ModuleLoader {
     pub fn resolve_imports(&mut self, module: &Module) -> Result<Module, String> {
         let mut imported_decls: Vec<Decl> = Vec::new();
         let mut own_decls: Vec<Decl> = Vec::new();
-        let mut seen_imports: HashSet<String> = HashSet::new();
+        // Import declarations grouped per module, in first-appearance order.
+        // GHC MERGES repeated imports — each one contributes visibility
+        // (`import M (a)` + `import M (b)` makes both visible; qualified
+        // and unqualified forms of one module coexist; two aliases both
+        // work). The old `seen_imports` short-circuit dropped every import
+        // after a module's first, so the second list's names stayed hidden
+        // and a second alias was never introduced.
+        let mut import_order: Vec<String> = Vec::new();
+        let mut import_paths: HashMap<String, Vec<String>> = HashMap::new();
+        let mut import_forms: HashMap<String, Vec<ImportItems>> = HashMap::new();
+        for decl in &module.decls {
+            if let Decl::Import { module_path, items } = decl {
+                let key = module_path.join(".");
+                if !import_paths.contains_key(&key) {
+                    import_order.push(key.clone());
+                    import_paths.insert(key.clone(), module_path.clone());
+                }
+                import_forms.entry(key).or_default().push(items.clone());
+            }
+        }
         // Aliases introduced by `import qualified X as M`. A use-site `M.foo`
         // parses as the field-access shape `App(Var "foo", Con "M")`; once we
         // know which `Con`s are really module aliases, we rewrite those into a
@@ -198,127 +217,133 @@ impl ModuleLoader {
         // never overridden by an explicit import elsewhere.
         let mut private_names: HashSet<String> = HashSet::new();
 
-        for decl in &module.decls {
-            match decl {
-                Decl::Import { module_path, items } => {
-                    let key = module_path.join(".");
-                    if seen_imports.contains(&key) {
-                        continue;
+        for key in &import_order {
+            let module_path = &import_paths[key];
+            let forms = &import_forms[key];
+
+            // Recursively resolve imports in the imported module
+            let resolved = if self.resolved.contains_key(key) {
+                self.resolved.get(key).unwrap().clone()
+            } else if self.in_progress.contains(key) {
+                // Cycle: treat as a module with no declarations
+                Module { decls: Vec::new(), exports: None, hidden: HashSet::new() }
+            } else {
+                self.in_progress.insert(key.clone());
+                let imported = self.load_module(module_path)?.clone();
+                let r = self.resolve_imports(&imported)?;
+                self.in_progress.remove(key);
+                self.resolved.insert(key.clone(), r.clone());
+                r
+            };
+
+            // Include ALL non-import declarations for compilation
+            // (exported functions may depend on internal helpers).
+            // Track hidden names for typechecker enforcement. The
+            // resolved module is ours (one clone out of the cache
+            // above); its declarations move into the import list.
+            let all_decls: Vec<Decl> = resolved.decls.into_iter()
+                .filter(|d| !matches!(d, Decl::Import { .. }))
+                .collect();
+
+            // Compute hidden names: names the module itself defines but
+            // does not export. Only the module's OWN declarations count
+            // — names merged in transitively from its imports are not
+            // "private to" this module just because its export list
+            // omits them, so we look at the loaded (pre-merge) module.
+            let parsed_exports = self.loaded.get(key).and_then(|m| m.exports.clone());
+            let own_decl_names: Vec<String> = self.loaded.get(key)
+                .map(|m| m.decls.iter()
+                    .filter(|d| !matches!(d, Decl::Import { .. }))
+                    .filter_map(decl_name)
+                    .collect())
+                .unwrap_or_default();
+            if let Some(ref exports) = parsed_exports {
+                for name in &own_decl_names {
+                    if !exports.contains(name) {
+                        private_names.insert(name.clone());
+                        hidden_names.insert(name.clone());
                     }
-                    seen_imports.insert(key.clone());
-
-                    // Recursively resolve imports in the imported module
-                    let resolved = if self.resolved.contains_key(&key) {
-                        self.resolved.get(&key).unwrap().clone()
-                    } else if self.in_progress.contains(&key) {
-                        // Cycle: treat as a module with no declarations
-                        Module { decls: Vec::new(), exports: None, hidden: HashSet::new() }
-                    } else {
-                        self.in_progress.insert(key.clone());
-                        let imported = self.load_module(module_path)?.clone();
-                        let r = self.resolve_imports(&imported)?;
-                        self.in_progress.remove(&key);
-                        self.resolved.insert(key.clone(), r.clone());
-                        r
-                    };
-
-                    // Include ALL non-import declarations for compilation
-                    // (exported functions may depend on internal helpers).
-                    // Track hidden names for typechecker enforcement. The
-                    // resolved module is ours (one clone out of the cache
-                    // above); its declarations move into the import list.
-                    let all_decls: Vec<Decl> = resolved.decls.into_iter()
-                        .filter(|d| !matches!(d, Decl::Import { .. }))
-                        .collect();
-
-                    // Compute hidden names: names the module itself defines but
-                    // does not export. Only the module's OWN declarations count
-                    // — names merged in transitively from its imports are not
-                    // "private to" this module just because its export list
-                    // omits them, so we look at the loaded (pre-merge) module.
-                    let parsed_exports = self.loaded.get(&key).and_then(|m| m.exports.clone());
-                    let own_decl_names: Vec<String> = self.loaded.get(&key)
-                        .map(|m| m.decls.iter()
-                            .filter(|d| !matches!(d, Decl::Import { .. }))
-                            .filter_map(decl_name)
-                            .collect())
-                        .unwrap_or_default();
-                    if let Some(ref exports) = parsed_exports {
-                        for name in &own_decl_names {
-                            if !exports.contains(name) {
-                                private_names.insert(name.clone());
-                                hidden_names.insert(name.clone());
-                            }
-                        }
-                    }
-
-                    match items {
-                        ImportItems::All => {
-                            imported_decls.extend(all_decls);
-                        }
-                        ImportItems::Specific(items) => {
-                            // Include ALL declarations (internal helpers are
-                            // needed for type checking), but hide names that
-                            // weren't explicitly requested.
-                            let wanted: HashSet<String> = items.iter().map(|item| {
-                                match item {
-                                    ImportItem::Value(n) => n.clone(),
-                                    ImportItem::TypeAll(n) => n.clone(),
-                                    ImportItem::TypeOnly(n) => n.clone(),
-                                }
-                            }).collect();
-
-                            for w in &wanted {
-                                visible_names.insert(w.clone());
-                            }
-                            for d in all_decls {
-                                if let Some(n) = decl_name(&d)
-                                    && !wanted.contains(&n) {
-                                        hidden_names.insert(n);
-                                    }
-                                imported_decls.push(d);
-                            }
-                        }
-                        ImportItems::Hiding(items) => {
-                            let excluded: HashSet<String> = items.iter().map(|item| {
-                                match item {
-                                    ImportItem::Value(n) => n.clone(),
-                                    ImportItem::TypeAll(n) => n.clone(),
-                                    ImportItem::TypeOnly(n) => n.clone(),
-                                }
-                            }).collect();
-
-                            for d in all_decls {
-                                if let Some(n) = decl_name(&d)
-                                    && excluded.contains(&n) {
-                                        hidden_names.insert(n);
-                                    }
-                                imported_decls.push(d);
-                            }
-                        }
-                        ImportItems::Qualified(alias) => {
-                            // Prefix every declaration to `alias.name` AND rewrite
-                            // intra-module references (a sibling function call, a
-                            // reference to the module's own types) to the prefixed
-                            // names, so the qualified namespace is self-contained
-                            // and never collides with the Prelude.
-                            let names = collect_module_names(&all_decls);
-                            let qual = Qual { alias, names: &names };
-                            for d in &all_decls {
-                                imported_decls.push(qual.decl(d));
-                            }
-                        }
-                    }
-                }
-                _ => {
-                    let d = if qualified_aliases.is_empty() {
-                        decl.clone()
-                    } else {
-                        rewrite_qualified_uses_decl(decl.clone(), &qualified_aliases)
-                    };
-                    own_decls.push(d);
                 }
             }
+
+            // Split this module's import forms: the unqualified ones merge
+            // into ONE unqualified copy of the declarations (visibility is
+            // the union of what each form admits), and each distinct alias
+            // gets its own prefixed copy.
+            let item_names = |items: &[ImportItem]| -> HashSet<String> {
+                items.iter().map(|item| match item {
+                    ImportItem::Value(n) => n.clone(),
+                    ImportItem::TypeAll(n) => n.clone(),
+                    ImportItem::TypeOnly(n) => n.clone(),
+                }).collect()
+            };
+            let mut aliases: Vec<&String> = Vec::new();
+            let mut unqual: Vec<&ImportItems> = Vec::new();
+            for form in forms {
+                match form {
+                    ImportItems::Qualified(alias) => {
+                        if !aliases.contains(&alias) {
+                            aliases.push(alias);
+                        }
+                    }
+                    other => unqual.push(other),
+                }
+            }
+
+            if !unqual.is_empty() {
+                // Every explicitly requested name is recorded (the
+                // explicit-import-overrides-transitive-hiding rule below).
+                for form in &unqual {
+                    if let ImportItems::Specific(items) = form {
+                        for w in item_names(items) {
+                            visible_names.insert(w);
+                        }
+                    }
+                }
+                // A name is selection-hidden only when EVERY unqualified
+                // form hides it: a Specific list hides what it doesn't
+                // request, a Hiding list hides what it excludes, and a
+                // plain `import M` hides nothing.
+                let hidden_by_all = |n: &String| {
+                    unqual.iter().all(|form| match form {
+                        ImportItems::All => false,
+                        ImportItems::Specific(items) => !item_names(items).contains(n),
+                        ImportItems::Hiding(items) => item_names(items).contains(n),
+                        ImportItems::Qualified(_) => unreachable!("split above"),
+                    })
+                };
+                for d in &all_decls {
+                    if let Some(n) = decl_name(d)
+                        && hidden_by_all(&n) {
+                            hidden_names.insert(n);
+                        }
+                    imported_decls.push(d.clone());
+                }
+            }
+            for alias in aliases {
+                // Prefix every declaration to `alias.name` AND rewrite
+                // intra-module references (a sibling function call, a
+                // reference to the module's own types) to the prefixed
+                // names, so the qualified namespace is self-contained
+                // and never collides with the Prelude.
+                let names = collect_module_names(&all_decls);
+                let qual = Qual { alias, names: &names };
+                for d in &all_decls {
+                    imported_decls.push(qual.decl(d));
+                }
+            }
+        }
+
+        for decl in &module.decls {
+            if matches!(decl, Decl::Import { .. }) {
+                continue;
+            }
+            let d = if qualified_aliases.is_empty() {
+                decl.clone()
+            } else {
+                rewrite_qualified_uses_decl(decl.clone(), &qualified_aliases)
+            };
+            own_decls.push(d);
         }
 
         // An explicit import of a name overrides transitive selection-hiding,

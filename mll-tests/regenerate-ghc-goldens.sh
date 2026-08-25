@@ -114,6 +114,10 @@ excluded_reason() {
         cases/ExportHelper)              echo "helper module (twinned for import, no main)";;
         cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
         cases/OpQualDefs)                echo "helper module (twinned for import, no main)";;
+        cases/MergeNames)                echo "helper module (twinned for import, no main)";;
+        # Same twin module-resolution gap as qualified_import_instances (Q77
+        # seam) — the case mixes a qualified alias with unqualified imports.
+        cases/import_merge)              echo "qualified import: twin module resolution gap (Q77 seam)";;
         # Same twin module-resolution gap as qualified_import_instances (the
         # known Q77 seam: the runghc twin cannot find qualified-imported
         # sibling modules). Lift this exclusion when Q77 fixes the seam.
