@@ -838,6 +838,26 @@ impl Parser {
                     } else {
                         items.push(ImportItem::TypeOnly(name));
                     }
+                } else if self.at(&Token::LeftParen) {
+                    // An operator item, `(&)` — the export list accepts
+                    // this spelling, and the import (and hiding) lists
+                    // used to reject it with "Expected identifier".
+                    self.advance();
+                    let op = match self.peek().clone() {
+                        Token::Operator(op) => {
+                            self.advance();
+                            op
+                        }
+                        _ => {
+                            return Err(self.err_here(
+                                "Expected an operator inside the parentheses \
+                                 of an import-list item (e.g. `(&)`)"
+                                    .to_string(),
+                            ));
+                        }
+                    };
+                    self.expect(&Token::RightParen)?;
+                    items.push(ImportItem::Value(op));
                 } else {
                     let name = self.expect_ident()?;
                     items.push(ImportItem::Value(name));

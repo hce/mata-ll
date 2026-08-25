@@ -63,6 +63,24 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// The hiding list accepts operator items too, and a hidden operator is
+// rejected on use like any hidden name (accept side: import_operator_list
+// corpus case).
+#[test]
+fn hidden_operator_is_rejected_on_use() {
+    let source = "import OpsExports hiding ((&))\n\
+                  main :: IO ()\n\
+                  main = print (3 & (\\v -> v + 9))\n";
+    let msg = match compile(source, Path::new("tests/cases"), &[]) {
+        Err(e) => format!("{}", e),
+        Ok(_) => panic!("expected the hidden operator '&' to be rejected"),
+    };
+    assert!(
+        msg.contains("'&' is not exported"),
+        "expected a hidden-name error for '&': {msg}"
+    );
+}
+
 // GHC's rule (Haskell 2010 §3.14): a `do` block has at least one
 // statement and ENDS in an expression. Regression: the lax parser let
 // the other endings reach the desugarer, which invented meanings — an

@@ -223,6 +223,7 @@ mll_test!(qualified_operator_module, "qualified_operator_module.mll");
 mll_test!(import_merge, "import_merge.mll");
 mll_test!(dot_spacing, "dot_spacing.mll");
 mll_test!(infix_method_defs, "infix_method_defs.mll");
+mll_test!(import_operator_list, "import_operator_list.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
@@ -585,6 +586,7 @@ fn mll_case_registry_is_complete() {
         "QualShapes.mll",
         "OpQualDefs.mll",
         "MergeNames.mll",
+        "OpsExports.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")

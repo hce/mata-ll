@@ -115,6 +115,7 @@ excluded_reason() {
         cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
         cases/OpQualDefs)                echo "helper module (twinned for import, no main)";;
         cases/MergeNames)                echo "helper module (twinned for import, no main)";;
+        cases/OpsExports)                echo "helper module (twinned for import, no main)";;
         # Same twin module-resolution gap as qualified_import_instances (Q77
         # seam) — the case mixes a qualified alias with unqualified imports.
         cases/import_merge)              echo "qualified import: twin module resolution gap (Q77 seam)";;
@@ -204,7 +205,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid ExportHelper FixityOps; do
+for helper in DiamondLeaf DiamondMid ExportHelper FixityOps OpsExports; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

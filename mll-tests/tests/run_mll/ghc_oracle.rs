@@ -201,6 +201,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_radix_literals, "cases", "radix_literals.mll"),
         (ghc_oracle_dot_spacing, "cases", "dot_spacing.mll"),
         (ghc_oracle_infix_method_defs, "cases", "infix_method_defs.mll"),
+        (ghc_oracle_import_operator_list, "cases", "import_operator_list.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),
