@@ -613,6 +613,34 @@ fn compiled_module_carries_mllc_provenance() {
 /// whose only "exports" are header-listed therefore has no host surface when
 /// compiled standalone: no `main`, nothing in the return table, and dead-code
 /// elimination removes every definition. That used to produce an empty Lua
+/// A partial application's thunked captured argument is hoisted OUT of
+/// the closure (Q76): left inline, every invocation of the closure
+/// allocated a fresh thunk — each memoizing separately, so the captured
+/// computation re-ran per call where GHC shares one thunk. Eager captured
+/// arguments stay inline (hoisting would evaluate them at build time).
+#[test]
+fn partial_application_hoists_thunked_captures() {
+    let src = "pick2 :: Int -> Int -> Int\n\
+               pick2 x y = if y > 0 then x + y else y\n\n\
+               heavy :: Int -> Int\n\
+               heavy 0 = 0\n\
+               heavy n = n + heavy (n - 1)\n\n\
+               main :: IO ()\n\
+               main = print (sum (map (pick2 (heavy 3)) [1, 2, 0 - 1]))\n";
+    let result = compile(src, Path::new("tests/cases"), &[])
+        .expect("compiles");
+    assert!(
+        result.lua_code.contains("local _pc0 = __thunk("),
+        "thunked capture must be bound once, outside the closure:\n{}",
+        result.lua_code
+    );
+    assert!(
+        result.lua_code.contains("(_pc0, _pa0)"),
+        "the closure must reference the shared thunk:\n{}",
+        result.lua_code
+    );
+}
+
 /// An import alias that is also a data constructor: the constructor wins
 /// (alias_ctor_collision.mll pins the program meaning), and the compiler
 /// must SAY that qualified references through the alias will not resolve

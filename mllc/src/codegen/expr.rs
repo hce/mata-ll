@@ -1051,23 +1051,55 @@ impl CodeGen {
                 .collect();
             let callee = self.callee_ast(f);
             let mut cargs = Vec::new();
+            // Thunked captured arguments are HOISTED out of the closure:
+            // left inline, every invocation allocated a FRESH thunk, each
+            // memoizing separately — the argument's computation re-ran per
+            // call where GHC's partial application shares one thunk forced
+            // once. Hoisting a thunk only moves an allocation to closure
+            // build time (effect-free). Eager captured arguments stay
+            // inline deliberately: hoisting would EVALUATE them at build
+            // time, raising a ⊥ the callee only forces when the closure is
+            // actually invoked.
+            let mut hoisted: Vec<Stmt> = Vec::new();
             for (i, a) in args.iter().enumerate() {
                 let is_strict = callee_strict.as_ref()
                     .is_some_and(|v| v.get(i).copied().unwrap_or(false));
                 let arg_e = self.arg_ast(a, is_strict);
-                if i == 0 && let Some(adapter) = arg0_adapter {
-                    cargs.push(Expr::call_named(adapter, vec![arg_e]));
+                let arg_e = if i == 0 && let Some(adapter) = arg0_adapter {
+                    Expr::call_named(adapter, vec![arg_e])
                 } else {
-                    cargs.push(arg_e);
-                }
+                    arg_e
+                };
+                let arg_e = if matches!(&arg_e, Expr::Call(h, _)
+                    if matches!(h.as_ref(), Expr::Name(n) if n == "__thunk"))
+                {
+                    let cname = format!("_pc{}", i);
+                    hoisted.push(Stmt::Local(vec![cname.clone()], Some(arg_e)));
+                    Expr::name(cname)
+                } else {
+                    arg_e
+                };
+                cargs.push(arg_e);
             }
             for p in &extra_params {
                 cargs.push(Expr::name(p.clone()));
             }
-            Expr::paren(Expr::Func(
+            let closure = Expr::Func(
                 extra_params,
                 FuncBody::Block(Block(vec![Stmt::Return(Expr::call(callee, cargs))])),
-            ))
+            );
+            if hoisted.is_empty() {
+                Expr::paren(closure)
+            } else {
+                // The hoisted thunks live in a wrapper IIFE — its own Lua
+                // function scope, so they never count toward the enclosing
+                // function's local budget.
+                hoisted.push(Stmt::Return(closure));
+                Expr::call(
+                    Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(hoisted)))),
+                    vec![],
+                )
+            }
         } else {
             // Full application
             // Wrap function literals in parens so Lua allows calling them
