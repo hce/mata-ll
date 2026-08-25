@@ -38,10 +38,16 @@ impl Checker {
         let all_constructors: Vec<String> = self.constructors.iter()
             .filter(|(_, info)| info.type_name == type_name)
             .filter(|(_, info)| {
-                // If we have a scrutinee type, check if this constructor's
-                // result type can unify with it (i.e., is reachable)
+                // A constructor is excluded only when its result type is
+                // definitely APART from the scrutinee type (gadt_reachable),
+                // not when unification fails: a RIGID scrutinee index (the
+                // skolem of `f :: G b -> …`) refuses to unify with every
+                // indexed result type, which silently dropped REQUIRED
+                // cases — the match compiled non-exhaustive and crashed at
+                // runtime. The caller chooses `b`, so every constructor
+                // whose index b could be instantiated to is reachable.
                 if let Some(sty) = scrutinee_ty {
-                    self.unify(&info.result_type, sty).is_ok()
+                    self.gadt_reachable(&info.result_type, sty)
                 } else {
                     true
                 }
@@ -56,6 +62,53 @@ impl Checker {
             .filter(|c| !seen_constructors.contains(c))
             .map(|c| c.strip_suffix(super::SHADOW_SUFFIX).unwrap_or(&c).to_string())
             .collect()
+    }
+
+    /// Could a GADT constructor's result type and the scrutinee type be
+    /// EQUAL under some instantiation of their variables?  The negation is
+    /// apartness (the same notion the closed-type-family reduction uses):
+    /// only a definitely-apart constructor may be dropped from the required
+    /// set.  Skolems and variables are flexible — a rigid `b` in
+    /// `f :: G b -> …` is chosen by the CALLER, so a `MkInt :: G Int`
+    /// result is reachable — and a stuck type-family application could
+    /// reduce to anything, so it too is never apart.  Concrete mismatches
+    /// (`G Int` vs `MkBool :: G Bool`) are apart and stay excluded.
+    /// Unrecognized shape pairs fall back to the old unification probe,
+    /// which errs toward excluding (never toward a false missing-case
+    /// error — NonExhaustive is a hard error).
+    fn gadt_reachable(&self, con_result: &Ty, scrut: &Ty) -> bool {
+        // A stuck family application on either side is a wildcard.
+        let family_headed = |t: &Ty| {
+            let mut head = t;
+            while let Ty::App(f, _) = head {
+                head = f.as_ref();
+            }
+            matches!(head, Ty::Con(n) if self.is_type_family(n))
+        };
+        if family_headed(con_result) || family_headed(scrut) {
+            return true;
+        }
+        match (con_result, scrut) {
+            (Ty::Forall(_, x), _) => self.gadt_reachable(x, scrut),
+            (_, Ty::Forall(_, y)) => self.gadt_reachable(con_result, y),
+            (Ty::Skolem(..), _) | (_, Ty::Skolem(..)) => true,
+            (Ty::Var(_), _) | (_, Ty::Var(_)) => true,
+            (Ty::Con(x), Ty::Con(y)) => x == y,
+            (Ty::Promoted(x), Ty::Promoted(y)) => x == y,
+            (Ty::Unit, Ty::Unit) => true,
+            (Ty::App(f1, a1), Ty::App(f2, a2)) => {
+                self.gadt_reachable(f1, f2) && self.gadt_reachable(a1, a2)
+            }
+            (Ty::List(x), Ty::List(y)) | (Ty::IO(x), Ty::IO(y)) => self.gadt_reachable(x, y),
+            (Ty::LuaIO(_, x), Ty::LuaIO(_, y)) => self.gadt_reachable(x, y),
+            (Ty::Tuple(xs), Ty::Tuple(ys)) if xs.len() == ys.len() => {
+                xs.iter().zip(ys).all(|(x, y)| self.gadt_reachable(x, y))
+            }
+            (Ty::Arrow(x1, y1, _), Ty::Arrow(x2, y2, _)) => {
+                self.gadt_reachable(x1, x2) && self.gadt_reachable(y1, y2)
+            }
+            _ => self.unify(con_result, scrut).is_ok(),
+        }
     }
 
     /// Recursively collect pattern info, unwrapping Paren wrappers.
@@ -384,8 +437,15 @@ impl Checker {
             let first_patterns: Vec<&Pattern> = clauses.iter()
                 .map(|c| &c.patterns[0])
                 .collect();
-            // Extract the first argument type for GADT-aware exhaustiveness
-            let first_arg_ty = if let Ty::Arrow(a, _, _) = &final_ty { Some(a.as_ref()) } else { None };
+            // Extract the first argument type for GADT-aware exhaustiveness —
+            // from the DECLARED signature (fresh_ty), not the checked
+            // final_ty: a GADT clause's pattern refines the signature's
+            // index variable through the clause substitution (`f :: G b ->
+            // Int; f MkInt = 1` leaves final_ty at `G Int -> Int`), and
+            // exhaustiveness against the refined index dropped every
+            // constructor of the OTHER indices — the caller chooses `b`,
+            // so the declared type is the set of values that can arrive.
+            let first_arg_ty = if let Ty::Arrow(a, _, _) = &fresh_ty { Some(a.as_ref()) } else { None };
             let missing = self.check_exhaustiveness(&first_patterns, first_arg_ty);
             if !missing.is_empty() {
                 self.push_error_span(

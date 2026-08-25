@@ -63,6 +63,29 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A GADT match at a RIGID scrutinee index must require every
+// constructor: `f :: G b -> …` — the caller chooses b, so `f MkBool`
+// is a legal call. Regression: the coverage filter dropped constructors
+// whose result type failed to unify with the (clause-refined) scrutinee
+// type, so this partial match compiled and crashed at runtime. The
+// accept side (concrete-index exclusion still works) is pinned by the
+// gadt_exhaustive_rigid corpus case.
+#[test]
+fn gadt_rigid_index_requires_all_constructors() {
+    let source = r#"
+data G a where
+    MkInt  :: G Int
+    MkBool :: G Bool
+
+f :: G b -> Int
+f MkInt = 1
+
+main :: IO ()
+main = print (f MkInt)
+"#;
+    expect_compile_error(source, &[], &["Non-exhaustive", "'f'", "MkBool"]);
+}
+
 // Unit satisfies what is REGISTERED for it (Show/Eq/Ord, plus user
 // `instance C ()`), not every class. Regression: the entailment Unit arm
 // was Satisfied unconditionally, so `Num ()` typechecked and crashed in

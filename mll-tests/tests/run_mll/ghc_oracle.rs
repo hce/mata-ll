@@ -196,6 +196,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_wrapper_splice, "cases", "wrapper_splice.mll"),
         (ghc_oracle_tuple_instance, "cases", "tuple_instance.mll"),
         (ghc_oracle_functor_forward_ref, "cases", "functor_forward_ref.mll"),
+        (ghc_oracle_gadt_exhaustive_rigid, "cases", "gadt_exhaustive_rigid.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),
