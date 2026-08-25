@@ -742,14 +742,30 @@ impl Parser {
         let mut con_name = None;
         let mut field = None;
         let inner;
-        let braced_con = matches!(self.peek(), Token::UpperIdent(_))
-            && self.pos + 1 < self.tokens.len()
-            && self.tokens[self.pos + 1].token == Token::LeftBrace;
+        // The record brace may sit on the NEXT line (the data-declaration
+        // path accepts that layout via checkpoint+skip; this detection used
+        // to test tokens[pos+1] == LeftBrace directly, so an intervening
+        // layout token broke the record form). Scan past layout tokens for
+        // the detection, and skip them again after the constructor name.
+        let braced_con = matches!(self.peek(), Token::UpperIdent(_)) && {
+            let mut j = self.pos + 1;
+            while j < self.tokens.len()
+                && matches!(self.tokens[j].token, Token::Newline | Token::Indent(_))
+            {
+                j += 1;
+            }
+            j < self.tokens.len() && self.tokens[j].token == Token::LeftBrace
+        };
         if let Token::UpperIdent(con) = self.peek().clone()
             && (con == name || braced_con)
         {
             self.advance();
             con_name = Some(con);
+            let save_brace = self.checkpoint();
+            self.skip_newlines_and_indent();
+            if !self.at(&Token::LeftBrace) {
+                self.rewind(save_brace);
+            }
             if self.at(&Token::LeftBrace) {
                 // Record form: exactly one selector (a newtype has exactly
                 // one field).
