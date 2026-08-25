@@ -445,6 +445,34 @@ main = print (f MkInt)
 // the emitted Lua arithmetic. (The accept side — print (), () == () —
 // is pinned by the tuple_instance corpus case.)
 #[test]
+fn duplicate_class_method_across_classes_is_rejected() {
+    // Two classes declaring the same method name (Q68): the second
+    // registration used to overwrite the first's scheme in env while
+    // method_constraints kept the first's entry, so a use typechecked
+    // against one class's type and dispatched through the other's
+    // constraint — `tag (1 :: Int)` passed as Bool. GHC rejects the
+    // duplicate declaration.
+    let source = r#"
+class Alpha a where
+    tag :: a -> Int
+
+class Beta a where
+    tag :: a -> Bool
+
+instance Alpha Int where
+    tag n = n + 1
+
+main :: IO ()
+main = print (tag (1 :: Int))
+"#;
+    expect_compile_error(
+        source,
+        &[],
+        &["Duplicate class method 'tag'", "class 'Alpha'", "rename one of the methods"],
+    );
+}
+
+#[test]
 fn num_unit_is_rejected() {
     let source = r#"
 main :: IO ()

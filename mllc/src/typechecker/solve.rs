@@ -430,6 +430,34 @@ impl Checker {
         let mut default_methods = HashMap::new();
 
         for method in methods {
+            // A class method is a top-level binding: a second class
+            // declaring the same name would overwrite the first's SCHEME in
+            // env below while `method_constraints` kept the first's entry
+            // (or_insert) — a use site would then typecheck against one
+            // class's method type but check (and dispatch through) the
+            // OTHER class's constraint, silently accepting ill-typed
+            // programs. GHC rejects the duplicate declaration; so do we,
+            // keeping the first registration intact.
+            if let Some(owner) = self.classes.iter()
+                .find(|(cn, ci)| cn.as_str() != name
+                    && ci.methods.iter().any(|(m, _)| m == &method.name))
+                .map(|(cn, _)| cn.clone())
+            {
+                self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "Duplicate class method '{}': already declared by class '{}'",
+                        method.name, owner)),
+                    format!("declaration of class '{}'", name),
+                    format!(
+                        "class methods share the module's top-level namespace, so two \
+                         classes cannot both declare '{}' — the second declaration \
+                         would replace the first's method type while the first's \
+                         class constraint stayed in force. GHC rejects this as a \
+                         multiple declaration; rename one of the methods.",
+                        method.name),
+                );
+                continue;
+            }
             let ty = self.ast_type_to_ty(&method.ty);
             method_types.push((method.name.clone(), ty.clone()));
 
