@@ -147,4 +147,6 @@ done
 
 echo ""
 echo "$LUA_VERSION: $passed passed, $failures failed, $skipped skipped"
-exit "$failures"
+# 0/1 only: a raw count wraps mod 256, so exactly 256 failures would
+# exit 0 and the gate would read green.
+if [ "$failures" -gt 0 ]; then exit 1; else exit 0; fi
