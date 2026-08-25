@@ -29,19 +29,19 @@ type Map k v = HashMap k v
 empty :: Map k v
 empty = hmEmpty
 
-singleton :: k -> v -> Map k v
+singleton :: Hashable k => k -> v -> Map k v
 singleton k v = hmInsert k v hmEmpty
 
-insert :: k -> v -> Map k v -> Map k v
+insert :: Hashable k => k -> v -> Map k v -> Map k v
 insert = hmInsert
 
-delete :: k -> Map k v -> Map k v
+delete :: Hashable k => k -> Map k v -> Map k v
 delete = hmDelete
 
-lookup :: k -> Map k v -> Maybe v
+lookup :: Hashable k => k -> Map k v -> Maybe v
 lookup = hmLookup
 
-member :: k -> Map k v -> Bool
+member :: Hashable k => k -> Map k v -> Bool
 member = hmMember
 
 size :: Map k v -> Int
@@ -56,17 +56,17 @@ values = hmValues
 toList :: Map k v -> [(k, v)]
 toList = hmToList
 
-fromList :: [(k, v)] -> Map k v
+fromList :: Hashable k => [(k, v)] -> Map k v
 fromList = hmFromList
 
-map :: (v -> w) -> Map k v -> Map k w
+map :: Hashable k => (v -> w) -> Map k v -> Map k w
 map f m = fromList (mapPairs f (toList m))
 
 mapPairs :: (v -> w) -> [(k, v)] -> [(k, w)]
 mapPairs _ [] = []
 mapPairs f ((k, v):rest) = (k, f v) : mapPairs f rest
 
-filter :: (v -> Bool) -> Map k v -> Map k v
+filter :: Hashable k => (v -> Bool) -> Map k v -> Map k v
 filter p m = fromList (filterPairs p (toList m))
 
 filterPairs :: (v -> Bool) -> [(k, v)] -> [(k, v)]
@@ -87,21 +87,21 @@ foldrPairs :: (k -> v -> b -> b) -> b -> [(k, v)] -> b
 foldrPairs _ acc [] = acc
 foldrPairs f acc ((k, v):rest) = f k v (foldrPairs f acc rest)
 
-union :: Map k v -> Map k v -> Map k v
+union :: Hashable k => Map k v -> Map k v -> Map k v
 union m1 m2 = fromList (listAppend (toList m2) (toList m1))
 
 listAppend :: [a] -> [a] -> [a]
 listAppend [] ys = ys
 listAppend (x:xs) ys = x : listAppend xs ys
 
-intersection :: Eq k => Map k v -> Map k v -> Map k v
+intersection :: (Eq k, Hashable k) => Map k v -> Map k v -> Map k v
 intersection m1 m2 = filter (\_ -> True) (fromList (filterByKeys (keys m2) (toList m1)))
 
 filterByKeys :: Eq k => [k] -> [(k, v)] -> [(k, v)]
 filterByKeys _ [] = []
 filterByKeys ks ((k, v):rest) = if elem k ks then (k, v) : filterByKeys ks rest else filterByKeys ks rest
 
-difference :: Eq k => Map k v -> Map k v -> Map k v
+difference :: (Eq k, Hashable k) => Map k v -> Map k v -> Map k v
 difference m1 m2 = fromList (filterNotByKeys (keys m2) (toList m1))
 
 filterNotByKeys :: Eq k => [k] -> [(k, v)] -> [(k, v)]

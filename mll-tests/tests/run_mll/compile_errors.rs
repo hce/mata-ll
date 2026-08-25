@@ -63,6 +63,21 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// HashMap keys must have VALUE semantics in their Lua representation:
+// a boxed Integer key is a Lua table, so lookups compared by IDENTITY
+// (misses; size grew per insert of "the same" key) and hashmap_keys'
+// table.sort crashed. The method-less Hashable marker class constrains
+// the key-taking hm* functions; Integer is deliberately not an
+// instance.
+#[test]
+fn hashmap_integer_keys_are_rejected() {
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n    let m = hmInsert (123456789012345678901234567890 :: Integer) \"v\" hmEmpty\n    print (hmSize m)\n",
+        &[],
+        &["No instance for 'Hashable Integer'"],
+    );
+}
+
 // `!!` was in the consume-once operator whitelist, but indexing DROPS
 // every element of the list except the selected one — under
 // exactly-once, "consuming" a %1 list by indexing leaks the rest. It

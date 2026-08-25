@@ -526,6 +526,26 @@ impl Checker {
             ("enumFromTo", "enumFromTo_Int"), ("enumFromThenTo", "enumFromThenTo_Int"),
         ]);
 
+        // HashMap KEY constraint (round-3 Q54): the runtime map is a plain
+        // Lua table keyed by the forced key, so only types whose Lua
+        // representation has VALUE semantics can be keys. A boxed Integer
+        // key is a Lua table — identity semantics: lookups missed, size
+        // grew per insert of "the same" key, and hashmap_keys' table.sort
+        // crashed. Hashable is a method-less marker class over the scalar
+        // key types; the key-taking hm* functions carry it, so an Integer
+        // key is a compile-time "No instance for 'Hashable Integer'".
+        self.register_builtin_class("Hashable", "a", &[], vec![]);
+        for t in &["Int", "Number", "String", "Bool", "ByteString"] {
+            self.register_builtin_instance::<&str, &str>("Hashable", Ty::Con(t.to_string()), &[]);
+        }
+        for name in &["hmInsert", "hmLookup", "hmDelete", "hmMember", "hmFromList"] {
+            self.fn_contexts.insert(name.to_string(), FnContext {
+                declared: vec![("Hashable".to_string(), ta.clone())],
+                at_use: vec![("Hashable".to_string(), ta.clone())],
+                ..FnContext::default()
+            });
+        }
+
         // Built-in Bounded typeclass
         let min_bound_ty = ta.clone();
         let max_bound_ty = ta.clone();

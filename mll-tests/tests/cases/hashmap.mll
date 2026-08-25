@@ -34,10 +34,17 @@ main = do
     assert (fromMaybe 0 (hmLookup "x" m4) == 3) "fromList last write wins"
     assert (fromMaybe 0 (hmLookup "y" m4) == 2) "fromList other key"
     assert (not (hmMember "z" m4)) "fromList missing key"
-    assert (hmSize (hmFromList []) == 0) "fromList empty"
+    assert (hmSize (hmFromList ([] :: [(String, Int)])) == 0) "fromList empty"
     -- toList
     assert (length (hmToList m) == 3) "toList length"
     assert (pairsEq (hmToList m) (zip (hmKeys m) (hmValues m))) "toList matches zip keys values"
     assert (pairsEq (hmToList m) [("alice", 30), ("bob", 25), ("charlie", 35)]) "toList sorted by key"
     assert (pairsEq (hmToList (hmFromList (hmToList m))) (hmToList m)) "toList/fromList round-trip"
     assert (length (hmToList hmEmpty) == 0) "toList empty"
+
+    -- Bool keys (legal Hashable; hashmap_keys' sort orders False < True
+    -- through the boolean-aware comparator — plain table.sort cannot
+    -- `<` booleans)
+    let bm = hmFromList [(True, 1), (False, 2)]
+    assert (fromMaybe 0 (hmLookup True bm) == 1) "Bool key lookup"
+    assert (hmSize bm == 2) "Bool key size"
