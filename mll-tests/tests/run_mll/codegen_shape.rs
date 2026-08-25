@@ -641,6 +641,51 @@ fn partial_application_hoists_thunked_captures() {
     );
 }
 
+/// Structured demand rows respect shadowing (F2): a case binder named like
+/// a strict where-local masks the local's row, so a binding passed through
+/// the BINDER stays a thunk (the real callee — here `pick` — never demands
+/// it; eager evaluation raised a bottom GHC never touches). The unshadowed
+/// twin keeps the strict assignment — the fix must not over-mask genuine
+/// demand.
+#[test]
+fn shadowed_where_local_row_keeps_binding_lazy() {
+    let shadowed = "f :: Int -> Int -> Int\n\
+                    f x y = case pick of\n\
+                    \x20   go -> go bad\n\
+                    \x20 where\n\
+                    \x20   go n = n + 1\n\
+                    \x20   bad = y + 1\n\
+                    \x20   pick = \\_ -> 0\n\
+                    \x20   unused = go x\n\n\
+                    main :: IO ()\n\
+                    main = print (f 7 (error \"never demanded\"))\n";
+    let result = compile(shadowed, Path::new("tests/cases"), &[])
+        .expect("compiles");
+    assert!(
+        result.lua_code.contains("bad = __thunk("),
+        "a binding passed to the shadowing case binder must stay lazy:\n{}",
+        result.lua_code
+    );
+
+    let genuine = "f :: Int -> Int -> Int\n\
+                   f x y = case pick of\n\
+                   \x20   h -> go bad\n\
+                   \x20 where\n\
+                   \x20   go n = n + 1\n\
+                   \x20   bad = y + 1\n\
+                   \x20   pick = \\_ -> 0\n\n\
+                   main :: IO ()\n\
+                   main = print (f 7 (error \"genuinely demanded\"))\n";
+    let result = compile(genuine, Path::new("tests/cases"), &[])
+        .expect("compiles");
+    assert!(
+        result.lua_code.contains("bad = y + 1"),
+        "genuine demand through the surviving row must stay strict \
+         (y is entry-forced via f's row, so the binding reads it direct):\n{}",
+        result.lua_code
+    );
+}
+
 /// An import alias that is also a data constructor: the constructor wins
 /// (alias_ctor_collision.mll pins the program meaning), and the compiler
 /// must SAY that qualified references through the alias will not resolve

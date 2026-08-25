@@ -211,7 +211,7 @@ impl CodeGen {
             &self.demand_info.rows,
             &inlined,
             &|n| self.is_local_shadowed(n),
-            &clause.where_binds,
+            clause,
         ));
         env
     }
@@ -227,13 +227,20 @@ impl CodeGen {
     pub(super) fn clause_demanded(&self, clause: &TClause) -> crate::demand::DemandMap {
         let inlined = |n: &str| self.inline_fns.contains_key(n);
         let locals = self.clause_local_rows(clause);
+        // The seed is computed BEFORE where_binds_stmts registers the
+        // clause's where names as locals, so the ambient predicate alone
+        // misses them (and the clause's own pattern/inner binders): extend
+        // it with the clause-level shadow set — the structured twin of the
+        // boolean analysis's own_shadowed (see demand::clause_shadow_set).
+        let own = crate::demand::clause_shadow_set(clause, &locals);
+        let shadowed = |n: &str| own.contains(n) || self.is_local_shadowed(n);
         if clause.guards.is_empty() {
             crate::demand::demanded_map(
                 clause.plain_body(),
                 &self.demand_info.rows,
                 &locals,
                 &inlined,
-                &|n| self.is_local_shadowed(n),
+                &shadowed,
                 &self.cur_result_demand,
             )
         } else {
@@ -242,7 +249,7 @@ impl CodeGen {
                 &self.demand_info.rows,
                 &locals,
                 &inlined,
-                &|n| self.is_local_shadowed(n),
+                &shadowed,
                 &self.cur_result_demand,
             )
         }

@@ -189,6 +189,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_local_shadows_specials, "cases", "local_shadows_specials.mll"),
         (ghc_oracle_inline_no_capture, "cases", "inline_no_capture.mll"),
         (ghc_oracle_demand_shadowing, "cases", "demand_shadowing.mll"),
+        (ghc_oracle_shadowed_demand_rows, "cases", "shadowed_demand_rows.mll"),
         (ghc_oracle_seq_action_value, "cases", "seq_action_value.mll"),
         (ghc_oracle_record_update_lazy, "cases", "record_update_lazy.mll"),
         (ghc_oracle_record_update_call_sites, "cases", "record_update_call_sites.mll"),

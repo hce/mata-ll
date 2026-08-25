@@ -881,14 +881,23 @@ fn group_where_fn_equations(where_binds: &[TLocalDef]) -> Vec<(String, Vec<&TLoc
     groups
 }
 
-fn local_fn_demand(
-    clause: TLocalDefLike<'_>,
-    env: &HashMap<String, Vec<bool>>,
-    parent_shadowed: Shadowed,
-) -> LocalFnDemand {
+/// A clause's where-bound function groups that survive the local-row SCOPE
+/// filter: a group is dropped when its name is rebound anywhere in the
+/// clause (lambda/case/let binders, local-function parameters — such a
+/// name may refer to a different binder at some call site) or ambiguous
+/// (two separate same-named groups, or a group sharing its name with a
+/// where VALUE binding). Shared by the boolean (`local_fn_demand`) and
+/// structured (`local_fn_rows`) analyses so both key rows only by names
+/// with ONE clause-wide meaning. The structured side once skipped this
+/// filter: a case binder shadowing a strict where-local still installed
+/// the local's row, so a binding passed to the BINDER was judged demanded
+/// and evaluated eagerly — a spurious bottom GHC never evaluates (F2).
+/// Returns the two exclusion sets too — `local_fn_demand`'s captured-set
+/// filter reuses them.
+fn clean_where_fn_groups<'t>(clause: &TLocalDefLike<'t>) -> WhereFnScope<'t> {
     let mut groups = group_where_fn_equations(clause.where_binds);
     if groups.is_empty() {
-        return LocalFnDemand::empty();
+        return WhereFnScope { groups, rebound: HashSet::new(), ambiguous: HashSet::new() };
     }
 
     // Names rebound anywhere in the clause (see the scoping note above).
@@ -921,6 +930,23 @@ fn local_fn_demand(
         }
     }
     groups.retain(|(n, _)| !rebound.contains(n) && !ambiguous.contains(n));
+    WhereFnScope { groups, rebound, ambiguous }
+}
+
+/// The result of the local-row scope filter: the surviving groups plus the
+/// exclusion sets they were filtered by.
+struct WhereFnScope<'t> {
+    groups: Vec<(String, Vec<&'t TLocalDef>)>,
+    rebound: HashSet<String>,
+    ambiguous: HashSet<String>,
+}
+
+fn local_fn_demand(
+    clause: TLocalDefLike<'_>,
+    env: &HashMap<String, Vec<bool>>,
+    parent_shadowed: Shadowed,
+) -> LocalFnDemand {
+    let WhereFnScope { groups, rebound, ambiguous } = clean_where_fn_groups(&clause);
     if groups.is_empty() {
         return LocalFnDemand::empty();
     }
@@ -2353,8 +2379,12 @@ fn equations_rows<'t>(
 /// because codegen threads the same rows into `demanded_map` /
 /// `demanded_map_guards` (via its scoped `local_demand_rows` map), so the
 /// demanded-binding decision sees exactly what the rows analysis saw.
-pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, shadowed: Shadowed, where_binds: &[TLocalDef]) -> HashMap<String, LocalRows> {
-    let groups = group_where_fn_equations(where_binds);
+pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, shadowed: Shadowed, clause: &TClause) -> HashMap<String, LocalRows> {
+    // The same scope filter the boolean twin applies (see
+    // clean_where_fn_groups): a row keyed by a rebound or ambiguous name
+    // would be applied at call sites that resolve to a DIFFERENT binder.
+    let view = clause_view(clause);
+    let groups = clean_where_fn_groups(&view).groups;
     if groups.is_empty() {
         return HashMap::new();
     }
@@ -2467,6 +2497,15 @@ pub fn let_spine_maps<'t>(
     if !matches!(expr.kind, TExprKind::Let { .. }) {
         return None;
     }
+    // Same rebound-binder extension as `demanded_map`, computed once over
+    // the whole spine (a superset of each suffix's own rebound set — the
+    // spine's earlier binds are rebound in every suffix's actual scope, so
+    // the wider mask is the correct resolution there, and masking only
+    // under-claims).
+    let mut own = HashSet::new();
+    collect_rebound_names(expr, &mut own);
+    let sh = |n: &str| own.contains(n) || shadowed(n);
+    let shadowed: Shadowed = &sh;
     let cx = RowCx { rows, locals, inlined, shadowed, sites: None };
     // Collect the spine top-down.
     let mut spine: Vec<&TExpr> = Vec::new();
@@ -2489,12 +2528,43 @@ pub fn let_spine_maps<'t>(
     Some(maps)
 }
 
+/// The clause-level shadowed names codegen's demanded-map entries must add
+/// to their ambient (live local_vars) predicate — the structured-side twin
+/// of `analyze_equation`'s own_shadowed: the clause's binders
+/// (`clause_shadowed_names`) plus every where-bound FUNCTION name whose
+/// group the local-row scope filter dropped (no row in `locals`; an
+/// unsuppressed lookup for such a name would hit a same-named GLOBAL's row
+/// while the call targets the local). Needed because codegen computes its
+/// demand seed BEFORE the clause's where names are registered as locals,
+/// so the ambient predicate alone misses them (F2).
+pub fn clause_shadow_set(
+    clause: &TClause,
+    locals: &HashMap<String, LocalRows>,
+) -> HashSet<String> {
+    let view = clause_view(clause);
+    let mut s = clause_shadowed_names(&view);
+    for b in &clause.where_binds {
+        if !b.patterns.is_empty() && !locals.contains_key(&b.name) {
+            s.insert(b.name.clone());
+        }
+    }
+    s
+}
+
 /// Public entry point for codegen: the demand map of `expr` evaluated with
 /// result demand `rd` in run position (a bind-chain statement or a clause
 /// body — the positions codegen flattens). `locals` carries the rows of
 /// the where-bound local functions in scope (see `local_fn_rows`); without
 /// them a demand that flows through a call to a where-local is invisible
 /// and the binding stays conservatively thunked.
+///
+/// Every name `expr` itself rebinds (lambda/case/let binders) extends the
+/// caller's shadowed predicate for the walk: codegen's ambient predicate
+/// is the LIVE local_vars set, which cannot contain binders that only come
+/// into scope inside the walked expression — without the extension, a call
+/// through such a binder was resolved against a same-named global/local
+/// row and its argument spuriously eagerized (F2). Names with a surviving
+/// local row stay exempt at the lookup itself (see demand_app).
 pub fn demanded_map(
     expr: &TExpr,
     rows: &Rows,
@@ -2503,11 +2573,14 @@ pub fn demanded_map(
     shadowed: Shadowed,
     rd: &Demand,
 ) -> DemandMap {
-    let cx = RowCx { rows, locals, inlined, shadowed, sites: None };
+    let mut own = HashSet::new();
+    collect_rebound_names(expr, &mut own);
+    let sh = |n: &str| own.contains(n) || shadowed(n);
+    let cx = RowCx { rows, locals, inlined, shadowed: &sh, sites: None };
     demand_expr(&cx, expr, rd, true)
 }
 
-/// Guard-chain variant of `demanded_map`.
+/// Guard-chain variant of `demanded_map` (same rebound-binder extension).
 pub fn demanded_map_guards(
     guards: &[TGuard],
     rows: &Rows,
@@ -2516,7 +2589,13 @@ pub fn demanded_map_guards(
     shadowed: Shadowed,
     rd: &Demand,
 ) -> DemandMap {
-    let cx = RowCx { rows, locals, inlined, shadowed, sites: None };
+    let mut own = HashSet::new();
+    for g in guards {
+        collect_rebound_names(&g.condition, &mut own);
+        collect_rebound_names(&g.body, &mut own);
+    }
+    let sh = |n: &str| own.contains(n) || shadowed(n);
+    let cx = RowCx { rows, locals, inlined, shadowed: &sh, sites: None };
     demand_guards_map(&cx, guards, rd, true)
 }
 
@@ -2624,7 +2703,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
                     // Each clause gets its own where scope. Module level:
                     // no ambient shadowing (clause_demand_map adds each
                     // clause's own binders).
-                    let locals = local_fn_rows(&rows, &inlined, &|_| false, &clause.where_binds);
+                    let locals = local_fn_rows(&rows, &inlined, &|_| false, clause);
                     let cx = RowCx { rows: &rows, locals: &locals, inlined: &inlined, shadowed: &|_| false, sites: None };
                     let view = clause_view(clause);
                     let eqs = [&view];
@@ -2694,7 +2773,7 @@ fn analyze_rows(module: &TModule, strict_params: &HashMap<String, Vec<bool>>) ->
             }
             let rd = rows.result_demand(&func.name);
             for clause in &func.clauses {
-                let locals = local_fn_rows(&rows, &inlined, &|_| false, &clause.where_binds);
+                let locals = local_fn_rows(&rows, &inlined, &|_| false, clause);
                 let cx = RowCx { rows: &rows, locals: &locals, inlined: &inlined, shadowed: &|_| false, sites: Some(&sites) };
                 // Clause body + where-value closure (records sites).
                 let _ = clause_demand_map(&cx, clause_view(clause), &rd);
