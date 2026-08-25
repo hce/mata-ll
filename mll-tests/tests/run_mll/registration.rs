@@ -169,6 +169,14 @@ mll_test!(dict_passing_first_class, "dict_passing_first_class.mll");
 // through the dict's `==` (not Lua `~=`), and [a]/Maybe a/tuple dicts are
 // composed from the element dictionary instead of a raw method name.
 mll_test!(dict_structural_eq, "dict_structural_eq.mll");
+// F6b: a class variable that occurs only in the RESULT binds from the node
+// type at every arity (dictify_use + the dict-body App arm) — the `_`
+// placeholder built dictionaries that resolved no method, and the body's
+// saturated recursion handed the enclosing dict to a deeper level.
+mll_test!(dict_result_position, "dict_result_position.mll");
+// F6e probe (kept as a pin): partial application of a dict-passing
+// function inside its own dictionary-form body saturates correctly.
+mll_test!(dict_partial_self, "dict_partial_self.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
 mll_test!(tuples, "tuples.mll");

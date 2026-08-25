@@ -2000,13 +2000,22 @@ impl Monomorphizer {
                         let mut bind: HashMap<String, Ty> = HashMap::new();
                         if let Some(dt) = &decl_ty {
                             Self::match_fn_args(dt, &args, &mut bind);
-                            // An UNDER-saturated call has no argument
-                            // carrying a variable that sits in an unapplied
-                            // parameter or the result: bind those by
-                            // matching the remaining declared type against
-                            // the node type (families blanked — they are
-                            // not injective, see `class_var_binding`).
-                            if args.len() < Self::spine_arrow_count(dt) {
+                            // An argument cannot carry a variable that sits
+                            // in an unapplied parameter or the RESULT: bind
+                            // those by matching the remaining declared type
+                            // against the node type (families blanked —
+                            // they are not injective, see
+                            // `class_var_binding`). This must run for
+                            // SATURATED calls too: `head (defAt (n - 1))`
+                            // recursing at `[a]` carries the changed type
+                            // only in its result, and matching nothing
+                            // handed the ENCLOSING dictionary to a
+                            // one-level-deeper recursion (F6b's body-side
+                            // twin). Over-saturated calls keep the
+                            // args-only path — the node type sits past the
+                            // declared result, so the suffix match would
+                            // mis-align.
+                            if args.len() <= Self::spine_arrow_count(dt) {
                                 let mut remaining = dt;
                                 for _ in 0..args.len() {
                                     if let Ty::Arrow(_, to, _) = remaining {
@@ -2311,12 +2320,14 @@ impl Monomorphizer {
         // argument type drives construction: substitute this use's types
         // for the signature variables, reduce any family (`Rep T` -> the
         // representation), then build the dictionary over it. A plain
-        // `Class a` at a saturated call keeps the EXACT original path
-        // (resolve the variable from the arguments, build) so nothing
-        // changes for existing dictionary-passing code; an under-saturated
-        // use prefers the full substitution — the class variable may only
-        // occur in an unapplied position, where the argument-driven
-        // resolver cannot see it.
+        // `Class a` prefers the full substitution at EVERY arity: it also
+        // binds a variable that occurs only in an unapplied parameter or
+        // the RESULT (matched against the node type above), which the
+        // argument-driven resolver below cannot see — a saturated
+        // `defAt 3 :: Int` with `defAt :: Mk a => Int -> a` used to fall
+        // to the resolver's `_` placeholder and build a dictionary that
+        // resolved no method (F6b). The argument-driven resolver stays as
+        // the fallback for a variable the substitution missed.
         let arg_tys = self.fn_constraint_args.get(call_name).cloned();
         let mut dict_args: Vec<TExpr> = Vec::new();
         for (i, c) in constraints.iter().enumerate() {
@@ -2333,12 +2344,8 @@ impl Monomorphizer {
                 dict_args.push(self.build_dict_expr(
                     cls, &concrete, &empty_c2d, &empty_env));
             } else {
-                let concrete = if args.len() < n_params {
-                    subst.get(&c.type_var).cloned().unwrap_or_else(||
-                        self.resolve_constraint_type(&c.type_var, poly_fn_ty.as_ref(), &args))
-                } else {
-                    self.resolve_constraint_type(&c.type_var, poly_fn_ty.as_ref(), &args)
-                };
+                let concrete = subst.get(&c.type_var).cloned().unwrap_or_else(||
+                    self.resolve_constraint_type(&c.type_var, poly_fn_ty.as_ref(), &args));
                 dict_args.push(self.build_dict_expr(
                     &c.class_name, &concrete, &empty_c2d, &empty_env));
             }
