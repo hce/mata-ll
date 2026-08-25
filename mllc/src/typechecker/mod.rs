@@ -2409,6 +2409,45 @@ impl Checker {
     /// Type aliases must be registered first so that data constructors
     /// referencing aliases (e.g. `data Foo = Foo MyAlias`) expand correctly.
     fn register_type_declarations(&mut self, module: &Module) {
+        // Duplicate TYPE-constructor declarations (data/newtype/alias
+        // sharing one name): registration is last-writer-wins, so two
+        // declarations silently merged into one constructor universe and
+        // one instance slot — a match covering the first `data T`'s
+        // constructors was reported non-exhaustive, demanding the SECOND
+        // declaration's (F12; GHC rejects with "Multiple declarations").
+        // Prelude declarations are exempt — a user declaration shadows a
+        // Prelude type deliberately, mirroring the constructor-shadowing
+        // rule; everything merged from imports and the module itself is
+        // one namespace, exactly as for values.
+        {
+            let mut seen: HashMap<String, &'static str> = HashMap::new();
+            for (i, decl) in module.decls.iter().enumerate() {
+                if i < self.prelude_decl_count {
+                    continue;
+                }
+                let (name, what) = match decl {
+                    Decl::DataDef { name, .. } => (name, "data type"),
+                    Decl::NewtypeDef { name, .. } => (name, "newtype"),
+                    Decl::TypeAlias { name, .. } => (name, "type alias"),
+                    _ => continue,
+                };
+                if let Some(prev) = seen.insert(name.clone(), what) {
+                    self.push_error_ctx_note(
+                        DiagnosticKind::Other(format!(
+                            "Multiple declarations of type '{}'", name)),
+                        format!("declaration of '{}'", name),
+                        format!(
+                            "'{}' is declared here as a {} and earlier as a {}. \
+                             mata-ll merges every module into one namespace, so two \
+                             type declarations under one name would silently share \
+                             one constructor universe and one instance slot — a \
+                             match over either type would demand the other's \
+                             constructors. Rename one of them.",
+                            name, what, prev),
+                    );
+                }
+            }
+        }
         for decl in &module.decls {
             if let Decl::TypeAlias { name, params, ty } = decl {
                 self.type_aliases.insert(name.clone(), (params.clone(), ty.clone()));

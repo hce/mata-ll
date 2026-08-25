@@ -4844,3 +4844,30 @@ main = putStrLn "unreachable"
         "note:",
     ]);
 }
+
+/// F12: two type declarations under one name silently merged into one
+/// constructor universe and instance slot (a match over either type
+/// demanded the other's constructors). GHC rejects with "Multiple
+/// declarations"; so does mata-ll now, for data/newtype/alias alike.
+#[test]
+fn duplicate_type_name_rejected() {
+    let source = r#"
+data T = A | B
+
+data T = C Int | D
+
+main :: IO ()
+main = print 1
+"#;
+    expect_compile_error(source, &[], &["Multiple declarations of type 'T'", "Rename one"]);
+
+    let source = r#"
+data U = U Int
+
+newtype U = MkU Int
+
+main :: IO ()
+main = print 1
+"#;
+    expect_compile_error(source, &[], &["Multiple declarations of type 'U'", "newtype"]);
+}
