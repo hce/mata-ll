@@ -48,3 +48,12 @@ main = do
     let bm = hmFromList [(True, 1), (False, 2)]
     assert (fromMaybe 0 (hmLookup True bm) == 1) "Bool key lookup"
     assert (hmSize bm == 2) "Bool key size"
+
+    -- Erased show through HashMap values: a LEADING Nothing element in
+    -- a tuple is a nil hole the old ipairs walk truncated at
+    -- (`(Nothing, 2)` showed as "()"); the maximal-key scan renders it.
+    -- (A TRAILING Nothing is representationally unrecoverable in the
+    -- erased path — {1, nil} stores no key 2 — the documented limit;
+    -- type-directed tuple shows carry the real arity.)
+    let mnil = hmInsert "k" (Nothing :: Maybe Int, 2 :: Int) hmEmpty
+    assert (show mnil == "{\"k\" -> (Nothing,2)}") "erased tuple show with leading Nothing"

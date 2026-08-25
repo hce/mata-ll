@@ -554,14 +554,23 @@ local function __mll_to_lua(x)
     -- string keys so exported functions and callbacks hand Lua a real
     -- dictionary. (Positional ADTs and tuples always fill [1]; cons lists were
     -- handled above; so a keyless [1] can only be a LuaDict or empty table.)
-    if x[1] == nil then
+    -- A tuple with a LEADING nil element ({nil, 2} — an erased Nothing)
+    -- has no [1] but DOES have a positive integer key: it is positional,
+    -- not a LuaDict. Scan for the maximal integer key first; the dict
+    -- branch below only sees tables with none.
+    local maxk = 0
+    for k in pairs(x) do
+        if type(k) == "number" and k > maxk then maxk = k end
+    end
+    if maxk == 0 then
         local result = {}
         for k, v in pairs(x) do result[k] = __mll_to_lua(v) end
         return result
     end
-    -- Tuple or ADT: force each element
+    -- Tuple or ADT: force each element (walk to the maximal key so an
+    -- interior nil element does not truncate the array)
     local result = {}
-    for i, v in ipairs(x) do result[i] = __mll_to_lua(v) end
+    for i = 1, maxk do result[i] = __mll_to_lua(x[i]) end
     return result
 end
 
@@ -1109,7 +1118,18 @@ local function show(x)
             return "[" .. table.concat(parts, ",") .. "]"
         end
         local parts = {}
-        for i, v in ipairs(x) do parts[i] = show(v) end
+        -- Scan to the MAXIMAL integer key, not ipairs: a nil element (an
+        -- erased Nothing/()/[]) is a hole ipairs stops at, truncating
+        -- `show (Nothing, 2)` to "()". Holes render as their erased value
+        -- (show(nil) is "Nothing"). A TRAILING nil element is
+        -- representationally unrecoverable ({1, nil} stores no key 2) —
+        -- the erased-arity limit; the type-directed tuple shows carry the
+        -- real arity and are used wherever the element types are known.
+        local maxk = 0
+        for k in pairs(x) do
+            if type(k) == "number" and k > maxk then maxk = k end
+        end
+        for i = 1, maxk do parts[i] = show(x[i]) end
         return "(" .. table.concat(parts, ",") .. ")"
     else return tostring(x) end
 end
