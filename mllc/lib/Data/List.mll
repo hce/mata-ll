@@ -34,7 +34,10 @@ append [] ys = ys
 append (x:xs) ys = x : append xs ys
 
 drop :: Int -> [a] -> [a]
-drop 0 xs = xs
+-- GHC returns the whole list for n <= 0 (the runtime's native drop
+-- already does); matching only 0 recursed a negative n right through
+-- every element to [].
+drop n xs | n <= 0 = xs
 drop _ [] = []
 drop n (_:xs) = drop (n - 1) xs
 

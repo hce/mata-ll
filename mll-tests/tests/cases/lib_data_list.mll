@@ -53,3 +53,9 @@ main = do
     assert (map snd pairs == ["x", "y", "b", "a", "c"]) "sortBy is stable on EQ keys"
     -- already-sorted input (the old quicksort's quadratic case)
     assert (sortBy (\a b -> compare a b) [1, 2, 3, 4, 5, 6, 7, 8] == [1, 2, 3, 4, 5, 6, 7, 8]) "sortBy sorted input"
+
+    -- drop with negative and zero n returns the whole list (GHC; the
+    -- old clauses recursed a negative n through every element to [])
+    assert (drop (-1) [1, 2, 3] == [1, 2, 3]) "drop negative n"
+    assert (drop 0 [1, 2, 3] == [1, 2, 3]) "drop zero"
+    assert (drop 5 [1, 2] == []) "drop past the end"
