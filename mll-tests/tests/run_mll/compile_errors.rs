@@ -4871,3 +4871,34 @@ main = print 1
 "#;
     expect_compile_error(source, &[], &["Multiple declarations of type 'U'", "newtype"]);
 }
+
+/// F13: mutually-importing modules used to degrade to an empty placeholder
+/// module, surfacing as a far-away "Unbound variable" with nothing pointing
+/// at the cause. The cycle is now reported as the actual chain.
+#[test]
+fn import_cycle_reported_as_chain() {
+    let dir = std::env::temp_dir().join(format!("mll_cycle_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("temp module dir");
+    std::fs::write(
+        dir.join("CycleA.mll"),
+        "module CycleA where\n\nimport CycleB\n\naVal :: Int\naVal = bVal + 1\n",
+    ).expect("write CycleA");
+    std::fs::write(
+        dir.join("CycleB.mll"),
+        "module CycleB where\n\nimport CycleA\n\nbVal :: Int\nbVal = 1\n",
+    ).expect("write CycleB");
+    let source = "import CycleA\n\nmain :: IO ()\nmain = print aVal\n";
+    let err = match compile(source, &dir, &[]) {
+        Ok(_) => panic!("an import cycle must not compile"),
+        Err(e) => format!("{}", e),
+    };
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(
+        err.contains("module imports form a cycle: CycleA -> CycleB -> CycleA"),
+        "the diagnostic must name the chain:\n{err}"
+    );
+    assert!(
+        err.contains("Break the cycle"),
+        "the diagnostic must offer the fix:\n{err}"
+    );
+}

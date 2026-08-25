@@ -24,6 +24,11 @@ pub struct ModuleLoader {
     resolved: HashMap<String, Module>,
     /// Modules currently being resolved (cycle detection)
     in_progress: HashSet<String>,
+    /// The same modules in RESOLUTION ORDER, so a detected cycle can be
+    /// reported as the actual chain (`A -> B -> A`) instead of degrading
+    /// to an empty module — which surfaced as a far-away "Unbound
+    /// variable" with nothing pointing at the cycle (F13).
+    in_progress_stack: Vec<String>,
     /// Fixities a module carries to its importers (its own declarations plus
     /// those of its imports, transitively — mata-ll merges every import into
     /// one namespace, and fixity travels with the operator).
@@ -56,6 +61,7 @@ impl ModuleLoader {
             loaded: HashMap::new(),
             resolved: HashMap::new(),
             in_progress: HashSet::new(),
+            in_progress_stack: Vec::new(),
             fixity_cache: HashMap::new(),
             fixities_in_progress: HashSet::new(),
             prelude_fixities,
@@ -246,13 +252,31 @@ impl ModuleLoader {
             let resolved = if self.resolved.contains_key(key) {
                 self.resolved.get(key).unwrap().clone()
             } else if self.in_progress.contains(key) {
-                // Cycle: treat as a module with no declarations
-                Module { decls: Vec::new(), exports: None, hidden: HashSet::new(), origin_spans: Vec::new() }
+                // Import cycle: report the actual chain. The old behavior —
+                // an empty placeholder module — compiled on and surfaced
+                // as an "Unbound variable" far from the cause (F13).
+                let start = self.in_progress_stack.iter()
+                    .position(|k| k == key)
+                    .unwrap_or(0);
+                let mut chain: Vec<&str> = self.in_progress_stack[start..]
+                    .iter().map(String::as_str).collect();
+                chain.push(key);
+                return Err(format!(
+                    "module imports form a cycle: {}\n\
+                     mata-ll resolves an import by copying the imported module's \
+                     declarations into the importer, which has no meaning when the \
+                     modules import each other (GHC rejects import cycles for the \
+                     same structural reason). Break the cycle by moving the shared \
+                     definitions into a module both can import.",
+                    chain.join(" -> ")));
             } else {
                 self.in_progress.insert(key.clone());
+                self.in_progress_stack.push(key.clone());
                 let imported = self.load_module(module_path)?.clone();
-                let r = self.resolve_imports_keyed(&imported, key)?;
+                let r = self.resolve_imports_keyed(&imported, key);
                 self.in_progress.remove(key);
+                self.in_progress_stack.pop();
+                let r = r?;
                 self.resolved.insert(key.clone(), r.clone());
                 r
             };
