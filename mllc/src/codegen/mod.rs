@@ -140,6 +140,10 @@ struct CodeGen {
     expr_depth: usize,
     /// Set once when the depth guard fires; surfaced by `generate`.
     depth_error: Option<String>,
+    /// A fn-table name collision detected while forward-declaring module
+    /// names (two distinct source names sanitizing to one Lua name — see
+    /// module_stmts); carried out of `generate` as a clean error.
+    name_collision_error: Option<String>,
     /// (con_name, type_name, variant_index, total, is_enum)
     constructors: Vec<(String, String, usize, usize, bool)>,
     /// Newtype constructor names (identity at runtime)
@@ -268,6 +272,7 @@ impl CodeGen {
         CodeGen {
             expr_depth: 0,
             depth_error: None,
+            name_collision_error: None,
             constructors: Vec::new(), newtypes: Vec::new(),
             forward_declared: std::collections::HashSet::new(),
             concrete_vars: std::collections::HashSet::new(),
@@ -528,6 +533,9 @@ pub(crate) fn generate(
     // then prepend only those (transitively).
     let mut stmts = cg.module_stmts(module);
     if let Some(msg) = cg.depth_error {
+        return Err(msg);
+    }
+    if let Some(msg) = cg.name_collision_error {
         return Err(msg);
     }
     opt::run(&mut stmts, opt_disable);

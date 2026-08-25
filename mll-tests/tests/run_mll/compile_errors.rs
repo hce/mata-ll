@@ -63,6 +63,31 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// sanitize_name is not injective (`f'` -> f_prime): two distinct source
+// names that sanitize alike shared one fn-table slot, and the
+// last-emitted definition silently served both names (confirmed: both
+// calls returned the second function's result). Now a loud error names
+// both spellings. The control: a lone primed name still compiles.
+#[test]
+fn sanitize_name_collisions_are_rejected() {
+    let source = "f' :: Int -> Int\n\
+                  f' x = if x > 0 then f' (x - 1) else x + 1\n\n\
+                  f_prime :: Int -> Int\n\
+                  f_prime x = if x > 100 then x else f_prime (x + 7)\n\n\
+                  main :: IO ()\n\
+                  main = do\n    print (f' 5)\n    print (f_prime 5)\n";
+    expect_compile_error(source, &[], &[
+        "Definitions 'f'' and 'f_prime' collide",
+        "both compile to the Lua name 'f_prime'",
+        "Rename one",
+    ]);
+    let control = "f' :: Int -> Int\n\
+                   f' x = if x > 0 then f' (x - 1) else x + 1\n\n\
+                   main :: IO ()\n\
+                   main = print (f' 5)\n";
+    compile(control, Path::new("."), &[]).expect("a lone primed name must stay legal");
+}
+
 // The '__' identifier prefix is the compiler's fresh-name namespace
 // (__lamN, __tup_N, __compN, __sec): desugaring substitutes those names
 // without renaming, so a same-spelled user binder would be silently

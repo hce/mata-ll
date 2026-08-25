@@ -219,6 +219,43 @@ impl CodeGen {
         // methods, and user functions all get __mll_fn[N] slots.
         let mut all_fn_names: Vec<String> = Vec::new();
 
+        // sanitize_name is not injective (`f'` -> f_prime, `not` -> not_):
+        // two DISTINCT source names that sanitize alike would share one
+        // fn-table key — and hence one slot, with the last-emitted
+        // definition silently serving both names. Detect it here, where
+        // every slot-receiving name passes with its source spelling still
+        // in hand. Same-source duplicates stay allowed (the documented
+        // user-wins case for names merged along two import paths).
+        {
+            let mut by_sanitized: std::collections::HashMap<String, &str> =
+                std::collections::HashMap::new();
+            let sources = module
+                .functions
+                .iter()
+                .map(|f| f.name.as_str())
+                .chain(module.instance_fns.iter().map(|f| f.name.as_str()))
+                .chain(module.newtypes.iter().map(|n| n.as_str()))
+                .chain(module.record_accessors.iter().map(|(n, _)| n.as_str()));
+            for src in sources {
+                let n = sanitize_name(src);
+                match by_sanitized.get(n.as_str()) {
+                    Some(prev) if *prev != src => {
+                        self.name_collision_error = Some(format!(
+                            "Definitions '{}' and '{}' collide: both compile to the \
+                             Lua name '{}' (mata-ll maps identifiers onto valid Lua \
+                             names — a prime becomes '_prime', a Lua keyword gains a \
+                             trailing '_'), so one definition would silently replace \
+                             the other. Rename one of them",
+                            prev, src, n,
+                        ));
+                    }
+                    _ => {
+                        by_sanitized.insert(n, src);
+                    }
+                }
+            }
+        }
+
         // Data constructors
         for def in &module.data_defs {
             for con in &def.constructors {
