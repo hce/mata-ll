@@ -1,0 +1,8 @@
+Just 5
+Nothing
+[1,2,3]
+Just ()
+[(),(),()]
+effect ran
+[()]
+0

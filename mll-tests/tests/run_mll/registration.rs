@@ -599,6 +599,8 @@ mll_lib_test!(lib_los, "lib_los.mll");
 mll_lib_test!(lib_data_list, "lib_data_list.mll");
 mll_lib_test!(lib_data_maybe, "lib_data_maybe.mll");
 mll_lib_test!(lib_data_map, "lib_data_map.mll");
+// F19: void/join are Monad-polymorphic; guard documented list-only.
+mll_lib_test!(control_monad_poly, "control_monad_poly.mll");
 mll_lib_test!(lib_data_foldable, "lib_data_foldable.mll");
 // FFI marshalling probed with CONSTRUCTED values (ranges, map/filter, `<>`,
 // JSON decoding, computed Just/Nothing) — literals are already native Lua

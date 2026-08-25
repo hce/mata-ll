@@ -410,6 +410,16 @@ see above).
 The lazy list functions stream properly over infinite lists, so e.g.
 `takeWhile (< 100) [1 ..]` and `take 10 (filter even [1 ..])` terminate.
 
+## Control.Monad is narrower than GHC's
+
+`void` and `join` are Monad-polymorphic, but slightly narrower than
+GHC's signatures (`void` is `Functor f => f a -> f ()` there; here it is
+`Monad m => m a -> m ()` — every mata-ll Functor-like type of interest
+is a Monad, and the Monad machinery is what the compiler dispatches).
+`guard` is fixed at the list instance (`Bool -> [()]`): mata-ll has no
+`Alternative` class to abstract it over. For the Maybe spelling write
+`if c then Just () else Nothing`.
+
 ## Foldable and Traversable are narrower than GHC's
 
 `Foldable` (methods `foldr`/`foldl`) and `Traversable` (method

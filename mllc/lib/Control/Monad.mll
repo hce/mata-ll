@@ -19,16 +19,21 @@ forM xs f = mapM f xs
 unless :: Applicative f => Bool -> f () -> f ()
 unless cond action = if cond then pure () else action
 
+-- DEVIATION (see HASKDIFF.md "Control.Monad is narrower than GHC's"):
+-- GHC's guard is `Alternative f => Bool -> f ()`; mata-ll has no
+-- Alternative class, so guard is fixed at the list instance. For the
+-- Maybe equivalent write `if c then Just () else Nothing`.
 guard :: Bool -> [()]
 guard True = [()]
 guard False = []
 
-void :: IO a -> IO ()
+-- GHC's void is `Functor f => f a -> f ()`; mata-ll's is Monad-constrained
+-- (slightly narrower — see HASKDIFF.md), polymorphic over any Monad.
+void :: Monad m => m a -> m ()
 void action = action >> pure ()
 
-join :: Maybe (Maybe a) -> Maybe a
-join Nothing = Nothing
-join (Just x) = x
+join :: Monad m => m (m a) -> m a
+join x = x >>= \inner -> inner
 
 sequence_ :: Monad m => [m a] -> m ()
 sequence_ [] = pure ()
