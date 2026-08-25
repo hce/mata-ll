@@ -212,6 +212,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_temp_named_bindings, "cases", "temp_named_bindings.mll"),
         (ghc_oracle_bounded_product, "cases", "bounded_product.mll"),
         (ghc_oracle_ord_bool, "cases", "ord_bool.mll"),
+        (ghc_oracle_num_sign_edges, "cases", "num_sign_edges.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),

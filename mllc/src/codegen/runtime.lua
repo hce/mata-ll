@@ -1273,9 +1273,16 @@ local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .
 local function negate_Int(x) return -__force(x) end
 local function negate_Number(x) return -__force(x) end
 local function abs_Int(x) x = __force(x); if x < 0 then return -x else return x end end
-local function abs_Number(x) x = __force(x); if x < 0 then return -x else return x end end
+-- GHC parity: abs (-0.0) is 0.0 (the `x < 0` test let -0.0 through
+-- unchanged). `0.0 - x` clears the sign for both zeros; NaN falls to
+-- the else and stays NaN, like GHC.
+local function abs_Number(x) x = __force(x); if x <= 0 then return 0.0 - x else return x end end
 local function signum_Int(x) x = __force(x); if x < 0 then return -1 elseif x > 0 then return 1 else return 0 end end
-local function signum_Number(x) x = __force(x); if x < 0 then return -1.0 elseif x > 0 then return 1.0 else return 0.0 end end
+-- GHC's exact definition (GHC.Float): x > 0 -> 1, x < 0 -> -1,
+-- otherwise -> x ITSELF — so signum NaN is NaN and signum (-0.0) is
+-- -0.0 (runghc-confirmed; the round-3 finding's claim of -1.0 for NaN
+-- was wrong, and the old code returned +0.0 for -0.0).
+local function signum_Number(x) x = __force(x); if x > 0 then return 1.0 elseif x < 0 then return -1.0 else return x end end
 -- fromInteger_Int / fromInteger_Number narrow an Integer to the machine type;
 -- defined after the Integer library below (they use its helpers). A numeric
 -- LITERAL never reaches them — Int/Number literals emit bare and Integer
