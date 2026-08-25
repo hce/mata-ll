@@ -558,6 +558,7 @@ mll_lib_test!(caf_forward_reference, "caf_forward_reference.mll");
 mll_lib_test!(derive_fromjson, "derive_fromjson.mll");
 mll_lib_test!(derive_tojson, "derive_tojson.mll");
 mll_lib_test!(derive_generic, "derive_generic.mll");
+mll_lib_test!(gadt_syntax_generic_json, "gadt_syntax_generic_json.mll");
 mll_lib_test!(generic_json, "generic_json.mll");
 mll_lib_test!(generic_json_many, "generic_json_many.mll");
 mll_lib_test!(generic_json_decode, "generic_json_decode.mll");

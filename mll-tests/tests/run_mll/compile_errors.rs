@@ -120,8 +120,11 @@ fn linear_use_in_later_guard_condition_is_rejected() {
 // A GADT-syntax constructor keeps its fields in gadt_type, so the
 // parser-level nullary test saw zero fields and a FIELDED GADT
 // constructor passed LuaDict's all-nullary check — registering the
-// type as a string enum with an undefined runtime layout. GADT and
-// existential shapes now reject up front, for every LuaDict shape.
+// type as a string enum with an undefined runtime layout. The shape
+// tests are registry-driven now, so this mixed fielded/nullary sum is
+// rejected for its SHAPE, with exactly the message its Haskell-98
+// spelling gets (vanilla GADT syntax is ordinary syntax — Q74); an
+// all-nullary GADT-syntax sum legitimately registers as a string enum.
 #[test]
 fn luadict_rejects_gadt_syntax_constructors() {
     expect_compile_error(
@@ -129,7 +132,7 @@ fn luadict_rejects_gadt_syntax_constructors() {
         &[],
         &[
             "Cannot derive 'LuaDict' for 'T'",
-            "GADT / existential constructor",
+            "multiple constructors and at least one has fields",
         ],
     );
 }

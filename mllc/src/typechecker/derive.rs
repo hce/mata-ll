@@ -42,7 +42,7 @@ impl Checker {
             "ToJSON" => self.derive_tojson(type_name, type_vars, constructors),
             "FromJSON" => self.derive_fromjson(type_name, type_vars, constructors),
             "Generic" => self.ensure_generic(type_name, type_vars, constructors),
-            "LuaDict" => { self.derive_luadict(type_name, constructors); vec![] }
+            "LuaDict" => { self.derive_luadict(type_name, type_vars, constructors); vec![] }
             other => {
                 self.push_error_ctx(
                     DiagnosticKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor, Generic, ToJSON, FromJSON and LuaDict are supported", other)),
@@ -122,24 +122,24 @@ impl Checker {
     /// only makes sense for a single record constructor whose fields all have
     /// names to use as keys, so we validate that here and reject anything else
     /// with an explanation of *why* rather than a bare "cannot derive".
-    pub(super) fn derive_luadict(&mut self, type_name: &str, constructors: &[Constructor]) {
+    pub(super) fn derive_luadict(&mut self, type_name: &str, type_vars: &[String], constructors: &[Constructor]) {
         let reject = |checker: &mut Self, reason: String, note: &str| {
             checker.reject_derive("LuaDict", type_name, &reason, note);
         };
 
-        // GADT-syntax and existential constructors are rejected up front,
-        // for EVERY shape: the parser-level nullary test below reads
-        // ConstructorFields, which is EMPTY for a GADT-syntax constructor
-        // (`Con :: a -> T` keeps its whole signature in gadt_type), so a
-        // FIELDED GADT constructor used to pass the all-nullary test and
-        // register as a string enum with an undefined runtime layout.
-        for con in constructors {
-            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
-                reject(self,
-                    format!("'{}' is a GADT / existential constructor", con.name),
-                    "LuaDict keys the table by record field name, which GADT and existential constructors do not provide.");
-                return;
-            }
+        // Existential and result-refining constructors are rejected up
+        // front, for EVERY shape, through the registry-backed predicate the
+        // structural derives use. A VANILLA GADT-syntax constructor passes:
+        // the shape tests below are registry-driven where layout depends on
+        // arity (`derived_is_nullary`), so an all-nullary GADT-syntax sum
+        // registers as a string enum exactly like its Haskell-98 spelling,
+        // and a fielded one falls to the record-syntax rejection (GADT
+        // syntax declares no field names to key the table by).
+        if let Some((con_name, why)) = self.non_vanilla_constructor(type_vars, constructors) {
+            reject(self,
+                format!("constructor '{}' {}", con_name, why),
+                "LuaDict keys the table by record field name, which existential and result-refining constructors do not provide.");
+            return;
         }
 
         // Shape 1: an all-nullary sum type (every constructor has zero fields).
@@ -1865,16 +1865,19 @@ impl Checker {
             );
             return vec![];
         }
-        for con in constructors {
-            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
-                self.push_error_ctx(
-                    DiagnosticKind::Other(format!(
-                        "Cannot derive 'Generic' for '{}': constructor '{}' is a GADT or existential constructor, which has no structural representation",
-                        type_name, con.name)),
-                    format!("data {}", type_name),
-                );
-                return vec![];
-            }
+        // Vanilla GADT-SYNTAX constructors (`MkW :: Int -> W`, no result
+        // refinement, no existentials) are ordinary constructors in
+        // different clothing — the six structural derives accept them
+        // through the same registry-backed predicate. Only genuine
+        // refinement or existentials have no structural representation.
+        if let Some((con_name, why)) = self.non_vanilla_constructor(type_vars, constructors) {
+            self.push_error_ctx(
+                DiagnosticKind::Other(format!(
+                    "Cannot derive 'Generic' for '{}': constructor '{}' {}, so the type has no structural representation",
+                    type_name, con_name, why)),
+                format!("data {}", type_name),
+            );
+            return vec![];
         }
         if constructors.is_empty() {
             self.push_error_ctx(
@@ -1942,7 +1945,10 @@ impl Checker {
             let ca_fn = format!("__meta_conArity_{}_{}", type_name, con.name);
             let cr_fn = format!("__meta_conIsRecord_{}_{}", type_name, con.name);
             let is_record = matches!(&con.fields, ConstructorFields::Named(fs) if !fs.is_empty());
-            let arity = con.field_count();
+            // Arity from the REGISTRY: the parser's field list is empty for
+            // a GADT-syntax constructor (its signature lives in gadt_type),
+            // and conArity metadata must reflect the real field count.
+            let arity = field_tys.len();
             out_fns.push(self.meta_string_fn(&cn_fn, con.effective_tag()));
             out_fns.push(self.meta_int_fn(&ca_fn, arity as i64));
             out_fns.push(self.meta_bool_fn(&cr_fn, is_record));
@@ -2593,14 +2599,16 @@ impl Checker {
                     n = dir.noun(), c = class));
             return None;
         }
-        for con in constructors {
-            if con.gadt_type.is_some() || !con.existential_vars.is_empty() {
-                self.reject_derive(class, type_name,
-                    &format!("constructor '{}' is a GADT / existential constructor", con.name),
-                    &format!("{} must name every field's type to choose how to {} it, which GADT and existential constructors do not allow.",
-                        dir.a_noun(), dir.verb()));
-                return None;
-            }
+        // Registry-backed vanilla check, exactly like the structural
+        // derives: a plain GADT-SYNTAX constructor is fine (its field
+        // types come from the registry), only result refinement or
+        // existentials have no per-field types to pick codecs by.
+        if let Some((con_name, why)) = self.non_vanilla_constructor(type_vars, constructors) {
+            self.reject_derive(class, type_name,
+                &format!("constructor '{}' {}", con_name, why),
+                &format!("{} must name every field's type to choose how to {} it, which existential and result-refining constructors do not allow.",
+                    dir.a_noun(), dir.verb()));
+            return None;
         }
         let single_nullary = constructors.len() == 1 && self.derived_is_nullary(&constructors[0]);
         let tagged = constructors.len() > 1 || single_nullary;
