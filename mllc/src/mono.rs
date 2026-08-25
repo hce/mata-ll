@@ -2707,7 +2707,7 @@ impl Monomorphizer {
         // Seed the cache BEFORE rewriting bodies: a method whose body uses
         // the class at the instance's own type (`csize xs` inside the `[a]`
         // instance) builds this same dictionary recursively.
-        self.dictform_impls.insert(key, names.clone());
+        self.dictform_impls.insert(key.clone(), names.clone());
 
         let dict_params: Vec<(String, String)> = ctx.iter()
             .map(|c| (c.class_name.clone(), format!("__dictf_{}_{}", c.class_name, c.type_var)))
@@ -2731,6 +2731,11 @@ impl Monomorphizer {
         let saved_dict_by_arg = std::mem::take(&mut self.cur_dict_by_arg);
         for (base, dictform) in work {
             let Some(mut f) = self.poly_fns.get(&base).cloned() else {
+                // Near-dead (the pre-scan above verified every base), but
+                // a bail here must UNSEED the cache: leaving the seed would
+                // make a later query hand out method names whose dictforms
+                // were never generated — a nil lua_ref at runtime.
+                self.dictform_impls.remove(&key);
                 self.cur_dict_params = saved_dict_params;
                 self.cur_dict_by_arg = saved_dict_by_arg;
                 return None;
