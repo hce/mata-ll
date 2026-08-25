@@ -1938,7 +1938,7 @@ impl Parser {
             if !matches!(&dot.token, Token::Operator(o) if o == ".") {
                 break;
             }
-            if dot.line != prev.line || dot.col != prev.col + token_len(&prev.token) {
+            if dot.line != prev.line || dot.col != prev.end_col {
                 break; // space before the dot: not a qualifier
             }
             let seg = &self.tokens[self.pos + 1];
@@ -2850,8 +2850,8 @@ impl Parser {
             if dot_tok.line != prev_tok.line {
                 break;
             }
-            // Estimate end column of previous token
-            let prev_end = prev_tok.col + token_len(&prev_tok.token);
+            // The lexer carries the exact source end column.
+            let prev_end = prev_tok.end_col;
             if dot_tok.col != prev_end {
                 break; // there's a gap — this is composition, not field access
             }
@@ -4087,23 +4087,6 @@ fn is_comparison_op(op: &str) -> bool {
     matches!(op, "==" | "/=" | "<" | "<=" | ">" | ">=")
 }
 
-/// Estimate the source length of a token for adjacency checks.
-fn token_len(tok: &Token) -> usize {
-    match tok {
-        Token::Ident(s) | Token::UpperIdent(s) => s.len(),
-        Token::StrLit(s) => s.len(),
-        Token::Operator(s) => s.len(),
-        Token::IntLit(n) => format!("{}", n).len(),
-        Token::NumLit(n) => format!("{}", n).len(),
-        Token::LeftParen | Token::RightParen | Token::LeftBracket
-        | Token::RightBracket | Token::LeftBrace | Token::RightBrace
-        | Token::Comma | Token::Semicolon | Token::Backtick
-        | Token::Backslash | Token::Underscore | Token::At => 1,
-        Token::Arrow | Token::FatArrow | Token::DblColon | Token::Eq
-        | Token::Pipe | Token::Bind => 2,
-        _ => 1,
-    }
-}
 
 /// True when `ty` is (syntactically) `Either String a` for some `a`, ignoring
 /// enclosing parentheses. Used to enforce the LuaTry/LuaCatch/LuaIOCatch result

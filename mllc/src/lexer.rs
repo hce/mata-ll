@@ -184,6 +184,13 @@ pub struct Located {
     pub token: Token,
     pub line: usize,
     pub col: usize,
+    /// One past the token's LAST source column (the column the lexer's
+    /// cursor sits on after consuming it). Carried from the source so
+    /// adjacency checks (field-access/qualified dots) are exact — a
+    /// re-derived length is wrong wherever the token's rendering differs
+    /// from its source spelling (string escapes, radix prefixes, numeric
+    /// underscores, big literals).
+    pub end_col: usize,
 }
 
 pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
@@ -238,6 +245,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                     token: Token::Indent(indent),
                     line,
                     col: 1,
+                    end_col: col,
                 });
             }
             at_line_start = false;
@@ -353,6 +361,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                 token: Token::StrLit(bytes),
                 line: tok_line,
                 col: tok_col,
+                end_col: col,
             });
             continue;
         }
@@ -441,7 +450,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                         Some(n) => Token::IntLit(n),
                         None => Token::BigIntLit(radix_to_decimal(&digits, base)),
                     };
-                    tokens.push(Located { token, line: tok_line, col: tok_col });
+                    tokens.push(Located { token, line: tok_line, col: tok_col, end_col: col });
                     continue;
                 }
             }
@@ -487,6 +496,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                     token: Token::NumLit(n),
                     line: tok_line,
                     col: tok_col,
+                    end_col: col,
                 });
             } else {
                 // Only ASCII digits were consumed, so the sole way `parse` fails
@@ -501,6 +511,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                     token,
                     line: tok_line,
                     col: tok_col,
+                    end_col: col,
                 });
             }
             continue;
@@ -586,6 +597,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                 token,
                 line: tok_line,
                 col: tok_col,
+                end_col: col,
             });
             continue;
         }
@@ -593,52 +605,52 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
         // Operators and symbols
         match ch {
             '(' => {
-                tokens.push(Located { token: Token::LeftParen, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::LeftParen, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             ')' => {
-                tokens.push(Located { token: Token::RightParen, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::RightParen, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             '[' => {
-                tokens.push(Located { token: Token::LeftBracket, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::LeftBracket, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             ']' => {
-                tokens.push(Located { token: Token::RightBracket, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::RightBracket, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             '{' => {
-                tokens.push(Located { token: Token::LeftBrace, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::LeftBrace, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             '}' => {
-                tokens.push(Located { token: Token::RightBrace, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::RightBrace, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             ',' => {
-                tokens.push(Located { token: Token::Comma, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::Comma, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             ';' => {
-                tokens.push(Located { token: Token::Semicolon, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::Semicolon, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             '`' => {
-                tokens.push(Located { token: Token::Backtick, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::Backtick, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             '\\' => {
-                tokens.push(Located { token: Token::Backslash, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::Backslash, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             '@' => {
-                tokens.push(Located { token: Token::At, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::At, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             '\'' if pos + 1 < chars.len() && chars[pos + 1].is_uppercase() => {
                 // DataKinds promoted constructor prefix: 'Empty, 'NonEmpty
-                tokens.push(Located { token: Token::Tick, line: tok_line, col: tok_col });
+                tokens.push(Located { token: Token::Tick, line: tok_line, col: tok_col, end_col: tok_col + 1 });
                 pos += 1; col += 1;
             }
             _ if is_operator_char(ch) => {
@@ -661,6 +673,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                     token,
                     line: tok_line,
                     col: tok_col,
+                    end_col: col,
                 });
             }
             _ => {
@@ -676,6 +689,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
         token: Token::EOF,
         line,
         col,
+        end_col: col,
     });
 
     // A line whose only content is a BLOCK comment contributes an Indent
@@ -942,4 +956,34 @@ fn lex_string_escape(
         format!("Unknown escape sequence `\\{}`", c),
         esc_line, esc_col,
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `end_col` is the SOURCE end, not a re-derived rendering length —
+    /// the spellings that differ from their rendering used to mislead the
+    /// parser's dot-adjacency checks (Q87): string escapes (decoded
+    /// shorter than source), radix prefixes, numeric underscores, and big
+    /// literals (whose old estimate fell to 1).
+    #[test]
+    fn end_col_is_source_exact() {
+        let src = "x = \"a\\nb\" 0xFF 1_000 99999999999999999999\n";
+        let toks = lex(src).expect("lexes");
+        let spans: Vec<(usize, usize)> = toks.iter()
+            .filter(|t| !matches!(t.token, Token::Indent(_) | Token::EOF))
+            .map(|t| (t.col, t.end_col))
+            .collect();
+        // x=1..2  ==3..4  "a\nb"=5..11 (6 source chars, decoded 3)
+        // 0xFF=12..16 (4 source chars, rendered "255" is 3)
+        // 1_000=17..22 (5 source chars, rendered "1000" is 4)
+        // bigint=23..43 (20 digits; the old estimate fell to 1)
+        assert_eq!(
+            spans,
+            vec![(1, 2), (3, 4), (5, 11), (12, 16), (17, 22), (23, 43)],
+            "tokens: {:?}",
+            toks.iter().map(|t| format!("{:?}@{}..{}", t.token, t.col, t.end_col)).collect::<Vec<_>>()
+        );
+    }
 }
