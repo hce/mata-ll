@@ -1,0 +1,4 @@
+MkOuter (MkInner 2 3)
+ONone
+MkA (MkB (MkA (MkB (ALeaf 20))))
+MkB (ALeaf 6)

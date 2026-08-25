@@ -1355,7 +1355,6 @@ impl Checker {
         last_var: &str,
         value: TExpr,
         b_ty: &Ty,
-        self_fmap: &str,
         fresh: &mut usize,
     ) -> Result<TExpr, String> {
         if !Self::ty_mentions_var(field_ty, last_var) {
@@ -1390,7 +1389,7 @@ impl Checker {
                         },
                         ety.clone(),
                     );
-                    mapped.push(self.functor_map_value(ety, last_var, proj, b_ty, self_fmap, fresh)?);
+                    mapped.push(self.functor_map_value(ety, last_var, proj, b_ty, fresh)?);
                 }
                 Ok(TExpr::new(TExprKind::Tuple(mapped), field_ty.clone()))
             }
@@ -1418,7 +1417,7 @@ impl Checker {
                     ),
                     (**res).clone(),
                 );
-                let mapped_res = self.functor_map_value(res, last_var, applied, b_ty, self_fmap, fresh)?;
+                let mapped_res = self.functor_map_value(res, last_var, applied, b_ty, fresh)?;
                 let inner = TExpr::new(
                     TExprKind::Lambda {
                         params: vec![(x_name, (**arg).clone())],
@@ -1439,7 +1438,7 @@ impl Checker {
                 ))
             }
             Ty::List(elem) | Ty::IO(elem) => {
-                self.functor_map_container(field_ty, elem, last_var, value, b_ty, self_fmap, fresh)
+                self.functor_map_container(field_ty, elem, last_var, value, b_ty, fresh)
             }
             Ty::App(_, _) => {
                 // Peel the application spine: every occurrence of the class
@@ -1464,7 +1463,7 @@ impl Checker {
                     ));
                 }
                 let elem = *args.last().unwrap();
-                self.functor_map_container(field_ty, elem, last_var, value, b_ty, self_fmap, fresh)
+                self.functor_map_container(field_ty, elem, last_var, value, b_ty, fresh)
             }
             _ => Err(format!(
                 "the type variable '{}' occurs in a field of shape '{}' that \
@@ -1488,7 +1487,6 @@ impl Checker {
         last_var: &str,
         value: TExpr,
         b_ty: &Ty,
-        self_fmap: &str,
         fresh: &mut usize,
     ) -> Result<TExpr, String> {
         let a_ty = Ty::Var(TyVar { name: last_var.to_string(), id: u32::MAX });
@@ -1501,7 +1499,7 @@ impl Checker {
             *fresh += 1;
             let e_name = format!("_e{}", fresh);
             let e_var = TExpr::new(TExprKind::Var(e_name.clone()), elem_ty.clone());
-            let mapped = self.functor_map_value(elem_ty, last_var, e_var, b_ty, self_fmap, fresh)?;
+            let mapped = self.functor_map_value(elem_ty, last_var, e_var, b_ty, fresh)?;
             TExpr::new(
                 TExprKind::Lambda {
                     params: vec![(e_name, elem_ty.clone())],
@@ -1510,7 +1508,7 @@ impl Checker {
                 Ty::arrow(elem_ty.clone(), elem_ty.clone()),
             )
         };
-        let fmap_resolved = self.resolve_functor_fmap(container_ty, self_fmap);
+        let fmap_resolved = self.resolve_functor_fmap(container_ty)?;
         let fmap_f = TExpr::new(
             TExprKind::App(
                 Box::new(TExpr::new(
@@ -1530,9 +1528,16 @@ impl Checker {
         ))
     }
 
-    /// Resolve the concrete fmap function for a type constructor at derive time.
-    /// Extracts the outermost type constructor and looks up the Functor instance.
-    pub(super) fn resolve_functor_fmap(&self, ty: &Ty, self_fmap: &str) -> String {
+    /// Resolve the concrete fmap function for a type constructor at derive
+    /// time: the registered Functor instance's method, or — for a container
+    /// whose instance is not registered YET (declared later in the module,
+    /// or mutually recursive with the deriving type; the deriving type
+    /// itself is the common case) — the name the prescan predicts it will
+    /// register (`functor_fmap_futures`). A container with no Functor
+    /// anywhere is an error: the old fallback substituted the DERIVING
+    /// type's own fmap, which destructured the inner container with the
+    /// outer type's constructor patterns.
+    pub(super) fn resolve_functor_fmap(&self, ty: &Ty) -> Result<String, String> {
         // Only container-shaped types (a head constructor applied to at least
         // one argument, or a list/IO) can have a Functor instance; a bare
         // `Ty::Con` field is not mapped over.
@@ -1544,13 +1549,21 @@ impl Checker {
             let key = ("Functor".to_string(), tc);
             if let Some(inst) = self.instances.get(&key)
                 && let Some(name) = inst.method_fns.get("fmap") {
-                    return name.clone();
+                    return Ok(name.clone());
                 }
-            // Self-recursive: instance not yet registered, use self_fmap
-            return self_fmap.to_string();
+            if let ("Functor", InstHead::Con(n)) = (key.0.as_str(), &key.1)
+                && let Some(predicted) = self.functor_fmap_futures.get(n) {
+                    return Ok(predicted.clone());
+                }
+            return Err(format!(
+                "the field type '{}' has no Functor instance, so fmap cannot \
+                 map through it. Derive or declare 'Functor {}' (GHC needs \
+                 the same instance for this deriving)",
+                ty, key.1
+            ));
         }
         // Fallback: use generic fmap (will need monomorphizer resolution)
-        "fmap".to_string()
+        Ok("fmap".to_string())
     }
 
     /// Generate `fmap` for a data type.
@@ -1637,7 +1650,7 @@ impl Checker {
                 let field_ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
                 let value = TExpr::new(TExprKind::Var(pname.clone()), field_ty.clone());
                 let mapped = match self.functor_map_value(
-                    &field_ty, &last_tv_name, value, &b_ty_val, &mangled, &mut fresh,
+                    &field_ty, &last_tv_name, value, &b_ty_val, &mut fresh,
                 ) {
                     Ok(m) => m,
                     Err(reason) => {

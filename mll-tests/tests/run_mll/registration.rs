@@ -215,6 +215,7 @@ mll_test!(const_propagation, "const_propagation.mll");
 mll_test!(case_irrefutable_lazy, "case_irrefutable_lazy.mll");
 mll_test!(wrapper_splice, "wrapper_splice.mll");
 mll_test!(tuple_instance, "tuple_instance.mll");
+mll_test!(functor_forward_ref, "functor_forward_ref.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");

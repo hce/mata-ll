@@ -632,6 +632,15 @@ pub struct Checker {
     /// end of the module, so a derived encoder can reference the encoder of a
     /// type declared later (mutual recursion).
     tojson_types: HashSet<String>,
+    /// Same prescan for Functor: head name -> the fmap function that WILL be
+    /// registered by the end of the module (`fmap_T` for every
+    /// `deriving (Functor)` and every explicit bare-headed
+    /// `instance Functor T`). Lets a derived fmap reference the fmap of a
+    /// container declared later in the module (or mutually recursive with
+    /// the deriving one); resolving against the still-empty registry used
+    /// to fall back to the DERIVING type's own fmap, which destructured the
+    /// inner container with the outer type's patterns.
+    functor_fmap_futures: HashMap<String, String>,
     /// Constructor keys (into `constructors`/`env`) declared by the *local*
     /// module (decl index >= `local_decl_start`), as opposed to builtins, the
     /// Prelude and imports. Drives duplicate-vs-shadowing decisions.
@@ -726,6 +735,7 @@ impl Checker {
             wanted: Vec::new(),
             binder_types: Vec::new(),
             fromjson_types: HashSet::new(),
+            functor_fmap_futures: HashMap::new(),
             tojson_types: HashSet::new(),
             local_con_keys: HashSet::new(),
             local_con_renames: HashMap::new(),
@@ -2546,6 +2556,7 @@ impl Checker {
     fn prescan_json_instances(&mut self, module: &Module) {
         self.fromjson_types.clear();
         self.tojson_types.clear();
+        self.functor_fmap_futures.clear();
         for decl in &module.decls {
             match decl {
                 Decl::DataDef { name, deriving, .. } => {
@@ -2554,6 +2565,11 @@ impl Checker {
                     }
                     if deriving.iter().any(|c| c == "ToJSON") {
                         self.tojson_types.insert(name.clone());
+                    }
+                    if deriving.iter().any(|c| c == "Functor") {
+                        // derive_functor registers exactly this name.
+                        self.functor_fmap_futures
+                            .insert(name.clone(), format!("fmap_{}", name));
                     }
                 }
                 Decl::InstanceDecl { class_name, target_type, .. }
@@ -2564,6 +2580,19 @@ impl Checker {
                         } else {
                             self.tojson_types.insert(head);
                         }
+                    }
+                }
+                Decl::InstanceDecl { class_name, target_type, .. }
+                    if class_name == "Functor" => {
+                    // Only a BARE constructor target's method name is
+                    // predictable here (preregister_instance mangles with
+                    // the full type's display form); an applied target
+                    // spelling registers before pass 4b checks bodies, and
+                    // a derive that needs it earlier reports the missing
+                    // instance rather than guessing a name.
+                    if let Type::Con(head) = target_type {
+                        self.functor_fmap_futures
+                            .insert(head.clone(), format!("fmap_{}", head));
                     }
                 }
                 _ => {}
