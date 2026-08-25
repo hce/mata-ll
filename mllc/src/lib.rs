@@ -170,7 +170,7 @@ impl std::fmt::Display for CompileError {
 /// Parse and return the prelude declarations.
 fn parse_prelude() -> Result<Vec<ast::Decl>, CompileError> {
     let tokens = lexer::lex(stdlib::PRELUDE).map_err(|d| CompileError::Lex(*d))?;
-    let module = parser::parse(&tokens).map_err(CompileError::Parse)?;
+    let module = parser::parse(tokens).map_err(CompileError::Parse)?;
     Ok(module.decls)
 }
 
@@ -228,7 +228,7 @@ fn compile_impl(
     let fixities = loader.fixities_for(&tokens);
 
     // Parse
-    let parsed = parser::parse_with_fixities(&tokens, &fixities).map_err(CompileError::Parse)?;
+    let parsed = parser::parse_with_fixities(tokens, &fixities).map_err(CompileError::Parse)?;
 
     // Parse the prelude up-front: its signature shapes are the baseline against
     // which unqualified imports are checked for incompatible-type collisions.

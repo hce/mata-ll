@@ -345,7 +345,7 @@ fn fuzz_run(count: u64) {
                 // compile re-elaborates the whole Prelude (~150 ms), which
                 // would otherwise be nearly all of the batch's runtime.
                 if let Ok(tokens) = mllc::lexer::lex(&src) {
-                    let _ = mllc::parser::parse(&tokens);
+                    let _ = mllc::parser::parse(tokens);
                 }
                 // Deep probes are excluded from pipeline sampling: they
                 // target the parser's depth guard (covered by the parse

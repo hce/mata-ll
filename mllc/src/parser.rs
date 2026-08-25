@@ -4360,7 +4360,11 @@ pub fn scan_imports(tokens: &[Located]) -> Vec<Vec<String>> {
 /// Parse a token stream into a module. On failure, returns every syntax
 /// error found (the parser recovers at declaration boundaries), in source
 /// order; the list is never empty.
-pub fn parse(tokens: &[Located]) -> Result<Module, Vec<Diagnostic>> {
+///
+/// Takes the tokens by value: every caller owns its freshly lexed vector
+/// and is done with it here, so the parser holds it directly instead of
+/// deep-cloning the whole stream per module.
+pub fn parse(tokens: Vec<Located>) -> Result<Module, Vec<Diagnostic>> {
     parse_with_fixities(tokens, &HashMap::new())
 }
 
@@ -4371,14 +4375,17 @@ pub fn parse(tokens: &[Located]) -> Result<Module, Vec<Diagnostic>> {
 /// the implicit Prelude's). The module's own declarations, scanned up front,
 /// take precedence over imported ones.
 pub fn parse_with_fixities(
-    tokens: &[Located],
+    tokens: Vec<Located>,
     imported: &HashMap<String, (Assoc, u8)>,
 ) -> Result<Module, Vec<Diagnostic>> {
-    let mut parser = Parser::new(tokens.to_vec());
+    // Scan the module's own fixity declarations before the vector moves
+    // into the parser.
+    let own_fixities = scan_fixities(&tokens);
+    let mut parser = Parser::new(tokens);
     for (op, &(assoc, prec)) in imported {
         parser.fixities.insert(op.clone(), (assoc, prec));
     }
-    for (op, assoc, prec) in scan_fixities(tokens) {
+    for (op, assoc, prec) in own_fixities {
         parser.fixities.insert(op, (assoc, prec));
     }
     parser.parse_module()

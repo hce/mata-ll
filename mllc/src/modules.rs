@@ -115,7 +115,7 @@ impl ModuleLoader {
         let fixities = self.fixities_for(&tokens);
         // An imported module's syntax errors surface through the import-error
         // channel, prefixed with the module that failed to parse.
-        let module = parser::parse_with_fixities(&tokens, &fixities).map_err(|diags| {
+        let module = parser::parse_with_fixities(tokens, &fixities).map_err(|diags| {
             let msgs: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
             format!("in module '{}': {}", key, msgs.join("\n"))
         })?;
