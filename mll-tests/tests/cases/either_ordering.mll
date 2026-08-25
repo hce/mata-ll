@@ -22,6 +22,14 @@ main = do
     assert (compare 3 2 == GT) "compare Int GT"
     assert (compare "abc" "abd" == LT) "compare String LT"
     assert (compare 2.5 1.5 == GT) "compare Number GT"
+    -- Either's own derived Eq/Ord (GHC parity: Left < Right,
+    -- lexicographic within a constructor) — Either derived only Show
+    -- before round-3 Q48
+    assert (Left 1 == (Left 1 :: Either Int Bool)) "Either Eq same"
+    assert (not (Left 1 == (Left 2 :: Either Int Bool))) "Either Eq differs"
+    assert ((Left 9 :: Either Int Bool) < Right False) "Left < Right"
+    assert (compare (Right 2) (Right 1 :: Either Bool Int) == GT) "Right payload compare"
+    assert (compare (Left 1) (Left 2 :: Either Int Bool) == LT) "Left payload compare"
     -- compare via derived Ord on a user enum
     assert (compare Low High == LT) "compare enum LT"
     assert (compare High High == EQ) "compare enum EQ"

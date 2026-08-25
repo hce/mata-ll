@@ -34,7 +34,7 @@ assert False msg = error msg
 data Any = AnyString String | AnyInt Int | AnyNumber Number | AnyBool Bool | AnyNull
 
 data Either a b = Left a | Right b
-    deriving (Show)
+    deriving (Show, Eq, Ord)
 
 data Ordering = LT | EQ | GT
     deriving (Show, Eq, Ord, Enum, Bounded)
