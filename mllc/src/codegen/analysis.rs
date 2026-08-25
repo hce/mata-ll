@@ -95,34 +95,9 @@ impl CodeGen {
                     f = inner_f.as_ref();
                 }
                 args.reverse();
-                if let TExprKind::Var(name) = &f.kind
-                    && let Some(thunked) = ever_thunked.get_mut(name.as_str()) {
-                        let called = ever_called.get_mut(name.as_str()).unwrap();
-                        for (i, arg) in args.iter().enumerate() {
-                            if i < thunked.len() {
-                                called[i] = true;
-                                // A parameter is judged "always cheap" (the
-                                // callee then skips forcing it and treats it as
-                                // a value) only when EVERY call site passes an
-                                // argument that arg_ast is guaranteed to
-                                // evaluate eagerly regardless of context. That
-                                // guarantee is the *context-free floor* of
-                                // is_cheap_to_force: cheap structure built
-                                // without leaning on any variable's WHNF-ness
-                                // (var_ok = false) and free of trapping ops.
-                                // arg_ast's eager set (strict OR
-                                // is_cheap_to_force) is a superset of this, so
-                                // whenever the callee assumes a value one was
-                                // passed. Any other argument may be thunked by
-                                // arg_ast, so mark the position thunked here.
-                                if !Self::is_cheap_with(arg, &|_| false)
-                                    || Self::contains_trapping_op(arg)
-                                {
-                                    thunked[i] = true;
-                                }
-                            }
-                        }
-                    }
+                if let TExprKind::Var(name) = &f.kind {
+                    Self::register_call_site(name, &args, ever_thunked, ever_called);
+                }
                 for arg in &args {
                     self.scan_call_sites(arg, ever_thunked, ever_called);
                 }
@@ -182,7 +157,63 @@ impl CodeGen {
             TExprKind::SpecCall { args, .. } => { for a in args { self.scan_call_sites(a, ever_thunked, ever_called); } }
             TExprKind::OutgoingCallback { callee, .. } => self.scan_call_sites(callee, ever_thunked, ever_called),
             TExprKind::FfiMaybeArg { value } => self.scan_call_sites(value, ever_thunked, ever_called),
+            // A call site hidden inside an unscanned subtree is invisible to
+            // the always-cheap judgment: a visible site passing a cheap
+            // argument then marks the position concrete while the hidden one
+            // passes a thunk — the callee reads the raw thunk table. These
+            // three node kinds carry expressions and used to fall through to
+            // the catch-all.
+            TExprKind::RecordUpdate { record, updates, .. } => {
+                self.scan_call_sites(record, ever_thunked, ever_called);
+                for (_, _, val) in updates {
+                    self.scan_call_sites(val, ever_thunked, ever_called);
+                }
+            }
+            TExprKind::DictMethod { dict, .. } => self.scan_call_sites(dict, ever_thunked, ever_called),
+            TExprKind::DictCall { func_name, dict_args, value_args } => {
+                // A DictCall IS a call site of func_name: its value
+                // arguments are emitted with the plain lazy argument
+                // protocol (arg_ast, never strict-eager), positionally
+                // aligned with the function's value parameters — register
+                // them exactly like a spine call.
+                let value_refs: Vec<&TExpr> = value_args.iter().collect();
+                Self::register_call_site(func_name, &value_refs, ever_thunked, ever_called);
+                for a in dict_args { self.scan_call_sites(a, ever_thunked, ever_called); }
+                for a in value_args { self.scan_call_sites(a, ever_thunked, ever_called); }
+            }
             _ => {}
+        }
+    }
+
+    /// Register one call site of `name`: mark each argument position called,
+    /// and thunked unless the argument is guaranteed eager. A parameter is
+    /// judged "always cheap" (the callee then skips forcing it and treats it
+    /// as a value) only when EVERY call site passes an argument that arg_ast
+    /// is guaranteed to evaluate eagerly regardless of context. That
+    /// guarantee is the *context-free floor* of is_cheap_to_force: cheap
+    /// structure built without leaning on any variable's WHNF-ness
+    /// (var_ok = false) and free of trapping ops. arg_ast's eager set
+    /// (strict OR is_cheap_to_force) is a superset of this, so whenever the
+    /// callee assumes a value one was passed. Any other argument may be
+    /// thunked by arg_ast, so mark the position thunked here.
+    fn register_call_site(
+        name: &str,
+        args: &[&TExpr],
+        ever_thunked: &mut std::collections::HashMap<String, Vec<bool>>,
+        ever_called: &mut std::collections::HashMap<String, Vec<bool>>,
+    ) {
+        if let Some(thunked) = ever_thunked.get_mut(name) {
+            let called = ever_called.get_mut(name).unwrap();
+            for (i, arg) in args.iter().enumerate() {
+                if i < thunked.len() {
+                    called[i] = true;
+                    if !Self::is_cheap_with(arg, &|_| false)
+                        || Self::contains_trapping_op(arg)
+                    {
+                        thunked[i] = true;
+                    }
+                }
+            }
         }
     }
 

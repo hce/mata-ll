@@ -210,6 +210,7 @@ mll_test!(export_module, "export_module.mll");
 mll_test!(import_hiding, "import_hiding.mll");
 mll_test!(record_update, "record_update.mll");
 mll_test!(record_update_lazy, "record_update_lazy.mll");
+mll_test!(record_update_call_sites, "record_update_call_sites.mll");
 mll_test!(where_local_no_leak, "where_local_no_leak.mll");
 mll_test!(caf_trap_lazy, "caf_trap_lazy.mll");
 mll_test!(const_propagation, "const_propagation.mll");

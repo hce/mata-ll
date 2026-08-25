@@ -189,6 +189,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_demand_shadowing, "cases", "demand_shadowing.mll"),
         (ghc_oracle_seq_action_value, "cases", "seq_action_value.mll"),
         (ghc_oracle_record_update_lazy, "cases", "record_update_lazy.mll"),
+        (ghc_oracle_record_update_call_sites, "cases", "record_update_call_sites.mll"),
         (ghc_oracle_where_local_no_leak, "cases", "where_local_no_leak.mll"),
         (ghc_oracle_caf_trap_lazy, "cases", "caf_trap_lazy.mll"),
         (ghc_oracle_const_propagation, "cases", "const_propagation.mll"),
