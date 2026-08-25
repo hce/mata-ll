@@ -448,6 +448,37 @@ main = print (f MkInt)
 // the emitted Lua arithmetic. (The accept side — print (), () == () —
 // is pinned by the tuple_instance corpus case.)
 #[test]
+fn list_instance_context_failure_gets_the_explanation() {
+    // A context-carrying LIST instance failing on its element must get the
+    // instance-chain note, exactly like App heads and tuples (the gate was
+    // widened to List/Tuple in Q15; this pins the List side — Q85).
+    let source = r#"
+class Pretty a where
+    pretty :: a -> String
+
+instance Pretty Int where
+    pretty n = show n
+
+instance Pretty a => Pretty [a] where
+    pretty xs = "[..]"
+
+data Opaque = Opaque
+
+main :: IO ()
+main = putStrLn (pretty [Opaque])
+"#;
+    expect_compile_error(
+        source,
+        &[],
+        &[
+            "No instance for 'Pretty [Opaque]'",
+            "instance '(Pretty a) => Pretty [a]'",
+            "needs 'Pretty Opaque'",
+        ],
+    );
+}
+
+#[test]
 fn missing_context_shows_digit_suffixed_variable_verbatim(){
     // The missing-context diagnostic used to digit-trim the DISPLAYED
     // variable to undo freshening ("t1519" → "t"), which also mangled
