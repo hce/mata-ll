@@ -2259,6 +2259,16 @@ fn clause_param_row<'t>(cx: &RowCx<'_, 't>, clause: TLocalDefLike<'t>, arity: us
 fn seed_param(clauses: &[&TLocalDefLike], i: usize) -> Option<Demand> {
     for c in clauses {
         if let Some(p) = c.patterns.get(i) {
+            // `all@(x:xs)` and parenthesized spellings seed like the plain
+            // pattern beneath: the As binder adds a name, not structure —
+            // without unwrapping, the as-spelling fell to the Head default
+            // and the GFP could not recognize the same element-strict
+            // recursion it proves for the plain spelling (a sound
+            // under-claim, but a needless parity gap between spellings).
+            let mut p = p;
+            while let TPattern::As(_, inner) | TPattern::Paren(inner) = p {
+                p = inner.as_ref();
+            }
             match p {
                 TPattern::Var(_, ty) => return Some(deep_of_ty(ty)),
                 TPattern::Constructor { name, .. } if name == ":" || name == "[]" => {
@@ -2779,6 +2789,46 @@ mod tests {
 
     fn var(n: &str) -> TExpr {
         TExpr::new(TExprKind::Var(n.into()), int())
+    }
+
+    /// `seed_param` must see through As and Paren spellings: `go
+    /// all@(x:xs)` seeds the same element demand as the plain `go (x:xs)`
+    /// (the GFP seed decides whether recursion-carried element strictness
+    /// can be recognized at all — see the seed rationale).
+    #[test]
+    fn seed_param_unwraps_as_and_paren() {
+        let cons = TPattern::Constructor {
+            name: ":".into(),
+            args: vec![
+                TPattern::Var("x".into(), int()),
+                TPattern::Var("xs".into(), Ty::List(Box::new(int()))),
+            ],
+        };
+        let plain = TLocalDefLike {
+            patterns: std::slice::from_ref(&cons),
+            guards: &[],
+            body: None,
+            where_binds: &[],
+        };
+        let wrapped_pat = TPattern::As(
+            "all".into(),
+            Box::new(TPattern::Paren(Box::new(cons.clone()))),
+        );
+        let wrapped = TLocalDefLike {
+            patterns: std::slice::from_ref(&wrapped_pat),
+            guards: &[],
+            body: None,
+            where_binds: &[],
+        };
+        assert_eq!(
+            seed_param(&[&plain], 0),
+            seed_param(&[&wrapped], 0),
+            "as/paren spellings must seed like the plain pattern"
+        );
+        assert_eq!(
+            seed_param(&[&wrapped], 0),
+            Some(Demand::Elems(Box::new(Demand::Head))),
+        );
     }
 
     /// A first-class reference to a let-bound local FUNCTION demands the
