@@ -2268,11 +2268,20 @@ impl Parser {
         let mut lhs_is_negation = matches!(lhs, Expr::Negate(_));
         loop {
             // Try to consume indentation for continuation lines
-            // Only if the next real token after indent is an operator
-            // and the indent is at or deeper than the expression start
+            // Only if the next real token after indent is an operator and
+            // the indent is STRICTLY deeper than the enclosing layout
+            // block's item column: at exactly that column GHC's layout
+            // inserts a `;` — the line is the block's NEXT item (`x = 1`
+            // then `+ 2` at x's own column is a parse error in GHC, and
+            // used to be silently accepted as a continuation here, keyed
+            // to the weaker `>= expr_min_indent`). Deeper than the block
+            // column is a continuation even when it equals the
+            // expression-start line's own indent (`( 40` / `+ 2` aligned
+            // inside a let binding), which is why the block column — not
+            // the expression start — is the base.
             if let Token::Indent(n) = self.peek() {
                 let n = *n;
-                if n >= self.expr_min_indent {
+                if n > self.block_indent {
                     let save = self.checkpoint();
                     self.advance(); // consume indent
                     self.current_indent = n;

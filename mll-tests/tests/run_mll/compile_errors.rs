@@ -63,6 +63,23 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// An operator line at the enclosing block's item column is the block's
+// NEXT item (GHC's layout inserts a `;` there), not a continuation of
+// the previous expression. Regression: the continuation check keyed to
+// the expression-start line (`>=`), silently accepting `x = 1` followed
+// by `+ 2` at x's own column — a parse error in GHC. Deeper-than-block
+// continuations (including ones aligned with the expression-start line,
+// e.g. `( 40` / `+ 2` inside a let binding) stay legal and are covered
+// by the tuples.mll corpus case.
+#[test]
+fn operator_line_at_block_column_is_next_item() {
+    expect_compile_error(
+        "x :: Int\nx = 1\n+ 2\n\nmain :: IO ()\nmain = print x\n",
+        &[],
+        &["Unexpected token '+' at top level"],
+    );
+}
+
 // A bare negative literal is not a pattern ATOM (Haskell 2010: apat has
 // no negative literal), so `f (Just -1)` is a parse error like GHC's;
 // the parenthesized `Just (-1)` and whole-pattern case-branch forms are
