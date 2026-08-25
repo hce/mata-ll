@@ -63,6 +63,47 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// Unit satisfies what is REGISTERED for it (Show/Eq/Ord, plus user
+// `instance C ()`), not every class. Regression: the entailment Unit arm
+// was Satisfied unconditionally, so `Num ()` typechecked and crashed in
+// the emitted Lua arithmetic. (The accept side — print (), () == () —
+// is pinned by the tuple_instance corpus case.)
+#[test]
+fn num_unit_is_rejected() {
+    let source = r#"
+main :: IO ()
+main = print (() + ())
+"#;
+    expect_compile_error(source, &[], &["No instance", "Num ()"]);
+}
+
+// A tuple instance's declared context must bind the element types and be
+// enforced — and the failure explains itself through the context note.
+#[test]
+fn tuple_instance_context_is_enforced() {
+    let source = r##"
+class Pretty a where
+    pretty :: a -> String
+
+instance Pretty Int where
+    pretty n = "#" <> show n
+
+instance (Pretty a, Pretty b) => Pretty (a, b) where
+    pretty p = case p of
+        (x, y) -> "<" <> pretty x <> ", " <> pretty y <> ">"
+
+main :: IO ()
+main = putStrLn (pretty ((1.5, 2) :: (Number, Int)))
+"##;
+    expect_compile_error(source, &[], &[
+        "No instance",
+        "Pretty (Number, Int)",
+        "note:",
+        "there is an instance '(Pretty a, Pretty b) => Pretty (a, b)'",
+        "needs 'Pretty Number'",
+    ]);
+}
+
 // A first-class operator section `(+)` / `(`div`)` is a use of the
 // operator: its class constraints must be emitted on the instantiation.
 // Regression: the OpFunc arm called bare `instantiate` (no

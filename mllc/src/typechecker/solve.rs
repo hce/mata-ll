@@ -74,7 +74,17 @@ impl Checker {
             // No instance for functions or effectful actions, ever.
             Ty::Arrow(..) | Ty::Forall(_, _) | Ty::IO(_) | Ty::LuaIO(_, _) => Entailment::Failed,
             Ty::Promoted(_) => Entailment::Failed,
-            Ty::Unit => Entailment::Satisfied,
+            // Unit is a concrete type like any Con: what it satisfies is
+            // what is REGISTERED for it (built-in Show/Eq/Ord, plus user
+            // `instance C ()` declarations). It used to be Satisfied for
+            // every class, so `Num ()` typechecked and crashed in the
+            // emitted Lua arithmetic.
+            Ty::Unit => {
+                let registered = self
+                    .instances
+                    .contains_key(&(class.to_string(), InstHead::Unit));
+                if registered { Entailment::Satisfied } else { Entailment::Failed }
+            }
             // Lists/tuples are structural for Show and Eq (mono generates the
             // instance), but not for Ord — mata-ll has no list/tuple ordering.
             // A non-structural class can still have a registered list instance
@@ -94,12 +104,29 @@ impl Checker {
             }
             Ty::Tuple(elems) => {
                 if structural_container_class(class) {
-                    Entailment::Demands {
+                    return Entailment::Demands {
                         via: None,
                         subs: elems.iter().map(|e| (class.to_string(), e.clone())).collect(),
-                    }
-                } else {
-                    Entailment::Failed
+                    };
+                }
+                // A non-structural class can still have a registered tuple
+                // instance (`instance (Pretty a, Pretty b) => Pretty (a, b)`),
+                // keyed by arity; its declared context governs what each
+                // element must provide — the same two-arm shape as the List
+                // case above. It used to be Failed unconditionally, which
+                // made every legal user tuple instance unusable.
+                let Some(inst) = self
+                    .instances
+                    .get(&(class.to_string(), InstHead::Tuple(elems.len())))
+                else {
+                    return Entailment::Failed;
+                };
+                match &inst.context {
+                    Some(_) => self.instance_context_demands(inst, ty),
+                    None => Entailment::Demands {
+                        via: None,
+                        subs: elems.iter().map(|e| (class.to_string(), e.clone())).collect(),
+                    },
                 }
             }
             Ty::Con(_) => {
@@ -227,10 +254,11 @@ impl Checker {
     /// failure is not context-shaped (no registered head instance, a function
     /// type, …); the plain "No instance" message already covers those.
     pub(super) fn context_failure_note(&self, class: &str, ty: &Ty) -> Option<String> {
-        // Only applied-type heads get this note (the plain "No instance"
-        // message covers everything else) — keep the gate so error text
-        // stays stable.
-        if !matches!(ty, Ty::App(_, _)) {
+        // Only types that can carry a CONTEXT instance get this note —
+        // applied heads, lists, tuples (the plain "No instance" message
+        // covers everything else); keep the gate so error text stays
+        // stable for the rest.
+        if !matches!(ty, Ty::App(_, _) | Ty::List(_) | Ty::Tuple(_)) {
             return None;
         }
         let Entailment::Demands { via: Some(inst), subs } = self.entail_step(class, ty) else {
@@ -266,6 +294,31 @@ impl Checker {
     /// the two argument spines have different lengths — the caller then defers
     /// rather than guessing.
     fn match_instance_args(inst_target: &Ty, use_ty: &Ty) -> Option<HashMap<String, Ty>> {
+        // The structural container targets don't spell their arguments as
+        // an App spine: `instance C [a]` is Ty::List(Var a) and
+        // `instance C (a, b)` is Ty::Tuple([Var a, Var b]). Bind their
+        // element variables positionally; the App peel below only sees
+        // Con-headed instances and would bind NOTHING for these (an empty
+        // binds map silently dropped the instance's whole context).
+        match (inst_target, use_ty) {
+            (Ty::List(ia), Ty::List(ua)) => {
+                let mut binds = HashMap::new();
+                if let Ty::Var(v) = ia.as_ref() {
+                    binds.insert(v.name.clone(), ua.as_ref().clone());
+                }
+                return Some(binds);
+            }
+            (Ty::Tuple(ias), Ty::Tuple(uas)) if ias.len() == uas.len() => {
+                let mut binds = HashMap::new();
+                for (ia, ua) in ias.iter().zip(uas.iter()) {
+                    if let Ty::Var(v) = ia {
+                        binds.insert(v.name.clone(), ua.clone());
+                    }
+                }
+                return Some(binds);
+            }
+            _ => {}
+        }
         fn peel(ty: &Ty) -> Vec<&Ty> {
             let mut head = ty;
             let mut args = Vec::new();
