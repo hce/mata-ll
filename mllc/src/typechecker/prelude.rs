@@ -141,8 +141,11 @@ impl Checker {
         // Prelude.mll provides: putStrLn, sqrt, id, const, flip,
         //   head, tail, map, filter, take, zipWith, length, reverse
         // (foldr/foldl are Foldable class methods, registered below)
+        // `print` is deliberately ABSENT: Prelude.mll defines the real
+        // `print :: Show a => a -> IO ()` (via show), and its registration
+        // must not compete with a stale monomorphic String form here — the
+        // old builtin entry was only masked by registration order.
         let entries: Vec<(&str, Vec<TyVar>, Ty)> = vec![
-            ("print", vec![], Ty::arrow(Ty::Con("String".into()), Ty::io(Ty::Unit))),
             ("++", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::list(ta.clone())], Ty::list(ta.clone()))),
             ("!!", vec![a.clone()], Ty::fun(&[Ty::list(ta.clone()), Ty::Con("Int".into())], ta.clone())),
             ("$", vec![a.clone(), b.clone()], Ty::fun(&[Ty::arrow(ta.clone(), tb.clone()), ta.clone()], tb.clone())),
