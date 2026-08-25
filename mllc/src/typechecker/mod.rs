@@ -1983,9 +1983,29 @@ impl Checker {
             let mut all_scheme_vars = tvars.clone();
             all_scheme_vars.extend(ex_tvars.clone());
 
+            // A GADT signature may bind universal variables under names the
+            // header doesn't use (`MkAny :: b -> G b` under `data G a
+            // where`): they reach the result type, so they are universals
+            // exactly like the header's — every use site must instantiate
+            // them FRESH. Left unquantified, the scheme's type carried one
+            // literal `b` (id u32::MAX) shared by every use, so two `MkAny`
+            // uses in one clause spuriously demanded equal payload types.
+            // They join both the scheme (expression uses) and the
+            // constructor's type_vars (pattern instantiation freshens that
+            // list), appended AFTER the header vars — ffi.rs pairs
+            // type_vars with a type application's arguments positionally,
+            // and the header arity prefix must stay aligned.
+            let mut con_type_vars = tvars.clone();
+            for v in con_type.free_vars() {
+                if !all_scheme_vars.contains(&v) {
+                    all_scheme_vars.push(v.clone());
+                    con_type_vars.push(v);
+                }
+            }
+
             self.constructors.insert(con_key.clone(), ConInfo {
                 type_name: name.to_string(), variant_index: i + 1, total_variants: constructors.len(),
-                field_types: field_types.clone(), type_vars: tvars.clone(), result_type: con_result_type.clone(),
+                field_types: field_types.clone(), type_vars: con_type_vars, result_type: con_result_type.clone(),
                 existential_vars: ex_tvars,
                 existential_constraints: ex_constraints,
             });
