@@ -462,10 +462,17 @@ impl Monomorphizer {
             return;
         }
         for clause in &mut func.clauses {
+            // Location for any diagnostic the rewrite pushes (a first-class
+            // use of a dict-passing function at a polymorphic type).
+            let saved_ctx = self.cur_ctx.replace(
+                format!("definition of '{}'", func.name));
+            let saved_span = std::mem::replace(&mut self.cur_span, clause.span);
             clause.map_exprs(&mut |e| {
                 let e = self.revert_purged(e);
                 self.rewrite_dict_call_sites(e)
             });
+            self.cur_ctx = saved_ctx;
+            self.cur_span = saved_span;
         }
     }
 
@@ -1897,6 +1904,48 @@ impl Monomorphizer {
                                 &class_name, name, &ty, class_to_dict, env);
                             return TExpr { kind, ty };
                         }
+                // A FIRST-CLASS reference to a dict-passing function (the
+                // function itself, or a constrained sibling) inside this
+                // dictionary-form body: the bare name compiles to the
+                // dictionary-form Lua function, so whoever receives it would
+                // pass a value where a dictionary is expected. Eta-expand
+                // over the value parameters, building the dictionaries here —
+                // from this body's own dictionary parameters when the use is
+                // at an enclosing constrained variable, constructed
+                // otherwise. (The call-site analogue lives in
+                // `rewrite_dict_call_sites`; this body's calls never pass
+                // through it.)
+                if (*name == *func_name || self.poly_fns.contains_key(name))
+                    && self.fn_constraints.get(name).is_some_and(|cs| !cs.is_empty())
+                    && (self.dict_passing_fns.contains(name) || self.is_polymorphic(&ty))
+                    && self.dictify_feasible(name, 0, &ty)
+                {
+                    let name = name.clone();
+                    // A still-polymorphic first-class use can never resolve
+                    // to a specialization — mark the callee dict-passing so
+                    // run()'s worklist rewrites it too (same discovery as
+                    // the call arm below).
+                    self.dict_passing_fns.insert(name.clone());
+                    let constraints = self.fn_constraints
+                        .get(&name).cloned().unwrap_or_default();
+                    let decl_ty = self.poly_fns.get(&name).map(|f| f.ty.clone());
+                    let mut bind: HashMap<String, Ty> = HashMap::new();
+                    if let Some(dt) = &decl_ty {
+                        let blanked = self.blank_family_apps(dt);
+                        Self::collect_subst_by_name(&blanked, &ty, &mut bind);
+                    }
+                    let dict_args = self.build_body_dict_args(
+                        &constraints, &bind, class_to_dict, env);
+                    let n_params = self.dict_fn_arity(&name).unwrap_or(0);
+                    let inst_fn_ty = decl_ty.map(|mut t| {
+                        for (v, s) in &bind {
+                            t = Self::subst_ty_by_name(&t, v, s);
+                        }
+                        t
+                    });
+                    return Self::saturate_dict_call(
+                        &name, n_params, dict_args, Vec::new(), ty, inst_fn_ty);
+                }
                 return expr;
             }
             TExprKind::App(_, _) => {
@@ -1910,11 +1959,17 @@ impl Monomorphizer {
                 // must be built from this function's own parameters. The
                 // callee is marked dict-passing so run()'s worklist rewrites
                 // it too.
+                // The node type being polymorphic marks a callee that can
+                // never specialize; a callee ALREADY flagged dict-passing
+                // needs dictionaries even when this call's result type is
+                // concrete (`gshow x` inside this body returns String, but
+                // gshow's dictionary-form still takes the Show dictionary
+                // first).
                 let general_callee = |s: &Self, name: &str, t: &Ty| {
                     name != func_name
                         && s.poly_fns.contains_key(name)
                         && s.fn_constraints.get(name).is_some_and(|cs| !cs.is_empty())
-                        && s.is_polymorphic(t)
+                        && (s.is_polymorphic(t) || s.dict_passing_fns.contains(name))
                 };
                 if let Some(call_name) = head_name
                     && (call_name == func_name || general_callee(self, &call_name, &ty)) {
@@ -1938,14 +1993,25 @@ impl Monomorphizer {
                         let mut bind: HashMap<String, Ty> = HashMap::new();
                         if let Some(dt) = &decl_ty {
                             Self::match_fn_args(dt, &args, &mut bind);
+                            // An UNDER-saturated call has no argument
+                            // carrying a variable that sits in an unapplied
+                            // parameter or the result: bind those by
+                            // matching the remaining declared type against
+                            // the node type (families blanked — they are
+                            // not injective, see `class_var_binding`).
+                            if args.len() < Self::spine_arrow_count(dt) {
+                                let mut remaining = dt;
+                                for _ in 0..args.len() {
+                                    if let Ty::Arrow(_, to, _) = remaining {
+                                        remaining = to;
+                                    }
+                                }
+                                let remaining = self.blank_family_apps(remaining);
+                                Self::collect_subst_by_name(&remaining, &ty, &mut bind);
+                            }
                         }
-                        let mut dict_args: Vec<TExpr> = Vec::new();
-                        for c in &constraints {
-                            let bound = bind.get(&c.type_var).cloned()
-                                .unwrap_or_else(|| Ty::Var(TyVar { name: c.type_var.clone(), id: 0 }));
-                            dict_args.push(self.build_dict_expr(
-                                &c.class_name, &bound, class_to_dict, env));
-                        }
+                        let mut dict_args = self.build_body_dict_args(
+                            &constraints, &bind, class_to_dict, env);
                         if dict_args.is_empty() {
                             // No recorded constraints (defensive): pass the
                             // enclosing function's dictionary parameters
@@ -1960,14 +2026,16 @@ impl Monomorphizer {
                         let value_args: Vec<TExpr> = args.into_iter()
                             .map(|a| self.rewrite_dict_expr(a, func_name, class_to_dict, env))
                             .collect();
-                        return TExpr {
-                            kind: TExprKind::DictCall {
-                                func_name: call_name,
-                                dict_args,
-                                value_args,
-                            },
-                            ty,
-                        };
+                        let n_params = self.dict_fn_arity(&call_name)
+                            .unwrap_or(value_args.len());
+                        let inst_fn_ty = decl_ty.map(|mut t| {
+                            for (v, s) in &bind {
+                                t = Self::subst_ty_by_name(&t, v, s);
+                            }
+                            t
+                        });
+                        return Self::saturate_dict_call(
+                            &call_name, n_params, dict_args, value_args, ty, inst_fn_ty);
                     }
                 // Not a dict-passing call: generic descent below.
                 expr.kind
@@ -1996,6 +2064,27 @@ impl Monomorphizer {
         };
         TExpr { kind, ty }
             .map_children(&mut |c| self.rewrite_dict_expr(c, func_name, class_to_dict, env))
+    }
+
+    /// Dictionary arguments for a use of a dict-passing function INSIDE a
+    /// dictionary-form body: each constraint's variable resolved through
+    /// `bind` (this use's substitution), built via `build_dict_expr` — the
+    /// enclosing body's own dictionary parameter when it resolves to an
+    /// enclosing constrained variable, a constructed dictionary otherwise.
+    /// An unresolved variable falls back to the constraint's own variable
+    /// name, which `env` matches by name (the recursion-at-`a` case).
+    fn build_body_dict_args(
+        &mut self,
+        constraints: &[TyConstraint],
+        bind: &HashMap<String, Ty>,
+        class_to_dict: &HashMap<String, String>,
+        env: &HashMap<(String, String), String>,
+    ) -> Vec<TExpr> {
+        constraints.iter().map(|c| {
+            let bound = bind.get(&c.type_var).cloned()
+                .unwrap_or_else(|| Ty::Var(TyVar { name: c.type_var.clone(), id: 0 }));
+            self.build_dict_expr(&c.class_name, &bound, class_to_dict, env)
+        }).collect()
     }
 
     /// Decompose nested App into (head_function, [arg1, arg2, ...])
@@ -2046,63 +2135,294 @@ impl Monomorphizer {
                 let head_name = Self::app_head_name(&expr);
                 if let Some(call_name) = head_name
                     && self.dict_passing_fns.contains(&call_name) && !self.is_polymorphic(&ty)
-                        && let Some(constraints) = self.fn_constraints.get(&call_name).cloned() {
-                            let (_head, args) = Self::split_app_chain(expr);
-                            let poly_fn_ty = self.poly_fns.get(&call_name).map(|f| f.ty.clone());
-                            let empty_c2d: HashMap<String, String> = HashMap::new();
-                            let empty_env: HashMap<(String, String), String> = HashMap::new();
-                            // For a COMPOUND constraint (`GEncode (Rep a)`) the
-                            // recorded argument type drives construction:
-                            // substitute this call's types for the signature
-                            // variables, reduce any family (`Rep T` -> the
-                            // representation), then build the dictionary over it.
-                            // A plain `Class a` keeps the EXACT original path
-                            // (resolve the variable, build) so nothing changes
-                            // for existing dictionary-passing code.
-                            let arg_tys = self.fn_constraint_args.get(&call_name).cloned();
-                            let mut subst: HashMap<String, Ty> = HashMap::new();
-                            if arg_tys.is_some() && let Some(ft) = &poly_fn_ty {
-                                Self::match_fn_args(ft, &args, &mut subst);
+                        && self.fn_constraints.contains_key(&call_name) {
+                            let n_args = Self::app_chain_len(&expr);
+                            if self.dictify_feasible(&call_name, n_args, &ty) {
+                                let (_head, args) = Self::split_app_chain(expr);
+                                return self.dictify_use(&call_name, args, ty);
                             }
-                            let mut dict_args: Vec<TExpr> = Vec::new();
-                            for (i, c) in constraints.iter().enumerate() {
-                                let compound_arg = arg_tys.as_ref()
-                                    .and_then(|a| a.get(i))
-                                    .filter(|(_, arg)| !matches!(arg, Ty::Var(_)));
-                                if let Some((cls, arg)) = compound_arg {
-                                    let mut concrete = arg.clone();
-                                    for (v, t) in &subst {
-                                        concrete = Self::subst_ty_by_name(&concrete, v, t);
-                                    }
-                                    let concrete = self.reduce_families(&concrete)
-                                        .unwrap_or(concrete);
-                                    dict_args.push(self.build_dict_expr(
-                                        cls, &concrete, &empty_c2d, &empty_env));
-                                } else {
-                                    let concrete = self.resolve_constraint_type(
-                                        &c.type_var, poly_fn_ty.as_ref(), &args);
-                                    dict_args.push(self.build_dict_expr(
-                                        &c.class_name, &concrete, &empty_c2d, &empty_env));
-                                }
-                            }
-                            let value_args: Vec<TExpr> = args.into_iter()
-                                .map(|a| self.rewrite_dict_call_sites(a))
-                                .collect();
-                            return TExpr {
-                                kind: TExprKind::DictCall {
-                                    func_name: call_name.clone(),
-                                    dict_args,
-                                    value_args,
-                                },
-                                ty,
-                            };
                         }
                 // Not a dict-passing call: generic descent (which also
                 // covers the App operands themselves).
                 expr.map_children(&mut |c| self.rewrite_dict_call_sites(c))
             }
+            // A FIRST-CLASS reference to a dict-passing function (`map gshow
+            // xs`): the bare name compiles to the dictionary-form function,
+            // whose first Lua parameters are the dictionaries — the caller
+            // (`map`) would pass a list element where a dictionary is
+            // expected. Eta-expand at the use's concrete type: a lambda over
+            // the value parameters wrapping a saturated DictCall whose
+            // dictionaries are built here, at compile time, from that type.
+            TExprKind::Var(ref name)
+                if self.dict_passing_fns.contains(name)
+                    && self.fn_constraints.get(name).is_some_and(|c| !c.is_empty()) =>
+            {
+                let name = name.clone();
+                if self.is_polymorphic(&ty) {
+                    // No concrete type to build the dictionaries at. GHC
+                    // would pass dictionaries at runtime; mata-ll builds
+                    // them at compile time, so this use cannot be compiled —
+                    // report it rather than emit the silent miscompile.
+                    self.push_first_class_dict_error(&name, &ty);
+                    return TExpr { kind: TExprKind::Var(name), ty };
+                }
+                if self.dictify_feasible(&name, 0, &ty) {
+                    self.dictify_use(&name, Vec::new(), ty)
+                } else {
+                    TExpr { kind: TExprKind::Var(name), ty }
+                }
+            }
             _ => expr.map_children(&mut |c| self.rewrite_dict_call_sites(c)),
         }
+    }
+
+    /// Number of arguments an application spine supplies.
+    fn app_chain_len(expr: &TExpr) -> usize {
+        let mut n = 0;
+        let mut e = expr;
+        while let TExprKind::App(f, _) = &e.kind {
+            n += 1;
+            e = f.as_ref();
+        }
+        n
+    }
+
+    /// Number of leading arrows in a type (the arguments it can still take).
+    fn spine_arrow_count(ty: &Ty) -> usize {
+        let mut n = 0;
+        let mut t = ty;
+        while let Ty::Arrow(_, to, _) = t {
+            n += 1;
+            t = to.as_ref();
+        }
+        n
+    }
+
+    /// The value arity of a dict-passing function: the arrow count of its
+    /// DECLARED type. That is codegen's N-ary convention (`count_arrows` in
+    /// codegen/util.rs) — a definition with fewer patterns than arrows (a
+    /// body that returns a lambda, a point-free alias) is `_eta`-padded to
+    /// the full arrow count when emitted, so the dictionary-form Lua
+    /// function takes (dicts.., one value per arrow).
+    fn dict_fn_arity(&self, name: &str) -> Option<usize> {
+        self.poly_fns.get(name).map(|f| Self::spine_arrow_count(&f.ty))
+    }
+
+    /// An under-saturated use can only be eta-expanded if the node's type
+    /// exposes an arrow for every missing parameter (always true for a
+    /// checked program; this guards the rewrite against ever emitting an
+    /// under-saturated DictCall from a malformed type).
+    fn dictify_feasible(&self, name: &str, n_args: usize, node_ty: &Ty) -> bool {
+        match self.dict_fn_arity(name) {
+            Some(n_params) if n_args < n_params =>
+                Self::spine_arrow_count(node_ty) >= n_params - n_args,
+            Some(_) => true,
+            None => false,
+        }
+    }
+
+    /// Record an error for a first-class reference to a dict-passing
+    /// function at a type that is still polymorphic: there is no concrete
+    /// type to build its dictionaries at.
+    fn push_first_class_dict_error(&mut self, name: &str, ty: &Ty) {
+        self.errors.push(Diagnostic {
+            kind: DiagnosticKind::Other(format!(
+                "cannot pass '{}' as a function value at the polymorphic type '{}'",
+                name, ty)),
+            context: self.cur_ctx.clone(),
+            span: self.cur_span,
+            file: None,
+            notes: vec![format!(
+                "'{}' is compiled with dictionary passing (it exceeded the \
+                 specialization limit), and a first-class use needs one \
+                 concrete type to build the dictionaries at compile time. \
+                 GHC resolves this by passing dictionaries at runtime; in \
+                 mata-ll, annotate the use so its type is concrete.",
+                name)],
+            baseline: false,
+        });
+    }
+
+    /// Build a SATURATED use of dict-passing `call_name` from `args` (the
+    /// supplied application spine — possibly empty, for a first-class
+    /// reference) at concrete node type `node_ty`. The emitted DictCall's
+    /// value arguments always match the function's value arity: missing
+    /// arguments are eta-expanded into an enclosing lambda, and extra
+    /// arguments (a call into a function-returning body) become ordinary
+    /// applications of the DictCall's result. The dictionary-form Lua
+    /// function is called with exactly its declared parameters either way —
+    /// an unsaturated direct call would misalign values against dictionary
+    /// slots (too few) or drop arguments (too many).
+    fn dictify_use(&mut self, call_name: &str, mut args: Vec<TExpr>, node_ty: Ty) -> TExpr {
+        let constraints = self.fn_constraints.get(call_name).cloned().unwrap_or_default();
+        let poly_fn_ty = self.poly_fns.get(call_name).map(|f| f.ty.clone());
+        let n_params = self.dict_fn_arity(call_name).unwrap_or(args.len());
+        let empty_c2d: HashMap<String, String> = HashMap::new();
+        let empty_env: HashMap<(String, String), String> = HashMap::new();
+        // Signature variables := this use's types. Supplied argument types
+        // bind variables in applied positions; matching the REMAINING
+        // declared type against the node type binds variables that sit in
+        // unapplied parameters or the result — a first-class or partial
+        // reference has no argument carrying them. Family applications in
+        // the declared type are blanked before matching (they are not
+        // injective; matching them would bind a variable to a piece of the
+        // family's reduct — see `class_var_binding`).
+        let mut subst: HashMap<String, Ty> = HashMap::new();
+        if let Some(ft) = &poly_fn_ty {
+            Self::match_fn_args(ft, &args, &mut subst);
+            let mut remaining = ft;
+            for _ in 0..args.len().min(Self::spine_arrow_count(ft)) {
+                if let Ty::Arrow(_, to, _) = remaining {
+                    remaining = to;
+                }
+            }
+            let remaining = self.blank_family_apps(remaining);
+            Self::collect_subst_by_name(&remaining, &node_ty, &mut subst);
+        }
+        // For a COMPOUND constraint (`GEncode (Rep a)`) the recorded
+        // argument type drives construction: substitute this use's types
+        // for the signature variables, reduce any family (`Rep T` -> the
+        // representation), then build the dictionary over it. A plain
+        // `Class a` at a saturated call keeps the EXACT original path
+        // (resolve the variable from the arguments, build) so nothing
+        // changes for existing dictionary-passing code; an under-saturated
+        // use prefers the full substitution — the class variable may only
+        // occur in an unapplied position, where the argument-driven
+        // resolver cannot see it.
+        let arg_tys = self.fn_constraint_args.get(call_name).cloned();
+        let mut dict_args: Vec<TExpr> = Vec::new();
+        for (i, c) in constraints.iter().enumerate() {
+            let compound_arg = arg_tys.as_ref()
+                .and_then(|a| a.get(i))
+                .filter(|(_, arg)| !matches!(arg, Ty::Var(_)));
+            if let Some((cls, arg)) = compound_arg {
+                let mut concrete = arg.clone();
+                for (v, t) in &subst {
+                    concrete = Self::subst_ty_by_name(&concrete, v, t);
+                }
+                let concrete = self.reduce_families(&concrete)
+                    .unwrap_or(concrete);
+                dict_args.push(self.build_dict_expr(
+                    cls, &concrete, &empty_c2d, &empty_env));
+            } else {
+                let concrete = if args.len() < n_params {
+                    subst.get(&c.type_var).cloned().unwrap_or_else(||
+                        self.resolve_constraint_type(&c.type_var, poly_fn_ty.as_ref(), &args))
+                } else {
+                    self.resolve_constraint_type(&c.type_var, poly_fn_ty.as_ref(), &args)
+                };
+                dict_args.push(self.build_dict_expr(
+                    &c.class_name, &concrete, &empty_c2d, &empty_env));
+            }
+        }
+        let args: Vec<TExpr> = args.drain(..)
+            .map(|a| self.rewrite_dict_call_sites(a))
+            .collect();
+        // The callee's declared type at this use's substitution — the
+        // over-saturated case peels applied parameters off it to type the
+        // inner DictCall node.
+        let inst_fn_ty = poly_fn_ty.map(|mut t| {
+            for (v, s) in &subst {
+                t = Self::subst_ty_by_name(&t, v, s);
+            }
+            self.reduce_families(&t).unwrap_or(t)
+        });
+        Self::saturate_dict_call(call_name, n_params, dict_args, args, node_ty, inst_fn_ty)
+    }
+
+    /// Assemble a use of dict-passing `call_name` from already-built
+    /// dictionaries and already-rewritten supplied arguments, SATURATING to
+    /// the function's value arity `n_params`. The dictionary-form Lua
+    /// function is a direct call with exactly (dicts.., values..)
+    /// parameters, so an unsaturated DictCall misaligns values against
+    /// dictionary slots (too few arguments) or silently drops arguments
+    /// (too many):
+    /// - exactly n_params arguments: a plain DictCall;
+    /// - fewer (a first-class reference or partial application): a lambda
+    ///   over the missing parameters — their types peeled off the node
+    ///   type, which IS the remaining function type — wrapping the
+    ///   saturated DictCall;
+    /// - more (the body returns a function that the call applies further):
+    ///   a DictCall over the first n_params arguments, applied to the rest
+    ///   with ordinary Apps.
+    fn saturate_dict_call(
+        call_name: &str,
+        n_params: usize,
+        dict_args: Vec<TExpr>,
+        mut args: Vec<TExpr>,
+        node_ty: Ty,
+        inst_fn_ty: Option<Ty>,
+    ) -> TExpr {
+        if args.len() == n_params {
+            return TExpr {
+                kind: TExprKind::DictCall {
+                    func_name: call_name.to_string(),
+                    dict_args,
+                    value_args: args,
+                },
+                ty: node_ty,
+            };
+        }
+        if args.len() < n_params {
+            let missing = n_params - args.len();
+            let mut params: Vec<(String, Ty)> = Vec::new();
+            let mut rest = &node_ty;
+            for i in 0..missing {
+                if let Ty::Arrow(from, to, _) = rest {
+                    params.push((format!("__eta{}", i), (**from).clone()));
+                    rest = to;
+                }
+            }
+            let mut value_args = args;
+            for (p, pty) in &params {
+                value_args.push(TExpr {
+                    kind: TExprKind::Var(p.clone()),
+                    ty: pty.clone(),
+                });
+            }
+            let body = TExpr {
+                kind: TExprKind::DictCall {
+                    func_name: call_name.to_string(),
+                    dict_args,
+                    value_args,
+                },
+                ty: rest.clone(),
+            };
+            return TExpr {
+                kind: TExprKind::Lambda { params, body: Box::new(body) },
+                ty: node_ty,
+            };
+        }
+        let extra = args.split_off(n_params);
+        let mut dc_ty = inst_fn_ty.unwrap_or_else(|| node_ty.clone());
+        for _ in 0..n_params {
+            if let Ty::Arrow(_, to, _) = dc_ty {
+                dc_ty = *to;
+            }
+        }
+        let mut result = TExpr {
+            kind: TExprKind::DictCall {
+                func_name: call_name.to_string(),
+                dict_args,
+                value_args: args,
+            },
+            ty: dc_ty,
+        };
+        let n_extra = extra.len();
+        for (i, a) in extra.into_iter().enumerate() {
+            let next_ty = if i + 1 == n_extra {
+                node_ty.clone()
+            } else if let Ty::Arrow(_, to, _) = &result.ty {
+                (**to).clone()
+            } else {
+                node_ty.clone()
+            };
+            result = TExpr {
+                kind: TExprKind::App(Box::new(result), Box::new(a)),
+                ty: next_ty,
+            };
+        }
+        result
     }
 
     fn resolve_constraint_type(&self, type_var: &str, poly_fn_ty: Option<&Ty>, args: &[TExpr]) -> Ty {
