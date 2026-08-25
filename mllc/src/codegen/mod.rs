@@ -200,13 +200,24 @@ struct CodeGen {
     /// Count of `local` declarations in the current function scope.
     /// Used to detect when we're approaching Lua's 200-local limit.
     local_count: usize,
-    /// When local_count exceeds the threshold, new locals go into a `_v` table.
-    /// Maps sanitized local name to 1-based index in the `_v` table.
-    var_slots: std::collections::HashMap<String, usize>,
-    /// Next available `_v` index (1-based).
+    /// When local_count exceeds the threshold, new locals go into the
+    /// current function scope's spill table. Maps sanitized local name to
+    /// its full spill lvalue (e.g. `_v[3]`, `_v2[1]`): entries from
+    /// ENCLOSING function scopes stay resolvable (Lua upvalues) while each
+    /// function scope spills into its own table (see `FnSpillScope`).
+    var_slots: std::collections::HashMap<String, String>,
+    /// Next available index in the current scope's spill table (1-based).
     var_slots_next: usize,
-    /// Whether `local _v = {}` has been emitted in the current scope.
+    /// Whether the current scope's `local <spill_table> = {}` has been emitted.
     var_table_emitted: bool,
+    /// Name of the current function scope's spill table: `_v` in a
+    /// top-level function, `_v2`/`_v3`/… inside nested Lua functions —
+    /// depth-unique so an inner declaration never shadows an enclosing
+    /// table its body still references.
+    spill_table: String,
+    /// Nesting depth of emitted Lua function scopes (0 = top level);
+    /// drives the `spill_table` naming.
+    spill_depth: usize,
     /// Demand analysis: per-function parameter strictness.
     demand_info: DemandInfo,
     /// Strictness rows for where-bound local functions currently in scope
@@ -290,6 +301,8 @@ impl CodeGen {
             var_slots: std::collections::HashMap::new(),
             var_slots_next: 0,
             var_table_emitted: false,
+            spill_table: "_v".to_string(),
+            spill_depth: 0,
             demand_info: DemandInfo {
                 strict_params: std::collections::HashMap::new(),
                 rows: crate::demand::Rows::default(),
@@ -360,9 +373,9 @@ impl CodeGen {
     /// Forward-declared names use __mll_fn[N], others use the name directly.
     fn lua_ref(&self, lua_name: &str) -> String {
         if self.local_vars.contains(lua_name) {
-            // Check if this local is in the _v table (overflow fallback)
-            if let Some(&idx) = self.var_slots.get(lua_name) {
-                format!("_v[{}]", idx)
+            // Check if this local is in a spill table (overflow fallback)
+            if let Some(lv) = self.var_slots.get(lua_name) {
+                lv.clone()
             } else {
                 lua_name.to_string()
             }
@@ -406,15 +419,16 @@ impl CodeGen {
         self.local_count += 1;
         if self.local_count > Self::LOCAL_LIMIT {
             let pre = if !self.var_table_emitted {
-                // The _v table declaration (this itself is one local)
+                // The spill-table declaration (this itself is one local)
                 self.var_table_emitted = true;
-                Some(lua::Stmt::Local(vec!["_v".into()], Some(lua::Expr::Table(vec![]))))
+                Some(lua::Stmt::Local(vec![self.spill_table.clone()], Some(lua::Expr::Table(vec![]))))
             } else {
                 None
             };
             self.var_slots_next += 1;
-            self.var_slots.insert(name.to_string(), self.var_slots_next);
-            (pre, LocalDecl::Slot(format!("_v[{}]", self.var_slots_next)))
+            let lv = format!("{}[{}]", self.spill_table, self.var_slots_next);
+            self.var_slots.insert(name.to_string(), lv.clone());
+            (pre, LocalDecl::Slot(lv))
         } else {
             (None, LocalDecl::Fresh(name.to_string()))
         }
@@ -441,8 +455,8 @@ impl CodeGen {
 
     /// Get the Lua lvalue for an already-declared local (for assignment after fwd decl).
     fn local_lvalue(&self, name: &str) -> String {
-        if let Some(&idx) = self.var_slots.get(name) {
-            format!("_v[{}]", idx)
+        if let Some(lv) = self.var_slots.get(name) {
+            lv.clone()
         } else {
             name.to_string()
         }
@@ -472,6 +486,16 @@ impl CodeGen {
         sub.luadict_enum_tag = self.luadict_enum_tag.clone();
         sub.top_level_names = self.top_level_names.clone();
         sub.local_vars = self.local_vars.clone();
+        // Spill state comes along with local_vars: a guard condition routed
+        // through the sub-generator references locals of the enclosing
+        // scope, and a spilled one must resolve to its slot lvalue — without
+        // this the sub emitted the bare (undeclared -> nil global) name.
+        sub.var_slots = self.var_slots.clone();
+        sub.local_count = self.local_count;
+        sub.var_slots_next = self.var_slots_next;
+        sub.var_table_emitted = self.var_table_emitted;
+        sub.spill_table = self.spill_table.clone();
+        sub.spill_depth = self.spill_depth;
         // Scoped local-function rows apply to everything emitted within the
         // same clause, including guard conditions and bodies routed through
         // a sub-generator.

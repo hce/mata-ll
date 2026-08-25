@@ -27,6 +27,7 @@ macro_rules! mll_lib_test {
 
 mll_test!(basics, "basics.mll");
 mll_test!(lists, "lists.mll");
+mll_test!(local_spill_scopes, "local_spill_scopes.mll");
 mll_test!(data_types, "data_types.mll");
 mll_test!(records, "records.mll");
 mll_test!(luadict, "luadict.mll");

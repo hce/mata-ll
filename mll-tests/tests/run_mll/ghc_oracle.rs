@@ -290,6 +290,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_list_comprehensions, "cases", "list_comprehensions.mll"),
         (ghc_oracle_list_element_laziness, "cases", "list_element_laziness.mll"),
         (ghc_oracle_lists, "cases", "lists.mll"),
+        (ghc_oracle_local_spill_scopes, "cases", "local_spill_scopes.mll"),
         (ghc_oracle_local_overflow, "cases", "local_overflow.mll"),
         (ghc_oracle_local_shadows_poly_global, "cases", "local_shadows_poly_global.mll"),
         (ghc_oracle_locals_iife_limit, "cases", "locals_iife_limit.mll"),

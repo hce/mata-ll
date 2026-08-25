@@ -39,8 +39,8 @@ pub(super) struct ScopeSnapshot {
     /// Count of `local` declarations in the current function scope
     /// (drives the 200-local `_v` spill).
     local_count: usize,
-    /// Spilled-local name -> 1-based `_v` table index.
-    var_slots: std::collections::HashMap<String, usize>,
+    /// Spilled-local name -> full spill lvalue (`_v[3]`, `_v2[1]`, …).
+    var_slots: std::collections::HashMap<String, String>,
     /// Next free `_v` index.
     var_slots_next: usize,
     /// Whether `local _v = {}` has been emitted in the current scope.
@@ -135,6 +135,53 @@ impl LocalVarsSnapshot {
     }
     pub(super) fn restore(self, cg: &mut CodeGen) {
         cg.local_vars = self.local_vars;
+    }
+}
+
+/// Spill scope for an emitted INNER Lua function (a lambda, a let or
+/// guarded-case IIFE, a where-group function, a where-IIFE). The inner
+/// function has its own 200-local budget, and its spilled locals are
+/// per-invocation state — spilling them into the ENCLOSING function's
+/// table (which the shared counters used to do) turned them into shared
+/// upvalue slots that a recursive call clobbers in its caller's frame.
+/// Entering resets the slot counters and switches to a depth-unique table
+/// name (`_v2`, `_v3`, …) so the inner `local _vN = {}` never shadows an
+/// enclosing table the body still references; entries for OUTER spilled
+/// locals stay in `var_slots`, so references to them keep resolving to the
+/// enclosing table as genuine upvalues. Exit restores everything.
+pub(super) struct FnSpillScope {
+    local_count: usize,
+    var_slots: std::collections::HashMap<String, String>,
+    var_slots_next: usize,
+    var_table_emitted: bool,
+    spill_table: String,
+    spill_depth: usize,
+}
+
+impl FnSpillScope {
+    pub(super) fn enter(cg: &mut CodeGen) -> Self {
+        let saved = FnSpillScope {
+            local_count: cg.local_count,
+            var_slots: cg.var_slots.clone(),
+            var_slots_next: cg.var_slots_next,
+            var_table_emitted: cg.var_table_emitted,
+            spill_table: cg.spill_table.clone(),
+            spill_depth: cg.spill_depth,
+        };
+        cg.local_count = 0;
+        cg.var_slots_next = 0;
+        cg.var_table_emitted = false;
+        cg.spill_depth += 1;
+        cg.spill_table = format!("_v{}", cg.spill_depth + 1);
+        saved
+    }
+    pub(super) fn exit(self, cg: &mut CodeGen) {
+        cg.local_count = self.local_count;
+        cg.var_slots = self.var_slots;
+        cg.var_slots_next = self.var_slots_next;
+        cg.var_table_emitted = self.var_table_emitted;
+        cg.spill_table = self.spill_table;
+        cg.spill_depth = self.spill_depth;
     }
 }
 
@@ -308,6 +355,8 @@ impl CodeGen {
         self.var_slots.clear();
         self.var_slots_next = 0;
         self.var_table_emitted = false;
+        self.spill_table = "_v".to_string();
+        self.spill_depth = 0;
         // The demand the whole program provably places on this function's
         // result (deep only when every call site applies it) — seeds the
         // demanded-binding analysis of result-position expressions.
@@ -435,9 +484,12 @@ impl CodeGen {
                 // locals of the IIFE, not of the module scope this arm's
                 // restore_keeping_locals preserves.
                 let where_scope = VarsSnapshot::capture(self);
+                // The thunked IIFE is its own Lua function scope.
+                let spill = FnSpillScope::enter(self);
                 let demanded = self.clause_demanded(&clauses[0]);
                 let mut body = self.where_binds_stmts(&clauses[0], demanded);
                 body.push(Stmt::Return(self.expr_ast(clauses[0].plain_body())));
+                spill.exit(self);
                 where_scope.restore(self);
                 let thunk = Expr::call_named(
                     "__thunk",
@@ -850,6 +902,11 @@ impl CodeGen {
         // every where-group, so the marks — and the parameter locals the
         // body registers — must not outlive this one.
         let scope = VarsSnapshot::capture(self);
+        // The where-group function is its own Lua function scope: its
+        // locals must spill into its OWN per-invocation table, never the
+        // enclosing function's (a recursive call would clobber its
+        // caller's slots — see FnSpillScope).
+        let spill = FnSpillScope::enter(self);
 
         if clauses.len() == 1 {
             let clause = &clauses[0];
@@ -913,6 +970,7 @@ impl CodeGen {
             }
             body.extend(self.pattern_match_block(&params, &clauses).0);
         }
+        spill.exit(self);
         scope.restore(self);
 
         stmts.push(Stmt::Function { target, params, body: Block(body) });
