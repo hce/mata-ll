@@ -33,6 +33,10 @@ pub struct ModuleLoader {
     /// The Prelude's fixity declarations, in force in every module (the
     /// implicit `import Prelude`).
     prelude_fixities: HashMap<String, (Assoc, u8)>,
+    /// Non-fatal diagnostics collected during resolution (an import alias
+    /// shadowed by a data constructor). Drained by the compile pipeline
+    /// into `CompileResult.warnings`.
+    warnings: Vec<crate::types::Diagnostic>,
 }
 
 impl ModuleLoader {
@@ -55,7 +59,13 @@ impl ModuleLoader {
             fixity_cache: HashMap::new(),
             fixities_in_progress: HashSet::new(),
             prelude_fixities,
+            warnings: Vec::new(),
         }
+    }
+
+    /// Drain the non-fatal diagnostics collected so far (see `warnings`).
+    pub fn take_warnings(&mut self) -> Vec<crate::types::Diagnostic> {
+        std::mem::take(&mut self.warnings)
     }
 
     pub fn add_search_path(&mut self, path: PathBuf) {
@@ -334,6 +344,53 @@ impl ModuleLoader {
             }
         }
 
+        // A constructor use `f M` and a qualified reference `M.f` parse to
+        // the SAME shape — `App(Var "f", Con "M")` (field access desugars
+        // accessor-first, exactly like application) — so when an alias name
+        // is also a visible data constructor the two meanings cannot be
+        // told apart here. The constructor wins: the plain application is
+        // the meaning the expression already has without the alias, and
+        // collapsing it produced a bogus "Unbound variable: M.f" (or a
+        // silent call of the wrong module's function). Qualified references
+        // through such an alias are therefore unavailable — a deviation
+        // from GHC, whose module aliases live in a separate namespace — so
+        // warn, pointing at the rename that restores them.
+        let ctor_names: HashSet<String> = module.decls.iter()
+            .chain(imported_decls.iter())
+            .flat_map(|d| -> Vec<String> {
+                match d {
+                    Decl::DataDef { constructors, .. } =>
+                        constructors.iter().map(|c| c.name.clone()).collect(),
+                    Decl::NewtypeDef { con_name: Some(c), .. } => vec![c.clone()],
+                    _ => Vec::new(),
+                }
+            })
+            .collect();
+        let qualified_aliases: HashSet<String> = qualified_aliases.into_iter()
+            .filter(|a| {
+                let keep = !ctor_names.contains(a);
+                if !keep {
+                    self.warnings.push(crate::types::Diagnostic {
+                        kind: crate::types::DiagnosticKind::Other(format!(
+                            "import alias '{}' is also a data constructor; \
+                             qualified references '{}.name' will not resolve",
+                            a, a)),
+                        context: None,
+                        span: None,
+                        file: None,
+                        notes: vec![format!(
+                            "in mata-ll, a qualified reference '{a}.f' and an \
+                             application 'f {a}' parse identically, so the \
+                             constructor meaning wins. GHC keeps module \
+                             aliases in a separate namespace and allows both; \
+                             rename the alias (e.g. 'as {a}M') to use \
+                             qualified references.")],
+                        baseline: false,
+                    });
+                }
+                keep
+            })
+            .collect();
         for decl in &module.decls {
             if matches!(decl, Decl::Import { .. }) {
                 continue;

@@ -116,6 +116,11 @@ excluded_reason() {
         cases/OpQualDefs)                echo "helper module (twinned for import, no main)";;
         cases/MergeNames)                echo "helper module (twinned for import, no main)";;
         cases/OpsExports)                echo "helper module (twinned for import, no main)";;
+        cases/AliasCtor)                 echo "helper module (twinned for import, no main)";;
+        # mata-ll DEVIATION (documented in HASKDIFF): the constructor wins
+        # over the colliding alias, GHC would accept both meanings — but the
+        # twin could not resolve the qualified sibling anyway (Q77 seam).
+        cases/alias_ctor_collision)      echo "alias/constructor collision: documented deviation + Q77 seam";;
         # Same twin module-resolution gap as qualified_import_instances (Q77
         # seam) — the case mixes a qualified alias with unqualified imports.
         cases/import_merge)              echo "qualified import: twin module resolution gap (Q77 seam)";;

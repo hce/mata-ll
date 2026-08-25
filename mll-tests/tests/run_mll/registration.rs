@@ -224,6 +224,7 @@ mll_test!(gadt_unnamed_universal, "gadt_unnamed_universal.mll");
 mll_test!(radix_literals, "radix_literals.mll");
 mll_test!(qualified_operator_module, "qualified_operator_module.mll");
 mll_test!(import_merge, "import_merge.mll");
+mll_test!(alias_ctor_collision, "alias_ctor_collision.mll");
 mll_test!(dot_spacing, "dot_spacing.mll");
 mll_test!(infix_method_defs, "infix_method_defs.mll");
 mll_test!(import_operator_list, "import_operator_list.mll");
@@ -601,6 +602,7 @@ fn mll_case_registry_is_complete() {
         "OpQualDefs.mll",
         "MergeNames.mll",
         "OpsExports.mll",
+        "AliasCtor.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")

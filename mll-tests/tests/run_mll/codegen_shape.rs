@@ -613,6 +613,49 @@ fn compiled_module_carries_mllc_provenance() {
 /// whose only "exports" are header-listed therefore has no host surface when
 /// compiled standalone: no `main`, nothing in the return table, and dead-code
 /// elimination removes every definition. That used to produce an empty Lua
+/// An import alias that is also a data constructor: the constructor wins
+/// (alias_ctor_collision.mll pins the program meaning), and the compiler
+/// must SAY that qualified references through the alias will not resolve
+/// (Q67) — silently dropping the alias would leave `M.size` failing with
+/// an unexplained unbound-variable error.
+#[test]
+fn alias_constructor_collision_warns() {
+    let src = "import qualified AliasCtor as M\n\n\
+               data Mode = M | N\n\n\
+               tag :: Mode -> Int\n\
+               tag M = 1\n\
+               tag N = 2\n\n\
+               main :: IO ()\n\
+               main = print (tag M)\n";
+    let result = compile(src, Path::new("tests/cases"), &[])
+        .expect("the constructor meaning must compile");
+    assert_eq!(result.warnings.len(), 1, "exactly one collision warning");
+    let rendered = format!("{}", result.warnings[0]);
+    assert!(
+        rendered.contains("import alias 'M' is also a data constructor"),
+        "warning must name the collision:\n{}",
+        rendered
+    );
+    assert!(
+        rendered.contains("rename the alias"),
+        "warning must offer the fix:\n{}",
+        rendered
+    );
+
+    // A non-colliding alias stays fully functional and warns nothing.
+    let clean = "import qualified AliasCtor as A\n\n\
+                 main :: IO ()\n\
+                 main = print A.size\n";
+    let result = compile(clean, Path::new("tests/cases"), &[])
+        .expect("non-colliding alias compiles");
+    assert!(
+        result.warnings.is_empty(),
+        "no warning without a collision: {:?}",
+        result.warnings.iter().map(|w| format!("{}", w)).collect::<Vec<_>>()
+    );
+    assert!(result.lua_code.contains("99"), "qualified use resolves");
+}
+
 /// shell *silently*; the compiler must now say so via `CompileResult.warnings`.
 #[test]
 fn header_only_root_module_warns_instead_of_silent_empty_output() {

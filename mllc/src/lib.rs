@@ -235,6 +235,9 @@ fn compile_impl(
     let prelude_decls = parse_prelude()?;
     let prelude_shapes = modules::signature_shapes(&prelude_decls);
     let module = loader.resolve_imports(&parsed).map_err(CompileError::Import)?;
+    // Non-fatal resolution diagnostics (an import alias shadowed by a data
+    // constructor) — carried into CompileResult.warnings below.
+    let import_warnings = loader.take_warnings();
     // Reject unqualified imports that would clash in the flattened namespace,
     // with a clear message, rather than letting the clash surface downstream.
     loader.check_import_collisions(&parsed, &prelude_shapes)
@@ -378,7 +381,7 @@ fn compile_impl(
     // what the author meant, so say so. A module-header export list does not
     // prevent this: it only scopes .mll-level imports (see `header_exports`
     // above), which is precisely the mixup the warning's notes explain.
-    let mut warnings = Vec::new();
+    let mut warnings = import_warnings;
     if !mono_module.has_main && mono_module.exports.is_empty() {
         warnings.push(no_host_surface_warning(header_exports.as_deref()));
     }

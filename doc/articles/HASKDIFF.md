@@ -263,6 +263,18 @@ switches it (and the generic-instance methods it uses) to dictionary
 passing, which stays correct at any number of types but pays a runtime
 dictionary indirection where the first 16 got fully specialised code.
 
+## An import alias that names a data constructor loses its qualified form
+
+In GHC, module aliases live in their own namespace: after
+`import qualified Foo as M` alongside `data Mode = M | N`, both `f M`
+(the constructor) and `M.f` (the qualified reference) work. mata-ll
+parses `M.f` and `f M` into the same shape, so the two meanings cannot
+be told apart when `M` is also a visible data constructor. The
+constructor wins — `f M` means what it means without the import — and
+qualified references through that alias do not resolve. The compiler
+warns at the colliding import; renaming the alias restores the
+qualified form.
+
 ## Orphan instances: only the top-level module is checked
 
 An orphan instance (for a class and a type both defined elsewhere) is
