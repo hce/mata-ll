@@ -293,6 +293,26 @@ the prefix `(:+:) f g`), grouping by their declared fixity. This exists chiefly 
 representation combinators (`:+:`, `:*:`). Non-`:` type operators (a
 `TypeOperators`-style `data a + b`) are not supported.
 
+## Operators cannot begin with `@`; `do`/`where` have no explicit-brace layout
+
+Two small syntactic gaps against Haskell 2010's grammar:
+
+- The lexer treats every `@` as the as-pattern marker (`xs@(x:rest)`),
+  so an operator symbol beginning with `@` (GHC-legal spellings like
+  `@@`) cannot be lexed. Operators may *contain* `@` after another
+  operator character (`<@>`). Why: as-patterns bind `@` tightly between
+  a variable and a pattern with no spaces, and giving `@` a second
+  lexical life as an operator head would make `xs@(…)` ambiguous at the
+  token level for very little gain — `@`-headed operators are rare even
+  in GHC code.
+
+- Explicit brace-and-semicolon layout is supported for `case … of
+  { p1 -> e1; p2 -> e2 }` but not for `do { a; b }` or `where { … }`;
+  those use the indentation rule only. A `;` outside a braced case is
+  simply not consumed.
+
+Both are loud (a parse error at the exact token), not silent deviations.
+
 ## Kinds are inferred; there are no kind annotations
 
 mata-ll has a real kind system — data/newtype parameters, class

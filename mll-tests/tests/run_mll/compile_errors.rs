@@ -4902,3 +4902,15 @@ fn import_cycle_reported_as_chain() {
         "the diagnostic must offer the fix:\n{err}"
     );
 }
+
+/// F18: both documented syntactic gaps (HASKDIFF "Operators cannot begin
+/// with `@`…") fail LOUDLY at the exact token — they must never become
+/// silent misparses.
+#[test]
+fn at_operator_and_brace_do_fail_loudly() {
+    let source = "(@@) :: Int -> Int -> Int\nx @@ y = x + y\n\nmain :: IO ()\nmain = print (1 @@ 2)\n";
+    expect_compile_error(source, &[], &["Parse error"]);
+
+    let source = "main :: IO ()\nmain = do { putStrLn \"a\"; putStrLn \"b\" }\n";
+    expect_compile_error(source, &[], &["Parse error", "'{'"]);
+}
