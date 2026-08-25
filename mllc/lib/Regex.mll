@@ -1,8 +1,19 @@
-import LString (strByte, strLen, strSub)
+import LString (strByte, strLen, strSub, strChar)
 
 -- Regular expression engine for MLL
 -- CPS-based backtracking matcher with precompiled pattern AST
 -- Supports: . * + ? | () [] [^] ^ $ \d \w \s \D \W \S \n \t \r \\
+--
+-- A quantifier with nothing to repeat ("*a") and an unknown alphanumeric
+-- escape ("\b", "\q") are COMPILE errors — silently matching them as
+-- literals hid typos and unsupported features (F14). Escaped punctuation
+-- ("\.", "\(") stays an identity escape.
+--
+-- Worst case: a plain backtracker has no protection against catastrophic
+-- backtracking — nested quantifiers over overlapping alternatives
+-- ("(a+)+b" against "aaaaaaaaaaaaaaaaaaaaX") take time exponential in the
+-- input. Keep patterns linear (no quantified group whose body can match
+-- the same text in more than one way) or bound the input you scan.
 
 -- Regex AST
 data RE = RLit Int | RDot | RSeq RE RE | RAlt RE RE | RStar RE | RPlus RE | ROpt RE | RClass [CItem] | RNClass [CItem] | RAnchorS | RAnchorE | REmpty
@@ -135,6 +146,12 @@ atomByte pat pos len 36 = POk RAnchorE (pos + 1)
 atomByte pat pos len 40 = parseGroup pat (pos + 1) len
 atomByte pat pos len 91 = parseCharClass pat (pos + 1) len
 atomByte pat pos len 92 = parseEscape pat (pos + 1) len
+-- A quantifier here has nothing to repeat: "*a" is an error in every
+-- mainstream flavor, and treating it as a literal '*' silently matched
+-- the wrong strings.
+atomByte pat pos len 42 = PErr ("quantifier '*' has nothing to repeat at position " <> show pos)
+atomByte pat pos len 43 = PErr ("quantifier '+' has nothing to repeat at position " <> show pos)
+atomByte pat pos len 63 = PErr ("quantifier '?' has nothing to repeat at position " <> show pos)
 atomByte pat pos len c = POk (RLit c) (pos + 1)
 
 parseGroup :: String -> Int -> Int -> PResult
@@ -157,7 +174,16 @@ escByte 83 pos = POk (RNClass ccSpace) (pos + 1)
 escByte 110 pos = POk (RLit 10) (pos + 1)
 escByte 116 pos = POk (RLit 9) (pos + 1)
 escByte 114 pos = POk (RLit 13) (pos + 1)
-escByte c pos = POk (RLit c) (pos + 1)
+-- An unknown ALPHANUMERIC escape is an error (PCRE's rule): "\b" or
+-- "\q" silently matching the literal letter hid both typos and
+-- unsupported features. Escaped punctuation stays an identity escape —
+-- "\.", "\(", "\[" and friends are how metacharacters are quoted.
+escByte c pos = if isAlnumByte c
+    then PErr ("unsupported escape '\\" <> strChar c <> "' at position " <> show pos)
+    else POk (RLit c) (pos + 1)
+
+isAlnumByte :: Int -> Bool
+isAlnumByte c = (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122)
 
 parseCharClass :: String -> Int -> Int -> PResult
 parseCharClass pat pos len = if pos > len then PErr "Unterminated character class" else if strByte pat pos == 94 then classBody pat (pos + 1) len True [] else classBody pat pos len False []
@@ -177,7 +203,11 @@ classEscByte :: String -> Int -> Int -> Bool -> [CItem] -> Int -> PResult
 classEscByte pat pos len neg acc 100 = classBody pat (pos + 1) len neg (CRange 48 57 : acc)
 classEscByte pat pos len neg acc 119 = classBody pat (pos + 1) len neg (CRange 97 122 : CRange 65 90 : CRange 48 57 : CChar 95 : acc)
 classEscByte pat pos len neg acc 115 = classBody pat (pos + 1) len neg (CChar 32 : CChar 9 : CChar 10 : CChar 13 : acc)
-classEscByte pat pos len neg acc c = classBody pat (pos + 1) len neg (CChar c : acc)
+-- Same rule as escByte: unknown alphanumeric escapes error, punctuation
+-- is identity.
+classEscByte pat pos len neg acc c = if isAlnumByte c
+    then PErr ("unsupported escape '\\" <> strChar c <> "' in character class")
+    else classBody pat (pos + 1) len neg (CChar c : acc)
 
 -- Public API
 

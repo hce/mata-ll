@@ -160,4 +160,22 @@ main = do
 
     -- Compile errors
     assert (isLeft (compile "(unclosed")) "error: unclosed paren"
+
+    -- F14: a quantifier with nothing to repeat is an error (it used to
+    -- compile as a literal '*'/'+'/'?')
+    assert (isLeft (compile "*a")) "error: leading * has nothing to repeat"
+    assert (isLeft (compile "+a")) "error: leading + has nothing to repeat"
+    assert (isLeft (compile "?a")) "error: leading ? has nothing to repeat"
+    assert (isLeft (compile "a|*b")) "error: * after | has nothing to repeat"
+
+    -- F14: unknown ALPHANUMERIC escapes are errors (\b silently matched a
+    -- literal 'b'); escaped punctuation stays an identity escape
+    assert (isLeft (compile "\\b")) "error: unsupported escape \\b"
+    assert (isLeft (compile "\\q")) "error: unsupported escape \\q"
+    assert (isLeft (compile "[\\b]")) "error: unsupported escape in class"
+    tryCompile "a\\.b" (\re -> do
+        assert (test re "xa.by") "identity escape: dot literal matches"
+        assert (not (test re "xaXby")) "identity escape: dot literal rejects X")
+    tryCompile "\\(x\\)" (\re ->
+        assert (test re "f(x)") "identity escape: parens")
     assert (isLeft (compile "[unclosed")) "error: unclosed class"
