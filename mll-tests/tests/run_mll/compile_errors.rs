@@ -63,6 +63,29 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A class context inside a higher-rank ARGUMENT type is rejected with
+// an honest unsupported-diagnostic: the lowering erases nested contexts,
+// so the rank-2 skolem carried no givens and a body use failed with a
+// note claiming the value "cannot demand any class instance" — a
+// baffling rejection of a signature GHC accepts. Unconstrained rank-2
+// arguments stay legal (control).
+#[test]
+fn constrained_rank2_argument_is_honestly_unsupported() {
+    expect_compile_error(
+        "f :: (forall a. Num a => a -> a) -> Int\nf g = g 3\n\nmain :: IO ()\nmain = print (f (\\x -> x + 1))\n",
+        &[],
+        &[
+            "class context inside a higher-rank argument type",
+            "not supported yet",
+            "note:",
+            "silently ignored, so it is rejected here instead",
+        ],
+    );
+    let control = "apply2 :: (forall a. a -> a) -> (Int, Bool)\napply2 g = (g 1, g True)\n\nmain :: IO ()\nmain = print (apply2 (\\x -> x))\n";
+    compile(control, Path::new("."), &[])
+        .expect("unconstrained rank-2 arguments must stay legal");
+}
+
 // A record field declared by TWO types silently overwrote the first
 // type's accessor and record_fields entry (last-writer-wins): its
 // record construction then failed with "Unknown field" and its

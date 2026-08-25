@@ -421,6 +421,62 @@ impl Checker {
         let mut kctx = KindCtx::new(true);
         self.expect_type_kind(ty, &Kind::Type, &mut kctx, ctx);
         self.check_family_saturation(ty, ctx);
+        self.check_rank2_contexts(ty, ctx);
+    }
+
+    /// Reject a class context INSIDE a higher-rank argument type
+    /// (`f :: (forall a. Num a => a -> a) -> Int`) with an honest
+    /// unsupported-diagnostic. The lowering to `Ty` erases nested
+    /// `Constrained` nodes (a top-level signature's context lives in
+    /// FnContext instead), so the rank-2 skolem was minted with NO givens
+    /// and a body use of the constrained operation failed with a note
+    /// claiming the value "cannot demand any class instance" — a baffling
+    /// rejection of a signature GHC accepts. Until `Ty::Forall` carries a
+    /// context, rejecting at the signature is the honest behavior.
+    pub(super) fn check_rank2_contexts(&mut self, ty: &Type, ctx: &str) {
+        match strip_paren(ty) {
+            Type::Arrow(a, b, _) => {
+                let mut p = strip_paren(a);
+                while let Type::Forall { inner, .. } = p {
+                    p = strip_paren(inner);
+                }
+                if !std::ptr::eq(p, strip_paren(a)) // there was at least one forall
+                    && matches!(p, Type::Constrained { .. })
+                {
+                    self.push_error_ctx_note(
+                        DiagnosticKind::Other(
+                            "A class context inside a higher-rank argument type \
+                             is not supported yet"
+                                .to_string(),
+                        ),
+                        ctx.to_string(),
+                        "the declared constraint would have to be passed to the \
+                         polymorphic argument as evidence, and mata-ll's rank-2 \
+                         checking currently carries no such evidence — the \
+                         context would be silently ignored, so it is rejected \
+                         here instead; use an unconstrained polymorphic argument, \
+                         or pass the class's operations explicitly",
+                    );
+                }
+                self.check_rank2_contexts(a, ctx);
+                self.check_rank2_contexts(b, ctx);
+            }
+            Type::Forall { inner, .. } | Type::Constrained { ty: inner, .. } => {
+                self.check_rank2_contexts(inner, ctx);
+            }
+            Type::List(a) | Type::IO(a) => self.check_rank2_contexts(a, ctx),
+            Type::ScopedLuaIO { inner, .. } => self.check_rank2_contexts(inner, ctx),
+            Type::App(f, a) => {
+                self.check_rank2_contexts(f, ctx);
+                self.check_rank2_contexts(a, ctx);
+            }
+            Type::Tuple(elems) => {
+                for e in elems {
+                    self.check_rank2_contexts(e, ctx);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Reject UNSATURATED type-family applications anywhere in `ty`. A type
