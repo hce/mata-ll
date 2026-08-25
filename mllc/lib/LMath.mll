@@ -18,11 +18,17 @@ atan2 :: Number -> Number -> LuaPure "math.atan" Number
 -- Exponential / logarithmic
 exp :: Number -> LuaPure "math.exp" Number
 log :: Number -> LuaPure "math.log" Number
-logBase :: Number -> Number -> LuaPure "math.log" Number
+-- GHC argument order: `logBase base x` (a runtime shim reverses into
+-- Lua's math.log(x, base) — binding math.log directly under this
+-- GHC-evoking name silently meant log_x(base)).
+logBase :: Number -> Number -> LuaPure "__mll_logbase" Number
 sqrt :: Number -> LuaPure "math.sqrt" Number
 
 -- Multi-return (packed into tuples)
-frexp :: Number -> LuaPure "math.frexp" (Number, Int)
+-- Portable: math.frexp is compiled out of stock Lua 5.4/5.5
+-- (LUA_COMPAT_MATHLIB); the shim uses it when present and computes the
+-- mantissa/exponent pair otherwise.
+frexp :: Number -> LuaPure "__mll_frexp" (Number, Int)
 modf :: Number -> LuaPure "math.modf" (Number, Number)
 
 -- Rounding / remainder

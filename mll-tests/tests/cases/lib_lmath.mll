@@ -52,5 +52,17 @@ main = do
     assert (approx (atan2 1.0 1.0) (pi / 4.0)) "atan2 1 1 = pi/4"
     assert (approx (atan2 0.0 1.0) 0.0) "atan2 0 1 = 0"
 
-    -- Note: frexp and modf are deprecated since Lua 5.3 and removed
-    -- from default Lua 5.4 builds (require LUA_COMPAT_MATHLIB).
+    -- frexp goes through the portable shim (__mll_frexp): stock 5.4/5.5
+    -- compile math.frexp out, so the direct binding was a nil call there.
+    let (m, e) = frexp 8.0
+    assert (approx m 0.5) "frexp 8: mantissa 0.5"
+    assert (e == 4) "frexp 8: exponent 4"
+    let (m2, e2) = frexp (0.0 - 0.75)
+    assert (approx m2 (0.0 - 0.75)) "frexp -0.75: mantissa -0.75"
+    assert (e2 == 0) "frexp -0.75: exponent 0"
+    let (m0, e0) = frexp 0.0
+    assert (m0 == 0.0 && e0 == 0) "frexp 0: (0, 0)"
+
+    -- logBase takes GHC's argument order: logBase base x.
+    assert (approx (logBase 2.0 8.0) 3.0) "logBase 2 8 = 3"
+    assert (approx (logBase 10.0 1000.0) 3.0) "logBase 10 1000 = 3"

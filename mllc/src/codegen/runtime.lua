@@ -1167,6 +1167,29 @@ local minBound_Int = math.mininteger or (-2^63)
 local maxBound_Int = math.maxinteger or (2^63 - 1)
 local minBound_Bool = false
 local maxBound_Bool = true
+-- LMath shims. frexp: math.frexp is compiled out of stock Lua 5.4/5.5
+-- (LUA_COMPAT_MATHLIB); binding it directly made LMath.frexp a nil call
+-- there while LuaJIT (which keeps it) worked. Use the native one when
+-- present, else compute mantissa/exponent (x = m * 2^e with 0.5 <= |m| < 1;
+-- 0, NaN and infinities pass through with exponent 0, as C's frexp does).
+local function __mll_frexp(x)
+    if math.frexp then return math.frexp(x) end
+    if x == 0.0 or x ~= x or x == math.huge or x == -math.huge then
+        return x, 0
+    end
+    local a = math.abs(x)
+    local e = math.floor(math.log(a, 2)) + 1
+    local m = a / 2.0 ^ e
+    -- math.log rounding can land one step off; renormalize.
+    while m >= 1.0 do m = m / 2.0; e = e + 1 end
+    while m < 0.5 do m = m * 2.0; e = e - 1 end
+    if x < 0 then m = -m end
+    return m, e
+end
+-- logBase in GHC's argument order (`logBase base x`); Lua's math.log
+-- takes (x, base) — binding it directly reversed the meaning under the
+-- GHC-evoking name.
+local function __mll_logbase(b, x) return math.log(x, b) end
 -- Read parsing (GHC parity). A read trims surrounding space and one
 -- layer of parentheses; anything the type's grammar does not cover
 -- raises GHC's exact "Prelude.read: no parse" (a catchable error).
