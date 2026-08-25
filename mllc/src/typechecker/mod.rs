@@ -2014,6 +2014,31 @@ impl Checker {
             // Register record field accessors
             if let ConstructorFields::Named(fields) = &con.fields {
                 for (fi, field) in fields.iter().enumerate() {
+                    // A field name already registered by ANOTHER type would
+                    // silently overwrite that type's accessor and
+                    // record_fields entry (last-writer-wins): the earlier
+                    // type's record construction then failed with
+                    // "Unknown field" and its accessor returned the wrong
+                    // component. GHC rejects the redeclaration; so do we.
+                    // A repeated field WITHIN one type (shared by two of
+                    // its constructors) stays legal, as in Haskell.
+                    if let Some((other_ty, _)) = self.record_fields.get(&field.name)
+                        && other_ty != name {
+                            let other_ty = other_ty.clone();
+                            self.push_error_ctx_note(
+                                DiagnosticKind::Other(format!(
+                                    "Duplicate record field '{}': already declared by \
+                                     '{}'",
+                                    field.name, other_ty,
+                                )),
+                                format!("data {}", name),
+                                "a record field defines a module-level accessor \
+                                 function of the same name, so two types cannot \
+                                 share a field name; rename one field (GHC \
+                                 rejects this as 'Multiple declarations')",
+                            );
+                            continue;
+                        }
                     let field_ty = self.ast_type_to_ty(&field.ty);
                     // A field whose type mentions an existential variable
                     // gets NO selector: `getIt :: Foo -> a` would hand the

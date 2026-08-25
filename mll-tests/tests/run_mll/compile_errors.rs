@@ -63,6 +63,29 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A record field declared by TWO types silently overwrote the first
+// type's accessor and record_fields entry (last-writer-wins): its
+// record construction then failed with "Unknown field" and its
+// accessor read the wrong component. GHC rejects the redeclaration
+// ("Multiple declarations"). A repeated field WITHIN one type (shared
+// by two of its constructors) stays legal.
+#[test]
+fn duplicate_record_field_across_types_is_rejected() {
+    expect_compile_error(
+        "data A = A { size :: Int }\ndata B = B { size :: Int, tag :: Int }\n\nmain :: IO ()\nmain = print (size (A { size = 3 }))\n",
+        &[],
+        &[
+            "Duplicate record field 'size'",
+            "already declared by 'A'",
+            "note:",
+            "Multiple declarations",
+        ],
+    );
+    let control = "data Sh = Circle { size :: Int } | Square { size :: Int }\n\nmain :: IO ()\nmain = do\n    print (size (Circle { size = 4 }))\n    print (size (Square { size = 9 }))\n";
+    compile(control, Path::new("."), &[])
+        .expect("a field shared by two constructors of ONE type must stay legal");
+}
+
 // A partially applied type ALIAS cannot expand and used to pass
 // through as an opaque Ty::Con, surfacing later as a baffling
 // "Cannot unify" (or slipping through entirely where a higher-kinded
