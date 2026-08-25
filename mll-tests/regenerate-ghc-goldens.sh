@@ -186,7 +186,22 @@ rewrite_body() {
 # cannot go in the header block.
 inject_default() {
     awk '
-        { lines[NR] = $0; if ($0 ~ /^import /) last_import = NR }
+        {
+            lines[NR] = $0
+            # An import STATEMENT may span lines (a multi-line import
+            # list); it continues while its parens are unbalanced, and the
+            # default must go after the statement/s last LINE — injecting
+            # after the last "^import"-prefixed line split such a list.
+            if ($0 ~ /^import /) { in_import = 1; depth = 0 }
+            if (in_import) {
+                line = $0
+                opens = gsub(/\(/, "(", line)
+                closes = gsub(/\)/, ")", line)
+                depth += opens - closes
+                last_import = NR
+                if (depth <= 0) in_import = 0
+            }
+        }
         END {
             for (i = 1; i <= NR; i++) {
                 print lines[i]

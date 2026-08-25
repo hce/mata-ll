@@ -852,6 +852,12 @@ impl Parser {
             self.advance();
             let mut items = Vec::new();
             loop {
+                // A multi-line import list: layout tokens between items are
+                // as meaningless as in an export list (the same
+                // skip_newlines_and_indent discipline — the import loop
+                // used to reject the shape with "Expected identifier,
+                // found start of a new line", F5).
+                self.skip_newlines_and_indent();
                 if self.at(&Token::RightParen) {
                     break;
                 }
@@ -889,12 +895,14 @@ impl Parser {
                     let name = self.expect_ident()?;
                     items.push(ImportItem::Value(name));
                 }
+                self.skip_newlines_and_indent();
                 if self.at(&Token::Comma) {
                     self.advance();
                 } else {
                     break;
                 }
             }
+            self.skip_newlines_and_indent();
             self.expect(&Token::RightParen)?;
             return Ok(Decl::Import {
                 module_path,

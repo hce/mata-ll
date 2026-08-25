@@ -326,6 +326,8 @@ mll_test!(diamond_instances, "diamond_instances.mll");
 // F4: exhaustive shapes under the matrix checker (and its deliberate
 // permissive holes) run with GHC-identical results.
 mll_test!(exhaustiveness_matrix, "exhaustiveness_matrix.mll");
+// F5: multi-line import lists (plain, hiding, and closing-paren-on-its-own-line).
+mll_test!(multi_line_imports, "multi_line_imports.mll");
 mll_test!(unit_type, "unit_type.mll");
 // Instance-evidence resolution regressions (structured instance identity,
 // deterministic class-variable dispatch, exact-identity specialization purge)
