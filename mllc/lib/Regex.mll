@@ -51,7 +51,12 @@ matchAt re s i len k = case re of
     RPlus a -> matchAt a s i len (\j -> if j == i then k j else matchStar a s j len k)
     ROpt a -> matchOpt a s i len k
     RClass items -> if i <= len && matchAny items (strByte s i) then k (i + 1) else Nothing
-    RNClass items -> if i <= len && strByte s i /= 10 && not (matchAny items (strByte s i)) then k (i + 1) else Nothing
+    -- A negated class matches ANY byte outside the listed items, newline
+    -- included: only '.' excludes newline (every mainstream flavor —
+    -- PCRE, POSIX, JS, Python — matches "\n" against [^a]). The class's
+    -- own items still exclude what they name, so \S keeps rejecting
+    -- newline through ccSpace.
+    RNClass items -> if i <= len && not (matchAny items (strByte s i)) then k (i + 1) else Nothing
 
 matchAlt :: RE -> RE -> String -> Int -> Int -> (Int -> Maybe Int) -> Maybe Int
 matchAlt a b s i len k = case matchAt a s i len k of

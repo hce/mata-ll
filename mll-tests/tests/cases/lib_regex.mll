@@ -87,6 +87,17 @@ main = do
         assert (matchFull re "abc") "nclass: abc"
         assert (not (matchFull re "123")) "nclass: rejects 123")
 
+    -- A negated class matches newline (only '.' excludes it — PCRE/POSIX/
+    -- JS/Python all match "\n" against [^a]); \D likewise; \S still
+    -- rejects it through its own items (newline IS a space).
+    tryCompile "[^a]" (\re -> do
+        assert (matchFull re "\n") "nclass: matches newline"
+        assert (not (matchFull re "a")) "nclass: still rejects the listed byte")
+    tryCompile "\\D" (\re ->
+        assert (matchFull re "\n") "backslash-D: matches newline")
+    tryCompile "\\S" (\re ->
+        assert (not (matchFull re "\n")) "backslash-S: rejects newline via its items")
+
     -- Escape sequences
     tryCompile "\\d+" (\re -> do
         assert (test re "abc123") "\\d: digits"
