@@ -145,6 +145,14 @@ struct CodeGen {
     /// names (two distinct source names sanitizing to one Lua name — see
     /// module_stmts); carried out of `generate` as a clean error.
     name_collision_error: Option<String>,
+    /// An emitter-agreement violation (a module-level prediction and the
+    /// actual emission decision disagree — `slot_always_whnf`,
+    /// `direct_perform_fns`): earlier-emitted references already encoded
+    /// the WRONG belief (a dropped force, a dropped runner), so the
+    /// compile must fail — in RELEASE builds too, where these used to be
+    /// debug_asserts that silently let the wrong code through (F11).
+    /// First violation wins; carried out of `generate` as a clean error.
+    internal_error: Option<String>,
     /// (con_name, type_name, variant_index, total, is_enum)
     constructors: Vec<(String, String, usize, usize, bool)>,
     /// Newtype constructor names (identity at runtime)
@@ -290,6 +298,7 @@ impl CodeGen {
             expr_depth: 0,
             depth_error: None,
             name_collision_error: None,
+            internal_error: None,
             constructors: Vec::new(), newtypes: Vec::new(),
             forward_declared: std::collections::HashSet::new(),
             concrete_vars: std::collections::HashSet::new(),
@@ -554,6 +563,9 @@ pub(crate) fn generate(
         return Err(msg);
     }
     if let Some(msg) = cg.name_collision_error {
+        return Err(msg);
+    }
+    if let Some(msg) = cg.internal_error {
         return Err(msg);
     }
     opt::run(&mut stmts, opt_disable);

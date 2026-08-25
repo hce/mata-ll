@@ -504,13 +504,21 @@ impl CodeGen {
             scope.restore_keeping_locals(self);
             // The forward-declaration seeding predicted this outcome from the
             // same predicate; a mismatch means an earlier-emitted reference
-            // already chose its force wrongly.
-            debug_assert_eq!(
-                is_concrete,
-                Self::slot_always_whnf(func),
-                "slot_always_whnf out of sync with function_stmts for '{}'",
-                func.name
-            );
+            // already chose its force wrongly — a wrongly-unforced (or
+            // doubly-forced) value in already-emitted code, so this must
+            // fail the compile in release builds too (F11), not just
+            // debug-assert.
+            if is_concrete != Self::slot_always_whnf(func) && self.internal_error.is_none() {
+                self.internal_error = Some(format!(
+                    "internal: slot_always_whnf out of sync with function_stmts \
+                     for '{}' (predicted {}, emitted {}) — an already-emitted \
+                     reference chose its force from the wrong belief; please \
+                     report this",
+                    func.name,
+                    Self::slot_always_whnf(func),
+                    is_concrete
+                ));
+            }
             if is_concrete {
                 self.concrete_vars.insert(lua_name);
             } else {
@@ -709,16 +717,23 @@ impl CodeGen {
     /// an unperformed action, so it fails loudly here. A name whose
     /// duplicate definitions classify differently is exempt (and never
     /// predicted direct-perform; see `direct_perform_conflicts`).
-    fn check_direct_perform_prediction(&self, func: &TFunction, emitted: Option<usize>) {
+    fn check_direct_perform_prediction(&mut self, func: &TFunction, emitted: Option<usize>) {
         if self.direct_perform_conflicts.contains(&func.name) {
             return;
         }
-        debug_assert_eq!(
-            self.direct_perform_fns.get(&func.name).copied(),
-            emitted,
-            "direct_perform_arity out of sync with function_stmts for '{}'",
-            func.name
-        );
+        let predicted = self.direct_perform_fns.get(&func.name).copied();
+        // A mismatch on the predicted-but-not-emitted side is a dropped
+        // runner around an unperformed action in already-emitted call
+        // sites: fail the compile in release builds too (F11).
+        if predicted != emitted && self.internal_error.is_none() {
+            self.internal_error = Some(format!(
+                "internal: direct_perform_arity out of sync with \
+                 function_stmts for '{}' (predicted {:?}, emitted {:?}) — \
+                 already-emitted tail sites chose bare-vs-runner from the \
+                 wrong belief; please report this",
+                func.name, predicted, emitted
+            ));
+        }
     }
 
     /// `demanded` seeds which where-bound names are provably forced by the
@@ -975,5 +990,39 @@ impl CodeGen {
 
         stmts.push(Stmt::Function { target, params, body: Block(body) });
         stmts
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// F11: an emitter-agreement violation must fail the compile in every
+    /// build profile — it records `internal_error` (surfaced as an error by
+    /// `generate`), not just a debug assertion.
+    #[test]
+    fn direct_perform_disagreement_records_internal_error() {
+        let mut cg = CodeGen::new();
+        let func = TFunction {
+            name: "act".into(),
+            ty: crate::types::Ty::Unit,
+            clauses: vec![],
+            specialized: false,
+            dict_params: vec![],
+            derived_strict: false,
+        };
+        // Predicted direct-perform at arity 1, but emission decided otherwise.
+        cg.direct_perform_fns.insert("act".into(), 1);
+        cg.check_direct_perform_prediction(&func, None);
+        let msg = cg.internal_error.expect("disagreement must be recorded");
+        assert!(msg.contains("direct_perform_arity"), "{msg}");
+        assert!(msg.contains("'act'"), "{msg}");
+
+        // A name whose duplicate definitions classify differently is exempt.
+        let mut cg = CodeGen::new();
+        cg.direct_perform_fns.insert("act".into(), 1);
+        cg.direct_perform_conflicts.insert("act".into());
+        cg.check_direct_perform_prediction(&func, None);
+        assert!(cg.internal_error.is_none(), "conflicted names are exempt");
     }
 }
