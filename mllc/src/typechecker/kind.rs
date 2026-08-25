@@ -455,6 +455,27 @@ impl Checker {
                             ctx.to_string(),
                         );
                     }
+                } else if let Some((params, _)) = self.type_aliases.get(name) {
+                    // A type alias is likewise a compile-time expansion, not
+                    // a first-class constructor: applied to fewer arguments
+                    // than its parameters it cannot expand, and it used to
+                    // pass through as an OPAQUE Ty::Con — surfacing later
+                    // as a baffling "Cannot unify 'Pair2 Int' with
+                    // '(Int, Int)'" instead of an error at the source.
+                    // (MORE arguments than parameters is fine: the
+                    // expansion may itself be a constructor to apply,
+                    // `type M = Maybe` then `M Int`.)
+                    let arity = params.len();
+                    if nargs < arity {
+                        let name = name.clone();
+                        self.push_error_ctx(
+                            DiagnosticKind::Other(format!(
+                                "Type alias '{}' is applied to {} of its {} argument{} here. An alias is expanded at compile time, so it needs all its arguments before it can stand for a type. GHC rejects partially applied type synonyms for the same reason",
+                                name, nargs, arity, if arity == 1 { "" } else { "s" }
+                            )),
+                            ctx.to_string(),
+                        );
+                    }
                 }
             }
             Type::Arrow(a, b, _) => {

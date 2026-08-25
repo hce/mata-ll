@@ -63,6 +63,32 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A partially applied type ALIAS cannot expand and used to pass
+// through as an opaque Ty::Con, surfacing later as a baffling
+// "Cannot unify" (or slipping through entirely where a higher-kinded
+// argument made the kinds line up). The saturation walk now covers
+// aliases like type families; over-application stays legal (the
+// expansion may itself be a constructor: `type M = Maybe`, `M Int`).
+#[test]
+fn partial_type_alias_application_is_rejected() {
+    let source = "type Pair2 a b = (a, b)\n\n\
+                  data Wrap f = MkWrap (f Int)\n\n\
+                  w :: Wrap (Pair2 Int)\n\
+                  w = MkWrap (3, 4)\n\n\
+                  main :: IO ()\nmain = case w of\n    MkWrap p -> print p\n";
+    expect_compile_error(source, &[], &[
+        "Type alias 'Pair2' is applied to 1 of its 2 arguments",
+        "expanded at compile time",
+    ]);
+    let control = "type Pair2 a b = (a, b)\ntype M = Maybe\n\n\
+                   ok :: Pair2 Int Bool -> Int\n\
+                   ok p = case p of\n    (n, _) -> n\n\n\
+                   wrapped :: M Int\nwrapped = Just 4\n\n\
+                   main :: IO ()\nmain = do\n    print (ok (7, True))\n    print wrapped\n";
+    compile(control, Path::new("."), &[])
+        .expect("saturated aliases and over-applied nullary aliases must stay legal");
+}
+
 // An ascription's type variables are RIGID: `(5 :: a)` claims the
 // expression has EVERY type `a`, which only a genuinely polymorphic
 // expression satisfies — GHC rejects it. Regression: the variables were
