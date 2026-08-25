@@ -59,3 +59,8 @@ main = do
     assert (drop (-1) [1, 2, 3] == [1, 2, 3]) "drop negative n"
     assert (drop 0 [1, 2, 3] == [1, 2, 3]) "drop zero"
     assert (drop 5 [1, 2] == []) "drop past the end"
+
+    -- foldl' forces the accumulator it PASSES (the old spelling seq'd
+    -- one `f acc x` thunk and passed a different, unforced one)
+    assert (foldl' (\acc x -> acc + x) 0 [1, 2, 3, 4] == 10) "foldl' sums"
+    assert (foldl' (\acc x -> acc * 2 + x) 1 [1, 0, 1] == 13) "foldl' order"

@@ -107,4 +107,8 @@ sortBy cmp list = go (map (\x -> [x]) list)
 
 foldl' :: (b -> a -> b) -> b -> [a] -> b
 foldl' _ acc [] = acc
-foldl' f acc (x:xs) = seq (f acc x) (foldl' f (f acc x) xs)
+-- The seq'd value and the passed accumulator must be the SAME
+-- binding: two textual `f acc x` are two separate thunks, so the old
+-- spelling forced one and passed the other UNforced — no strictness
+-- (the accumulator chain still grew) and the work done twice.
+foldl' f acc (x:xs) = let z = f acc x in seq z (foldl' f z xs)
