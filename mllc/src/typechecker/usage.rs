@@ -334,9 +334,13 @@ fn scale_usage(u: Usage, factor: Factor, cause: &Option<String>) -> Usage {
 /// once but may skip the right one, which exactly-once cannot allow for a
 /// tracked variable.) The Prelude cannot be redefined (the typechecker
 /// rejects interference with it), so matching by name is reliable.
+/// `!!` cannot be here: indexing DROPS every element but the selected
+/// one, and under exactly-once dropping the rest of a `%1` list is a
+/// leak — it now charges ω through its ordinary type, which rejects a
+/// tracked list (the same reasoning that removed `fst`/`snd` below).
 const CONSUME_ONCE_OPS: &[&str] = &[
     "+", "-", "*", "/", "^", "==", "/=", "<", ">", "<=", ">=",
-    "<>", "++", "!!", "div", "mod", "rem", "quot",
+    "<>", "++", "div", "mod", "rem", "quot",
 ];
 
 /// Prelude functions that consume their argument exactly once, by the same

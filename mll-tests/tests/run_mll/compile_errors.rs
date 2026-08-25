@@ -63,6 +63,24 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// `!!` was in the consume-once operator whitelist, but indexing DROPS
+// every element of the list except the selected one — under
+// exactly-once, "consuming" a %1 list by indexing leaks the rest. It
+// now charges through its ordinary unrestricted type, rejecting a
+// tracked list (the fst/snd reasoning).
+#[test]
+fn linear_list_indexing_is_rejected() {
+    expect_compile_error(
+        "pickOne :: [Int] %1 -> Int\npickOne xs = xs !! 1\n\nmain :: IO ()\nmain = print (pickOne [1, 2, 3])\n",
+        &[],
+        &[
+            "'xs' must be consumed exactly once",
+            "'!!'",
+            "does not promise to consume it exactly once",
+        ],
+    );
+}
+
 // A %1 value consumed only in a LATER guard's condition is consumed
 // zero times on the path where an earlier guard matches — a leak the
 // sequential guard accounting silently accepted (the one
