@@ -414,8 +414,19 @@ fn blocked_stmt(s: &Stmt, params: &HashSet<String>) -> bool {
             };
             target_hit || ps.iter().any(|p| params.contains(p))
         }
-        Stmt::Local(..)
-        | Stmt::Return(_)
+        // A body `local` re-declaring a parameter name shadows it for the
+        // rest of its block. The rename walk itself narrows correctly at
+        // the shadow, but the tail-update MultiAssign (tailloop's
+        // rewrite_tails, ioloop's rewrite_run_tail_sites) is inserted
+        // AFTER the rename and targets the real parameters BY NAME —
+        // inside the shadow it would assign the local instead (`k = k`),
+        // and the loop's carried state would never advance: an infinite
+        // loop where the recursion terminated. No current emission
+        // redeclares a parameter name (`_argN`/`_wargN` are
+        // namespace-separated from user-derived locals), so blocking here
+        // costs nothing reachable today.
+        Stmt::Local(names, _) => names.iter().any(|n| params.contains(n)),
+        Stmt::Return(_)
         | Stmt::Expr(_)
         | Stmt::If { .. }
         | Stmt::Do(_)
@@ -736,6 +747,41 @@ mod tests {
         let (out, rewrote) = converted(stmts);
         assert!(rewrote);
         assert!(out.contains("a, b = _w1, _w0"), "{out}");
+    }
+
+    #[test]
+    fn shadowing_local_blocks_conversion() {
+        // A body `local k` re-declares the parameter name: the rename walk
+        // narrows correctly at the shadow, but the tail-update MultiAssign
+        // is inserted AFTER the rename and targets the real parameter BY
+        // NAME — inside the shadow it would assign the local instead, so
+        // the loop's carried state would never advance (infinite loop
+        // where the recursion terminated). The conversion must decline.
+        // No current emission redeclares a parameter name (compiler
+        // parameter temps `_argN`/`_wargN` are namespace-separated from
+        // user-derived locals), so this blocks nothing reachable today —
+        // it keeps the pass sound against any emission that does.
+        let stmts = vec![
+            Stmt::Local(vec!["go".into()], None),
+            Stmt::Function {
+                target: FnTarget::Assigned("go".into()),
+                params: vec!["k".into()],
+                body: Block(vec![Stmt::If {
+                    cond: Expr::name("k"),
+                    then_b: Block(vec![Stmt::Return(Expr::lit("0"))]),
+                    elseifs: vec![],
+                    else_b: Some(Block(vec![
+                        Stmt::Local(
+                            vec!["k".into()],
+                            Some(Expr::binop("-", Expr::name("k"), Expr::lit("1"))),
+                        ),
+                        Stmt::Return(Expr::call_named("go", vec![Expr::name("k")])),
+                    ])),
+                }]),
+            },
+        ];
+        let (out, rewrote) = converted(stmts);
+        assert!(!rewrote, "shadowing local must block the conversion:\n{out}");
     }
 
     #[test]
