@@ -6,10 +6,13 @@
 //! extra argument that `$` and `.` emission introduces, so that position is
 //! never judged always-cheap. `find_inline_candidates` selects small pure
 //! functions (single clause, simple patterns, no guards, no where bindings,
-//! cheap body, not self-recursive, no constructor applications) for
-//! call-site inlining by inline.rs, recording per-parameter occurrence
-//! counts so the call site can refuse substitutions that would duplicate
-//! argument work.
+//! cheap body, not self-recursive) for call-site inlining by inline.rs,
+//! recording per-parameter occurrence counts so the call site can refuse
+//! substitutions that would duplicate argument work. (A constructor-
+//! application gate used to exclude ctor bodies for a long-obsolete
+//! expr_ast reason — and missed Lambda/If bodies anyway; the TIR-level
+//! substitution the inliner performs handles constructors like any other
+//! expression, so the gate is gone.)
 
 use crate::tir::*;
 use super::CodeGen;
@@ -262,9 +265,6 @@ impl CodeGen {
             if !all_simple { continue; }
             if !Self::is_cheap(clause.plain_body()) { continue; }
             if expr_references_name(clause.plain_body(), &func.name) { continue; } // recursive
-            // Only inline bodies that are arithmetic/comparison expressions,
-            // not constructor applications (which need special expr_ast handling)
-            if Self::body_has_constructors(clause.plain_body()) { continue; }
             let params: Vec<String> = clause.patterns.iter().map(|p| {
                 if let TPattern::Var(name, _) = p { name.clone() } else { unreachable!() }
             }).collect();
@@ -280,20 +280,6 @@ impl CodeGen {
                 .map(|p| count_name_occurrences(clause.plain_body(), p))
                 .collect();
             self.inline_fns.insert(func.name.clone(), (params, clause.plain_body().clone(), occ_counts));
-        }
-    }
-
-    /// Check if an expression contains constructor applications (Con nodes).
-    /// These need special handling in expr_ast (e.g. : → __mll_cons) that
-    /// expr_subst_ast doesn't replicate, so we skip inlining for them.
-    pub(super) fn body_has_constructors(expr: &TExpr) -> bool {
-        match &expr.kind {
-            TExprKind::Con(_) => true,
-            TExprKind::App(f, a) => Self::body_has_constructors(f) || Self::body_has_constructors(a),
-            TExprKind::InfixApp { lhs, rhs, .. } => Self::body_has_constructors(lhs) || Self::body_has_constructors(rhs),
-            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::body_has_constructors(inner),
-            TExprKind::Tuple(elems) => elems.iter().any(Self::body_has_constructors),
-            _ => false,
         }
     }
 }
