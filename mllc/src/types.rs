@@ -354,21 +354,44 @@ impl Ty {
 
     /// Apply a substitution to this type
     pub fn apply_subst(&self, subst: &Subst) -> Ty {
+        self.apply_subst_d(subst, 0)
+    }
+
+    /// `apply_subst` with a RE-ENTRY depth: `depth` counts how many times a
+    /// variable resolved to a structured image whose contents are then
+    /// substituted again. Every per-unification occurs check keeps a single
+    /// substitution acyclic, but COMPOSING two individually-sound
+    /// substitutions can produce a self-referential image (`{a → [b]}`
+    /// composed with `{b → [a]}` flattens to `a → [[a]]`), on which the
+    /// re-entry recursion never terminates — a native stack overflow
+    /// instead of any diagnostic (F7). Past the cap the image is returned
+    /// unsubstituted: only an already-inconsistent (infinite-type)
+    /// substitution can reach it, and stopping degrades to a stale type
+    /// where continuing crashed the process. Structural recursion into a
+    /// type's own children keeps the current depth — the children are
+    /// smaller, so only variable resolution can grow the walk.
+    fn apply_subst_d(&self, subst: &Subst, depth: u32) -> Ty {
+        /// Re-entry cap: generous against deep legitimate chains (the
+        /// var→var chain below already caps at 100), tiny against the
+        /// calibrated 2 GiB compiler stack.
+        const REENTRY_CAP: u32 = 512;
         match self {
             Ty::Con(_) | Ty::Unit | Ty::Promoted(_) | Ty::Skolem(..) => self.clone(),
             Ty::Var(v) => {
                 // Follow substitution chain iteratively to avoid stack overflow
                 // from cyclic or long transitive mappings (e.g., a→b, b→c, c→Int)
                 let mut current = v;
-                let mut depth = 0;
+                let mut chain = 0;
                 loop {
                     if let Some(ty) = subst.lookup(current) {
                         if let Ty::Var(next) = ty {
-                            depth += 1;
-                            if depth > 100 { return ty.clone(); }
+                            chain += 1;
+                            if chain > 100 { return ty.clone(); }
                             current = next;
+                        } else if depth >= REENTRY_CAP {
+                            return ty.clone();
                         } else {
-                            return ty.apply_subst(subst);
+                            return ty.apply_subst_d(subst, depth + 1);
                         }
                     } else {
                         return Ty::Var(current.clone());
@@ -376,24 +399,24 @@ impl Ty {
                 }
             }
             Ty::Arrow(a, b, m) => Ty::arrow_m(
-                a.apply_subst(subst), b.apply_subst(subst), subst.resolve_mult(*m)),
-            Ty::App(a, b) => Ty::app(a.apply_subst(subst), b.apply_subst(subst)),
-            Ty::List(a) => Ty::list(a.apply_subst(subst)),
-            Ty::IO(a) => Ty::io(a.apply_subst(subst)),
+                a.apply_subst_d(subst, depth), b.apply_subst_d(subst, depth), subst.resolve_mult(*m)),
+            Ty::App(a, b) => Ty::app(a.apply_subst_d(subst, depth), b.apply_subst_d(subst, depth)),
+            Ty::List(a) => Ty::list(a.apply_subst_d(subst, depth)),
+            Ty::IO(a) => Ty::io(a.apply_subst_d(subst, depth)),
             Ty::LuaIO(s, a) => {
                 let new_s = if let Some(Ty::Var(sv)) = subst.lookup(s) {
                     sv.clone()
                 } else {
                     s.clone()
                 };
-                Ty::lua_io(new_s, a.apply_subst(subst))
+                Ty::lua_io(new_s, a.apply_subst_d(subst, depth))
             }
             Ty::Forall(v, inner) => {
                 let mut restricted = subst.clone();
                 restricted.remove(v);
-                Ty::Forall(v.clone(), Box::new(inner.apply_subst(&restricted)))
+                Ty::Forall(v.clone(), Box::new(inner.apply_subst_d(&restricted, depth)))
             }
-            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| e.apply_subst(subst)).collect()),
+            Ty::Tuple(elems) => Ty::Tuple(elems.iter().map(|e| e.apply_subst_d(subst, depth)).collect()),
         }
     }
 
@@ -1984,5 +2007,38 @@ impl fmt::Display for Diagnostic {
             write!(f, "\n  note: {}", note)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod apply_subst_tests {
+    use super::*;
+
+    /// F7: composing two individually occurs-safe substitutions can
+    /// produce a self-referential image ({a → [b]} ∘ {b → [a]} flattens to
+    /// a → [[a]]); applying such a substitution must TERMINATE (re-entry
+    /// cap) instead of overflowing the native stack. The result on an
+    /// inconsistent (infinite-type) substitution is unspecified beyond
+    /// termination.
+    #[test]
+    fn cyclic_composed_subst_application_terminates() {
+        let a = TyVar { name: "a".into(), id: 1 };
+        let b = TyVar { name: "b".into(), id: 2 };
+        let s1 = Subst::singleton(a.clone(), Ty::list(Ty::Var(b.clone())));
+        let s2 = Subst::singleton(b.clone(), Ty::list(Ty::Var(a.clone())));
+        let composed = s1.compose(&s2);
+        // The composed image is self-referential; this call used to recurse
+        // without bound.
+        let _ = Ty::Var(a.clone()).apply_subst(&composed);
+        let _ = Ty::Var(b).apply_subst(&composed);
+
+        // A legitimate deep-but-finite chain still resolves fully.
+        let c = TyVar { name: "c".into(), id: 3 };
+        let s = Subst::singleton(a.clone(), Ty::list(Ty::Var(c.clone())))
+            .compose(&Subst::singleton(c, Ty::Con("Int".into())));
+        assert_eq!(
+            format!("{}", Ty::Var(a).apply_subst(&s)),
+            format!("{}", Ty::list(Ty::Con("Int".into())))
+        );
     }
 }
