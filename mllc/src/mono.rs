@@ -2048,7 +2048,15 @@ impl Monomorphizer {
                 expr.kind
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                if let Some(class_name) = self.method_to_class.get(&op).cloned()
+                // `/=` is not a registered method — Eq registers only `==`,
+                // and the specialization path (mono_expr_node's InfixApp arm)
+                // resolves it via `==` and wraps the call in `not`. The
+                // dictionary rewrite must mirror that: left unrewritten, a
+                // dict-form `x /= y` reached codegen as a raw InfixApp and
+                // compiled to Lua's `~=` — table identity, ignoring the
+                // instance's `==` entirely (F6d).
+                let lookup_op = if op == "/=" { "==" } else { op.as_str() };
+                if let Some(class_name) = self.method_to_class.get(lookup_op).cloned()
                     && class_to_dict.contains_key(&class_name)
                         && self.is_polymorphic(&lhs.ty) {
                             let op_ty = Ty::arrow(
@@ -2056,12 +2064,25 @@ impl Monomorphizer {
                                 Ty::arrow(rhs.ty.clone(), ty.clone()),
                             );
                             let access_kind = self.dict_method_use(
-                                &class_name, &op, &op_ty, class_to_dict, env);
+                                &class_name, lookup_op, &op_ty, class_to_dict, env);
                             let dict_access = TExpr::new(access_kind, Ty::Unit);
                             let lhs = self.rewrite_dict_expr(*lhs, func_name, class_to_dict, env);
                             let rhs = self.rewrite_dict_expr(*rhs, func_name, class_to_dict, env);
                             let app1 = TExpr::new(TExprKind::App(Box::new(dict_access), Box::new(lhs)), Ty::Unit);
-                            return TExpr::new(TExprKind::App(Box::new(app1), Box::new(rhs)), ty);
+                            let eq_app = TExpr::new(TExprKind::App(Box::new(app1), Box::new(rhs)), ty.clone());
+                            if op == "/=" {
+                                // SOURCE spelling ("not") — same rationale
+                                // as the specialization arm: name-keyed
+                                // tables key the source name.
+                                return TExpr::new(
+                                    TExprKind::App(
+                                        Box::new(TExpr::new(TExprKind::Var("not".to_string()), Ty::Unit)),
+                                        Box::new(eq_app),
+                                    ),
+                                    ty,
+                                );
+                            }
+                            return eq_app;
                         }
                 // An InfixApp whose operator is not a dict method: generic
                 // descent below, like every other structural node.
@@ -2492,8 +2513,43 @@ impl Monomorphizer {
                 })
                 .or_else(|| InstHead::of(concrete_ty).and_then(|h| {
                     self.instance_methods.get(&(method_name.clone(), h)).cloned()
-                }))
-                .unwrap_or_else(|| method_name.clone());
+                }));
+            let impl_name = match impl_name {
+                Some(n) => n,
+                None => {
+                    // Last resort: the bare method name. Legitimate only
+                    // when a definition actually exists under it — `show`
+                    // is shape-generic at runtime, and a method that is a
+                    // top-level polymorphic function has a generic copy to
+                    // land on. Anything else would emit a reference that
+                    // resolves to NOTHING (`==` sanitizes to
+                    // `_usr_eq__eq_`, defined nowhere) and crash with a
+                    // nil call at first use — report the compile error
+                    // instead of emitting it (F6a).
+                    if method_name != "show" && !self.poly_fns.contains_key(method_name) {
+                        self.errors.push(Diagnostic {
+                            kind: DiagnosticKind::Other(format!(
+                                "cannot build the '{}' dictionary for type '{}': \
+                                 method '{}' has no implementation at this type",
+                                class_name, concrete_ty, method_name)),
+                            context: self.cur_ctx.clone(),
+                            span: self.cur_span,
+                            file: None,
+                            notes: vec![format!(
+                                "the enclosing function is compiled with dictionary \
+                                 passing (it exceeded the specialization limit or is \
+                                 polymorphically recursive), which needs every class \
+                                 method resolved to a real implementation when a \
+                                 dictionary is built; '{}' resolved to nothing at \
+                                 '{}', and emitting the bare method name would crash \
+                                 at runtime",
+                                method_name, concrete_ty)],
+                            baseline: false,
+                        });
+                    }
+                    method_name.clone()
+                }
+            };
             method_impls.push((method_name.clone(), impl_name));
         }
         let spec = SpecKind::Dict {
@@ -2677,7 +2733,140 @@ impl Monomorphizer {
             // head-keyed static dictionary (builtin classes whose runtime
             // methods are shape-generic, e.g. show).
         }
+        if class_name == "Eq" && !ty.free_vars().is_empty()
+            && let Some(dict) = self.structural_eq_dict(ty, class_to_dict, env)
+        {
+            return dict;
+        }
         self.build_concrete_dict(class_name, ty)
+    }
+
+    /// A composed Eq dictionary for a structural type over still-polymorphic
+    /// elements — `[a]`, `Maybe a`, tuples — inside a dictionary-passing
+    /// body. The builtin container instances have no `instances` entry for
+    /// the branch above to compose from (the specialized path generates
+    /// their eq on demand — generate_list_eq & co.), so the fallback chain
+    /// bottomed out at build_concrete_dict's raw method name: an
+    /// `_usr_eq__eq_` reference that exists nowhere — a nil-call crash at
+    /// the first recursive use (F6a). Builds a DictCtor over a synthesized
+    /// dictform function (one per container shape, memoized) that threads
+    /// the element dictionaries' `==` through the same runtime helpers the
+    /// specialized path uses (`__mll_list_eq`/`__mll_maybe_eq`, inline
+    /// tuple projection).
+    fn structural_eq_dict(
+        &mut self,
+        ty: &Ty,
+        class_to_dict: &HashMap<String, String>,
+        env: &HashMap<(String, String), String>,
+    ) -> Option<TExpr> {
+        let bool_ty = Ty::Con("Bool".into());
+        // Canonical memo shape (element types erased — the dictform is
+        // generic over them) plus the element types this use needs dicts for.
+        let (shape, elems): (Ty, Vec<Ty>) = match ty {
+            Ty::List(e) => (Ty::List(Box::new(Ty::Unit)), vec![(**e).clone()]),
+            Ty::App(f, e) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") =>
+                (Ty::app(Ty::Con("Maybe".into()), Ty::Unit), vec![(**e).clone()]),
+            Ty::Tuple(es) if !es.is_empty() =>
+                (Ty::Tuple(vec![Ty::Unit; es.len()]), es.clone()),
+            _ => return None,
+        };
+        let key = ("==__dictform".to_string(), shape.clone());
+        let fname = if let Some(n) = self.generated_impls.get(&key) {
+            n.clone()
+        } else {
+            let fname = self.mangle_name("eq_dictform", &shape);
+            self.generated_impls.insert(key, fname.clone());
+            let n_dicts = elems.len();
+            let dict_params: Vec<String> =
+                (0..n_dicts).map(|i| format!("__d{i}")).collect();
+            let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+            let eq_of = |d: &str| TExpr::new(
+                TExprKind::DictAccess {
+                    dict_param: d.to_string(),
+                    method_name: "==".to_string(),
+                },
+                Ty::Unit,
+            );
+            let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
+                TExprKind::App(Box::new(f), Box::new(a)), t);
+            let body = match &shape {
+                Ty::Tuple(es) => {
+                    // (d0.== (tup_get 1 a) (tup_get 1 b)) && … per field.
+                    let mut acc: Option<TExpr> = None;
+                    for i in 0..es.len() {
+                        let proj = |v: &str| TExpr::new(
+                            TExprKind::SpecCall {
+                                original: "__mll_tup_get".to_string(),
+                                specialized: SpecKind::TupGet(i + 1),
+                                args: vec![var(v)],
+                            },
+                            Ty::Unit,
+                        );
+                        let cmp = app(
+                            app(eq_of(&dict_params[i]), proj("_a"), Ty::Unit),
+                            proj("_b"),
+                            bool_ty.clone(),
+                        );
+                        acc = Some(match acc {
+                            None => cmp,
+                            Some(prev) => TExpr::new(
+                                TExprKind::InfixApp {
+                                    op: "&&".to_string(),
+                                    lhs: Box::new(prev),
+                                    rhs: Box::new(cmp),
+                                },
+                                bool_ty.clone(),
+                            ),
+                        });
+                    }
+                    acc.expect("tuple shapes are non-empty")
+                }
+                Ty::List(_) => app(
+                    app(app(var("__mll_list_eq"), eq_of("__d0"), Ty::Unit),
+                        var("_a"), Ty::Unit),
+                    var("_b"), bool_ty.clone(),
+                ),
+                _ => app(
+                    app(app(var("__mll_maybe_eq"), eq_of("__d0"), Ty::Unit),
+                        var("_a"), Ty::Unit),
+                    var("_b"), bool_ty.clone(),
+                ),
+            };
+            let param_tys: Vec<Ty> = vec![Ty::Unit; n_dicts + 2];
+            let mut patterns: Vec<TPattern> = dict_params.iter()
+                .map(|d| TPattern::Var(d.clone(), Ty::Unit)).collect();
+            patterns.push(TPattern::Var("_a".to_string(), Ty::Unit));
+            patterns.push(TPattern::Var("_b".to_string(), Ty::Unit));
+            self.generated.push(TFunction {
+                name: fname.clone(),
+                ty: Ty::fun(&param_tys, bool_ty),
+                clauses: vec![TClause {
+                    span: None,
+                    patterns,
+                    guards: vec![],
+                    body: Some(body),
+                    where_binds: vec![],
+                }],
+                specialized: true,
+                dict_params: vec![],
+                derived_strict: false,
+            });
+            fname
+        };
+        let sub_dicts: Vec<TExpr> = elems.iter()
+            .map(|e| self.build_dict_expr("Eq", e, class_to_dict, env))
+            .collect();
+        Some(TExpr::new(
+            TExprKind::SpecCall {
+                original: "__dict_Eq".to_string(),
+                specialized: SpecKind::DictCtor {
+                    class: "Eq".to_string(),
+                    methods: vec![("==".to_string(), fname)],
+                },
+                args: sub_dicts,
+            },
+            Ty::Unit,
+        ))
     }
 
     /// Make sure dictionary-form methods exist for the parameterized

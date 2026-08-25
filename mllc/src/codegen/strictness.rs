@@ -35,6 +35,14 @@ impl CodeGen {
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
+            // A dictionary-parameter method read: dictionaries are total
+            // constructions (method tables of function values, never
+            // thunked — DictCall emits its dict args eagerly on the same
+            // ground), so the field read is WHNF-and-pure. Left lazy, the
+            // thunk wrapper reached runtime helpers that call the method
+            // value directly (`__mll_list_eq(elem_eq, …)` — a table where
+            // a function is expected).
+            TExprKind::DictAccess { .. } => true,
             TExprKind::Var(name) => var_ok(name),
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap_with(inner, var_ok),
             TExprKind::Tuple(elems) => elems.iter().all(|e| Self::is_cheap_with(e, var_ok)),

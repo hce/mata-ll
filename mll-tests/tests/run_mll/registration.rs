@@ -165,6 +165,10 @@ mll_test!(self_referential_caf, "self_referential_caf.mll");
 mll_test!(lazy_take_zip, "lazy_take_zip.mll");
 mll_test!(dict, "dict.mll");
 mll_test!(dict_passing_first_class, "dict_passing_first_class.mll");
+// Dictionary-passing at structural element types (F6a/F6d): `/=` routes
+// through the dict's `==` (not Lua `~=`), and [a]/Maybe a/tuple dicts are
+// composed from the element dictionary instead of a raw method name.
+mll_test!(dict_structural_eq, "dict_structural_eq.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
 mll_test!(tuples, "tuples.mll");
