@@ -652,7 +652,27 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
         col,
     });
 
-    Ok(tokens)
+    // A line whose only content is a BLOCK comment contributes an Indent
+    // but no tokens (the Indent is pushed before the `{-` is seen, and the
+    // comment then swallows the rest of the line). Comments are whitespace
+    // to layout — GHC's algorithm never sees them — but a stray Indent
+    // pair broke the operator-continuation check ("Unexpected token '+' at
+    // top level"). Drop every Indent that introduces no token on its line:
+    // its successor is another Indent, a Newline, or the end of the stream.
+    let mut cleaned: Vec<Located> = Vec::with_capacity(tokens.len());
+    for (i, t) in tokens.iter().enumerate() {
+        if matches!(t.token, Token::Indent(_))
+            && matches!(
+                tokens.get(i + 1).map(|n| &n.token),
+                None | Some(Token::Indent(_)) | Some(Token::Newline) | Some(Token::EOF)
+            )
+        {
+            continue;
+        }
+        cleaned.push(t.clone());
+    }
+
+    Ok(cleaned)
 }
 
 /// Does a `--` line comment start at `pos`? Two dashes begin a comment

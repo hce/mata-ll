@@ -203,6 +203,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_infix_method_defs, "cases", "infix_method_defs.mll"),
         (ghc_oracle_import_operator_list, "cases", "import_operator_list.mll"),
         (ghc_oracle_newtype_nextline_brace, "cases", "newtype_nextline_brace.mll"),
+        (ghc_oracle_block_comment_layout, "cases", "block_comment_layout.mll"),
         (ghc_oracle_diamond_import, "cases", "diamond_import.mll"),
         (ghc_oracle_dict, "cases", "dict.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),

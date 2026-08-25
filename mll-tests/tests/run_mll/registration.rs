@@ -225,6 +225,7 @@ mll_test!(dot_spacing, "dot_spacing.mll");
 mll_test!(infix_method_defs, "infix_method_defs.mll");
 mll_test!(import_operator_list, "import_operator_list.mll");
 mll_test!(newtype_nextline_brace, "newtype_nextline_brace.mll");
+mll_test!(block_comment_layout, "block_comment_layout.mll");
 mll_test!(record_brace_next_line, "record_brace_next_line.mll");
 mll_test!(enum_range, "enum_range.mll");
 mll_test!(read_typeclass, "read_typeclass.mll");
