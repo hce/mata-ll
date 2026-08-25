@@ -63,6 +63,24 @@ main = do
     compile(source, Path::new("."), &[]).expect("numeric negation must stay legal");
 }
 
+// A digit of the wrong base directly after a radix literal (`0o18`,
+// `0b102`) can only be a mistake: lexing it as two adjacent numbers
+// would surface as an application and a baffling type error, so it is
+// a loud lexer error naming the base's digit range. (The accept side —
+// hex/octal/binary/underscore literals — is pinned by the
+// radix_literals corpus case.)
+#[test]
+fn wrong_base_digit_in_radix_literal_is_rejected() {
+    expect_compile_error("main :: IO ()\nmain = print (0o18 :: Int)\n", &[], &[
+        "Invalid digit '8' in octal literal",
+        "0-7",
+    ]);
+    expect_compile_error("main :: IO ()\nmain = print (0b102 :: Int)\n", &[], &[
+        "Invalid digit '2' in binary literal",
+        "0 or 1",
+    ]);
+}
+
 // A GADT match at a RIGID scrutinee index must require every
 // constructor: `f :: G b -> …` — the caller chooses b, so `f MkBool`
 // is a legal call. Regression: the coverage filter dropped constructors

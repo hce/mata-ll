@@ -3,6 +3,30 @@ use std::fmt;
 use crate::ast::Span;
 use crate::types::Diagnostic;
 
+/// Convert MSB-first radix digits to their decimal-digit string, exactly
+/// (schoolbook bignum over base-10 cells): `BigIntLit` carries DECIMAL
+/// digits — that is what the runtime's `__int_from_decimal` parses — so a
+/// hex/octal/binary literal past `maxBound :: Int` must be re-based here.
+fn radix_to_decimal(digits: &[u32], base: u32) -> String {
+    let mut dec: Vec<u32> = vec![0]; // least-significant decimal digit first
+    for &d in digits {
+        let mut carry = d;
+        for cell in dec.iter_mut() {
+            let v = *cell * base + carry;
+            *cell = v % 10;
+            carry = v / 10;
+        }
+        while carry > 0 {
+            dec.push(carry % 10);
+            carry /= 10;
+        }
+    }
+    dec.iter()
+        .rev()
+        .map(|d| char::from_digit(*d, 10).unwrap())
+        .collect()
+}
+
 /// A lex diagnostic at a known source location. Built on the same
 /// [`Diagnostic`] machinery as parse and type errors, so lex errors render
 /// their span (`at line:col`) and `note:` lines the same way instead of
@@ -337,11 +361,95 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
 
         // Number literal
         if ch.is_ascii_digit() {
-            let start = pos;
-            while pos < chars.len() && chars[pos].is_ascii_digit() {
-                pos += 1;
-                col += 1;
+            // Consume a run of digits of `base`, with NumericUnderscores
+            // separators (GHC2021): an underscore run is part of the
+            // literal exactly when a digit of the base follows it, so
+            // `1_000_000` and `0xFF_FF` lex whole while `1_` is the
+            // literal `1` followed by the identifier `_` (maximal munch).
+            let digit_run = |pos: &mut usize, col: &mut usize, base: u32| {
+                loop {
+                    if *pos < chars.len() && chars[*pos].to_digit(base).is_some() {
+                        *pos += 1;
+                        *col += 1;
+                        continue;
+                    }
+                    if *pos < chars.len() && chars[*pos] == '_' {
+                        let mut j = *pos;
+                        while j < chars.len() && chars[j] == '_' {
+                            j += 1;
+                        }
+                        if j < chars.len() && chars[j].to_digit(base).is_some() {
+                            *col += j - *pos;
+                            *pos = j;
+                            continue;
+                        }
+                    }
+                    break;
+                }
+            };
+
+            // Radix prefix: 0x/0X hexadecimal, 0o/0O octal (Haskell 2010
+            // §2.5), 0b/0B binary (BinaryLiterals, in GHC2021). The prefix
+            // counts only when at least one digit of the base follows —
+            // otherwise maximal munch makes `0x` the literal 0 and an
+            // identifier `x`, exactly as before. These used to be missed
+            // entirely, so `0xFF` silently lexed as the APPLICATION
+            // `0 xFF` and surfaced as a baffling type error.
+            if ch == '0' && pos + 1 < chars.len() {
+                let base = match chars[pos + 1] {
+                    'x' | 'X' => Some(16u32),
+                    'o' | 'O' => Some(8),
+                    'b' | 'B' => Some(2),
+                    _ => None,
+                };
+                if let Some(base) = base
+                    && pos + 2 < chars.len()
+                    && chars[pos + 2].to_digit(base).is_some()
+                {
+                    let marker = chars[pos + 1];
+                    pos += 2;
+                    col += 2;
+                    let dig_start = pos;
+                    digit_run(&mut pos, &mut col, base);
+                    // A DECIMAL digit right after the run can only be a
+                    // digit of the wrong base (`0o18`, `0b102`): loudly
+                    // reject it instead of lexing two adjacent numbers
+                    // that surface as an application.
+                    if pos < chars.len() && chars[pos].is_ascii_digit() {
+                        let base_name = match base { 2 => "binary", 8 => "octal", _ => "hexadecimal" };
+                        return Err(err_at(
+                            format!(
+                                "Invalid digit '{}' in {} literal: '0{}…' digits must be {}",
+                                chars[pos], base_name, marker,
+                                match base { 2 => "0 or 1", 8 => "0-7", _ => "0-9 or a-f" },
+                            ),
+                            tok_line, tok_col,
+                        ));
+                    }
+                    let digits: Vec<u32> = chars[dig_start..pos]
+                        .iter()
+                        .filter_map(|c| c.to_digit(base))
+                        .collect();
+                    // Accumulate into i64; past maxBound :: Int the literal
+                    // is an Integer (BigIntLit carries DECIMAL digits, so
+                    // convert the radix digits — exact schoolbook bignum).
+                    let mut small: Option<i64> = Some(0);
+                    for &d in &digits {
+                        small = small.and_then(|v| {
+                            v.checked_mul(base as i64)?.checked_add(d as i64)
+                        });
+                    }
+                    let token = match small {
+                        Some(n) => Token::IntLit(n),
+                        None => Token::BigIntLit(radix_to_decimal(&digits, base)),
+                    };
+                    tokens.push(Located { token, line: tok_line, col: tok_col });
+                    continue;
+                }
             }
+
+            let start = pos;
+            digit_run(&mut pos, &mut col, 10);
             let mut is_float = false;
             // Fractional part: `.` digit+ . A dot NOT followed by a digit is
             // not part of the number (so `1..3` stays a range and `x.field`
@@ -350,10 +458,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                 is_float = true;
                 pos += 1; // skip dot
                 col += 1;
-                while pos < chars.len() && chars[pos].is_ascii_digit() {
-                    pos += 1;
-                    col += 1;
-                }
+                digit_run(&mut pos, &mut col, 10);
             }
             // Exponent: (e|E) [+|-] digit+ (Haskell 2010 §2.5). Maximal munch
             // needs at least one exponent digit; otherwise the `e` begins an
@@ -371,13 +476,11 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                         pos += 1;
                         col += 1;
                     }
-                    while pos < chars.len() && chars[pos].is_ascii_digit() {
-                        pos += 1;
-                        col += 1;
-                    }
+                    digit_run(&mut pos, &mut col, 10);
                 }
             }
-            let s: String = chars[start..pos].iter().collect();
+            // Underscore separators are lexed but carry no value.
+            let s: String = chars[start..pos].iter().filter(|c| **c != '_').collect();
             if is_float {
                 let n: f64 = s.parse().map_err(|e| {
                     err_at(format!("Invalid number '{}': {}", s, e), tok_line, tok_col)
