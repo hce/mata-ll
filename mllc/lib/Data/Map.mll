@@ -94,19 +94,22 @@ listAppend :: [a] -> [a] -> [a]
 listAppend [] ys = ys
 listAppend (x:xs) ys = x : listAppend xs ys
 
+-- intersection/difference probe the SECOND map directly (hmMember, a hash
+-- lookup) per entry of the first — O(n) overall. The previous spelling
+-- materialized `keys m2` and ran `elem` per entry, O(n*m) (F15).
 intersection :: (Eq k, Hashable k) => Map k v -> Map k v -> Map k v
-intersection m1 m2 = fromList (filterByKeys (keys m2) (toList m1))
+intersection m1 m2 = fromList (keepMember m2 (toList m1))
 
-filterByKeys :: Eq k => [k] -> [(k, v)] -> [(k, v)]
-filterByKeys _ [] = []
-filterByKeys ks ((k, v):rest) = if elem k ks then (k, v) : filterByKeys ks rest else filterByKeys ks rest
+keepMember :: Hashable k => Map k v -> [(k, v)] -> [(k, v)]
+keepMember _ [] = []
+keepMember m ((k, v):rest) = if member k m then (k, v) : keepMember m rest else keepMember m rest
 
 difference :: (Eq k, Hashable k) => Map k v -> Map k v -> Map k v
-difference m1 m2 = fromList (filterNotByKeys (keys m2) (toList m1))
+difference m1 m2 = fromList (dropMember m2 (toList m1))
 
-filterNotByKeys :: Eq k => [k] -> [(k, v)] -> [(k, v)]
-filterNotByKeys _ [] = []
-filterNotByKeys ks ((k, v):rest) = if elem k ks then filterNotByKeys ks rest else (k, v) : filterNotByKeys ks rest
+dropMember :: Hashable k => Map k v -> [(k, v)] -> [(k, v)]
+dropMember _ [] = []
+dropMember m ((k, v):rest) = if member k m then dropMember m rest else (k, v) : dropMember m rest
 
 null :: Map k v -> Bool
 null m = size m == 0

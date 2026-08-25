@@ -33,6 +33,15 @@ main = do
     assert (M.lookup "a" u == Just 1) "union is left-biased"
     assert (M.keys m == ["a", "b", "c"]) "keys sorted"
     assert (M.values m == [1, 2, 3]) "values by sorted key"
+    -- intersection / difference (F15: hash-membership probes, O(n); the
+    -- old keys-list `elem` spelling was O(n*m))
+    let ma = M.fromList [("a", 1), ("b", 2), ("c", 3)]
+    let mb = M.fromList [("b", 20), ("c", 30), ("d", 40)]
+    assert (M.toList (M.intersection ma mb) == [("b", 2), ("c", 3)]) "intersection keeps left values"
+    assert (M.toList (M.difference ma mb) == [("a", 1)]) "difference drops right keys"
+    assert (M.null (M.intersection ma M.empty)) "intersection with empty is empty"
+    assert (M.size (M.difference ma M.empty) == 3) "difference with empty keeps all"
+
     -- Prelude's colliding names still work unqualified in the same module.
     assert (map (\x -> x + 1) [1, 2, 3] == [2, 3, 4]) "Prelude map still works"
     assert (null ([] :: [Int])) "Prelude null still works"
