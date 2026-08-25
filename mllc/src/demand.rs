@@ -20,6 +20,7 @@ use std::collections::{HashMap, HashSet};
 use crate::tir::*;
 
 /// Per-function strictness info produced by the analysis.
+#[derive(Clone)]
 pub struct DemandInfo {
     /// function name -> Vec<bool> indexed by parameter position.
     /// true = parameter is forced on every code path (strict).
@@ -1569,7 +1570,7 @@ fn map_meet(a: &DemandMap, b: &DemandMap) -> DemandMap {
 
 /// Structured demand rows for every analyzed function, plus the
 /// whole-program deep-result set. See the section comment above.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct Rows {
     /// name → per-parameter demand when the function runs and its result
     /// is demanded to WHNF. `None` = parameter stays lazy.

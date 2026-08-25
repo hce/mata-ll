@@ -130,6 +130,7 @@ struct BigLitPool {
     index: std::collections::HashMap<String, usize>,
 }
 
+#[derive(Clone)]
 struct CodeGen {
     /// Current `expr_ast` recursion depth, bounded by
     /// `crate::MAX_NESTING_DEPTH`. Upstream passes (the parser's and the
@@ -274,8 +275,13 @@ struct CodeGen {
     /// return table must export it — even when there are no other exports.
     embed_var_export: bool,
     /// Hoisted big-integer literals (see `BigLitPool`). Interior mutability
-    /// because `collect_pattern_conditions` interns while holding `&self`.
-    big_lits: std::cell::RefCell<BigLitPool>,
+    /// because `collect_pattern_conditions` interns while holding `&self`;
+    /// behind an `Rc` so `new_sub`'s clone SHARES the module's one pool —
+    /// there is exactly one emitted `__mll_biglit` table, and every interned
+    /// index must resolve in it (a sub-generator once carried its own pool,
+    /// so a guard's `__mll_biglit[N]` indexed the wrong table — nil or a
+    /// colliding literal).
+    big_lits: std::rc::Rc<std::cell::RefCell<BigLitPool>>,
 }
 
 impl CodeGen {
@@ -313,7 +319,7 @@ impl CodeGen {
             direct_perform_fns: std::collections::HashMap::new(),
             direct_perform_conflicts: std::collections::HashSet::new(),
             embed_var_export: false,
-            big_lits: std::cell::RefCell::new(BigLitPool::default()),
+            big_lits: std::rc::Rc::new(std::cell::RefCell::new(BigLitPool::default())),
         }
     }
 
@@ -470,37 +476,25 @@ impl CodeGen {
         }
     }
 
-    /// Create a sub-CodeGen that shares this generator's lookup tables but
-    /// whose state changes are discarded (used for guard conditions — see
-    /// `guard_cond_ast` in pattern.rs).
+    /// Create a sub-CodeGen for guard conditions (see `guard_cond_ast` in
+    /// pattern.rs): a TOTAL clone of this generator, so every lookup table
+    /// and analysis result the enclosing scope has — spill state, inline
+    /// candidates, demand rows, always-cheap params, direct-perform
+    /// arities — applies inside the guard exactly as in the clause body,
+    /// and a field added to CodeGen later is inherited by construction. The
+    /// previous hand-maintained copy list silently dropped `big_lits` (a
+    /// guard's `__mll_biglit[N]` indexed the wrong pool) and the analysis
+    /// tables (guards never inlined or saw strictness). Scope-bookkeeping
+    /// changes the sub makes (locals, concreteness) die with it; two
+    /// deliberate departures from a plain clone:
+    /// - `big_lits` sits behind an `Rc`, so the clone SHARES the module's
+    ///   one literal pool — a guard's literal must intern in the pool the
+    ///   emitted `__mll_biglit` table is built from.
+    /// - `cur_result_demand` resets to `Head`: a guard condition is never
+    ///   the current function's result (see the field's contract).
     fn new_sub(&self) -> CodeGen {
-        let mut sub = CodeGen::new();
-        sub.constructors = self.constructors.clone();
-        sub.newtypes = self.newtypes.clone();
-        sub.fn_table = self.fn_table.clone();
-        sub.concrete_vars = self.concrete_vars.clone();
-        sub.record_accessors = self.record_accessors.clone();
-        sub.luadict_con_fields = self.luadict_con_fields.clone();
-        sub.luadict_field_key = self.luadict_field_key.clone();
-        sub.luadict_type_fields = self.luadict_type_fields.clone();
-        sub.luadict_enum_tag = self.luadict_enum_tag.clone();
-        sub.top_level_names = self.top_level_names.clone();
-        sub.local_vars = self.local_vars.clone();
-        // Spill state comes along with local_vars: a guard condition routed
-        // through the sub-generator references locals of the enclosing
-        // scope, and a spilled one must resolve to its slot lvalue — without
-        // this the sub emitted the bare (undeclared -> nil global) name.
-        sub.var_slots = self.var_slots.clone();
-        sub.local_count = self.local_count;
-        sub.var_slots_next = self.var_slots_next;
-        sub.var_table_emitted = self.var_table_emitted;
-        sub.spill_table = self.spill_table.clone();
-        sub.spill_depth = self.spill_depth;
-        // Scoped local-function rows apply to everything emitted within the
-        // same clause, including guard conditions and bodies routed through
-        // a sub-generator.
-        sub.local_strict_params = self.local_strict_params.clone();
-        sub.local_demand_rows = self.local_demand_rows.clone();
+        let mut sub = self.clone();
+        sub.cur_result_demand = crate::demand::Demand::Head;
         sub
     }
 

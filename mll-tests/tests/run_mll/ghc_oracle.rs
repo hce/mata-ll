@@ -170,6 +170,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_data_types, "cases", "data_types.mll"),
         (ghc_oracle_exponent_op, "cases", "exponent_op.mll"),
         (ghc_oracle_integer_bignum, "cases", "integer_bignum.mll"),
+        (ghc_oracle_big_lit_guards, "cases", "big_lit_guards.mll"),
+        (ghc_oracle_big_lit_guard_only, "cases", "big_lit_guard_only.mll"),
         (ghc_oracle_datakinds, "cases", "datakinds.mll"),
         (ghc_oracle_default_methods, "cases", "default_methods.mll"),
         (ghc_oracle_default_methods_ops, "cases", "default_methods_ops.mll"),

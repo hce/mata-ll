@@ -411,6 +411,11 @@ mll_test!(inline_sharing, "inline_sharing.mll");
 // against GHC, this runs their in-program assertions directly.
 mll_test!(exponent_op, "exponent_op.mll");
 mll_test!(integer_bignum, "integer_bignum.mll");
+// Big-integer literals inside guard conditions: the guard sub-generator must
+// intern into the module's ONE shared __mll_biglit pool (F1 — it once carried
+// its own discarded pool, so guards read a colliding slot or a nil table).
+mll_test!(big_lit_guards, "big_lit_guards.mll");
+mll_test!(big_lit_guard_only, "big_lit_guard_only.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
