@@ -151,6 +151,14 @@ struct BigLitPool {
 
 #[derive(Clone)]
 struct CodeGen {
+    /// The `_eta` padding parameters of the function whose clause matrix is
+    /// currently being emitted (multi-clause/guarded emission only — the
+    /// single-clause path applies its padding inline). `match_tail_stmts`
+    /// takes it for each clause/guard RESULT and applies the padding to the
+    /// emitted value (see `eta_call_ast`), keeping it empty during the body
+    /// walk so a nested `case` inside the clause body does not re-apply it.
+    /// Empty whenever no eta-padded matrix is being emitted (G9).
+    clause_eta_params: Vec<String>,
     /// Current `expr_ast` recursion depth, bounded by
     /// `crate::MAX_NESTING_DEPTH`. Upstream passes (the parser's and the
     /// typechecker's own depth guards) already bound the structural depth of
@@ -314,6 +322,7 @@ struct CodeGen {
 impl CodeGen {
     fn new() -> Self {
         CodeGen {
+            clause_eta_params: Vec::new(),
             expr_depth: 0,
             depth_error: None,
             name_collision_error: None,
@@ -523,6 +532,11 @@ impl CodeGen {
     fn new_sub(&self) -> CodeGen {
         let mut sub = self.clone();
         sub.cur_result_demand = crate::demand::Demand::Head;
+        // Emission-position state, not module state: a sub-generator emits
+        // sub-expressions (guard conditions, thunk bodies), never the
+        // enclosing function's clause RESULTS — inheriting the padding
+        // would apply it to a nested match's branches (G9).
+        sub.clause_eta_params.clear();
         sub
     }
 

@@ -192,6 +192,11 @@ mll_test!(spec_limit_wide, "spec_limit_wide.mll");
 // (Show + Eq dicts in declaration order), and an outside partial
 // application of a dict-passing function at a concrete type.
 mll_test!(dict_mutual_fallback, "dict_mutual_fallback.mll");
+// G9: eta padding is consumed — multi-clause/guarded clause results are
+// applied to the padding parameters, and local functions are padded to
+// their full arrow count like top-level ones (Lua discards arguments
+// beyond the parameter list, so a saturated flat call lost them).
+mll_test!(eta_padding_consumed, "eta_padding_consumed.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
 mll_test!(tuples, "tuples.mll");

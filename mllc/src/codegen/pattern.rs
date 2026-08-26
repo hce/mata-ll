@@ -80,10 +80,22 @@ impl CodeGen {
     /// convention), a nested do/if/case flattens further, and a saturated
     /// self call may return bare (see action_run_ast).
     fn match_tail_stmts(&mut self, body: &TExpr, tails: Option<bool>) -> Vec<Stmt> {
-        match tails {
+        // The enclosing function's eta padding, if any (clause_eta_params —
+        // set only by the multi-clause/guarded function emitters): TAKEN
+        // for the duration of the body walk, so a nested match inside the
+        // body (a `case` expression) does not re-apply it, and restored for
+        // the sibling clauses. Each clause/guard result is applied to the
+        // padding — the consuming half of the N-ary convention (G9).
+        let eta = std::mem::take(&mut self.clause_eta_params);
+        let stmts = match tails {
             Some(inside_action) => self.bind_chain_block(body, inside_action).0,
+            None if !eta.is_empty() => {
+                vec![Stmt::Return(self.eta_call_ast(body, &eta))]
+            }
             None => vec![Stmt::Return(self.tail_ast(body, false))],
-        }
+        };
+        self.clause_eta_params = eta;
+        stmts
     }
 
     pub(super) fn pattern_match_block(&mut self, params: &[String], clauses: &[TClause]) -> Block {

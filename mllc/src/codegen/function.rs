@@ -584,28 +584,10 @@ impl CodeGen {
                 let demanded = self.clause_demanded(clause);
                 body.extend(self.where_binds_stmts(clause, demanded));
                 if eta_count > 0 {
-                    // Eta-expand: apply extra params to the body. When the
-                    // emission is a function literal (a lambda, or the
-                    // parenthesized closure a partial application builds), it
-                    // is WHNF by construction — a __force wrapper would be a
-                    // no-op the peephole cannot collapse, because the callee
-                    // position needs the grouping the force call happens to
-                    // provide (Lua cannot call a bare `function … end`).
-                    // Emit the paren grouping directly instead. Every other
-                    // shape keeps the force: the callee must be a function
-                    // value, not a thunk.
-                    let body_e = self.expr_ast(clause.plain_body());
-                    let callee = match body_e {
-                        Expr::Func(ps, b) => Expr::paren(Expr::Func(ps, b)),
-                        Expr::Paren(inner) if matches!(inner.as_ref(), Expr::Func(..)) => {
-                            Expr::Paren(inner)
-                        }
-                        e => Expr::force(e),
-                    };
-                    body.push(Stmt::Return(Expr::call(
-                        callee,
-                        eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
-                    )));
+                    // Eta-expand: apply the extra params to the body (see
+                    // eta_call_ast for the force-vs-paren callee shapes).
+                    let call = self.eta_call_ast(clause.plain_body(), &eta_params);
+                    body.push(Stmt::Return(call));
                 } else if Self::returns_st(&func.ty) {
                     // ST-returning function: wrap body in a closure so the
                     // function returns an ST action (deferred computation).
@@ -663,6 +645,12 @@ impl CodeGen {
         let mut params: Vec<String> = (0..num_params).map(|i| format!("_arg{}", i)).collect();
         let eta_params_multi: Vec<String> = (0..eta_count).map(|i| format!("_eta{}", i)).collect();
         params.extend(eta_params_multi.iter().cloned());
+        // Eta padding must be CONSUMED, not just declared: every clause and
+        // guard result is applied to the padding parameters by
+        // match_tail_stmts (via clause_eta_params — the single-clause arm
+        // above does the same inline; this arm's clause bodies used to
+        // ignore them, G9).
+        self.clause_eta_params = eta_params_multi.clone();
         let mut all_params = dict_param_names.clone();
         all_params.extend(params.iter().cloned());
         let target = self.fn_target(&lua_name);
@@ -706,6 +694,7 @@ impl CodeGen {
             }
         }
         body.extend(self.pattern_match_block(&params, clauses).0);
+        self.clause_eta_params.clear();
         let stmts = vec![
             Stmt::Function { target, params: all_params, body: Block(body) },
             Stmt::Raw(String::new()),
@@ -714,6 +703,38 @@ impl CodeGen {
         self.concrete_vars.insert(lua_name);
         self.check_direct_perform_prediction(func, emitted_direct_perform);
         stmts
+    }
+
+    /// Apply the `_eta` padding parameters to an emitted clause-result
+    /// expression — the consuming half of the N-ary convention
+    /// (`count_arrows` in util.rs): the emitted Lua function's parameter
+    /// list is padded to the full arrow count and every call site passes
+    /// outstanding arguments IN THE SAME flat call, and Lua silently
+    /// discards arguments beyond the parameter list — so a body that
+    /// returns a function must be applied to the padding here (G9:
+    /// `pick True h = h` at four arrows returned `h` unapplied, and a
+    /// saturated `pick True f 1 2` printed a function value).
+    ///
+    /// When the emission is a function literal (a lambda, or the
+    /// parenthesized closure a partial application builds), it is WHNF by
+    /// construction — a `__force` wrapper would be a no-op the peephole
+    /// cannot collapse, because the callee position needs the grouping the
+    /// force call happens to provide (Lua cannot call a bare
+    /// `function … end`). Every other shape keeps the force: the callee
+    /// must be a function value, not a thunk.
+    pub(super) fn eta_call_ast(&mut self, body: &TExpr, eta_params: &[String]) -> Expr {
+        let body_e = self.expr_ast(body);
+        let callee = match body_e {
+            Expr::Func(ps, b) => Expr::paren(Expr::Func(ps, b)),
+            Expr::Paren(inner) if matches!(inner.as_ref(), Expr::Func(..)) => {
+                Expr::Paren(inner)
+            }
+            e => Expr::force(e),
+        };
+        Expr::call(
+            callee,
+            eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
+        )
     }
 
     /// The direct-perform twin of the `slot_always_whnf` agreement check:
@@ -910,9 +931,25 @@ impl CodeGen {
             i += 1;
         }
 
-        let params: Vec<String> = (0..num_params)
+        // Local functions obey the same N-ary convention as top-level ones
+        // (`count_arrows`): every call site — the partial-application
+        // closure and the saturated flat call alike — passes outstanding
+        // arguments IN THE SAME call, so a local whose body returns a
+        // function must be padded to its full arrow count and its results
+        // applied to the padding. Unpadded, Lua discarded the extra
+        // arguments (G9: a where-local `go True h = h` called `go b h 1 2`
+        // returned `h` unapplied).
+        let eta_count = clauses.first()
+            .and_then(|c| c.body.as_ref())
+            .map(|b| count_arrows(&b.ty))
+            .unwrap_or(0);
+        let mut params: Vec<String> = (0..num_params)
             .map(|j| format!("_warg{}", j))
             .collect();
+        let eta_params: Vec<String> = (0..eta_count)
+            .map(|j| format!("_eta{}", j))
+            .collect();
+        params.extend(eta_params.iter().cloned());
         let sname = sanitize_name(name);
         let mut stmts = Vec::new();
         // Name was forward-declared; use assignment form. The lvalue is the
@@ -951,7 +988,13 @@ impl CodeGen {
                         body.push(decl.stmt(Expr::name(format!("_warg{}", j))));
                     }
                 }
-                body.push(Stmt::Return(self.expr_ast(clause.plain_body())));
+                if eta_params.is_empty() {
+                    body.push(Stmt::Return(self.expr_ast(clause.plain_body())));
+                } else {
+                    // Consume the padding (see eta_call_ast / G9).
+                    let call = self.eta_call_ast(clause.plain_body(), &eta_params);
+                    body.push(Stmt::Return(call));
+                }
             } else {
                 for (j, pat) in clause.patterns.iter().enumerate() {
                     if pat.forces_scrutinee() {
@@ -962,7 +1005,13 @@ impl CodeGen {
                         self.concrete_vars.insert(format!("_warg{}", j));
                     }
                 }
+                // Save/restore, not set/clear: this emitter runs from
+                // clause_intro_stmts of an ENCLOSING clause matrix, whose
+                // own padding must survive for its match_tail_stmts.
+                let saved_eta = std::mem::replace(
+                    &mut self.clause_eta_params, eta_params.clone());
                 body.extend(self.pattern_match_block(&params, &clauses).0);
+                self.clause_eta_params = saved_eta;
             }
         } else {
             // Same entry-force rule as the top-level multi-clause emitter:
@@ -991,7 +1040,11 @@ impl CodeGen {
                     self.concrete_vars.insert(format!("_warg{}", j));
                 }
             }
+            // Save/restore — same rationale as the single-clause arm above.
+            let saved_eta = std::mem::replace(
+                &mut self.clause_eta_params, eta_params.clone());
             body.extend(self.pattern_match_block(&params, &clauses).0);
+            self.clause_eta_params = saved_eta;
         }
         spill.exit(self);
         scope.restore(self);
