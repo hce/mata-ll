@@ -84,6 +84,13 @@ mod util;
 
 pub(crate) use names::is_lua_keyword;
 
+/// Public for the strictness-contract check in mll-tests (G5): the harness
+/// probes runtime functions in emitted Lua by the names codegen actually
+/// gives them (`bsLength` → `__mll_bs[1]`, `error` → `error_`, …), taken
+/// from the compiler's own mapping instead of a hand-kept copy. Not API.
+#[doc(hidden)]
+pub use names::sanitize_name;
+
 /// Would the emitter build this expression eagerly (bare + concrete) rather
 /// than as a memoizing thunk? The single home of that predicate
 /// (`CodeGen::is_cheap`), exposed for the split pass, which must agree with
@@ -91,6 +98,18 @@ pub(crate) use names::is_lua_keyword;
 /// mirror there once drifted (it counted `^` as a Lua-native operator).
 pub(crate) fn is_cheap(e: &crate::tir::TExpr) -> bool {
     CodeGen::is_cheap(e)
+}
+
+/// The CONTEXT-FREE floor of `is_cheap_to_force`: cheap-to-force with no
+/// variable counted as provably WHNF. This is exactly the set of argument
+/// expressions `arg_ast` evaluates in place at EVERY call site regardless
+/// of context, which is what demand analysis' `arg_emitted_eagerly` mirror
+/// must match — its hand-kept copy drifted twice (it admitted `^`, a
+/// Prelude call, and non-constructor `$` applications; both over-claimed
+/// eagerness for shapes `arg_ast` thunks). Exposed like `is_cheap` above so
+/// the demand pass derives the predicate instead of mirroring it (G5).
+pub(crate) fn is_cheap_context_free(e: &crate::tir::TExpr) -> bool {
+    CodeGen::is_cheap_with(e, &|_| false)
 }
 use runtime::ondemand_prelude;
 
@@ -632,4 +651,92 @@ pub(crate) fn stamp_violations(module: &TModule) -> Vec<String> {
         return Vec::new();
     }
     opt::run_refuted(&mut stmts)
+}
+
+/// G5 mirror-contract tests: the pieces of the demand/codegen agreement
+/// that are checkable without running Lua. (The behavioral half — bombing
+/// every runtime body per the strictness masks — lives in mll-tests'
+/// strictness_contract.rs.)
+#[cfg(test)]
+mod contract_tests {
+    use super::*;
+    use crate::types::Ty;
+
+    fn e(kind: TExprKind) -> TExpr {
+        TExpr::new(kind, Ty::Unit)
+    }
+
+    /// Every method codegen inlines as a Lua binary operator must be marked
+    /// strict by demand analysis — an inlined `a < b` forces both operands
+    /// at the call site, and a missing row hides them from the analysis
+    /// (the hot-loop-counter regression). Candidates are generated from
+    /// (op family x primitive type), not twin-listed.
+    #[test]
+    fn primitive_binop_methods_cover_the_operator_table() {
+        let tys = ["Int", "Number", "String", "Bool", "ByteString", "Unit"];
+        let mut candidates: Vec<String> = Vec::new();
+        for t in tys {
+            candidates.push(format!("eq_{t}"));
+            for op in ["lt", "gt", "le", "ge", "max", "min", "compare"] {
+                candidates.push(format!("ord_{op}__{t}"));
+            }
+        }
+        candidates.push("semigroup_String".to_string());
+        for name in &candidates {
+            if names::primitive_method_lua_op(name).is_some() {
+                assert!(
+                    crate::demand::PRIMITIVE_BINOP_METHODS.contains(&name.as_str()),
+                    "codegen inlines '{name}' as a Lua operator, but demand \
+                     analysis does not list it in PRIMITIVE_BINOP_METHODS — \
+                     its operands are hidden from the analysis"
+                );
+            }
+        }
+        // The reverse: every demand-side entry is a real primitive method
+        // (catches a typo that would silently claim strictness for nothing).
+        for name in crate::demand::PRIMITIVE_BINOP_METHODS {
+            assert!(
+                candidates.iter().any(|c| c == name),
+                "PRIMITIVE_BINOP_METHODS entry '{name}' is not a known \
+                 primitive method name"
+            );
+        }
+    }
+
+    /// The context-free eager floor (what demand analysis'
+    /// `arg_emitted_eagerly` now derives from) rejects the two shapes the
+    /// hand-kept mirror wrongly admitted: `^` is a Prelude call and a
+    /// non-constructor `$` application calls its left side — `arg_ast`
+    /// thunks both, so claiming their demands would over-claim.
+    #[test]
+    fn eager_floor_rejects_application_shapes() {
+        let lam = e(TExprKind::Lambda {
+            params: vec![("x".into(), Ty::Unit)],
+            body: Box::new(e(TExprKind::Var("x".into()))),
+        });
+        let lit = |n| e(TExprKind::Lit(TLiteral::Integer(n)));
+        let dollar = e(TExprKind::InfixApp {
+            op: "$".into(),
+            lhs: Box::new(lam),
+            rhs: Box::new(lit(3)),
+        });
+        assert!(!is_cheap_context_free(&dollar),
+            "a non-constructor `$` application is thunked by arg_ast");
+        let pow = e(TExprKind::InfixApp {
+            op: "^".into(),
+            lhs: Box::new(lit(2)),
+            rhs: Box::new(lit(3)),
+        });
+        assert!(!is_cheap_context_free(&pow),
+            "`^` is a Prelude function call, thunked by arg_ast");
+        // Controls: what the floor DOES accept.
+        let add = e(TExprKind::InfixApp {
+            op: "+".into(),
+            lhs: Box::new(lit(1)),
+            rhs: Box::new(lit(2)),
+        });
+        assert!(is_cheap_context_free(&add));
+        assert!(!is_cheap_context_free(&e(TExprKind::Var("x".into()))),
+            "a bare variable may be a suspended bottom");
+    }
 }

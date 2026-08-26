@@ -56,7 +56,11 @@ pub struct DemandInfo {
 ///     slice through a thunk).
 ///   * ST array primitives — strict in the array and index (always forced),
 ///     lazy in the stored value (matching Haskell's `newArray`/`writeArray`).
-const STRICT_BUILTINS: &[(&str, &[bool])] = &[
+/// Public for the strictness-contract check in mll-tests (G5), which calls
+/// each runtime body with a bomb thunk per position and asserts the mask —
+/// strict positions must force, lazy positions must not. Not API.
+#[doc(hidden)]
+pub const STRICT_BUILTINS: &[(&str, &[bool])] = &[
     ("bsLength", &[true]),
     ("bsIndex", &[true, true]),
     ("bsSub", &[true, true, true]),
@@ -72,14 +76,23 @@ const STRICT_BUILTINS: &[(&str, &[bool])] = &[
     ("bsGetU32LE", &[true, true]),
     ("bsGetI8", &[true, true]),
     ("bsGetI16LE", &[true, true]),
-    ("bsPutI16LE", &[true, true, true]),
+    // One argument: `bsPutI16LE :: Int -> ByteString` (prelude.rs). The
+    // mask claimed three positions for years; only position 0 was ever
+    // consulted, so the phantom entries were inert — caught by the G5
+    // behavioral contract check, which pins mask arity to the runtime.
+    ("bsPutI16LE", &[true]),
     ("bsToString", &[true]),
     ("bsFromString", &[true]),
     // ST array primitives. An array and an index are always forced (you cannot
-    // allocate/read/write/measure through a thunk); the *stored value* stays
-    // lazy, matching Haskell's `newArray`/`writeArray`. These masks mirror the
-    // fused `__mll_st_*` masks in codegen so the run-once and closure emission
-    // paths agree. `modifySTArray`'s function argument is forced (it is called).
+    // allocate/read/write/measure through a thunk). The *stored value* /
+    // *initializer* positions stay `false` because BUILDING the first-class
+    // `__mll_ma_*` action forces nothing, and a built-but-never-run action
+    // must not force anything — but note the RUN does force them on store
+    // (the WHNF-slot invariant; the fused `__mll_st_*` masks in codegen mark
+    // them strict for exactly that reason). GHC's boxed arrays store thunks
+    // even on write, so the run-time force is a recorded deviation — pinned,
+    // as ForcedOnRun, by the strictness-contract harness in mll-tests.
+    // `modifySTArray`'s function argument is forced (it is called).
     ("newSTArray", &[true, false]),
     ("readSTArray", &[true, true]),
     ("writeSTArray", &[true, true, false]),
@@ -104,7 +117,11 @@ const STRICT_BUILTINS: &[(&str, &[bool])] = &[
 /// operands from the analysis (the comparison survives to TIR as
 /// `App(App(Var("ord_ge__Int"), a), b)`), which is what kept hot-loop
 /// counters lazy (see experiments/tracker/PERF-REGRESSION.md).
-const PRIMITIVE_BINOP_METHODS: &[&str] = &[
+/// Public for the strictness-contract checks (G5): the in-crate test that
+/// diffs this list against codegen's operator table, and the mll-tests
+/// harness that bombs each runtime fallback's operands. Not API.
+#[doc(hidden)]
+pub const PRIMITIVE_BINOP_METHODS: &[&str] = &[
     "eq_Int", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
     "ord_lt__Int", "ord_lt__Number", "ord_lt__String", "ord_lt__ByteString",
     "ord_gt__Int", "ord_gt__Number", "ord_gt__String", "ord_gt__ByteString",
@@ -135,7 +152,10 @@ const PRIMITIVE_BINOP_METHODS: &[&str] = &[
 ///
 /// `map`/`filter`/`zipWith` force their FUNCTION argument too (`f = __force(f)`
 /// runs before the nil check), so that position is strict as well.
-const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
+/// Public for the strictness-contract check in mll-tests (G5) — see
+/// [`STRICT_BUILTINS`]. Not API.
+#[doc(hidden)]
+pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     // show forces its value to WHNF first thing (`x = __force(x)`); each
     // type-directed shim is an unconditional `return show(x)` or forces
     // its argument itself (show_ByteString, show_HashMap).
@@ -1095,39 +1115,22 @@ fn collect_rebound_names(expr: &TExpr, out: &mut HashSet<String>) {
 ///
 /// Since the change to a bottom-safe weighing in `gen_arg`, that floor no
 /// longer includes a bare variable (a non-concrete variable is passed as its
-/// raw thunk-or-value, not forced) nor a trapping `div`/`mod`/`%` (which may be
-/// ⊥). What remains is genuinely total: literals, nullary constructors,
-/// lambdas, and non-trapping arithmetic / constructor / tuple / if structure
-/// built from those. (Constructors and tuples force nothing when built, so
-/// their demand is empty regardless; they are included only for structural
-/// completeness.)
+/// raw thunk-or-value, not forced). What remains is genuinely total:
+/// literals, nullary constructors, lambdas, dictionary reads, and
+/// non-trapping arithmetic / constructor / tuple / if structure built from
+/// those. (Constructors and tuples force nothing when built, so their
+/// demand is empty regardless.)
 fn arg_emitted_eagerly(expr: &TExpr) -> bool {
-    match &expr.kind {
-        TExprKind::Lit(_) | TExprKind::Con(_)
-        | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
-        // A bare variable is NOT forced eagerly by gen_arg any more.
-        TExprKind::Var(_) => false,
-        TExprKind::Paren(inner) | TExprKind::Negate(inner) => arg_emitted_eagerly(inner),
-        TExprKind::Tuple(elems) => elems.iter().all(arg_emitted_eagerly),
-        TExprKind::InfixApp { op, lhs, rhs } => {
-            // Trapping ops (div/mod/%) are excluded — gen_arg thunks them.
-            matches!(op.as_str(), "+" | "-" | "*" | "/" | "^" | "==" | "/=" | "~="
-                | "<" | ">" | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ".." | "$" | ".")
-                && arg_emitted_eagerly(lhs) && arg_emitted_eagerly(rhs)
-        }
-        TExprKind::App(func, arg) => {
-            let mut f = expr;
-            while let TExprKind::App(inner, _) = &f.kind { f = inner; }
-            matches!(&f.kind, TExprKind::Con(_))
-                && arg_emitted_eagerly(arg) && arg_emitted_eagerly(func)
-        }
-        TExprKind::If { cond, then_branch, else_branch } => {
-            arg_emitted_eagerly(cond)
-                && arg_emitted_eagerly(then_branch)
-                && arg_emitted_eagerly(else_branch)
-        }
-        _ => false,
-    }
+    // DERIVED, not mirrored: this is codegen's own context-free floor of
+    // `is_cheap_to_force` (see `codegen::is_cheap_context_free`) — the
+    // arguments `arg_ast` evaluates in place at every call site. A
+    // hand-kept structural copy lived here and drifted twice: it admitted
+    // `^` (a Prelude call, thunked by arg_ast) and non-constructor `$`
+    // applications (likewise thunked) — both over-claimed eagerness,
+    // latent only because the floor rejects bare variables, so every
+    // accepted expression is closed (up to lambda bodies, which contribute
+    // no demand) and its demand map was empty either way.
+    crate::codegen::is_cheap_context_free(expr)
 }
 
 /// Captured-demand info for the where-bound local functions in scope:

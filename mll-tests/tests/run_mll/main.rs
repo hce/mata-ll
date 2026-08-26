@@ -137,3 +137,4 @@ mod ffi;
 mod runtime;
 mod linear;
 mod ghc_oracle;
+mod strictness_contract;

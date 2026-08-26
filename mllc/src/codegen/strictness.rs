@@ -31,7 +31,7 @@ impl CodeGen {
     /// - `is_cheap_to_force` (var_ok = provably WHNF): "safe to evaluate
     ///   eagerly" — evaluating the expression now cannot force a suspended
     ///   computation, so it cannot raise or diverge where GHC would not.
-    pub(super) fn is_cheap_with(expr: &TExpr, var_ok: &dyn Fn(&str) -> bool) -> bool {
+    pub(crate) fn is_cheap_with(expr: &TExpr, var_ok: &dyn Fn(&str) -> bool) -> bool {
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,

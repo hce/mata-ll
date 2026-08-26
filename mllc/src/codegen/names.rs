@@ -103,7 +103,7 @@ pub(super) fn lua_field_assign(name: &str) -> String {
     if lua_bare_key_ok(name) { format!("{} = ", name) } else { format!("{} = ", lua_key_string(name)) }
 }
 
-pub(super) fn sanitize_name(name: &str) -> String {
+pub fn sanitize_name(name: &str) -> String {
     match name {
         "main" => "__run".to_string(),
         "return" => "return_".to_string(),
