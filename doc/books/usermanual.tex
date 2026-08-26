@@ -69,7 +69,9 @@
 \title{\textbf{MATA-LL User's Manual}\\[6pt]
   \large A Haskell-Inspired Language Targeting Lua}
 \author{MATA-LL Project}
-\date{July 2026}
+% The title date derives from the build (\month/\year), so a
+% rebuilt manual can never carry a stale hand-written date.
+\date{\ifcase\month\or January\or February\or March\or April\or May\or June\or July\or August\or September\or October\or November\or December\fi\ \the\year}
 
 \begin{document}
 \maketitle
