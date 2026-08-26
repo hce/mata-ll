@@ -960,3 +960,43 @@ assert(v < fromInteger_Integer(9), "lt between Integers still works")
     lua.load(&probed).set_name("integer_cmp_coerce").exec()
         .expect("mixed-operand Integer comparisons must coerce, not crash");
 }
+
+/// G2: `head []` and `tail []` bottom with GHC's message
+/// ("Prelude.head: empty list") instead of a raw Lua nil-index error —
+/// the one partial-function failure that used to look like a compiler
+/// bug ("attempt to index a nil value (local 'l')" + traceback).
+#[test]
+fn head_tail_empty_list_carry_ghc_message() {
+    for (expr, needle) in [
+        ("head ([] :: [Int])", "Prelude.head: empty list"),
+        ("tail ([] :: [Int])", "Prelude.tail: empty list"),
+    ] {
+        let source = format!(
+            "main :: IO ()\nmain = print ({expr})\n"
+        );
+        let lua_code = compile(&source, Path::new("."), &[])
+            .expect("should compile")
+            .lua_code;
+        let lua = mlua::Lua::new();
+        match lua.load(&lua_code).set_name("head_tail_empty").exec() {
+            Err(e) => {
+                let msg = format!("{}", e);
+                assert!(msg.contains(needle),
+                    "expected '{}', got: {}", needle, msg);
+                assert!(!msg.contains("attempt to index"),
+                    "raw Lua error leaked through: {}", msg);
+            }
+            Ok(()) => panic!("expected a runtime error from {expr}"),
+        }
+    }
+
+    // Laziness control: the [] check forces the list CELL, never an
+    // element — `head [1, undefined]` still returns 1.
+    let source = "main :: IO ()\nmain = print (head [1 :: Int, undefined])\n";
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("head_lazy_elems").exec()
+        .expect("head [1, undefined] must not force the second element");
+}

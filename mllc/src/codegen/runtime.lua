@@ -1323,8 +1323,22 @@ local function fromRational_Number(x) return __force(x) end
 -- __force would mistake the nested thunk for the value. `head [1, ⊥]` still
 -- returns 1 (only the first element is forced), and a merely *stored*
 -- `head xs` stays unevaluated because the call itself sits inside a thunk.
-local function head(xs) return __force(__mll_head(xs)) end
-local function tail(xs) return __mll_tail(xs) end
+-- Both check for [] themselves: every internal __mll_head/__mll_tail
+-- consumer (map, filter, the pattern matcher, ...) tests the cell before
+-- reading it, but head/tail are the USER-facing partial functions — their
+-- empty-list bottom must carry GHC's message, not a raw Lua nil-index
+-- error. Level 0 like error_/undefined: the message IS the diagnostic, a
+-- runtime.lua position would only obscure it.
+local function head(xs)
+    xs = __force(xs)
+    if xs == nil then error("Prelude.head: empty list", 0) end
+    return __force(__mll_head(xs))
+end
+local function tail(xs)
+    xs = __force(xs)
+    if xs == nil then error("Prelude.tail: empty list", 0) end
+    return __mll_tail(xs)
+end
 local function map(f, xs)
     f = __force(f); xs = __force(xs)
     if xs == nil then return nil end
