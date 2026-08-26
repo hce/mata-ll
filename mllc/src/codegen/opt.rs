@@ -792,6 +792,13 @@ fn iife_parts(e: &Expr) -> Option<(&Vec<String>, &FuncBody, &Vec<Expr>)> {
     if params.len() != args.len() {
         return None;
     }
+    // A vararg lambda is not flattenable: `...` is not a bindable name
+    // (`local ... = e` is a Lua syntax error), and the body's `...` reads
+    // would rebind to the ENCLOSING function's varargs anyway. First
+    // producer: the first-class ($)/(.) OpFunc values.
+    if params.iter().any(|p| p == "...") {
+        return None;
+    }
     Some((params, body, args))
 }
 

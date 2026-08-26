@@ -234,6 +234,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_spec_limit_wide, "cases", "spec_limit_wide.mll"),
         (ghc_oracle_eta_padding_consumed, "cases", "eta_padding_consumed.mll"),
         (ghc_oracle_dict_dead_generic, "cases", "dict_dead_generic.mll"),
+        (ghc_oracle_opfunc_dollar_compose, "cases", "opfunc_dollar_compose.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),
         (ghc_oracle_div_large_exact, "cases", "div_large_exact.mll"),
         (ghc_oracle_div_large_interaction, "cases", "div_large_interaction.mll"),

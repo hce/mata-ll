@@ -576,6 +576,79 @@ impl CodeGen {
                         ))]),
                     );
                 }
+                if op == "$" {
+                    // First-class ($) IS application: force the function
+                    // (the callee position needs a function value, not a
+                    // thunk), pass the argument RAW — `($) f ⊥` must stay
+                    // exactly as lazy as `f ⊥`, the callee decides. The
+                    // varargs forward the flat N-ary protocol: at a use
+                    // like `($) (+) 1 2` the result type still has arrows,
+                    // so the call site passes every outstanding argument in
+                    // the same call (count_arrows convention) and the
+                    // callee's own padding consumes them. The fallback
+                    // below emitted a literal `$` binop: a Lua syntax
+                    // error (the REPL's `($) (+) 1 2`).
+                    return Expr::Func(
+                        vec!["_a".into(), "_b".into(), "...".into()],
+                        FuncBody::Inline(vec![Stmt::Return(Expr::call(
+                            Expr::force(Expr::name("_a")),
+                            vec![Expr::name("_b"), Expr::name("...")],
+                        ))]),
+                    );
+                }
+                if op == "." {
+                    // First-class (.) builds the composed closure. Same
+                    // laziness as the inline composition (composition_ast):
+                    // the inner `g x` is SUSPENDED when handed to f — f may
+                    // never force its argument (`const 9 . error`), so
+                    // running g eagerly would raise where GHC does not.
+                    // Both flat-protocol shapes occur at call sites: a
+                    // direct/partial application passes (f, g, x, extras…)
+                    // in ONE call (count_arrows convention — the result
+                    // type still has arrows), while a higher-order consumer
+                    // (`zipWith (.) fs gs`) calls with exactly (f, g) and
+                    // applies the returned closure later — so the value
+                    // dispatches on whether the composition's argument
+                    // arrived. The fallback below emitted a literal `.`
+                    // binop: Lua index syntax, a syntax error against a
+                    // call expression.
+                    let go_body = Expr::Func(
+                        vec!["_x".into(), "...".into()],
+                        FuncBody::Inline(vec![Stmt::Return(Expr::call(
+                            Expr::force(Expr::name("_a")),
+                            vec![
+                                Expr::thunk(Expr::call(
+                                    Expr::force(Expr::name("_b")),
+                                    vec![Expr::name("_x")],
+                                )),
+                                Expr::name("..."),
+                            ],
+                        ))]),
+                    );
+                    return Expr::Func(
+                        vec!["_a".into(), "_b".into(), "...".into()],
+                        FuncBody::Block(Block(vec![
+                            Stmt::Local(vec!["_go".into()], Some(go_body)),
+                            Stmt::If {
+                                cond: Expr::binop(
+                                    "==",
+                                    Expr::call_named("select", vec![
+                                        Expr::lit("\"#\""),
+                                        Expr::name("..."),
+                                    ]),
+                                    Expr::lit("0"),
+                                ),
+                                then_b: Block(vec![Stmt::Return(Expr::name("_go"))]),
+                                elseifs: vec![],
+                                else_b: None,
+                            },
+                            Stmt::Return(Expr::call(
+                                Expr::name("_go"),
+                                vec![Expr::name("...")],
+                            )),
+                        ])),
+                    );
+                }
                 let lua_op = match op.as_str() {
                     "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
                     other => other,
