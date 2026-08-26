@@ -29,13 +29,86 @@ impl Checker {
         rows: &[Vec<PatCell<'_>>],
         col_tys: &[Option<Ty>],
     ) -> Vec<String> {
-        self.missing_witnesses(rows, col_tys, WITNESS_CAP)
+        self.missing_witnesses(rows, col_tys, WITNESS_CAP, false)
             .into_iter()
             .map(|w| {
                 let row: Vec<String> = w.into_iter().map(|c| c.text).collect();
                 row.join(" ")
             })
             .collect()
+    }
+
+    /// The WARNING posture of the matrix (G3): literal columns are treated
+    /// as open domains — a literal covers exactly itself, and the
+    /// infinitely many other values are covered only by a catch-all row —
+    /// instead of the hard checker's accept-everything over-approximation.
+    /// Returned witnesses are value shapes that reach the runtime
+    /// "Non-exhaustive patterns" error. Run it only when the hard checker
+    /// found nothing: its result is a warning (GHC's default is silent
+    /// here; -Wincomplete-patterns reports the same gap), never an error,
+    /// because completeness over an infinite domain is undecidable and the
+    /// fall-off may be the author's deliberate bottom.
+    pub(super) fn literal_fallthrough_witnesses(
+        &self,
+        rows: &[Vec<PatCell<'_>>],
+        col_tys: &[Option<Ty>],
+    ) -> Vec<String> {
+        self.missing_witnesses(rows, col_tys, WITNESS_CAP, true)
+            .into_iter()
+            .map(|w| {
+                let row: Vec<String> = w.into_iter().map(|c| c.text).collect();
+                row.join(" ")
+            })
+            .collect()
+    }
+
+    /// The G3 warning, shared by function-clause and case matches: when the
+    /// hard checker passed but the warning posture finds literal
+    /// fall-throughs, record a warning naming the unmatched shapes. The
+    /// `has_open_literal` gate keeps literal-free matches free of the
+    /// second matrix pass (without an open literal the postures cannot
+    /// differ).
+    fn warn_literal_fallthrough(
+        &mut self,
+        where_: &str,
+        ctx_fn: &str,
+        rows: &[Vec<PatCell<'_>>],
+        col_tys: &[Option<Ty>],
+        span: Option<Span>,
+    ) {
+        // Skip the whole pass inside the Prelude region — push_warning_span
+        // would drop the result anyway (Prelude-internal warnings are never
+        // the user's business), so the second matrix walk is pure waste.
+        if self.checking_prelude {
+            return;
+        }
+        let has_lit = rows.iter().flatten()
+            .any(|c| matches!(c, PatCell::P(p) if has_open_literal(p)));
+        if !has_lit {
+            return;
+        }
+        let open = self.literal_fallthrough_witnesses(rows, col_tys);
+        if open.is_empty() {
+            return;
+        }
+        self.push_warning_span(
+            DiagnosticKind::Other(format!(
+                "literal patterns in {} have no catch-all: nothing matches {}",
+                where_, open.join(", "))),
+            format!("definition of '{}'", ctx_fn),
+            span,
+            vec![
+                "a match on number or string literals can never be proven \
+                 complete (the type has infinitely many values), so the \
+                 unmatched values fail at runtime with 'Non-exhaustive \
+                 patterns'. Add a final catch-all clause (a variable or '_' \
+                 pattern) to cover them.".to_string(),
+                "GHC's default is silent here (-Wincomplete-patterns reports \
+                 the same gap); mata-ll warns by default, matching its \
+                 compile-time rejection of incomplete matches over \
+                 enumerable types.".to_string(),
+            ],
+        );
     }
 
     /// Maranget-style usefulness of the all-wildcard row against `rows`:
@@ -61,6 +134,7 @@ impl Checker {
         rows: &[Vec<PatCell<'_>>],
         col_tys: &[Option<Ty>],
         cap: usize,
+        open_lits: bool,
     ) -> Vec<Vec<Witness>> {
         if cap == 0 {
             return Vec::new();
@@ -72,14 +146,63 @@ impl Checker {
         let rest_tys = &col_tys[1..];
         let heads: Vec<Head<'_>> = rows.iter().map(|r| self.cell_head(r[0])).collect();
 
-        // Undecidable column: keep every row (over-approximate coverage —
-        // sound for a hard error) and continue right of it.
-        if heads.iter().any(|h| matches!(h, Head::OtherLit)) {
-            let sub: Vec<Vec<PatCell<'_>>> = rows.iter().map(|r| r[1..].to_vec()).collect();
-            return prepend_witness(
-                self.missing_witnesses(&sub, rest_tys, cap),
-                Witness::atomic("_"),
-            );
+        // Undecidable column. Hard posture: keep every row
+        // (over-approximate coverage — sound for a hard error) and continue
+        // right of it. Warning posture (open_lits): a literal covers
+        // exactly itself — specialize per distinct seen literal (a
+        // decidable gap BEHIND a literal is still found), then the
+        // complement, which only catch-all rows cover.
+        if heads.iter().any(|h| matches!(h, Head::OtherLit(_))) {
+            if !open_lits {
+                let sub: Vec<Vec<PatCell<'_>>> = rows.iter().map(|r| r[1..].to_vec()).collect();
+                return prepend_witness(
+                    self.missing_witnesses(&sub, rest_tys, cap, open_lits),
+                    Witness::atomic("_"),
+                );
+            }
+            let mut seen: Vec<&Literal> = Vec::new();
+            for h in &heads {
+                if let Head::OtherLit(l) = h
+                    && !seen.iter().any(|s| same_literal(s, l))
+                {
+                    seen.push(l);
+                }
+            }
+            let mut out = Vec::new();
+            for lit in &seen {
+                if out.len() >= cap {
+                    break;
+                }
+                let sub_rows: Vec<Vec<PatCell<'_>>> = rows.iter().zip(&heads)
+                    .filter(|(_, h)| match h {
+                        Head::OtherLit(l) => same_literal(l, lit),
+                        Head::Wild => true,
+                        _ => false,
+                    })
+                    .map(|(r, _)| r[1..].to_vec())
+                    .collect();
+                let text = literal_witness_text(lit);
+                let w = Witness { atomic: !text.starts_with('-'), text };
+                out.extend(prepend_witness(
+                    self.missing_witnesses(&sub_rows, rest_tys, cap - out.len(), open_lits),
+                    w,
+                ));
+            }
+            if out.len() < cap {
+                let sub_rows: Vec<Vec<PatCell<'_>>> = rows.iter().zip(&heads)
+                    .filter(|(_, h)| matches!(h, Head::Wild))
+                    .map(|(r, _)| r[1..].to_vec())
+                    .collect();
+                let listed = seen.iter()
+                    .map(|l| literal_witness_text(l))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                out.extend(prepend_witness(
+                    self.missing_witnesses(&sub_rows, rest_tys, cap - out.len(), open_lits),
+                    Witness::atomic(format!("(not one of {})", listed)),
+                ));
+            }
+            return out;
         }
 
         // Tuple column: one constructor, positional components.
@@ -111,7 +234,7 @@ impl Checker {
                     _ => {}
                 }
             }
-            return self.missing_witnesses(&sub_rows, &sub_tys, cap)
+            return self.missing_witnesses(&sub_rows, &sub_tys, cap, open_lits)
                 .into_iter()
                 .map(|mut w| {
                     let comps: Vec<Witness> = w.drain(..arity).collect();
@@ -138,7 +261,7 @@ impl Checker {
                     .collect();
                 let name = if want { "True" } else { "False" };
                 out.extend(prepend_witness(
-                    self.missing_witnesses(&sub_rows, rest_tys, cap - out.len()),
+                    self.missing_witnesses(&sub_rows, rest_tys, cap - out.len(), open_lits),
                     Witness::atomic(name),
                 ));
                 if out.len() >= cap {
@@ -242,7 +365,7 @@ impl Checker {
                             _ => {}
                         }
                     }
-                    let sub = self.missing_witnesses(&sub_rows, &sub_tys, cap - out.len());
+                    let sub = self.missing_witnesses(&sub_rows, &sub_tys, cap - out.len(), open_lits);
                     out.extend(sub.into_iter().map(|mut w| {
                         let args: Vec<Witness> = w.drain(..arity).collect();
                         let mut row = vec![Witness::of_con(source_con_name(ckey), &args)];
@@ -257,7 +380,7 @@ impl Checker {
                         .filter(|(_, h)| matches!(h, Head::Wild))
                         .map(|(r, _)| r[1..].to_vec())
                         .collect();
-                    let sub = self.missing_witnesses(&sub_rows, rest_tys, cap - out.len());
+                    let sub = self.missing_witnesses(&sub_rows, rest_tys, cap - out.len(), open_lits);
                     out.extend(sub.into_iter().map(|mut w| {
                         let args = vec![Witness::atomic("_"); arity];
                         let mut row = vec![Witness::of_con(source_con_name(ckey), &args)];
@@ -275,7 +398,7 @@ impl Checker {
             .map(|(r, _)| r[1..].to_vec())
             .collect();
         prepend_witness(
-            self.missing_witnesses(&sub_rows, rest_tys, cap),
+            self.missing_witnesses(&sub_rows, rest_tys, cap, open_lits),
             Witness::atomic("_"),
         )
     }
@@ -307,7 +430,11 @@ impl Checker {
                 }
                 Pattern::Tuple(ps) => return Head::Tup(ps),
                 Pattern::LitPat(Literal::Bool(b)) => return Head::BoolLit(*b),
-                Pattern::LitPat(_) => return Head::OtherLit,
+                // `()` is the ONLY value of its type: the pattern matches
+                // everything that can arrive, exactly like a wildcard (and
+                // unlike every other literal, whose domain is infinite).
+                Pattern::LitPat(Literal::Unit) => return Head::Wild,
+                Pattern::LitPat(l) => return Head::OtherLit(l),
             }
         }
     }
@@ -381,8 +508,10 @@ enum Head<'a> {
     Con(String, &'a [Pattern]),
     Tup(&'a [Pattern]),
     BoolLit(bool),
-    /// A non-Bool literal: infinite domain, undecidable column.
-    OtherLit,
+    /// A non-Bool, non-Unit literal: infinite domain, undecidable column.
+    /// Carries the literal so the warning posture (`open_lits`) can
+    /// specialize per distinct value and render the complement.
+    OtherLit(&'a Literal),
 }
 
 /// A rendered missing-case witness cell, tracking whether it needs parens
@@ -433,6 +562,49 @@ fn prepend_witness(rows: Vec<Vec<Witness>>, w: Witness) -> Vec<Vec<Witness>> {
 /// user wrote.
 fn source_con_name(key: &str) -> &str {
     key.strip_suffix(SHADOW_SUFFIX).unwrap_or(key)
+}
+
+/// Literal identity for coverage: two literal patterns cover the same
+/// values iff they are the same literal. (An i64-range integer is never
+/// spelled as a `BigInteger` — the parser only falls back past i64 — so
+/// the cross-variant case cannot alias.)
+fn same_literal(a: &Literal, b: &Literal) -> bool {
+    match (a, b) {
+        (Literal::Integer(x), Literal::Integer(y)) => x == y,
+        (Literal::BigInteger(x), Literal::BigInteger(y)) => x == y,
+        (Literal::Number(x), Literal::Number(y)) => x == y,
+        (Literal::Str(x), Literal::Str(y)) => x == y,
+        (Literal::Bool(x), Literal::Bool(y)) => x == y,
+        (Literal::Unit, Literal::Unit) => true,
+        _ => false,
+    }
+}
+
+/// Witness text for a literal pattern (warning posture).
+fn literal_witness_text(l: &Literal) -> String {
+    match l {
+        Literal::Integer(n) => n.to_string(),
+        Literal::BigInteger(s) => s.clone(),
+        Literal::Number(x) => format!("{}", x),
+        Literal::Str(bytes) => format!("{:?}", String::from_utf8_lossy(bytes)),
+        Literal::Bool(b) => if *b { "True" } else { "False" }.to_string(),
+        Literal::Unit => "()".to_string(),
+    }
+}
+
+/// Does this pattern (recursively) contain a literal the matrix treats as
+/// an open domain (non-Bool, non-Unit)? The cheap gate for the warning
+/// posture: without one, the warning pass cannot differ from the hard
+/// pass, so it is skipped.
+fn has_open_literal(p: &Pattern) -> bool {
+    match p {
+        Pattern::LitPat(Literal::Bool(_) | Literal::Unit) => false,
+        Pattern::LitPat(_) => true,
+        Pattern::Paren(inner) | Pattern::As(_, inner) => has_open_literal(inner),
+        Pattern::Constructor { args, .. } => args.iter().any(has_open_literal),
+        Pattern::Tuple(ps) => ps.iter().any(has_open_literal),
+        Pattern::Var(_) | Pattern::Wildcard => false,
+    }
 }
 
 impl Checker {
@@ -750,6 +922,10 @@ impl Checker {
                     format!("definition of '{}'", name),
                     clauses[0].span,
                 );
+            } else {
+                self.warn_literal_fallthrough(
+                    &format!("'{}'", name), name,
+                    &rows, &col_tys, Some(clauses[0].span));
             }
         }
 
@@ -2006,6 +2182,14 @@ impl Checker {
                         )),
                         format!("definition of '{}'", fn_name),
                     );
+                } else {
+                    let fn_name = self.current_fn.clone().unwrap_or_else(|| "<expr>".into());
+                    let warn_rows: Vec<Vec<PatCell<'_>>> = case_patterns.iter()
+                        .map(|p| vec![PatCell::P(p)])
+                        .collect();
+                    self.warn_literal_fallthrough(
+                        &format!("the case expression in '{}'", fn_name), &fn_name,
+                        &warn_rows, &[Some(resolved_scrut_ty.clone())], None);
                 }
 
                 let final_ty = result_ty.apply_subst(&subst);

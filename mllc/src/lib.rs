@@ -383,6 +383,10 @@ fn compile_impl(
     // prevent this: it only scopes .mll-level imports (see `header_exports`
     // above), which is precisely the mixup the warning's notes explain.
     let mut warnings = import_warnings;
+    // Typechecker warnings (e.g. literal patterns without a catch-all) —
+    // recorded during the successful check above; Prelude-internal ones
+    // were never recorded (see Checker::push_warning_span).
+    warnings.append(&mut checker.warnings);
     if !mono_module.has_main && mono_module.exports.is_empty() {
         warnings.push(no_host_surface_warning(header_exports.as_deref()));
     }

@@ -4956,3 +4956,82 @@ main = putStrLn (pick True gg 0 (3 :: Int))
         "one first-class-use site must yield exactly one diagnostic, got: {e}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// G3: literal patterns without a catch-all WARN (never error) — the hard
+// checker stays permissive over infinite domains (d83b002), the warning
+// posture reports the runtime fall-through. Accept-side controls pin that
+// a catch-all (or guard coverage) stays silent.
+// ---------------------------------------------------------------------------
+
+/// The queue's shape: `f 1 = "one"` over Int compiles (GHC's default also
+/// accepts) but now carries the warning naming the complement, for both
+/// function clauses and case expressions; the decidable residue behind a
+/// literal ("1 False") is named too.
+#[test]
+fn literal_match_without_catchall_warns() {
+    let src = r#"
+f :: Int -> String
+f 1 = "one"
+
+g :: Int -> Bool -> String
+g 1 True = "a"
+g 2 False = "b"
+
+c :: Int -> String
+c n = case n of
+  1 -> "one"
+
+main :: IO ()
+main = putStrLn (f 1 <> g 1 True <> c 1)
+"#;
+    let result = compile(src, Path::new("."), &[])
+        .expect("literal matches stay accepted (warning, not error)");
+    let rendered: Vec<String> =
+        result.warnings.iter().map(|w| format!("{}", w)).collect();
+    assert_eq!(rendered.len(), 3, "one warning per match: {rendered:?}");
+    assert!(rendered[0].contains("literal patterns in 'f' have no catch-all")
+        && rendered[0].contains("(not one of 1)"),
+        "f's warning names the complement: {}", rendered[0]);
+    assert!(rendered[1].contains("1 False")
+        && rendered[1].contains("2 True")
+        && rendered[1].contains("(not one of 1, 2) _"),
+        "g's warning names residue and complement: {}", rendered[1]);
+    assert!(rendered[2].contains("case expression in 'c'"),
+        "the case warning is attributed: {}", rendered[2]);
+    assert!(rendered[0].contains("note:") && rendered[0].contains("catch-all"),
+        "the warning explains the fix: {}", rendered[0]);
+}
+
+/// Accept-side controls: a catch-all clause, a guarded cover (guards count
+/// as covering — the fall-off is the author's deliberate bottom), a
+/// nested-literal match WITH catch-all, and `()` literals (a one-value
+/// domain, complete by itself) all stay warning-free.
+#[test]
+fn literal_match_with_catchall_stays_silent() {
+    let src = r#"
+f :: Int -> String
+f 1 = "one"
+f _ = "other"
+
+sign :: Int -> String
+sign n | n < 0 = "neg"
+       | otherwise = "pos"
+
+nest :: Maybe Int -> String
+nest (Just 1) = "one"
+nest (Just _) = "n"
+nest Nothing = "none"
+
+u :: () -> String
+u () = "unit"
+
+main :: IO ()
+main = putStrLn (f 2 <> sign 1 <> nest Nothing <> u ())
+"#;
+    let result = compile(src, Path::new("."), &[])
+        .expect("should compile");
+    assert!(result.warnings.is_empty(),
+        "covered literal matches must not warn: {:?}",
+        result.warnings.iter().map(|w| format!("{}", w)).collect::<Vec<_>>());
+}

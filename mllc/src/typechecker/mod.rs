@@ -502,6 +502,11 @@ pub struct Checker {
     sig_mult_vars: HashMap<String, u32>,
     constructors: HashMap<String, ConInfo>,
     pub errors: Vec<Diagnostic>,
+    /// Non-fatal diagnostics: the compile still succeeds, and `compile`
+    /// surfaces them in `CompileResult::warnings`. Nothing is recorded
+    /// while `checking_prelude` — a Prelude-internal warning is the
+    /// Prelude author's business, never the user's.
+    pub warnings: Vec<Diagnostic>,
     current_fn: Option<String>,
     /// Registered typeclasses
     classes: HashMap<String, ClassInfo>,
@@ -706,6 +711,7 @@ impl Checker {
             sig_mult_vars: HashMap::new(),
             constructors: HashMap::new(),
             errors: Vec::new(),
+            warnings: Vec::new(),
             current_fn: None,
             classes: HashMap::new(),
             instances: HashMap::new(),
@@ -1385,6 +1391,26 @@ impl Checker {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
         self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file: None, notes, baseline });
+    }
+
+    /// Record a WARNING (see the `warnings` field). Skipped entirely inside
+    /// the Prelude region: user programs must never see Prelude-internal
+    /// warnings, and unlike errors there is no cause to trace back — the
+    /// compile succeeds either way.
+    pub(super) fn push_warning_span(
+        &mut self,
+        kind: DiagnosticKind,
+        ctx: String,
+        span: Option<Span>,
+        notes: Vec<String>,
+    ) {
+        if self.checking_prelude {
+            return;
+        }
+        self.warnings.push(Diagnostic {
+            kind, context: Some(ctx), span, file: None, notes,
+            baseline: false,
+        });
     }
 
     /// Provenance notes for every existential skolem a diagnostic's types
