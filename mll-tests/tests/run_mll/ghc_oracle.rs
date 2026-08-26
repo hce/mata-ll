@@ -229,6 +229,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_dict_result_position, "cases", "dict_result_position.mll"),
         (ghc_oracle_dict_partial_self, "cases", "dict_partial_self.mll"),
         (ghc_oracle_dict_nullary_method, "cases", "dict_nullary_method.mll"),
+        (ghc_oracle_dict_shadowed_callsites, "cases", "dict_shadowed_callsites.mll"),
         (ghc_oracle_div_exact_and_zero, "cases", "div_exact_and_zero.mll"),
         (ghc_oracle_div_large_exact, "cases", "div_large_exact.mll"),
         (ghc_oracle_div_large_interaction, "cases", "div_large_interaction.mll"),

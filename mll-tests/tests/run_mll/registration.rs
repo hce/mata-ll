@@ -179,6 +179,10 @@ mll_test!(dict_result_position, "dict_result_position.mll");
 mll_test!(dict_partial_self, "dict_partial_self.mll");
 // F23: nullary class methods through parameterized-instance dictforms.
 mll_test!(dict_nullary_method, "dict_nullary_method.mll");
+// G1: locals shadow dict-passing globals in the dictionary rewrite passes
+// (clause/lambda/let/case/where binders); a function named `f` no longer
+// collides with Prelude parameters of the same name.
+mll_test!(dict_shadowed_callsites, "dict_shadowed_callsites.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
 mll_test!(tuples, "tuples.mll");

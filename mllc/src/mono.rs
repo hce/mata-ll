@@ -467,9 +467,9 @@ impl Monomorphizer {
             let saved_ctx = self.cur_ctx.replace(
                 format!("definition of '{}'", func.name));
             let saved_span = std::mem::replace(&mut self.cur_span, clause.span);
-            clause.map_exprs(&mut |e| {
-                let e = self.revert_purged(e);
-                self.rewrite_dict_call_sites(e)
+            self.map_clause_exprs_scoped(clause, &mut |m, e| {
+                let e = m.revert_purged(e);
+                m.rewrite_dict_call_sites(e)
             });
             self.cur_ctx = saved_ctx;
             self.cur_span = saved_span;
@@ -892,6 +892,94 @@ impl Monomorphizer {
             self.locals.remove(name);
         }
         result
+    }
+
+    /// Apply `f` to every top-level expression of `clause` — the same
+    /// coverage list as [`TClause::map_exprs`] — with the clause's binders in
+    /// `locals`: pattern variables and where-bound names over everything,
+    /// each where-binding's own parameters over its body only. The
+    /// dictionary rewrite passes walk clauses OUTSIDE `mono_clause`, so they
+    /// must reestablish the scope themselves; through the scope-blind
+    /// `map_exprs`, `apply gg = gg 1 2` had its PARAMETER call rewritten
+    /// into a DictCall on the dict-passing global `gg` (G1).
+    fn map_clause_exprs_scoped(
+        &mut self,
+        clause: &mut TClause,
+        f: &mut impl FnMut(&mut Self, TExpr) -> TExpr,
+    ) {
+        fn take(e: &mut TExpr) -> TExpr {
+            std::mem::replace(e, TExpr::new(TExprKind::Lit(TLiteral::Unit), Ty::Unit))
+        }
+        let scope: Vec<String> = clause.patterns.iter().flat_map(TPattern::bound_vars)
+            .chain(clause.where_binds.iter().map(|ld| ld.name.clone()))
+            .collect();
+        self.with_locals(scope, |m| {
+            for g in &mut clause.guards {
+                g.condition = f(m, take(&mut g.condition));
+                g.body = f(m, take(&mut g.body));
+            }
+            clause.body = clause.body.take().map(|b| f(m, b));
+            for wb in &mut clause.where_binds {
+                let params: Vec<String> =
+                    wb.patterns.iter().flat_map(TPattern::bound_vars).collect();
+                let body = take(&mut wb.body);
+                wb.body = m.with_locals(params, |m| f(m, body));
+            }
+        });
+    }
+
+    /// One level of binder-scoped descent for the dictionary rewrite passes:
+    /// rebuild `expr`'s children with `f`, entering lambda parameters, let
+    /// group names (each binding's own parameters over its body), and case
+    /// pattern variables into `locals` around the children they scope over.
+    /// `mono_expr` carries its own (spine-unrolled) copy of this discipline;
+    /// the rewrites walk finished TIR after it and previously descended with
+    /// the scope-blind `TExpr::map_children`, so a local named like a
+    /// dict-passing global was rewritten as the global (G1).
+    fn map_children_scoped(
+        &mut self,
+        expr: TExpr,
+        f: &mut impl FnMut(&mut Self, TExpr) -> TExpr,
+    ) -> TExpr {
+        let ty = expr.ty;
+        let kind = match expr.kind {
+            TExprKind::Lambda { params, body } => {
+                let names: Vec<String> = params.iter().map(|(n, _)| n.clone()).collect();
+                let body = self.with_locals(names, |m| f(m, *body));
+                TExprKind::Lambda { params, body: Box::new(body) }
+            }
+            TExprKind::Let { binds, body } => {
+                // The group's names scope over every binding body and the
+                // let body — one recursive scope, like a where group.
+                let group: Vec<String> = binds.iter().map(|b| b.name.clone()).collect();
+                self.with_locals(group, |m| {
+                    let binds = binds.into_iter().map(|ld| {
+                        let params: Vec<String> =
+                            ld.patterns.iter().flat_map(TPattern::bound_vars).collect();
+                        let body = m.with_locals(params, |m| f(m, ld.body));
+                        TLocalDef { name: ld.name, patterns: ld.patterns, body }
+                    }).collect();
+                    let body = f(m, *body);
+                    TExprKind::Let { binds, body: Box::new(body) }
+                })
+            }
+            TExprKind::Case { scrutinee, branches } => {
+                let scrutinee = f(self, *scrutinee);
+                let branches = branches.into_iter().map(|br| {
+                    self.with_locals(br.pattern.bound_vars(), |m| TCaseBranch {
+                        guards: br.guards.into_iter().map(|g| TGuard {
+                            condition: f(m, g.condition),
+                            body: f(m, g.body),
+                        }).collect(),
+                        body: br.body.map(|b| f(m, b)),
+                        pattern: br.pattern,
+                    })
+                }).collect();
+                TExprKind::Case { scrutinee: Box::new(scrutinee), branches }
+            }
+            kind => return TExpr { kind, ty }.map_children(&mut |c| f(self, c)),
+        };
+        TExpr { kind, ty }
     }
 
     /// Monomorphize a local function/value binding: its own parameters are
@@ -1896,8 +1984,8 @@ impl Monomorphizer {
         let saved_dict_by_arg = std::mem::replace(&mut self.cur_dict_by_arg, dict_by_arg);
         let saved_dict_params = std::mem::replace(&mut self.cur_dict_params, dict_params);
         for clause in &mut func.clauses {
-            clause.map_exprs(&mut |e| {
-                self.rewrite_dict_expr(e, &func_name, &class_to_dict, &env)
+            self.map_clause_exprs_scoped(clause, &mut |m, e| {
+                m.rewrite_dict_expr(e, &func_name, &class_to_dict, &env)
             });
         }
         self.cur_dict_params = saved_dict_params;
@@ -1909,6 +1997,12 @@ impl Monomorphizer {
         let ty = expr.ty.clone();
         let kind = match expr.kind {
             TExprKind::Var(ref name) => {
+                if self.locals.contains(name) {
+                    // A locally-bound name shadows any method, dict-passing
+                    // global, or the function itself for the rest of this
+                    // node (same discipline as mono_expr_node's Var arm).
+                    return expr;
+                }
                 if let Some(class_name) = self.method_to_class.get(name).cloned()
                     && class_to_dict.contains_key(&class_name)
                         && self.is_polymorphic(&ty) {
@@ -1984,6 +2078,7 @@ impl Monomorphizer {
                         && (s.is_polymorphic(t) || s.dict_passing_fns.contains(name))
                 };
                 if let Some(call_name) = head_name
+                    && !self.locals.contains(&call_name)
                     && (call_name == func_name || general_callee(self, &call_name, &ty)) {
                         if call_name != *func_name {
                             self.dict_passing_fns.insert(call_name.clone());
@@ -2070,7 +2165,8 @@ impl Monomorphizer {
                 // compiled to Lua's `~=` — table identity, ignoring the
                 // instance's `==` entirely (F6d).
                 let lookup_op = if op == "/=" { "==" } else { op.as_str() };
-                if let Some(class_name) = self.method_to_class.get(lookup_op).cloned()
+                if !self.locals.contains(&op)
+                    && let Some(class_name) = self.method_to_class.get(lookup_op).cloned()
                     && class_to_dict.contains_key(&class_name)
                         && self.is_polymorphic(&lhs.ty) {
                             let op_ty = Ty::arrow(
@@ -2104,8 +2200,9 @@ impl Monomorphizer {
             }
             other => other,
         };
-        TExpr { kind, ty }
-            .map_children(&mut |c| self.rewrite_dict_expr(c, func_name, class_to_dict, env))
+        self.map_children_scoped(TExpr { kind, ty }, &mut |m, c| {
+            m.rewrite_dict_expr(c, func_name, class_to_dict, env)
+        })
     }
 
     /// Dictionary arguments for a use of a dict-passing function INSIDE a
@@ -2176,7 +2273,8 @@ impl Monomorphizer {
             TExprKind::App(_, _) => {
                 let head_name = Self::app_head_name(&expr);
                 if let Some(call_name) = head_name
-                    && self.dict_passing_fns.contains(&call_name) && !self.is_polymorphic(&ty)
+                    && self.dict_passing_fns.contains(&call_name)
+                        && !self.locals.contains(&call_name) && !self.is_polymorphic(&ty)
                         && self.fn_constraints.contains_key(&call_name) {
                             let n_args = Self::app_chain_len(&expr);
                             if self.dictify_feasible(&call_name, n_args, &ty) {
@@ -2186,7 +2284,7 @@ impl Monomorphizer {
                         }
                 // Not a dict-passing call: generic descent (which also
                 // covers the App operands themselves).
-                expr.map_children(&mut |c| self.rewrite_dict_call_sites(c))
+                self.map_children_scoped(expr, &mut |m, c| m.rewrite_dict_call_sites(c))
             }
             // A FIRST-CLASS reference to a dict-passing function (`map gshow
             // xs`): the bare name compiles to the dictionary-form function,
@@ -2196,7 +2294,7 @@ impl Monomorphizer {
             // the value parameters wrapping a saturated DictCall whose
             // dictionaries are built here, at compile time, from that type.
             TExprKind::Var(ref name)
-                if self.dict_passing_fns.contains(name)
+                if self.dict_passing_fns.contains(name) && !self.locals.contains(name)
                     && self.fn_constraints.get(name).is_some_and(|c| !c.is_empty()) =>
             {
                 let name = name.clone();
@@ -2214,7 +2312,7 @@ impl Monomorphizer {
                     TExpr { kind: TExprKind::Var(name), ty }
                 }
             }
-            _ => expr.map_children(&mut |c| self.rewrite_dict_call_sites(c)),
+            _ => self.map_children_scoped(expr, &mut |m, c| m.rewrite_dict_call_sites(c)),
         }
     }
 
@@ -2267,10 +2365,22 @@ impl Monomorphizer {
     /// function at a type that is still polymorphic: there is no concrete
     /// type to build its dictionaries at.
     fn push_first_class_dict_error(&mut self, name: &str, ty: &Ty) {
+        let msg = format!(
+            "cannot pass '{}' as a function value at the polymorphic type '{}'",
+            name, ty);
+        // One error per (message, site). The rewrite worklist re-walks a
+        // function whenever a new dict-passing flag appears, and a guarded
+        // clause presents the same expression through several top-level
+        // slots — without this, one root cause surfaced as a cascade of
+        // identical diagnostics.
+        if self.errors.iter().any(|e| e.span == self.cur_span
+            && e.context == self.cur_ctx
+            && matches!(&e.kind, DiagnosticKind::Other(m) if *m == msg))
+        {
+            return;
+        }
         self.errors.push(Diagnostic {
-            kind: DiagnosticKind::Other(format!(
-                "cannot pass '{}' as a function value at the polymorphic type '{}'",
-                name, ty)),
+            kind: DiagnosticKind::Other(msg.clone()),
             context: self.cur_ctx.clone(),
             span: self.cur_span,
             file: None,
