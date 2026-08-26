@@ -823,6 +823,36 @@ be imported by the module you compile.
 The library modules that ship with the compiler are catalogued in the
 next section.
 
+\subsection{The Whole-Program Model}
+\label{sec:whole-program}
+
+Compilation is \emph{whole-program}: one root module per compiler
+invocation.  Its imports are resolved from the search path and merged
+into a \emph{single flat namespace} --- an unqualified name defined by
+two imports (or by an import and the Prelude) is a compile error, and
+qualified imports are the fix --- then the whole program is
+typechecked, specialized and emitted as \emph{one} self-contained Lua
+file, runtime included, with no external \texttt{require}s.
+
+The consequences, stated plainly:
+
+\begin{itemize}
+\item There is no separate compilation and no linking.  You cannot
+  compile two \texttt{.mll} modules independently and combine the
+  results; the compiled unit is always the root program plus
+  everything it imports.
+\item Changing an imported module means recompiling every program
+  that imports it.  Imports are read from source on each run.
+\item A library module compiled on its own produces a Lua file with
+  nothing in it --- dead-code elimination keeps only what
+  \texttt{main} or an \texttt{export} declaration can reach --- and
+  the compiler warns when that happens (see \emph{Export Lists}
+  above).
+\item The emitted file is a closed world: embedding it in a Lua host
+  needs no library path, and two separately compiled mata-ll programs
+  loaded into one host do not share code or state.
+\end{itemize}
+
 %======================================================================
 \section{Standard Library}
 \label{sec:stdlib}

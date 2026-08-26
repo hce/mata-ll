@@ -678,6 +678,43 @@ divergence is missing from the record.
 \end{tabular}
 
 %----------------------------------------------------------------------
+\section{Embedding the Compiler}
+\label{sec:embedding-compiler}
+
+\texttt{mllc} is a plain Rust library; the CLI, the REPL and the test
+harness are thin front-ends over \texttt{mllc::compile} /
+\texttt{compile\_with\_options}.  Two facts bind every embedder, and
+both bite on \emph{legal} inputs:
+
+\paragraph{Run \texttt{compile} on the calibrated stack.}
+Call it through \texttt{mllc::with\_compiler\_stack} (or on your own
+thread of \texttt{COMPILER\_STACK\_SIZE}, 2\,GiB of \emph{virtual}
+reservation --- it costs nothing until touched).  The compiler walks
+nested syntax with native recursion, and its nesting limit
+(\texttt{MAX\_NESTING\_DEPTH}) is calibrated against that stack: on a
+default thread, inputs the limit admits overflow the native stack
+instead of getting the clean ``nested too deeply'' diagnostic.  In a
+debug build even a \(\sim\)30-level operator spine --- an 8-line
+example program --- exceeds a default 2\,MB thread.
+
+\paragraph{Compilation is whole-program.}
+One root module per call: imports are resolved from the search path
+and merged into a single flat namespace, and the result is one
+self-contained Lua file (runtime included, no external
+\texttt{require}s).  There is no separate compilation and no linking;
+a library module compiled alone yields an empty shell plus a warning.
+The user-facing statement of this model and its consequences is the
+user manual's \emph{The Whole-Program Model}.
+
+\paragraph{The result surface.}
+\texttt{CompileResult} carries the Lua text (\texttt{lua\_code}) with
+byte offsets separating boilerplate, module body and entry point;
+\texttt{has\_main} and the \texttt{export} names; and non-fatal
+\texttt{warnings} (import-alias collisions, no-host-surface modules,
+literal patterns without a catch-all) that a front-end should
+display --- the CLI prints them to stderr.
+
+%----------------------------------------------------------------------
 \section{CLI Reference}
 
 \begin{lstlisting}[language=bash]

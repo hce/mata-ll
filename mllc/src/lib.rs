@@ -1,3 +1,35 @@
+//! mllc — the mata-ll compiler as a library: Haskell-style source in, one
+//! self-contained Lua file out. The CLI (`mata-ll`), the REPL and the test
+//! harness are all front-ends over [`compile`] / [`compile_with_options`].
+//!
+//! # The embedding contract
+//!
+//! Two facts bind every embedder; both are easy to miss and both bite on
+//! legal inputs:
+//!
+//! 1. **Run `compile` on the calibrated stack.** Call it through
+//!    [`with_compiler_stack`] (or on your own thread of
+//!    [`COMPILER_STACK_SIZE`]). The compiler walks nested syntax with
+//!    native recursion and its depth limit ([`MAX_NESTING_DEPTH`]) is
+//!    calibrated against that stack — on a default thread, programs the
+//!    limit admits overflow instead of getting the clean "nested too
+//!    deeply" diagnostic. In a debug build even a ~30-level operator
+//!    spine (an 8-line example) exceeds a default 2 MB thread.
+//!
+//! 2. **Compilation is whole-program.** One root module per `compile`
+//!    call: its imports are resolved from the search path and merged into
+//!    a single flat namespace (unqualified name clashes are compile
+//!    errors; qualified imports are the fix), then the whole program is
+//!    typechecked, monomorphized and emitted as ONE self-contained Lua
+//!    file — runtime included, no external requires. There is no separate
+//!    compilation and no linking: a library module compiled alone
+//!    produces an empty shell (and a warning), and changing any imported
+//!    module means recompiling the program that imports it.
+//!
+//! The result surface is [`CompileResult`]: the Lua text plus offsets,
+//! export names, and non-fatal [`CompileResult::warnings`] a front-end
+//! should display.
+
 pub mod ast;
 pub mod codegen;
 pub mod dce;
