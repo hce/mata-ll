@@ -183,6 +183,15 @@ mll_test!(dict_nullary_method, "dict_nullary_method.mll");
 // (clause/lambda/let/case/where binders); a function named `f` no longer
 // collides with Prelude parameters of the same name.
 mll_test!(dict_shadowed_callsites, "dict_shadowed_callsites.mll");
+// G4: the SPEC_LIMIT-fallback corpus. Wide route — more distinct
+// instantiations than the cap, so specializations are purged and reverted
+// mid-compilation.
+mll_test!(spec_limit_wide, "spec_limit_wide.mll");
+// G4: mutual class-constrained polymorphic recursion (the discovery walk
+// drags the sibling into dictionary passing), a two-constraint fallback
+// (Show + Eq dicts in declaration order), and an outside partial
+// application of a dict-passing function at a concrete type.
+mll_test!(dict_mutual_fallback, "dict_mutual_fallback.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
 mll_test!(tuples, "tuples.mll");
