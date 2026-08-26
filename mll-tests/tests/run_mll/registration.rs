@@ -197,6 +197,9 @@ mll_test!(dict_mutual_fallback, "dict_mutual_fallback.mll");
 // their full arrow count like top-level ones (Lua discards arguments
 // beyond the parameter list, so a saturated flat call lost them).
 mll_test!(eta_padding_consumed, "eta_padding_consumed.mll");
+// G7: a first-class dict-passing reference in a DEAD generic original no
+// longer rejects the program — the diagnosis defers to DCE reachability.
+mll_test!(dict_dead_generic, "dict_dead_generic.mll");
 mll_test!(hashmap, "hashmap.mll");
 mll_test!(gadts, "gadts.mll");
 mll_test!(tuples, "tuples.mll");

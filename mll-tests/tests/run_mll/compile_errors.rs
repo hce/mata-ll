@@ -4915,22 +4915,17 @@ fn at_operator_and_brace_do_fail_loudly() {
     expect_compile_error(source, &[], &["Parse error", "'{'"]);
 }
 
-/// G1 regression, error half: a real first-class use of a dict-passing
-/// function at a polymorphic type is reported ONCE per site — the rewrite
-/// worklist re-walks a function whenever a new dict-passing flag appears,
-/// and used to push an identical diagnostic on every pass. (The accept
-/// side — locals SHADOWING the dict-passing global compile and run — is
-/// the oracle case dict_shadowed_callsites.mll.)
-///
-/// The rejection itself is a recorded GHC deviation, not an endorsement:
-/// GHC accepts this program (runtime dictionary passing; it prints 3),
-/// and the only surviving polymorphic use sits in the generic copy of
-/// `pick`, which is dead once every real use specializes at Int. Reported
-/// as an open finding (G7); if that is fixed, this test moves to the
-/// oracle corpus.
+/// G7: the first-class-dict diagnosis is deferred to DCE reachability —
+/// a still-polymorphic reference in a generic original that DIES once
+/// every real use specialized no longer rejects the program (the accept
+/// side moved to the oracle corpus: dict_dead_generic.mll, which GHC also
+/// accepts). What still cannot work is EXPORTING such a function: a
+/// constrained export is rejected up front (a class dictionary cannot
+/// cross the FFI boundary), which is the control pinning that no
+/// constrained generic can be forced alive as a DCE root.
 #[test]
-fn first_class_dict_use_reported_once() {
-    let e = expect_compile_error(
+fn constrained_export_cannot_keep_dict_generic_alive() {
+    expect_compile_error(
         r#"
 gg :: Show a => Int -> a -> String
 gg 0 x = show x
@@ -4940,20 +4935,16 @@ pick :: Show a => Bool -> (Int -> a -> String) -> Int -> a -> String
 pick True h = h
 pick False _ = gg
 
+export pick :: Show a => Bool -> (Int -> a -> String) -> Int -> a -> String
+
 main :: IO ()
 main = putStrLn (pick True gg 0 (3 :: Int))
 "#,
         &[],
         &[
-            "cannot pass 'gg' as a function value at the polymorphic type",
-            "in definition of 'pick'",
-            "note: 'gg' is compiled with dictionary passing",
+            "Export 'pick' has a class constraint",
+            "cannot cross the FFI boundary",
         ],
-    );
-    assert_eq!(
-        e.matches("cannot pass 'gg'").count(),
-        1,
-        "one first-class-use site must yield exactly one diagnostic, got: {e}"
     );
 }
 

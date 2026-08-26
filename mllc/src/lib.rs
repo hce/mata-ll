@@ -407,6 +407,25 @@ fn compile_impl(
     // and instance methods) not reachable from main/exports.
     let mono_module = dce::eliminate(mono_module);
 
+    // Backend-limitation diagnoses deferred to reachability (G7): a
+    // first-class polymorphic use of a dict-passing function cannot be
+    // compiled — but only where it is EMITTED. The generic original that
+    // holds such a use is usually dead once every real use specialized
+    // (`pick True h = h; pick False _ = gg`, used only at Int — GHC-legal),
+    // so the error is reported only if its function survived DCE.
+    let deferred: Vec<types::Diagnostic> = mono_pass.deferred_errors
+        .drain(..)
+        .filter(|(fn_name, _)| {
+            mono_module.functions.iter()
+                .chain(&mono_module.instance_fns)
+                .any(|f| f.name == *fn_name)
+        })
+        .map(|(_, d)| d)
+        .collect();
+    if !deferred.is_empty() {
+        return Err(CompileError::Type(deferred));
+    }
+
     // A module with neither `main` nor any `export` declaration compiles to a
     // Lua file with no entry point and an empty (or absent) return table:
     // dead-code elimination — whose only roots are `main` and the exports —

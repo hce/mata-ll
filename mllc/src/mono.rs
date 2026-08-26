@@ -104,6 +104,20 @@ pub struct Monomorphizer {
     /// Errors collected during monomorphization, located at the clause
     /// being processed when they arose (see `cur_ctx`/`cur_span`).
     pub errors: Vec<Diagnostic>,
+    /// Diagnoses of BACKEND limitations, keyed by the function whose body
+    /// they sit in, reported only if that function survives dead-code
+    /// elimination (see `compile_impl`). The one producer today is the
+    /// first-class-dict error: a still-polymorphic reference to a
+    /// dict-passing function is uncompilable ONLY where it is emitted, and
+    /// the GENERIC original that holds it is usually dead once every real
+    /// use specialized — erroring eagerly rejected GHC-legal programs (G7:
+    /// `pick True h = h; pick False _ = gg` used only at Int). Unlike type
+    /// errors, which hold whether or not the code is reachable, an
+    /// unemittable expression in unemitted code limits nothing.
+    pub deferred_errors: Vec<(String, Diagnostic)>,
+    /// The function whose clauses `rewrite_non_dict_fn` is currently
+    /// rewriting — the reachability key for `deferred_errors`.
+    cur_rewrite_fn: Option<String>,
     /// The enclosing definition currently being monomorphized, phrased like
     /// the typechecker's contexts ("definition of 'main'", "clause 2 of 'f'").
     cur_ctx: Option<String>,
@@ -252,6 +266,8 @@ impl Monomorphizer {
             generated_impls: HashMap::new(),
             mangled_names: HashMap::new(),
             errors: Vec::new(),
+            deferred_errors: Vec::new(),
+            cur_rewrite_fn: None,
             cur_ctx: None,
             cur_span: None,
             dict_passing_fns: HashSet::new(),
@@ -461,6 +477,7 @@ impl Monomorphizer {
         if self.dict_passing_fns.contains(&func.name) {
             return;
         }
+        let saved_fn = self.cur_rewrite_fn.replace(func.name.clone());
         for clause in &mut func.clauses {
             // Location for any diagnostic the rewrite pushes (a first-class
             // use of a dict-passing function at a polymorphic type).
@@ -474,6 +491,7 @@ impl Monomorphizer {
             self.cur_ctx = saved_ctx;
             self.cur_span = saved_span;
         }
+        self.cur_rewrite_fn = saved_fn;
     }
 
     /// The type the CLASS VARIABLE of `method` is bound to at a use site,
@@ -2373,13 +2391,13 @@ impl Monomorphizer {
         // clause presents the same expression through several top-level
         // slots — without this, one root cause surfaced as a cascade of
         // identical diagnostics.
-        if self.errors.iter().any(|e| e.span == self.cur_span
+        if self.deferred_errors.iter().any(|(_, e)| e.span == self.cur_span
             && e.context == self.cur_ctx
             && matches!(&e.kind, DiagnosticKind::Other(m) if *m == msg))
         {
             return;
         }
-        self.errors.push(Diagnostic {
+        let diag = Diagnostic {
             kind: DiagnosticKind::Other(msg.clone()),
             context: self.cur_ctx.clone(),
             span: self.cur_span,
@@ -2392,7 +2410,16 @@ impl Monomorphizer {
                  mata-ll, annotate the use so its type is concrete.",
                 name)],
             baseline: false,
-        });
+        };
+        // Deferred to reachability (see `deferred_errors`): the enclosing
+        // function is usually a generic original that dies once every real
+        // use specialized, and dead code cannot hit a backend limitation.
+        match &self.cur_rewrite_fn {
+            Some(f) => self.deferred_errors.push((f.clone(), diag)),
+            // Defensive: no enclosing function recorded — report eagerly
+            // rather than lose the diagnosis.
+            None => self.errors.push(diag),
+        }
     }
 
     /// Build a SATURATED use of dict-passing `call_name` from `args` (the
