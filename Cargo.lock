@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "mata-ll"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "clap",
  "mllc",
@@ -217,7 +217,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "mll-repl"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "mllc",
  "mlua",
@@ -225,7 +225,7 @@ dependencies = [
 
 [[package]]
 name = "mll-tests"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "mllc",
  "mlua",
@@ -233,11 +233,11 @@ dependencies = [
 
 [[package]]
 name = "mllc"
-version = "0.1.6"
+version = "0.1.7"
 
 [[package]]
 name = "mllc-wasm"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "mllc",
  "wasm-bindgen",

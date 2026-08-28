@@ -29,7 +29,177 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+## [0.1.7] - 2026-08-28
+
+### Added
+
+- **as-patterns.** `name@(Just y)`, `all@(x : rest)` — the full Haskell
+  form, in every pattern position.
+
+- **The remaining Haskell `newtype` declaration forms** — record syntax
+  (with the brace allowed on the next line), and the same strictness and
+  representation guarantees as the positional form.
+
+- **Hexadecimal, octal and binary integer literals, and numeric
+  underscores.** `0xFF`, `0o755`, `0b1010`, `1_000_000` — GHC's grammar.
+
+- **A round of surface-syntax parity.** Multi-line import lists; operator
+  names as import/`hiding` items; the infix definition form inside class
+  and instance bodies (`a <+> b = …`); tuple-pattern bindings in `where`
+  blocks; comma-separated pattern-guard qualifiers; implicit `do`/`case`
+  blocks close on `,` `]` `}` and `then`/`else`/`of`/`in`/`where`, as
+  GHC's layout rule closes them.
+
+- **First-class `($)` and `(.)`.** The bare sections are real functions
+  now — `($) (+) 1 2`, `foldr (.) id fs` — with `($)` forwarding the flat
+  call protocol and `(.)` building the composed closure; `(&&)`/`(||)`
+  as sections keep their short-circuit behavior.
+
+- **`deriving (Generic)` gives `as` renames a meaning.** The derived
+  metadata reflects a field's or constructor's *effective* external name
+  (`selName`/`conName` return the `as "…"` rename when present), so a
+  type deriving only `Generic` may carry renames — the hook for writing
+  generic codecs against wire names instead of source names.
+
+- **`deriving (Bounded)`** for enums and single-constructor products,
+  plus `Bounded Int`/`Bool`; `Either` derives `Eq` and `Ord`; `Ord Bool`.
+
+- **GADT-syntax constructors work with the derive machinery.** Vanilla
+  constructors declared in GADT syntax are accepted by the stock derives
+  and by `Generic`/`ToJSON`/`FromJSON`/`LuaDict`; genuinely existential
+  or index-refined heads are rejected with the reason.
+
+- **A compiler warnings channel.** `CompileResult` now carries warnings
+  (the CLI and the wasm playground print them). First residents: a
+  literal pattern match without a catch-all warns with a witness
+  (`(not one of 1, 2)`) — on by default, where GHC needs
+  `-Wincomplete-patterns`, and the message says so — and a data
+  constructor colliding with an import alias warns at the import.
+
+- **The REPL runs IO actions.** An expression of type `IO a` executes
+  (declarations and pure values keep printing); the REPL embeds Lua 5.4
+  matching the `mll` runner, truncates long output at a character
+  boundary, and survives closed stdout and non-UTF-8 stdin.
+
+- **An embedding surface for the `mllc` crate.** `with_compiler_stack`
+  (the calibrated-stack prerequisite) and `GIT_COMMIT` are exported, and
+  the crate-level docs state the embedding contract and the
+  whole-program compilation model.
+
+### Changed
+
+- **`max` and `min` are `Ord` class methods**, overridable per instance,
+  as in GHC.
+
+- **Exhaustiveness checking is a Maranget-style usefulness matrix.** All
+  columns at once, tuple components, nested constructor arguments, `Bool`
+  as a two-constructor domain, and real witnesses (`Just False`,
+  `(False, G)`) in the error. Deliberately permissive where coverage is
+  undecidable (guarded rows count as covering; non-Bool literals match
+  anything for the hard error — the new warning handles the literal
+  residue).
+
+- **`head`/`tail` on `[]` carry GHC's messages** —
+  `Prelude.head: empty list`, verbatim, with no position prefix.
+
+- **Nothing of the runtime reaches `_G`.** The callback wrappers became
+  locals; embedding hosts see a clean global table.
+
+- **Optimizer additions.** Loop-invariant closure hoisting (pass 7);
+  cross-binding constant propagation with literal beta-reduction and
+  compile-time `show` of `Int`/`Bool` literals; partial applications
+  share their thunked captures; iterator lists allocate nothing per
+  single-value step; the prelude chunk index is built once per process.
+
+- **Sharper rejections and diagnostics.** Import cycles are reported as
+  the actual chain; duplicate type-name declarations, a class method
+  declared by two classes, a record field declared by two types, and
+  partially applied type aliases are rejected instead of misbehaving
+  later; a character literal gets the no-`Char` explanation; a
+  missing-context diagnostic names the source variable; an unterminated
+  `{-` is an error; every `note:` is a structured note.
+
 ### Fixed
+
+- **Multi-clause functions returning functions no longer drop or ignore
+  arguments.** The N-ary calling convention declares eta-padding
+  parameters for a function whose type has more arrows than its clauses
+  bind — but a multi-clause or guarded function never *consumed* the
+  padding (`pick True h = h` at four arrows returned `h` unapplied), and
+  `where`/`let`-local functions were never padded at all (extra
+  arguments in a saturated call were silently discarded). Clause results
+  now apply the padding they declared, and local functions get the same
+  padding as top-level ones.
+
+- **The dictionary-passing fallback (past the 16-specialisation cap) had
+  a cluster of wrong-code and wrong-rejection paths, all closed.** A
+  local binder that shadowed a dict-passing global was rewritten as if
+  it were the global (Lua "arithmetic on a table value", or a cascade of
+  30+ spurious errors); `/=` dispatched through the wrong method;
+  list/`Maybe`/tuple `Eq` needed structural dictionaries that were never
+  synthesized; a class variable only in result position lost its
+  dictionary at some arities; nullary class methods died in the
+  dictform; under-applied uses weren't saturated. And a first-class-dict
+  error in *dead* generic code no longer rejects the program — the
+  diagnosis defers to DCE reachability.
+
+- **An action-typed value binding re-performs.** `let step = putStrLn "x"`
+  used twice runs twice — the binding is re-performable, not a memoized
+  first run.
+
+- **A round of laziness repairs.** Record-update fields and the
+  scrutinee of an irrefutable-first `case` bind lazily; `$` applications
+  are no longer treated as cheap to force; a `where`-local of one value
+  binding no longer leaks into later bindings; a CAF whose body can trap
+  (division, partial match) is thunked instead of evaluated at module
+  load; demand analysis respects shadowing (a rebound name no longer
+  inherits the outer binding's strictness).
+
+- **Local binders shadow every rewrite.** A local named like a top-level
+  function, a runtime special name, or a fast-path callee is just a
+  local, in every compiler pass; user `_`/`__`-prefixed names live in a
+  namespace disjoint from compiler temporaries.
+
+- **Prelude/runtime GHC parity.** `sortBy` is a stable merge sort;
+  `foldl'` seqs the accumulator it passes; `drop` returns the list for
+  `n <= 0`; `(!!)` raises on a negative index; `read` validates its
+  input; `abs`/`signum` match GHC's signed-zero and NaN edges;
+  ByteString accessors are bounds-checked and `bsXor` truncates to the
+  shorter operand; `quot`/`rem` get GHC's `infixl 7` fixity; `Integer`
+  comparisons coerce plain-number operands.
+
+- **Library fixes.** `Data.Map` `intersection`/`difference` probe the
+  second map per entry instead of scanning a keys list (linear, not
+  quadratic); `Regex` rejects dangling quantifiers and unknown
+  alphanumeric escapes, and a negated character class matches newline;
+  `LMath` gains a portable `frexp` and `logBase` takes GHC's argument
+  order; `Control.Monad`'s `void`/`join` are `Monad`-polymorphic.
+
+- **Module-system fixes.** Diamond imports merge each module's
+  declarations once (no more spurious "Duplicate instance" from a shared
+  ancestor); repeated imports of one module merge like GHC's; qualified
+  import prefixes reach instance heads and bodies, class defaults, and
+  backtick operators.
+
+- **Parser fixes.** A `-` after a record-update brace is subtraction; a
+  bare negative literal is not a pattern atom; an operator continuation
+  must out-indent its block column; dash runs followed by a symbol
+  character lex as operators; block-comment-only lines are whitespace to
+  layout; an empty `where` no longer swallows the declarations after it;
+  a `do` block must end in an expression statement, reported at the
+  offending line.
+
+- **Typechecker fixes.** Composed self-referential substitutions can no
+  longer hang inference; GADT exhaustiveness demands a *reachable*
+  constructor, not merely a unifiable one, and universals the header
+  doesn't name are quantified; operator sections and unary minus emit
+  their class constraints; ascription type variables are rigid; every
+  equation of a function must bind the same number of arguments (GHC's
+  rule); `LuaIO` tuple results are multi-return again.
+
+- **Linear types:** `(!!)` is not a consume-once operator, and a later
+  guard's condition is a skippable path — both no longer reject valid
+  programs.
 
 - **A tail call from one IO function to another runs in constant
   stack.** An IO function that performs at call time and ends by

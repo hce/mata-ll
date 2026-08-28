@@ -20,31 +20,27 @@ crate (which provides the `mll` command).
 
 ## Changelog
 
-Latest release — 0.1.6:
+Latest release — 0.1.7:
 
-- Breaking: arbitrary-precision `Integer` — a real bignum this time — and it
-  is the numeric default, restoring GHC's model: unannotated literals default
-  to `Integer` (`default (Integer, Number)`), `Int` stays the explicit 64-bit
-  machine-word type. Exact on both PUC Lua and LuaJIT; with the new `(^)`
-  operator, `2 ^ 100` matches GHC byte-for-byte, and the JSON codecs
-  round-trip `Integer` exactly at any magnitude.
-- Generics: `deriving (Generic)` and a `Data.Generics` module — `from`/`to`,
-  the representation types, and datatype/constructor/field metadata — plus
-  `genericToJSON`/`genericFromJSON` in `JSON`, byte-exact library twins of the
-  native codec derives. Infix type operators (`data (:+:) a b = …`) come with
-  it.
-- Soundness: a function body can no longer narrow its signature's type
-  variables (`f :: a -> Int; f x = x` is rejected, as GHC rejects it), and a
-  higher-rank argument must really be polymorphic — the program that ran
-  `True + 1` at runtime no longer compiles.
-- Performance: self-tail-recursive functions and self-recursive IO loops
-  compile to Lua `while` loops and run in constant stack at any depth, and an
-  annotation engine strips provably redundant `__force` calls from the
-  generated code.
-- Syntax: the full Haskell 2010 string-escape grammar, scientific-notation
-  literals, `let` qualifiers in list comprehensions, and multi-line list
-  literals, comprehensions and parenthesized expressions free of the layout
-  rule.
+- Correctness: a deep review round — four fresh-eyes passes, ~200 fixes.
+  Highlights: multi-clause functions returning functions no longer drop
+  arguments (eta padding is consumed, local functions are padded); the
+  dictionary-passing fallback's wrong-code and wrong-rejection paths are
+  closed; a tail call from one IO function to another runs in constant
+  stack; action-typed value bindings re-perform instead of memoizing.
+- Diagnostics: a warnings channel (a literal match without a catch-all
+  warns with a witness), Maranget-matrix exhaustiveness with real
+  witnesses in the error, import cycles reported as the actual chain.
+- Syntax: as-patterns, the remaining `newtype` forms, hex/octal/binary
+  literals and numeric underscores, first-class `($)` and `(.)`,
+  multi-line import lists, infix definitions in class/instance bodies.
+- Generics: `as` renames are reflected through the derived metadata
+  (`selName`/`conName`), so a `deriving (Generic)` type can rename fields
+  for user-written generic codecs.
+- REPL: IO actions execute, embedded Lua 5.4 matches the runner.
+- Prelude parity: `sortBy` is stable, `foldl'` is strict in its
+  accumulator, `max`/`min` are `Ord` methods, `head`/`tail` carry GHC's
+  messages.
 
 See [CHANGELOG.md](https://github.com/hce/mata-ll/blob/main/CHANGELOG.md) for the
 full history.
