@@ -326,6 +326,42 @@ impl CodeGen {
             }
         }
 
+        // Fixed value arities, whole-module and BEFORE any body is emitted:
+        // a call site consults them for callees defined later in the file.
+        // See `fixed_arity` / `known_callee_arity` — this is what keeps a
+        // use at an arity-widening instantiation (`const inc "x" 3`) from
+        // passing the emitted Lua function more arguments than it declares.
+        // A name defined twice with DIFFERENT arities is dropped: all such
+        // definitions write one slot, and a call cannot know which one it
+        // reaches, so it keeps the type-derived flat call. Dictionary-taking
+        // definitions are dropped for the same reason — their value spine is
+        // built by the DictCall lowering, which saturates it itself.
+        {
+            let mut conflicts: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
+            for f in module.functions.iter().chain(module.instance_fns.iter()) {
+                self.module_fn_names.insert(f.name.clone());
+                if !f.dict_params.is_empty() {
+                    conflicts.insert(f.name.clone());
+                    continue;
+                }
+                let arity = Self::emitted_value_arity(f);
+                match self.fixed_arity.entry(f.name.clone()) {
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(arity);
+                    }
+                    std::collections::hash_map::Entry::Occupied(o) => {
+                        if *o.get() != arity {
+                            conflicts.insert(f.name.clone());
+                        }
+                    }
+                }
+            }
+            for name in &conflicts {
+                self.fixed_arity.remove(name);
+            }
+        }
+
         // Direct-perform classification, whole-module and BEFORE any body is
         // emitted: a tail terminal that saturates a call to any of these
         // functions returns bare (see action_run_ast), and the callee may be

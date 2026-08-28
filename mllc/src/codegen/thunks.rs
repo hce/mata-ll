@@ -11,7 +11,9 @@
 //! `flatten_lambda` / `lambda_param_names` implement the N-ary calling
 //! convention for curried lambdas; `runtime_generic_adapter` curries
 //! arguments handed to the erased runtime generics (map, zipWith);
-//! `callee_ast` parenthesizes bare function literals in Lua call position.
+//! `callee_ast` parenthesizes bare function literals in Lua call position,
+//! and `known_callee_arity` / `split_call_ast` keep a flat call from handing
+//! a fixed-arity callee more arguments than it has parameters.
 
 use crate::tir::*;
 use crate::types::Ty;
@@ -180,6 +182,78 @@ impl CodeGen {
         let needs_wrap = Self::is_bare_fn_literal(f);
         let e = self.expr_raw_ast(f);
         if needs_wrap { Expr::paren(e) } else { e }
+    }
+
+    /// The Lua parameter count of `f` when that count is FIXED by the
+    /// callee's definition rather than by its type at this use site —
+    /// `None` when the two always agree and the N-ary convention's default
+    /// (one flat call carrying every outstanding argument) is right.
+    ///
+    /// The convention holds because monomorphization gives each use its own
+    /// copy, whose declared arrow count is the instantiated one — including
+    /// the shared prelude builtins, which mono specializes exactly when an
+    /// instantiation widens their arity (`specialization_wanted`). What is
+    /// left outside that guarantee is every callee mono cannot copy:
+    ///
+    ///   * the runtime prelude functions (`head`, `map`, `foldr`, …), which
+    ///     have no mata-ll body — one erased Lua definition serves every
+    ///     instantiation;
+    ///   * a function whose specializations were purged at the limit, whose
+    ///     uses fall back to the shared generic copy.
+    ///
+    /// For those, instantiating a result type variable to a function makes a
+    /// use site carry MORE arguments than the callee has parameters
+    /// (`const inc "x" 3` against `const :: a -> b -> a`); Lua drops the
+    /// excess and hands back the unapplied function. `split_call_ast` uses
+    /// this to saturate the callee and apply its result to the rest.
+    ///
+    /// Only a bare name can be identified this way. A local binder shadowing
+    /// the name makes the callee an unknown local (whose arity IS its type's
+    /// arrow count — local bindings are monomorphic), and every other callee
+    /// shape — a lambda, a partial application, a call result — is emitted
+    /// with exactly `count_arrows` parameters by construction.
+    pub(super) fn known_callee_arity(&self, f: &TExpr) -> Option<usize> {
+        let mut c = f;
+        while let TExprKind::Paren(p) = &c.kind {
+            c = p.as_ref();
+        }
+        let TExprKind::Var(name) = &c.kind else { return None };
+        if self.is_local_shadowed(name) {
+            return None;
+        }
+        if let Some(&n) = self.fixed_arity.get(name.as_str()) {
+            return Some(n);
+        }
+        // A user definition under the same source name shadows the prelude's
+        // (it is emitted after the runtime block), so the prelude parameter
+        // count applies only to names the module does not define.
+        if self.module_fn_names.contains(name.as_str()) {
+            return None;
+        }
+        super::runtime::prelude_arity(&sanitize_name(name))
+    }
+
+    /// Emit `callee(args…)` under the N-ary convention, splitting the call
+    /// when `arity` (from `known_callee_arity`) proves the callee takes fewer
+    /// parameters than there are arguments: the first `arity` arguments
+    /// saturate it, and its result — a function value, forced because a call
+    /// may yield a thunk — is applied to the rest.
+    ///
+    /// One split always suffices. The saturating call yields an ordinary
+    /// value whose own arity is the arrow count of its type, and that is
+    /// exactly the number of arguments left over.
+    ///
+    /// A zero-arity callee is never split: a value binding or a nullary IO
+    /// action reached with arguments is not an over-application of a curried
+    /// function, and `f()(x)` would perform the action to call its result.
+    pub(super) fn split_call_ast(callee: Expr, mut args: Vec<Expr>, arity: Option<usize>) -> Expr {
+        match arity {
+            Some(n) if n > 0 && args.len() > n => {
+                let rest = args.split_off(n);
+                Expr::call(Expr::force(Expr::call(callee, args)), rest)
+            }
+            _ => Expr::call(callee, args),
+        }
     }
 
     /// True when the Lua that `expr_ast` builds for `expr` is GUARANTEED to

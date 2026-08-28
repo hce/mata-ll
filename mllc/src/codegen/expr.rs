@@ -89,11 +89,12 @@ impl CodeGen {
                     _ => {
                         let sname = sanitize_name(name);
                         let lref = self.lua_ref(&sname);
-                        if self.concrete_vars.contains(&sname) {
+                        let e = if self.concrete_vars.contains(&sname) {
                             Expr::name(lref)
                         } else {
                             Expr::force(Expr::name(lref))
-                        }
+                        };
+                        self.widened_ref_ast(expr, e)
                     }
                 }
             }
@@ -123,6 +124,9 @@ impl CodeGen {
 
                 let (f, args) = Self::collect_app_spine(func, arg);
 
+                if let Some(e) = self.try_opfunc_infix_app(expr, f, &args) {
+                    return e;
+                }
                 if let Some(e) = self.try_exception_app(f, &args) {
                     return e;
                 }
@@ -480,14 +484,16 @@ impl CodeGen {
                     // The callee must be WHNF; when the emission already
                     // yields that, callee_ast only adds the parens a bare fn
                     // literal needs to be called.
+                    let arity = self.known_callee_arity(inner_body);
                     let callee = if self.expr_yields_whnf(inner_body) {
                         self.callee_ast(inner_body)
                     } else {
                         Expr::force(self.expr_ast(inner_body))
                     };
-                    Expr::call(
+                    Self::split_call_ast(
                         callee,
                         eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
+                        arity,
                     )
                 } else {
                     // Lambda body is in tail position — strip parens for PTC.
@@ -989,6 +995,35 @@ impl CodeGen {
         None
     }
 
+    /// A first-class REFERENCE to a fixed-arity function whose type at this
+    /// use has more arrows than the definition has parameters — `map id
+    /// [inc]`, or `const` handed to a higher-order function at `a := Int ->
+    /// Int` — must not travel as the bare name: every consumer of a function
+    /// VALUE applies it under the N-ary convention, in one flat call carrying
+    /// as many arguments as its type has arrows, and the callee would drop
+    /// the excess (see known_callee_arity for why the two can differ).
+    ///
+    /// Eta-expand it here instead, into a closure of exactly the arity the
+    /// type promises, which saturates the real function and applies its
+    /// result to the rest. Callee positions do NOT come through here (they
+    /// emit through `callee_ast`/`expr_raw_ast` and split the call in place),
+    /// so a saturated call never pays for the closure.
+    fn widened_ref_ast(&mut self, expr: &TExpr, emitted: Expr) -> Expr {
+        let Some(arity) = self.known_callee_arity(expr) else { return emitted };
+        let total = count_arrows(&expr.ty);
+        if arity == 0 || total <= arity {
+            return emitted;
+        }
+        let params: Vec<String> = (0..total).map(|i| format!("_ea{}", i)).collect();
+        let args: Vec<Expr> = params.iter().map(|p| Expr::name(p.clone())).collect();
+        Expr::paren(Expr::Func(
+            params,
+            FuncBody::Inline(vec![Stmt::Return(
+                Self::split_call_ast(emitted, args, Some(arity)),
+            )]),
+        ))
+    }
+
     /// Collect all applied arguments of a (possibly curried) application,
     /// split out only to keep `expr_ast_inner` readable: returns the head
     /// callee and the arguments in application order.
@@ -1001,6 +1036,50 @@ impl CodeGen {
         }
         args.reverse();
         (f, args)
+    }
+
+    /// A first-class `($)` or `(.)` that is APPLIED to both its operands —
+    /// `($) f x`, `(.) f g x` — is the infix application written in prefix
+    /// form, so lower it to the infix emission (`dollar_infix_ast` /
+    /// `compose_infix_ast`) and keep the runtime value for the genuinely
+    /// first-class uses it exists for (`zipWith (.) fs gs`, `foldr ($) z`).
+    ///
+    /// The infix emission knows both operands' static types; the runtime
+    /// values cannot. They forward their extra arguments to `f` in one flat
+    /// call but hand `g` exactly one — right only while every operand's arity
+    /// equals its type's arrow count, which a fixed-arity callee at a
+    /// widening instantiation breaks in both directions at once
+    /// (`(.) applyToInc id` at `id :: (Int -> Int) -> (Int -> Int)`).
+    ///
+    /// The rebuilt spine's node types come from the argument types and the
+    /// whole application's result, exactly as the shadowed-backtick-operator
+    /// path rebuilds them.
+    fn try_opfunc_infix_app(
+        &mut self,
+        expr: &TExpr,
+        f: &TExpr,
+        args: &[&TExpr],
+    ) -> Option<Expr> {
+        let TExprKind::OpFunc(op) = &f.kind else { return None };
+        if (op != "$" && op != ".") || args.len() < 2 {
+            return None;
+        }
+        let rest_tys: Vec<Ty> = args[2..].iter().map(|a| a.ty.clone()).collect();
+        let mut node = TExpr::new(
+            TExprKind::InfixApp {
+                op: op.clone(),
+                lhs: Box::new(args[0].clone()),
+                rhs: Box::new(args[1].clone()),
+            },
+            Ty::fun(&rest_tys, expr.ty.clone()),
+        );
+        for (i, arg) in args[2..].iter().enumerate() {
+            node = TExpr::new(
+                TExprKind::App(Box::new(node), Box::new((*arg).clone())),
+                Ty::fun(&rest_tys[i + 1..], expr.ty.clone()),
+            );
+        }
+        Some(self.expr_ast(&node))
     }
 
     /// The `try`/`catch` case of the App arm, split out only to keep
@@ -1113,6 +1192,11 @@ impl CodeGen {
         let arg0_adapter = args.first()
             .and_then(|a| self.runtime_generic_adapter(f, 0, &a.ty));
 
+        // A callee whose emitted parameter list is shorter than this spine
+        // must be saturated first and its result applied to the rest — see
+        // known_callee_arity / split_call_ast.
+        let arity = self.known_callee_arity(f);
+
         // Check if this is a partial application:
         // the result type is still a function type
         let remaining = count_arrows(&expr.ty);
@@ -1159,7 +1243,9 @@ impl CodeGen {
             }
             let closure = Expr::Func(
                 extra_params,
-                FuncBody::Block(Block(vec![Stmt::Return(Expr::call(callee, cargs))])),
+                FuncBody::Block(Block(vec![Stmt::Return(
+                    Self::split_call_ast(callee, cargs, arity),
+                )])),
             );
             if hoisted.is_empty() {
                 Expr::paren(closure)
@@ -1188,7 +1274,7 @@ impl CodeGen {
                     cargs.push(arg_e);
                 }
             }
-            Expr::call(callee, cargs)
+            Self::split_call_ast(callee, cargs, arity)
         }
     }
 
@@ -1293,6 +1379,7 @@ impl CodeGen {
                     .and_then(|v| v.get(applied).copied())
                     .unwrap_or(false))
         };
+        let arity = self.known_callee_arity(lhs);
         let callee = self.callee_ast(lhs);
         let arg = self.arg_ast(rhs, rhs_strict);
         let arg = match adapter {
@@ -1308,10 +1395,12 @@ impl CodeGen {
             }
             Expr::paren(Expr::Func(
                 extra,
-                FuncBody::Inline(vec![Stmt::Return(Expr::call(callee, cargs))]),
+                FuncBody::Inline(vec![Stmt::Return(
+                    Self::split_call_ast(callee, cargs, arity),
+                )]),
             ))
         } else {
-            Expr::call(callee, vec![arg])
+            Self::split_call_ast(callee, vec![arg], arity)
         }
     }
 
@@ -1400,10 +1489,12 @@ impl CodeGen {
                 .or_else(|| self.demand_info.strict_params.get(n))
                 .and_then(|v| v.first().copied()).unwrap_or(false));
         let suspend = !f_strict && g_extras == 0 && adapter.is_none();
+        let f_arity = self.known_callee_arity(lhs);
+        let g_arity = self.known_callee_arity(rhs);
         let f_callee = self.callee_ast(lhs);
         let inner = if g_extras == 0 {
             let g_callee = self.callee_ast(rhs);
-            Expr::call(g_callee, vec![Expr::name("_x")])
+            Self::split_call_ast(g_callee, vec![Expr::name("_x")], g_arity)
         } else {
             let pb_params: Vec<String> =
                 (0..g_extras).map(|i| format!("_pb{}", i)).collect();
@@ -1414,7 +1505,9 @@ impl CodeGen {
             }
             Expr::paren(Expr::Func(
                 pb_params,
-                FuncBody::Inline(vec![Stmt::Return(Expr::call(g_callee, gargs))]),
+                FuncBody::Inline(vec![Stmt::Return(
+                    Self::split_call_ast(g_callee, gargs, g_arity),
+                )]),
             ))
         };
         let inner = match adapter {
@@ -1430,7 +1523,9 @@ impl CodeGen {
         }
         Expr::paren(Expr::Func(
             outer_params,
-            FuncBody::Inline(vec![Stmt::Return(Expr::call(f_callee, fargs))]),
+            FuncBody::Inline(vec![Stmt::Return(
+                Self::split_call_ast(f_callee, fargs, f_arity),
+            )]),
         ))
     }
 

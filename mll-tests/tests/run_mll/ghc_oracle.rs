@@ -167,6 +167,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_clause_local_scope, "cases", "clause_local_scope.mll"),
         (ghc_oracle_compose_non_strict, "cases", "compose_non_strict.mll"),
         (ghc_oracle_curried_lambda_arity, "cases", "curried_lambda_arity.mll"),
+        (ghc_oracle_over_application_arity, "cases", "over_application_arity.mll"),
         (ghc_oracle_data_types, "cases", "data_types.mll"),
         (ghc_oracle_exponent_op, "cases", "exponent_op.mll"),
         (ghc_oracle_integer_bignum, "cases", "integer_bignum.mll"),

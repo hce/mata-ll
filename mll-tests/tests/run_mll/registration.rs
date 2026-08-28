@@ -386,6 +386,11 @@ mll_test!(instance_forward_ref, "instance_forward_ref.mll");
 // results flowing through the erased runtime generics (map/zipWith)
 mll_test!(curried_lambda_arity, "curried_lambda_arity.mll");
 
+// The other side of the same convention: a call site must not hand a
+// fixed-arity callee (a shared prelude builtin, an erased runtime generic)
+// more arguments than it declares, at an instantiation that widens its arity
+mll_test!(over_application_arity, "over_application_arity.mll");
+
 // head/(!!) return the element itself, never a raw lazy-cons-head thunk
 // (the WHNF-return invariant) — and stay exactly as lazy as before
 mll_test!(lazy_head_projection, "lazy_head_projection.mll");

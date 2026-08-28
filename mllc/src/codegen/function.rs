@@ -228,6 +228,32 @@ impl CodeGen {
             && !expr_evaluates_global_ref(first_body)
     }
 
+    /// How many VALUE parameters `function_stmts` emits for this definition —
+    /// its clause patterns plus the `_eta` padding that brings the parameter
+    /// list up to the declared type's arrow count. This is the arity every
+    /// call site must respect under the N-ary convention, and it is fixed by
+    /// the DECLARED type: a use at an instantiation that turns the result
+    /// variable into a function (`const inc "x" 3`, where `const :: a -> b ->
+    /// a` is emitted with two parameters) has MORE outstanding arguments than
+    /// the callee takes, and Lua silently discards the excess. `known_callee_arity`
+    /// reads this to split such a call into a saturating one plus an
+    /// application of its result (see `split_call_ast`).
+    ///
+    /// Dictionary parameters are not counted: they precede the value
+    /// parameters and are supplied by the DictCall lowering, not by the value
+    /// spine. A value binding (no patterns, nothing to eta-expand) is 0 — its
+    /// slot holds a value or a nullary action, never a function of arguments.
+    ///
+    /// The two function-emitting arms of `function_stmts` debug_assert their
+    /// emitted parameter list against this, so the prediction and the emission
+    /// cannot drift (the same discipline as `slot_always_whnf` and
+    /// `direct_perform_arity`).
+    pub(super) fn emitted_value_arity(func: &TFunction) -> usize {
+        let Some(first) = func.clauses.first() else { return 0 };
+        let pat_arity = func.clauses.iter().map(|c| c.patterns.len()).max().unwrap_or(0);
+        pat_arity + count_arrows(&func.ty).saturating_sub(first.patterns.len())
+    }
+
     /// Is this binding emitted DIRECT-PERFORM — a Lua function whose body IS
     /// the IO action, so calling it saturated performs and returns a result
     /// in the runners' range (see the __mll_run contract in the runtime)?
@@ -543,6 +569,9 @@ impl CodeGen {
             let mut params: Vec<String> = (0..clause.patterns.len()).map(|i| format!("_arg{}", i)).collect();
             let eta_params: Vec<String> = (0..eta_count).map(|i| format!("_eta{}", i)).collect();
             params.extend(eta_params.iter().cloned());
+            debug_assert_eq!(params.len(), Self::emitted_value_arity(func),
+                "emitted_value_arity disagrees with the single-clause emission of '{}'",
+                func.name);
             let mut all_params = dict_param_names.clone();
             all_params.extend(params.iter().cloned());
             let target = self.fn_target(&lua_name);
@@ -645,6 +674,9 @@ impl CodeGen {
         let mut params: Vec<String> = (0..num_params).map(|i| format!("_arg{}", i)).collect();
         let eta_params_multi: Vec<String> = (0..eta_count).map(|i| format!("_eta{}", i)).collect();
         params.extend(eta_params_multi.iter().cloned());
+        debug_assert_eq!(params.len(), Self::emitted_value_arity(func),
+            "emitted_value_arity disagrees with the multi-clause emission of '{}'",
+            func.name);
         // Eta padding must be CONSUMED, not just declared: every clause and
         // guard result is applied to the padding parameters by
         // match_tail_stmts (via clause_eta_params — the single-clause arm
@@ -715,15 +747,22 @@ impl CodeGen {
     /// `pick True h = h` at four arrows returned `h` unapplied, and a
     /// saturated `pick True f 1 2` printed a function value).
     ///
+    /// The body is emitted in CALLEE position (`callee_ast`), which for a
+    /// bare name yields the name itself — never the eta-expanded closure a
+    /// first-class reference gets (`widened_ref_ast`) — so a fixed-arity body
+    /// reached with more padding than it has parameters (`f = const` at three
+    /// arrows) is split here instead, exactly as at any other call site.
     /// When the emission is a function literal (a lambda, or the
     /// parenthesized closure a partial application builds), it is WHNF by
     /// construction — a `__force` wrapper would be a no-op the peephole
     /// cannot collapse, because the callee position needs the grouping the
     /// force call happens to provide (Lua cannot call a bare
-    /// `function … end`). Every other shape keeps the force: the callee
-    /// must be a function value, not a thunk.
+    /// `function … end`), and it would hide the immediate application from
+    /// the beta-reduction peephole. Every other shape keeps the force: the
+    /// callee must be a function value, not a thunk.
     pub(super) fn eta_call_ast(&mut self, body: &TExpr, eta_params: &[String]) -> Expr {
-        let body_e = self.expr_ast(body);
+        let arity = self.known_callee_arity(body);
+        let body_e = self.callee_ast(body);
         let callee = match body_e {
             Expr::Func(ps, b) => Expr::paren(Expr::Func(ps, b)),
             Expr::Paren(inner) if matches!(inner.as_ref(), Expr::Func(..)) => {
@@ -731,9 +770,10 @@ impl CodeGen {
             }
             e => Expr::force(e),
         };
-        Expr::call(
+        Self::split_call_ast(
             callee,
             eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
+            arity,
         )
     }
 

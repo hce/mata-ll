@@ -263,6 +263,54 @@ static PRELUDE: std::sync::LazyLock<String> = std::sync::LazyLock::new(|| {
     s
 });
 
+/// The Lua parameter count of every top-level `local function NAME(…)` in the
+/// prelude, READ OFF the runtime text rather than restated here — a
+/// hand-kept copy would be one more twin to keep in step with runtime.lua.
+///
+/// Call sites consult it through `CodeGen::known_callee_arity`: a runtime
+/// prelude function has no mata-ll body, so its parameter list — not the
+/// arrow count of the type at a use site — is what fixes its arity under the
+/// N-ary convention. `head xs 3` (at `a := Int -> Int`) must call `head(xs)`
+/// and apply the result, because `head` takes exactly one parameter and Lua
+/// discards the rest.
+///
+/// Variadic definitions are deliberately absent: `__mll_seq(a, b, ...)`,
+/// `engage(f, ...)` and the first-class `($)`/`(.)` values forward their
+/// extra arguments themselves, so their call sites must keep passing
+/// everything in one flat call.
+static PRELUDE_ARITY: std::sync::LazyLock<std::collections::HashMap<&'static str, usize>> =
+    std::sync::LazyLock::new(|| {
+        let mut m = std::collections::HashMap::new();
+        for line in PRELUDE.lines() {
+            let Some(rest) = line.strip_prefix("local function ") else { continue };
+            let Some((name, params)) = rest.split_once('(') else { continue };
+            let Some((params, _)) = params.split_once(')') else { continue };
+            if !is_ident(name) {
+                continue;
+            }
+            let params = params.trim();
+            if params.contains("...") {
+                continue;
+            }
+            let arity = if params.is_empty() {
+                0
+            } else {
+                params.split(',').count()
+            };
+            // A later definition of the same name is the one user code
+            // reaches, exactly as Lua's scoping resolves it.
+            m.insert(name, arity);
+        }
+        m
+    });
+
+/// The Lua parameter count of runtime prelude function `lua_name` (a
+/// `sanitize_name` output: `not_`, `error_`, …), or `None` when the prelude
+/// has no such fixed-arity definition. See [`PRELUDE_ARITY`].
+pub(super) fn prelude_arity(lua_name: &str) -> Option<usize> {
+    PRELUDE_ARITY.get(lua_name).copied()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -281,6 +329,28 @@ mod tests {
             .map(|l| provided_names(l).len())
             .sum();
         assert!(locals > 200, "prelude declares {} top-level locals", locals);
+    }
+
+    /// `PRELUDE_ARITY` is read off the runtime text, so this pins the shape
+    /// it reads rather than a copy of the data: the value arities call sites
+    /// split on, and the variadic definitions it must NOT claim an arity for
+    /// (they forward their extra arguments themselves).
+    #[test]
+    fn prelude_arity_reads_the_runtime_definitions() {
+        for (name, arity) in [
+            ("head", 1), ("tail", 1), ("map", 2), ("filter", 2),
+            ("take", 2), ("drop", 2), ("zipWith", 3), ("foldr", 3),
+            ("foldl", 3), ("not_", 1), ("error_", 1), ("show", 1),
+        ] {
+            assert_eq!(prelude_arity(name), Some(arity), "arity of runtime '{name}'");
+        }
+        for name in ["__mll_seq", "engage"] {
+            assert_eq!(
+                prelude_arity(name), None,
+                "'{name}' is variadic — it must claim no fixed arity"
+            );
+        }
+        assert_eq!(prelude_arity("no_such_runtime_function"), None);
     }
 
     /// `code_idents` cuts each line at its first `--`, which is only right

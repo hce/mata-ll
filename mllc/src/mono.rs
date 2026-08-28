@@ -59,6 +59,19 @@ pub struct Monomorphizer {
     poly_fns: HashMap<String, TFunction>,
     /// Set of prelude/built-in names (don't try to specialize these)
     builtins: HashSet<String>,
+    /// The `builtins` that DO have a mata-ll body in this module (`id`,
+    /// `const`, `flip`, `reverse`, …). They are shared, not specialized per
+    /// instantiation — with one exception, `specialization_wanted`: a use
+    /// whose instantiation WIDENS the function's arity gets its own copy.
+    ///
+    /// Codegen emits one Lua function per definition, with as many parameters
+    /// as the DECLARED type has arrows, and every call site passes the
+    /// arguments its own instantiated type calls for, in one flat call (the
+    /// N-ary convention). The two agree for every other function because
+    /// specialization gives each instantiation its own copy — but a shared
+    /// `const :: a -> b -> a` used at `a := Int -> Int` is a two-parameter
+    /// Lua function handed three arguments, and Lua discards the third.
+    arity_only_fns: HashSet<String>,
     /// Collected specializations: SpecKey -> mangled name
     specializations: HashMap<SpecKey, String>,
     /// Generated specialized functions
@@ -256,6 +269,7 @@ impl Monomorphizer {
         Monomorphizer {
             poly_fns: HashMap::new(),
             builtins,
+            arity_only_fns: HashSet::new(),
             specializations: HashMap::new(),
             generated: Vec::new(),
             class_methods,
@@ -330,7 +344,12 @@ impl Monomorphizer {
     pub fn run(&mut self, mut module: TModule) -> TModule {
         // Collect polymorphic user-defined functions
         for func in &module.functions {
-            if self.is_polymorphic(&func.ty) && !self.builtins.contains(&func.name) {
+            if self.is_polymorphic(&func.ty) {
+                if self.builtins.contains(&func.name) {
+                    // A builtin stays shared; only an arity-widening use of it
+                    // is specialized (see `arity_only_fns`).
+                    self.arity_only_fns.insert(func.name.clone());
+                }
                 self.poly_fns.insert(func.name.clone(), func.clone());
             }
         }
@@ -1155,7 +1174,14 @@ impl Monomorphizer {
                 // polymorphic but we have specialization(s) for this function
                 // name, use the most recent one (the recursive/sibling call
                 // shares the same concrete type as the enclosing specialization)
-                if self.poly_fns.contains_key(name) && !self.locals.contains(name) && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty) {
+                // An `arity_only_fns` builtin is excluded: its specializations
+                // exist only to fix an arity, so redirecting a
+                // still-polymorphic reference to an arbitrary one of them
+                // would hand the use a function of the WRONG arity. The
+                // shared generic copy is what such a reference wants.
+                if self.poly_fns.contains_key(name) && !self.locals.contains(name)
+                    && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty)
+                    && !self.arity_only_fns.contains(name) {
                     // Resolve to the enclosing specialization of this function
                     // (top-most on the generation stack). The HashMap of all
                     // specializations has no meaningful order, so fall back to
@@ -1186,7 +1212,9 @@ impl Monomorphizer {
                         return TExpr { kind: TExprKind::Var(mangled), ty };
                     }
                 }
-                if self.poly_fns.contains_key(name) && !self.locals.contains(name) && !self.dict_passing_fns.contains(name) && !self.is_polymorphic(&ty) {
+                if self.poly_fns.contains_key(name) && !self.locals.contains(name)
+                    && !self.dict_passing_fns.contains(name) && !self.is_polymorphic(&ty)
+                    && self.specialization_wanted(name, &ty) {
                     let key = SpecKey { name: name.clone(), ty: ty.clone() };
                     let mangled = if let Some(existing) = self.specializations.get(&key) {
                         existing.clone()
@@ -2343,6 +2371,23 @@ impl Monomorphizer {
             e = f.as_ref();
         }
         n
+    }
+
+    /// Does this use of polymorphic `name` at concrete `use_ty` need its own
+    /// specialization? Every ordinary polymorphic function is specialized per
+    /// instantiation. A builtin (`arity_only_fns`) is shared instead — its
+    /// one compiled copy serves every use — EXCEPT where the instantiation
+    /// widens its arity, which the shared copy cannot serve: codegen emits it
+    /// with the declared type's arrow count of parameters, while this use
+    /// would hand it the instantiated count (`const inc "x" 3` against
+    /// `const :: a -> b -> a`). There the arity, not the type, is what forces
+    /// a separate copy.
+    fn specialization_wanted(&self, name: &str, use_ty: &Ty) -> bool {
+        if !self.arity_only_fns.contains(name) {
+            return true;
+        }
+        self.poly_fns.get(name).is_some_and(|f|
+            Self::spine_arrow_count(use_ty) > Self::spine_arrow_count(&f.ty))
     }
 
     /// Number of leading arrows in a type (the arguments it can still take).

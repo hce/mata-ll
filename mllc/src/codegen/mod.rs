@@ -299,6 +299,24 @@ struct CodeGen {
     /// function_stmts debug_asserts its own emission decision against this
     /// map (the `slot_always_whnf` pattern), so the two cannot drift.
     direct_perform_fns: std::collections::HashMap<String, usize>,
+    /// The module's compiled functions — source name → the number of VALUE
+    /// parameters their emitted Lua function takes (`emitted_value_arity`),
+    /// filled by `module_stmts` before any body is emitted so a call site may
+    /// consult a callee defined later in the file. That arity is fixed by the
+    /// DECLARED type, while a call site derives its argument count from the
+    /// type at the USE: the two differ exactly when an instantiation turns a
+    /// result type variable into a function, and the surplus arguments would
+    /// be silently dropped by Lua. `known_callee_arity` reads this map (and
+    /// the runtime prelude's own parameter counts) to split such a call.
+    /// A name with two definitions of DIFFERENT arity is absent, as is a
+    /// dictionary-taking one (its call sites are DictCalls, saturated by the
+    /// dictionary lowering itself).
+    fixed_arity: std::collections::HashMap<String, usize>,
+    /// Every source name the module defines a function for, whatever its
+    /// arity: a definition here shadows the runtime prelude function of the
+    /// same name (codegen emits it after the runtime block), so the prelude's
+    /// parameter count must not be applied to it.
+    module_fn_names: std::collections::HashSet<String>,
     /// Names defined more than once in the merged module whose definitions
     /// classify differently (see the seeding in module_stmts): never in
     /// `direct_perform_fns`, and exempt from function_stmts' agreement
@@ -354,6 +372,8 @@ impl CodeGen {
             local_demand_rows: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
             direct_perform_fns: std::collections::HashMap::new(),
+            fixed_arity: std::collections::HashMap::new(),
+            module_fn_names: std::collections::HashSet::new(),
             direct_perform_conflicts: std::collections::HashSet::new(),
             embed_var_export: false,
             big_lits: std::rc::Rc::new(std::cell::RefCell::new(BigLitPool::default())),
