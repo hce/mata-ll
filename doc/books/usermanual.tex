@@ -1572,10 +1572,13 @@ The compiler enforces two rules on renames:
         object), so two fields mapping to the same key (or a key of
         \texttt{""}) are rejected.
   \item \texttt{as} requires that the type derive at least one of
-        \texttt{LuaDict}, \texttt{ToJSON}, or \texttt{FromJSON}.
+        \texttt{LuaDict}, \texttt{ToJSON}, \texttt{FromJSON}, or
+        \texttt{Generic} (whose derived representation reflects the
+        rename as \texttt{selName}/\texttt{conName} metadata).
         Without one of those the rename has nothing to apply to ---
-        there is no name-keyed table and no JSON codec --- and the
-        annotation is rejected rather than silently ignored.
+        there is no name-keyed table, no JSON codec, and no
+        reflected metadata --- and the annotation is rejected
+        rather than silently ignored.
 \end{itemize}
 
 Sum-type \emph{constructors} have a parallel rename ---

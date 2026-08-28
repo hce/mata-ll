@@ -64,6 +64,7 @@ excluded_reason() {
         cases/ffi_maybe_args)            echo "FFI declarations";;
         cases/ffi_strictness)            echo "FFI declarations";;
         cases/gadt_syntax_generic_json)  echo "Generics substrate + JSON FFI library";;
+        cases/generic_as_rename)         echo "Generics substrate + JSON FFI library (\`as\` renames under Generic)";;
         cases/generic_json)              echo "Generics substrate + JSON FFI library";;
         cases/generic_json_decode)       echo "Generics substrate + JSON FFI library";;
         cases/generic_json_many)         echo "Generics substrate + JSON FFI library";;

@@ -2453,11 +2453,12 @@ main = pure ()
 
 #[test]
 fn luadict_rename_without_relevant_deriving_rejected() {
-    // `as` renames the field's shared external name: the LuaDict table key
-    // and the JSON key of a derived ToJSON/FromJSON codec. Without any of
-    // those derivings the record never crosses a boundary that keys by
-    // name, so the rename would be silently meaningless. The error must
-    // name all three derivings that would give the rename meaning.
+    // `as` renames the field's shared external name: the LuaDict table key,
+    // the JSON key of a derived ToJSON/FromJSON codec, and the selName of a
+    // derived Generic representation. Without any of those derivings the
+    // record never crosses a boundary that keys by name, so the rename would
+    // be silently meaningless. The error must name all four derivings that
+    // would give the rename meaning.
     let source = r#"
 data D = D { a as "k" :: Int }
     deriving (Show)
@@ -2466,10 +2467,11 @@ main :: IO ()
 main = pure ()
 "#;
     expect_compile_error(source, &[], &[
-        "derives none of LuaDict, ToJSON or FromJSON",
+        "derives none of LuaDict, ToJSON, FromJSON or Generic",
         "`deriving (LuaDict)`",
         "`deriving (ToJSON)`",
         "`deriving (FromJSON)`",
+        "`deriving (Generic)`",
     ]);
 }
 

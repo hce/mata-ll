@@ -1185,10 +1185,11 @@ main = pure ()
 
 #[test]
 fn constructor_as_without_json_deriving_rejected() {
-    // The constructor rename only changes the JSON tag; a constructor is a
-    // positional integer tag at the Lua boundary, so without a derived JSON
-    // codec the rename has nothing to apply to and is rejected rather than
-    // silently ignored. (This also pins down the old misparse: before the
+    // The constructor rename only changes the external tag; a constructor is
+    // a positional integer tag at the Lua boundary, so without a derived JSON
+    // codec or Generic representation (whose conName reflects the rename) the
+    // rename has nothing to apply to and is rejected rather than silently
+    // ignored. (This also pins down the old misparse: before the
     // constructor `as` grammar existed, `data Foo = Foo as "foo"` parsed
     // `as` and `"foo"` as two phantom FIELD TYPES — it "compiled" and then
     // failed bizarrely at every use of Foo. It must now parse as the rename
@@ -1201,7 +1202,7 @@ main = pure ()
 "#;
     let msg = expect_compile_error(source, &[], &[
         "Constructor 'Foo' of 'Foo' is renamed with `as \"foo\"`",
-        "derives neither ToJSON nor FromJSON",
+        "derives none of ToJSON, FromJSON or Generic",
         "positional integer tag",
     ]);
     assert!(!msg.contains("expects 2 args"),

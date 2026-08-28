@@ -32,6 +32,7 @@ cases/ffi_maybe_args	FFI declarations
 cases/ffi_multi_return	LuaPure FFI declarations (math.modf multi-return)
 cases/ffi_strictness	FFI declarations
 cases/gadt_syntax_generic_json	Generics substrate + JSON FFI library
+cases/generic_as_rename	Generics substrate + JSON FFI library (`as` renames under Generic)
 cases/generic_json	Generics substrate + JSON FFI library
 cases/generic_json_decode	Generics substrate + JSON FFI library
 cases/generic_json_many	Generics substrate + JSON FFI library

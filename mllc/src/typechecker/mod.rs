@@ -2753,23 +2753,25 @@ impl Checker {
             if let Decl::DataDef { name, type_vars, constructors, deriving } = decl {
                 // A field-key rename (`field as "key" :: T`) gives the field
                 // one shared EXTERNAL name: the key in the runtime Lua table
-                // that `deriving (LuaDict)` lays the record out as, and the
-                // JSON object key of a derived ToJSON/FromJSON codec. Without
-                // any of those derivings the record never crosses a boundary
-                // that keys by name, so the rename would be silently
-                // meaningless. Reject it instead.
-                if !deriving.iter().any(|c| c == "LuaDict" || c == "ToJSON" || c == "FromJSON") {
+                // that `deriving (LuaDict)` lays the record out as, the
+                // JSON object key of a derived ToJSON/FromJSON codec, and the
+                // `selName` a derived Generic representation reflects (which
+                // user-written generic codecs key on). Without any of those
+                // derivings the record never crosses a boundary that keys by
+                // name, so the rename would be silently meaningless. Reject
+                // it instead.
+                if !deriving.iter().any(|c| c == "LuaDict" || c == "ToJSON" || c == "FromJSON" || c == "Generic") {
                     for con in constructors {
                         if let ConstructorFields::Named(fields) = &con.fields {
                             for field in fields {
                                 if let Some(key) = &field.external_key {
                                     self.push_error_ctx_note(
                                         DiagnosticKind::Other(format!(
-                                            "Field '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives none of LuaDict, ToJSON or FromJSON: the rename only changes the field's external name — the key in the runtime Lua table of a LuaDict record and the JSON object key of a derived ToJSON/FromJSON codec — and without one of those derivings there is nothing the rename could apply to",
+                                            "Field '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives none of LuaDict, ToJSON, FromJSON or Generic: the rename only changes the field's external name — the key in the runtime Lua table of a LuaDict record, the JSON object key of a derived ToJSON/FromJSON codec, and the selName of a derived Generic representation — and without one of those derivings there is nothing the rename could apply to",
                                             field.name, name, key, name,
                                         )),
                                         format!("data {}", name),
-                                        "`as` field renaming is a mata-ll extension with no GHC equivalent; add `deriving (LuaDict)`, `deriving (ToJSON)` or `deriving (FromJSON)`, or drop the rename.",
+                                        "`as` field renaming is a mata-ll extension with no GHC equivalent; add `deriving (LuaDict)`, `deriving (ToJSON)`, `deriving (FromJSON)` or `deriving (Generic)`, or drop the rename.",
                                     );
                                 }
                             }
@@ -2777,27 +2779,28 @@ impl Checker {
                     }
                 }
                 // A constructor rename (`Con field-types as "name"`) gives
-                // the constructor an external TAG. Two derivings give that tag
-                // a meaning: a ToJSON/FromJSON codec writes and reads it to
-                // tell the constructors of a sum type apart at the JSON
-                // boundary; and `deriving (LuaDict)` on an all-nullary sum type
-                // makes the tag the constructor's runtime string at the Lua
-                // boundary. Absent both, nothing names the constructor
-                // externally (an ADT with fields is a positional integer tag,
-                // not a name), so the rename would be silently meaningless —
-                // reject it instead.
+                // the constructor an external TAG. Three derivings give that
+                // tag a meaning: a ToJSON/FromJSON codec writes and reads it
+                // to tell the constructors of a sum type apart at the JSON
+                // boundary; a derived Generic representation reflects it as
+                // `conName`; and `deriving (LuaDict)` on an all-nullary sum
+                // type makes the tag the constructor's runtime string at the
+                // Lua boundary. Absent all of them, nothing names the
+                // constructor externally (an ADT with fields is a positional
+                // integer tag, not a name), so the rename would be silently
+                // meaningless — reject it instead.
                 let is_luadict_enum = deriving.iter().any(|c| c == "LuaDict")
                     && constructors.iter().all(|c| c.is_nullary());
-                if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON") && !is_luadict_enum {
+                if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON" || c == "Generic") && !is_luadict_enum {
                     for con in constructors {
                         if let Some(ext) = &con.external_name {
                             self.push_error_ctx_note(
                                 DiagnosticKind::Other(format!(
-                                    "Constructor '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives neither ToJSON nor FromJSON, nor is it an all-nullary type deriving LuaDict: the rename only changes the constructor's external tag — the string a derived JSON codec, or a LuaDict string-enum, uses to tell the constructors apart — and without one of those there is nothing the rename could apply to",
+                                    "Constructor '{}' of '{}' is renamed with `as \"{}\"`, but '{}' derives none of ToJSON, FromJSON or Generic, nor is it an all-nullary type deriving LuaDict: the rename only changes the constructor's external tag — the string a derived JSON codec or a LuaDict string-enum uses to tell the constructors apart, and the conName of a derived Generic representation — and without one of those there is nothing the rename could apply to",
                                     con.name, name, ext, name,
                                 )),
                                 format!("data {}", name),
-                                "`as` constructor renaming is a mata-ll extension with no GHC equivalent; on a type with fields it never affects the Lua side (at the Lua boundary such a constructor is a positional integer tag, not a name). Add `deriving (ToJSON)` or `deriving (FromJSON)`, or make an all-nullary sum type `deriving (LuaDict)` so its constructors become Lua strings, or drop the rename.",
+                                "`as` constructor renaming is a mata-ll extension with no GHC equivalent; on a type with fields it never affects the Lua side (at the Lua boundary such a constructor is a positional integer tag, not a name). Add `deriving (ToJSON)`, `deriving (FromJSON)` or `deriving (Generic)`, or make an all-nullary sum type `deriving (LuaDict)` so its constructors become Lua strings, or drop the rename.",
                             );
                         }
                     }

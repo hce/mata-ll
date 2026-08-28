@@ -620,6 +620,7 @@ mll_lib_test!(gadt_syntax_generic_json, "gadt_syntax_generic_json.mll");
 mll_lib_test!(generic_json, "generic_json.mll");
 mll_lib_test!(generic_json_many, "generic_json_many.mll");
 mll_lib_test!(generic_json_decode, "generic_json_decode.mll");
+mll_lib_test!(generic_as_rename, "generic_as_rename.mll");
 mll_lib_test!(constructor_as_rename, "constructor_as_rename.mll");
 mll_lib_test!(lib_regex, "lib_regex.mll");
 mll_lib_test!(lib_los, "lib_los.mll");

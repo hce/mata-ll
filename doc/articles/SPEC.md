@@ -1559,8 +1559,12 @@ wrapper around a product (`:*:`) of fields, each field an `S1` selector
 wrapper around a `K1` constant that holds the field value. `U1` is the
 empty product (a nullary constructor). `D1`/`C1`/`S1` carry the datatype,
 constructor and field *metadata* — `datatypeName`, `conName` and `selName`
-return the source names (a positional field's `selName` is `""`), which the
-`Datatype`/`Constructor`/`Selector` classes reflect.
+return the *effective external* names (the `as "…"` rename when present,
+the source name otherwise; a positional field's `selName` is `""`), which
+the `Datatype`/`Constructor`/`Selector` classes reflect. `deriving
+(Generic)` therefore counts as a rename-consuming derive: `as` on a type
+deriving only `Generic` is accepted, the rename surfacing through the
+metadata.
 
 `Rep` is a closed type family the compiler extends with one equation per
 `deriving (Generic)`. A generic function's `GC (Rep a)` constraint is
