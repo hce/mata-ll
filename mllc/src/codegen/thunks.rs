@@ -341,9 +341,44 @@ impl CodeGen {
     /// not see a thunk.
     pub(super) fn forced_ast(&mut self, expr: &TExpr) -> Expr {
         if self.expr_yields_whnf(expr) {
-            self.expr_ast(expr)
+            let e = self.expr_ast(expr);
+            self.whnf_claim_checked(expr, e)
         } else {
             Expr::force(self.expr_ast(expr))
+        }
+    }
+
+    /// TEST-ONLY (see `whnf_assert`): wrap `e` in the runtime claim checker
+    /// `checker`. Production emission (`whnf_assert` unset) returns `e`
+    /// untouched — the checkers must never appear in shipped output.
+    pub(super) fn claim_checked(&self, checker: &str, e: Expr) -> Expr {
+        if self.whnf_assert {
+            Expr::call(Expr::name(checker.to_string()), vec![e])
+        } else {
+            e
+        }
+    }
+
+    /// `claim_checked("__assert_whnf", …)` for an emission that
+    /// `expr_yields_whnf` justified leaving unforced, skipping the arms whose
+    /// claim needs no checking here: a variable (the Var arm of `expr_ast`
+    /// asserts its own bare reads, and a non-concrete one is emitted under
+    /// `__force`, which refutation mode rebinds to the checked twin), and the
+    /// emissions that are Lua literals by construction (a number, a table
+    /// literal, a function literal). What remains — Con, Negate, InfixApp,
+    /// the App arms — is exactly the reasoning-carrying part of the mirror.
+    pub(super) fn whnf_claim_checked(&self, expr: &TExpr, e: Expr) -> Expr {
+        if !self.whnf_assert {
+            return e;
+        }
+        let mut k = expr;
+        while let TExprKind::Paren(inner) = &k.kind {
+            k = inner.as_ref();
+        }
+        match &k.kind {
+            TExprKind::Var(_) | TExprKind::Lit(_) | TExprKind::Tuple(_)
+            | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => e,
+            _ => self.claim_checked("__assert_whnf", e),
         }
     }
 
@@ -424,7 +459,12 @@ impl CodeGen {
         // Lua statement. Only an emission that can yield a thunk needs the
         // explicit `__force(...)` call (which is also statement syntax).
         let first = if self.expr_yields_whnf(a) {
-            Stmt::Local(vec!["_".into()], Some(self.expr_ast(a)))
+            let a_e = self.expr_ast(a);
+            // If the claim is wrong here, the force is silently SKIPPED — a
+            // missed bottom, i.e. a GHC divergence with no crash — so the
+            // refutation wrapper (test-only) is the only thing that can see it.
+            let a_e = self.whnf_claim_checked(a, a_e);
+            Stmt::Local(vec!["_".into()], Some(a_e))
         } else {
             Stmt::Expr(Expr::force(self.expr_ast(a)))
         };

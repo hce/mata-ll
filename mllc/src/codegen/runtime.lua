@@ -1918,3 +1918,47 @@ local function __mll_st_to_list(arr)
     for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
     return r
 end
+local function __assert_whnf(x)
+    -- TEST-ONLY claim checker (WHNF refutation, compile_with_whnf_refutation
+    -- in lib.rs): wraps each emission whose codegen predicate CLAIMED the
+    -- value is already forced (expr_yields_whnf, the concrete_vars bare
+    -- reads that action_result_is_whnf justifies, infix_yields_whnf).
+    -- Inspecting the metatable forces nothing, so a refutation is loud and a
+    -- confirmation changes no behavior. Production compiles never reference
+    -- this, so the on-demand subset never emits it.
+    if getmetatable(x) == __thunk_mt then
+        error("WHNF claim refuted: a claimed forced position holds an unforced thunk", 2)
+    end
+    return x
+end
+local function __assert_purebare(x)
+    -- TEST-ONLY claim checker for pure_value_bare_is_safe: a pure value may
+    -- escape to a caller's __mll_run unboxed only when forcing it is a no-op
+    -- (not a thunk) AND it can never be a Lua function (which __mll_run's
+    -- action test would wrongly call). Either half failing is a refutation.
+    if getmetatable(x) == __thunk_mt or type(x) == "function" then
+        error("pure bare claim refuted: an escaping pure value is a thunk or a Lua function", 2)
+    end
+    return x
+end
+local function __force_checked(x)
+    -- TEST-ONLY checked twin of __force (defined near the top of this file;
+    -- keep the memoization protocol in step with it). The WHNF-refutation
+    -- mode rebinds `__force = __force_checked` after the prelude block:
+    -- every prelude caller closes over the VARIABLE __force, so the rebind
+    -- covers them all. The added check is the one prose invariant __force
+    -- relies on (see the comment block above __mll_head): a thunk body must
+    -- return WHNF, never a raw thunk, because __force unwraps exactly one
+    -- level. A nested thunk here is a codegen site that forgot a force.
+    if getmetatable(x) == __thunk_mt then
+        if x[2] then return x[1] end
+        local val = x[1]()
+        if getmetatable(val) == __thunk_mt then
+            error("one level force invariant refuted: a thunk body returned a raw thunk", 2)
+        end
+        x[1] = val
+        x[2] = true
+        return val
+    end
+    return x
+end

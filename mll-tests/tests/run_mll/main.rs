@@ -30,53 +30,71 @@ fn run_mll_file(path: &Path, libs: &[&Path]) {
             .unwrap_or_else(|e| panic!("Cannot read {}: {}", path.display(), e));
 
         let source_dir = path.parent().unwrap_or(Path::new("."));
-        // The stamp-refutation twin of mllc::compile: same output, plus
-        // the emitted-Lua annotation check every corpus program should
-        // exercise (see verify::check_stamps).
+        let expected = expected_lines(&source);
+        // Pass 1 — the stamp-refutation twin of mllc::compile: output
+        // byte-identical to production, plus the emitted-Lua annotation
+        // check (see verify::check_stamps). This run is the acceptance
+        // signal for what actually ships.
         let lua_code = match mllc::compile_with_stamp_refutation(&source, source_dir, libs) {
             Ok(r) => r.lua_code,
             Err(e) => panic!("{}: compilation failed:\n{}", path.display(), e),
         };
-
-        let lua = mlua::Lua::new();
-        let expected = expected_lines(&source);
-        let captured = lua.create_table().unwrap();
-        if !expected.is_empty() {
-            // Capture `print` (putStrLn/print compile to it) line by line.
-            let sink = captured.clone();
-            let print_fn = lua
-                .create_function(move |_, args: mlua::Variadic<mlua::Value>| -> mlua::Result<()> {
-                    let parts: Vec<String> = args
-                        .iter()
-                        .map(|v| match v {
-                            mlua::Value::String(s) => Ok(s.to_str()?.to_string()),
-                            other => Ok(format!("{:?}", other)),
-                        })
-                        .collect::<mlua::Result<_>>()?;
-                    let n = sink.raw_len();
-                    sink.raw_set(n + 1, parts.join("\t"))?;
-                    Ok(())
-                })
-                .unwrap();
-            lua.globals().set("print", print_fn).unwrap();
-        }
-        match lua.load(&lua_code).set_name(path.to_str().unwrap()).exec() {
-            Ok(()) => {}
-            Err(e) => panic!("{}: runtime error:\n{}", path.display(), e),
-        }
-        if !expected.is_empty() {
-            let printed: Vec<String> = captured
-                .sequence_values::<String>()
-                .collect::<mlua::Result<_>>()
-                .unwrap();
-            let printed: Vec<String> = printed.into_iter().filter(|l| l != ".").collect();
-            assert_eq!(
-                printed, expected,
-                "{}: printed output (left) differs from its `-- expect:` lines (right)",
-                path.display()
-            );
-        }
+        exec_case(path, &lua_code, &expected, "production output");
+        // Pass 2 — WHNF claim refutation (see
+        // mllc::compile_with_whnf_refutation): instrumented output whose
+        // runtime checkers refute any aggressive `*_is_whnf` /
+        // pure-bare-escape claim at the site that made it. Same source,
+        // same expected output — the instrumentation must change nothing
+        // observable.
+        let checked = match mllc::compile_with_whnf_refutation(&source, source_dir, libs) {
+            Ok(r) => r.lua_code,
+            Err(e) => panic!("{}: whnf-refutation compilation failed:\n{}", path.display(), e),
+        };
+        exec_case(path, &checked, &expected, "whnf refutation");
     })
+}
+
+/// Run one compiled case under mlua and compare its printed lines against
+/// the `-- expect:` lines (when present). `mode` labels which of
+/// `run_mll_file`'s two passes a failure came from.
+fn exec_case(path: &Path, lua_code: &str, expected: &[String], mode: &str) {
+    let lua = mlua::Lua::new();
+    let captured = lua.create_table().unwrap();
+    if !expected.is_empty() {
+        // Capture `print` (putStrLn/print compile to it) line by line.
+        let sink = captured.clone();
+        let print_fn = lua
+            .create_function(move |_, args: mlua::Variadic<mlua::Value>| -> mlua::Result<()> {
+                let parts: Vec<String> = args
+                    .iter()
+                    .map(|v| match v {
+                        mlua::Value::String(s) => Ok(s.to_str()?.to_string()),
+                        other => Ok(format!("{:?}", other)),
+                    })
+                    .collect::<mlua::Result<_>>()?;
+                let n = sink.raw_len();
+                sink.raw_set(n + 1, parts.join("\t"))?;
+                Ok(())
+            })
+            .unwrap();
+        lua.globals().set("print", print_fn).unwrap();
+    }
+    match lua.load(lua_code).set_name(path.to_str().unwrap()).exec() {
+        Ok(()) => {}
+        Err(e) => panic!("{} [{}]: runtime error:\n{}", path.display(), mode, e),
+    }
+    if !expected.is_empty() {
+        let printed: Vec<String> = captured
+            .sequence_values::<String>()
+            .collect::<mlua::Result<_>>()
+            .unwrap();
+        let printed: Vec<String> = printed.into_iter().filter(|l| l != ".").collect();
+        assert_eq!(
+            printed, expected,
+            "{} [{}]: printed output (left) differs from its `-- expect:` lines (right)",
+            path.display(), mode
+        );
+    }
 }
 
 // Every compile in this harness runs on the compiler's calibrated stack
@@ -138,3 +156,4 @@ mod runtime;
 mod linear;
 mod ghc_oracle;
 mod strictness_contract;
+mod whnf_refutation;

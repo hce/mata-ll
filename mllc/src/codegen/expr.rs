@@ -90,7 +90,12 @@ impl CodeGen {
                         let sname = sanitize_name(name);
                         let lref = self.lua_ref(&sname);
                         let e = if self.concrete_vars.contains(&sname) {
-                            Expr::name(lref)
+                            // A bare read acts on the concreteness claim
+                            // (action_result_is_whnf, forced scrutinees,
+                            // strict params) — refutation mode checks it at
+                            // every read, which is exactly where a wrong
+                            // claim would miscompile.
+                            self.claim_checked("__assert_whnf", Expr::name(lref))
                         } else {
                             Expr::force(Expr::name(lref))
                         };
@@ -250,6 +255,13 @@ impl CodeGen {
                 if first_forces {
                     if !self.expr_yields_whnf(scrutinee) {
                         stmts.push(Stmt::Assign("_cg".into(), Expr::force(Expr::name("_cg"))));
+                    } else if self.whnf_assert {
+                        // The skipped re-force is a claim about the scrutinee
+                        // emission; refutation mode re-checks `_cg` in place.
+                        stmts.push(Stmt::Assign(
+                            "_cg".into(),
+                            self.claim_checked("__assert_whnf", Expr::name("_cg")),
+                        ));
                     }
                     self.concrete_vars.insert("_cg".to_string());
                 }
@@ -486,7 +498,8 @@ impl CodeGen {
                     // literal needs to be called.
                     let arity = self.known_callee_arity(inner_body);
                     let callee = if self.expr_yields_whnf(inner_body) {
-                        self.callee_ast(inner_body)
+                        let c = self.callee_ast(inner_body);
+                        self.whnf_claim_checked(inner_body, c)
                     } else {
                         Expr::force(self.expr_ast(inner_body))
                     };
@@ -1438,7 +1451,8 @@ impl CodeGen {
             // value") whenever `f x` returned a plain value,
             // which is the normal case.
             let f_e = if self.expr_yields_whnf(rhs) {
-                self.callee_ast(rhs)
+                let c = self.callee_ast(rhs);
+                self.whnf_claim_checked(rhs, c)
             } else {
                 // A thunk-valued continuation (a lazily bound
                 // local) must be forced to a callable first.

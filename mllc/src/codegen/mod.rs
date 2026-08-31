@@ -327,6 +327,19 @@ struct CodeGen {
     /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
     /// return table must export it — even when there are no other exports.
     embed_var_export: bool,
+    /// TEST-ONLY WHNF claim refutation (`compile_with_whnf_refutation` in
+    /// lib.rs): when set, every emission that ACTS on a `*_is_whnf` /
+    /// `pure_value_bare_is_safe` claim — skipping a `__force`, reading a
+    /// `concrete_vars` name bare, letting a pure value escape unboxed —
+    /// wraps the value in the matching runtime checker (`__assert_whnf`,
+    /// `__assert_purebare`), and `generate` rebinds `__force` to its checked
+    /// twin so a thunk body returning a raw thunk is caught at the force.
+    /// The claims are hand-kept mirrors of the emission arms; this turns
+    /// every corpus run into a mechanical refutation of all of them at once.
+    /// Aggressive drift used to surface only as a downstream miscompile
+    /// ("attempt to perform arithmetic on a table value") — or not at all.
+    /// Production compiles never set this and emit none of it.
+    whnf_assert: bool,
     /// Hoisted big-integer literals (see `BigLitPool`). Interior mutability
     /// because `collect_pattern_conditions` interns while holding `&self`;
     /// behind an `Rc` so `new_sub`'s clone SHARES the module's one pool —
@@ -376,6 +389,7 @@ impl CodeGen {
             module_fn_names: std::collections::HashSet::new(),
             direct_perform_conflicts: std::collections::HashSet::new(),
             embed_var_export: false,
+            whnf_assert: false,
             big_lits: std::rc::Rc::new(std::cell::RefCell::new(BigLitPool::default())),
         }
     }
@@ -593,10 +607,14 @@ pub(crate) struct GeneratedLua {
 /// `opt_disable`: explicit optimization-pass skip list (comma-separated,
 /// the `MLL_OPT_DISABLE` vocabulary); `None` reads the environment
 /// variable — see `CompileOptions::disable_opt_passes`.
+/// `whnf_assert`: TEST-ONLY WHNF claim refutation (see the `CodeGen` field) —
+/// the emitted Lua carries the claim checkers and a `__force` rebound to its
+/// checked twin. Production callers pass `false` and the output is unchanged.
 pub(crate) fn generate(
     module: &TModule,
     embed_source: Option<(EmbedMode, &str)>,
     opt_disable: Option<&str>,
+    whnf_assert: bool,
 ) -> Result<GeneratedLua, String> {
     // Pass-order witness (see TModule::passes_run): codegen consumes the
     // fully processed module — monomorphized, folded, split, DCE'd.
@@ -607,6 +625,7 @@ pub(crate) fn generate(
     );
     let mut cg = CodeGen::new();
     cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
+    cg.whnf_assert = whnf_assert;
     cg.demand_info = crate::demand::analyze(module);
     // Build the program body first (as one Lua statement list, then printed)
     // so we can see which runtime-prelude functions it actually references,
@@ -649,7 +668,14 @@ pub(crate) fn generate(
     // body. The prelude scan is fed `big_lit_defs` too so `__int_from_decimal`
     // stays selected even when every inline occurrence was replaced by an index.
     let big_lit_defs = cg.big_lit_defs();
-    let prelude = ondemand_prelude(&format!("{big_lit_defs}{body}"));
+    // WHNF refutation glue: rebinding the prelude-local `__force` AFTER the
+    // prelude block retargets every caller at once — the prelude functions
+    // close over the VARIABLE, not its value — so the checked twin's raw-thunk
+    // check covers prelude-internal forces too, not just emitted ones. The
+    // glue is part of the prelude scan input so `__force_checked` (and, when
+    // the body itself never forces, `__force`) is selected into the subset.
+    let whnf_glue = if whnf_assert { "__force = __force_checked\n" } else { "" };
+    let prelude = ondemand_prelude(&format!("{whnf_glue}{big_lit_defs}{body}"));
     // The embedded-source block goes at the very top of the file: extraction
     // takes the earliest marker, so the genuine block must precede anything
     // user-derived, and placing it before the prelude also keeps the prelude
@@ -660,6 +686,7 @@ pub(crate) fn generate(
     };
     out.push_str(&prelude);
     out.push('\n');
+    out.push_str(whnf_glue);
     let user_code_start = out.len();
     out.push_str(&big_lit_defs);
     let body_start = out.len();

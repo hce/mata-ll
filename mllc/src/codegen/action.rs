@@ -135,7 +135,12 @@ impl CodeGen {
     /// non-strict), so a possibly-⊥ payload stays suspended inside the box.
     pub(super) fn pure_action_ast(&mut self, arg: &TExpr) -> Expr {
         if self.pure_value_bare_is_safe(arg) {
-            self.arg_ast(arg, false)
+            // Refutation mode checks BOTH halves of the bare-escape claim
+            // (never a thunk, never a Lua function) at the escape itself —
+            // a wrong half misfires only in the caller's `__mll_run`, far
+            // from this decision.
+            let bare = self.arg_ast(arg, false);
+            self.claim_checked("__assert_purebare", bare)
         } else {
             let payload = self.arg_ast(arg, false);
             Expr::call_named("__mll_pure", vec![payload])

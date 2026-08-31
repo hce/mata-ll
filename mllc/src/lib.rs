@@ -223,7 +223,7 @@ pub fn compile_with_options(
     lib_paths: &[&Path],
     options: &CompileOptions,
 ) -> Result<CompileResult, CompileError> {
-    compile_impl(source, source_dir, lib_paths, options, false)
+    compile_impl(source, source_dir, lib_paths, options, false, false)
 }
 
 /// Test-suite twin of [`compile`]: additionally runs the emitted-Lua stamp
@@ -237,7 +237,27 @@ pub fn compile_with_stamp_refutation(
     source_dir: &Path,
     lib_paths: &[&Path],
 ) -> Result<CompileResult, CompileError> {
-    compile_impl(source, source_dir, lib_paths, &CompileOptions::default(), true)
+    compile_impl(source, source_dir, lib_paths, &CompileOptions::default(), true, false)
+}
+
+/// Test-suite twin of [`compile`] for WHNF claim refutation: the emitted Lua
+/// wraps every codegen site that ACTS on a `*_is_whnf` /
+/// `pure_value_bare_is_safe` claim in a runtime checker, and `__force` is
+/// rebound to a twin that rejects a thunk body returning a raw thunk (the
+/// one-level force invariant — see runtime.lua's `__force_checked`). The
+/// claims are hand-kept mirrors of the emission arms; RUNNING this output
+/// over the corpus refutes an aggressive drift at the exact site that made
+/// the claim, where production output would miscompile silently.
+///
+/// Unlike [`compile_with_stamp_refutation`], the output is NOT
+/// byte-identical to production output — run it as a second pass alongside
+/// the production-output run, never instead of it.
+pub fn compile_with_whnf_refutation(
+    source: &str,
+    source_dir: &Path,
+    lib_paths: &[&Path],
+) -> Result<CompileResult, CompileError> {
+    compile_impl(source, source_dir, lib_paths, &CompileOptions::default(), false, true)
 }
 
 fn compile_impl(
@@ -246,6 +266,7 @@ fn compile_impl(
     lib_paths: &[&Path],
     options: &CompileOptions,
     stamp_check: bool,
+    whnf_assert: bool,
 ) -> Result<CompileResult, CompileError> {
     // Lex
     let tokens = lexer::lex(source).map_err(|d| CompileError::Lex(*d))?;
@@ -459,6 +480,7 @@ fn compile_impl(
         &mono_module,
         embed,
         options.disable_opt_passes.as_deref(),
+        whnf_assert,
     )
     .map_err(|msg| {
         CompileError::Type(vec![types::Diagnostic::new(
