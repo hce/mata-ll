@@ -2581,30 +2581,28 @@ main = print (f 5)
 }
 
 #[test]
-fn duplicate_constructor_rejected() {
-    // Two data types with the same constructor name in scope.
-    // Known gap: the compiler may silently overwrite the first constructor.
+fn duplicate_imported_constructor_rejected() {
+    // Two IMPORTED types claiming one constructor name — the non-local arm
+    // of claim_constructor_name, previously untested. A LOCAL declaration
+    // may shadow an imported constructor (GHC scoping, see
+    // shadowed_prelude_constructor_stays_shadowed), but two imports have no
+    // shadowing order: the merged flat namespace would silently hand the
+    // name to one of them, so it is a hard error, consistent with the
+    // import-collision policy for functions. (The same-module arm is
+    // duplicate_local_constructor_rejected; this file once carried a
+    // tolerant duplicate_constructor_rejected written to pass whether or
+    // not the compiler rejected — a test that cannot fail pins nothing.)
     let source = r#"
-data Foo = MkThing Int
-data Bar = MkThing String
-
-useFoo :: Foo -> Int
-useFoo (MkThing n) = n
+import DupConEast
+import DupConWest
 
 main :: IO ()
-main = print (useFoo (MkThing 42))
+main = putStrLn "should not compile"
 "#;
-    match compile(source, Path::new("."), &[]) {
-        Err(e) => {
-            let msg = format!("{}", e);
-            assert!(
-                msg.contains("duplicate") || msg.contains("Duplicate") || msg.contains("Cannot unify"),
-                "Expected duplicate constructor error, got: {}", msg
-            );
-        }
-        // Known gap: duplicate constructor names from different types not detected
-        Ok(_) => { /* known gap: duplicate constructor names not rejected */ }
-    }
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
+        "Duplicate data constructor 'Shared'",
+        "by the Prelude or an import",
+    ]);
 }
 
 #[test]

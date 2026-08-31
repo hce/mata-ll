@@ -673,6 +673,8 @@ fn mll_case_registry_is_complete() {
         "MergeNames.mll",
         "OpsExports.mll",
         "AliasCtor.mll",
+        "DupConEast.mll",
+        "DupConWest.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")
