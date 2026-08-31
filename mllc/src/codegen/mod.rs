@@ -675,7 +675,7 @@ pub(crate) fn generate(
     // glue is part of the prelude scan input so `__force_checked` (and, when
     // the body itself never forces, `__force`) is selected into the subset.
     let whnf_glue = if whnf_assert { "__force = __force_checked\n" } else { "" };
-    let prelude = ondemand_prelude(&format!("{whnf_glue}{big_lit_defs}{body}"));
+    let prelude = ondemand_prelude(&format!("{whnf_glue}{big_lit_defs}{body}"))?;
     // The embedded-source block goes at the very top of the file: extraction
     // takes the earliest marker, so the genuine block must precede anything
     // user-derived, and placing it before the prelude also keeps the prelude

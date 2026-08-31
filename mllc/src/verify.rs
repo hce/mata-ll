@@ -33,11 +33,14 @@ use crate::tir::*;
 use crate::types::Ty;
 
 /// The type-erased show functions: the bare class method and the two generic
-/// runtime wrappers that delegate to it. A concrete structured call must never
-/// resolve to one of these. (`eq`/`==` belong here in principle but flow mostly
-/// through `InfixApp`; left for a follow-up rather than asserted before it is
-/// verified clean.)
-const TYPE_ERASED_SHOWS: &[&str] = &["show", "show_Maybe", "show_List_"];
+/// runtime wrappers that delegate to it. A concrete structured call must
+/// never resolve to one of these. Equality has NO entry here: at TIR level
+/// the Eq method only ever appears as the `==`/`/=` operator (`InfixApp`
+/// applied, `OpFunc` first-class) — both have their own checks in `walk` —
+/// while a bare `eq` Var is an ordinary binder (`nubBy eq xs` in the
+/// Prelude), which is exactly the false positive that fired the first time
+/// `"eq"` was added to this list.
+const TYPE_ERASED_METHODS: &[&str] = &["show", "show_Maybe", "show_List_"];
 
 /// Check the module's invariants. Returns one message per violation; empty
 /// means the module is clean.
@@ -49,7 +52,7 @@ pub fn check(module: &TModule) -> Vec<String> {
         ["mono"],
         "verify::check must run directly on mono's output"
     );
-    let erased: HashSet<&str> = TYPE_ERASED_SHOWS.iter().copied().collect();
+    let erased: HashSet<&str> = TYPE_ERASED_METHODS.iter().copied().collect();
     let mut v = Verifier { erased, violations: Vec::new() };
     for f in &module.functions {
         v.check_function(f);
@@ -120,6 +123,22 @@ impl Verifier {
         // hands the erased show to composition, which applies it to the
         // composition's argument. Both escape the App shape above (Q92).
         if let TExprKind::InfixApp { op, lhs, rhs } = &e.kind {
+            // The equality OPERATOR at a structured type: mono rewrites
+            // these to derived/synthetic implementations (eq_T, the
+            // ListEq/MaybeEq/TupleEq SpecCalls); one surviving to codegen
+            // would emit native Lua `==`, which compares TABLE IDENTITY —
+            // `[1] == [1]` silently false. This was the A4 follow-up the
+            // erased-show check deferred until verified clean; the whole
+            // corpus and the backend fuzzer run clean against it.
+            if (op == "==" || op == "/=") && is_lossy_concrete(&lhs.ty) {
+                self.violations.push(format!(
+                    "internal: structural '{}' at concrete type '{}' reached \
+                     codegen unresolved in '{}' — monomorphization should \
+                     have selected a derived or synthetic equality; native \
+                     Lua == would compare table identity",
+                    op, lhs.ty, ctx
+                ));
+            }
             if op == "$"
                 && let TExprKind::Var(name) = &lhs.kind
                 && self.erased.contains(name.as_str())
@@ -150,6 +169,22 @@ impl Verifier {
                     }
                 }
             }
+        }
+        // First-class `(==)`/`(/=)` at a structured operand type — handed to
+        // a higher-order consumer (`nubBy (==) points`): mono must have
+        // replaced it with the derived/synthetic equality; the runtime
+        // operator value compares table identity.
+        if let TExprKind::OpFunc(op) = &e.kind
+            && (op == "==" || op == "/=")
+            && matches!(&e.ty, Ty::Arrow(from, _, _) if is_lossy_concrete(from))
+        {
+            self.violations.push(format!(
+                "internal: first-class '{}' at concrete type '{}' reached \
+                 codegen unresolved in '{}' — monomorphization should have \
+                 selected a derived or synthetic equality; the runtime \
+                 operator value would compare table identity",
+                op, e.ty, ctx
+            ));
         }
         // Recurse into every sub-expression.
         e.for_each_child(&mut |c| self.walk(c, ctx));

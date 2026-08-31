@@ -35,7 +35,7 @@ struct PChunk {
 /// back to the WHOLE prelude when the check failed; that text declares more
 /// top-level locals than Lua's 200-per-function limit, so the fallback would
 /// have been an unloadable chunk, not a safety net (see `prelude_*` tests).
-pub(super) fn ondemand_prelude(body: &str) -> String {
+pub(super) fn ondemand_prelude(body: &str) -> Result<String, String> {
     let index = &*CHUNK_INDEX;
     let chunks = &index.chunks;
     let all_names = &index.all_names;
@@ -76,13 +76,30 @@ pub(super) fn ondemand_prelude(body: &str) -> String {
 
     // Every prelude name referenced by the body or by an emitted chunk is
     // defined in the emitted set — by construction of the closure above.
-    debug_assert!(
-        idents(body).chain(code_idents(&out))
-            .filter(|t| all_names.contains(t))
-            .all(|t| provided.contains(t)),
-        "ondemand_prelude: the reachability closure left a referenced prelude name unprovided"
-    );
-    out
+    // Checked in RELEASE builds too (this used to be a debug_assert): the
+    // whole-prelude fallback was removed (it exceeds Lua's 200-local limit
+    // and would not load), so an under-approximating closure in a release
+    // compiler had NO net under it — the user got `attempt to call a nil
+    // value` at runtime with nothing naming the cause. A compile-time
+    // internal error is strictly better, and the extra scan is one linear
+    // pass over text this function just built (the F11 promotion pattern).
+    let missing: Vec<&str> = idents(body).chain(code_idents(&out))
+        .filter(|t| all_names.contains(t) && !provided.contains(t))
+        .collect();
+    if !missing.is_empty() {
+        let mut names: Vec<&str> = missing;
+        names.sort_unstable();
+        names.dedup();
+        return Err(format!(
+            "internal compiler error: the runtime tree-shaker's reachability \
+             closure left referenced prelude definition(s) unprovided: {} — \
+             the emitted file would fail at runtime with 'attempt to call a \
+             nil value'; this is a compiler bug in ondemand_prelude's \
+             closure, not a problem with your program",
+            names.join(", "),
+        ));
+    }
+    Ok(out)
 }
 
 /// The prelude's chunks with their name index, computed once per process:
@@ -395,15 +412,16 @@ mod tests {
     /// Completeness of the on-demand subset for every possible root: each
     /// prelude name, taken alone as the body's only reference, closes to a
     /// set that provides every prelude name its chunks mention (the
-    /// debug_assert inside `ondemand_prelude` fires otherwise), and the
-    /// subset stays within the local limit.
+    /// completeness check inside `ondemand_prelude` errors otherwise — in
+    /// release builds too), and the subset stays within the local limit.
     #[test]
     fn prelude_subset_is_complete_for_every_root() {
         let chunks = parse_prelude_chunks();
         let names: Vec<String> = chunks.iter().flat_map(|c| c.provides.iter().cloned()).collect();
         assert!(!names.is_empty());
         for name in &names {
-            let out = ondemand_prelude(name);
+            let out = ondemand_prelude(name)
+                .unwrap_or_else(|e| panic!("root {name}: {e}"));
             assert!(out.starts_with("-- MLL Runtime (on-demand subset)"), "root {}", name);
             let locals: usize = out
                 .lines()
