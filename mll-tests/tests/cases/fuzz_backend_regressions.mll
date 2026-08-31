@@ -25,6 +25,18 @@
 --     Arity-widening specialization now fires on the canonicalized type
 --     even when dead variables remain.
 
+-- (4) index 123: the same widening hole for a USER polymorphic function —
+--     `fuzzTwice` at `a := t1 -> t2 -> R` with a dead type variable left in
+--     the use type stayed on the generic copy (whose body applies `f` one
+--     argument at a time) while the flattened 3-parameter lambda argument
+--     expected flat calls: the lambda ran on nils and the caller applied
+--     its table result ("attempt to call a table value"). Kept verbatim
+--     from the generator: hand-written shrinks missed the exact dead-var
+--     residue every time.
+
+fuzzTwice :: (a -> a) -> a -> a
+fuzzTwice f x = f (f x)
+
 main :: IO ()
 main = do
     -- (1) paren idempotence: lambda over a constructor arg, lazy element
@@ -35,3 +47,4 @@ main = do
     print (((flip const (Just True) (null [])), 1) :: (Bool, Int))
     -- (3) widened builtin at a type with a dead variable
     print (((flip const True (\v -> False)) []) :: Bool)
+    print ((((((fuzzTwice (\v1 -> (\v2 -> (\v3 -> ((True, False), (Just 3))))) (\v4 -> (\v5 -> ((False, False), (Just 10))))) . (\v6 -> [4])) (case (2, 7) of { (v7, v8) -> (Just 15) })) . (case (let v9 = 5 in (5, (4, False))) of { (v10, v11) -> (id (\v12 -> Nothing)) })) (1, ((\v13 -> 5) $ []))) :: ((Bool, Bool), (Maybe Int)))

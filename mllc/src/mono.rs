@@ -1193,7 +1193,13 @@ impl Monomorphizer {
                 // shared generic copy is what such a reference wants.
                 if self.poly_fns.contains_key(name) && !self.locals.contains(name)
                     && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty)
-                    && !self.arity_only_fns.contains(name) {
+                    && !self.arity_only_fns.contains(name)
+                    // A WIDENING use is excluded for the same reason the
+                    // arity-only builtins are: the enclosing/arbitrary
+                    // specialization was compiled at its own arrow count,
+                    // which is the wrong one for this use. It takes the
+                    // canonicalized widening specialization below instead.
+                    && !self.arity_widening(name, &ty) {
                     // Resolve to the enclosing specialization of this function
                     // (top-most on the generation stack). The HashMap of all
                     // specializations has no meaningful order, so fall back to
@@ -1240,9 +1246,18 @@ impl Monomorphizer {
                 // slot as nil and flip's real result was applied to a
                 // boolean. The copy and the widened value must agree, so
                 // the copy must exist.
+                // Not just the shared builtins: a USER polymorphic function
+                // hits the same hole (backend_fuzz index 123 — `fuzzTwice`
+                // at `a := t1 -> t2 -> R` with a dead variable left in the
+                // use type kept the generic copy, whose body applies `f` one
+                // argument at a time, against a 3-parameter flattened lambda
+                // argument: the flat lambda ran on nils and the caller
+                // applied its table result). Constrained functions are
+                // excluded — their specializations must build dictionaries,
+                // which residual variables cannot name.
                 let widened_poly = self.is_polymorphic(&ty)
-                    && self.arity_only_fns.contains(name)
-                    && self.specialization_wanted(name, &ty);
+                    && self.arity_widening(name, &ty)
+                    && self.fn_constraints.get(name).is_none_or(|c| c.is_empty());
                 if self.poly_fns.contains_key(name) && !self.locals.contains(name)
                     && !self.dict_passing_fns.contains(name)
                     && ((!self.is_polymorphic(&ty) && self.specialization_wanted(name, &ty))
@@ -2423,6 +2438,16 @@ impl Monomorphizer {
         if !self.arity_only_fns.contains(name) {
             return true;
         }
+        self.arity_widening(name, use_ty)
+    }
+
+    /// Does this use instantiate `name` at MORE arrows than its declared
+    /// type has — i.e. a result type variable became a function? Such a use
+    /// cannot be served by any copy compiled at fewer arrows: the emitted
+    /// parameter list and every call inside the body count arrows from the
+    /// type they can see, and the two views disagree exactly here (the
+    /// 76923e0 invariant).
+    fn arity_widening(&self, name: &str, use_ty: &Ty) -> bool {
         self.poly_fns.get(name).is_some_and(|f|
             Self::spine_arrow_count(use_ty) > Self::spine_arrow_count(&f.ty))
     }
