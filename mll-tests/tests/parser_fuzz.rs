@@ -11,9 +11,9 @@
 //! hangs (a watchdog enforces a per-input timeout). A sampled input that
 //! compiles is additionally EXECUTED under mlua: the emitted Lua may raise
 //! mata-ll's own error() paths, but never a Lua-level type crash
-//! ("attempt to …") — that would be emitted-code corruption. A generator
-//! of TYPE-CORRECT programs (which would fuzz the backend far harder than
-//! the mostly-ill-typed random modules here) remains open infra work.
+//! ("attempt to …") — that would be emitted-code corruption. The
+//! TYPE-CORRECT counterpart — every program compiles and its output is
+//! byte-compared against a reference evaluator — is backend_fuzz.rs.
 //!
 //! Everything is deterministic and offline. Each input is derived from
 //! (BATCH_SEED, index) through SplitMix64, so any failure reproduces by
