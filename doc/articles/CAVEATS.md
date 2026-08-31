@@ -74,8 +74,9 @@ it can be hard to track down.
 
 ## Int overflow wraps silently
 
-mata-ll integers are Lua integers (64-bit signed on Lua 5.4+, or floats on
-Lua 5.3 and earlier). Overflow wraps silently — there is no checked arithmetic
+`Int` values are Lua integers (64-bit signed on Lua 5.3+, floats on Lua 5.2
+and earlier — 5.3 is where Lua gained the integer subtype). Overflow wraps
+silently — there is no checked arithmetic
 at runtime. If you need to detect overflow, check the bounds manually.
 On LuaJIT, integers are represented as doubles, so precision is lost beyond
 2^53.
@@ -120,10 +121,10 @@ own `Int`-pair arithmetic and `Show`/`Eq`) would be disproportionate to its
 value in a Lua-hosted language whose fractional type is already a double. For
 the same reason the `Real` class carries no `toRational` method; it exists only
 as the `(Num a, Ord a) =>` superclass marker that `Integral` sits above.
-GHC's `Integral` method `toInteger` is likewise absent: its result type is
-the arbitrary-precision `Integer`, which mata-ll does not have, so a use of
-`toInteger` is rejected with a `note:` pointing at `Int` (`fromInteger`
-stays — its argument is just the literal type `Int`).
+`Integral`'s `toInteger` and `Num`'s `fromInteger` are both present with
+their GHC signatures: `Integer` is a real arbitrary-precision type — the
+default for unannotated integer literals — and `Int`↔`Integer`
+conversions go through exactly this pair (see HASKDIFF.md, "Integers").
 
 ## `Floating` and `RealFrac` are functions, not classes
 

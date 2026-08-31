@@ -93,9 +93,17 @@ single-character string.
 mata-ll has GHC's two integer types. `Integer` is arbitrary precision and
 is the default for unannotated numeric literals, so a defaulted
 computation cannot silently overflow — exactly GHC's model. `Int` is the
-machine word: it maps to Lua's integer type (64-bit signed on Lua 5.4+ and
-LuaJIT) and overflow wraps silently, precisely GHC's `Int`. Annotate a
-value `:: Int` to opt into the fast wrapping word.
+machine word: it maps to the host's number type, and which host that is
+decides how faithful the mapping is. On Lua 5.3+ (the embedded runner is
+5.4) it is the native 64-bit signed integer and overflow wraps silently —
+precisely GHC's `Int`. LuaJIT and Lua 5.1–5.2 have no integer type at
+all: every number is a double, so on those hosts `Int` loses precision
+past 2^53 and never wraps — a silent deviation from GHC, not just a
+different speed. Annotate a value `:: Int` for the fast machine word when
+the deployment host is Lua 5.3+ or the values provably stay below 2^53;
+the full story (`div` beyond 2^53, the erased-`show` corner) is in
+CAVEATS.md under "Int overflow wraps silently". `Integer` is exact on
+every host.
 
 Numeric defaulting is GHC's implicit `default (Integer, Number)` (`Number`
 is GHC's `Double`), so an unannotated literal used only in integer

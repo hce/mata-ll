@@ -227,8 +227,12 @@ until n = n > 100
 \begin{note}
 As in GHC, \texttt{Integer} is arbitrary precision and is the default for
 unannotated numeric literals, so defaulted integer arithmetic never
-silently overflows.  \texttt{Int} is the 64-bit machine word (overflow
-wraps); annotate a value \texttt{:: Int} to opt into it.
+silently overflows.  \texttt{Int} is the host's machine word: the native
+64-bit signed integer (overflow wraps) on Lua~5.3+, but a double on
+LuaJIT and Lua~5.1--5.2, where \texttt{Int} loses precision past
+$2^{53}$ and never wraps.  Annotate a value \texttt{:: Int} to opt into
+it when the deployment host is Lua~5.3+ or the values stay below
+$2^{53}$; \texttt{Integer} is exact on every host.
 \end{note}
 
 \begin{note}
@@ -1796,7 +1800,11 @@ decodeJSON "{...,\"members\":[{\"name\":\"B\",\"age\":2},{\"name\":\"C\"}]}"
 Numbers are handled exactly: integers round-trip with full 64-bit
 precision (beyond the $2^{53}$ range of a double), and decoding an
 \texttt{Int} field rejects non-integral numbers (\texttt{3.5}) and
-numbers outside the 64-bit range instead of silently rounding.
+numbers outside the 64-bit range instead of silently rounding.  The
+64-bit half of that guarantee is the host integer type's, so it holds on
+Lua~5.3+ hosts; on LuaJIT \texttt{Int} itself is a double (see the
+\texttt{Int} note in the type-system chapter) --- decode into
+\texttt{Integer} fields there for exactness at any magnitude.
 
 \subsubsection{What Can Be Derived}
 

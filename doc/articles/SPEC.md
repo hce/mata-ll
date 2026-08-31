@@ -1173,28 +1173,30 @@ String literals use double quotes with C-style escape sequences:
 
 # Numeric classes
 
-The numeric typeclass hierarchy is built in, with GHC's signatures:
+The numeric typeclass hierarchy is built in, with GHC's signatures — one
+deviation: mata-ll has no `Rational` type, so `fromRational` takes a
+`Number` (see CAVEATS.md, "`fromRational` takes a `Number`"):
 
     class Num a where
         (+), (-), (*) :: a -> a -> a
         negate, abs, signum :: a -> a
-        fromInteger :: Int -> a
+        fromInteger :: Integer -> a
 
     class Num a => Fractional a where
         (/) :: a -> a -> a
         recip :: a -> a
-        fromRational :: Rational -> a
+        fromRational :: Number -> a
 
     class (Num a, Ord a) => Real a          -- superclass marker
 
     class (Real a, Enum a) => Integral a where
         quot, rem, div, mod :: a -> a -> a
         quotRem, divMod :: a -> a -> (a, a)
-        toInteger :: a -> Int
+        toInteger :: a -> Integer
 
-`Int` is `Num`, `Real`, and `Integral`. `Number` is `Num`,
-`Real`, and `Fractional` (`Int` is deliberately not `Fractional`
-and `Number` is deliberately not `Integral`, exactly as GHC). You can
+`Int` and `Integer` are `Num`, `Real`, and `Integral`. `Number` is `Num`,
+`Real`, and `Fractional` (`Int` and `Integer` are deliberately not
+`Fractional` and `Number` is deliberately not `Integral`, exactly as GHC). You can
 write ordinary polymorphic numeric code (`sum :: Num a => [a] -> a`,
 `average :: Fractional a => [a] -> a`) and give a hand-written `Num`
 instance to a user type (e.g. a modular-arithmetic newtype).
