@@ -99,12 +99,6 @@ excluded_reason() {
         # a use as the one consumption. The twins are compile-time rejected.
         cases/linear_affine_basic)       echo "GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar";;
         cases/linear_mult_poly)          echo "GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar";;
-        # mata-ll has no Integer, so `fromInteger :: Int -> a`; GHC's is
-        # `Integer -> a`, which cannot feed Z5's Int field — the twin is a
-        # compile-time type error, so this case is outside the oracle's domain
-        # (still exercised by mll_test!(num_user_instance)).
-        cases/num_user_instance)         echo "GHC's fromInteger :: Integer -> a can't feed Z5's Int field (mata-ll has no Integer)";;
-
         # -- mata-ll-only grammar / name shadowing ----------------------------
         cases/newtypes)                  echo "'newtype Age = Int' implicit-constructor sugar is not Haskell";;
         cases/superclass)                echo "redefines the Eq/Ord classes (mata-ll builtin shadowing)";;
@@ -117,6 +111,8 @@ excluded_reason() {
         cases/DiamondShared)             echo "helper module (twinned for import, no main)";;
         cases/DiamondWest)               echo "helper module (twinned for import, no main)";;
         cases/DiamondEast)               echo "helper module (twinned for import, no main)";;
+        cases/DupConEast)                echo "helper module (twinned for import, no main)";;
+        cases/DupConWest)                echo "helper module (twinned for import, no main)";;
         cases/ExportHelper)              echo "helper module (twinned for import, no main)";;
         cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
         cases/OpQualDefs)                echo "helper module (twinned for import, no main)";;

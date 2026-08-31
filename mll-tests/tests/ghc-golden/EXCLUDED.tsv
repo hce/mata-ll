@@ -60,7 +60,6 @@ cases/lua_keywords	record fields named after Lua keywords collide with Prelude.u
 cases/luacatch	LuaCatch FFI
 cases/luadict	LuaDict FFI
 cases/newtypes	'newtype Age = Int' implicit-constructor sugar is not Haskell
-cases/num_user_instance	GHC's fromInteger :: Integer -> a can't feed Z5's Int field (mata-ll has no Integer)
 cases/poly_recursion_user_class	contains a LuaPure FFI declaration
 cases/pure_scalar_bare_escape	ByteString builtins (Lua byte strings)
 cases/purehashmap	LuaPure hash FFI
