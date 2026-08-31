@@ -209,6 +209,14 @@ enum Expr {
     /// A bare reference to a prelude/scaffold function used first-class
     /// (`map`, `const`, `($)`, …) — the arity-widening and adapters path.
     FunRef(P),
+    /// `(e :: T)` — pins a type the surrounding text does not determine.
+    /// Generated in every DEAD or non-flowing position (`length []`, a
+    /// lambda handed to an applier, `seq`'s first operand, a discarded
+    /// `const` argument, a case scrutinee): without the pin such programs
+    /// are genuinely ambiguous and both mata-ll and GHC reject them
+    /// (found by batch index 1264, the first generator bug the compiler
+    /// caught rather than the other way around).
+    Annot(Box<Expr>, Ty),
 }
 
 fn b(e: Expr) -> Box<Expr> {
@@ -320,6 +328,7 @@ fn render(e: &Expr) -> String {
             }
         }
         Expr::FunRef(p) => p_name(p).into(),
+        Expr::Annot(e, ty) => format!("({} :: {})", render(e), ty.render()),
     }
 }
 
@@ -638,6 +647,7 @@ fn eval(e: &Expr, env: &Env) -> Value {
             call_builtin(p, vals)
         }
         Expr::FunRef(p) => Value::Builtin(p.clone(), Vec::new()),
+        Expr::Annot(e, _) => eval(e, env),
     }
 }
 
@@ -688,6 +698,14 @@ impl Gen {
         format!("v{}", self.fresh)
     }
 
+    /// `expr`, wrapped in a `(… :: T)` pin — for DEAD and non-flowing
+    /// positions, where nothing else in the text determines the type (see
+    /// `Expr::Annot`).
+    fn pinned(&mut self, ty: &Ty, depth: usize) -> Expr {
+        let e = self.expr(ty, depth);
+        Expr::Annot(b(e), ty.clone())
+    }
+
     /// An expression of type `ty`, at most `depth` productions deep.
     fn expr(&mut self, ty: &Ty, depth: usize) -> Expr {
         // A scoped variable of the right type, sometimes.
@@ -709,7 +727,7 @@ impl Gen {
             1 => {
                 let vt = gen_ty(&mut self.r, 1, false);
                 let name = self.fresh_var();
-                let rhs = self.expr(&vt, depth - 1);
+                let rhs = self.pinned(&vt, depth - 1);
                 self.scope.push((name.clone(), vt));
                 let body = self.expr(ty, depth - 1);
                 self.scope.pop();
@@ -719,7 +737,7 @@ impl Gen {
                 // Application of a generated function to a generated
                 // argument — including through ($) and (.).
                 let at = gen_ty(&mut self.r, 1, false);
-                let f = self.expr(&Ty::fun(at.clone(), ty.clone()), depth - 1);
+                let f = self.pinned(&Ty::fun(at.clone(), ty.clone()), depth - 1);
                 let x = self.expr(&at, depth - 1);
                 return match self.r.below(3) {
                     0 => Expr::Call(P::DollarApp, vec![f, x]),
@@ -730,14 +748,14 @@ impl Gen {
                 // (f . g) x — the composition emission with fresh types.
                 let mid = gen_ty(&mut self.r, 1, false);
                 let at = gen_ty(&mut self.r, 1, false);
-                let f = self.expr(&Ty::fun(mid.clone(), ty.clone()), depth - 1);
-                let g = self.expr(&Ty::fun(at.clone(), mid), depth - 1);
+                let f = self.pinned(&Ty::fun(mid.clone(), ty.clone()), depth - 1);
+                let g = self.pinned(&Ty::fun(at.clone(), mid), depth - 1);
                 let x = self.expr(&at, depth - 1);
                 return Expr::Call(P::CompApp, vec![f, g, x]);
             }
             4 => {
                 let st = gen_ty(&mut self.r, 1, false);
-                let scrut = self.expr(&Ty::Maybe(Box::new(st.clone())), depth - 1);
+                let scrut = self.pinned(&Ty::Maybe(Box::new(st.clone())), depth - 1);
                 let nothing_arm = self.expr(ty, depth - 1);
                 let var = self.fresh_var();
                 self.scope.push((var.clone(), st));
@@ -752,7 +770,7 @@ impl Gen {
             }
             5 => {
                 let et = gen_ty(&mut self.r, 1, false);
-                let scrut = self.expr(&Ty::list(et.clone()), depth - 1);
+                let scrut = self.pinned(&Ty::list(et.clone()), depth - 1);
                 let nil_arm = self.expr(ty, depth - 1);
                 let hd = self.fresh_var();
                 let tl = self.fresh_var();
@@ -772,7 +790,7 @@ impl Gen {
             6 => {
                 let at = gen_ty(&mut self.r, 1, false);
                 let bt = gen_ty(&mut self.r, 1, false);
-                let scrut = self.expr(
+                let scrut = self.pinned(
                     &Ty::Pair(Box::new(at.clone()), Box::new(bt.clone())),
                     depth - 1,
                 );
@@ -788,7 +806,7 @@ impl Gen {
             7 => {
                 // seq: force an arbitrary value, return the payload.
                 let at = gen_ty(&mut self.r, 1, false);
-                let x = self.expr(&at, depth - 1);
+                let x = self.pinned(&at, depth - 1);
                 let y = self.expr(ty, depth - 1);
                 return Expr::Call(P::Seq, vec![x, y]);
             }
@@ -800,12 +818,12 @@ impl Gen {
                     0 => Expr::Call(P::Id, vec![self.expr(ty, depth - 1)]),
                     1 => {
                         let jt = gen_ty(&mut self.r, 1, false);
-                        let junk = self.expr(&jt, depth - 1);
+                        let junk = self.pinned(&jt, depth - 1);
                         Expr::Call(P::Const, vec![self.expr(ty, depth - 1), junk])
                     }
                     2 => {
                         let jt = gen_ty(&mut self.r, 1, false);
-                        let junk = self.expr(&jt, depth - 1);
+                        let junk = self.pinned(&jt, depth - 1);
                         // flip const junk keeps = keeps
                         Expr::Call(
                             P::Flip,
@@ -813,7 +831,7 @@ impl Gen {
                         )
                     }
                     _ => {
-                        let f = self.expr(&Ty::fun(ty.clone(), ty.clone()), depth - 1);
+                        let f = self.pinned(&Ty::fun(ty.clone(), ty.clone()), depth - 1);
                         Expr::Call(P::Twice, vec![f, self.expr(ty, depth - 1)])
                     }
                 };
@@ -900,7 +918,7 @@ impl Gen {
             ),
             4 => {
                 let t = gen_ty(&mut self.r, 1, false);
-                Expr::Call(P::Length, vec![self.expr(&Ty::list(t), depth - 1)])
+                Expr::Call(P::Length, vec![self.pinned(&Ty::list(t), depth - 1)])
             }
             5 => Expr::Call(P::Sum, vec![self.expr(&Ty::list(Ty::Int), depth - 1)]),
             6 => {
@@ -912,7 +930,7 @@ impl Gen {
             7 => {
                 // foldr/foldl over Int.
                 let p = if self.r.chance(1, 2) { P::Foldr } else { P::Foldl };
-                let f = self.expr(
+                let f = self.pinned(
                     &Ty::fun(Ty::Int, Ty::fun(Ty::Int, Ty::Int)),
                     depth - 1,
                 );
@@ -924,10 +942,10 @@ impl Gen {
                 let t = gen_ty(&mut self.r, 1, false);
                 if self.r.chance(1, 2) {
                     let pt = Ty::Pair(Box::new(Ty::Int), Box::new(t));
-                    Expr::Call(P::Fst, vec![self.expr(&pt, depth - 1)])
+                    Expr::Call(P::Fst, vec![self.pinned(&pt, depth - 1)])
                 } else {
                     let pt = Ty::Pair(Box::new(t), Box::new(Ty::Int));
-                    Expr::Call(P::Snd, vec![self.expr(&pt, depth - 1)])
+                    Expr::Call(P::Snd, vec![self.pinned(&pt, depth - 1)])
                 }
             }
             _ => self.atom(&Ty::Int),
@@ -955,7 +973,7 @@ impl Gen {
             3 => Expr::Not(b(self.expr(&Ty::Bool, depth - 1))),
             4 => {
                 let t = gen_ty(&mut self.r, 1, false);
-                Expr::Call(P::Null, vec![self.expr(&Ty::list(t), depth - 1)])
+                Expr::Call(P::Null, vec![self.pinned(&Ty::list(t), depth - 1)])
             }
             _ => self.atom(&Ty::Bool),
         }
@@ -966,12 +984,12 @@ impl Gen {
             0 | 1 => {
                 // map with a random source element type.
                 let src = gen_ty(&mut self.r, 1, false);
-                let f = self.expr(&Ty::fun(src.clone(), elem.clone()), depth - 1);
+                let f = self.pinned(&Ty::fun(src.clone(), elem.clone()), depth - 1);
                 let xs = self.expr(&Ty::list(src), depth - 1);
                 Expr::Call(P::Map, vec![f, xs])
             }
             2 => {
-                let f = self.expr(&Ty::fun(elem.clone(), Ty::Bool), depth - 1);
+                let f = self.pinned(&Ty::fun(elem.clone(), Ty::Bool), depth - 1);
                 let xs = self.expr(&Ty::list(elem.clone()), depth - 1);
                 Expr::Call(P::Filter, vec![f, xs])
             }
@@ -988,7 +1006,7 @@ impl Gen {
             5 => {
                 let a = gen_ty(&mut self.r, 1, false);
                 let bt = gen_ty(&mut self.r, 1, false);
-                let f = self.expr(
+                let f = self.pinned(
                     &Ty::fun(a.clone(), Ty::fun(bt.clone(), elem.clone())),
                     depth - 1,
                 );
