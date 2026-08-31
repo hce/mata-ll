@@ -144,8 +144,14 @@ fn run_compiler(cli: Cli) {
     // ../../lib to an unrelated user directory and silently extend the module
     // search path with it. Installed binaries rely on the embedded stdlib;
     // additional paths come from -L, which always takes precedence (searched
-    // first, in the order given).
-    let dev_root = std::env::current_exe().ok().and_then(|exe| {
+    // first, in the order given). MLL_NO_DEV_PATHS=1 disables the auto-add,
+    // so a dev-tree binary resolves imports exactly like an installed one —
+    // and any compile FAILURE names the auto-added paths (see the error
+    // path below), because "compiles in the checkout, fails installed" is
+    // this feature's one confusing failure mode.
+    let dev_paths_disabled = std::env::var_os("MLL_NO_DEV_PATHS")
+        .is_some_and(|v| v == "1");
+    let dev_root = std::env::current_exe().ok().filter(|_| !dev_paths_disabled).and_then(|exe| {
         let exe_dir = exe.parent()?;
         let profile = exe_dir.file_name()?.to_str()?;
         if profile != "debug" && profile != "release" {
@@ -184,6 +190,22 @@ fn run_compiler(cli: Cli) {
         Ok(r) => r,
         Err(e) => {
             eprint!("{}", e);
+            // A failing compile in a dev tree names its auto-searched
+            // paths: a program resolving imports through them compiles
+            // here and fails with an installed binary, and nothing in the
+            // program says why. (Set MLL_NO_DEV_PATHS=1 to compile with
+            // installed-binary resolution.)
+            let autos: Vec<String> = [&auto_lib, &auto_contrib].iter()
+                .filter_map(|p| p.as_ref().map(|p| p.display().to_string()))
+                .collect();
+            if !autos.is_empty() {
+                eprintln!(
+                    "\nnote: this dev-tree build auto-searched {} for \
+                     imports; an installed mll does not (MLL_NO_DEV_PATHS=1 \
+                     reproduces that here)",
+                    autos.join(" and "),
+                );
+            }
             std::process::exit(1);
         }
     };
