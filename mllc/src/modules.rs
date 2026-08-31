@@ -835,10 +835,10 @@ impl Qual<'_> {
                 let binds = binds.iter().map(|ld| self.localdef(ld, bound)).collect();
                 DoStmt::DoLet { binds }
             }
-            DoStmt::PatternBind { pattern, expr } => {
+            DoStmt::PatternBind { pattern, expr, span } => {
                 let e = self.expr(expr, bound);
                 collect_pattern_vars(pattern, bound);
-                DoStmt::PatternBind { pattern: pattern.clone(), expr: e }
+                DoStmt::PatternBind { pattern: pattern.clone(), expr: e, span: *span }
             }
         }
     }

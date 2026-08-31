@@ -963,10 +963,14 @@ The compiler may inline functions whenever deemed necessary.
 ## Pattern matching
 
 Pattern matching is supported for function definitions, case blocks,
-and assignments. In assignments (`let`, `where`, and `<-`), only
-variable and tuple patterns are currently accepted — constructor
-patterns such as `let Just x = m` or `Just y <- action` are not yet
-parsed. Constructor patterns in function definitions, case
+and assignments. A monadic bind `pat <- action` accepts any pattern; a
+refutable one desugars with GHC's MonadFail-style fallback ("Pattern
+match failure in do expression at line:col"). Local-binding PARAMETERS
+(`let f (a, b) = e`, where-bindings) accept any pattern too, desugaring
+like pattern lambdas with the partial-function fallback. What remains
+out: a constructor pattern as the assignment LHS itself (`let Just x =
+m` — bind the value and match it with `case`, or use `Just x <- return
+m` in do). Constructor patterns in function definitions, case
 alternatives, and lambda arguments are fully supported.
 
 Non-exhaustive function definitions and case expressions are rejected

@@ -25,6 +25,7 @@ cases/constructor_shadowing_json	JSON FFI library
 cases/derive_fromjson	JSON FFI library
 cases/derive_generic	mata-ll Generics substrate (Data.Generics is not GHC's)
 cases/derive_tojson	JSON FFI library
+cases/do_pattern_bind_failure	MonadFail/partial-pattern failure messages: mata-ll error strings vs GHC IOException rendering (same semantics, different formatting)
 cases/error_forces_message	imports LString (Lua string FFI)
 cases/exitvalue_prelude	ExitValue/exit (Lua process control)
 cases/export_module	'export' keyword (Lua module export)

@@ -113,6 +113,7 @@ excluded_reason() {
         cases/DiamondEast)               echo "helper module (twinned for import, no main)";;
         cases/DupConEast)                echo "helper module (twinned for import, no main)";;
         cases/DupConWest)                echo "helper module (twinned for import, no main)";;
+        cases/do_pattern_bind_failure)   echo "MonadFail/partial-pattern failure messages: mata-ll error strings vs GHC IOException rendering (same semantics, different formatting)";;
         cases/ExportHelper)              echo "helper module (twinned for import, no main)";;
         cases/FixityOps)                 echo "helper module (twinned for import, no main)";;
         cases/OpQualDefs)                echo "helper module (twinned for import, no main)";;

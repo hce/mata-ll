@@ -274,37 +274,36 @@ fields* (`fst (1, error "boom")` is `1`; `snd (error "boom", 2)` is `2` — a
 tuple field is suspended until a value-consumer reads it, just like a cons
 head). Data-constructor fields other than the cons head were always lazy.
 
-## `let` binds values, not functions
+## `let` bindings: functions, values, and pattern parameters
 
-`let` and do-block `let` bind values only. A binding with parameters, e.g.
-
-    let f x = x + 1 in f 10
-
-is not supported and fails type checking with `Unbound variable: x` (the
-parameter is never brought into scope). Value bindings are mutually recursive,
+`let` and do-block `let` bind values AND functions, mutually recursively —
 including self-referential lazy values:
 
+    let f x = x + 1 in f 10                                         -- 11
     let fib = [1, 1] ++ zipWith (+) fib (drop 1 fib) in fib !! 11   -- 144
 
-For a local function, bind a lambda (`let f = \x -> x + 1`) or use a `where`
-clause, which does support multi-clause local functions.
+A binding may take PATTERN parameters (`let dist (a, b) = a + b`), which
+desugar exactly like pattern lambdas. A refutable pattern parameter
+(`let fromJust' (Just v) = v`) is accepted with GHC's partial-function
+semantics: a mismatch raises `Non-exhaustive patterns in <name>` at run
+time. Local bindings are single-equation; multi-clause local functions
+belong in a `where` clause.
 
-## Do-block `<-` binds a variable, `_`, or a tuple only
+## Do-block `<-` binds any pattern
 
-A monadic bind `pat <- action` accepts a plain variable, a wildcard `_`, or a
-tuple pattern — nothing else. A unit pattern or a constructor pattern on the
-left is a parse error:
+A monadic bind `pat <- action` accepts any pattern: a variable, `_`,
+tuples (nested too), `()`, constructor patterns, list patterns, literals.
+A REFUTABLE pattern gets GHC's MonadFail-style semantics — a mismatch
+raises `Pattern match failure in do expression at <line>:<col>`, catchable
+with `try` like any other `error`:
 
-    () <- return ()          -- Parse error: Expected expression, found Bind
-    Just x <- lookupThing k  -- not supported (no MonadFail-style refutable bind)
+    Just x <- lookupThing k       -- raises if the lookup returns Nothing
+    (a : rest) <- readValues      -- raises on []
+    () <- checkThing              -- irrefutable: no failure path
 
-Use `_ <- action` to discard a result, and match constructor results with a
-`case` on the bound value instead:
-
-    r <- lookupThing k
-    case r of
-        Just x  -> ...
-        Nothing -> ...
+The message is mata-ll's `error` string; GHC renders the same failure as
+an `IOException` with a file-qualified span — same semantics, different
+formatting.
 
 ## Lua errors from FFI calls are not wrapped
 

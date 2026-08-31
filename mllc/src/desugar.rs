@@ -127,6 +127,21 @@ fn desugar_expr(expr: Expr) -> Expr {
 /// pattern bind mints are indexed by the statement's position (`__tup_i`),
 /// unique within one block; nested blocks are separate calls and their
 /// lambdas shadow, so equal names cannot collide.
+/// Syntactic irrefutability, for the do-bind fallback arm: a pattern that
+/// can never fail to match — variables, wildcards, and tuples of such
+/// (tuples have one constructor). Constructor, literal, and as-patterns are
+/// refutable here even when the TYPE has a single constructor: that is not
+/// knowable before type checking, and an extra fallback arm on an
+/// exhaustive case is dead code, not a semantics change.
+fn pattern_irrefutable(p: &Pattern) -> bool {
+    match p {
+        Pattern::Var(_) | Pattern::Wildcard => true,
+        Pattern::Paren(inner) => pattern_irrefutable(inner),
+        Pattern::Tuple(ps) => ps.iter().all(pattern_irrefutable),
+        Pattern::Constructor { .. } | Pattern::LitPat(_) | Pattern::As(..) => false,
+    }
+}
+
 fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
     let mut stmts = stmts.into_iter().enumerate().rev();
     let Some((_, last)) = stmts.next() else {
@@ -167,12 +182,37 @@ fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
                 }).collect();
                 Expr::Let { binds, body: Box::new(result) }
             }
-            DoStmt::PatternBind { pattern, expr } => {
-                // (a, b) <- expr => expr >>= \__tup -> case __tup of { (a, b) -> rest }
+            DoStmt::PatternBind { pattern, expr, span } => {
+                // pat <- expr  =>  expr >>= \__pat -> case __pat of
+                //     { pat -> rest [; _ -> error "Pattern match failure…"] }
+                //
+                // The fallback arm is GHC's MonadFail semantics for a
+                // REFUTABLE bind pattern (`Just x <- action`): a mismatch
+                // raises "Pattern match failure in do expression", located.
+                // A syntactically irrefutable pattern — `(a, b)`, `()`,
+                // nested wildcards — gets no arm, exactly as before (A15).
                 let fresh = format!("__tup_{}", i);
+                let mut branches =
+                    vec![CaseBranch { pattern: pattern.clone(), guards: vec![], body: Some(result) }];
+                if !pattern_irrefutable(&pattern) {
+                    branches.push(CaseBranch {
+                        pattern: Pattern::Wildcard,
+                        guards: vec![],
+                        body: Some(Expr::App(
+                            Box::new(Expr::Var("error".into())),
+                            Box::new(Expr::Lit(Literal::Str(
+                                format!(
+                                    "Pattern match failure in do expression at {}:{}",
+                                    span.line, span.col
+                                )
+                                .into_bytes(),
+                            ))),
+                        )),
+                    });
+                }
                 let case = Expr::Case {
                     scrutinee: Box::new(Expr::Var(fresh.clone())),
-                    branches: vec![CaseBranch { pattern, guards: vec![], body: Some(result) }],
+                    branches,
                 };
                 bind(desugar_expr(expr), fresh, case)
             }

@@ -3650,15 +3650,16 @@ fn export_list_unknown_entry_is_diagnosed() {
     ]);
 }
 
-/// A pattern parameter on a local (let/do-let) function binding is a clear
-/// error at the binding, not a silent rename that leaves the pattern's
-/// variables unbound.
+/// A pattern parameter on a local (let/do-let) function binding is
+/// ACCEPTED (A14): it desugars exactly like a pattern lambda, with GHC's
+/// partial-function fallback for a refutable pattern. This used to be a
+/// clean rejection ("cannot take a pattern as a parameter"); behavior is
+/// pinned by let_pattern_params.mll and do_pattern_bind_failure.mll — this
+/// test keeps the old reject shape compiling as the accept-side control.
 #[test]
-fn local_binding_pattern_parameter_is_diagnosed() {
-    expect_compile_error("main :: IO ()\nmain = do\n    let f (Just x) = x\n    putStrLn (f (Just \"a\"))\n", &[], &[
-        "cannot take a pattern as a parameter",
-        "GHC accepts pattern parameters",
-    ]);
+fn local_binding_pattern_parameter_is_supported() {
+    compile("main :: IO ()\nmain = do\n    let f (Just x) = x\n    putStrLn (f (Just \"a\"))\n", Path::new("."), &[])
+        .expect("pattern parameters on local bindings are supported (A14)");
 }
 
 /// A freely named newtype constructor (`newtype Rad = MkRad Double`) is

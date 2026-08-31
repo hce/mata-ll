@@ -398,8 +398,8 @@ impl Expr {
                         body: f(ld.body),
                     }).collect(),
                 },
-                DoStmt::PatternBind { pattern, expr } =>
-                    DoStmt::PatternBind { pattern, expr: f(expr) },
+                DoStmt::PatternBind { pattern, expr, span } =>
+                    DoStmt::PatternBind { pattern, expr: f(expr), span },
             }).collect()),
             Expr::Ascription(x, t) => Expr::Ascription(Box::new(f(*x)), t),
             Expr::RecordCon { constructor, fields } => Expr::RecordCon {
@@ -497,7 +497,7 @@ pub enum DoStmt {
     /// `(a, b) <- expr` (pattern bind). A `let (a, b) = expr` statement is
     /// NOT a variant of its own: the parser desugars it into `DoLet`
     /// selector bindings, exactly like a let-expression's tuple binding.
-    PatternBind { pattern: Pattern, expr: Expr },
+    PatternBind { pattern: Pattern, expr: Expr, span: Span },
 }
 
 /// Literal values.

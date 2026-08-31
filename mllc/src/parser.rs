@@ -1632,10 +1632,15 @@ impl Parser {
         let body = if patterns.is_empty() {
             body
         } else {
-            Expr::Lambda {
-                params: self.lambda_param_names(patterns.clone())?,
-                body: Box::new(body),
-            }
+            // Pattern parameters (`let f (a, b) = e`, `where g (Just x) = …`)
+            // desugar exactly like a pattern lambda (A14): fresh parameter +
+            // case, with GHC's partial-function fallback for a refutable
+            // pattern.
+            Self::lambda_from_patterns(
+                patterns.clone(),
+                body,
+                &format!("Non-exhaustive patterns in {}", name),
+            )
         };
         // The patterns are KEPT on the LocalDef (the body is still the
         // desugared lambda): they are the syntactic function-binding
@@ -3486,43 +3491,37 @@ impl Parser {
                 continue;
             }
 
-            // Check for `(a, b) <- expr` (pattern bind)
-            if matches!(self.peek(), Token::LeftParen) {
-                let save_tup = self.checkpoint();
-                if let Ok(pat) = self.parse_pattern_atom()
-                    && matches!(pat, Pattern::Tuple(_)) && self.at(&Token::Bind) {
+            // `pat <- expr` — a monadic bind over ANY pattern (A15):
+            // `x`, `_`, `(a, b)`, `()`, `Just x`, `(x : rest)`, literals.
+            // Probed exactly like a list-comprehension generator: parse a
+            // full pattern and commit only on `<-` (an expression statement
+            // often starts like a pattern, so anything else rewinds). Plain
+            // variables and `_` stay on the simple Bind path — the
+            // refutable-pattern desugar (a case with GHC's MonadFail-style
+            // fallback, see desugar.rs) is only for the shapes that need it.
+            if self.is_pattern_start() {
+                let bind_loc = self.peek_loc().clone();
+                let save_pat = self.checkpoint();
+                if let Ok(pat) = self.parse_pattern()
+                    && self.at(&Token::Bind) {
                         self.advance();
                         let expr = self.parse_stmt_expr()?;
-                        stmts.push(DoStmt::PatternBind { pattern: pat, expr });
+                        match pat {
+                            Pattern::Var(name) => {
+                                stmts.push(DoStmt::Bind { name, expr });
+                            }
+                            Pattern::Wildcard => {
+                                stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
+                            }
+                            pattern => stmts.push(DoStmt::PatternBind {
+                                pattern,
+                                expr,
+                                span: Span::new(bind_loc.line, bind_loc.col),
+                            }),
+                        }
                         continue;
                     }
-                self.rewind(save_tup);
-            }
-
-            // Check for `_ <- expr` (discard bind)
-            if self.at(&Token::Underscore) {
-                let save_u = self.checkpoint();
-                self.advance();
-                if self.at(&Token::Bind) {
-                    self.advance();
-                    let expr = self.parse_stmt_expr()?;
-                    stmts.push(DoStmt::Bind { name: "_".to_string(), expr });
-                    continue;
-                }
-                self.rewind(save_u);
-            }
-
-            // Check for `name <- expr` (bind)
-            let save = self.checkpoint();
-            if let Token::Ident(name) = self.peek().clone() {
-                self.advance();
-                if self.at(&Token::Bind) {
-                    self.advance();
-                    let expr = self.parse_stmt_expr()?;
-                    stmts.push(DoStmt::Bind { name, expr });
-                    continue;
-                }
-                self.rewind(save);
+                self.rewind(save_pat);
             }
 
             // Bare expression
@@ -3604,8 +3603,18 @@ impl Parser {
             return Err(self.err_here("Expected lambda parameter".to_string()));
         }
         self.expect(&Token::Arrow)?;
-        let mut body = self.parse_expr()?;
+        let body = self.parse_expr()?;
+        Ok(Self::lambda_from_patterns(pats, body, "non-exhaustive lambda pattern"))
+    }
 
+    /// Build a lambda over general PATTERN parameters: plain variables and
+    /// wildcards become parameters directly; every other pattern gets a
+    /// fresh parameter matched by a `case` wrapped around the body, with a
+    /// wildcard fallback raising `fallback_msg` for a partial pattern —
+    /// GHC's semantics for a refutable pattern in a lambda or a local
+    /// function binding. Shared by `parse_lambda` and `group_binding`
+    /// (`let f (a, b) = e`, where-bindings), so the two desugar identically.
+    fn lambda_from_patterns(pats: Vec<Pattern>, mut body: Expr, fallback_msg: &str) -> Expr {
         let mut params = Vec::with_capacity(pats.len());
         let mut matched = Vec::new(); // (parameter name, pattern), in source order
         for (i, pat) in pats.into_iter().enumerate() {
@@ -3631,13 +3640,13 @@ impl Parser {
                         guards: vec![],
                         body: Some(Expr::App(
                             Box::new(Expr::Var("error".into())),
-                            Box::new(Expr::Lit(Literal::Str(b"non-exhaustive lambda pattern".to_vec()))),
+                            Box::new(Expr::Lit(Literal::Str(fallback_msg.as_bytes().to_vec()))),
                         )),
                     },
                 ],
             };
         }
-        Ok(Expr::Lambda { params, body: Box::new(body) })
+        Expr::Lambda { params, body: Box::new(body) }
     }
 
     /// A constructor atom: record construction `Con { f = v, ... }`
@@ -3819,32 +3828,6 @@ impl Parser {
             }
 
         Ok(lhs)
-    }
-
-    /// Parameter names of a local function-form binding (`let f x y = e`,
-    /// do-`let`). Local bindings support plain variable (or wildcard)
-    /// parameters only; a pattern parameter is rejected here rather than
-    /// silently renamed away, which would leave the pattern's variables
-    /// unbound and fail far from the cause.
-    fn lambda_param_names(&self, patterns: Vec<Pattern>) -> PResult<Vec<String>> {
-        patterns.into_iter().map(|pat| match pat {
-            Pattern::Var(n) => Ok(n),
-            Pattern::Wildcard => Ok("_".to_string()),
-            _ => {
-                let mut diag = self.err_here(
-                    "A local function binding cannot take a pattern as a \
-                     parameter; bind a plain variable and match it with \
-                     'case' in the body."
-                        .to_string(),
-                );
-                diag.notes.push(
-                    "GHC accepts pattern parameters in let/where bindings; \
-                     mata-ll does not support that yet"
-                        .to_string(),
-                );
-                Err(diag)
-            }
-        }).collect()
     }
 
     fn is_pattern_start(&self) -> bool {

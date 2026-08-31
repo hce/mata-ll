@@ -478,6 +478,10 @@ mll_test!(big_lit_guard_only, "big_lit_guard_only.mll");
 // idempotence through IIFE flattening, escaping-reference always-cheap
 // poisoning, and arity-widening specialization at a dead-variable type.
 mll_test!(fuzz_backend_regressions, "fuzz_backend_regressions.mll");
+// A14/A15: general patterns in do-binds and local-binding parameters.
+mll_test!(do_pattern_binds, "do_pattern_binds.mll");
+mll_test!(do_pattern_bind_failure, "do_pattern_bind_failure.mll");
+mll_test!(let_pattern_params, "let_pattern_params.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {
