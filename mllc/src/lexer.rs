@@ -193,8 +193,31 @@ pub struct Located {
     pub end_col: usize,
 }
 
+/// A `{-# … #-}` pragma the lexer consumed: its inner text (between the
+/// `#` markers, trimmed) and the source position of its opening `{-`.
+/// mata-ll honors NO pragmas — GHC features it supports (GADTs, type
+/// families, linear types, …) are always on and need no LANGUAGE pragma,
+/// and everything else is unsupported — so callers turn these into
+/// "ignored pragma" warnings (see lib.rs / modules.rs). Until 2026-08 a
+/// pragma was silently swallowed as an ordinary `{- -}` block comment,
+/// which is also exactly how it still LEXES; this only makes the swallow
+/// loud.
+pub struct Pragma {
+    pub text: String,
+    pub line: usize,
+    pub col: usize,
+}
+
 pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
+    lex_with_pragmas(source).map(|(tokens, _)| tokens)
+}
+
+/// `lex`, additionally returning the pragmas encountered (see [`Pragma`]).
+pub fn lex_with_pragmas(
+    source: &str,
+) -> Result<(Vec<Located>, Vec<Pragma>), Box<Diagnostic>> {
     let mut tokens = Vec::new();
+    let mut pragmas: Vec<Pragma> = Vec::new();
     let chars: Vec<char> = source.chars().collect();
     let mut pos = 0;
     let mut line = 1;
@@ -277,11 +300,16 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
             continue;
         }
 
-        // Block comment {- ... -}
+        // Block comment {- ... -} — and the pragma form {-# ... #-}, which
+        // lexes identically (the `-}` scan below closes it) but is recorded
+        // so the front-end can warn instead of silently compiling as if the
+        // pragma were absent (see `Pragma`).
         if ch == '{' && pos + 1 < chars.len() && chars[pos + 1] == '-' {
             let (open_line, open_col) = (line, col);
             pos += 2;
             col += 2;
+            let is_pragma = pos < chars.len() && chars[pos] == '#';
+            let content_start = pos;
             let mut depth = 1;
             while pos < chars.len() && depth > 0 {
                 if chars[pos] == '{' && pos + 1 < chars.len() && chars[pos + 1] == '-' {
@@ -316,6 +344,16 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
                         .to_string(),
                 );
                 return Err(diag);
+            }
+            if is_pragma {
+                // Content between `{-` and the closing `-}`, shorn of the
+                // `#` markers: `# LANGUAGE GADTs #` → `LANGUAGE GADTs`.
+                let text: String = chars[content_start..pos.saturating_sub(2)]
+                    .iter()
+                    .collect::<String>()
+                    .trim_matches(|c: char| c == '#' || c.is_whitespace())
+                    .to_string();
+                pragmas.push(Pragma { text, line: open_line, col: open_col });
             }
             continue;
         }
@@ -732,7 +770,7 @@ pub fn lex(source: &str) -> Result<Vec<Located>, Box<Diagnostic>> {
         cleaned.push(t.clone());
     }
 
-    Ok(cleaned)
+    Ok((cleaned, pragmas))
 }
 
 /// Does a `--` line comment start at `pos`? Two dashes begin a comment

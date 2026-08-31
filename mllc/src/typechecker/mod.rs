@@ -599,6 +599,22 @@ pub struct Checker {
     /// Prelude's own (decl index < `prelude_decl_count`). Maintained alongside
     /// `checking_local` by every decl-processing pass.
     checking_prelude: bool,
+    /// Display file name per declaration of the merged module, parallel to
+    /// `module.decls` (see `lib.rs`'s construction: `None` for the Prelude
+    /// region, the imported module's resolved path for its region, and
+    /// `CompileOptions::source_name` for the user's own region). Empty when
+    /// the front-end provided none — every lookup then yields `None` and
+    /// diagnostics keep the historical bare `at line:col` rendering.
+    decl_files: Vec<Option<String>>,
+    /// `decl_files` entry of the declaration currently being processed —
+    /// maintained by `set_decl_position` in every decl-processing pass, and
+    /// attached to each diagnostic by the push helpers so an error inside an
+    /// imported module names the file its span's line numbers index.
+    cur_file: Option<String>,
+    /// File of each successfully checked top-level function, by name — the
+    /// monomorphizer's diagnostics (reported per enclosing function, after
+    /// the checker is done) are attributed through this in lib.rs.
+    pub fn_files: HashMap<String, String>,
     /// Classes defined in the local module (for orphan detection)
     local_classes: HashSet<String>,
     /// Types defined in the local module (for orphan detection)
@@ -733,6 +749,9 @@ impl Checker {
             local_decl_start: 0,
             prelude_decl_count: 0,
             checking_prelude: false,
+            decl_files: Vec::new(),
+            cur_file: None,
+            fn_files: HashMap::new(),
             local_classes: HashSet::new(),
             local_types: HashSet::new(),
             orphan_check_enabled: false,
@@ -1369,10 +1388,36 @@ impl Checker {
         (sig_skolems, demote)
     }
 
+    /// Record which declaration a decl-processing pass is standing on:
+    /// `checking_local` / `checking_prelude` (scoping and baseline
+    /// attribution) and `cur_file` (diagnostic file attribution). Every pass
+    /// that iterates `module.decls` calls this at the top of its loop, so
+    /// the three cannot drift apart.
+    fn set_decl_position(&mut self, decl_idx: usize) {
+        self.checking_local = decl_idx >= self.local_decl_start;
+        self.checking_prelude = decl_idx < self.prelude_decl_count;
+        self.cur_file = self.decl_files.get(decl_idx).cloned().flatten();
+    }
+
+    /// Leave decl-processing: clears the position `set_decl_position` set.
+    fn clear_decl_position(&mut self) {
+        self.checking_local = false;
+        self.checking_prelude = false;
+        self.cur_file = None;
+    }
+
+    /// Install the per-declaration file map (see `decl_files`). Called by
+    /// lib.rs before checking; front-ends that skip it lose nothing but file
+    /// names on diagnostics.
+    pub fn set_decl_files(&mut self, files: Vec<Option<String>>) {
+        self.decl_files = files;
+    }
+
     fn push_error_ctx(&mut self, kind: DiagnosticKind, ctx: String) {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file: None, notes, baseline });
+        let file = self.cur_file.clone();
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file, notes, baseline, excerpt: None });
     }
 
     /// `push_error_ctx` plus one explanatory `note:` line, carried as a
@@ -1390,7 +1435,8 @@ impl Checker {
     fn push_error_span(&mut self, kind: DiagnosticKind, ctx: String, span: Span) {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file: None, notes, baseline });
+        let file = self.cur_file.clone();
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file, notes, baseline, excerpt: None });
     }
 
     /// Record a WARNING (see the `warnings` field). Skipped entirely inside
@@ -1407,9 +1453,10 @@ impl Checker {
         if self.checking_prelude {
             return;
         }
+        let file = self.cur_file.clone();
         self.warnings.push(Diagnostic {
-            kind, context: Some(ctx), span, file: None, notes,
-            baseline: false,
+            kind, context: Some(ctx), span, file, notes,
+            baseline: false, excerpt: None,
         });
     }
 
@@ -1658,7 +1705,7 @@ impl Checker {
                 notes: vec![format!(
                     "GHC (with DataKinds) accepts the un-ticked pun when the name is unambiguous; mata-ll always requires the tick."
                 )],
-                baseline,
+                baseline, excerpt: None,
             });
         } else {
             self.push_error_ctx(DiagnosticKind::UnknownType(name.to_string()), ctx.to_string());
@@ -2482,8 +2529,7 @@ impl Checker {
         for (decl_idx, decl) in module.decls.iter().enumerate() {
             // Constructor names claimed by a local declaration shadow
             // non-local (Prelude/import) ones; same-scope duplicates error.
-            self.checking_local = decl_idx >= self.local_decl_start;
-            self.checking_prelude = decl_idx < self.prelude_decl_count;
+            self.set_decl_position(decl_idx);
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
                     self.register_data_type(name, type_vars, constructors);
@@ -2494,8 +2540,7 @@ impl Checker {
                 _ => {}
             }
         }
-        self.checking_local = false;
-        self.checking_prelude = false;
+        self.clear_decl_position();
     }
 
     /// Pass 2: register typeclass declarations and type families (and the
@@ -2748,8 +2793,7 @@ impl Checker {
             // Derived instances build TIR directly; constructor references in
             // them must resolve in the scope of the data type they derive for
             // (a local shadowing constructor resolves to its mangled key).
-            self.checking_local = decl_idx >= self.local_decl_start;
-            self.checking_prelude = decl_idx < self.prelude_decl_count;
+            self.set_decl_position(decl_idx);
             if let Decl::DataDef { name, type_vars, constructors, deriving } = decl {
                 // A field-key rename (`field as "key" :: T`) gives the field
                 // one shared EXTERNAL name: the key in the runtime Lua table
@@ -2909,8 +2953,7 @@ impl Checker {
                 }
             }
         }
-        self.checking_local = false;
-        self.checking_prelude = false;
+        self.clear_decl_position();
         instance_fns
     }
 
@@ -2930,15 +2973,13 @@ impl Checker {
         for (decl_idx, decl) in module.decls.iter().enumerate() {
             // Instance method bodies reference constructors; resolve them in
             // the scope of the declaring module (shadowing, see pass 1).
-            self.checking_local = decl_idx >= self.local_decl_start;
-            self.checking_prelude = decl_idx < self.prelude_decl_count;
+            self.set_decl_position(decl_idx);
             if let Decl::InstanceDecl { class_name, target_type, context, methods } = decl {
                 let ifns = self.check_instance(class_name, target_type, context, methods);
                 instance_fns.extend(ifns);
             }
         }
-        self.checking_local = false;
-        self.checking_prelude = false;
+        self.clear_decl_position();
     }
 
     /// Pass 5: generate FFI functions (type sigs with LuaPure/LuaIO and no
@@ -3044,14 +3085,19 @@ impl Checker {
             // Constructor references in local bodies resolve to local
             // (possibly shadowing) constructors; non-local bodies keep seeing
             // the constructors of their own scope.
-            self.checking_local = decl_idx >= self.local_decl_start;
-            self.checking_prelude = decl_idx < self.prelude_decl_count;
+            self.set_decl_position(decl_idx);
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
                     data_defs.push(self.convert_data_def(name, type_vars, constructors));
                 }
                 Decl::FunDef { name, clauses } => {
                     if name == "main" { has_main = true; }
+                    if let Some(f) = &self.cur_file {
+                        // Post-checker passes (mono) report per enclosing
+                        // function; this is how their diagnostics find the
+                        // function's file (see `fn_files`).
+                        self.fn_files.insert(name.clone(), f.clone());
+                    }
                     if let Some(declared_ty) = sigs.get(name) {
                         if let Some(tfun) = self.check_function(name, clauses, declared_ty) {
                             functions.push(tfun);
@@ -3098,8 +3144,7 @@ impl Checker {
                 _ => {}
             }
         }
-        self.checking_local = false;
-        self.checking_prelude = false;
+        self.clear_decl_position();
         (has_main, exports, constrained_exports)
     }
 

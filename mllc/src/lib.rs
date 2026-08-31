@@ -269,7 +269,8 @@ fn compile_impl(
     whnf_assert: bool,
 ) -> Result<CompileResult, CompileError> {
     // Lex
-    let tokens = lexer::lex(source).map_err(|d| CompileError::Lex(*d))?;
+    let (tokens, pragmas) =
+        lexer::lex_with_pragmas(source).map_err(|d| CompileError::Lex(*d))?;
 
     // The module loader is created before parsing: fixity travels with an
     // import in Haskell, so the root module's expressions must be parsed
@@ -313,6 +314,9 @@ fn compile_impl(
         .count();
     let hidden = module.hidden.clone();
     let prelude_count = prelude_decls.len();
+    // Captured before the Prelude merge below discards it: provenance of the
+    // resolved decl list, for per-declaration file attribution (`decl_files`).
+    let origin_spans = module.origin_spans.clone();
     let mut module = ast::Module {
         decls: prelude_decls.into_iter()
             .chain(module.decls)
@@ -323,10 +327,42 @@ fn compile_impl(
     };
     let local_start = module.decls.len() - own_count;
 
+    // Per-declaration file attribution for diagnostics, parallel to the
+    // merged decl list: None for the Prelude region (baseline errors are
+    // replaced with a diagnosis anyway), each imported declaration's
+    // resolved path (spans index that file's text), and the root file's
+    // display name (`CompileOptions::source_name`) for the user's own
+    // region. `origin_spans` records (module_key, decl_count) runs in decl
+    // order, ending with the root's own region — but the qualified-alias
+    // copies an `import M as A` splices in carry NO span entry, so when the
+    // spans under-cover the import region the whole region is left
+    // unattributed (`None`, the historical rendering) rather than shifted
+    // onto the wrong file. Misattribution is the one failure mode this
+    // construction must not have.
+    let decl_files: Vec<Option<String>> = {
+        let import_region = module.decls.len() - prelude_count - own_count;
+        let import_spans = &origin_spans[..origin_spans.len().saturating_sub(1)];
+        let spans_cover: usize = import_spans.iter().map(|(_, c)| c).sum();
+        let mut v: Vec<Option<String>> = vec![None; prelude_count];
+        if spans_cover == import_region {
+            for (key, count) in import_spans {
+                let name = loader.module_source(key).map(|(n, _)| n.to_string());
+                v.extend(std::iter::repeat_n(name, *count));
+            }
+        } else {
+            v.extend(std::iter::repeat_n(None::<String>, import_region));
+        }
+        v.extend(std::iter::repeat_n(options.source_name.clone(), own_count));
+        debug_assert_eq!(v.len(), module.decls.len(),
+            "decl_files must cover the merged decl list exactly");
+        v
+    };
+
     // Desugar do-notation to >>= chains
     desugar::desugar_module(&mut module);
 
     let mut checker = typechecker::Checker::new();
+    checker.set_decl_files(decl_files);
 
     // The user's own top-level value definitions that reuse a name the
     // baseline already provides (a Prelude definition or a compiler builtin).
@@ -356,12 +392,20 @@ fn compile_impl(
         &module.decls[local_start..],
         &checker,
     );
+    // Every CompileError::Type below goes out through this: source-line
+    // excerpts attached centrally (see attach_excerpts), never at the
+    // construction sites.
+    let enrich = |mut diags: Vec<types::Diagnostic>, loader: &modules::ModuleLoader| {
+        attach_excerpts(&mut diags, source, options.source_name.as_deref(), loader);
+        diags
+    };
+
     let early: Vec<types::Diagnostic> = redefined.iter()
         .filter(|r| r.load_bearing || r.duplicate)
         .map(|r| redefinition_diagnostic(r, options.source_name.as_deref()))
         .collect();
     if !early.is_empty() {
-        return Err(CompileError::Type(early));
+        return Err(CompileError::Type(enrich(early, &loader)));
     }
 
     // Type check
@@ -380,9 +424,9 @@ fn compile_impl(
                 .map(|r| redefinition_diagnostic(r, options.source_name.as_deref()))
                 .collect();
             diags.extend(errors.into_iter().filter(|e| !e.baseline));
-            return Err(CompileError::Type(diags));
+            return Err(CompileError::Type(enrich(diags, &loader)));
         }
-        return Err(CompileError::Type(errors));
+        return Err(CompileError::Type(enrich(errors, &loader)));
     }
 
     // The TIR pipeline, in dependency order:
@@ -404,7 +448,21 @@ fn compile_impl(
     let mono_module = mono_pass.run(tir_module);
 
     if !mono_pass.errors.is_empty() {
-        return Err(CompileError::Type(mono_pass.errors));
+        let mut errors = std::mem::take(&mut mono_pass.errors);
+        // Attribute each error to its enclosing function's file where the
+        // checker recorded one (mono's own spans carry no file — see
+        // Checker::fn_files); the excerpt pass then finds the right text.
+        // Mono's context is its own fixed "definition of '<name>'" shape.
+        for e in &mut errors {
+            if e.file.is_none()
+                && let Some(name) = e.context.as_deref()
+                    .and_then(|c| c.strip_prefix("definition of '"))
+                    .and_then(|c| c.strip_suffix('\''))
+                && let Some(f) = checker.fn_files.get(name) {
+                    e.file = Some(f.clone());
+                }
+        }
+        return Err(CompileError::Type(enrich(errors, &loader)));
     }
 
     // Invariant check: every type-directed `show` must have resolved to a
@@ -441,10 +499,19 @@ fn compile_impl(
                 .chain(&mono_module.instance_fns)
                 .any(|f| f.name == *fn_name)
         })
-        .map(|(_, d)| d)
+        .map(|(fn_name, mut d)| {
+            // The deferral key IS the enclosing function — attribute its
+            // file (see Checker::fn_files) so the diagnostic renders
+            // `at file:line:col` and the excerpt pass finds its text.
+            if d.file.is_none()
+                && let Some(f) = checker.fn_files.get(&fn_name) {
+                    d.file = Some(f.clone());
+                }
+            d
+        })
         .collect();
     if !deferred.is_empty() {
-        return Err(CompileError::Type(deferred));
+        return Err(CompileError::Type(enrich(deferred, &loader)));
     }
 
     // A module with neither `main` nor any `export` declaration compiles to a
@@ -455,6 +522,10 @@ fn compile_impl(
     // prevent this: it only scopes .mll-level imports (see `header_exports`
     // above), which is precisely the mixup the warning's notes explain.
     let mut warnings = import_warnings;
+    // The root file's `{-# … #-}` pragmas, as "ignored pragma" warnings
+    // (imported modules' pragmas come through `import_warnings` — see
+    // ModuleLoader::load_module).
+    warnings.extend(pragmas.iter().map(|p| pragma_warning(p, options.source_name.as_deref())));
     // Typechecker warnings (e.g. literal patterns without a catch-all) —
     // recorded during the successful check above; Prelude-internal ones
     // were never recorded (see Checker::push_warning_span).
@@ -627,6 +698,74 @@ fn collect_baseline_redefinitions(
                 },
         })
         .collect()
+}
+
+/// The "ignored pragma" warning for one `{-# … #-}` the lexer consumed
+/// (see `lexer::Pragma`). Until 2026-08 a pragma was silently swallowed as
+/// a block comment (`{-#` opens `{-`, `#-}` closes it), so pasted GHC code
+/// compiled as if the pragma were absent with nothing saying so — this
+/// keeps that behavior but says so. LANGUAGE pragmas get the note that
+/// explains why ignoring them is usually right; every other pragma
+/// (INLINE, OPTIONS_GHC, …) gets the generic note.
+pub(crate) fn pragma_warning(p: &lexer::Pragma, file: Option<&str>) -> types::Diagnostic {
+    let mut d = types::Diagnostic::new(types::DiagnosticKind::Other(format!(
+        "ignored pragma `{{-# {} #-}}`", p.text
+    )));
+    d.span = Some(ast::Span::new(p.line, p.col));
+    d.file = file.map(str::to_string);
+    d.notes.push(if p.text.trim_start().starts_with("LANGUAGE") {
+        "mata-ll has no language extensions: the GHC features it supports \
+         (GADTs, type families, linear types, …) are always on, and the \
+         rest are unsupported. The program is compiled as if the pragma \
+         were absent — which is the right meaning when the extension names \
+         an always-on feature, and a later type or parse error when it \
+         names an unsupported one."
+            .to_string()
+    } else {
+        "mata-ll honors no compiler pragmas (INLINE, OPTIONS_GHC, RULES, \
+         …); the program is compiled as if the pragma were absent."
+            .to_string()
+    });
+    d
+}
+
+/// Fill `Diagnostic::excerpt` for every diagnostic whose span identifies a
+/// source line (see the field's doc in types.rs — this pass is the only
+/// writer, so no error-construction site carries source text around):
+///
+///   * `file: Some(f)` — the text is looked up by display name among the
+///     loader's retained module sources, or is the root source when `f` is
+///     the root's display name;
+///   * `file: None`, not `baseline` — the span indexes the root source (the
+///     historical convention for the user's own file when no `source_name`
+///     was provided);
+///   * `baseline` — skipped: the span indexes the embedded Prelude, and
+///     baseline errors are replaced with an interference diagnosis anyway.
+///
+/// Tabs are replaced with single spaces so the rendered caret column aligns
+/// with the printed line.
+fn attach_excerpts(
+    diags: &mut [types::Diagnostic],
+    root_source: &str,
+    root_name: Option<&str>,
+    loader: &modules::ModuleLoader,
+) {
+    let by_display: std::collections::HashMap<&str, &str> = loader.loaded_sources().collect();
+    for d in diags {
+        if d.excerpt.is_some() || d.baseline {
+            continue;
+        }
+        let Some(span) = d.span else { continue };
+        let text = match d.file.as_deref() {
+            None => Some(root_source),
+            Some(f) if Some(f) == root_name => Some(root_source),
+            Some(f) => by_display.get(f).copied(),
+        };
+        let Some(text) = text else { continue };
+        if let Some(line) = text.lines().nth(span.line.saturating_sub(1)) {
+            d.excerpt = Some(line.replace('\t', " "));
+        }
+    }
 }
 
 /// The clear, user-located error for a rejected baseline redefinition.

@@ -139,6 +139,10 @@ pub struct Monomorphizer {
     cur_span: Option<Span>,
     /// Functions that use dictionary-passing instead of monomorphization
     dict_passing_fns: HashSet<String>,
+    /// Distinct instantiation count at the moment each function tripped the
+    /// specialization cap (see `trip_spec_cap`) — reported by the
+    /// first-class-use diagnostic so the cause is legible at the use site.
+    dict_passing_counts: HashMap<String, usize>,
     /// Specializations deleted when their function tripped the specialization
     /// limit: purged mangled name -> original function name. Call sites
     /// rewritten to these names BEFORE the limit tripped must be reverted to
@@ -285,6 +289,7 @@ impl Monomorphizer {
             cur_ctx: None,
             cur_span: None,
             dict_passing_fns: HashSet::new(),
+            dict_passing_counts: HashMap::new(),
             purged_specs: HashMap::new(),
             gen_stack: Vec::new(),
             cur_dict_params: Vec::new(),
@@ -810,10 +815,17 @@ impl Monomorphizer {
     /// Call sites already rewritten to a purged name are reverted to the
     /// original function in `run` via `purged_specs`.
     fn trip_spec_cap(&mut self, name: &str) -> bool {
-        if self.specializations.keys().filter(|k| k.name == name).count() <= SPEC_LIMIT {
+        let count = self.specializations.keys().filter(|k| k.name == name).count();
+        if count <= SPEC_LIMIT {
             return false;
         }
         self.dict_passing_fns.insert(name.to_string());
+        // The count at trip time, for the first-class-use diagnostic: it
+        // tells the user WHICH way the cap was crossed — a runaway ladder
+        // (polymorphic recursion) or simply a 17th genuine instantiation —
+        // and that adding an instantiation elsewhere is what broke this
+        // unrelated-looking use site.
+        self.dict_passing_counts.insert(name.to_string(), count);
         let purged: HashSet<String> = self.specializations.iter()
             .filter(|(k, _)| k.name == name)
             .map(|(_, v)| v.clone())
@@ -873,7 +885,7 @@ impl Monomorphizer {
             span: self.cur_span,
             file: None,
             notes: hint.map(str::to_string).into_iter().collect(),
-            baseline: false,
+            baseline: false, excerpt: None,
         });
     }
 
@@ -2447,14 +2459,27 @@ impl Monomorphizer {
             context: self.cur_ctx.clone(),
             span: self.cur_span,
             file: None,
-            notes: vec![format!(
-                "'{}' is compiled with dictionary passing (it exceeded the \
-                 specialization limit), and a first-class use needs one \
-                 concrete type to build the dictionaries at compile time. \
-                 GHC resolves this by passing dictionaries at runtime; in \
-                 mata-ll, annotate the use so its type is concrete.",
-                name)],
-            baseline: false,
+            notes: vec![
+                match self.dict_passing_counts.get(name) {
+                    Some(n) => format!(
+                        "'{}' is compiled with dictionary passing: it reached \
+                         {} distinct type instantiations (the limit is {}, a \
+                         guard against polymorphic-recursion ladders — a 17th \
+                         genuine instantiation trips it the same way). Note \
+                         that the instantiation that crossed the limit may be \
+                         far from this use site.",
+                        name, n, SPEC_LIMIT),
+                    None => format!(
+                        "'{}' is compiled with dictionary passing (it \
+                         exceeded the specialization limit of {}).",
+                        name, SPEC_LIMIT),
+                },
+                "a first-class use needs one concrete type to build the \
+                 dictionaries at compile time. GHC resolves this by passing \
+                 dictionaries at runtime; in mata-ll, annotate the use so \
+                 its type is concrete.".to_string(),
+            ],
+            baseline: false, excerpt: None,
         };
         // Deferred to reachability (see `deferred_errors`): the enclosing
         // function is usually a generic original that dies once every real
@@ -2738,7 +2763,7 @@ impl Monomorphizer {
                                  '{}', and emitting the bare method name would crash \
                                  at runtime",
                                 method_name, concrete_ty)],
-                            baseline: false,
+                            baseline: false, excerpt: None,
                         });
                     }
                     method_name.clone()
@@ -3152,5 +3177,42 @@ impl Monomorphizer {
         self.cur_dict_params = saved_dict_params;
         self.cur_dict_by_arg = saved_dict_by_arg;
         Some(names)
+    }
+}
+
+#[cfg(test)]
+mod first_class_dict_error_tests {
+    use super::*;
+
+    /// The first-class-use diagnostic names the mechanism (A10): with a
+    /// recorded trip count it states how many distinct instantiations were
+    /// reached and what the limit is — the instantiation that crosses the
+    /// cap can be far from the use site it breaks — and without one it
+    /// still names the limit. (The reachable-in-full-compiles shape is the
+    /// accept side, dict_dead_generic.mll: since G7 the common case
+    /// compiles, which is exactly why the message is pinned here at its
+    /// construction site.)
+    #[test]
+    fn diagnostic_names_limit_and_trip_count() {
+        let checker = crate::typechecker::Checker::new();
+        let mut m = Monomorphizer::new(&checker);
+        m.dict_passing_counts.insert("grow".into(), SPEC_LIMIT + 1);
+
+        m.push_first_class_dict_error("grow", &Ty::Var(crate::types::TyVar { name: "a".into(), id: 0 }));
+        m.push_first_class_dict_error("plain", &Ty::Var(crate::types::TyVar { name: "b".into(), id: 1 }));
+
+        let counted = &m.errors[0];
+        let text = format!("{}", counted);
+        assert!(text.contains("cannot pass 'grow'"), "got: {text}");
+        assert!(text.contains(&format!("{} distinct type instantiations", SPEC_LIMIT + 1)),
+            "the note must state the reached count, got: {text}");
+        assert!(text.contains(&format!("the limit is {}", SPEC_LIMIT)),
+            "the note must state the limit, got: {text}");
+        assert!(text.contains("far from this use site"),
+            "the note must warn about action at a distance, got: {text}");
+
+        let uncounted = format!("{}", m.errors[1]);
+        assert!(uncounted.contains(&format!("specialization limit of {}", SPEC_LIMIT)),
+            "the fallback note must still name the limit, got: {uncounted}");
     }
 }

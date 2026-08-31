@@ -2581,6 +2581,50 @@ main = print (f 5)
 }
 
 #[test]
+fn diagnostics_carry_source_excerpt_with_caret() {
+    // A11: a diagnostic with a span renders the offending source line under
+    // a gutter with a caret — filled by lib.rs's enrichment pass
+    // (attach_excerpts), never by the error's construction site.
+    let source = r#"
+main :: IO ()
+main = putStrLn missingThing
+"#;
+    let msg = expect_compile_error(source, &[], &["Unbound variable"]);
+    assert!(
+        msg.contains("| main = putStrLn missingThing"),
+        "expected the offending source line in a gutter, got:\n{msg}"
+    );
+    assert!(
+        msg.lines().any(|l| l.contains('|') && l.trim_end().ends_with('^')),
+        "expected a caret line under the excerpt, got:\n{msg}"
+    );
+}
+
+#[test]
+fn diagnostics_name_the_imported_file() {
+    // A11: an error INSIDE an imported module is attributed to that module's
+    // resolved path (decl_files in lib.rs) and excerpts that file's text —
+    // its span's line numbers index the import, not the root file, so a bare
+    // `at line:col` would send the reader to the wrong file's coordinates.
+    // The helper lives outside tests/cases/ (see its header comment).
+    let source = r#"
+import BrokenIntHelper
+
+main :: IO ()
+main = print broken
+"#;
+    let msg = expect_compile_error(
+        source,
+        &[Path::new("tests/broken-helpers")],
+        &["BrokenIntHelper.mll:"],
+    );
+    assert!(
+        msg.contains("| broken = \"not an int\""),
+        "expected the imported file's offending line excerpted, got:\n{msg}"
+    );
+}
+
+#[test]
 fn duplicate_imported_constructor_rejected() {
     // Two IMPORTED types claiming one constructor name — the non-local arm
     // of claim_constructor_name, previously untested. A LOCAL declaration
@@ -5024,4 +5068,38 @@ main = putStrLn (f 2 <> sign 1 <> nest Nothing <> u ())
     assert!(result.warnings.is_empty(),
         "covered literal matches must not warn: {:?}",
         result.warnings.iter().map(|w| format!("{}", w)).collect::<Vec<_>>());
+}
+
+/// A12: a `{-# … #-}` pragma no longer vanishes as a block comment — the
+/// program still compiles exactly as if the pragma were absent (the right
+/// meaning for always-on extensions on pasted GHC code), but a warning now
+/// SAYS so, one per pragma, naming it. GHC-style: unrecognized pragmas
+/// warn, they do not error.
+#[test]
+fn pragmas_compile_as_absent_but_warn() {
+    let src = r#"{-# LANGUAGE GADTs, TypeFamilies #-}
+{-# OPTIONS_GHC -Wall #-}
+
+{-# INLINE double #-}
+double :: Int -> Int
+double x = x + x
+
+main :: IO ()
+main = print (double 21)
+"#;
+    let result = compile(src, Path::new("."), &[])
+        .expect("a pragma must not break the program around it");
+    let rendered: Vec<String> =
+        result.warnings.iter().map(|w| format!("{}", w)).collect();
+    assert_eq!(rendered.len(), 3, "one warning per pragma: {rendered:?}");
+    assert!(rendered[0].contains("ignored pragma `{-# LANGUAGE GADTs, TypeFamilies #-}`"),
+        "the warning names the pragma: {}", rendered[0]);
+    assert!(rendered[0].contains("always on"),
+        "the LANGUAGE note explains why ignoring is usually right: {}", rendered[0]);
+    assert!(rendered[1].contains("OPTIONS_GHC") && rendered[1].contains("honors no compiler pragmas"),
+        "non-LANGUAGE pragmas get the generic note: {}", rendered[1]);
+    assert!(rendered[2].contains("INLINE double"),
+        "each pragma warns separately: {}", rendered[2]);
+    assert!(rendered[0].contains("at 1:1"),
+        "the warning carries the pragma's location: {}", rendered[0]);
 }

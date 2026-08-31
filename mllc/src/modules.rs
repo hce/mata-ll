@@ -38,6 +38,12 @@ pub struct ModuleLoader {
     /// The Prelude's fixity declarations, in force in every module (the
     /// implicit `import Prelude`).
     prelude_fixities: HashMap<String, (Assoc, u8)>,
+    /// Each loaded module's display name and source text, by module key —
+    /// retained for diagnostics: file attribution (`Diagnostic::file`) and
+    /// the excerpt enrichment pass in lib.rs, which needs the text a span's
+    /// line/col indexes. The display name is the resolved path for a file on
+    /// disk and `<module key>` for an embedded stdlib module.
+    module_sources: HashMap<String, (String, String)>,
     /// Non-fatal diagnostics collected during resolution (an import alias
     /// shadowed by a data constructor). Drained by the compile pipeline
     /// into `CompileResult.warnings`.
@@ -66,7 +72,21 @@ impl ModuleLoader {
             fixities_in_progress: HashSet::new(),
             prelude_fixities,
             warnings: Vec::new(),
+            module_sources: HashMap::new(),
         }
+    }
+
+    /// The display name and source text of loaded module `key`, when it was
+    /// loaded from source (see `module_sources`).
+    pub fn module_source(&self, key: &str) -> Option<(&str, &str)> {
+        self.module_sources.get(key).map(|(n, s)| (n.as_str(), s.as_str()))
+    }
+
+    /// Every loaded module's (display name, source text) — the excerpt
+    /// enrichment pass in lib.rs resolves a diagnostic's `file` back to the
+    /// text its span indexes through this.
+    pub fn loaded_sources(&self) -> impl Iterator<Item = (&str, &str)> {
+        self.module_sources.values().map(|(n, s)| (n.as_str(), s.as_str()))
     }
 
     /// Drain the non-fatal diagnostics collected so far (see `warnings`).
@@ -103,18 +123,30 @@ impl ModuleLoader {
         // Filesystem search paths take precedence (so `-L <dir>` can shadow a
         // stdlib module); fall back to the embedded stdlib baked into the crate
         // so an installed compiler needs no `lib/` directory on disk.
-        let source = match self.resolve_path(module_path) {
-            Some(file_path) => fs::read_to_string(&file_path)
-                .map_err(|e| format!("Error reading {}: {}", file_path.display(), e))?,
-            None => crate::stdlib::embedded_module(&key)
-                .map(str::to_string)
-                .ok_or_else(|| format!("Cannot find module '{}'", key))?,
+        let (display_name, source) = match self.resolve_path(module_path) {
+            Some(file_path) => {
+                let text = fs::read_to_string(&file_path)
+                    .map_err(|e| format!("Error reading {}: {}", file_path.display(), e))?;
+                (file_path.display().to_string(), text)
+            }
+            None => {
+                let text = crate::stdlib::embedded_module(&key)
+                    .map(str::to_string)
+                    .ok_or_else(|| format!("Cannot find module '{}'", key))?;
+                (format!("<{}>", key), text)
+            }
         };
+        self.module_sources.insert(key.clone(), (display_name.clone(), source.clone()));
 
         // An imported module's lex and parse errors surface through the
         // import-error channel, prefixed with the module that failed.
-        let tokens = lexer::lex(&source)
+        let (tokens, pragmas) = lexer::lex_with_pragmas(&source)
             .map_err(|d| format!("in module '{}': {}", key, d))?;
+        // Its pragmas become "ignored pragma" warnings attributed to the
+        // imported file, exactly as the root's are in compile_impl.
+        for p in &pragmas {
+            self.warnings.push(crate::pragma_warning(p, Some(display_name.as_str())));
+        }
         // Fixity is part of a module's interface: this module's operators
         // must group under the fixities its imports (and the implicit
         // Prelude) declare, so those are collected before parsing.
@@ -450,7 +482,7 @@ impl ModuleLoader {
                              aliases in a separate namespace and allows both; \
                              rename the alias (e.g. 'as {a}M') to use \
                              qualified references.")],
-                        baseline: false,
+                        baseline: false, excerpt: None,
                     });
                 }
                 keep

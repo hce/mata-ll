@@ -1598,15 +1598,22 @@ pub struct Diagnostic {
     /// these with a diagnosis of the interference (e.g. a redefined Prelude
     /// name) instead of showing errors at source lines the user never wrote.
     pub baseline: bool,
+    /// The source line the span points into, filled by the enrichment pass in
+    /// lib.rs (`attach_excerpts`) just before a `CompileError::Type` is
+    /// returned — construction sites never set it, so no error path has to
+    /// carry source text around. Rendered as a gutter-plus-caret block under
+    /// the `at …` line. `None` (no span, unknown file, or a span past the
+    /// text) renders nothing, keeping the historical output.
+    pub excerpt: Option<String>,
 }
 
 impl Diagnostic {
     pub fn new(kind: DiagnosticKind) -> Self {
-        Diagnostic { kind, context: None, span: None, file: None, notes: Vec::new(), baseline: false }
+        Diagnostic { kind, context: None, span: None, file: None, notes: Vec::new(), baseline: false, excerpt: None }
     }
 
     pub fn in_context(kind: DiagnosticKind, ctx: impl Into<String>) -> Self {
-        Diagnostic { kind, context: Some(ctx.into()), span: None, file: None, notes: Vec::new(), baseline: false }
+        Diagnostic { kind, context: Some(ctx.into()), span: None, file: None, notes: Vec::new(), baseline: false, excerpt: None }
     }
 
     /// A parse error at a known source location. Rendered inline as
@@ -1619,6 +1626,7 @@ impl Diagnostic {
             file: None,
             notes: Vec::new(),
             baseline: false,
+            excerpt: None,
         }
     }
 
@@ -1996,6 +2004,21 @@ impl fmt::Display for Diagnostic {
             }
         } else if let Some(span) = &self.span {
             write!(f, "\n  at {}", loc(span))?;
+        }
+        // The source line under a gutter, caret under the column (see the
+        // `excerpt` field — filled by lib.rs's enrichment pass, never by an
+        // error construction site):
+        //       12 | let x = bar baz
+        //          |         ^
+        if let (Some(text), Some(span)) = (&self.excerpt, &self.span) {
+            let gutter = span.line.to_string();
+            let pad = " ".repeat(gutter.len());
+            // The caret sits under the span's (1-based) column, clamped to
+            // the line's end. Columns are counted in characters; the
+            // enrichment pass replaces tabs with spaces so the count aligns.
+            let caret_offset = span.col.saturating_sub(1).min(text.chars().count());
+            write!(f, "\n  {} | {}", gutter, text)?;
+            write!(f, "\n  {} | {}^", pad, " ".repeat(caret_offset))?;
         }
         if let Some(hint) = self.hint() {
             write!(f, "\n  note: {}", hint)?;
