@@ -625,6 +625,10 @@ impl Monomorphizer {
             && let Some(name) = self.structural_eq_impl(&binding) {
                 return MethodDispatch::Resolved(name);
             }
+        if matches!(method, "compare" | "<" | "<=" | ">" | ">=" | "max" | "min")
+            && let Some(name) = self.structural_ord_impl(method, &binding) {
+                return MethodDispatch::Resolved(name);
+            }
         if let Some(head) = InstHead::of(&binding)
             && let Some(mangled) = self.instance_methods.get(&(method.to_string(), head)) {
                 return MethodDispatch::Resolved(mangled.clone());
@@ -654,6 +658,11 @@ impl Monomorphizer {
                     return Some(self.generate_tuple_show(&elem_tys.clone()));
                 }
                 if let Some(name) = self.generate_container_show(binding) {
+                    return Some(name);
+                }
+            }
+            "compare" | "<" | "<=" | ">" | ">=" | "max" | "min" => {
+                if let Some(name) = self.structural_ord_impl(method, binding) {
                     return Some(name);
                 }
             }
@@ -688,6 +697,82 @@ impl Monomorphizer {
     /// generated (or memoized) by element type; `None` for every other type.
     /// Shared by the concrete resolver and the polymorphic-binding operator
     /// dispatch, which once carried the same three-arm block each.
+    /// The structural Ord family for a compiler-owned shape (A16), the
+    /// compare analog of `structural_eq_impl`: `compare` is generated per
+    /// shape (lexicographic lists, Nothing < Just, element-wise tuples),
+    /// and every other Ord method derives from it (`OrdFromCmp` — the
+    /// Ordering result is its constructor index, so the operators are
+    /// integer tests on the compare result, and max/min select an operand).
+    fn structural_ord_impl(&mut self, method: &str, binding: &Ty) -> Option<String> {
+        let cmp = match binding {
+            Ty::List(elem_ty) => self.generate_list_cmp(&elem_ty.clone()),
+            m if Self::is_maybe_type(m) => {
+                let inner = Self::maybe_inner_type(m).unwrap();
+                self.generate_maybe_cmp(&inner)
+            }
+            Ty::Tuple(elem_tys) => self.generate_tuple_cmp(&elem_tys.clone()),
+            _ => return None,
+        };
+        if method == "compare" {
+            return Some(cmp);
+        }
+        let (base, result_ty) = match method {
+            "<" => ("ord_lt_", Ty::Con("Bool".into())),
+            "<=" => ("ord_le_", Ty::Con("Bool".into())),
+            ">" => ("ord_gt_", Ty::Con("Bool".into())),
+            ">=" => ("ord_ge_", Ty::Con("Bool".into())),
+            "max" => ("ord_max_", binding.clone()),
+            "min" => ("ord_min_", binding.clone()),
+            _ => return None,
+        };
+        let op = method.to_string();
+        Some(self.synthetic_spec_fn(method, base, binding, &["_a", "_b"], result_ty,
+            move |_| SpecKind::OrdFromCmp { op, cmp }))
+    }
+
+    fn generate_list_cmp(&mut self, elem_ty: &Ty) -> String {
+        let list_ty = Ty::List(Box::new(elem_ty.clone()));
+        let elem_ty = elem_ty.clone();
+        self.synthetic_spec_fn("compare", "ord_compare_", &list_ty, &["_a", "_b"],
+            Ty::Con("Ordering".into()),
+            move |slf| SpecKind::ListCmp(slf.resolve_elem_cmp(&elem_ty)))
+    }
+
+    fn generate_maybe_cmp(&mut self, inner_ty: &Ty) -> String {
+        let maybe_ty = Ty::app(Ty::Con("Maybe".into()), inner_ty.clone());
+        let inner_ty = inner_ty.clone();
+        self.synthetic_spec_fn("compare", "ord_compare_", &maybe_ty, &["_a", "_b"],
+            Ty::Con("Ordering".into()),
+            move |slf| SpecKind::MaybeCmp(slf.resolve_elem_cmp(&inner_ty)))
+    }
+
+    fn generate_tuple_cmp(&mut self, elem_tys: &[Ty]) -> String {
+        let tuple_ty = Ty::Tuple(elem_tys.to_vec());
+        let elem_tys = elem_tys.to_vec();
+        self.synthetic_spec_fn("compare", "ord_compare_", &tuple_ty, &["_a", "_b"],
+            Ty::Con("Ordering".into()),
+            move |slf| {
+                let names: Vec<String> = elem_tys.iter()
+                    .map(|et| slf.resolve_elem_cmp(et))
+                    .collect();
+                SpecKind::TupleCmp(names)
+            })
+    }
+
+    /// Element comparator, mirroring `resolve_elem_eq`: the concrete
+    /// `compare` where the type resolves one, `__mll_cmp` (the type-erased
+    /// runtime fallback) at a genuinely polymorphic position.
+    fn resolve_elem_cmp(&mut self, ty: &Ty) -> String {
+        if matches!(ty, Ty::Var(_)) {
+            return "__mll_cmp".to_string();
+        }
+        let cmp_use_ty = Ty::fun(&[ty.clone(), ty.clone()], Ty::Con("Ordering".into()));
+        match self.resolve_at_type("compare", ty, &cmp_use_ty) {
+            Some(name) => name,
+            None => "__mll_cmp".to_string(),
+        }
+    }
+
     fn structural_eq_impl(&mut self, binding: &Ty) -> Option<String> {
         if let Ty::List(elem_ty) = binding {
             return Some(self.generate_list_eq(&elem_ty.clone()));

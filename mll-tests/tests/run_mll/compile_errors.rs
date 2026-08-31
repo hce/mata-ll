@@ -4134,24 +4134,16 @@ main = print ([1, 2] <> [3, 4] :: [Int])
         ],
     );
 
-    // Ordering whole tuples is rejected at type-check with the missing-instance
-    // explanation (the checker discharges the Ord constraint before codegen).
-    // The tuple is annotated `(Int, Int)` so the rejection is the
-    // missing tuple-Ord instance, not literal-defaulting ambiguity: with
-    // polymorphic literals `(1, 2)` alone is `(Num a, Num b) => (a, b)`, and
-    // since mata-ll has no `Ord (a, b)` instance the elements cannot default,
-    // so an un-annotated tuple would report an (also-correct) ambiguity error.
-    expect_compile_error(
-        r#"
-main :: IO ()
-main = print (((1, 2) :: (Int, Int)) > (1, 3))
-"#,
+    // Ordering whole tuples COMPILES since A16 (structural Ord for lists,
+    // tuples, Maybe — behavior pinned by ord_structural.mll and its GHC
+    // golden); this used to be the "No instance for 'Ord (Int, Int)'"
+    // rejection, kept here as the accept-side control.
+    compile(
+        "main :: IO ()\nmain = print (((1, 2) :: (Int, Int)) > (1, 3))\n",
+        Path::new("."),
         &[],
-        &[
-            "No instance for 'Ord (Int, Int)'",
-            "no Ord instance",
-        ],
-    );
+    )
+    .expect("tuple Ord is structural since A16");
 }
 
 /// Unpacking an existential must SKOLEMIZE: the hidden type variable becomes

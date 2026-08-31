@@ -482,6 +482,8 @@ mll_test!(fuzz_backend_regressions, "fuzz_backend_regressions.mll");
 mll_test!(do_pattern_binds, "do_pattern_binds.mll");
 mll_test!(do_pattern_bind_failure, "do_pattern_bind_failure.mll");
 mll_test!(let_pattern_params, "let_pattern_params.mll");
+// A16: structural Ord (lists/tuples/Maybe) and sort/sortBy.
+mll_test!(ord_structural, "ord_structural.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

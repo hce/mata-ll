@@ -198,10 +198,13 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
                 SpecKind::ListEq(name)
                 | SpecKind::MaybeEq(name)
                 | SpecKind::ShowList(name)
-                | SpecKind::ShowMaybe(name) => {
+                | SpecKind::ShowMaybe(name)
+                | SpecKind::ListCmp(name)
+                | SpecKind::MaybeCmp(name)
+                | SpecKind::OrdFromCmp { cmp: name, .. } => {
                     refs.insert(name.clone());
                 }
-                SpecKind::TupleEq(names) => {
+                SpecKind::TupleEq(names) | SpecKind::TupleCmp(names) => {
                     for name in names {
                         refs.insert(name.clone());
                     }

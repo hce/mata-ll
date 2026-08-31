@@ -196,6 +196,33 @@ minimum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "minimum: empty structure"
     (x:xs) -> foldl (\m y -> if y < m then y else m) x xs
 
+-- Stable sort (GHC's Data.List.sort/sortBy; mata-ll's flat namespace puts
+-- them in the Prelude like the other list functions). Bottom-up mergesort:
+-- singleton runs merged pairwise until one remains. `mergeTwo` takes the
+-- LEFT element unless the right is STRICTLY smaller, which is what makes
+-- the sort stable, exactly as GHC's.
+sortBy :: (a -> a -> Ordering) -> [a] -> [a]
+sortBy cmp xs = mergeRuns (map (\x -> [x]) xs)
+  where
+    mergeRuns [] = []
+    mergeRuns [r] = r
+    mergeRuns rs = mergeRuns (mergePairs rs)
+    mergePairs (r1 : r2 : rest) = mergeTwo r1 r2 : mergePairs rest
+    mergePairs rs = rs
+    mergeTwo [] ys = ys
+    mergeTwo ys [] = ys
+    mergeTwo (x : xs') (y : ys') = case cmp y x of
+        LT -> y : mergeTwo (x : xs') ys'
+        _  -> x : mergeTwo xs' (y : ys')
+
+-- Built on (<=) rather than `compare`: a user module may shadow the Ord
+-- CLASS itself (see superclass.mll) with a compare of a different type,
+-- and the Prelude must keep compiling under it. For a lawful Ord instance
+-- the two are the same function; mergesort only ever asks "strictly
+-- smaller?" anyway.
+sort :: Ord a => [a] -> [a]
+sort = sortBy (\x y -> if x <= y then (if y <= x then EQ else LT) else GT)
+
 -- Fold a list of monoid values into one (GHC's mconcat).
 mconcat :: Monoid a => [a] -> a
 mconcat xs = foldr mappend mempty xs

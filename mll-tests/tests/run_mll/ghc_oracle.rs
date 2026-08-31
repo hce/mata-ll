@@ -171,6 +171,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_fuzz_backend_regressions, "cases", "fuzz_backend_regressions.mll"),
         (ghc_oracle_do_pattern_binds, "cases", "do_pattern_binds.mll"),
         (ghc_oracle_let_pattern_params, "cases", "let_pattern_params.mll"),
+        (ghc_oracle_ord_structural, "cases", "ord_structural.mll"),
         // Excluded as un-twinnable while mata-ll had no Integer; the case
         // (and fromInteger) became GHC-true when Integer arrived, and the
         // A8 doc sweep caught the stale exclusion.

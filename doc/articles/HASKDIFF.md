@@ -379,17 +379,15 @@ type-checks and stays sound. Differences from GHC:
   is fuel-bounded and reports "type family did not terminate". GHC has a
   reduction-depth limit too (`-freduction-depth`).
 
-## Ord covers scalars, not containers
+## Ord covers containers structurally, like Eq and Show
 
 `Ord` has instances for `Int`, `Integer`, `Number`, `String`,
-`ByteString`, `Bool` (GHC's `False < True`), `()`, and anything that
-derives it. GHC's *lexicographic* container orderings — `Ord [a]`,
-`Ord (Maybe a)`, and tuple `Ord` — do not exist: comparing lists,
-`Maybe`s, or tuples with `<`/`compare` is a compile-time "No instance"
-error. Structural `Eq` for those containers IS provided; only the
-ordering is missing. Compare through your own key function
-(`compare (fst a) (fst b)`) or a helper when you need lexicographic
-order.
+`ByteString`, `Bool` (GHC's `False < True`), `()`, anything that derives
+it — and, structurally, the compiler-owned containers: `Ord [a]`
+(lexicographic), `Ord (a, b, …)` (element-wise), and `Ord (Maybe a)`
+(`Nothing < Just _`), exactly GHC's derived orderings. `sort` and
+`sortBy` (stable mergesort, GHC's `Data.List` behavior) live in the flat
+Prelude namespace like the other list functions.
 
 ## The Prelude is a curated subset
 

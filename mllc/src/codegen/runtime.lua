@@ -1511,6 +1511,41 @@ local function __mll_maybe_eq(elem_eq, a, b)
     -- Both are Just wrappers; compare the unwrapped payloads.
     return elem_eq(a[1], b[1])
 end
+local function __mll_cmp(a, b)
+    -- Type-erased Ordering fallback (the compare analog of __mll_eq): the
+    -- last resort at a genuinely polymorphic element position inside a
+    -- polymorphic derived body. Numbers and strings order natively;
+    -- booleans get False < True by hand (Lua cannot `<` them). The result
+    -- is the Ordering constructor index: LT=1, EQ=2, GT=3.
+    a = __force(a); b = __force(b)
+    if a == b then return 2 end
+    if a == false then return 1 end
+    if b == false then return 3 end
+    if a < b then return 1 end
+    return 3
+end
+local function __mll_list_cmp(elem_cmp, a, b)
+    -- Lexicographic list compare threading the element comparator (the
+    -- compare analog of __mll_list_eq, walking the same way). Ordering is
+    -- its constructor index (LT=1, EQ=2, GT=3), as ord_compare__Int & co.
+    a = __force(a); b = __force(b)
+    while true do
+        if a == nil and b == nil then return 2 end
+        if a == nil then return 1 end
+        if b == nil then return 3 end
+        local c = elem_cmp(__force(a[1]), __force(b[1]))
+        if c ~= 2 then return c end
+        a = __mll_tail(a); b = __mll_tail(b)
+    end
+end
+local function __mll_maybe_cmp(elem_cmp, a, b)
+    -- Nothing < Just _, exactly GHC's derived Ord for Maybe.
+    a = __force(a); b = __force(b)
+    if a == nil and b == nil then return 2 end
+    if a == nil then return 1 end
+    if b == nil then return 3 end
+    return elem_cmp(a[1], b[1])
+end
 local function __mll_show_maybe(elem_show, x)
     -- Type-directed Maybe show. `Nothing` is nil; `Just p` is a tagged wrapper
     -- whose payload is field [1] (itself possibly nil, e.g. `Just Nothing`), so

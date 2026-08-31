@@ -1657,6 +1657,97 @@ impl CodeGen {
                 let a1 = self.expr_ast(&args[1]);
                 Expr::call_named("__mll_maybe_eq", vec![Expr::name(eq_ref), a0, a1])
             }
+            SpecKind::ListCmp(elem_cmp) => {
+                let cmp_ref = self.lua_ref(elem_cmp);
+                let a0 = self.expr_ast(&args[0]);
+                let a1 = self.expr_ast(&args[1]);
+                Expr::call_named("__mll_list_cmp", vec![Expr::name(cmp_ref), a0, a1])
+            }
+            SpecKind::MaybeCmp(elem_cmp) => {
+                let cmp_ref = self.lua_ref(elem_cmp);
+                let a0 = self.expr_ast(&args[0]);
+                let a1 = self.expr_ast(&args[1]);
+                Expr::call_named("__mll_maybe_cmp", vec![Expr::name(cmp_ref), a0, a1])
+            }
+            SpecKind::TupleCmp(cmp_fns) => {
+                // Element-wise lexicographic compare: each element's
+                // comparator runs at most once (bound to a local), the first
+                // non-EQ result returns, the last element's result is the
+                // tuple's. An IIFE because the chain needs statements; the
+                // arguments are the synthetic function's own parameters, so
+                // re-indexing them per element repeats no work (the TupleEq
+                // discipline).
+                let mut stmts: Vec<Stmt> = Vec::new();
+                let n = cmp_fns.len();
+                for (i, cmp_fn) in cmp_fns.iter().enumerate() {
+                    let cmp_ref = self.lua_ref(cmp_fn);
+                    let l = self.forced_prefix_ast(&args[0]);
+                    let r = self.forced_prefix_ast(&args[1]);
+                    let call = Expr::call_named(
+                        &cmp_ref,
+                        vec![
+                            Expr::index(l, format!("[{}]", i + 1)),
+                            Expr::index(r, format!("[{}]", i + 1)),
+                        ],
+                    );
+                    if i + 1 == n {
+                        stmts.push(Stmt::Return(call));
+                    } else {
+                        let c = format!("_c{}", i);
+                        stmts.push(Stmt::Local(vec![c.clone()], Some(call)));
+                        stmts.push(Stmt::If {
+                            cond: Expr::binop("~=", Expr::name(c.clone()), Expr::lit("2")),
+                            then_b: Block(vec![Stmt::Return(Expr::name(c))]),
+                            elseifs: vec![],
+                            else_b: None,
+                        });
+                    }
+                }
+                Expr::call(
+                    Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(stmts)))),
+                    vec![],
+                )
+            }
+            SpecKind::OrdFromCmp { op, cmp } => {
+                // Ordering is its constructor index (LT=1, EQ=2, GT=3), so
+                // the four operators are integer tests on the compare
+                // result; max/min select an operand — through an IIFE, since
+                // the operand is an arbitrary value (`x and a or b` would
+                // mis-select on false/Nothing). The operands are the
+                // synthetic function's parameters: reading one twice repeats
+                // no work.
+                let cmp_ref = self.lua_ref(cmp);
+                let a0 = self.expr_ast(&args[0]);
+                let a1 = self.expr_ast(&args[1]);
+                let call = Expr::call_named(&cmp_ref, vec![a0.clone(), a1.clone()]);
+                match op.as_str() {
+                    "<" => Expr::binop("==", call, Expr::lit("1")),
+                    "<=" => Expr::binop("~=", call, Expr::lit("3")),
+                    ">" => Expr::binop("==", call, Expr::lit("3")),
+                    ">=" => Expr::binop("~=", call, Expr::lit("1")),
+                    // GHC: max x y = if x <= y then y else x (y on EQ);
+                    //      min x y = if x <= y then x else y (x on EQ).
+                    sel => {
+                        let (then_e, else_e) = if sel == "max" {
+                            (a1, a0)
+                        } else {
+                            (a0, a1)
+                        };
+                        Expr::call(
+                            Expr::paren(Expr::Func(
+                                vec![],
+                                FuncBody::Block(Block(vec![Stmt::If {
+                                    cond: Expr::binop("~=", call, Expr::lit("3")),
+                                    then_b: Block(vec![Stmt::Return(then_e)]),
+                                    elseifs: vec![],
+                                    else_b: Some(Block(vec![Stmt::Return(else_e)])),
+                                }])),
+                            )),
+                            vec![],
+                        )
+                    }
+                }
+            }
             SpecKind::TupleEq(eq_fns) => {
                 // Tuple eq: compare element-wise
                 let mut acc: Option<Expr> = None;

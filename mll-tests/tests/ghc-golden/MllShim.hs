@@ -49,6 +49,7 @@ module MllShim
   , getArgs
   , Multiplicity (..)
   , try, catch
+  , sort, sortBy
   , read_Int, read_Number, read_Bool, read_String
   , ST, runST, STArray
   , newSTArray, readSTArray, writeSTArray, modifySTArray
@@ -61,6 +62,7 @@ import Prelude hiding
 import qualified Prelude as P
 import Control.Monad (when)
 import qualified Control.Exception as E
+import Data.List (sort, sortBy)
 import Control.Monad.ST (ST, runST)
 import GHC.Exts (Multiplicity (..))
 import System.Environment (getArgs)

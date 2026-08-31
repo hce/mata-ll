@@ -665,6 +665,18 @@ pub enum SpecKind {
     ShowMaybe(String),
     /// Tuple `==`: one eq function per element, in element order.
     TupleEq(Vec<String>),
+    /// Structural Ord (A16), mirroring the Eq family: lexicographic list /
+    /// Maybe `compare` threading the element comparator.
+    ListCmp(String),
+    MaybeCmp(String),
+    /// Tuple `compare`: one comparator per element, in element order.
+    TupleCmp(Vec<String>),
+    /// An Ord operator/selector derived from a structural `compare`:
+    /// `op` is the method as written ("<", "<=", ">", ">=", "max", "min"),
+    /// `cmp` the generated compare's name. Ordering is its constructor
+    /// index at runtime (LT=1, EQ=2, GT=3), so the operators are integer
+    /// comparisons on the compare result.
+    OrdFromCmp { op: String, cmp: String },
     /// Derived tuple-show projection: force field `idx` (1-based).
     TupGet(usize),
     /// Dictionary table literal `{ m = impl, … }` for a concrete instance.
