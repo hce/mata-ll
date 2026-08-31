@@ -196,6 +196,7 @@ fn run_compiler(cli: Cli) {
     }
 
     // Write .lua file if requested or if not running
+    let mut written_lua: Option<String> = None;
     if cli.emit_lua || !cli.run {
         // --recompile rewrites the emitted .lua in place
         let out_filename = if cli.recompile {
@@ -223,6 +224,7 @@ fn run_compiler(cli: Cli) {
             eprintln!("Error writing {}: {}", out_filename, e);
             std::process::exit(1);
         }
+        written_lua = Some(out_filename.clone());
         if !cli.run {
             if cli.recompile {
                 println!("Recompiled {} from its embedded source", filename);
@@ -234,16 +236,27 @@ fn run_compiler(cli: Cli) {
 
     // Run with mlua if requested
     if cli.run {
-        run_lua(&result.lua_code, filename, &cli.prog_args);
+        // The chunk name labels every traceback line, and those line numbers
+        // are positions in the GENERATED Lua — naming the chunk after the
+        // .mll source made a traceback's `foo.mll:812` point into the wrong
+        // file's coordinates. Name it the written .lua when one exists (a
+        // real, openable location); otherwise say what the text is, so a
+        // reader reaches for --emit-lua instead of the .mll line.
+        let chunk_name = match &written_lua {
+            Some(out) => out.clone(),
+            None => format!("{} (generated Lua; --emit-lua writes it)", filename),
+        };
+        run_lua(&result.lua_code, filename, &chunk_name, &cli.prog_args);
     }
 }
 
-fn run_lua(code: &str, filename: &str, prog_args: &[String]) {
+fn run_lua(code: &str, filename: &str, chunk_name: &str, prog_args: &[String]) {
     let lua = mlua::Lua::new();
 
     // Populate the Lua `arg` table the way `lua`/`luajit` do, so a program's
-    // getArgs sees the forwarded arguments. arg[0] is the script name and
-    // arg[1..] are the program arguments.
+    // getArgs sees the forwarded arguments. arg[0] is the script name (the
+    // .mll the user invoked, matching how lua sets it to the script it was
+    // handed) and arg[1..] are the program arguments.
     let arg_table = lua.create_table().expect("create arg table");
     arg_table.set(0, filename).expect("set arg[0]");
     for (i, a) in prog_args.iter().enumerate() {
@@ -251,7 +264,7 @@ fn run_lua(code: &str, filename: &str, prog_args: &[String]) {
     }
     lua.globals().set("arg", arg_table).expect("install arg table");
 
-    match lua.load(code).set_name(filename).exec() {
+    match lua.load(code).set_name(chunk_name).exec() {
         Ok(()) => {}
         Err(e) => {
             eprintln!("Runtime error: {}", e);
