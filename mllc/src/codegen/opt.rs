@@ -180,14 +180,33 @@ pub(super) fn run(stmts: &mut Vec<Stmt>, opt_disable: Option<&str>) {
 /// engine of a structured rewrite that came after it), plus whether the
 /// force pass ran — that decides the refutation's residual-force check.
 fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool) {
-    if !d.parens {
-        normalize_parens_block(stmts);
-    }
-    if !d.dead {
-        dead_branch_block(stmts);
-    }
-    if !d.iife {
-        flatten_iife_block(stmts);
+    // The expression passes enable one another — flattening an IIFE exposes
+    // redundant parens, stripping a paren exposes a flattenable IIFE — so
+    // they run to a FIXPOINT: the idempotence refutation demands the final
+    // tree be one, and deeply nested generated code (backend_fuzz index 82)
+    // showed a single ordered sweep is not always enough. Each pass only
+    // shrinks the tree (parens, dead branches, IIFEs), so the loop
+    // terminates on its own; the render compare is the same equality the
+    // refutation applies, and the iteration bound is a backstop against a
+    // rewrite cycle, not an expected count.
+    if !d.parens || !d.dead || !d.iife {
+        let mut before = render_stmts(stmts);
+        for _ in 0..16 {
+            if !d.parens {
+                normalize_parens_block(stmts);
+            }
+            if !d.dead {
+                dead_branch_block(stmts);
+            }
+            if !d.iife {
+                flatten_iife_block(stmts);
+            }
+            let after = render_stmts(stmts);
+            if after == before {
+                break;
+            }
+            before = after;
+        }
     }
     let mut engine = if !d.force {
         Some(annot::Engine::run_pass(stmts, &mut ForceCollapse))
@@ -840,7 +859,15 @@ fn try_splice_return(stmts: &mut Vec<Stmt>, i: usize, budget: &mut usize) -> boo
     let Expr::Func(params, body) = *pf else { unreachable!() };
     let mut spliced = Vec::new();
     for (p, a) in params.into_iter().zip(args) {
-        spliced.push(Stmt::Local(vec![p], Some(a)));
+        let mut bound = Stmt::Local(vec![p], Some(a));
+        // The argument moves from CALL position — where a paren around a
+        // call had to stay, it enforces multi-return truncation — into a
+        // single-name local RHS, which truncates by itself, so the paren
+        // is redundant there. Pass 1 already ran; re-normalize the built
+        // statement here or the idempotence refutation (rightly) flags
+        // the leftover.
+        normalize_parens_stmt(&mut bound, Ctx::Delim);
+        spliced.push(bound);
     }
     spliced.extend(body_stmts(body));
     stmts.splice(i..i, spliced);

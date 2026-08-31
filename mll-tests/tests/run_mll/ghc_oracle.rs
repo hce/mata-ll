@@ -168,6 +168,11 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_compose_non_strict, "cases", "compose_non_strict.mll"),
         (ghc_oracle_curried_lambda_arity, "cases", "curried_lambda_arity.mll"),
         (ghc_oracle_over_application_arity, "cases", "over_application_arity.mll"),
+        (ghc_oracle_fuzz_backend_regressions, "cases", "fuzz_backend_regressions.mll"),
+        // Excluded as un-twinnable while mata-ll had no Integer; the case
+        // (and fromInteger) became GHC-true when Integer arrived, and the
+        // A8 doc sweep caught the stale exclusion.
+        (ghc_oracle_num_user_instance, "cases", "num_user_instance.mll"),
         (ghc_oracle_data_types, "cases", "data_types.mll"),
         (ghc_oracle_exponent_op, "cases", "exponent_op.mll"),
         (ghc_oracle_integer_bignum, "cases", "integer_bignum.mll"),

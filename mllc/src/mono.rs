@@ -1224,10 +1224,35 @@ impl Monomorphizer {
                         return TExpr { kind: TExprKind::Var(mangled), ty };
                     }
                 }
+                // A still-polymorphic use normally cannot be specialized
+                // (no concrete type to key on) — EXCEPT an arity-WIDENING
+                // use of a shared builtin whose leftover variables are dead
+                // (unconstrained; codegen erases them, nothing dispatches
+                // on them). There the ARROW STRUCTURE is the whole point of
+                // the copy, and it is concrete even when an element type is
+                // not. The key is canonicalized (variables renamed in
+                // first-occurrence order) so every use of the same shape
+                // shares one copy. Refuted by backend_fuzz index 66:
+                // `(flip const True (\v -> False)) []` — the dead `[]`
+                // element type kept `flip` on the generic copy, whose body
+                // calls `f(a, b)` flat, while the first-class `const` was
+                // (rightly) widened to three parameters: f consumed its eta
+                // slot as nil and flip's real result was applied to a
+                // boolean. The copy and the widened value must agree, so
+                // the copy must exist.
+                let widened_poly = self.is_polymorphic(&ty)
+                    && self.arity_only_fns.contains(name)
+                    && self.specialization_wanted(name, &ty);
                 if self.poly_fns.contains_key(name) && !self.locals.contains(name)
-                    && !self.dict_passing_fns.contains(name) && !self.is_polymorphic(&ty)
-                    && self.specialization_wanted(name, &ty) {
-                    let key = SpecKey { name: name.clone(), ty: ty.clone() };
+                    && !self.dict_passing_fns.contains(name)
+                    && ((!self.is_polymorphic(&ty) && self.specialization_wanted(name, &ty))
+                        || widened_poly) {
+                    let spec_ty = if widened_poly {
+                        Self::canonicalize_vars(&ty)
+                    } else {
+                        ty.clone()
+                    };
+                    let key = SpecKey { name: name.clone(), ty: spec_ty.clone() };
                     let mangled = if let Some(existing) = self.specializations.get(&key) {
                         existing.clone()
                     } else {
@@ -1237,9 +1262,9 @@ impl Monomorphizer {
                         if self.trip_spec_cap(name) {
                             return TExpr { kind: expr.kind, ty };
                         }
-                        let mangled = self.mangle_name(name, &ty);
+                        let mangled = self.mangle_name(name, &spec_ty);
                         self.specializations.insert(key, mangled.clone());
-                        self.generate_specialization(name, &mangled, &ty);
+                        self.generate_specialization(name, &mangled, &spec_ty);
                         mangled
                     };
                     TExprKind::Var(mangled)
@@ -2400,6 +2425,43 @@ impl Monomorphizer {
         }
         self.poly_fns.get(name).is_some_and(|f|
             Self::spine_arrow_count(use_ty) > Self::spine_arrow_count(&f.ty))
+    }
+
+    /// Rename every type variable to a canonical one in first-occurrence
+    /// order, so two structurally identical still-polymorphic types key the
+    /// SAME arity-widening specialization (see the `widened_poly` branch of
+    /// the Var arm) regardless of which fresh unification variables the
+    /// checker happened to mint. Structure is untouched — only `Var`
+    /// identities change — so the canonical type has exactly the arrow
+    /// shape the copy exists to fix.
+    fn canonicalize_vars(ty: &Ty) -> Ty {
+        fn walk(ty: &Ty, map: &mut HashMap<(String, u32), u32>) -> Ty {
+            match ty {
+                Ty::Var(v) => {
+                    let n = map.len() as u32;
+                    let id = *map.entry((v.name.clone(), v.id)).or_insert(n);
+                    Ty::Var(crate::types::TyVar { name: format!("_w{id}"), id })
+                }
+                Ty::Arrow(a, b, m) => Ty::Arrow(
+                    Box::new(walk(a, map)),
+                    Box::new(walk(b, map)),
+                    m.clone(),
+                ),
+                Ty::App(a, b) => {
+                    Ty::App(Box::new(walk(a, map)), Box::new(walk(b, map)))
+                }
+                Ty::List(t) => Ty::List(Box::new(walk(t, map))),
+                Ty::IO(t) => Ty::IO(Box::new(walk(t, map))),
+                Ty::Tuple(ts) => Ty::Tuple(ts.iter().map(|t| walk(t, map)).collect()),
+                // Variants that either carry no nested value types the
+                // arrow shape depends on, or cannot appear in an
+                // arity-widening builtin's instantiation (LuaIO's scope
+                // variable, rank-2 foralls, skolems): kept as they are —
+                // a use containing them simply keys on itself.
+                other => other.clone(),
+            }
+        }
+        walk(ty, &mut HashMap::new())
     }
 
     /// Number of leading arrows in a type (the arguments it can still take).

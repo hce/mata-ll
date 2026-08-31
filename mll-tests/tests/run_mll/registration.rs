@@ -474,6 +474,10 @@ mll_test!(integer_bignum, "integer_bignum.mll");
 // its own discarded pool, so guards read a colliding slot or a nil table).
 mll_test!(big_lit_guards, "big_lit_guards.mll");
 mll_test!(big_lit_guard_only, "big_lit_guard_only.mll");
+// Backend-fuzzer regressions (indices 34/61/66 of the first batch): paren
+// idempotence through IIFE flattening, escaping-reference always-cheap
+// poisoning, and arity-widening specialization at a dead-variable type.
+mll_test!(fuzz_backend_regressions, "fuzz_backend_regressions.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

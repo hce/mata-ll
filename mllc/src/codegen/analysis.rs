@@ -126,7 +126,16 @@ impl CodeGen {
                 if op == "." {
                     Self::mark_hidden_call_site(rhs, ever_thunked, ever_called);
                 }
-                self.scan_call_sites(lhs, ever_thunked, ever_called);
+                // A bare-Var `$` operand is callee-like — the hidden-site
+                // mark above accounts for the argument it receives, and
+                // the emission calls it directly — so it skips the generic
+                // scan, which would poison it as an escaping reference
+                // (the Var arm below). `.` operands DO escape: the
+                // composition is a value whose runtime forwards extra
+                // arguments raw, so a Var there takes the poison path.
+                if op != "$" || !matches!(&lhs.kind, TExprKind::Var(_)) {
+                    self.scan_call_sites(lhs, ever_thunked, ever_called);
+                }
                 self.scan_call_sites(rhs, ever_thunked, ever_called);
             }
             TExprKind::InfixApp { lhs, rhs, .. } => {
@@ -183,6 +192,27 @@ impl CodeGen {
                 Self::register_call_site(func_name, &value_refs, ever_thunked, ever_called);
                 for a in dict_args { self.scan_call_sites(a, ever_thunked, ever_called); }
                 for a in value_args { self.scan_call_sites(a, ever_thunked, ever_called); }
+            }
+            // A bare reference to a known function OUTSIDE call-head
+            // position: the function VALUE escapes — an argument to a
+            // higher-order function, a tuple or cons field, a stored
+            // closure — and whoever eventually calls it passes raw lazy
+            // arguments this site scan cannot see. Its always-cheap
+            // judgment must die: every parameter keeps its entry force.
+            // (Refuted by backend_fuzz index 61: `const 5 True` judged
+            // const's first parameter always-cheap from the one visible
+            // site, then `flip const (Just True) (null [])` in a lazy
+            // tuple field called that copy flat with a raw thunk — whose
+            // bare `return x` forwarded it, a thunk body returning a raw
+            // thunk. Call HEADS never reach this arm: the App arm above
+            // registers them without recursing into the head, which is
+            // what keeps direct calls precise.)
+            TExprKind::Var(name) => {
+                if let Some(thunked) = ever_thunked.get_mut(name) {
+                    for t in thunked.iter_mut() {
+                        *t = true;
+                    }
+                }
             }
             _ => {}
         }
