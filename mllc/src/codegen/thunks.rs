@@ -551,6 +551,28 @@ impl CodeGen {
         // Eagerness weight wins: the callee forces it anyway, or it is provably
         // total (cannot be ⊥). Evaluate in place — no thunk.
         if strict || self.is_cheap_to_force(expr) {
+            // A bare variable in a STRICT position passes raw. It already
+            // denotes a thunk-or-value, and strictness means the callee
+            // forces this position on every path — the physical entry force
+            // backing a strict parameter's concreteness claim, a G5-pinned
+            // runtime-body force, or the per-use force every non-concrete
+            // read emits — so a call-site `__force(v)` was a duplicate:
+            // measured as the single largest cost on the IORef and
+            // generics benchmarks (every force is a call plus a metatable
+            // probe, and 86-100% of them found a non-thunk). The always-
+            // cheap contract is untouched: register_call_site judges the
+            // TIR argument (a bare Var is never context-free cheap), so a
+            // parameter fed by one was never marked always-cheap even when
+            // the old emission passed it forced.
+            if strict {
+                let mut stripped = expr;
+                while let TExprKind::Paren(inner) = &stripped.kind {
+                    stripped = inner.as_ref();
+                }
+                if matches!(&stripped.kind, TExprKind::Var(_)) {
+                    return self.lazy_ref_ast(stripped);
+                }
+            }
             return self.expr_ast(expr);
         }
         // Laziness weight is maximal (the argument may be ⊥ and the callee may

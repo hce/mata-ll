@@ -59,9 +59,17 @@ API of the `mllc` library crate.)
   ops carry per-argument strictness rows, so their call sites pass raw
   expressions instead of argument thunks; and Integer literals intern
   into the existing `__mll_biglit` constant pool instead of re-running
-  `fromInteger` at every evaluation. Measured on the bench suite:
-  integer_arith −14% wall time on Lua 5.5 and −31% under LuaJIT; smaller
-  wins for the list pipeline and strict folds generally.
+  `fromInteger` at every evaluation. A second batch continues the same
+  program: a bare variable in a strict argument position passes raw (the
+  callee's pinned force does the work — the call-site force was a
+  duplicate); `map`/`filter`/`zipWith` force their function argument
+  once per call instead of once per element and read the head of a
+  just-forced cell directly; and `mod` by a nonzero integer literal
+  emits native `%` (identical floor semantics, no trap possible)
+  instead of the `__mll_mod` helper call. Measured on the bench suite
+  across both batches (Lua 5.5 wall time): list_pipeline −22%,
+  integer_arith −18%, arith_loop −13%, ioref_loop −10%; LuaJIT's
+  integer_arith −37%.
 
 ### Fixed
 

@@ -43,10 +43,10 @@ generics 148/54, list_pipeline 215/179, integer_arith 1436/717):
 
 | workload      | Lua 5.5 | LuaJIT  |
 |---------------|--------:|--------:|
-| arith_loop    |   21.5x |    1.0x |
-| string_build  |   14.2x |   16.7x |
-| hm_churn      |   55.5x |   38.1x |
-| ioref_loop    |  108.1x |   28.2x |
-| generics_json |  149.3x |   52.4x |
-| list_pipeline |  236.0x |  169.4x |
-| integer_arith | 1260.3x |  448.0x |
+| string_build  |   12.1x |   19.5x |
+| arith_loop    |   19.5x |    1.0x |
+| hm_churn      |   55.3x |   34.9x |
+| ioref_loop    |   97.0x |   24.0x |
+| generics_json |  143.7x |   72.2x |
+| list_pipeline |  151.0x |  143.0x |
+| integer_arith | 1176.5x |  412.5x |

@@ -1408,7 +1408,24 @@ impl CodeGen {
     /// error on a zero divisor and use native integer floor
     /// division (Lua 5.3+ `//`) when the host has it. quot/rem
     /// truncate toward zero (remainder takes the dividend's sign).
+    ///
+    /// ONE native exception: `mod` by a NONZERO integer literal emits bare
+    /// `%`. Lua's `%` is floor-mod exactly like Haskell's `mod` (the helper
+    /// itself computes `a % b`), and with the divisor a nonzero literal the
+    /// zero-divisor trap cannot fire — so the helper call and its argument
+    /// handling were pure overhead in every mod-by-constant hot loop.
+    /// `div` gets no such form even with a literal: its native operator is
+    /// `//`, which LuaJIT's parser rejects, so __mll_div must keep choosing
+    /// its implementation at load time.
     fn intdiv_infix_ast(&mut self, op: &str, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        if op == "mod" && let Some(n) = Self::nonzero_int_literal(rhs) {
+            let l = self.forced_ast(lhs);
+            return Expr::paren(Expr::binop(
+                "%",
+                l,
+                self.literal_ast(&TLiteral::Integer(n)),
+            ));
+        }
         let helper = match op {
             "div" => "__mll_div", "mod" => "__mll_mod",
             "quot" => "__mll_quot", _ => "__mll_rem",
@@ -1416,6 +1433,30 @@ impl CodeGen {
         let l = self.forced_ast(lhs);
         let r = self.forced_ast(rhs);
         Expr::call_named(helper, vec![l, r])
+    }
+
+    /// The value of `expr` when it is (parens stripped) a nonzero integer
+    /// literal, negated or not. `i64::MIN` under Negate is out of range and
+    /// declines; zero declines so the zero-divisor trap stays on the helper.
+    fn nonzero_int_literal(expr: &TExpr) -> Option<i64> {
+        let mut e = expr;
+        let mut neg = false;
+        loop {
+            match &e.kind {
+                TExprKind::Paren(inner) => e = inner.as_ref(),
+                TExprKind::Negate(inner) if !neg => {
+                    neg = true;
+                    e = inner.as_ref();
+                }
+                _ => break,
+            }
+        }
+        match &e.kind {
+            TExprKind::Lit(TLiteral::Integer(n)) if *n != 0 => {
+                if neg { n.checked_neg() } else { Some(*n) }
+            }
+            _ => None,
+        }
     }
 
     /// The infix cons case (`x : xs`) of the InfixApp arm, split out only to
