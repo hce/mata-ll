@@ -177,6 +177,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ioref_basic, "cases", "ioref_basic.mll"),
         (ghc_oracle_ioref_laziness, "cases", "ioref_laziness.mll"),
         (ghc_oracle_let_seq_pure_function, "cases", "let_seq_pure_function.mll"),
+        (ghc_oracle_integer_smallpath_bounds, "cases", "integer_smallpath_bounds.mll"),
         // Excluded as un-twinnable while mata-ll had no Integer; the case
         // (and fromInteger) became GHC-true when Integer arrived, and the
         // A8 doc sweep caught the stale exclusion.

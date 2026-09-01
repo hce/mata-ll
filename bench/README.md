@@ -49,4 +49,4 @@ generics 148/54, list_pipeline 215/179, integer_arith 1436/717):
 | ioref_loop    |   97.0x |   24.0x |
 | generics_json |  143.7x |   72.2x |
 | list_pipeline |  151.0x |  143.0x |
-| integer_arith | 1176.5x |  412.5x |
+| integer_arith |  232.9x |  101.5x |

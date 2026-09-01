@@ -496,6 +496,7 @@ mll_test!(foldable_generic, "foldable_generic.mll");
 mll_test!(ioref_basic, "ioref_basic.mll");
 mll_test!(ioref_laziness, "ioref_laziness.mll");
 mll_test!(let_seq_pure_function, "let_seq_pure_function.mll");
+mll_test!(integer_smallpath_bounds, "integer_smallpath_bounds.mll");
 // A19: where-binding generalization.
 mll_test!(where_polymorphism, "where_polymorphism.mll");
 

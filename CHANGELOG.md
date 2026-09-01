@@ -71,6 +71,19 @@ API of the `mllc` library crate.)
   integer_arith −18%, arith_loop −13%, ioref_loop −10%; LuaJIT's
   integer_arith −37%.
 
+- **The boxed-Integer ops take small-magnitude fast paths.** When both
+  operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
+  and box the result, skipping the limb walks — divmod's bit-by-bit
+  long division was the dominant cost of every small-value `mod`. The
+  representation is unchanged (an Integer is the same always-boxed
+  table; this is not the rejected type-erased small-int fast path), and
+  every bound stays inside the 2^53 double-exact range with explicit
+  rounding slack. A GHC-goldened boundary matrix
+  (`integer_smallpath_bounds`) straddles the limb and exactness edges
+  with both signs and pins byte-exact agreement with GMP. The
+  integer_arith benchmark drops another 5.1x on Lua 5.5 (1.72s →
+  0.34s; 2.10s → 0.34s for the round) and 4x under LuaJIT.
+
 ### Fixed
 
 - **Nil-represented values (`Nothing`, `[]`, `()`) stored under scalar

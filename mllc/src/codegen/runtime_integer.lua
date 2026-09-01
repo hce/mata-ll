@@ -14,7 +14,9 @@
 -- Base 2^24 is a POWER OF TWO, so `% B` and `/ B` are exact bit-shifts in
 -- IEEE doubles: the whole library is exact on both Lua 5.3+ (native int)
 -- and LuaJIT / 5.1 (doubles only), and uses no `//` or bitwise operators.
--- Always-boxed (no small-int fast path yet — a later optimization).
+-- Always-boxed; add/sub/mul/divmod take small-MAGNITUDE fast paths
+-- (__int_small/__int_box) that compute natively when both operands fit
+-- two limbs, without ever changing what an Integer value IS.
 -- ===================================================================
 local __INT_B = 16777216  -- 2^24
 
@@ -203,6 +205,37 @@ local function __int_mk(sign, mag)
     return setmetatable(t, __integer_mt)
 end
 
+-- ---- small-magnitude fast paths ----
+-- The signed machine value of an Integer whose magnitude fits TWO limbs
+-- (< 2^48 — exact in an IEEE double and in a Lua 5.3+ integer alike), or
+-- nil for anything larger. The representation stays always-boxed; these
+-- only let add/sub/mul/divmod compute natively when the VALUES are small,
+-- which skips the limb walks (divmod's bit-by-bit long division above is
+-- the expensive one) and their per-op table traffic.
+local function __int_small(x)
+    local n = #x
+    if n == 2 then return x[1] * x[2] end
+    if n == 3 then return x[1] * (x[2] + x[3] * 16777216) end
+    if n == 1 then return 0 end
+    return nil
+end
+-- Box a signed integer-valued machine number (any size a double holds
+-- exactly; the loop runs at most thrice for the < 2^49 sums below).
+local function __int_box(v)
+    if v == 0 then return __int_zero end
+    local sign = 1
+    if v < 0 then sign = -1; v = -v end
+    local t = {sign}
+    local i = 2
+    while v ~= 0 do
+        local lo = v % __INT_B
+        t[i] = lo
+        v = (v - lo) / __INT_B
+        i = i + 1
+    end
+    return setmetatable(t, __integer_mt)
+end
+
 -- Build an Integer from a machine number (the `fromInteger` conversion for a
 -- literal that resolved to Integer, and for fromIntegral :: Int -> Integer).
 fromInteger_Integer = function(n)
@@ -260,6 +293,8 @@ local function signum_Integer(x)
 end
 add_Integer = function(a, b)
     a = __force(a); b = __force(b)
+    local va, vb = __int_small(a), __int_small(b)
+    if va and vb then return __int_box(va + vb) end  -- |sum| < 2^49, exact
     local sa, sb = a[1], b[1]
     if sa == 0 then return b end
     if sb == 0 then return a end
@@ -271,16 +306,46 @@ add_Integer = function(a, b)
     return __int_mk(sb, __int_usub(mb, ma))
 end
 sub_Integer = function(a, b)
+    a = __force(a); b = __force(b)
+    local va, vb = __int_small(a), __int_small(b)
+    if va and vb then return __int_box(va - vb) end  -- |diff| < 2^49, exact
     return add_Integer(a, negate_Integer(b))
 end
 mul_Integer = function(a, b)
     a = __force(a); b = __force(b)
     local sa, sb = a[1], b[1]
     if sa == 0 or sb == 0 then return __int_zero end
+    local va, vb = __int_small(a), __int_small(b)
+    if va and vb then
+        local ma = va; if ma < 0 then ma = -ma end
+        local mb = vb; if mb < 0 then mb = -mb end
+        -- Exactness bound with rounding slack: 2^52/mb is itself a rounded
+        -- quotient, so ma <= it only guarantees ma*mb < 2^52 + mb — still
+        -- comfortably under 2^53 (mb < 2^48), where every product of two
+        -- exact operands is exact. Aiming at 2^53 directly would leave no
+        -- room for that rounding.
+        if ma <= 4503599627370496 / mb then return __int_box(va * vb) end
+    end
     return __int_mk(sa * sb, __int_umul(__int_mag(a), __int_mag(b)))
 end
 -- Truncating quotient/remainder (remainder takes the DIVIDEND's sign).
 local function __int_qr_trunc(a, b)
+    local va, vb = __int_small(a), __int_small(b)
+    if va and vb then
+        -- Native magnitude division with a one-step correction: ma/mb is
+        -- the correctly-rounded real quotient (both exact, < 2^48), so
+        -- floor of it can be off by at most one — q*mb and the remainder
+        -- stay < 2^49, exact, which makes the check itself exact.
+        local ma = va; if ma < 0 then ma = -ma end
+        local mb = vb; if mb < 0 then mb = -mb end
+        local q = math.floor(ma / mb)
+        local r = ma - q * mb
+        if r < 0 then q = q - 1; r = r + mb
+        elseif r >= mb then q = q + 1; r = r - mb end
+        local sq = 1; if (va < 0) ~= (vb < 0) then sq = -1 end
+        if va < 0 then r = -r end
+        return __int_box(sq * q), __int_box(r)
+    end
     local qm, rm = __int_udivmod(__int_mag(a), __int_mag(b))
     return __int_mk(a[1] * b[1], qm), __int_mk(a[1], rm)
 end
