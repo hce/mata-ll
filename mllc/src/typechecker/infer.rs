@@ -1241,13 +1241,15 @@ impl Checker {
 
         let expected_ret = remaining_ty.apply_subst(&subst);
 
-        // Pre-register where-bound names so they're in scope for the body
+        // Pre-register where-bound names so the group is mutually recursive
+        // (a binding sees itself and its siblings at the shared monomorphic
+        // variable while the group is inferred). Shadowed outer schemes are
+        // saved: generalization below is over the OUTER environment.
+        let mut where_reg_tys: Vec<Ty> = Vec::with_capacity(clause.where_binds.len());
+        let mut where_shadowed: Vec<Option<Scheme>> = Vec::with_capacity(clause.where_binds.len());
         for ld in &clause.where_binds {
-            if ld.patterns.is_empty() {
-                let fresh = self.fresh_var("_wh");
-                // A where value binder's type is determined by its body/uses.
-                self.binder_types.push(fresh.clone());
-                local_env.insert(ld.name.clone(), Scheme::mono(fresh));
+            let reg_ty = if ld.patterns.is_empty() {
+                self.fresh_var("_wh")
             } else {
                 // Local function: assign a fresh type for each parameter + return
                 let mut fn_ty = self.fresh_var("_wr");
@@ -1255,12 +1257,55 @@ impl Checker {
                     let param_ty = self.fresh_var("_wp");
                     fn_ty = Ty::arrow(param_ty, fn_ty);
                 }
-                // The whole local-function type (params + result) is determined
-                // by its uses; record it so constraints from its body are not
-                // spuriously flagged as ambiguous.
-                self.binder_types.push(fn_ty.clone());
-                local_env.insert(ld.name.clone(), Scheme::mono(fn_ty));
+                fn_ty
+            };
+            // The binder's type is determined by its body/uses; record it so
+            // constraints over its variables are not flagged as ambiguous.
+            self.binder_types.push(reg_ty.clone());
+            where_shadowed.push(local_env.remove(&ld.name));
+            local_env.insert(ld.name.clone(), Scheme::mono(reg_ty.clone()));
+            where_reg_tys.push(reg_ty);
+        }
+
+        // A19: the where-bindings are checked BEFORE the clause body — they
+        // used to be checked after it, so the body's uses drove their types
+        // through the shared monomorphic variable and a polymorphic helper
+        // used at two types could not exist. Checking the definitions first
+        // lets each binding be GENERALIZED like a `let` group.
+        let mut twhere = Vec::new();
+        for ld in &clause.where_binds {
+            twhere.push(self.check_where_binding(ld, clause.span, ctx, &local_env, &mut subst)?);
+        }
+
+        // Generalize each where-binding over the outer environment, exactly
+        // infer_let_group's step: the group's own registrations come out
+        // (restoring any shadowed outer scheme), each binding's resolved
+        // type is generalized, and — the monomorphism restriction, plus the
+        // deliberate Q37 deviation documented there and in HASKDIFF.md — a
+        // variable still carrying an unresolved class constraint stays
+        // monomorphic: a where-binding is ONE Lua closure, and a
+        // class-polymorphic local would need the per-use specialization
+        // monomorphization performs only for top-level functions.
+        for (ld, old) in clause.where_binds.iter().zip(where_shadowed) {
+            local_env.remove(&ld.name);
+            if let Some(old_scheme) = old {
+                local_env.insert(ld.name.clone(), old_scheme.apply_subst(&subst));
             }
+        }
+        let is_constrained = |checker: &Self, v: &TyVar| {
+            checker.wanted.iter().rev()
+                .any(|(_, cty)| cty.apply_subst(&subst).free_vars().contains(v))
+        };
+        let mut where_schemes: Vec<Scheme> = Vec::with_capacity(clause.where_binds.len());
+        for reg_ty in &where_reg_tys {
+            let bind_ty = reg_ty.apply_subst(&subst);
+            let genv = local_env.applied(&subst);
+            let mut scheme = self.generalize(&genv, &bind_ty);
+            scheme.vars.retain(|v| !is_constrained(self, v));
+            where_schemes.push(scheme);
+        }
+        for (ld, scheme) in clause.where_binds.iter().zip(where_schemes) {
+            local_env.insert(ld.name.clone(), scheme);
         }
 
         let mut tguards = Vec::new();
@@ -1306,12 +1351,6 @@ impl Checker {
             let (tb, body_s) = self.check_expr_typed(body, &ret, &body_env)?;
             subst = subst.compose(&body_s);
             tbody = Some(tb);
-        }
-
-        // Type-check where bindings fully, accumulating substitutions
-        let mut twhere = Vec::new();
-        for ld in &clause.where_binds {
-            twhere.push(self.check_where_binding(ld, clause.span, ctx, &local_env, &mut subst)?);
         }
 
         // An existential skolem unpacked by this clause (in an argument

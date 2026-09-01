@@ -218,6 +218,16 @@ impl CodeGen {
             c = p.as_ref();
         }
         let TExprKind::Var(name) = &c.kind else { return None };
+        // A where-local FUNCTION has a registered emitted arity (A19: a
+        // generalized local can be used at more arrows than its one emitted
+        // closure has parameters, so its calls split like a top-level
+        // callee's). Checked before the shadowing bailout: the group name IS
+        // a local. Registration is scoped (ScopeSnapshot), and sibling
+        // value bindings remove their names, so a stale entry never
+        // outlives the where group that made it.
+        if let Some(&n) = self.local_fn_arity.get(name.as_str()) {
+            return Some(n);
+        }
         if self.is_local_shadowed(name) {
             return None;
         }

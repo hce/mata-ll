@@ -488,6 +488,8 @@ mll_test!(ord_structural, "ord_structural.mll");
 mll_test!(hashmap_structural_keys, "hashmap_structural_keys.mll");
 // A18: Foldable/Traversable-generic Prelude functions.
 mll_test!(foldable_generic, "foldable_generic.mll");
+// A19: where-binding generalization.
+mll_test!(where_polymorphism, "where_polymorphism.mll");
 
 // GHC-style compatibility tests
 macro_rules! ghc_test {

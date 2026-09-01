@@ -317,6 +317,13 @@ struct CodeGen {
     /// same name (codegen emits it after the runtime block), so the prelude's
     /// parameter count must not be applied to it.
     module_fn_names: std::collections::HashSet<String>,
+    /// Emitted parameter counts of where-local functions in scope — the
+    /// local analog of `fixed_arity`, kept by ScopeSnapshot exactly like
+    /// `local_strict_params` (see function.rs). A19 made where-fns
+    /// generalizable, so a local can be used at MORE arrows than its one
+    /// emitted closure has parameters; known_callee_arity consults this so
+    /// such calls split.
+    local_fn_arity: std::collections::HashMap<String, usize>,
     /// Names defined more than once in the merged module whose definitions
     /// classify differently (see the seeding in module_stmts): never in
     /// `direct_perform_fns`, and exempt from function_stmts' agreement
@@ -387,6 +394,7 @@ impl CodeGen {
             direct_perform_fns: std::collections::HashMap::new(),
             fixed_arity: std::collections::HashMap::new(),
             module_fn_names: std::collections::HashSet::new(),
+            local_fn_arity: std::collections::HashMap::new(),
             direct_perform_conflicts: std::collections::HashSet::new(),
             embed_var_export: false,
             whnf_assert: false,

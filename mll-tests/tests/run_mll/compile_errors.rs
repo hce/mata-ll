@@ -1931,14 +1931,18 @@ fn where_binding_definition_use_mismatch_rejected() {
     // deferred `No instance for (Num String)` instead of a use-site unify
     // failure — this uses a monomorphic Bool binding to keep exercising the
     // definition-vs-use mismatch path.)
+    // A19 moved the attribution: where-bindings are inferred (and
+    // generalized) BEFORE the clause body, so the self-consistent
+    // definition types first and the mismatch is reported at the USE —
+    // where GHC reports it too.
     let source = r#"
 main :: IO ()
 main = putStrLn x
   where x = True
 "#;
     expect_compile_error(source, &[], &[
-        "Cannot unify",
-        "where-binding 'x'",
+        "Cannot unify 'String' with 'Bool'",
+        "in definition of 'main'",
     ]);
 }
 
@@ -1963,12 +1967,17 @@ fn where_function_pattern_use_mismatch_rejected() {
     // The where-function's pattern gives it type `Maybe a -> a`, but the clause
     // body applies it to a Bool. Regression: the pattern/use unification
     // failure was discarded, producing a Lua indexing crash at runtime.
+    // Attribution at the use since A19 (see
+    // where_binding_definition_use_mismatch_rejected).
     let source = r#"
 main :: IO ()
 main = putStrLn (f True)
   where f (Just x) = x
 "#;
-    expect_compile_error(source, &[], &["where-binding 'f'"]);
+    expect_compile_error(source, &[], &[
+        "Cannot unify 'Maybe a' with 'Bool'",
+        "in definition of 'main'",
+    ]);
 }
 
 #[test]

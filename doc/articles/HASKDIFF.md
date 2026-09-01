@@ -495,18 +495,24 @@ generic over them, as in GHC. The differences:
   work. `liftA2 g x y` keeps only fully-applied values in the
   container and works everywhere (`traverse` is built on it).
 
-## Existentials: where-helpers are monomorphic
+## Existentials, and how far where-bindings generalize
 
 Existential types behave as in GHC: unpacking skolemizes the hidden
 variable, escapes are rejected, constructor contexts
 (`forall a. Show a => …`) are enforced at pack and unpack, and record
 fields with existential types have no selector and no record update.
-One divergence: mata-ll `where`-bindings are monomorphic, so a
-polymorphic where-helper applied to values unpacked from two
-*different* boxes is rejected — the first use pins the helper to the
-first box's hidden type. GHC generalizes where-bindings and accepts
-it. Inline the helper or make it a top-level function with a
-signature.
+
+`where`-bindings generalize like `let`-bindings: an unconstrained
+polymorphic helper used at two types works (`go y = [y]` at `Int` and
+`String`), and the definition-vs-use type errors are reported at the
+use, as GHC's are. What does NOT generalize, in `where` and `let`
+alike, is a variable carrying an unresolved CLASS constraint — a local
+binding is one Lua closure, and a class-polymorphic local would need
+the per-use specialization monomorphization performs only for
+top-level functions (generalizing it typechecks and then miscompiles;
+confirmed by repro). `inc x = x + 1` used at `Int` and `Number` is
+therefore rejected where GHC accepts it: bind at the top level for
+class-polymorphic reuse.
 
 ## Linear types match GHC's `LinearTypes`
 

@@ -49,6 +49,13 @@ pub(super) struct ScopeSnapshot {
     local_strict_params: std::collections::HashMap<String, Vec<bool>>,
     /// Structured twin of `local_strict_params`: their demand rows.
     local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
+    /// Emitted parameter counts of the where-local functions in scope (the
+    /// local analog of `fixed_arity`): a GENERALIZED where-fn (A19) can be
+    /// used at an instantiation with more arrows than its emitted closure
+    /// has parameters, and the call must split exactly as for a top-level
+    /// callee — locals used to be exempt from `known_callee_arity` on the
+    /// grounds that local bindings are monomorphic, which A19 ended.
+    local_fn_arity: std::collections::HashMap<String, usize>,
 }
 
 impl ScopeSnapshot {
@@ -62,6 +69,7 @@ impl ScopeSnapshot {
             var_table_emitted: cg.var_table_emitted,
             local_strict_params: cg.local_strict_params.clone(),
             local_demand_rows: cg.local_demand_rows.clone(),
+            local_fn_arity: cg.local_fn_arity.clone(),
         }
     }
 
@@ -75,6 +83,7 @@ impl ScopeSnapshot {
         cg.var_table_emitted = self.var_table_emitted;
         cg.local_strict_params = self.local_strict_params;
         cg.local_demand_rows = self.local_demand_rows;
+        cg.local_fn_arity = self.local_fn_arity;
     }
 
     /// Restores concreteness and the where-scope rows, deliberately KEEPING
@@ -88,6 +97,7 @@ impl ScopeSnapshot {
         cg.concrete_vars = self.concrete_vars;
         cg.local_strict_params = self.local_strict_params;
         cg.local_demand_rows = self.local_demand_rows;
+        cg.local_fn_arity = self.local_fn_arity;
     }
 
 }
@@ -861,6 +871,29 @@ impl CodeGen {
         // the enclosing clause emitter restores the map at scope exit.
         for b in binds {
             self.local_strict_params.remove(&b.name);
+            self.local_fn_arity.remove(&b.name);
+        }
+        // Register each function group's emitted arity — patterns plus eta
+        // padding, the formula where_func_group_body_stmts emits — AFTER the
+        // shadow-removal loop above (which would otherwise delete these very
+        // entries) and before any body, so calls inside the group's own
+        // recursive bodies split correctly too (see `local_fn_arity`).
+        {
+            let mut i = 0;
+            while i < binds.len() {
+                if !binds[i].patterns.is_empty() {
+                    self.local_fn_arity.insert(
+                        binds[i].name.clone(),
+                        binds[i].patterns.len() + count_arrows(&binds[i].body.ty),
+                    );
+                    let name = &binds[i].name;
+                    while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
+                        i += 1;
+                    }
+                } else {
+                    i += 1;
+                }
+            }
         }
         let local_rows =
             crate::demand::local_fn_strict_params(clause, &self.demand_info.strict_params, &|n| self.is_local_shadowed(n));

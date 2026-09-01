@@ -173,6 +173,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_let_pattern_params, "cases", "let_pattern_params.mll"),
         (ghc_oracle_ord_structural, "cases", "ord_structural.mll"),
         (ghc_oracle_foldable_generic, "cases", "foldable_generic.mll"),
+        (ghc_oracle_where_polymorphism, "cases", "where_polymorphism.mll"),
         // Excluded as un-twinnable while mata-ll had no Integer; the case
         // (and fromInteger) became GHC-true when Integer arrived, and the
         // A8 doc sweep caught the stale exclusion.
