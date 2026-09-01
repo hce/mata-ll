@@ -1305,6 +1305,23 @@ local function ord_compare__Number(a, b) a = __force(a); b = __force(b); if a < 
 local function ord_compare__String(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function ord_compare__ByteString(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .. b end
+-- mconcat at String: the Monoid String instance overrides the class default
+-- (foldr mappend mempty) with this table.concat builder — the flat fold is
+-- O(total bytes^2) (each `..` copies the whole suffix), the builder is
+-- linear. Forcing is identical to the default whenever the result is
+-- demanded: producing the string forces every spine cell and every element,
+-- left to right, exactly as the fold would (String is WHNF-atomic, so there
+-- is no partial demand to preserve).
+local function string_mconcat_prim(l)
+    local t, n = {}, 0
+    l = __force(l)
+    while l ~= nil do
+        n = n + 1
+        t[n] = __force(l[1])
+        l = __mll_tail(l)
+    end
+    return table.concat(t)
+end
 -- Numeric-class method helpers (Num / Fractional / Integral). The arithmetic
 -- OPERATORS (+ - * / div mod quot rem) never reach these — they inline to Lua
 -- operators / the strict div/mod/quot/rem cores. Only the NAMED methods land

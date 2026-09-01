@@ -111,6 +111,22 @@ API of the `mllc` library crate.)
   31x (−66% wall). Pinned by the GHC-goldened ioref cases, which hit
   the spliced path throughout.
 
+- **`mconcat` is a `Monoid` class method, and the `String` instance
+  overrides it with a linear builder.** The class now carries `mconcat`
+  with GHC's default (`foldr mappend mempty`), exactly as in base —
+  a GHC-parity improvement in itself — and `instance Monoid String`
+  overrides it with a `table.concat` builder: the right-nested fold
+  copies the whole suffix at every step (O(total bytes²) for a flat
+  concatenation), the builder collects the forced elements and joins
+  once. Result and forcing behavior are identical to the default
+  (String is WHNF-atomic; the spine walk is the demand either way),
+  pinned byte-exact against GHC by the `mconcat_method` case and the
+  strictness-contract probe. string_build drops 43% on Lua 5.5
+  (11.8x → 6.9x speed-of-light) and 37% under LuaJIT; the tracker
+  canary improves to 6.0x realtime. A flat `mconcat` over thousands of
+  strings also no longer risks LuaJIT's fixed C stack — the builder is
+  iterative where the fold recursed per element.
+
 - **The boxed-Integer ops take small-magnitude fast paths.** When both
   operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
   and box the result, skipping the limb walks — divmod's bit-by-bit

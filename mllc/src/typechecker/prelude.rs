@@ -797,6 +797,12 @@ impl Checker {
         // primitive is exposed for lists.)
         self.env_scheme("semigroup_String", vec![],
             Ty::fun(&[Ty::Con("String".into()), Ty::Con("String".into())], Ty::Con("String".into())));
+        // The linear mconcat builder (table.concat over the forced spine),
+        // called by the Prelude's `instance Monoid String` mconcat override —
+        // the class default `foldr mappend mempty` copies the suffix on every
+        // step, O(total bytes^2) for a flat concatenation.
+        self.env_scheme("string_mconcat_prim", vec![],
+            Ty::fun(&[Ty::List(Box::new(Ty::Con("String".into())))], Ty::Con("String".into())));
 
         // The Semigroup/Monoid classes and their String/[a] instances all
         // live in lib/Prelude.mll now. The deliberate mata-ll divergence —

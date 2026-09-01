@@ -498,6 +498,7 @@ mll_test!(ioref_laziness, "ioref_laziness.mll");
 mll_test!(let_seq_pure_function, "let_seq_pure_function.mll");
 mll_test!(integer_smallpath_bounds, "integer_smallpath_bounds.mll");
 mll_test!(partial_app_uncovered_param, "partial_app_uncovered_param.mll");
+mll_test!(mconcat_method, "mconcat_method.mll");
 // A19: where-binding generalization.
 mll_test!(where_polymorphism, "where_polymorphism.mll");
 

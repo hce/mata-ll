@@ -186,6 +186,7 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("error", &[true]),       // error(__force(msg)) — forces before raising
     ("head", &[true]),        // __mll_head forces the cell (l = __force(l))
     ("tail", &[true]),        // __mll_tail forces the cell (l = __force(l))
+    ("string_mconcat_prim", &[true]), // forces the spine cell at entry
     ("map", &[true, true]),
     ("filter", &[true, true]),
     ("take", &[true, false]), // n always; the list NOT when n <= 0

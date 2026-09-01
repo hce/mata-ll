@@ -144,6 +144,8 @@ const PROBES: &[Probe] = &[
     },
     probe("head", &[ILIST], &[Strict]),
     probe("tail", &[ILIST], &[Strict]),
+    // The Monoid String mconcat override: forces the spine cell at entry.
+    probe("string_mconcat_prim", &[SLIST], &[Strict]),
     probe("map", &[IDF, ILIST], &[Strict, Strict]),
     probe("filter", &[TRUEF, ILIST], &[Strict, Strict]),
     // take is LAZY in the list when n <= 0 — `take 0 undefined` is `[]`
@@ -283,6 +285,7 @@ main = do
   if bsNull b then error "empty" else pure ()
   print (head [1 :: Int, 2])
   print (tail [1 :: Int, 2])
+  putStrLn (mconcat ["a", "b"])
   print (map (+ 1) [1 :: Int])
   print (filter even [1 :: Int, 2])
   print (take 1 [1 :: Int, 2])

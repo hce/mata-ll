@@ -218,10 +218,6 @@ sortBy cmp xs = mergeRuns (map (\x -> [x]) xs)
 sort :: Ord a => [a] -> [a]
 sort = sortBy (\x y -> if x <= y then (if y <= x then EQ else LT) else GT)
 
--- Fold a list of monoid values into one (GHC's mconcat).
-mconcat :: Monoid a => [a] -> a
-mconcat xs = foldr mappend mempty xs
-
 -- Map each element to a monoid and combine the results.
 -- Monoid instances: String (concatenation, mempty "") and lists
 -- (append, mempty []).
@@ -242,6 +238,12 @@ class Semigroup a => Monoid a where
     mempty  :: a
     mappend :: a -> a -> a
     mappend x y = x <> y
+    -- Fold a list of monoid values into one. A class method with GHC's
+    -- default, exactly as in base — so an instance may override it with a
+    -- shape that builds better than the right-nested fold (String does:
+    -- see its instance below).
+    mconcat :: [a] -> a
+    mconcat xs = foldr mappend mempty xs
 
 -- Semigroup and Monoid instances for the builtin containers.
 --
@@ -263,6 +265,11 @@ instance Semigroup [a] where
 instance Monoid String where
     mempty = ""
     mappend x y = semigroup_String x y
+    -- The default (foldr mappend mempty) copies the suffix at every step —
+    -- O(total bytes^2) for a flat concatenation. The primitive collects the
+    -- forced elements and joins once with table.concat; forcing is
+    -- identical whenever the result is demanded (String is WHNF-atomic).
+    mconcat xs = string_mconcat_prim xs
 
 instance Monoid [a] where
     mempty = []

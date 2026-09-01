@@ -1381,11 +1381,16 @@ Note: `String` is *not* a list, so `(++)` does not concatenate
 strings — use `(<>)` for that. Conversely `(<>)` today applies only to
 `String`; lists are joined with `(++)`. (`(<>)` is the `Semigroup`
 method; only the `String` instance is usable at present.) The `Monoid`
-class (superclass `Semigroup`) provides `mempty` and the *named*
-method `mappend`, with instances for `String` and `[a]` — `mappend`
-does dispatch on lists (polymorphic `Monoid` code like `foldMap`
-needs a working append), while the `(<>)` operator on lists stays
-rejected in favour of `(++)`. The `Semigroup`/`Monoid` *classes* and
+class (superclass `Semigroup`) provides `mempty`, the *named* method
+`mappend`, and `mconcat` (a class method with GHC's default
+`foldr mappend mempty`, exactly as in base), with instances for
+`String` and `[a]` — `mappend` does dispatch on lists (polymorphic
+`Monoid` code like `foldMap` needs a working append), while the `(<>)`
+operator on lists stays rejected in favour of `(++)`. The `String`
+instance overrides `mconcat` with a linear builder (the elements are
+collected and joined once), so a flat `mconcat` over many strings does
+not pay the right-nested fold's repeated suffix copying; its result and
+forcing behavior are identical to the default. The `Semigroup`/`Monoid` *classes* and
 their `String`/`[a]` instances are ordinary declarations in the Prelude
 source (like the `Foldable`/`Traversable` ones). An undetermined
 `mempty` is still reported as an ambiguity at compile time: the

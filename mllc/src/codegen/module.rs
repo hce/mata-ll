@@ -157,6 +157,7 @@ impl CodeGen {
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList", "hashmap_toList",
             "__mll_list_append", "__mll_list_index", "semigroup_String",
+            "string_mconcat_prim",
             "__mll_show_list", "__mll_show_arg", "__mll_show_maybe", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
             "__mll_try", "__mll_pcall", "__mll_iter", "getArgs", "exit_",
             "try_", "catch_",
