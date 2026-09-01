@@ -46,5 +46,5 @@ min of 3):
 | hm_churn      |   59.3x |   38.5x |
 | ioref_loop    |  109.9x |   26.8x |
 | generics_json |  147.5x |   54.4x |
+| list_pipeline |  215.1x |  178.7x |
 | integer_arith | 1436.1x |  716.5x |
-| list_pipeline | 1604.5x | 1650.7x |

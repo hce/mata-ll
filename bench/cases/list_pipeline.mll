@@ -7,6 +7,6 @@ module Main where
 import Data.List (foldl')
 
 main :: IO ()
-main = print (foldl' step 0 (filter odd (map (* 3) [1 .. 200000])))
+main = print (foldl' step 0 (filter odd (map (* 3) [1 .. 200000 :: Int])))
   where
     step a x = (a + x) `mod` 1000000007
