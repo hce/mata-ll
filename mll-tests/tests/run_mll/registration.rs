@@ -486,6 +486,9 @@ mll_test!(let_pattern_params, "let_pattern_params.mll");
 mll_test!(ord_structural, "ord_structural.mll");
 // A17: structural HashMap keys.
 mll_test!(hashmap_structural_keys, "hashmap_structural_keys.mll");
+// Nil-represented values (Nothing, [], ()) under scalar keys survive
+// storage (the __mll_hm_nilv sentinel; a backend-fuzzer find).
+mll_test!(hashmap_nil_values, "hashmap_nil_values.mll");
 // A18: Foldable/Traversable-generic Prelude functions.
 mll_test!(foldable_generic, "foldable_generic.mll");
 // A19: where-binding generalization.

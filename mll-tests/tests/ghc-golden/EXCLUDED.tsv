@@ -41,6 +41,7 @@ cases/generic_json_decode	Generics substrate + JSON FFI library
 cases/generic_json_many	Generics substrate + JSON FFI library
 cases/getline	reads stdin; LuaUserData FFI
 cases/hashmap	HashMap builtins (Lua tables)
+cases/hashmap_nil_values	HashMap builtins (Lua tables)
 cases/hashmap_structural_keys	HashMap builtins (Lua tables)
 cases/import_merge	qualified import: twin module resolution gap (Q77 seam)
 cases/integer_json	Generics substrate + JSON FFI library

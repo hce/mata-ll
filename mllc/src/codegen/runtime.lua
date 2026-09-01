@@ -7,6 +7,14 @@ local __cons_mt = {}
 -- Tags a `Just` wrapper (see the Maybe constructor below); declared here so the
 -- generic `show`/`__mll_to_lua` can identify it as an upvalue.
 local __just_mt = {}
+-- Boxes a nil-REPRESENTED value (Nothing, [], ()) stored under a scalar
+-- HashMap key: `t[k] = nil` is Lua's delete, so writing the raw value would
+-- silently drop the entry (hmFromList [(7, Nothing)] must have size 1).
+-- Every scalar-path write wraps nil behind this unique sentinel and every
+-- read unwraps it; encoded-key maps store {k, v} entry tables and need no
+-- boxing. Declared this early so the FFI marshallers can translate it at
+-- the host boundary.
+local __mll_hm_nilv = {}
 -- Tags a suspended `pure`/`return` value — a "pure action" that has escaped its
 -- defining function. `__mll_run` unwraps it WITHOUT forcing
 -- or calling the payload, so a `pure ⊥` bound across a function boundary does
@@ -328,6 +336,10 @@ local function __mll_ffi_decode(desc, v, root, dir)
                     "the map is declared with numeric keys but this key is a " .. kt, dir)
             end
             if desc.v then val = __mll_ffi_decode(desc.v, val, root, dir) end
+            -- pairs() never yields a nil host value, but decoding can
+            -- produce one (a payload whose mata-ll representation is nil);
+            -- store it boxed or the entry would vanish.
+            if val == nil then val = __mll_hm_nilv end
             r[key] = val
         end
         return r
@@ -493,7 +505,11 @@ local function __mll_arg_marshal(v, d)
         local t = {}
         for k, val in pairs(v) do
             local x = __force(val)
-            if d.v then x = __mll_arg_marshal(x, d.v) end
+            -- Unbox a stored-nil value: the host convention for an absent
+            -- payload is nil (the key stays absent host-side, exactly how
+            -- the decoder above reads it back).
+            if rawequal(x, __mll_hm_nilv) then x = nil end
+            if x ~= nil and d.v then x = __mll_arg_marshal(x, d.v) end
             t[k] = x
         end
         return t
@@ -1486,8 +1502,8 @@ local function __mll_hm_scalar_key(k)
     end
     return k
 end
-local function hashmap_insert(k, v, m) k = __mll_hm_scalar_key(k); v = __force(v); m = __force(m); local t = {} for a,b in pairs(m) do t[a] = b end t[k] = v return t end
-local function hashmap_lookup(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local v = m[k] if v == nil then return nil else return Just(v) end end
+local function hashmap_insert(k, v, m) k = __mll_hm_scalar_key(k); v = __force(v); m = __force(m); if v == nil then v = __mll_hm_nilv end local t = {} for a,b in pairs(m) do t[a] = b end t[k] = v return t end
+local function hashmap_lookup(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local v = m[k] if v == nil then return nil elseif rawequal(v, __mll_hm_nilv) then return Just(nil) else return Just(v) end end
 local function hashmap_delete(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local t = {} for a,b in pairs(m) do t[a] = b end t[k] = nil return t end
 local function hashmap_size(m) m = __force(m); local n = 0 for _ in pairs(m) do n = n + 1 end return n end
 -- Key sort comparator: Bool is a legal key type but Lua cannot `<`
@@ -1499,10 +1515,10 @@ local function __mll_hm_lt(a, b)
     return a < b
 end
 local function hashmap_keys(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons(ks[i], r) end return r end
-local function hashmap_values(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons(m[ks[i]], r) end return r end
+local function hashmap_values(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = m[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons(v, r) end return r end
 local function hashmap_member(k, m) k = __mll_hm_scalar_key(k); m = __force(m); return m[k] ~= nil end
-local function show_HashMap(m) m = __force(m); local parts = {} if getmetatable(m) == __mll_hme_mt then for _, e in pairs(m) do parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end else for k, v in pairs(m) do parts[#parts+1] = show(k) .. " -> " .. show(v) end end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
-local function hashmap_fromList(xs) xs = __force(xs); local t = {} local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) t[__mll_hm_scalar_key(pair[1])] = __force(pair[2]) cur = __mll_tail(cur) end return t end
+local function show_HashMap(m) m = __force(m); local parts = {} if getmetatable(m) == __mll_hme_mt then for _, e in pairs(m) do parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end else for k, v in pairs(m) do if rawequal(v, __mll_hm_nilv) then v = nil end parts[#parts+1] = show(k) .. " -> " .. show(v) end end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
+local function hashmap_fromList(xs) xs = __force(xs); local t = {} local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end t[__mll_hm_scalar_key(pair[1])] = v cur = __mll_tail(cur) end return t end
 
 -- Structural-key HashMaps (A17). A scalar key indexes the Lua table
 -- directly (the functions above, unchanged); a STRUCTURAL key (tuple, list,
@@ -1535,7 +1551,7 @@ local function __mll_hme_values(cmp, m) local es = __mll_hme_sorted(cmp, m) loca
 local function __mll_hme_toList(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons({es[i][1], es[i][2]}, r) end return r end
 
 
-local function hashmap_toList(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons({ks[i], m[ks[i]]}, r) end return r end
+local function hashmap_toList(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = m[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons({ks[i], v}, r) end return r end
 
 -- Specialized list show: uses a typed element show function
 local function __mll_list_eq(elem_eq, a, b)
