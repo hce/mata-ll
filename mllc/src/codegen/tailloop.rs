@@ -150,6 +150,10 @@ pub(super) fn self_target(target: &FnTarget, params: &[String]) -> Option<SelfNa
         FnTarget::LocalFn(n) if is_plain_ident(n) => SelfName::LocalFn(n.clone()),
         FnTarget::Assigned(n) if is_plain_ident(n) => SelfName::Assigned(n.clone()),
         FnTarget::Slot(i) => SelfName::Slot(format!("__mll_fn[{}]", i)),
+        // A lifted thunk body (thunklift.rs) cannot reference its own slot
+        // — the slot is minted after the body existed — so there is no
+        // self-identity to loop on.
+        FnTarget::ThunkSlot(_) => return None,
         FnTarget::LocalFn(_) | FnTarget::Assigned(_) => return None,
     };
     if !params.iter().all(|p| is_plain_ident(p)) {
@@ -411,6 +415,7 @@ fn blocked_stmt(s: &Stmt, params: &HashSet<String>) -> bool {
             let target_hit = match target {
                 FnTarget::LocalFn(n) | FnTarget::Assigned(n) => text_mentions(n, params),
                 FnTarget::Slot(_) => params.contains("__mll_fn"),
+                FnTarget::ThunkSlot(_) => params.contains(super::lua::TKF_TABLE),
             };
             target_hit || ps.iter().any(|p| params.contains(p))
         }

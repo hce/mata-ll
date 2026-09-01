@@ -348,6 +348,11 @@ fn free_block(stmts: &[Stmt], bound: &HashSet<String>, free: &mut HashSet<String
                             free.insert(super::lua::FN_TABLE.to_string());
                         }
                     }
+                    FnTarget::ThunkSlot(_) => {
+                        if !bound.contains(super::lua::TKF_TABLE) {
+                            free.insert(super::lua::TKF_TABLE.to_string());
+                        }
+                    }
                 }
                 let mut inner = bound.clone();
                 inner.extend(params.iter().cloned());

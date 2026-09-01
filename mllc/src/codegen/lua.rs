@@ -162,6 +162,9 @@ pub(super) enum Stmt {
 /// `name_mentions_fn_table`) and the store-key spelling share this one
 /// constant instead of repeating the literal.
 pub(super) const FN_TABLE: &str = "__mll_fn";
+/// The lifted-thunk function table (see thunklift.rs) — the one spelling,
+/// shared by the pass that fills it and the renderer.
+pub(super) const TKF_TABLE: &str = "__mll_tkf";
 
 /// Does a NON-`Slot` header mention the function table — in its target
 /// name or any parameter? Both consumers (the slot census's poison arm in
@@ -188,6 +191,12 @@ pub(super) enum FnTarget {
     /// The lvalue arrives rendered, like `Stmt::Assign`'s: a bare name
     /// (`go`) or its `_v[N]` spill slot.
     Assigned(String),
+    /// `__mll_tkf[<slot>] = function(…)` — a lifted thunk body
+    /// (thunklift.rs). A dedicated variant, not an `Assigned` spelling:
+    /// the paren pass keys its Delim return context off it (a lifted
+    /// body's one consumer is `__force`'s truncating call), and a string
+    /// prefix match would go silently stale if the spelling moved.
+    ThunkSlot(u32),
 }
 
 impl FnTarget {
@@ -208,6 +217,12 @@ impl FnTarget {
             FnTarget::Assigned(lhs) => {
                 out.push_str(lhs);
                 out.push_str(" = function");
+            }
+            FnTarget::ThunkSlot(i) => {
+                out.push_str(TKF_TABLE);
+                out.push('[');
+                out.push_str(&i.to_string());
+                out.push_str("] = function");
             }
         }
         out.push('(');

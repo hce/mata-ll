@@ -249,7 +249,9 @@ fn repeat_safe_stmt(s: &Stmt) -> bool {
         // twice — the emitter keeps slot functions top-level, and this
         // check turns that assumption into a gate.
         Stmt::Function { target, params, .. } => match target {
-            FnTarget::Slot(_) => false,
+            // Slot-family stores are top-level by construction; one inside
+            // a skeleton would repeat a store the module counted once.
+            FnTarget::Slot(_) | FnTarget::ThunkSlot(_) => false,
             FnTarget::LocalFn(n) | FnTarget::Assigned(n) => {
                 !super::lua::name_mentions_fn_table(n, params)
             }

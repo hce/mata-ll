@@ -57,9 +57,7 @@ use std::collections::HashSet;
 
 use super::annot::is_plain_ident;
 use super::hoist::free_names_func;
-use super::lua::{Block, Expr, FnTarget, FuncBody, Stmt};
-
-pub(super) const TKF_TABLE: &str = "__mll_tkf";
+use super::lua::{Block, Expr, FnTarget, FuncBody, Stmt, TKF_TABLE};
 
 /// One enclosing function scope on the walk path.
 struct Frame {
@@ -77,7 +75,7 @@ struct Frame {
 
 struct Lift {
     defs: Vec<Stmt>,
-    counter: usize,
+    counter: u32,
 }
 
 pub(super) fn run(stmts: &mut Vec<Stmt>) {
@@ -327,7 +325,7 @@ fn try_lift(fb: &mut FuncBody, st: &mut Lift, frames: &[Frame]) -> Option<(Strin
     let slot = format!("{TKF_TABLE}[{k}]");
     let body_stmts = std::mem::take(fb.stmts_mut());
     st.defs.push(Stmt::Function {
-        target: FnTarget::Assigned(slot.clone()),
+        target: FnTarget::ThunkSlot(k),
         params: captures.clone(),
         body: Block(body_stmts),
     });

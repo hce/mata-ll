@@ -457,6 +457,8 @@ fn collect_facts_stmt(s: &Stmt, f: &mut ScopeFacts) {
                 // site, keeping the table's name disqualified from name
                 // stamps. (The slot census below is the precise view.)
                 FnTarget::Slot(_) => f.bind("__mll_fn"),
+                // Same treatment for the lifted-thunk table's slot stores.
+                FnTarget::ThunkSlot(_) => f.bind(super::lua::TKF_TABLE),
             }
             for p in params {
                 f.bind(p);
@@ -759,6 +761,14 @@ fn slot_scan_stmt(st: &Stmt, s: &mut SlotStores) {
                 }
                 FnTarget::LocalFn(n) | FnTarget::Assigned(n) => {
                     if super::lua::name_mentions_fn_table(n, params) {
+                        s.poisoned = true;
+                    }
+                }
+                // A lifted-thunk slot store touches only __mll_tkf; the
+                // parameter check keeps the same conservatism as the
+                // named-target arms.
+                FnTarget::ThunkSlot(_) => {
+                    if super::lua::name_mentions_fn_table(super::lua::TKF_TABLE, params) {
                         s.poisoned = true;
                     }
                 }

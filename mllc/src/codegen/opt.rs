@@ -690,7 +690,7 @@ fn normalize_parens_stmt(stmt: &mut Stmt, ret_ctx: Ctx) {
             // thunk bodies, and what keeps deep lazy force chains in
             // proper tail calls.
             let ret = match target {
-                FnTarget::Assigned(n) if n.starts_with("__mll_tkf[") => Ctx::Delim,
+                FnTarget::ThunkSlot(_) => Ctx::Delim,
                 _ => Ctx::DelimLast,
             };
             normalize_parens_block_ret(&mut body.0, ret);
