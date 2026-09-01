@@ -84,11 +84,8 @@ reverse xs = go [] xs
         go acc (x:rest) = go (x:acc) rest
 
 -- List operations
-concatMap :: (a -> [b]) -> [a] -> [b]
-concatMap _ [] = []
-concatMap f (x:xs) = prepend (f x) (concatMap f xs)
-    where prepend [] rest = rest
-          prepend (y:ys) rest = y : prepend ys rest
+concatMap :: Foldable t => (a -> [b]) -> t a -> [b]
+concatMap f t = foldr (\x acc -> f x ++ acc) [] t
 
 -- Longest prefix of elements satisfying the predicate. Lazy in the spine,
 -- so it works on infinite lists (e.g. `takeWhile (< 5) [1..]`).
@@ -118,9 +115,8 @@ init [_]      = []
 init (x : xs) = x : init xs
 
 -- Flatten a list of lists.
-concat :: [[a]] -> [a]
-concat []         = []
-concat (xs : xss) = xs ++ concat xss
+concat :: Foldable t => t [a] -> [a]
+concat t = foldr (\xs acc -> xs ++ acc) [] t
 
 -- n copies of x (empty when n <= 0).
 replicate :: Int -> a -> [a]
@@ -149,23 +145,22 @@ unzip (p : rest) = case unzip rest of
     (as, bs) -> (fst p : as, snd p : bs)
 
 -- Conjunction / disjunction of a Bool list. Short-circuiting.
-and :: [Bool] -> Bool
-and []       = True
-and (x : xs) = if x then and xs else False
+-- Foldable-generic (A18), through explicit lambdas rather than the
+-- first-class operators so the accumulator stays LAZY: the short-circuit
+-- (`or (repeat True)` terminates) survives the instance's foldr.
+and :: Foldable t => t Bool -> Bool
+and t = foldr (\x acc -> if x then acc else False) True t
 
-or :: [Bool] -> Bool
-or []       = False
-or (x : xs) = if x then True else or xs
+or :: Foldable t => t Bool -> Bool
+or t = foldr (\x acc -> if x then True else acc) False t
 
 -- Do any / all elements satisfy p? Short-circuiting and lazy:
 -- `any (\x -> x > 3) [1 ..]` terminates.
-any :: (a -> Bool) -> [a] -> Bool
-any _ []       = False
-any p (x : xs) = if p x then True else any p xs
+any :: Foldable t => (a -> Bool) -> t a -> Bool
+any p t = foldr (\x acc -> if p x then True else acc) False t
 
-all :: (a -> Bool) -> [a] -> Bool
-all _ []       = True
-all p (x : xs) = if p x then all p xs else False
+all :: Foldable t => (a -> Bool) -> t a -> Bool
+all p t = foldr (\x acc -> if p x then acc else False) True t
 
 -- Sum and product of any Foldable of numbers, generic over Num exactly as
 -- GHC. The `0`/`1` seeds are polymorphic numeric literals (`fromInteger`).
@@ -481,18 +476,18 @@ infixr 0 `seq`
 
 -- Monadic combinators
 -- Result-discarding traversal (works in any monad).
-mapM_ :: Monad m => (a -> m b) -> [a] -> m ()
-mapM_ _ [] = pure ()
-mapM_ f (x:xs) = f x >> mapM_ f xs
+mapM_ :: (Foldable t, Monad m) => (a -> m b) -> t a -> m ()
+mapM_ f t = foldr (\x k -> f x >> k) (pure ()) t
 
 -- Result-collecting traversal (works in any monad).
-mapM :: Monad m => (a -> m b) -> [a] -> m [b]
-mapM _ [] = pure []
-mapM f (x:xs) = f x >>= \y -> mapM f xs >>= \ys -> pure (y : ys)
+-- mapM = traverse and sequence = sequenceA at Monad, exactly GHC's
+-- definitions (Applicative is Monad's superclass, so the constraint
+-- entails what traverse needs).
+mapM :: (Traversable t, Monad m) => (a -> m b) -> t a -> m (t b)
+mapM f t = traverse f t
 
-sequence :: Monad m => [m a] -> m [a]
-sequence [] = pure []
-sequence (x:xs) = x >>= \y -> sequence xs >>= \ys -> pure (y : ys)
+sequence :: (Traversable t, Monad m) => t (m a) -> m (t a)
+sequence t = sequenceA t
 
 -- Conditional execution (non-strict evaluation makes this safe:
 -- the action is thunked and only forced when the condition is true)

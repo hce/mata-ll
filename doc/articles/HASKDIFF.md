@@ -449,11 +449,13 @@ generic over them, as in GHC. The differences:
 - **`sum`/`product` are `(Foldable t, Num a) => t a -> a`,** as in GHC
   (they used to be fixed at `Int` before the numeric classes
   were added).
-- **`mapM`/`mapM_`/`sequence`/`forM` stay list-only** (`Monad m =>
-  (a -> m b) -> [a] -> m [b]` etc.); GHC generalizes them to any
-  Traversable/Foldable. Use `traverse` for non-list structures.
-- **`and`/`or`/`any`/`all`/`concat`/`concatMap` stay list-only**;
-  GHC's are Foldable-generic. Apply them after `toList` if needed.
+- **`mapM`/`mapM_`/`sequence`/`sequence_`/`forM`/`forM_` are generic**,
+  as in GHC: `mapM = traverse` and `sequence = sequenceA` at `Monad`
+  (Applicative is Monad's superclass), the discarding forms fold over
+  any Foldable.
+- **`and`/`or`/`any`/`all`/`concat`/`concatMap` are Foldable-generic**,
+  as in GHC, short-circuiting included (`any (> 3) [1 ..]` and
+  `or (repeat True)` terminate).
 - **A fold over `Either` needs the `Left` type determined.**
   `length (Right 1)` is an ambiguity error (monomorphization must pin
   the instance's type); annotate:

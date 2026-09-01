@@ -8,12 +8,12 @@ module Control.Monad
 
 -- forM_ = flip mapM_: result-discarding traversal with args swapped, so the
 -- action can be written as a trailing lambda block.
-forM_ :: Monad m => [a] -> (a -> m b) -> m ()
+forM_ :: (Foldable t, Monad m) => t a -> (a -> m b) -> m ()
 forM_ xs f = mapM_ f xs
 
 -- forM = flip mapM: result-collecting traversal with args swapped, so the
 -- action can be written as a trailing lambda block.
-forM :: Monad m => [a] -> (a -> m b) -> m [b]
+forM :: (Traversable t, Monad m) => t a -> (a -> m b) -> m (t b)
 forM xs f = mapM f xs
 
 unless :: Applicative f => Bool -> f () -> f ()
@@ -35,6 +35,5 @@ void action = action >> pure ()
 join :: Monad m => m (m a) -> m a
 join x = x >>= \inner -> inner
 
-sequence_ :: Monad m => [m a] -> m ()
-sequence_ [] = pure ()
-sequence_ (x:xs) = x >> sequence_ xs
+sequence_ :: (Foldable t, Monad m) => t (m a) -> m ()
+sequence_ t = foldr (\x k -> x >> k) (pure ()) t
