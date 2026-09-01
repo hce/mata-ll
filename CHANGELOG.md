@@ -71,6 +71,33 @@ API of the `mllc` library crate.)
   integer_arith −18%, arith_loop −13%, ioref_loop −10%; LuaJIT's
   integer_arith −37%.
 
+- **Strict parameters take a site-forced calling convention.** When a
+  parameter is forced on every path through its function and every
+  delivery of an argument into it is a visible, position-covering call
+  site — the function never escapes as a value, no partial application
+  or `$`/`.` closure forwards into the position, and the function is
+  not exported to the Lua host — the entry `__force` moves to the call
+  sites, which pass raw when the emission proves WHNF-ness and force
+  otherwise. One analysis (`analyze_param_conventions`) decides each
+  parameter's convention and both ends read it, so callee and call
+  sites cannot drift; in WHNF-refutation builds the callee re-checks
+  the claim at entry with `__assert_whnf`, so the corpus second pass
+  exercises the whole contract. On top of this, `expr_yields_whnf` now
+  claims the WHNF-return invariant for direct applications of known
+  module functions (declined for newtype-typed and action results — a
+  newtype constructor is transparent, so such a result can be a raw
+  thunk — and for inline candidates), which lets those call results
+  flow into strict positions with no force at all. Together the two
+  changes cut the generics_json encode path from 566 to 68 `__force`
+  calls per record. Bench (Lua 5.5 wall time): arith_loop −84%
+  (19.5x → 3.1x speed-of-light ratio), generics_json −55%
+  (144x → 61x), list_pipeline and integer_arith −5% each; the tracker
+  canary improves ~9% under LuaJIT (5.3x → 5.8x realtime). The scan
+  also learned two escape channels it was blind to: a specialization
+  payload's embedded functions (an element eq/show/compare threaded
+  through a runtime helper, a dictionary method table) and
+  user-operator infix call sites.
+
 - **The boxed-Integer ops take small-magnitude fast paths.** When both
   operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
   and box the result, skipping the limb walks — divmod's bit-by-bit

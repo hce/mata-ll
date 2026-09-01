@@ -735,13 +735,23 @@ impl CodeGen {
                     // closed-over sub-dictionaries) — nothing to suspend.
                     cargs.push(self.expr_ast(d));
                 }
-                for v in value_args {
+                let conv_row = self.callee_conv_row(func_name).cloned();
+                for (i, v) in value_args.iter().enumerate() {
                     // Value arguments take the ordinary lazy call protocol: a
                     // dictionary-passing callee may never demand an argument
                     // (a decoder's type proxy, a discarded field), and
                     // evaluating a possibly-⊥ argument eagerly here would
-                    // raise where GHC would not.
-                    cargs.push(self.arg_ast(v, false));
+                    // raise where GHC would not. A SiteForced position is the
+                    // exception by construction: the callee forces it on
+                    // every path and binds it bare, so this site delivers
+                    // WHNF (see analyze_param_conventions).
+                    if conv_row.as_ref().is_some_and(|r| matches!(
+                        r.get(i), Some(super::analysis::ParamConv::SiteForced)))
+                    {
+                        cargs.push(self.site_forced_arg_ast(v));
+                    } else {
+                        cargs.push(self.arg_ast(v, false));
+                    }
                 }
                 Expr::call_named(&fref, cargs)
             }
@@ -1306,6 +1316,14 @@ impl CodeGen {
         } else {
             None
         };
+        // The callee's convention row (same shadow discipline as the strict
+        // row above): a SiteForced position obliges THIS site to deliver
+        // WHNF — the callee binds it bare (see analyze_param_conventions).
+        let callee_conv = if let TExprKind::Var(name) = &f.kind {
+            self.callee_conv_row(name).cloned()
+        } else {
+            None
+        };
 
         // The function argument of a runtime generic (map/zipWith) may
         // need a currying adapter — see runtime_generic_adapter.
@@ -1341,7 +1359,13 @@ impl CodeGen {
             for (i, a) in args.iter().enumerate() {
                 let is_strict = callee_strict.as_ref()
                     .is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                let arg_e = self.arg_ast(a, is_strict);
+                let site_forced = callee_conv.as_ref().is_some_and(|r| matches!(
+                    r.get(i), Some(super::analysis::ParamConv::SiteForced)));
+                let arg_e = if site_forced {
+                    self.site_forced_arg_ast(a)
+                } else {
+                    self.arg_ast(a, is_strict)
+                };
                 let arg_e = if i == 0 && let Some(adapter) = arg0_adapter {
                     Expr::call_named(adapter, vec![arg_e])
                 } else {
@@ -1387,7 +1411,13 @@ impl CodeGen {
             for (i, a) in args.iter().enumerate() {
                 let is_strict = callee_strict.as_ref()
                     .is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                let arg_e = self.arg_ast(a, is_strict);
+                let site_forced = callee_conv.as_ref().is_some_and(|r| matches!(
+                    r.get(i), Some(super::analysis::ParamConv::SiteForced)));
+                let arg_e = if site_forced {
+                    self.site_forced_arg_ast(a)
+                } else {
+                    self.arg_ast(a, is_strict)
+                };
                 if i == 0 && let Some(adapter) = arg0_adapter {
                     cargs.push(Expr::call_named(adapter, vec![arg_e]));
                 } else {
@@ -1709,11 +1739,29 @@ impl CodeGen {
             let r = self.forced_ast(rhs);
             Expr::paren(Expr::binop(lua_op, l, r))
         } else {
-            // User-defined or non-Lua operator: emit as function call
+            // User-defined or non-Lua operator: emit as function call. The
+            // scan registers this as a two-argument call site of the
+            // operator function, so its convention row applies: a
+            // SiteForced position must be delivered in WHNF (the eager
+            // expr_ast emission usually is, but the row's claim needs
+            // forced_ast's wrapper on the shapes it cannot prove).
+            let conv_row = self.callee_conv_row(op).cloned();
+            let site_forced = |r: &Option<Vec<super::analysis::ParamConv>>, i: usize| {
+                r.as_ref().is_some_and(|r| matches!(
+                    r.get(i), Some(super::analysis::ParamConv::SiteForced)))
+            };
             let sop = sanitize_name(op);
             let fref = self.lua_ref(&sop);
-            let l = self.expr_ast(lhs);
-            let r = self.expr_ast(rhs);
+            let l = if site_forced(&conv_row, 0) {
+                self.site_forced_arg_ast(lhs)
+            } else {
+                self.expr_ast(lhs)
+            };
+            let r = if site_forced(&conv_row, 1) {
+                self.site_forced_arg_ast(rhs)
+            } else {
+                self.expr_ast(rhs)
+            };
             Expr::call_named(&fref, vec![l, r])
         }
     }

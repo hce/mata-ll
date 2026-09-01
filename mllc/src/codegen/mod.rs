@@ -192,6 +192,12 @@ struct CodeGen {
     /// positions are always passed cheap (non-thunk) arguments at every call site.
     /// If true, the param never needs __force at entry.
     params_always_cheap: std::collections::HashMap<String, Vec<bool>>,
+    /// Per-parameter calling convention (see `analysis::ParamConv`): the one
+    /// decision both the parameter binding in function_stmts and every call
+    /// -site argument emission read, including the SITE-FORCED upgrade that
+    /// moves a strict parameter's entry `__force` to its (all visible,
+    /// all covering) call sites.
+    param_conv: std::collections::HashMap<String, Vec<analysis::ParamConv>>,
     /// Small pure functions eligible for inlining at call sites.
     /// Maps function name to (param_names, body, per-param occurrence counts).
     /// The counts are count_name_occurrences over the body: a parameter that
@@ -369,6 +375,7 @@ impl CodeGen {
             forward_declared: std::collections::HashSet::new(),
             concrete_vars: std::collections::HashSet::new(),
             params_always_cheap: std::collections::HashMap::new(),
+            param_conv: std::collections::HashMap::new(),
             inline_fns: std::collections::HashMap::new(),
             top_level_names: std::collections::HashSet::new(),
             record_accessors: std::collections::HashMap::new(),

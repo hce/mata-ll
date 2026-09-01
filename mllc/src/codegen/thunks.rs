@@ -315,16 +315,69 @@ impl CodeGen {
                     && self.record_accessors.contains_key(&sanitize_name(name)) {
                         return true;
                     }
-                // Fully-applied primitive typeclass method → native operator.
                 let mut n_args = 0usize;
                 let mut f = expr;
                 while let TExprKind::App(inner_f, _) = &f.kind {
                     n_args += 1;
                     f = inner_f.as_ref();
                 }
-                n_args == 2
+                // Fully-applied primitive typeclass method → native operator.
+                if n_args == 2
                     && matches!(&f.kind, TExprKind::Var(name)
                         if primitive_method_lua_op(name).is_some())
+                {
+                    return true;
+                }
+                // A direct application of a module-level function yields
+                // WHNF by the runtime's WHNF-return invariant (see the
+                // head-consumption contract in runtime.lua): every compiled
+                // function — FFI import wrappers and their native inlinings
+                // included — returns a value, never a raw thunk; a partial
+                // application yields a closure, and an over-application
+                // chains calls of such functions. Excluded: a locally
+                // shadowed name (the callee is an unknown local value —
+                // though even those, as codegen-emitted closures, uphold
+                // the invariant, the claim sticks to what the name
+                // provably denotes); an inline candidate (the call
+                // re-emits the candidate's body, so the result is the
+                // body's emission, not a function return); and any result
+                // TYPE that can be a transparent newtype wrap or an action
+                // (`ty_app_result_whnf`) — the one systematic breach of the
+                // invariant: a newtype constructor erases to the identity,
+                // so `fromInteger n = Z5 (…lazy…)` returns a raw thunk
+                // (num_user_instance caught exactly this). Refutation
+                // builds check the claim at every site (whnf_claim_checked).
+                self.ty_app_result_whnf(&expr.ty)
+                    && matches!(&f.kind, TExprKind::Var(name)
+                        if self.module_fn_names.contains(name.as_str())
+                            && !self.inline_fns.contains_key(name.as_str())
+                            && !self.is_local_shadowed(name))
+            }
+            _ => false,
+        }
+    }
+
+    /// Whether a value of this TYPE, returned by a compiled function, is
+    /// guaranteed to be a WHNF representation — the type-side gate of the
+    /// App arm's WHNF-return claim in `expr_yields_whnf`. A newtype is
+    /// erased to its wrapped value, so a newtype-typed result can be a raw
+    /// thunk; a type variable (or skolem/forall) may be instantiated at a
+    /// newtype (dict-passing residuals keep them); an IO/LuaIO result flows
+    /// through the runner protocol, whose pure-box payloads are exactly the
+    /// values `__force` must not see early. Everything else — a function
+    /// value, a cons cell, a tuple, unit, a non-newtype constructor — is
+    /// WHNF as represented.
+    fn ty_app_result_whnf(&self, ty: &crate::types::Ty) -> bool {
+        use crate::types::Ty;
+        match ty {
+            Ty::Con(name) => !self.is_newtype(name),
+            Ty::List(_) | Ty::Tuple(_) | Ty::Unit | Ty::Arrow(..) => true,
+            Ty::App(head, _) => {
+                let mut h = head.as_ref();
+                while let Ty::App(inner, _) = h {
+                    h = inner.as_ref();
+                }
+                matches!(h, Ty::Con(name) if !self.is_newtype(name))
             }
             _ => false,
         }
@@ -543,6 +596,22 @@ impl CodeGen {
         let saved_result_demand =
             std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
         let e = self.arg_ast_inner(expr, strict);
+        self.cur_result_demand = saved_result_demand;
+        e
+    }
+
+    /// Build an argument for a SITE-FORCED callee position (see
+    /// `analysis::ParamConv::SiteForced`): the callee binds the parameter
+    /// bare, so this site must deliver WHNF — raw when the emission already
+    /// proves it (`forced_ast`'s claim), under one `__force` otherwise.
+    /// Semantically this is the entry force the callee dropped, run a few
+    /// instructions earlier in the same demand: the position is forced on
+    /// every path through the callee. Same result-demand hygiene as
+    /// `arg_ast`.
+    pub(super) fn site_forced_arg_ast(&mut self, expr: &TExpr) -> Expr {
+        let saved_result_demand =
+            std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
+        let e = self.forced_ast(expr);
         self.cur_result_demand = saved_result_demand;
         e
     }

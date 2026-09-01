@@ -573,7 +573,7 @@ impl CodeGen {
             return stmts;
         }
 
-        if clauses.len() == 1 && clauses[0].guards.is_empty() {
+        if Self::emission_single_clause(func) {
             let clause = &clauses[0];
             let dict_param_names: Vec<String> = func.dict_params.iter().map(|(_, p)| p.clone()).collect();
             let mut params: Vec<String> = (0..clause.patterns.len()).map(|i| format!("_arg{}", i)).collect();
@@ -591,32 +591,42 @@ impl CodeGen {
             self.concrete_vars.insert(lua_name.clone());
             for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
 
-            let all_simple = clause.patterns.iter().all(|p| matches!(p, TPattern::Var(_, _) | TPattern::Wildcard));
+            let all_simple = Self::emission_all_simple(clause);
             if all_simple {
-                // Mark params concrete based on call-site and demand analysis:
-                // - If all callers pass cheap args, skip __force (already concrete).
-                // - If demand analysis says param is strict, force at entry.
-                // - Otherwise, stay lazy (param might never be used).
-                let call_site_cheap = self.params_always_cheap.get(&func.name).cloned();
-                let demand_strict = self.demand_info.strict_params.get(&func.name).cloned();
+                // Bind each parameter per its convention row (see
+                // analyze_param_conventions — the same row every call site
+                // reads): Cheap and SiteForced bind bare and concrete (their
+                // WHNF-ness is the call sites' obligation), EntryForced
+                // forces once at entry, Lazy stays a raw thunk-or-value.
+                let conv_row = self.param_conv.get(&func.name).cloned();
                 for (i, pat) in clause.patterns.iter().enumerate() {
                     if let TPattern::Var(v, _) = pat {
                         let sname = sanitize_name(v);
-                        let always_cheap = call_site_cheap.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
-                        let is_strict = demand_strict.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
+                        let conv = conv_row.as_ref().and_then(|r| r.get(i)).copied()
+                            .unwrap_or(super::analysis::ParamConv::Lazy);
                         let (pre, decl) = self.declare_local_parts(&sname);
                         if let Some(s) = pre { body.push(s); }
-                        if always_cheap {
-                            // All callers pass concrete values — no __force needed
-                            body.push(decl.stmt(Expr::name(format!("_arg{}", i))));
-                            self.concrete_vars.insert(sname);
-                        } else if is_strict {
-                            // Demand analysis: body forces this param — force at entry
-                            body.push(decl.stmt(Expr::force(Expr::name(format!("_arg{}", i)))));
-                            self.concrete_vars.insert(sname);
-                        } else {
-                            // Not demanded — stay lazy
-                            body.push(decl.stmt(Expr::name(format!("_arg{}", i))));
+                        match conv {
+                            super::analysis::ParamConv::Cheap => {
+                                body.push(decl.stmt(Expr::name(format!("_arg{}", i))));
+                                self.concrete_vars.insert(sname);
+                            }
+                            super::analysis::ParamConv::SiteForced => {
+                                // Every call site passes WHNF; refutation
+                                // builds check the claim at entry.
+                                body.push(decl.stmt(self.claim_checked(
+                                    "__assert_whnf",
+                                    Expr::name(format!("_arg{}", i)),
+                                )));
+                                self.concrete_vars.insert(sname);
+                            }
+                            super::analysis::ParamConv::EntryForced => {
+                                body.push(decl.stmt(Expr::force(Expr::name(format!("_arg{}", i)))));
+                                self.concrete_vars.insert(sname);
+                            }
+                            super::analysis::ParamConv::Lazy => {
+                                body.push(decl.stmt(Expr::name(format!("_arg{}", i))));
+                            }
                         }
                     }
                 }
@@ -655,13 +665,27 @@ impl CodeGen {
                     body.extend(self.bind_chain_block(clause.plain_body(), false).0);
                 }
             } else {
-                // Force only args that are destructured
+                // Destructuring clause: the convention row carries the
+                // forces_scrutinee decision (EntryForced), or its site-forced
+                // upgrade — the sites then deliver the WHNF the match reads.
+                let conv_row = self.param_conv.get(&func.name).cloned();
                 for (i, p) in params.iter().enumerate() {
-                    if i < clause.patterns.len()
-                        && clause.patterns[i].forces_scrutinee()
-                    {
-                        body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
-                        self.concrete_vars.insert(p.clone());
+                    let conv = conv_row.as_ref().and_then(|r| r.get(i)).copied()
+                        .unwrap_or(super::analysis::ParamConv::Lazy);
+                    match conv {
+                        super::analysis::ParamConv::EntryForced => {
+                            body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
+                            self.concrete_vars.insert(p.clone());
+                        }
+                        super::analysis::ParamConv::SiteForced => {
+                            if self.whnf_assert {
+                                body.push(Stmt::Assign(p.clone(), self.claim_checked(
+                                    "__assert_whnf", Expr::name(p.clone()))));
+                            }
+                            self.concrete_vars.insert(p.clone());
+                        }
+                        super::analysis::ParamConv::Cheap
+                        | super::analysis::ParamConv::Lazy => {}
                     }
                 }
                 let demanded = self.clause_demanded(clause);
@@ -699,40 +723,40 @@ impl CodeGen {
         let mut body = Vec::new();
         self.concrete_vars.insert(lua_name.clone());
         for dp in &dict_param_names { self.concrete_vars.insert(dp.clone()); }
-        // Force params that are destructured OR where call-site analysis
-        // shows all callers pass cheap args (so the value is already concrete).
-        let call_site_cheap = self.params_always_cheap.get(&func.name).cloned();
-        let demand_strict = self.demand_info.strict_params.get(&func.name).cloned();
+        // Bind each parameter per its convention row (see
+        // analyze_param_conventions, which folds the first-clause-scrutinizes
+        // rule, the demand row — a guard chain like `go n i | i >= 64 = n | …`
+        // would otherwise re-force n and i at every use — and the always-cheap
+        // judgment into one decision the call sites share). An arg scrutinized
+        // only by LATER clauses stays Lazy and is forced once earlier clauses
+        // have failed (see later_clause_force_col) — GHC's top-to-bottom,
+        // left-to-right laziness: `zip [] _` must return `[]` without forcing
+        // the second argument.
+        let conv_row = self.param_conv.get(&func.name).cloned();
         for (i, p) in params.iter().enumerate() {
             if i >= num_params { break; }
-            let always_cheap = call_site_cheap.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
-            // Force at entry ONLY if the FIRST clause scrutinizes this arg — it
-            // is then forced on every path (clause 0 is always tried first). An
-            // arg scrutinized only by LATER clauses stays lazy and is forced
-            // once earlier clauses have failed — by a single rebind at the
-            // chain split when the next clause provably forces it first
-            // (see later_clause_force_col), per use inside the clause
-            // conditions otherwise — so a matching earlier clause never
-            // forces it. This is GHC's top-to-bottom, left-to-right
-            // laziness: `zip [] _` must return `[]` without forcing the
-            // second argument.
-            let needs_force = clauses.first().is_some_and(|c| {
-                c.patterns.get(i).is_some_and(TPattern::forces_scrutinee)
-            });
-            // Demand analysis proves EVERY path through every clause (guard
-            // chains included, sequenced right-to-left) forces this param,
-            // so a single entry force is exactly as strict as the per-use
-            // forces it replaces. The single-clause simple path has used
-            // this rule all along; without it here, a guard chain like
-            // `go n i | i >= 64 = n | …` re-forced n and i at every use.
-            let is_strict = demand_strict.as_ref().is_some_and(|v| v.get(i).copied().unwrap_or(false));
-            if needs_force || is_strict {
-                // Forced on every path — force once at entry.
-                body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
-                self.concrete_vars.insert(p.clone());
-            } else if always_cheap {
-                // All callers pass concrete values — mark concrete, no force needed
-                self.concrete_vars.insert(p.clone());
+            let conv = conv_row.as_ref().and_then(|r| r.get(i)).copied()
+                .unwrap_or(super::analysis::ParamConv::Lazy);
+            match conv {
+                super::analysis::ParamConv::EntryForced => {
+                    // Forced on every path — force once at entry.
+                    body.push(Stmt::Assign(p.clone(), Expr::force(Expr::name(p.clone()))));
+                    self.concrete_vars.insert(p.clone());
+                }
+                super::analysis::ParamConv::SiteForced => {
+                    // Forced on every path, and every call site delivers
+                    // WHNF; refutation builds check the claim at entry.
+                    if self.whnf_assert {
+                        body.push(Stmt::Assign(p.clone(), self.claim_checked(
+                            "__assert_whnf", Expr::name(p.clone()))));
+                    }
+                    self.concrete_vars.insert(p.clone());
+                }
+                super::analysis::ParamConv::Cheap => {
+                    // All callers pass concrete values — mark concrete only.
+                    self.concrete_vars.insert(p.clone());
+                }
+                super::analysis::ParamConv::Lazy => {}
             }
         }
         body.extend(self.pattern_match_block(&params, clauses).0);

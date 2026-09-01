@@ -447,14 +447,6 @@ impl CodeGen {
             stmts.push(Stmt::Raw(String::new()));
         }
 
-        // Emit instance method functions
-        if !module.instance_fns.is_empty() {
-            stmts.push(Stmt::Raw("-- Typeclass instances".into()));
-        }
-        for func in &module.instance_fns {
-            stmts.extend(self.function_stmts(func));
-        }
-
         // Identify small pure functions eligible for inlining. Must run before
         // analyze_call_sites: cheapness of a call argument depends on whether
         // the callee is inlinable (a saturated call to an inlinable function is
@@ -462,8 +454,21 @@ impl CodeGen {
         self.find_inline_candidates(module);
 
         // Whole-program call-site analysis: determine which function params
-        // are always passed cheap (non-thunk) arguments at every call site.
+        // are always passed cheap (non-thunk) arguments at every call site,
+        // and each parameter's calling convention. Must run before ANY
+        // function emission — instance methods included: emitted ahead of
+        // the analysis they had no rows, so they never saw always-cheap and,
+        // once the convention rows arrived, defaulted to lazy per-use
+        // forcing instead of their entry force.
         self.analyze_call_sites(module);
+
+        // Emit instance method functions
+        if !module.instance_fns.is_empty() {
+            stmts.push(Stmt::Raw("-- Typeclass instances".into()));
+        }
+        for func in &module.instance_fns {
+            stmts.extend(self.function_stmts(func));
+        }
 
         // Emit functions (main last, so specializations are defined before use)
         let mut main_fn = None;
