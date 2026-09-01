@@ -3165,7 +3165,7 @@ impl Checker {
 /// (mono generates them from the element instances). Ord is excluded — there is
 /// no list/tuple/Maybe ordering — as are Read and user classes.
 fn structural_container_class(class: &str) -> bool {
-    matches!(class, "Show" | "Eq" | "Ord")
+    matches!(class, "Show" | "Eq" | "Ord" | "Hashable")
 }
 
 /// The monad-hierarchy classes, which mata-ll resolves structurally for IO

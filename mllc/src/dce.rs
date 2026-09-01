@@ -201,11 +201,18 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
                 | SpecKind::ShowMaybe(name)
                 | SpecKind::ListCmp(name)
                 | SpecKind::MaybeCmp(name)
-                | SpecKind::OrdFromCmp { cmp: name, .. } => {
+                | SpecKind::OrdFromCmp { cmp: name, .. }
+                | SpecKind::KeyEncList(name)
+                | SpecKind::KeyEncMaybe(name) => {
                     refs.insert(name.clone());
                 }
-                SpecKind::TupleEq(names) | SpecKind::TupleCmp(names) => {
+                SpecKind::TupleEq(names) | SpecKind::TupleCmp(names) | SpecKind::KeyEncTuple(names) => {
                     for name in names {
+                        refs.insert(name.clone());
+                    }
+                }
+                SpecKind::HmOp { enc, cmp, .. } => {
+                    for name in enc.iter().chain(cmp.iter()) {
                         refs.insert(name.clone());
                     }
                 }

@@ -38,17 +38,21 @@ user-defined ADT. The built-in operations are:
     hmValues   :: HashMap k v -> [v]
     hmToList   :: HashMap k v -> [(k, v)]
 
-**Key-type constraint.** Keys must be *primitive* — strings or
-numbers. Two reasons, both rooted in the Lua-table backing:
+**Key types.** A key is any `Hashable` type: the scalars (`Int`,
+`Number`, `String`, `Bool`, `ByteString`) and, structurally, tuples,
+lists, and `Maybe` of hashables — `HashMap (Int, Int) v` works. The two
+flavors have different runtime layouts, chosen per key type at compile
+time:
 
-  1. Lua tables hash compound values (tables) by identity, not by
-     content, so a tuple or ADT key would never compare equal to a
-     structurally-identical lookup key: `hmLookup (1,2) (hmInsert (1,2) v m)`
-     would miss.
-  2. `hmKeys`, `hmValues`, `hmToList`, and `show` on a HashMap impose a
-     deterministic order by sorting the keys (see below), and Lua's
-     `table.sort` can only order mutually-comparable primitives — it
-     errors on table keys.
+  1. A *scalar* key indexes the Lua table directly (value semantics).
+  2. A *structural* key is a Lua table — identity semantics, so it
+     cannot index directly (`hmLookup (1,2)` would never find the
+     structurally-equal inserted key). Instead the compiler threads a
+     type-directed injective string ENCODER: the table is keyed by the
+     encoding and stores `{key, value}` entries, and the enumerating
+     operations sort by the structural `compare`, so `hmKeys` and
+     friends come back in Ord order. A boxed type with no structural
+     ordering (e.g. `Integer`) is still not `Hashable`.
 
 A HashMap is unordered by definition, but the enumerating operations
 (`hmKeys`/`hmValues`/`hmToList`/`show`) must still be *pure functions*:

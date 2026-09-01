@@ -671,6 +671,16 @@ pub enum SpecKind {
     MaybeCmp(String),
     /// Tuple `compare`: one comparator per element, in element order.
     TupleCmp(Vec<String>),
+    /// Structural-key HashMap threading (A17). `KeyEnc*` build the
+    /// injective string encoder for a structural key type, threading
+    /// element encoders exactly as ListEq threads element eqs (the scalar
+    /// base is the runtime `__mll_key_scalar`). `HmOp` is one hm operation
+    /// rewritten at a structural key type: `enc` for the keyed operations,
+    /// `cmp` (the A16 structural compare) for the sorted iteration ones.
+    KeyEncList(String),
+    KeyEncMaybe(String),
+    KeyEncTuple(Vec<String>),
+    HmOp { op: String, enc: Option<String>, cmp: Option<String> },
     /// An Ord operator/selector derived from a structural `compare`:
     /// `op` is the method as written ("<", "<=", ">", ">=", "max", "min"),
     /// `cmp` the generated compare's name. Ordering is its constructor

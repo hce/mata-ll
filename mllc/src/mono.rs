@@ -697,6 +697,167 @@ impl Monomorphizer {
     /// generated (or memoized) by element type; `None` for every other type.
     /// Shared by the concrete resolver and the polymorphic-binding operator
     /// dispatch, which once carried the same three-arm block each.
+    /// The eight hm* operations whose behavior depends on the KEY layout
+    /// (A17). `hmSize` counts entries either way and `hmEmpty` is the shared
+    /// empty table (the first insert stamps the flavor), so neither is here.
+    fn hm_key_op(name: &str) -> Option<&'static str> {
+        ["hmInsert", "hmLookup", "hmDelete", "hmMember", "hmFromList",
+         "hmKeys", "hmValues", "hmToList"]
+            .into_iter()
+            .find(|op| *op == name)
+    }
+
+    /// The key type of an hm operation, read off its INSTANTIATED type: the
+    /// first parameter for the keyed ops, the pair's first component for
+    /// `hmFromList`, the map type's first argument for the iteration ops.
+    fn hm_key_type(op: &str, fn_ty: &Ty) -> Option<Ty> {
+        let Ty::Arrow(first, ..) = fn_ty else { return None };
+        match op {
+            "hmInsert" | "hmLookup" | "hmDelete" | "hmMember" => Some((**first).clone()),
+            "hmFromList" => match first.as_ref() {
+                Ty::List(pair) => match pair.as_ref() {
+                    Ty::Tuple(kv) if kv.len() == 2 => Some(kv[0].clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+            _ => match first.as_ref() {
+                // HashMap k v = App(App(Con "HashMap", k), v)
+                Ty::App(hk, _) => match hk.as_ref() {
+                    Ty::App(h, k) if matches!(h.as_ref(), Ty::Con(n) if n == "HashMap") =>
+                        Some((**k).clone()),
+                    _ => None,
+                },
+                _ => None,
+            },
+        }
+    }
+
+    /// A key type the scalar hashmap path cannot serve: its Lua value is a
+    /// table (identity semantics), so it goes through the encoded-entry
+    /// variants. Exactly the shapes the structural solve admits.
+    fn is_structural_key(ty: &Ty) -> bool {
+        matches!(ty, Ty::List(_) | Ty::Tuple(_)) || Self::is_maybe_type(ty)
+    }
+
+    /// The injective string encoder for structural key type `ty` (A17):
+    /// composites thread element encoders exactly as ListEq threads element
+    /// eqs; scalars are the runtime `__mll_key_scalar`.
+    fn structural_key_enc(&mut self, ty: &Ty) -> String {
+        match ty {
+            Ty::List(elem) => {
+                let list_ty = ty.clone();
+                let elem = (**elem).clone();
+                self.synthetic_spec_fn("hashkey", "hashkey_", &list_ty, &["_k"],
+                    Ty::Con("String".into()),
+                    move |slf| SpecKind::KeyEncList(slf.elem_key_enc(&elem)))
+            }
+            m if Self::is_maybe_type(m) => {
+                let inner = Self::maybe_inner_type(m).unwrap();
+                let maybe_ty = m.clone();
+                self.synthetic_spec_fn("hashkey", "hashkey_", &maybe_ty, &["_k"],
+                    Ty::Con("String".into()),
+                    move |slf| SpecKind::KeyEncMaybe(slf.elem_key_enc(&inner)))
+            }
+            Ty::Tuple(elems) => {
+                let tuple_ty = ty.clone();
+                let elems = elems.clone();
+                self.synthetic_spec_fn("hashkey", "hashkey_", &tuple_ty, &["_k"],
+                    Ty::Con("String".into()),
+                    move |slf| {
+                        let names: Vec<String> =
+                            elems.iter().map(|e| slf.elem_key_enc(e)).collect();
+                        SpecKind::KeyEncTuple(names)
+                    })
+            }
+            _ => "__mll_key_scalar".to_string(),
+        }
+    }
+
+    fn elem_key_enc(&mut self, ty: &Ty) -> String {
+        if Self::is_structural_key(ty) {
+            self.structural_key_enc(ty)
+        } else {
+            "__mll_key_scalar".to_string()
+        }
+    }
+
+    /// The threaded wrapper for hm operation `op` at structural key type
+    /// `key_ty`, declared at the use's full instantiated type (so the N-ary
+    /// convention holds at every call and partial application). The keyed
+    /// ops carry the encoder; the iteration ops carry the A16 structural
+    /// compare, so they come back in true Ord order.
+    fn hm_threaded_impl(&mut self, op: &str, key_ty: &Ty, use_ty: &Ty) -> String {
+        // Erased element variables reach this path (see the Var-arm
+        // comment); canonicalize so every use of one shape shares one
+        // wrapper, exactly as the arity-widening specializations do.
+        let use_ty = &if self.is_polymorphic(use_ty) {
+            Self::canonicalize_vars(use_ty)
+        } else {
+            use_ty.clone()
+        };
+        let key_ty = &if self.is_polymorphic(key_ty) {
+            Self::canonicalize_vars(key_ty)
+        } else {
+            key_ty.clone()
+        };
+        let mangled = match self.memo_or_mangle(op, &format!("{}_", op), use_ty) {
+            Ok(existing) => return existing,
+            Err(fresh) => fresh,
+        };
+        let enc = if matches!(op, "hmKeys" | "hmValues" | "hmToList") {
+            None
+        } else {
+            Some(self.structural_key_enc(key_ty))
+        };
+        let cmp = if enc.is_none() {
+            self.structural_ord_impl("compare", key_ty)
+        } else {
+            None
+        };
+        // Parameter types come from peeling the instantiated arrows — hm
+        // signatures are heterogeneous, so synthetic_spec_fn's same-type
+        // parameter list does not fit here.
+        let mut param_tys = Vec::new();
+        let mut rest = use_ty;
+        while let Ty::Arrow(a, b, _) = rest {
+            param_tys.push((**a).clone());
+            rest = b;
+        }
+        let result_ty = rest.clone();
+        let param_names: Vec<String> =
+            (0..param_tys.len()).map(|i| format!("_h{}", i)).collect();
+        let args: Vec<TExpr> = param_names.iter().zip(&param_tys)
+            .map(|(p, t)| TExpr::new(TExprKind::Var(p.clone()), t.clone()))
+            .collect();
+        let body = TExpr::new(
+            TExprKind::SpecCall {
+                original: mangled.clone(),
+                specialized: SpecKind::HmOp { op: op.to_string(), enc, cmp },
+                args,
+            },
+            result_ty.clone(),
+        );
+        let func = TFunction {
+            name: mangled.clone(),
+            ty: use_ty.clone(),
+            clauses: vec![TClause {
+                span: None,
+                patterns: param_names.iter()
+                    .map(|p| TPattern::Var(p.clone(), Ty::Unit))
+                    .collect(),
+                guards: vec![],
+                body: Some(body),
+                where_binds: vec![],
+            }],
+            specialized: true,
+            dict_params: vec![],
+            derived_strict: false,
+        };
+        self.generated.push(func);
+        mangled
+    }
+
     /// The structural Ord family for a compiler-owned shape (A16), the
     /// compare analog of `structural_eq_impl`: `compare` is generated per
     /// shape (lexicographic lists, Nothing < Just, element-wise tuples),
@@ -1276,6 +1437,25 @@ impl Monomorphizer {
                 // still-polymorphic reference to an arbitrary one of them
                 // would hand the use a function of the WRONG arity. The
                 // shared generic copy is what such a reference wants.
+                // Structural-key HashMap ops (A17): an hm* use whose KEY
+                // type is a structural SHAPE is rewritten to the threaded
+                // wrapper — the scalar hashmap path would key the Lua table
+                // by identity (and the runtime tripwire would reject it).
+                // The shape decides, not full concreteness: Hashable is not
+                // a standard defaulting class, so a literal-keyed
+                // `hmFromList [((0, 1), …)]` reaches mono with ERASED
+                // element variables — those take the scalar encoder, the
+                // exact degradation the erased `__mll_eq`/`__mll_cmp`
+                // fallbacks already define for erased scalars. The wrapper
+                // is keyed and declared at the canonicalized type when
+                // variables remain, so one shape shares one copy.
+                if !self.locals.contains(name)
+                    && let Some(op) = Self::hm_key_op(name)
+                    && let Some(key_ty) = Self::hm_key_type(op, &ty)
+                    && Self::is_structural_key(&key_ty) {
+                        let mangled = self.hm_threaded_impl(op, &key_ty, &ty);
+                        return TExpr { kind: TExprKind::Var(mangled), ty };
+                    }
                 if self.poly_fns.contains_key(name) && !self.locals.contains(name)
                     && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty)
                     && !self.arity_only_fns.contains(name)

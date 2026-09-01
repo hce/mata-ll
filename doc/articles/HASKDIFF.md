@@ -204,6 +204,14 @@ Lua are runtime internals, not source names.) For the familiar
 — the import must be qualified; a plain `import Data.Map` is rejected
 because its names clash with the Prelude.
 
+Keys are any `Hashable` type: the scalars, and structurally tuples,
+lists, and `Maybe` of hashables — `HashMap (Int, Int) v` (grids,
+coordinate caches) works. Structural keys are stored under a
+type-directed injective encoding, and `hmKeys`/`hmValues`/`hmToList`
+enumerate them in structural Ord order (scalar-keyed maps sort keys
+natively, as before). `Integer` keys remain rejected: the boxed bignum
+has table identity and no scalar encoding.
+
 ## No lazy I/O
 
 There is no `hGetContents`, `readFile` returning a lazy String, or

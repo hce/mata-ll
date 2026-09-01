@@ -1708,6 +1708,48 @@ impl CodeGen {
                     vec![],
                 )
             }
+            SpecKind::KeyEncList(elem) => {
+                let e_ref = self.lua_ref(elem);
+                let a0 = self.expr_ast(&args[0]);
+                Expr::call_named("__mll_key_list", vec![Expr::name(e_ref), a0])
+            }
+            SpecKind::KeyEncMaybe(elem) => {
+                let e_ref = self.lua_ref(elem);
+                let a0 = self.expr_ast(&args[0]);
+                Expr::call_named("__mll_key_maybe", vec![Expr::name(e_ref), a0])
+            }
+            SpecKind::KeyEncTuple(enc_fns) => {
+                // "(" .. e1(k[1]) .. "," .. e2(k[2]) .. … .. ")" — the
+                // TupleEq indexing discipline; the encoders force their own
+                // arguments.
+                let mut acc = Expr::lit("\"(\"");
+                for (i, enc_fn) in enc_fns.iter().enumerate() {
+                    let e_ref = self.lua_ref(enc_fn);
+                    let k = self.forced_prefix_ast(&args[0]);
+                    let call = Expr::call_named(
+                        &e_ref,
+                        vec![Expr::index(k, format!("[{}]", i + 1))],
+                    );
+                    if i > 0 {
+                        acc = Expr::binop("..", acc, Expr::lit("\",\""));
+                    }
+                    acc = Expr::binop("..", acc, call);
+                }
+                Expr::binop("..", acc, Expr::lit("\")\""))
+            }
+            SpecKind::HmOp { op, enc, cmp } => {
+                let suffix = op.strip_prefix("hm").expect("hm op name");
+                let runtime = format!("__mll_hme_{}{}",
+                    suffix[..1].to_lowercase(), &suffix[1..]);
+                let mut cargs = Vec::new();
+                if let Some(name) = enc.as_ref().or(cmp.as_ref()) {
+                    cargs.push(Expr::name(self.lua_ref(name)));
+                }
+                for a in args {
+                    cargs.push(self.expr_ast(a));
+                }
+                Expr::call_named(&runtime, cargs)
+            }
             SpecKind::OrdFromCmp { op, cmp } => {
                 // Ordering is its constructor index (LT=1, EQ=2, GT=3), so
                 // the four operators are integer tests on the compare
