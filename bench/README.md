@@ -31,7 +31,8 @@ Workloads:
 | arith_loop    | Int tail recursion — pure call/arith overhead floor   |
 | list_pipeline | lazy map/filter/foldl' vs a fused Lua loop            |
 | string_build  | mconcat string building vs table.concat               |
-| hm_churn      | persistent hmInsert/hmLookup/hmDelete vs table mutation |
+| hm_lookup     | hmLookup hammer on a static map vs table reads        |
+| hm_churn      | interleaved persistent insert/delete vs table mutation |
 | integer_arith | always-boxed Integer vs native numbers (small values) |
 | generics_json | derived ToJSON encoding vs handwritten concatenation  |
 | ioref_loop    | modifyIORef' in an IO loop vs a local-variable loop   |
@@ -41,16 +42,20 @@ min of 5; after the site-forced calling convention, the WHNF-return
 claim for direct calls, the closure-free IO self-loops, the
 mconcat@String builder, the HashMap strictness rows, and the
 closure-free thunk representation — the pre-round numbers were
-string_build 14.1/16.3, arith_loop 22.5/1.0, hm_churn 59/39,
-ioref 110/27, generics 148/54, list_pipeline 215/179,
-integer_arith 1436/717):
+string_build 14.1/16.3, arith_loop 22.5/1.0, ioref 110/27,
+generics 148/54, list_pipeline 215/179, integer_arith 1436/717, and
+the RETIRED original hm_churn 59/39, which bundled build + lookups +
+deletes and was 81% lookup wall time; it split into hm_lookup and a
+rebuilt hm_churn that actually churns, so their columns are not
+comparable to the old hm_churn number):
 
 | workload      | Lua 5.5 | LuaJIT  |
 |---------------|--------:|--------:|
 | arith_loop    |    3.1x |    1.0x |
 | ioref_loop    |   30.5x |    1.1x |
 | string_build  |    7.0x |    6.1x |
-| hm_churn      |   46.8x |    7.7x |
+| hm_lookup     |   44.0x |    6.4x |
 | generics_json |   64.1x |   44.6x |
 | list_pipeline |  161.9x |   62.4x |
 | integer_arith |  219.9x |  100.7x |
+| hm_churn      |  803.0x |  834.1x |

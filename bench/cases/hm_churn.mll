@@ -1,25 +1,20 @@
--- HashMap churn: build a 2000-key map by sequential insert, hammer it
--- with 1000000 lookups, then delete half the keys and count survivors.
--- hmInsert/hmDelete are persistent (full copy per operation), the twin
--- mutates one table in place — the ratio prices value semantics.
+-- HashMap churn — and this time the name is earned: every iteration
+-- inserts one key, deletes one key, and looks one up, over a map held
+-- near 500 entries. hmInsert/hmDelete are persistent (full copy per
+-- operation), the twin mutates one table in place — the ratio prices
+-- value semantics on WRITE turnover, with just enough lookup traffic
+-- to keep the result honest. The read path has its own benchmark now
+-- (hm_lookup); the original hm_churn was 81% lookups by wall time.
 module Main where
 
-build :: Int -> HashMap Int Int -> HashMap Int Int
-build 0 m = m
-build i m = build (i - 1) (hmInsert i (i * i) m)
-
-lookups :: Int -> Int -> HashMap Int Int -> Int
-lookups 0 acc _ = acc
-lookups i acc m = case hmLookup (i `mod` 2000 + 1) m of
-    Just v  -> lookups (i - 1) ((acc + v) `mod` 1000000007) m
-    Nothing -> lookups (i - 1) acc m
-
-deleteHalf :: Int -> HashMap Int Int -> HashMap Int Int
-deleteHalf 0 m = m
-deleteHalf i m = deleteHalf (i - 1) (hmDelete (i * 2) m)
+churn :: Int -> Int -> HashMap Int Int -> Int
+churn 0 acc m = (acc + hmSize m) `mod` 1000000007
+churn i acc m =
+    let m1 = hmInsert (i `mod` 500) (i * i) m
+        m2 = hmDelete ((i * 7) `mod` 500) m1
+    in case hmLookup ((i * 3) `mod` 500) m2 of
+        Just v  -> churn (i - 1) ((acc + v) `mod` 1000000007) m2
+        Nothing -> churn (i - 1) acc m2
 
 main :: IO ()
-main = do
-    let m = build 2000 hmEmpty
-    print (lookups 1000000 0 m)
-    print (hmSize (deleteHalf 1000 m))
+main = print (churn 30000 0 hmEmpty)

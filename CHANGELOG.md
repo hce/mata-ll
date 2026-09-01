@@ -41,10 +41,16 @@ API of the `mllc` library crate.)
   deliberately absent (single-threaded host, no weak-reference hook) —
   see HASKDIFF.
 
-- **A speed-of-light benchmark suite** (`bench/`): seven idiomatic
-  workloads, each timed against a handwritten-Lua twin that must print
+- **A speed-of-light benchmark suite** (`bench/`): idiomatic workloads,
+  each timed against a handwritten-Lua twin that must print
   byte-identical output; the mll/twin ratio per workload ranks
-  optimization work (baseline in `bench/README.md`).
+  optimization work (baseline in `bench/README.md`). The original
+  hm_churn mislabeled itself — measured, 81% of its wall time was a
+  million lookups against a static map — so it split into `hm_lookup`
+  (the read hammer) and a rebuilt `hm_churn` that actually churns
+  (interleaved persistent insert/delete): the split surfaced that
+  value-semantics write turnover really costs ~800x the mutating twin,
+  a number the old blend hid at 47x.
 
 ### Changed
 
