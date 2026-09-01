@@ -247,6 +247,21 @@ impl CodeGen {
                     }
                 }
             }
+            // A PARTIAL application covers only its spine positions. The
+            // remaining parameters are delivered later through the closure
+            // general_call_ast builds, which forwards its `_pa` parameters
+            // RAW — whoever calls the partial application (a runtime
+            // generic's element loop, a stored closure) passes lazy
+            // arguments this scan cannot see. Every uncovered position must
+            // therefore be judged thunked: with only the covered positions
+            // registered, one full call elsewhere with cheap arguments
+            // granted always-cheap on a position a partial application
+            // delivers a raw thunk to — the callee skipped its entry force
+            // and inspected the thunk table as a value (a native `==`
+            // against it returned false: a wrong RESULT, not a crash).
+            for i in args.len()..thunked.len() {
+                thunked[i] = true;
+            }
         }
     }
 
@@ -277,7 +292,15 @@ impl CodeGen {
                 let called = ever_called.get_mut(name.as_str()).unwrap();
                 if extra_pos < thunked.len() {
                     called[extra_pos] = true;
-                    thunked[extra_pos] = true;
+                }
+                // Poison every position from the hidden argument ON: when the
+                // operand's callee has parameters past extra_pos, the `$`/`.`
+                // result is a function value and any further application
+                // reaches those positions through closure forwarding this
+                // scan cannot see — the same raw-delivery door the partial-
+                // application rule in register_call_site closes.
+                for t in thunked.iter_mut().skip(extra_pos) {
+                    *t = true;
                 }
             }
     }

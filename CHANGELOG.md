@@ -86,6 +86,20 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A partial application no longer defeats the always-cheap parameter
+  judgment.** The whole-program call-site analysis lets a function skip
+  its entry `__force` when every visible call site passes a cheap
+  (never-thunked) argument — but a partial application only covers its
+  own spine positions, and the closure it builds forwards the remaining
+  parameters raw. One full call with cheap arguments plus one partial
+  application could therefore grant always-cheap on a position the
+  partial application later fed a thunk, and the callee then inspected
+  the thunk table as a value (`pb == "q"` was false for a thunk of
+  `"q"` — a wrong answer, not a crash). Call sites now mark every
+  position beyond their own spine as potentially thunked; the hidden
+  extra positions behind `$`/`.` get the same closure. Pinned by
+  `partial_app_uncovered_param` (GHC-goldened).
+
 - **Nil-represented values (`Nothing`, `[]`, `()`) stored under scalar
   `HashMap` keys no longer vanish.** `t[k] = nil` is Lua's delete, so
   `hmFromList [(7, Nothing)]` had size 0 and lookups missed. The scalar
