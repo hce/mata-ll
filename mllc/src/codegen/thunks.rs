@@ -56,6 +56,11 @@ impl CodeGen {
                     let lref = self.lua_ref(&sname);
                     if self.concrete_vars.contains(&sname) {
                         Expr::name(lref)
+                    } else if self.runtime_fn_ref(&sname) {
+                        // A runtime prelude function value — never a thunk
+                        // (see runtime_fn_ref); checked in refutation mode
+                        // like every other bare-read claim.
+                        self.claim_checked("__assert_whnf", Expr::name(lref))
                     } else {
                         Expr::force(Expr::name(lref))
                     }

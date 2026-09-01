@@ -328,6 +328,46 @@ pub(super) fn prelude_arity(lua_name: &str) -> Option<usize> {
     PRELUDE_ARITY.get(lua_name).copied()
 }
 
+/// Every prelude name bound to a plain Lua function value at the chunk's
+/// top level, READ OFF the runtime text like [`PRELUDE_ARITY`] — the
+/// `local function NAME(…)` definitions plus the `NAME = function(…)`
+/// assignments that fill a forward-declared local (the Integer core uses
+/// that form for its mutual recursion, so those names are absent from
+/// PRELUDE_ARITY's stricter scan).
+///
+/// The runtime chunk has fully run before any compiled code executes, so a
+/// reference to one of these names is a Lua function — not a thunk, not
+/// nil — and the Var emission arms skip the defensive `__force` on it
+/// (under `__assert_whnf` in refutation mode, which checks the claim at
+/// every read). Variadic definitions are fine here: the claim is about the
+/// VALUE of the name, not its arity.
+static RUNTIME_FN_NAMES: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut s = std::collections::HashSet::new();
+        for line in PRELUDE.lines() {
+            if let Some(rest) = line.strip_prefix("local function ") {
+                let Some((name, _)) = rest.split_once('(') else { continue };
+                if is_ident(name) {
+                    s.insert(name);
+                }
+            } else if let Some((name, rest)) = line.split_once(" = function") {
+                // Column-0 assignment form: `NAME = function(…)`. A name
+                // with a space, dot, or `local` prefix fails is_ident, so
+                // indented or field assignments never match.
+                if rest.starts_with('(') && is_ident(name) {
+                    s.insert(name);
+                }
+            }
+        }
+        s
+    });
+
+/// True when `lua_name` is bound to a plain Lua function value by the
+/// runtime prelude chunk. See [`RUNTIME_FN_NAMES`].
+pub(super) fn runtime_fn_name(lua_name: &str) -> bool {
+    RUNTIME_FN_NAMES.contains(lua_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

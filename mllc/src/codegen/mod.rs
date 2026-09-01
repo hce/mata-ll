@@ -454,6 +454,18 @@ impl CodeGen {
         self.local_vars.contains(&names::sanitize_name(name))
     }
 
+    /// True when a reference to sanitized name `sname` resolves to a runtime
+    /// prelude function value: no local binding and no `__mll_fn` slot claims
+    /// the name (so `lua_ref` returns the bare runtime name), and the prelude
+    /// chunk binds it to a plain Lua function (`runtime::runtime_fn_name`).
+    /// Such a reference can never be a thunk — the chunk has fully run before
+    /// compiled code executes — so the Var emission arms skip its `__force`.
+    fn runtime_fn_ref(&self, sname: &str) -> bool {
+        !self.local_vars.contains(sname)
+            && !self.fn_table.contains_key(sname)
+            && runtime::runtime_fn_name(sname)
+    }
+
     /// Resolve a sanitized name to its Lua reference.
     /// Forward-declared names use __mll_fn[N], others use the name directly.
     fn lua_ref(&self, lua_name: &str) -> String {
@@ -695,8 +707,12 @@ pub(crate) fn generate(
     out.push_str(&prelude);
     out.push('\n');
     out.push_str(whnf_glue);
-    let user_code_start = out.len();
+    // The biglit table is lowered runtime support, not module body: the
+    // published user_code_start contract (and the section-offset test) is
+    // that user code begins at the provenance header, so the table sits on
+    // the prelude side of the boundary.
     out.push_str(&big_lit_defs);
+    let user_code_start = out.len();
     let body_start = out.len();
     out.push_str(&body);
     Ok(GeneratedLua {

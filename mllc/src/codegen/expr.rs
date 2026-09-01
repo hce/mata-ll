@@ -96,6 +96,11 @@ impl CodeGen {
                             // every read, which is exactly where a wrong
                             // claim would miscompile.
                             self.claim_checked("__assert_whnf", Expr::name(lref))
+                        } else if self.runtime_fn_ref(&sname) {
+                            // A runtime prelude function value — never a
+                            // thunk (see runtime_fn_ref); same refutation
+                            // check as the concreteness claim above.
+                            self.claim_checked("__assert_whnf", Expr::name(lref))
                         } else {
                             Expr::force(Expr::name(lref))
                         };
@@ -125,6 +130,15 @@ impl CodeGen {
 
                 if let Some(e) = self.try_pure_app(func, arg) {
                     return e;
+                }
+
+                // An Integer literal (the typechecker's
+                // `fromInteger_Integer <lit>` conversion) reads its interned
+                // `__mll_biglit[N]` CAF instead of re-running the conversion
+                // at every evaluation — same pool, same soundness argument
+                // as the too-large-for-i64 literals (see literal_ast).
+                if let Some(s) = self.integer_lit_app(expr) {
+                    return self.big_lit_ref(&s);
                 }
 
                 let (f, args) = Self::collect_app_spine(func, arg);
@@ -374,6 +388,9 @@ impl CodeGen {
                 )
             }
             TExprKind::Let { binds, body } => {
+                if let Some(e) = self.try_let_seq_strict_ast(binds, body) {
+                    return e;
+                }
                 let scope = VarsSnapshot::capture(self);
                 // The let lowers to an IIFE — its own Lua function scope.
                 let spill = FnSpillScope::enter(self);
@@ -864,6 +881,96 @@ impl CodeGen {
                 Expr::call_named("__mll_opt", vec![v])
             }
         }
+    }
+
+    /// The strict-accumulator case of the Let arm, split out only to keep
+    /// `expr_ast_inner` readable: `let z = RHS in seq z REST` (prefix or
+    /// backtick `seq`) binds z EAGERLY and drops the seq.
+    ///
+    /// The general Let arm thunks a non-cheap RHS even when the body
+    /// demands it (strict_binding_ok requires is_cheap for demanded
+    /// bindings, because eagerizing an expensive RHS past OTHER computation
+    /// could surface a different bottom than GHC). This shape has no such
+    /// gap to cross: the body's first act is `seq z`, so evaluating the RHS
+    /// at binding time runs the same computation at the same point — bottom
+    /// identity is exact, only the thunk allocation, its closure, and the
+    /// immediate re-force disappear. This is the shape of every hand-strict
+    /// accumulator (`foldl'`, `acc' `seq` go …`), which made the thunk
+    /// build-then-force the hottest allocation in strict folds (and, as a
+    /// closure birth per element, a LuaJIT NYI-FNEW trace abort).
+    ///
+    /// Fires only when the binding group is exactly the one value binding
+    /// (no sibling assignment can run between the bind and the seq), the
+    /// binding is neither self-referencing (strict_binding_safe) nor a
+    /// first-class action (those must stay re-performable closures), the
+    /// body's `seq` is the prelude's (not locally shadowed, not the bound
+    /// name itself), and the forced variable IS the bound name.
+    fn try_let_seq_strict_ast(
+        &mut self,
+        binds: &[TLocalDef],
+        body: &TExpr,
+    ) -> Option<Expr> {
+        if binds.len() != 1 {
+            return None;
+        }
+        let b = &binds[0];
+        // The body-type guard keeps action-typed lets on the action-aware
+        // path: `let z = … in seq z (pure z)` terminates a bind chain, and
+        // lowering its `pure` through the plain expression walk loses the
+        // `__mll_pure` box — a returned `pure <function>` would then be
+        // mistaken for an action closure (caught by the tracker diff).
+        if !b.patterns.is_empty()
+            || Self::is_nullary_action_type(&b.body.ty)
+            || Self::is_nullary_action_type(&body.ty)
+            || !strict_binding_safe(binds, 0)
+            || b.name == "seq"
+            || self.is_local_shadowed("seq")
+        {
+            return None;
+        }
+        let mut bod = body;
+        while let TExprKind::Paren(p) = &bod.kind {
+            bod = p.as_ref();
+        }
+        let is_bound_var = |e: &TExpr| {
+            let mut v = e;
+            while let TExprKind::Paren(p) = &v.kind {
+                v = p.as_ref();
+            }
+            matches!(&v.kind, TExprKind::Var(n) if *n == b.name)
+        };
+        let rest = match &bod.kind {
+            TExprKind::InfixApp { op, lhs, rhs }
+                if op == "seq" && is_bound_var(lhs) => rhs.as_ref(),
+            TExprKind::App(f1, rest) => {
+                let TExprKind::App(f0, z) = &f1.kind else { return None };
+                let TExprKind::Var(sq) = &f0.kind else { return None };
+                if sq != "seq" || !is_bound_var(z) {
+                    return None;
+                }
+                rest.as_ref()
+            }
+            _ => return None,
+        };
+        let scope = VarsSnapshot::capture(self);
+        // Same IIFE scope discipline as the general Let arm.
+        let spill = FnSpillScope::enter(self);
+        let sname = sanitize_name(&b.name);
+        let mut stmts = self.declare_local_fwd_stmts(&sname);
+        let rhs = self.forced_ast(&b.body);
+        stmts.push(Stmt::Assign(self.local_lvalue(&sname), rhs));
+        // The binding holds a forced value from here on — every read in
+        // REST is bare (checked in refutation mode like any concreteness
+        // claim).
+        self.concrete_vars.insert(sname);
+        stmts.push(Stmt::Return(self.tail_ast(rest, false)));
+        let out = Expr::call(
+            Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(stmts)))),
+            vec![],
+        );
+        spill.exit(self);
+        scope.restore(self);
+        Some(out)
     }
 
     /// The record-accessor case of the App arm, split out only to keep

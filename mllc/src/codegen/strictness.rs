@@ -108,6 +108,14 @@ impl CodeGen {
     /// under this same rule (so WHNF-ness propagates transitively through a
     /// binding group).
     pub(super) fn is_cheap_to_force(&self, expr: &TExpr) -> bool {
+        // An Integer literal conversion emits as a read of its interned
+        // `__mll_biglit[N]` CAF (see integer_lit_app) — a table index of an
+        // immutable load-time value, as cheap and total as the literal it
+        // denotes. Top-level check only: a conversion nested deeper inside
+        // a non-cheap expression cannot rescue that expression anyway.
+        if self.integer_lit_app(expr).is_some() {
+            return true;
+        }
         Self::is_cheap_with(expr, &|name| {
             // Prelude `otherwise` is the literal `true` — unless a local
             // binder shadows it, in which case it is an ordinary (possibly
@@ -115,6 +123,43 @@ impl CodeGen {
             (name == "otherwise" && !self.is_local_shadowed(name))
                 || self.concrete_vars.contains(&sanitize_name(name))
         }) && !Self::contains_trapping_op(expr)
+    }
+
+    /// The decimal string of an Integer-literal conversion: `expr` (parens
+    /// stripped) is the typechecker's `fromInteger_Integer` applied to one
+    /// integer literal, and the name still refers to the runtime conversion
+    /// (no local binder or user definition has taken it — either would make
+    /// this an ordinary call whose eager evaluation could run user code).
+    /// Both the emission intercept (the biglit-pool read) and
+    /// `is_cheap_to_force` key on this one judgment.
+    pub(super) fn integer_lit_app(&self, expr: &TExpr) -> Option<String> {
+        let mut e = expr;
+        while let TExprKind::Paren(p) = &e.kind {
+            e = p.as_ref();
+        }
+        let TExprKind::App(func, arg) = &e.kind else { return None };
+        let mut f = func.as_ref();
+        while let TExprKind::Paren(p) = &f.kind {
+            f = p.as_ref();
+        }
+        let TExprKind::Var(name) = &f.kind else { return None };
+        if name != "fromInteger_Integer"
+            || self.is_local_shadowed(name)
+            || self.module_fn_names.contains(name.as_str())
+        {
+            return None;
+        }
+        let mut a = arg.as_ref();
+        while let TExprKind::Paren(p) = &a.kind {
+            a = p.as_ref();
+        }
+        match &a.kind {
+            TExprKind::Lit(TLiteral::Integer(n)) => Some(n.to_string()),
+            // Already pooled by literal_ast on its own, but routing the
+            // whole conversion through one slot skips the wrapper call too.
+            TExprKind::Lit(TLiteral::BigInteger(s)) => Some(s.clone()),
+            _ => None,
+        }
     }
 
     /// True when `expr` (already known to be structurally cheap) contains a

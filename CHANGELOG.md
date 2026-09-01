@@ -41,6 +41,28 @@ API of the `mllc` library crate.)
   deliberately absent (single-threaded host, no weak-reference hook) —
   see HASKDIFF.
 
+- **A speed-of-light benchmark suite** (`bench/`): seven idiomatic
+  workloads, each timed against a handwritten-Lua twin that must print
+  byte-identical output; the mll/twin ratio per workload ranks
+  optimization work (baseline in `bench/README.md`).
+
+### Changed
+
+- **Generated code allocates less and forces less on hot paths.** Four
+  measurement-driven codegen changes, semantics unchanged (all pinned by
+  the strictness-contract harness and the GHC goldens): references to
+  runtime-provided functions are no longer defensively `__force`d (they
+  can never be thunks); the strict-accumulator shape
+  `let z = e in z `seq` rest` binds `z` eagerly instead of allocating a
+  thunk it forces on the next line — this also removes the closure birth
+  that aborted LuaJIT traces in strict folds; the boxed-Integer runtime
+  ops carry per-argument strictness rows, so their call sites pass raw
+  expressions instead of argument thunks; and Integer literals intern
+  into the existing `__mll_biglit` constant pool instead of re-running
+  `fromInteger` at every evaluation. Measured on the bench suite:
+  integer_arith −14% wall time on Lua 5.5 and −31% under LuaJIT; smaller
+  wins for the list pipeline and strict folds generally.
+
 ### Fixed
 
 - **Nil-represented values (`Nothing`, `[]`, `()`) stored under scalar

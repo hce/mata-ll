@@ -37,14 +37,16 @@ Workloads:
 | ioref_loop    | modifyIORef' in an IO loop vs a local-variable loop   |
 
 Baseline ratios on the reference machine (2026-09-01, Apple Silicon,
-min of 3):
+min of 3; after the first perf-round codegen work — the pre-round
+numbers were string_build 14.1/16.3, hm_churn 59/39, ioref 110/27,
+generics 148/54, list_pipeline 215/179, integer_arith 1436/717):
 
 | workload      | Lua 5.5 | LuaJIT  |
 |---------------|--------:|--------:|
-| arith_loop    |   22.5x |    1.0x |
-| string_build  |   14.1x |   16.3x |
-| hm_churn      |   59.3x |   38.5x |
-| ioref_loop    |  109.9x |   26.8x |
-| generics_json |  147.5x |   54.4x |
-| list_pipeline |  215.1x |  178.7x |
-| integer_arith | 1436.1x |  716.5x |
+| arith_loop    |   21.5x |    1.0x |
+| string_build  |   14.2x |   16.7x |
+| hm_churn      |   55.5x |   38.1x |
+| ioref_loop    |  108.1x |   28.2x |
+| generics_json |  149.3x |   52.4x |
+| list_pipeline |  236.0x |  169.4x |
+| integer_arith | 1260.3x |  448.0x |

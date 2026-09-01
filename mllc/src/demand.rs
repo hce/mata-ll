@@ -191,6 +191,38 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("take", &[true, false]), // n always; the list NOT when n <= 0
     ("drop", &[true, true]),
     ("zipWith", &[true, true, true]),
+    // The boxed-Integer core (runtime_integer.lua). Every body forces every
+    // argument on every path before any arithmetic — a limb walk cannot go
+    // through a thunk — so call sites may pass raw expressions instead of
+    // arg thunks. Without these rows an Integer hot loop allocated a thunk
+    // plus closure per operand per operation (measured: the single largest
+    // cost in the integer_arith benchmark). The division family raises on a
+    // zero divisor only AFTER forcing both operands, so the mask holds on
+    // the error path too.
+    ("fromInteger_Integer", &[true]),
+    ("toInteger_Integer", &[true]),
+    ("toInteger_Int", &[true]),
+    ("negate_Integer", &[true]),
+    ("abs_Integer", &[true]),
+    ("signum_Integer", &[true]),
+    ("show_Integer", &[true]),
+    ("add_Integer", &[true, true]),
+    ("sub_Integer", &[true, true]),
+    ("mul_Integer", &[true, true]),
+    ("quot_Integer", &[true, true]),
+    ("rem_Integer", &[true, true]),
+    ("quotRem_Integer", &[true, true]),
+    ("div_Integer", &[true, true]),
+    ("mod_Integer", &[true, true]),
+    ("divMod_Integer", &[true, true]),
+    ("eq_Integer", &[true, true]),
+    ("ord_lt__Integer", &[true, true]),
+    ("ord_gt__Integer", &[true, true]),
+    ("ord_le__Integer", &[true, true]),
+    ("ord_ge__Integer", &[true, true]),
+    ("ord_max__Integer", &[true, true]),
+    ("ord_min__Integer", &[true, true]),
+    ("ord_compare__Integer", &[true, true]),
 ];
 
 /// Run demand analysis on a typed module with cross-function propagation.

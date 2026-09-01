@@ -75,6 +75,11 @@ const ILIST65: &str = "__mll_cons(65, nil)";
 const SLIST: &str = "__mll_cons(\"a\", nil)";
 const ARR: &str = "({7, 7})";
 const REF: &str = "setmetatable({0}, __mll_ioref_mt)";
+/// Boxed Integers, built by the runtime's own constructor (reachable —
+/// `fromInteger_Integer` is itself probed). 3 divides nothing sampled, so
+/// the division family's control calls stay off the zero-divisor error.
+const INTG: &str = "fromInteger_Integer(5)";
+const INTG2: &str = "fromInteger_Integer(3)";
 
 /// Probes for `STRICT_BUILTINS` and `RUNTIME_PRELUDE_STRICTNESS`.
 /// (`PRIMITIVE_BINOP_METHODS` probes are generated — all are 2-ary and
@@ -146,6 +151,32 @@ const PROBES: &[Probe] = &[
     probe("take", &["0", ILIST], &[Strict, Lazy]),
     probe("drop", &["1", ILIST], &[Strict, Strict]),
     probe("zipWith", &[ADD2, ILIST, ILIST], &[Strict, Strict, Strict]),
+    // --- the boxed-Integer core (strict in every position — a limb walk
+    // cannot go through a thunk; see the demand.rs block comment) ---
+    probe("fromInteger_Integer", &["5"], &[Strict]),
+    probe("toInteger_Integer", &[INTG], &[Strict]),
+    probe("toInteger_Int", &["5"], &[Strict]),
+    probe("negate_Integer", &[INTG], &[Strict]),
+    probe("abs_Integer", &[INTG], &[Strict]),
+    probe("signum_Integer", &[INTG], &[Strict]),
+    probe("show_Integer", &[INTG], &[Strict]),
+    probe("add_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("sub_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("mul_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("quot_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("rem_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("quotRem_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("div_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("mod_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("divMod_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("eq_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ord_lt__Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ord_gt__Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ord_le__Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ord_ge__Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ord_max__Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ord_min__Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ord_compare__Integer", &[INTG, INTG2], &[Strict, Strict]),
 ];
 
 /// `PRIMITIVE_BINOP_METHODS` entries with no reachable named fallback: the
@@ -268,6 +299,16 @@ main = do
   print (run2 mmB (bsFromString "a") (bsFromString "b"))
   putStrLn (deep 2 (7 :: Int))
   putStrLn (deepM 2 (7 :: Int))
+  -- Reach every boxed-Integer runtime body (the Integer ops have no
+  -- inline form, so each use below emits the named function).
+  let gi = (1234567890123 :: Integer)
+  print (gi + 2 * gi - abs gi + signum gi + negate gi)
+  print (gi `div` 3, gi `mod` 3, gi `quot` 3, gi `rem` 3)
+  print (divMod gi 3)
+  print (quotRem gi 3)
+  print (toInteger gi + toInteger (5 :: Int))
+  print (gi == gi, gi < gi, gi > gi, gi <= gi, gi >= gi)
+  print (max gi gi, min gi gi, compare gi gi)
 "#;
 
 /// One position's probe: `args` with a fresh bomb spliced at `bomb_at`.
