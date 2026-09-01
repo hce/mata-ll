@@ -571,6 +571,48 @@ impl CodeGen {
     /// When `inside_action` is true, terminal IO expressions are performed
     /// (called with `()`) because we're inside a do-block action closure.
     /// When false (regular function body), IO actions are returned as-is.
+    /// `modifyIORef' r (\v -> E)` in DISCARDED statement position: emit the
+    /// runtime helper's own steps flat — read the cell, bind the raw
+    /// payload, write back the forced body — with the lambda body spliced
+    /// in place, so no argument closure is allocated per execution. Inside
+    /// a converted IO self-loop that closure was the last per-iteration
+    /// allocation (a LuaJIT FNEW trace breaker). Semantics are exactly
+    /// `__mll_ioref_modify_strict`'s: the payload local stays
+    /// NON-concrete (modify' hands the function the raw thunk-or-value,
+    /// and the body's uses force it), and the stored result is forced to
+    /// WHNF. The `do … end` scope keeps the spliced names from shadowing
+    /// later statements; `__mll_mc` cannot collide with user locals (the
+    /// `__mll_` namespace is reserved by the name-collision check).
+    fn try_fused_ioref_modify_stmts(&mut self, expr: &TExpr) -> Option<Vec<Stmt>> {
+        let (fused, fargs) = Self::st_intrinsic_fused(expr)?;
+        if fused != "__mll_ioref_modify_strict" || fargs.len() != 2 {
+            return None;
+        }
+        let mut f = fargs[1];
+        while let TExprKind::Paren(inner) = &f.kind {
+            f = inner.as_ref();
+        }
+        let TExprKind::Lambda { params, body } = &f.kind else { return None };
+        if params.len() != 1 {
+            return None;
+        }
+        let vname = sanitize_name(&params[0].0);
+        let saved_rd = std::mem::replace(
+            &mut self.cur_result_demand, crate::demand::Demand::Head);
+        let cell = self.forced_ast(fargs[0]);
+        let scope = VarsSnapshot::capture(self);
+        self.local_vars.insert(vname.clone());
+        self.concrete_vars.remove(&vname);
+        let rhs = self.forced_ast(body);
+        scope.restore(self);
+        self.cur_result_demand = saved_rd;
+        Some(vec![Stmt::Do(Block(vec![
+            Stmt::Local(vec!["__mll_mc".into()], Some(cell)),
+            Stmt::Local(vec![vname], Some(Expr::index(Expr::name("__mll_mc"), "[1]"))),
+            Stmt::Assign("__mll_mc[1]".into(), rhs),
+        ]))])
+    }
+
     pub(super) fn bind_chain_block(&mut self, expr: &TExpr, inside_action: bool) -> Block {
         // Iterative loop for right-spine bind chains to avoid stack overflow
         // on deeply nested do-blocks. Only recurses for non-spine children
@@ -611,11 +653,15 @@ impl CodeGen {
                                 TExprKind::App(func, _) if matches!(&func.kind,
                                     TExprKind::Var(n) if n == "pure" || n == "return"));
                             if !is_pure_discard {
-                                let saved_rd = std::mem::replace(
-                                    &mut self.cur_result_demand, crate::demand::Demand::Head);
-                                let action = self.action_run_ast(lhs_unwrapped, true);
-                                self.cur_result_demand = saved_rd;
-                                stmts.push(Stmt::Expr(action));
+                                if let Some(mut fused) = self.try_fused_ioref_modify_stmts(lhs_unwrapped) {
+                                    stmts.append(&mut fused);
+                                } else {
+                                    let saved_rd = std::mem::replace(
+                                        &mut self.cur_result_demand, crate::demand::Demand::Head);
+                                    let action = self.action_run_ast(lhs_unwrapped, true);
+                                    self.cur_result_demand = saved_rd;
+                                    stmts.push(Stmt::Expr(action));
+                                }
                             }
                             expr = body;
                             inside_action = true;
@@ -660,11 +706,15 @@ impl CodeGen {
                         // used: identical forcing/effect behaviour, and it
                         // skips the consuming runner's unbox of a result
                         // nobody looks at.
-                        let saved_rd = std::mem::replace(
-                            &mut self.cur_result_demand, crate::demand::Demand::Head);
-                        let action = self.action_run_ast(lhs_unwrapped, true);
-                        self.cur_result_demand = saved_rd;
-                        stmts.push(Stmt::Expr(action));
+                        if let Some(mut fused) = self.try_fused_ioref_modify_stmts(lhs_unwrapped) {
+                            stmts.append(&mut fused);
+                        } else {
+                            let saved_rd = std::mem::replace(
+                                &mut self.cur_result_demand, crate::demand::Demand::Head);
+                            let action = self.action_run_ast(lhs_unwrapped, true);
+                            self.cur_result_demand = saved_rd;
+                            stmts.push(Stmt::Expr(action));
+                        }
                     }
                     expr = rhs;
                     inside_action = true;

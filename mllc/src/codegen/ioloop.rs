@@ -283,6 +283,13 @@ fn repeat_safe_expr(e: &Expr) -> bool {
                 // (or thunk object) the first run memoized into the shared
                 // cell, so both runs observe identical results and sharing.
                 "__force" | "__mll_head" | "__mll_tail" | "__mll_tail_lazy"
+                    // The numeric-literal pattern comparison: one idempotent
+                    // force, then a pure read-only compare (__int_cmp walks
+                    // immutable Integer limb tables; the literal lift
+                    // allocates a fresh pure value). An Int-typed `go r 0`
+                    // dispatch emits this, and its absence here declined
+                    // the whole conversion for every such loop (ioref_loop).
+                    | "__mll_lit_eq"
                     // Pure allocators and inspectors.
                     | "__thunk" | "__mll_cons" | "__mll_lazy_cons" | "__mll_pure"
                     | "getmetatable" | "type" | "error"

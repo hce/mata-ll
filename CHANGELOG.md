@@ -98,6 +98,19 @@ API of the `mllc` library crate.)
   through a runtime helper, a dictionary method table) and
   user-operator infix call sites.
 
+- **IO self-loops over IORefs run closure-free.** Two changes: the IO
+  self-loop conversion's repeat-safe vocabulary now admits
+  `__mll_lit_eq` (the numeric-literal pattern comparison — one
+  idempotent force plus a pure compare), whose absence declined the
+  conversion for every `go r 0 = …` loop; and a discarded
+  `modifyIORef' r (\v -> e)` statement splices the lambda body into
+  the read-compute-write sequence instead of allocating the argument
+  closure — the loop's last per-iteration allocation. ioref_loop under
+  LuaJIT drops from 22x to **1.1x** the handwritten twin (the trace
+  compiles end to end; 27x before the round), and Lua 5.5 from 90x to
+  31x (−66% wall). Pinned by the GHC-goldened ioref cases, which hit
+  the spliced path throughout.
+
 - **The boxed-Integer ops take small-magnitude fast paths.** When both
   operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
   and box the result, skipping the limb walks — divmod's bit-by-bit
