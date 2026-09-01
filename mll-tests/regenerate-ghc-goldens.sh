@@ -91,6 +91,7 @@ excluded_reason() {
         cases/string_escapes)            echo "imports LString (Lua string FFI)";;
         cases/export_module)             echo "'export' keyword (Lua module export)";;
         cases/lib_data_map)              echo "mata-ll Data.Map API (values/mapPairs/...) is its own library, not containers";;
+        cases/lib_data_set)              echo "mata-ll Data.Set/Data.Map API is its own library, not containers";;
         ghc/ghc_regr005)                 echo "HashMap builtins (Lua tables)";;
 
         # -- linear types: same surface syntax, different core discipline -----

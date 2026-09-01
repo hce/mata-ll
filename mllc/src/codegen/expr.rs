@@ -1739,7 +1739,12 @@ impl CodeGen {
             }
             SpecKind::HmOp { op, enc, cmp } => {
                 let suffix = op.strip_prefix("hm").expect("hm op name");
-                let runtime = format!("__mll_hme_{}{}",
+                // enc and cmp both None marks the runtime-dispatching dyn
+                // family (a still-polymorphic key type); the static
+                // families thread their encoder or comparator.
+                let dyn_ = enc.is_none() && cmp.is_none();
+                let runtime = format!("__mll_hm{}_{}{}",
+                    if dyn_ { "_dyn" } else { "e" },
                     suffix[..1].to_lowercase(), &suffix[1..]);
                 let mut cargs = Vec::new();
                 if let Some(name) = enc.as_ref().or(cmp.as_ref()) {

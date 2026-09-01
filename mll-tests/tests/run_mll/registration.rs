@@ -659,6 +659,8 @@ mll_lib_test!(ffi_constructed_values, "ffi_constructed_values.mll");
 // The rejection side (leak / use-after-close) is in the
 // linear_rejects_liolinear_* tests below.
 mll_lib_test!(lib_liolinear, "lib_liolinear.mll");
+// A20: Data.Set + Data.Map ordered enumeration and additions.
+mll_lib_test!(lib_data_set, "lib_data_set.mll");
 
 /// Mirror of `ghc_oracle_registry_is_complete` for the runnable-case lists:
 /// every .mll file under tests/cases/ must be registered via `mll_test!` or

@@ -192,10 +192,16 @@ one form it does *not* support is an unqualified rename: `import Module as M`
 without `qualified` is a parse error. Names from a plain (non-qualified)
 import go directly into scope.
 
-## HashMap instead of Data.Map
+## HashMap, Data.Map, and Data.Set
 
-There is no ordered `Map` type. Use `HashMap k v`, which is backed by
-Lua tables. The API uses standalone builtin functions (`hmLookup`,
+`HashMap k v` is the primitive, backed by Lua tables — and since the
+enumerating operations sort (scalars natively, structural keys by the
+structural `compare`), `Data.Map` over it is ORDERED: `M.toList`,
+`M.keys`, `M.elems` come back in ascending key order, and `Data.Set`
+(`import qualified Data.Set as S`) does the same for elements. Both are
+mata-ll's own libraries with containers-compatible names — not GHC's
+containers, and with wrapper complexity (enumeration sorts, O(n log n);
+per-key operations are hash lookups). `HashMap` itself: The API uses standalone builtin functions (`hmLookup`,
 `hmInsert`, `hmFromList`, `hmMember`, etc.) rather than a
 typeclass-based interface. (The `hashmap_*` names visible in emitted
 Lua are runtime internals, not source names.) For the familiar

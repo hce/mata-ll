@@ -48,6 +48,7 @@ cases/json_codec	JSON FFI library
 cases/lbit_64bit_boundary	LBit (Lua bit-op semantics, deliberately not Data.Bits)
 cases/lbit_strict_primitive_arg	LBit (Lua bit-op semantics)
 cases/lib_data_map	mata-ll Data.Map API (values/mapPairs/...) is its own library, not containers
+cases/lib_data_set	mata-ll Data.Set/Data.Map API is its own library, not containers
 cases/lib_json	JSON FFI library
 cases/lib_lbit	LBit (Lua bit-op semantics)
 cases/lib_liolinear	LIOLinear file FFI + linear types

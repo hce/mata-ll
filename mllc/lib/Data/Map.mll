@@ -6,6 +6,7 @@ module Data.Map
     , map, filter, foldlWithKey, foldrWithKey
     , union, intersection, difference
     , null
+    , elems, findWithDefault, insertWith, adjust
     ) where
 
 -- Data.Map is backed by the HashMap FFI type.
@@ -33,31 +34,31 @@ singleton :: Hashable k => k -> v -> Map k v
 singleton k v = hmInsert k v hmEmpty
 
 insert :: Hashable k => k -> v -> Map k v -> Map k v
-insert = hmInsert
+insert k v m = hmInsert k v m
 
 delete :: Hashable k => k -> Map k v -> Map k v
-delete = hmDelete
+delete k m = hmDelete k m
 
 lookup :: Hashable k => k -> Map k v -> Maybe v
-lookup = hmLookup
+lookup k m = hmLookup k m
 
 member :: Hashable k => k -> Map k v -> Bool
-member = hmMember
+member k m = hmMember k m
 
 size :: Map k v -> Int
 size = hmSize
 
 keys :: Map k v -> [k]
-keys = hmKeys
+keys m = hmKeys m
 
 values :: Map k v -> [v]
-values = hmValues
+values m = hmValues m
 
 toList :: Map k v -> [(k, v)]
-toList = hmToList
+toList m = hmToList m
 
 fromList :: Hashable k => [(k, v)] -> Map k v
-fromList = hmFromList
+fromList kvs = hmFromList kvs
 
 map :: Hashable k => (v -> w) -> Map k v -> Map k w
 map f m = fromList (mapPairs f (toList m))
@@ -113,3 +114,22 @@ dropMember m ((k, v):rest) = if member k m then dropMember m rest else (k, v) : 
 
 null :: Map k v -> Bool
 null m = size m == 0
+
+-- containers-compatible additions (A20).
+elems :: Map k v -> [v]
+elems = values
+
+findWithDefault :: Hashable k => v -> k -> Map k v -> v
+findWithDefault d k m = case lookup k m of
+    Nothing -> d
+    Just v  -> v
+
+insertWith :: Hashable k => (v -> v -> v) -> k -> v -> Map k v -> Map k v
+insertWith f k v m = case lookup k m of
+    Nothing  -> insert k v m
+    Just old -> insert k (f v old) m
+
+adjust :: Hashable k => (v -> v) -> k -> Map k v -> Map k v
+adjust f k m = case lookup k m of
+    Nothing -> m
+    Just v  -> insert k (f v) m

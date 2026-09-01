@@ -1533,6 +1533,8 @@ local function __mll_hme_sorted(cmp, m) m = __force(m); local es = {} for _, e i
 local function __mll_hme_keys(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][1], r) end return r end
 local function __mll_hme_values(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][2], r) end return r end
 local function __mll_hme_toList(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons({es[i][1], es[i][2]}, r) end return r end
+
+
 local function hashmap_toList(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons({ks[i], m[ks[i]]}, r) end return r end
 
 -- Specialized list show: uses a typed element show function
@@ -1554,12 +1556,28 @@ local function __mll_maybe_eq(elem_eq, a, b)
 end
 local function __mll_cmp(a, b)
     -- Type-erased Ordering fallback (the compare analog of __mll_eq): the
-    -- last resort at a genuinely polymorphic element position inside a
-    -- polymorphic derived body. Numbers and strings order natively;
-    -- booleans get False < True by hand (Lua cannot `<` them). The result
-    -- is the Ordering constructor index: LT=1, EQ=2, GT=3.
+    -- last resort at a genuinely polymorphic position. Numbers and strings
+    -- order natively; booleans get False < True by hand (Lua cannot `<`
+    -- them); nil (an erased Nothing) sorts first, GHC's Maybe order; and
+    -- TABLES (erased tuples, cons cells, Just wrappers) compare
+    -- lexicographically over their numeric slots, nil-aware — shorter
+    -- list first, Nothing before Just, exactly the structural compares.
+    -- The result is the Ordering constructor index: LT=1, EQ=2, GT=3.
     a = __force(a); b = __force(b)
     if a == b then return 2 end
+    if a == nil then return 1 end
+    if b == nil then return 3 end
+    if type(a) == "table" and type(b) == "table" then
+        local na, nb = 0, 0
+        for j in pairs(a) do if type(j) == "number" and j > na then na = j end end
+        for j in pairs(b) do if type(j) == "number" and j > nb then nb = j end end
+        local n = na > nb and na or nb
+        for i = 1, n do
+            local c = __mll_cmp(a[i], b[i])
+            if c ~= 2 then return c end
+        end
+        return 2
+    end
     if a == false then return 1 end
     if b == false then return 3 end
     if a < b then return 1 end
@@ -1587,6 +1605,44 @@ local function __mll_maybe_cmp(elem_cmp, a, b)
     if b == nil then return 3 end
     return elem_cmp(a[1], b[1])
 end
+
+-- (Placed AFTER __mll_cmp: these close over it, and a Lua local must be
+-- declared before its reader or the reference silently compiles as a nil
+-- global — the show_HashMap ordering lesson.)
+-- Runtime-dispatching hm variants for a POLYMORPHIC key type: a generic
+-- Hashable-constrained body (Data.Map/Data.Set wrappers) serves every key
+-- type through one copy, so the flavor decision moves to runtime. A scalar
+-- key takes the scalar path byte-for-byte (so maps built here interoperate
+-- with statically-specialized accessors); a table or nil key (an erased
+-- structural key, or Nothing) takes the encoded-entry path with the
+-- type-erased encoder below. One key type never mixes the two.
+local function __mll_key_dyn(k)
+    k = __force(k)
+    if k == nil then return "N" end
+    if type(k) == "table" then
+        local n = 0
+        for j in pairs(k) do if type(j) == "number" and j > n then n = j end end
+        local parts = {}
+        for i = 1, n do
+            local e = k[i]
+            if e == nil then parts[#parts+1] = "N" else parts[#parts+1] = __mll_key_dyn(e) end
+        end
+        return "(" .. table.concat(parts, ",") .. ")"
+    end
+    return __mll_key_scalar(k)
+end
+local function __mll_hm_dyn_enc(k)
+    k = __force(k)
+    return k == nil or type(k) == "table"
+end
+local function __mll_hm_dyn_insert(k, v, m) if __mll_hm_dyn_enc(k) then return __mll_hme_insert(__mll_key_dyn, k, v, m) end return hashmap_insert(k, v, m) end
+local function __mll_hm_dyn_lookup(k, m) if __mll_hm_dyn_enc(k) then return __mll_hme_lookup(__mll_key_dyn, k, m) end return hashmap_lookup(k, m) end
+local function __mll_hm_dyn_delete(k, m) if __mll_hm_dyn_enc(k) then return __mll_hme_delete(__mll_key_dyn, k, m) end return hashmap_delete(k, m) end
+local function __mll_hm_dyn_member(k, m) if __mll_hm_dyn_enc(k) then return __mll_hme_member(__mll_key_dyn, k, m) end return hashmap_member(k, m) end
+local function __mll_hm_dyn_fromList(xs) local x = __force(xs) if x == nil then return hashmap_empty end local p = __force(__mll_head(x)) if __mll_hm_dyn_enc(p[1]) then return __mll_hme_fromList(__mll_key_dyn, xs) end return hashmap_fromList(xs) end
+local function __mll_hm_dyn_keys(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_keys(__mll_cmp, m) end return hashmap_keys(m) end
+local function __mll_hm_dyn_values(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_values(__mll_cmp, m) end return hashmap_values(m) end
+local function __mll_hm_dyn_toList(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_toList(__mll_cmp, m) end return hashmap_toList(m) end
 local function __mll_show_maybe(elem_show, x)
     -- Type-directed Maybe show. `Nothing` is nil; `Just p` is a tagged wrapper
     -- whose payload is field [1] (itself possibly nil, e.g. `Just Nothing`), so

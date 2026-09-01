@@ -777,6 +777,11 @@ impl Monomorphizer {
     fn elem_key_enc(&mut self, ty: &Ty) -> String {
         if Self::is_structural_key(ty) {
             self.structural_key_enc(ty)
+        } else if matches!(ty, Ty::Var(_)) {
+            // An ERASED element may be a table (a nested structural value)
+            // or nil (Nothing) at run time; the dyn encoder handles every
+            // shape, where the scalar one would format a table.
+            "__mll_key_dyn".to_string()
         } else {
             "__mll_key_scalar".to_string()
         }
@@ -805,15 +810,18 @@ impl Monomorphizer {
             Ok(existing) => return existing,
             Err(fresh) => fresh,
         };
-        let enc = if matches!(op, "hmKeys" | "hmValues" | "hmToList") {
-            None
+        // A still-polymorphic key (a generic Hashable-constrained body —
+        // the Data.Map/Data.Set wrappers — whose one copy serves every key
+        // type) threads NOTHING: enc and cmp both None marks the wrapper
+        // as the runtime-dispatching __mll_hm_dyn_* family, which decides
+        // the flavor per key at run time and stays layout-compatible with
+        // both static paths.
+        let (enc, cmp) = if matches!(key_ty, Ty::Var(_)) {
+            (None, None)
+        } else if matches!(op, "hmKeys" | "hmValues" | "hmToList") {
+            (None, self.structural_ord_impl("compare", key_ty))
         } else {
-            Some(self.structural_key_enc(key_ty))
-        };
-        let cmp = if enc.is_none() {
-            self.structural_ord_impl("compare", key_ty)
-        } else {
-            None
+            (Some(self.structural_key_enc(key_ty)), None)
         };
         // Parameter types come from peeling the instantiated arrows — hm
         // signatures are heterogeneous, so synthetic_spec_fn's same-type
@@ -1452,7 +1460,8 @@ impl Monomorphizer {
                 if !self.locals.contains(name)
                     && let Some(op) = Self::hm_key_op(name)
                     && let Some(key_ty) = Self::hm_key_type(op, &ty)
-                    && Self::is_structural_key(&key_ty) {
+                    && (Self::is_structural_key(&key_ty)
+                        || matches!(key_ty, Ty::Var(_))) {
                         let mangled = self.hm_threaded_impl(op, &key_ty, &ty);
                         return TExpr { kind: TExprKind::Var(mangled), ty };
                     }
