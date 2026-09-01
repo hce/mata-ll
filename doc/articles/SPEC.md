@@ -939,7 +939,8 @@ Rejected — a compile-time error naming the binder, the position and the
 direction — is anything else: a plain `data` ADT with no designed shape
 (above), a bare polymorphic type variable (Lua has no representation for
 a polymorphic value), a class-constrained type (a dictionary cannot
-cross), a region-scoped `ST`/`STArray`/`STRef` handle, an `IO`/`LuaIO`
+cross), a region-scoped `ST`/`STArray` handle, an `IORef` cell (it
+holds a mata-ll value, possibly unevaluated), an `IO`/`LuaIO`
 action in ARGUMENT position (a Lua caller cannot supply an action; only
 a top-level callback returning `LuaIO` may carry an effect inward), and
 a function in any non-top-level-argument position. The one designed
@@ -1652,7 +1653,7 @@ wrapper that performs the action when the host calls it, and a value
 export is marshalled to Lua as its forced value, by the same
 type-directed conversion a function result uses. An export whose
 signature uses a type the marshaller cannot move — a polymorphic or
-class-constrained type, an ST/STArray/STRef handle, an IO/LuaIO
+class-constrained type, an ST/STArray handle, an IORef cell, an IO/LuaIO
 action in argument position, or a function anywhere but a direct
 top-level `(A -> LuaIO s R)` argument — is rejected at compile time
 (see "Boundaries between standard Lua and MATA-LL" for the full
@@ -1674,6 +1675,38 @@ It uses the same rank-2 scope-sealing technique as `LuaIO s`:
 
 `ST s` is the same runtime as IO but with a type-level distinction.
 The `forall s.` in `runST` prevents mutable state from escaping.
+
+# IORef (mutable IO cells)
+
+`IORef a` is GHC's plain mutable cell, imported as `Data.IORef`:
+
+    newIORef     :: a -> IO (IORef a)
+    readIORef    :: IORef a -> IO a
+    writeIORef   :: IORef a -> a -> IO ()
+    modifyIORef  :: IORef a -> (a -> a) -> IO ()
+    modifyIORef' :: IORef a -> (a -> a) -> IO ()
+
+Unlike `STArray` it is polymorphic in the element and not
+region-scoped: a ref is an ordinary first-class value, and its
+operations live in `IO` (use `liftIO` from a `LuaIO` context). The
+runtime representation is one tagged Lua table slot, so a read or
+write in a do-block compiles to a bare table index.
+
+Laziness follows GHC exactly. `newIORef` and `writeIORef` don't
+force the value; `modifyIORef` stores the unevaluated `f old`
+(GHC's `read >>= write . f` — the classic space-leak shape, so
+prefer `modifyIORef'` for counters and accumulators); `modifyIORef'`
+forces the new value to WHNF before storing. A value read back with
+`readIORef` shares its suspension with the cell, so forcing either
+memoizes both — the same sharing GHC gives.
+
+`instance Eq (IORef a)` is pointer identity, as in GHC: two refs
+are `==` exactly when they are the same cell, whatever they hold,
+and the instance demands nothing of the element type. There is no
+`Show`, `Ord`, or `Hashable` instance, and a ref cannot cross the
+FFI boundary in either direction (read the value out and pass
+that). The `atomicModifyIORef`/`atomicWriteIORef`/`mkWeakIORef`
+family is absent — see HASKDIFF.
 
 # ByteString
 
@@ -1950,11 +1983,13 @@ operations use `LString` or `ByteString`.
 Not supported. Single-parameter typeclasses cover the needed use
 cases for the Lua target.
 
-### IORef, MVar, STRef
+### MVar, STRef
 
-Lua has no preemptive threading, so concurrent mutable state
-primitives serve no purpose. `STArray` covers the scoped mutation
-use case.
+`MVar` is a concurrency primitive and Lua has no preemptive
+threading. `STRef` adds nothing over `IORef` in a single-threaded
+runtime except `runST`'s purity seal; the scoped-mutation hot path
+is `STArray`, and the general mutable cell is `IORef` (which, unlike
+these two, IS provided — see "IORef (mutable IO cells)").
 
 # Known limitations
 

@@ -74,6 +74,7 @@ const ILIST: &str = "__mll_cons(1, nil)";
 const ILIST65: &str = "__mll_cons(65, nil)";
 const SLIST: &str = "__mll_cons(\"a\", nil)";
 const ARR: &str = "({7, 7})";
+const REF: &str = "setmetatable({0}, __mll_ioref_mt)";
 
 /// Probes for `STRICT_BUILTINS` and `RUNTIME_PRELUDE_STRICTNESS`.
 /// (`PRIMITIVE_BINOP_METHODS` probes are generated — all are 2-ary and
@@ -108,6 +109,16 @@ const PROBES: &[Probe] = &[
     st_probe("stArrayLength", &[ARR], &[Strict]),
     st_probe("newSTArrayFromList", &[ILIST], &[Strict]),
     st_probe("stArrayToList", &[ARR], &[Strict]),
+    // --- first-class IORef closures (built, then run) ---
+    // The value positions are Lazy on EVERY path — GHC parity (writeIORef
+    // doesn't force the value, modifyIORef stores the suspension), unlike
+    // the ST array ops' ForcedOnRun deviation. modifyIORef' calls f on the
+    // run and forces its result, hence Strict in f.
+    st_probe("newIORef", &["0"], &[Lazy]),
+    st_probe("readIORef", &[REF], &[Strict]),
+    st_probe("writeIORef", &[REF, "0"], &[Strict, Lazy]),
+    st_probe("modifyIORef", &[REF, IDF], &[Strict, Lazy]),
+    st_probe("modifyIORef'", &[REF, IDF], &[Strict, Strict]),
     // --- runtime-implemented prelude functions ---
     probe("show", &["1"], &[Strict]),
     probe("show_Int", &["1"], &[Strict]),
@@ -169,6 +180,9 @@ module Main where
 once :: ST s a -> ST s a
 once a = a
 
+onceIO :: IO a -> IO a
+onceIO a = a
+
 run2 :: [a -> a -> b] -> a -> a -> [b]
 run2 fs x y = map (\f -> f x y) fs
 
@@ -220,6 +234,12 @@ main = do
     arr2 <- once (newSTArrayFromList [1, 2, 3 :: Int])
     l <- once (stArrayToList arr2)
     pure (x + n + length l)))
+  ref <- onceIO (newIORef (0 :: Int))
+  onceIO (writeIORef ref 1)
+  onceIO (modifyIORef ref (+ 1))
+  onceIO (modifyIORef' ref (+ 1))
+  rv <- onceIO (readIORef ref)
+  print rv
   print (1 :: Int)
   print (1.5 :: Number)
   print "s"

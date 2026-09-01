@@ -29,6 +29,28 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Added
+
+- **`Data.IORef`** — GHC's plain mutable IO cell: `newIORef`, `readIORef`,
+  `writeIORef`, `modifyIORef`, `modifyIORef'`, with GHC's exact laziness
+  (writes don't force the value; `modifyIORef` stores the unevaluated
+  `f old`; `modifyIORef'` forces to WHNF) and `instance Eq (IORef a)` as
+  pointer identity. Polymorphic in the element, not region-scoped; in
+  run-once do-block position the operations compile to bare Lua table
+  reads/writes. The `atomicModifyIORef`/`mkWeakIORef` family is
+  deliberately absent (single-threaded host, no weak-reference hook) —
+  see HASKDIFF.
+
+### Fixed
+
+- **Nil-represented values (`Nothing`, `[]`, `()`) stored under scalar
+  `HashMap` keys no longer vanish.** `t[k] = nil` is Lua's delete, so
+  `hmFromList [(7, Nothing)]` had size 0 and lookups missed. The scalar
+  path now boxes nil values behind a runtime sentinel on every write and
+  unwraps on every read, on both FFI marshalling directions too.
+  Structural (encoded) keys were unaffected. Found by the grown backend
+  fuzzer on its first run.
+
 ## [0.1.7] - 2026-08-28
 
 ### Added

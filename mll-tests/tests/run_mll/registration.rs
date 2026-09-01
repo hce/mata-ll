@@ -491,6 +491,10 @@ mll_test!(hashmap_structural_keys, "hashmap_structural_keys.mll");
 mll_test!(hashmap_nil_values, "hashmap_nil_values.mll");
 // A18: Foldable/Traversable-generic Prelude functions.
 mll_test!(foldable_generic, "foldable_generic.mll");
+// Data.IORef: basics + pointer-identity Eq, and GHC laziness parity
+// (lazy writes, suspended modifyIORef, WHNF-only modifyIORef').
+mll_test!(ioref_basic, "ioref_basic.mll");
+mll_test!(ioref_laziness, "ioref_laziness.mll");
 // A19: where-binding generalization.
 mll_test!(where_polymorphism, "where_polymorphism.mll");
 

@@ -338,6 +338,28 @@ impl Checker {
         self.env_scheme("stArrayToList", vec![s.clone()],
             Ty::arrow(sta_s.clone(), st_s(Ty::list(int.clone()))));
 
+        // IORef a — plain mutable state in IO (Data.IORef). Unlike STArray
+        // it is polymorphic in the element and NOT region-scoped: the ref is
+        // an ordinary first-class value whose ops live in IO. Laziness is
+        // GHC's: writeIORef doesn't force the value, modifyIORef stores the
+        // unevaluated `f old`, modifyIORef' forces the new value to WHNF.
+        let ioref = |inner: Ty| Ty::app(Ty::Con("IORef".into()), inner);
+        // newIORef :: a -> IO (IORef a)
+        self.env_scheme("newIORef", vec![a.clone()],
+            Ty::arrow(ta.clone(), Ty::io(ioref(ta.clone()))));
+        // readIORef :: IORef a -> IO a
+        self.env_scheme("readIORef", vec![a.clone()],
+            Ty::arrow(ioref(ta.clone()), Ty::io(ta.clone())));
+        // writeIORef :: IORef a -> a -> IO ()
+        self.env_scheme("writeIORef", vec![a.clone()],
+            Ty::fun(&[ioref(ta.clone()), ta.clone()], Ty::io(Ty::Unit)));
+        // modifyIORef :: IORef a -> (a -> a) -> IO ()
+        self.env_scheme("modifyIORef", vec![a.clone()],
+            Ty::fun(&[ioref(ta.clone()), Ty::arrow(ta.clone(), ta.clone())], Ty::io(Ty::Unit)));
+        // modifyIORef' :: IORef a -> (a -> a) -> IO ()
+        self.env_scheme("modifyIORef'", vec![a.clone()],
+            Ty::fun(&[ioref(ta.clone()), Ty::arrow(ta.clone(), ta.clone())], Ty::io(Ty::Unit)));
+
         // -- Functor → Applicative → Monad hierarchy --
 
         // Type abbreviations for higher-kinded method types
@@ -607,6 +629,11 @@ impl Checker {
             self.register_builtin_instance("Eq", Ty::Con(type_name.to_string()),
                 &[("==", format!("eq_{}", type_name))]);
         }
+        // Eq (IORef a) — pointer identity, context-free like GHC's instance
+        // (no `Eq a` demanded of the element; two refs are == iff they are
+        // the same cell, whatever they hold).
+        self.register_builtin_instance_empty_ctx("Eq", Ty::Con("IORef".to_string()),
+            &[("==", "eq_IORef")]);
 
         // Built-in Ord typeclass (superclass: Eq)
         let cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));

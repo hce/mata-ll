@@ -191,6 +191,8 @@ impl CodeGen {
             "runST", "newSTArray", "readSTArray", "writeSTArray",
             "modifySTArray", "stArrayLength", "newSTArrayFromList",
             "stArrayToList",
+            "newIORef", "readIORef", "writeIORef", "modifyIORef",
+            "modifyIORef'",
             "hmEmpty", "hmInsert", "hmLookup", "hmDelete", "hmSize",
             "hmKeys", "hmValues", "hmMember", "hmFromList", "hmToList",
             "return", "pure", "not", "print", "error", "show", "undefined",

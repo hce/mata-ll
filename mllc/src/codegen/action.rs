@@ -67,7 +67,14 @@ impl CodeGen {
                 self.is_cheap_to_force(rhs),
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => true,
             TExprKind::SpecCall { specialized: SpecKind::Io(_), .. } => true,
-            _ if Self::st_intrinsic_fused(a).is_some() => true,
+            // Every fused intrinsic result is WHNF except __mll_ioref_read:
+            // the ST slots store forced values, and the IORef writes/news
+            // return () or the cell itself — but an IORef slot holds the
+            // value AS STORED, possibly a thunk (writeIORef is lazy in the
+            // value, modifyIORef stores a suspension), so a fused read may
+            // hand a raw thunk to its binder.
+            _ if Self::st_intrinsic_fused(a)
+                .is_some_and(|(fused, _)| fused != "__mll_ioref_read") => true,
             _ => false,
         }
     }
@@ -301,6 +308,17 @@ impl CodeGen {
                     "__mll_st_length" => &[true],
                     "__mll_st_from_list" => &[true],
                     "__mll_st_to_list" => &[true],
+                    // IORef: the ref cell is forced (you cannot store into a
+                    // thunk), but the VALUE positions stay lazy even in run
+                    // position — GHC's writeIORef/newIORef don't force the
+                    // value, and modifyIORef doesn't call f at modify time (it
+                    // stores the suspension). Only modifyIORef' calls f and
+                    // forces the result on this run.
+                    "__mll_ioref_new" => &[false],           // value (not forced)
+                    "__mll_ioref_read" => &[true],           // ref
+                    "__mll_ioref_write" => &[true, false],   // ref, value (lazy)
+                    "__mll_ioref_modify" => &[true, false],  // ref, f (suspended)
+                    "__mll_ioref_modify_strict" => &[true, true], // ref, f (called)
                     _ => &[],
                 };
                 let mut cargs = Vec::new();
@@ -466,6 +484,13 @@ impl CodeGen {
             "stArrayLength" => ("__mll_st_length", 1),
             "newSTArrayFromList" => ("__mll_st_from_list", 1),
             "stArrayToList" => ("__mll_st_to_list", 1),
+            // The IORef intrinsics fuse the same way (IO's bind runs its
+            // continuation exactly once, like ST's).
+            "newIORef" => ("__mll_ioref_new", 1),
+            "readIORef" => ("__mll_ioref_read", 1),
+            "writeIORef" => ("__mll_ioref_write", 2),
+            "modifyIORef" => ("__mll_ioref_modify", 2),
+            "modifyIORef'" => ("__mll_ioref_modify_strict", 2),
             _ => return None,
         };
         if args.len() == arity {

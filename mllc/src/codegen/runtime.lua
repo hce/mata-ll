@@ -2066,6 +2066,76 @@ local function __mll_st_to_list(arr)
     for i = #arr, 1, -1 do r = __mll_cons(arr[i], r) end
     return r
 end
+-- IORef runtime (Data.IORef): a ref is one metatable-tagged slot. The tag
+-- exists so a ref is never mistaken for a structural value (eq_IORef is
+-- pointer identity, GHC's `instance Eq (IORef a)`; the mt carries no __eq,
+-- so plain == on two cells IS identity). The slot holds the value AS
+-- STORED — possibly a thunk: writes don't force (GHC's writeIORef is lazy
+-- in the value), and reads hand the stored value back unforced, so a bound
+-- `x <- readIORef r` shares one memoization with the cell exactly like
+-- GHC shares the thunk. nil-represented values (Nothing, [], ()) need no
+-- boxing here: a slot read/write has no presence semantics (unlike the
+-- scalar HashMap store, where t[k] = nil deletes the entry).
+local __mll_ioref_mt = {}
+-- First-class action closures (a stored/passed `writeIORef r 5` builds the
+-- action without performing it; building forces NOTHING). The modify
+-- lesson from __mll_ma_modify applies: a first-class action may run more
+-- than once, so every run re-reads the cell and no upvalue is rebound.
+local function __mll_ref_new(v)
+    return function() return setmetatable({v}, __mll_ioref_mt) end
+end
+local function __mll_ref_read(r)
+    return function() return __force(r)[1] end
+end
+local function __mll_ref_write(r, v)
+    return function() __force(r)[1] = v end
+end
+local function __mll_ref_modify(r, f)
+    -- GHC's lazy modifyIORef: read >>= write . f — the cell ends up holding
+    -- the UNEVALUATED `f old`, with `old` sampled at perform time. Forcing
+    -- the thunk later memoizes into it, shared with every reader.
+    return function()
+        local c = __force(r)
+        local old = c[1]
+        c[1] = __thunk(function() return __force(f)(old) end)
+    end
+end
+local function __mll_ref_modify_strict(r, f)
+    -- modifyIORef': forces the NEW value to WHNF before the store (GHC:
+    -- `let x' = f x in x' `seq` writeIORef ref x'`). The old value is
+    -- passed to f as stored — f decides whether to evaluate it.
+    return function()
+        local c = __force(r)
+        c[1] = __force(__force(f)(c[1]))
+    end
+end
+-- Fused twins: identical effects, performed immediately — emitted only in
+-- run-once do-block position (see ioref arms in st_intrinsic_fused). Note
+-- __mll_ioref_read may return a thunk: it is the one fused intrinsic whose
+-- result is NOT claimed WHNF (fused_result_is_whnf in codegen/action.rs).
+local function __mll_ioref_new(v)
+    return setmetatable({v}, __mll_ioref_mt)
+end
+local function __mll_ioref_read(r)
+    return __force(r)[1]
+end
+local function __mll_ioref_write(r, v)
+    __force(r)[1] = v
+end
+local function __mll_ioref_modify(r, f)
+    local c = __force(r)
+    local old = c[1]
+    c[1] = __thunk(function() return __force(f)(old) end)
+end
+local function __mll_ioref_modify_strict(r, f)
+    local c = __force(r)
+    c[1] = __force(__force(f)(c[1]))
+end
+local function eq_IORef(a, b)
+    -- Pointer identity (GHC: two refs are == iff they are the same ref).
+    -- No __eq metamethod exists on __mll_ioref_mt, so == is raw identity.
+    return __force(a) == __force(b)
+end
 local function __assert_whnf(x)
     -- TEST-ONLY claim checker (WHNF refutation, compile_with_whnf_refutation
     -- in lib.rs): wraps each emission whose codegen predicate CLAIMED the

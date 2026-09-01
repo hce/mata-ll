@@ -1411,6 +1411,9 @@ compile time, with the offending sub-type named in the error:
   dictionary cannot cross the boundary;
 \item a region-scoped \texttt{ST}/\texttt{STArray} handle --- it must
   not outlive its \texttt{runST};
+\item an \texttt{IORef} cell --- it holds a mata-ll value, possibly an
+  unevaluated thunk; read the value with \texttt{readIORef} and pass
+  that;
 \item an \texttt{IO} or \texttt{LuaIO} action in \emph{argument}
   position --- a Lua caller has no action to hand in;
 \item a function type anywhere except as a direct top-level argument
@@ -1962,6 +1965,35 @@ go acc (x:rest) = do
 The \texttt{forall s.} in \texttt{runST}'s type prevents mutable state
 from escaping.
 
+\subsection{Mutable IO Cells: Data.IORef}
+
+For mutation intertwined with I/O, \texttt{Data.IORef} provides GHC's
+plain mutable cell --- polymorphic in the element and not region-scoped:
+
+\begin{lstlisting}
+import Data.IORef
+
+main :: IO ()
+main = do
+    counter <- newIORef (0 :: Int)
+    modifyIORef' counter (+ 1)
+    modifyIORef' counter (+ 1)
+    n <- readIORef counter
+    print n            -- 2
+\end{lstlisting}
+
+The five operations are \texttt{newIORef}, \texttt{readIORef},
+\texttt{writeIORef}, \texttt{modifyIORef}, and \texttt{modifyIORef'},
+with GHC's laziness: \texttt{writeIORef} doesn't force the value, and
+\texttt{modifyIORef} stores the unevaluated \texttt{f old} --- for
+counters and accumulators prefer \texttt{modifyIORef'}, which forces
+the new value before storing (the same advice GHC's documentation
+gives). Refs compare with \texttt{==} by identity: two cells holding
+equal values are not equal. There is no \texttt{Show} or
+\texttt{Hashable} instance, and a ref cannot cross the FFI boundary.
+From a \texttt{LuaIO} context, lift the operations with
+\texttt{liftIO}.
+
 \subsection{Scoped Lua Callbacks}
 
 When exporting functions that receive Lua callbacks:
@@ -2142,8 +2174,11 @@ If you are coming from Haskell, keep these differences in mind:
         functions from \texttt{LString}.
   \item \textbf{No multi-parameter typeclasses}.
   \item \textbf{No lazy I/O}.  File operations read eagerly.
-  \item \textbf{No \texttt{IORef}/\texttt{MVar}/\texttt{STRef}}.
-        Use \texttt{STArray} for scoped mutation.
+  \item \textbf{No \texttt{MVar}/\texttt{STRef}}.  \texttt{IORef} is
+        provided (\texttt{import Data.IORef}); \texttt{MVar} is a
+        concurrency primitive and the host is single-threaded, and
+        \texttt{STRef}'s scoped-mutation role is covered by
+        \texttt{STArray} and \texttt{IORef}.
   \item \textbf{All top-level bindings need type signatures}.
   \item \textbf{Single-file modules}.  Each \texttt{.mll} file is one module.
 \end{enumerate}

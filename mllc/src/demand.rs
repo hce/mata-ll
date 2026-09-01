@@ -100,6 +100,20 @@ pub const STRICT_BUILTINS: &[(&str, &[bool])] = &[
     ("stArrayLength", &[true]),
     ("newSTArrayFromList", &[true]),
     ("stArrayToList", &[true]),
+    // IORef primitives. The ref cell is forced (you cannot read or store
+    // through a thunk), the VALUE positions are lazy on every path — GHC
+    // parity: newIORef/writeIORef don't force the value, and modifyIORef
+    // doesn't call f (it stores the suspension `f old`). Unlike the ST
+    // array ops there is NO ForcedOnRun divergence — running the action
+    // forces exactly what the mask claims — so the fused run row equals
+    // this mask and st_intrinsic_run_row needs no IORef arm.
+    // `modifyIORef'` calls f and forces its result on the run, hence
+    // strict in f.
+    ("newIORef", &[false]),
+    ("readIORef", &[true]),
+    ("writeIORef", &[true, false]),
+    ("modifyIORef", &[true, false]),
+    ("modifyIORef'", &[true, true]),
     // List-consuming ByteString intrinsics: the runtime walks the whole
     // spine and forces every element (see the `__mll_bs` concatList/pack
     // implementations), so the list argument is forced at least to WHNF.

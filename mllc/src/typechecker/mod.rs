@@ -1581,6 +1581,8 @@ impl Checker {
                 Box::new(Kind::Arrow(Box::new(Kind::Type), Box::new(Kind::Type)))));
         // STArray: kind Type -> Type (parameterized by scope s)
         self.kinds.insert("STArray".to_string(), type_to_type.clone());
+        // IORef: kind Type -> Type (Data.IORef — plain mutable IO state)
+        self.kinds.insert("IORef".to_string(), type_to_type.clone());
         // HashMap: kind Type -> Type -> Type
         self.kinds.insert("HashMap".to_string(),
             Kind::Arrow(Box::new(Kind::Type),

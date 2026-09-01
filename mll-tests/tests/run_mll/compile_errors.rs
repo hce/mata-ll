@@ -78,6 +78,27 @@ fn hashmap_integer_keys_are_rejected() {
     );
 }
 
+// IORef has Eq (pointer identity) but deliberately NO Show and NO
+// Hashable, matching GHC (a ref has no printable content and no stable
+// hash — its Lua representation is a mutable table compared by identity).
+#[test]
+fn ioref_show_is_rejected() {
+    expect_compile_error(
+        "import Data.IORef\n\nmain :: IO ()\nmain = do\n    r <- newIORef (1 :: Int)\n    print r\n",
+        &[],
+        &["No instance for", "IORef"],
+    );
+}
+
+#[test]
+fn ioref_hashmap_keys_are_rejected() {
+    expect_compile_error(
+        "import Data.IORef\n\nmain :: IO ()\nmain = do\n    r <- newIORef (1 :: Int)\n    let m = hmInsert r \"v\" hmEmpty\n    print (hmSize m)\n",
+        &[],
+        &["No instance for", "Hashable", "IORef"],
+    );
+}
+
 // `!!` was in the consume-once operator whitelist, but indexing DROPS
 // every element of the list except the selected one — under
 // exactly-once, "consuming" a %1 list by indexing leaks the rest. It

@@ -1231,6 +1231,15 @@ fn ffi_export_rejects_unmarshallable_types() {
         "STArray",
     ]);
 
+    // An IORef is a mutable cell holding a (possibly unevaluated) mata-ll
+    // value — no Lua representation in either direction.
+    expect_compile_error("export h :: IORef Int -> Int\nh _ = 5\nmain :: IO ()\nmain = pure ()\n", &[], &[
+        "Export 'h'",
+        "argument 1",
+        "IORef",
+        "cannot cross the FFI boundary",
+    ]);
+
     // An IO action cannot be supplied by a Lua caller (import position).
     expect_compile_error("export bad :: IO () -> Int\nbad _ = 5\nmain :: IO ()\nmain = pure ()\n", &[], &[
         "Export 'bad'",

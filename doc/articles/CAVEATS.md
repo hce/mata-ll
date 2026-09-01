@@ -369,8 +369,11 @@ FFI shape:
     separately;
   - a class-constrained type (`export f :: Num a => a -> a`) — a
     typeclass dictionary cannot cross the boundary;
-  - a region-scoped `ST`/`STArray`/`STRef` handle — it must not outlive
+  - a region-scoped `ST`/`STArray` handle — it must not outlive
     its `runST` and has no Lua representation;
+  - an `IORef` cell — it holds a mata-ll value, possibly an unevaluated
+    thunk, which has no meaning to a Lua host; read the value with
+    `readIORef` and pass that;
   - an `IO`/`LuaIO` action in ARGUMENT position — a Lua caller has no
     action to hand in; only a *top-level callback* (a function returning
     `LuaIO`) may carry an effect inward;

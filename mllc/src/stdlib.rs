@@ -20,6 +20,7 @@ pub(crate) const EMBEDDED_MODULES: &[(&str, &str)] = &[
     ("Control.Monad", include_str!("../lib/Control/Monad.mll")),
     ("Data.Foldable", include_str!("../lib/Data/Foldable.mll")),
     ("Data.Generics", include_str!("../lib/Data/Generics.mll")),
+    ("Data.IORef", include_str!("../lib/Data/IORef.mll")),
     ("Data.List", include_str!("../lib/Data/List.mll")),
     ("Data.Map", include_str!("../lib/Data/Map.mll")),
     ("Data.Set", include_str!("../lib/Data/Set.mll")),

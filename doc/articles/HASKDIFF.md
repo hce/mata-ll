@@ -218,6 +218,26 @@ enumerate them in structural Ord order (scalar-keyed maps sort keys
 natively, as before). `Integer` keys remain rejected: the boxed bignum
 has table identity and no scalar encoding.
 
+## Data.IORef is the five-function core; no atomics, no weak refs
+
+`Data.IORef` provides `newIORef`, `readIORef`, `writeIORef`,
+`modifyIORef`, and `modifyIORef'` with GHC's exact semantics: lazy
+writes (`writeIORef r undefined` succeeds until the value is
+demanded), `modifyIORef` storing the unevaluated `f old`,
+`modifyIORef'` forcing to WHNF, and `instance Eq (IORef a)` as
+pointer identity with no context. What GHC has and mata-ll does not:
+
+- `atomicModifyIORef`/`atomicModifyIORef'`/`atomicWriteIORef` — these
+  exist to order memory operations between threads, and the Lua host
+  runs one thread. There is no interleaving for them to defend
+  against, and providing them would suggest otherwise. Where GHC code
+  uses one purely for its strictness (`atomicModifyIORef'`), the
+  rewrite is `modifyIORef'` — note the result-value variant
+  (`(a -> (a, b)) -> IO b`) has no direct equivalent; use a
+  `readIORef`/`writeIORef` pair.
+- `mkWeakIORef` — Lua exposes no weak-reference hook the runtime
+  could attach a finalizer through.
+
 ## No lazy I/O
 
 There is no `hGetContents`, `readFile` returning a lazy String, or

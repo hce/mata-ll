@@ -572,8 +572,10 @@ Key intentional differences:
         classes.
   \item No multi-parameter typeclasses.
   \item No lazy I/O --- file operations read eagerly.
-  \item No \texttt{IORef}, \texttt{MVar}, \texttt{STRef} ---
-        \texttt{STArray} covers scoped mutation.
+  \item No \texttt{MVar}, \texttt{STRef} --- \texttt{IORef} is provided
+        (\texttt{Data.IORef}, GHC laziness and pointer-identity
+        \texttt{Eq}); \texttt{MVar} is a concurrency primitive and the
+        host is single-threaded; \texttt{STArray} covers scoped mutation.
   \item String concatenation uses \texttt{<>} (Semigroup), not \texttt{++}
         (which is list append).
 \end{itemize}

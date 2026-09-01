@@ -144,6 +144,11 @@ fn export_ffi_note(culprit: &Ty, dir: FfiDir) -> String {
         _ if matches!(head, Some("ST") | Some("STArray") | Some("STRef")) =>
             "an ST handle is region-scoped (it must not outlive its runST) and has \
              no Lua representation.".to_string(),
+        _ if head == Some("IORef") =>
+            "an IORef is a mutable cell holding a mata-ll value (possibly an \
+             unevaluated thunk) — it has no Lua representation and cannot cross \
+             the FFI boundary. Read the value with readIORef and pass that."
+                .to_string(),
         // A plain user/prelude `data` type (Either/Ordering/ExitValue or a
         // user ADT) reached here has real constructors but no designed FFI
         // shape — it would cross only as its internal `{tag, fields…}` table,
