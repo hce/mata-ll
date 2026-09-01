@@ -187,6 +187,22 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("head", &[true]),        // __mll_head forces the cell (l = __force(l))
     ("tail", &[true]),        // __mll_tail forces the cell (l = __force(l))
     ("string_mconcat_prim", &[true]), // forces the spine cell at entry
+    // The scalar-key HashMap family: every body forces every argument on
+    // every path first thing (__mll_hm_scalar_key forces the key, the map
+    // and value are forced before the copy/read), and the dynamic
+    // (__mll_hm_dyn_*) and encoded (__mll_hme_*) twins these names can
+    // dispatch through force identically. Rows keyed by the SOURCE names —
+    // structural/polymorphic keys are rewritten by mono to generated
+    // wrapper functions and never consult them.
+    ("hmInsert", &[true, true, true]),
+    ("hmLookup", &[true, true]),
+    ("hmDelete", &[true, true]),
+    ("hmMember", &[true, true]),
+    ("hmSize", &[true]),
+    ("hmKeys", &[true]),
+    ("hmValues", &[true]),
+    ("hmToList", &[true]),
+    ("hmFromList", &[true]),
     ("map", &[true, true]),
     ("filter", &[true, true]),
     ("take", &[true, false]), // n always; the list NOT when n <= 0

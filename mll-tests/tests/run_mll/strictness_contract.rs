@@ -146,6 +146,17 @@ const PROBES: &[Probe] = &[
     probe("tail", &[ILIST], &[Strict]),
     // The Monoid String mconcat override: forces the spine cell at entry.
     probe("string_mconcat_prim", &[SLIST], &[Strict]),
+    // The scalar-key HashMap family (probed through sanitize_name at the
+    // hashmap_* runtime locals; hashmap_empty is the shared empty table).
+    probe("hmInsert", &["1", "2", "hashmap_empty"], &[Strict, Strict, Strict]),
+    probe("hmLookup", &["1", "hashmap_empty"], &[Strict, Strict]),
+    probe("hmDelete", &["1", "hashmap_empty"], &[Strict, Strict]),
+    probe("hmMember", &["1", "hashmap_empty"], &[Strict, Strict]),
+    probe("hmSize", &["hashmap_empty"], &[Strict]),
+    probe("hmKeys", &["hashmap_empty"], &[Strict]),
+    probe("hmValues", &["hashmap_empty"], &[Strict]),
+    probe("hmToList", &["hashmap_empty"], &[Strict]),
+    probe("hmFromList", &["__mll_cons({1, 2}, nil)"], &[Strict]),
     probe("map", &[IDF, ILIST], &[Strict, Strict]),
     probe("filter", &[TRUEF, ILIST], &[Strict, Strict]),
     // take is LAZY in the list when n <= 0 — `take 0 undefined` is `[]`
@@ -281,6 +292,12 @@ main = do
   print (Just (3 :: Int))
   print b
   print (hmInsert (1 :: Int) (2 :: Int) hmEmpty)
+  print (hmLookup (1 :: Int) (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
+  print (hmSize (hmDelete (1 :: Int) (hmInsert (1 :: Int) (2 :: Int) hmEmpty)))
+  print (hmMember (1 :: Int) (hmFromList [(1 :: Int, 2 :: Int)]))
+  print (hmKeys (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
+  print (hmValues (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
+  print (hmToList (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
   print (not False)
   if bsNull b then error "empty" else pure ()
   print (head [1 :: Int, 2])

@@ -127,6 +127,21 @@ API of the `mllc` library crate.)
   strings also no longer risks LuaJIT's fixed C stack — the builder is
   iterative where the fold recursed per element.
 
+- **The scalar-key HashMap operations carry strictness rows, and a
+  nonzero-literal divisor no longer counts as trapping.** Every
+  `hashmap_*` body (and its dynamic/encoded twins) forces every
+  argument on every path, so `hmInsert`/`hmLookup`/… now have
+  per-argument strictness rows (probed by the strictness-contract
+  harness like the Integer core), and the eager-argument judgment
+  learned that `div`/`mod`/`quot`/`rem` by a nonzero integer literal
+  cannot trap (the family's one failure is the zero divisor) —
+  mirroring the emission rule that already lowers such `mod` to native
+  `%`. Together these stop the hm_churn lookup loop allocating a key
+  thunk per iteration and let the insert/delete accumulators run
+  eagerly. hm_churn: −78% under LuaJIT (36x → 7.7x speed-of-light; the
+  loop now traces) and −25% on Lua 5.5 (55x → 45x); the tracker canary
+  reaches 6.2x realtime.
+
 - **The boxed-Integer ops take small-magnitude fast paths.** When both
   operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
   and box the result, skipping the limb walks — divmod's bit-by-bit

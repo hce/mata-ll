@@ -174,7 +174,27 @@ impl CodeGen {
     pub(super) fn contains_trapping_op(expr: &TExpr) -> bool {
         match &expr.kind {
             TExprKind::InfixApp { op, lhs, rhs } => {
-                matches!(op.as_str(), "div" | "mod" | "quot" | "rem" | "%")
+                // The integer division family's ONE trap is the zero
+                // divisor (Lua's own integer division wraps MIN/-1
+                // silently, and __mll_div/__mll_mod raise only on zero) —
+                // so a NONZERO integer-literal divisor cannot trap, and
+                // `i mod 2000 + 1` is as safe to evaluate eagerly as
+                // `i + 1`. This mirrors the emission rule that lowers
+                // mod-by-nonzero-literal to native `%`; without it every
+                // such expression was thunked in a lazy argument position
+                // (a closure per loop iteration on the hm_churn lookup
+                // path).
+                let trapping_divisor = matches!(op.as_str(),
+                        "div" | "mod" | "quot" | "rem" | "%")
+                    && {
+                        let mut r = rhs.as_ref();
+                        while let TExprKind::Paren(p) = &r.kind {
+                            r = p.as_ref();
+                        }
+                        !matches!(&r.kind,
+                            TExprKind::Lit(TLiteral::Integer(n)) if *n != 0)
+                    };
+                trapping_divisor
                     || Self::contains_trapping_op(lhs)
                     || Self::contains_trapping_op(rhs)
             }
