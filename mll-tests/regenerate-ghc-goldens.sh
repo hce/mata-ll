@@ -71,6 +71,7 @@ excluded_reason() {
         cases/getline)                   echo "reads stdin; LuaUserData FFI";;
         cases/hashmap)                   echo "HashMap builtins (Lua tables)";;
         cases/hashmap_nil_values)        echo "HashMap builtins (Lua tables)";;
+        cases/hm_lookup_case_fused)      echo "HashMap builtins (Lua tables)";;
         cases/hashmap_structural_keys)   echo "HashMap builtins (Lua tables)";;
         cases/integer_json)              echo "Generics substrate + JSON FFI library";;
         cases/json_codec)                echo "JSON FFI library";;

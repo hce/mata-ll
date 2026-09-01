@@ -169,6 +169,21 @@ API of the `mllc` library crate.)
   realtime; PUC Lua is neutral (the lighter carriers exist precisely to
   keep it so).
 
+- **`case hmLookup k m of Just v -> …; Nothing -> …` fuses to a raw
+  slot read.** hashmap_lookup allocates a `Just` cell per hit for a
+  value that shape tears apart on the next line — a million such
+  allocations in the hm_lookup benchmark. When the scrutinee is a
+  direct call of the Prelude `hmLookup` (scalar keys; structural and
+  polymorphic keys were already rewritten to generated wrappers) and
+  the branches are exactly unguarded `Just`-of-variable-or-wildcard
+  and `Nothing`, the case emits a nil test on the raw slot instead,
+  unwrapping the stored-nil sentinel in the Just branch exactly as the
+  lookup would have. Pinned by hm_lookup_case_fused (hit, miss,
+  stored-nil binding, both branch orders, wildcard, and a guarded
+  shape that must keep the general path). hm_lookup drops 32% on
+  Lua 5.5 (44x → 28x speed-of-light); LuaJIT is unchanged (its traces
+  already sank the allocation).
+
 - **The boxed-Integer ops take small-magnitude fast paths.** When both
   operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
   and box the result, skipping the limb walks — divmod's bit-by-bit

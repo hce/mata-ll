@@ -489,6 +489,10 @@ mll_test!(hashmap_structural_keys, "hashmap_structural_keys.mll");
 // Nil-represented values (Nothing, [], ()) under scalar keys survive
 // storage (the __mll_hm_nilv sentinel; a backend-fuzzer find).
 mll_test!(hashmap_nil_values, "hashmap_nil_values.mll");
+// The fused case-of-hmLookup emission (raw slot read, no Just cell):
+// hit/miss/stored-nil-sentinel, both branch orders, wildcard, and the
+// guarded shape that must NOT fuse.
+mll_test!(hm_lookup_case_fused, "hm_lookup_case_fused.mll");
 // A18: Foldable/Traversable-generic Prelude functions.
 mll_test!(foldable_generic, "foldable_generic.mll");
 // Data.IORef: basics + pointer-identity Eq, and GHC laziness parity

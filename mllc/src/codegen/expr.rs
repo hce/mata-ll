@@ -307,6 +307,9 @@ impl CodeGen {
                 )
             }
             TExprKind::Case { scrutinee, branches } => {
+                if let Some(e) = self.try_fused_hm_lookup_case(scrutinee, branches) {
+                    return e;
+                }
                 // The entry force is keyed on the FIRST pattern: GHC matches
                 // top-to-bottom, and an irrefutable first pattern (`case e of
                 // r -> …`) selects its branch without inspecting `e` at all —
@@ -1288,6 +1291,113 @@ impl CodeGen {
                     return Some(Expr::paren(inlined));
                 }
         None
+    }
+
+    /// `case hmLookup k m of Just v -> A; Nothing -> B` (either branch
+    /// order): emit a raw slot read plus nil test and never materialize
+    /// the Maybe — hashmap_lookup allocates a Just cell per hit for a
+    /// value this case tears apart on the next line (a million such
+    /// allocations in the hm_lookup benchmark). Fuses only when the
+    /// scrutinee is a saturated direct call of the PRELUDE hmLookup (not
+    /// locally shadowed, not a user redefinition; a structural or
+    /// polymorphic key was rewritten by mono to a generated wrapper and
+    /// never reaches this name — the surviving name IS the scalar path)
+    /// and the branches are exactly unguarded `Just (<var or wildcard>)`
+    /// and `Nothing`. The bound payload is WHNF — every hm writer forces
+    /// what it stores — so it binds concrete (bare reads; checked by the
+    /// refutation mode like any concrete claim), and a stored nil rides
+    /// the __mll_hm_nilv sentinel, unwrapped in the Just branch exactly
+    /// as hashmap_lookup would have.
+    fn try_fused_hm_lookup_case(
+        &mut self,
+        scrutinee: &TExpr,
+        branches: &[TCaseBranch],
+    ) -> Option<Expr> {
+        fn strip_pat(p: &TPattern) -> &TPattern {
+            let mut p = p;
+            while let TPattern::Paren(i) = p {
+                p = i.as_ref();
+            }
+            p
+        }
+        let mut s = scrutinee;
+        while let TExprKind::Paren(p) = &s.kind {
+            s = p.as_ref();
+        }
+        let TExprKind::App(f1, arg_m) = &s.kind else { return None };
+        let TExprKind::App(f0, arg_k) = &f1.kind else { return None };
+        let mut h = f0.as_ref();
+        while let TExprKind::Paren(p) = &h.kind {
+            h = p.as_ref();
+        }
+        let TExprKind::Var(name) = &h.kind else { return None };
+        if name != "hmLookup"
+            || self.is_local_shadowed(name)
+            || self.module_fn_names.contains(name.as_str())
+        {
+            return None;
+        }
+        if branches.len() != 2 || branches.iter().any(|b| !b.guards.is_empty()) {
+            return None;
+        }
+        let mut just: Option<(&TPattern, &TExpr)> = None;
+        let mut nothing: Option<&TExpr> = None;
+        for b in branches {
+            match strip_pat(&b.pattern) {
+                TPattern::Constructor { name, args } if name == "Just" && args.len() == 1 => {
+                    match strip_pat(&args[0]) {
+                        inner @ (TPattern::Var(..) | TPattern::Wildcard) => {
+                            just = Some((inner, b.plain_body()));
+                        }
+                        _ => return None,
+                    }
+                }
+                TPattern::Constructor { name, args } if name == "Nothing" && args.is_empty() => {
+                    nothing = Some(b.plain_body());
+                }
+                _ => return None,
+            }
+        }
+        let (just_pat, just_body) = just?;
+        let nothing_body = nothing?;
+        // Both argument positions are strict (the hmLookup row), and
+        // __mll_hm_slot forces exactly as hashmap_lookup does.
+        let k_e = self.arg_ast(arg_k, true);
+        let m_e = self.arg_ast(arg_m, true);
+        let mut stmts = vec![Stmt::Local(
+            vec!["_s".into()],
+            Some(Expr::call_named("__mll_hm_slot", vec![k_e, m_e])),
+        )];
+        let scope = LocalVarsSnapshot::capture(self);
+        let mut just_stmts = Vec::new();
+        if let TPattern::Var(v, _) = just_pat {
+            let vn = sanitize_name(v);
+            just_stmts.push(Stmt::If {
+                cond: Expr::call_named(
+                    "rawequal",
+                    vec![Expr::name("_s"), Expr::name("__mll_hm_nilv")],
+                ),
+                then_b: Block(vec![Stmt::Assign("_s".into(), Expr::lit("nil"))]),
+                elseifs: vec![],
+                else_b: None,
+            });
+            just_stmts.push(Stmt::Local(vec![vn.clone()], Some(Expr::name("_s"))));
+            self.local_vars.insert(vn.clone());
+            self.concrete_vars.insert(vn);
+        }
+        just_stmts.push(Stmt::Return(self.tail_ast(just_body, false)));
+        scope.restore(self);
+        let nothing_stmts = vec![Stmt::Return(self.tail_ast(nothing_body, false))];
+        stmts.push(Stmt::If {
+            cond: Expr::binop("~=", Expr::name("_s"), Expr::lit("nil")),
+            then_b: Block(just_stmts),
+            elseifs: vec![],
+            else_b: Some(Block(nothing_stmts)),
+        });
+        Some(Expr::call(
+            Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(stmts)))),
+            vec![],
+        ))
     }
 
     /// The general call path of the App arm, split out only to keep

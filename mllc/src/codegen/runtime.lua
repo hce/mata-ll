@@ -1605,6 +1605,13 @@ local function __mll_hm_scalar_key(k)
 end
 local function hashmap_insert(k, v, m) k = __mll_hm_scalar_key(k); v = __force(v); m = __force(m); if v == nil then v = __mll_hm_nilv end local t = {} for a,b in pairs(m) do t[a] = b end t[k] = v return t end
 local function hashmap_lookup(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local v = m[k] if v == nil then return nil elseif rawequal(v, __mll_hm_nilv) then return Just(nil) else return Just(v) end end
+-- The fused `case hmLookup k m of Just v -> …; Nothing -> …` scrutinee
+-- (see try_fused_hm_lookup_case in codegen): the raw slot, sentinel
+-- preserved — nil means ABSENT (the Nothing branch); the emitted Just
+-- branch unwraps the sentinel to the stored nil. Skips the Just cell
+-- hashmap_lookup allocates per hit for a result the case tears apart
+-- on the next line.
+local function __mll_hm_slot(k, m) k = __mll_hm_scalar_key(k); m = __force(m); return m[k] end
 local function hashmap_delete(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local t = {} for a,b in pairs(m) do t[a] = b end t[k] = nil return t end
 local function hashmap_size(m) m = __force(m); local n = 0 for _ in pairs(m) do n = n + 1 end return n end
 -- Key sort comparator: Bool is a legal key type but Lua cannot `<`

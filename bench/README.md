@@ -54,7 +54,7 @@ comparable to the old hm_churn number):
 | arith_loop    |    3.1x |    1.0x |
 | ioref_loop    |   30.5x |    1.1x |
 | string_build  |    7.0x |    6.1x |
-| hm_lookup     |   44.0x |    6.4x |
+| hm_lookup     |   28.4x |    7.4x |
 | generics_json |   64.1x |   44.6x |
 | list_pipeline |  161.9x |   62.4x |
 | integer_arith |  219.9x |  100.7x |

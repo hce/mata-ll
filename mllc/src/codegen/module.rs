@@ -153,7 +153,7 @@ impl CodeGen {
             "ord_ge__Bool", "ord_compare__Bool", "ord_max__Bool", "ord_min__Bool",
             "head", "tail", "map", "filter", "take", "drop", "zipWith",
             "foldr", "foldl",
-            "__mll_hashstr", "__mll_hm_lt", "hashmap_empty", "hashmap_insert", "hashmap_lookup",
+            "__mll_hashstr", "__mll_hm_lt", "hashmap_empty", "hashmap_insert", "hashmap_lookup", "__mll_hm_slot",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList", "hashmap_toList",
             "__mll_list_append", "__mll_list_index", "semigroup_String",
