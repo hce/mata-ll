@@ -142,6 +142,27 @@ API of the `mllc` library crate.)
   loop now traces) and −25% on Lua 5.5 (55x → 45x); the tracker canary
   reaches 6.2x realtime.
 
+- **Thunks are closure-free.** A suspension used to be
+  `__thunk(function() … end)` — one fresh closure per thunk, and closure
+  creation (FNEW) is the one bytecode LuaJIT cannot trace through, so
+  every lazy allocation aborted the surrounding trace. A new pass
+  (thunklift, pass 0 of the optimization pipeline) lifts an eligible
+  thunk body to a module-level function created once and rewrites the
+  site to a plain table carrying the captured values
+  (`__mll_tk2(__mll_tkf[k], x, y)`); lazy-cons tails get an even lighter
+  metatable-free carrier (`__mll_gen*`, flavor marked in the cell's
+  `__lazy` flag), and the runtime's own list producers (map, filter,
+  zipWith, take, append) use it too. Eligibility is where value capture
+  provably equals Lua's reference capture: every free local of the body
+  is single-assignment and read-only (recursive-let forward references
+  and loop-carried parameters keep the closure form), bodies are
+  Raw-free, and captures cap at three. The WHNF-refutation corpus pass
+  exercises the new `__force` dispatch end to end. LuaJIT wall times:
+  list_pipeline −56% (131x → 62x speed-of-light), string_build −50%,
+  generics_json −28%, and the tracker canary jumps 6.2x → 8.1x
+  realtime; PUC Lua is neutral (the lighter carriers exist precisely to
+  keep it so).
+
 - **The boxed-Integer ops take small-magnitude fast paths.** When both
   operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
   and box the result, skipping the limb walks — divmod's bit-by-bit

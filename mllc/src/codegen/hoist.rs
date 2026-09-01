@@ -272,7 +272,7 @@ fn binders_block(stmts: &[Stmt], out: &mut HashSet<String>) {
 /// tokens instead (minus the bound set), which over-approximates: a spare
 /// name can only BLOCK a hoist. `Lit` content is never tokenized (a quoted
 /// string is not a reference).
-fn free_names_func(params: &[String], body: &[Stmt]) -> HashSet<String> {
+pub(super) fn free_names_func(params: &[String], body: &[Stmt]) -> HashSet<String> {
     let mut free = HashSet::new();
     let bound: HashSet<String> = params.iter().cloned().collect();
     free_block(body, &bound, &mut free);

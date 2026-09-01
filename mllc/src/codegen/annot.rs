@@ -1470,7 +1470,7 @@ fn call_stamp(f: &Expr, args: &[StampNode]) -> Stamp {
             Stamp::new(Shape::Whnf, false, true, true)
         }
         // A cons cell: builds one tagged table, forces nothing.
-        Expr::Name(n) if (n == "__mll_cons" || n == "__mll_lazy_cons") && args.len() == 2 => {
+        Expr::Name(n) if (n == "__mll_cons" || n == "__mll_lazy_cons" || n == "__mll_lazy_consg") && args.len() == 2 => {
             let mut stamp = Stamp::new(Shape::Cons, true, false, true);
             for a in args {
                 stamp = stamp.absorb_effects(&a.stamp);
@@ -1478,8 +1478,15 @@ fn call_stamp(f: &Expr, args: &[StampNode]) -> Stamp {
             stamp
         }
         // A suspension wrapper: builds one tagged table around the (already
-        // evaluated) closure argument, runs nothing.
-        Expr::Name(n) if n == "__thunk" && args.len() == 1 => {
+        // evaluated) closure argument, runs nothing. The __mll_tk* forms
+        // (thunklift.rs) are the same allocation with the captured values
+        // carried in the table instead of a closure.
+        Expr::Name(n)
+            if (n == "__thunk" && args.len() == 1)
+                || (n == "__mll_tk1" && args.len() == 2)
+                || (n == "__mll_tk2" && args.len() == 3)
+                || (n == "__mll_tk3" && args.len() == 4) =>
+        {
             let mut stamp = Stamp::new(Shape::Thunk, true, false, true);
             for a in args {
                 stamp = stamp.absorb_effects(&a.stamp);

@@ -290,8 +290,12 @@ fn repeat_safe_expr(e: &Expr) -> bool {
                     // dispatch emits this, and its absence here declined
                     // the whole conversion for every such loop (ioref_loop).
                     | "__mll_lit_eq"
-                    // Pure allocators and inspectors.
-                    | "__thunk" | "__mll_cons" | "__mll_lazy_cons" | "__mll_pure"
+                    // Pure allocators and inspectors. The __mll_tk* forms
+                    // are __thunk with the captured values carried in the
+                    // table (thunklift.rs) — the same pure allocation.
+                    | "__thunk" | "__mll_tk1" | "__mll_tk2" | "__mll_tk3"
+                    | "__mll_gen1" | "__mll_gen2" | "__mll_gen3"
+                    | "__mll_cons" | "__mll_lazy_cons" | "__mll_lazy_consg" | "__mll_pure"
                     | "getmetatable" | "type" | "error"
             )) && args.iter().all(repeat_safe_expr)
         }

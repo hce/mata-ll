@@ -39,17 +39,18 @@ Workloads:
 Baseline ratios on the reference machine (2026-09-01, Apple Silicon,
 min of 5; after the site-forced calling convention, the WHNF-return
 claim for direct calls, the closure-free IO self-loops, the
-mconcat@String builder, and the HashMap strictness rows — the
-pre-round numbers were string_build 14.1/16.3, arith_loop 22.5/1.0,
-hm_churn 59/39, ioref 110/27, generics 148/54, list_pipeline 215/179,
+mconcat@String builder, the HashMap strictness rows, and the
+closure-free thunk representation — the pre-round numbers were
+string_build 14.1/16.3, arith_loop 22.5/1.0, hm_churn 59/39,
+ioref 110/27, generics 148/54, list_pipeline 215/179,
 integer_arith 1436/717):
 
 | workload      | Lua 5.5 | LuaJIT  |
 |---------------|--------:|--------:|
 | arith_loop    |    3.1x |    1.0x |
 | ioref_loop    |   30.5x |    1.1x |
-| string_build  |    6.9x |   11.8x |
-| hm_churn      |   44.8x |    7.7x |
-| generics_json |   61.4x |   54.8x |
-| list_pipeline |  167.6x |  131.1x |
-| integer_arith |  222.0x |  101.3x |
+| string_build  |    7.0x |    6.1x |
+| hm_churn      |   46.8x |    7.7x |
+| generics_json |   64.1x |   44.6x |
+| list_pipeline |  161.9x |   62.4x |
+| integer_arith |  219.9x |  100.7x |

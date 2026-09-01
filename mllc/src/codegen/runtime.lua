@@ -29,12 +29,43 @@ local function __mll_unbox(v)
     return v
 end
 local function __thunk(f) return setmetatable({f, false}, __thunk_mt) end
+-- Closure-free thunks: `{f, false, n, a1..an}` where f is a SHARED
+-- module-level function (__mll_tkf[k], created once at load) and the
+-- captured values ride in the table — no per-thunk closure, so a lazy
+-- allocation is a plain table build LuaJIT can trace (FNEW aborts every
+-- trace). The thunk-lift pass (thunklift.rs) rewrites eligible
+-- `__thunk(function() … end)` sites to these; `{f, false}` with no arity
+-- slot stays the closure form. Memoization is identical: [1] becomes the
+-- value, [2] the done flag; the argument slots are cleared on evaluation
+-- so captured values are not retained past the closure form's lifetime.
+local function __mll_tk1(f, a) return setmetatable({f, false, 1, a}, __thunk_mt) end
+local function __mll_tk2(f, a, b) return setmetatable({f, false, 2, a, b}, __thunk_mt) end
+local function __mll_tk3(f, a, b, c) return setmetatable({f, false, 3, a, b, c}, __thunk_mt) end
+-- The lazy-cons GENERATOR variants: `{f, caps…}` — no metatable (a
+-- `setmetatable` C call per produced cell was the closure-free tails' one
+-- cost over the closures they replace on PUC Lua) and no arity slot (the
+-- evaluator calls `g[1](g[2], g[3], g[4])` flat; a lifted function has
+-- fixed parameters, so trailing nils are simply ignored — and a NIL
+-- capture is indistinguishable from a missing one to it for the same
+-- reason). The generator slot is guarded by the cell's `__lazy` flag, so
+-- its consumers know the shape without a tag: `__mll_tail` evaluates a
+-- table generator directly (the cell memoizes the result, exactly as for
+-- a closure generator), and `__mll_tail_lazy` — which must hand back a
+-- real memoizing thunk — rebuilds the struct as one.
+local function __mll_gen1(f, a) return {f, a} end
+local function __mll_gen2(f, a, b) return {f, a, b} end
+local function __mll_gen3(f, a, b, c) return {f, a, b, c} end
 local function __force(x)
     if getmetatable(x) == __thunk_mt then
         if x[2] then return x[1] end
-        local val = x[1]()
+        local n = x[3]
+        local val
+        if n == nil then val = x[1]()
+        else val = x[1](x[4], x[5], x[6])
+        end
         x[1] = val
         x[2] = true
+        if n ~= nil then x[3], x[4], x[5], x[6] = nil, nil, nil, nil end
         return val
     end
     return x
@@ -98,6 +129,12 @@ end
 -- `foldr` would force elements a lazy fold never demands).
 local function __mll_cons(h, t) return setmetatable({h, t}, __cons_mt) end
 local function __mll_lazy_cons(h, thunk) return setmetatable({h, thunk, __lazy = true}, __cons_mt) end
+-- The closure-free flavor: the generator is a `{f, caps…}` struct (see
+-- __mll_gen*), marked by `__lazy = 1` so the tail readers pick the
+-- evaluation form off the flag they already read — no `type()` C call per
+-- cell. Every `.__lazy` truthiness test elsewhere (take's streaming arm)
+-- is indifferent to which spelling marks the cell.
+local function __mll_lazy_consg(h, g) return setmetatable({h, g, __lazy = 1}, __cons_mt) end
 local function __mll_head(l) l = __force(l); return l[1] end
 -- TAIL-CONSUMPTION CONTRACT. In GHC, `tail (x:xs) = xs` extracts the tail
 -- field WITHOUT forcing it: matching a cons forces only that one cell, and the
@@ -125,8 +162,18 @@ local function __mll_head(l) l = __force(l); return l[1] end
 --     single unwrap suffices.
 local function __mll_tail(l)
     l = __force(l)
-    if l.__lazy then
-        l[2] = l[2]()
+    local lz = l.__lazy
+    if lz then
+        -- The suspended generator is a closure (`__lazy = true`, called) or
+        -- a closure-free struct (`__lazy = 1`, its shared function applied
+        -- to the carried values). The cell itself memoizes the result
+        -- either way; the guard clears, so the generator runs exactly once.
+        if lz == true then
+            l[2] = l[2]()
+        else
+            local g = l[2]
+            l[2] = g[1](g[2], g[3], g[4])
+        end
         l.__lazy = nil
     end
     -- The tail may be an unforced thunk: a recursive cons whose tail is a
@@ -144,24 +191,38 @@ local function __mll_tail(l)
 end
 local function __mll_tail_lazy(l)
     l = __force(l)
-    if l.__lazy then
-        -- Suspend the generator instead of running it: __thunk memoizes on
-        -- first force and is stored back into the cell, so every later read
-        -- (lazy or forcing) shares the one evaluation.
-        l[2] = __thunk(l[2])
+    local lz = l.__lazy
+    if lz then
+        -- Suspend the generator instead of running it: the stored thunk
+        -- memoizes on first force, so every later read (lazy or forcing)
+        -- shares the one evaluation. A closure generator (`__lazy = true`)
+        -- wraps in __thunk; a closure-free struct (`__lazy = 1`) rebuilds
+        -- as a carried thunk.
+        local g = l[2]
+        if lz == true then
+            g = __thunk(g)
+        else
+            g = setmetatable({g[1], false, 3, g[2], g[3], g[4]}, __thunk_mt)
+        end
+        l[2] = g
         l.__lazy = nil
     end
     return l[2]
 end
 
 -- List append (second arg is a thunk for laziness)
+local __mll_append_step
 local function __mll_list_append(xs, ys_thunk)
     xs = __force(xs)
-    if xs == nil then return ys_thunk() end
-    return __mll_lazy_cons(__mll_head(xs), function()
-        return __mll_list_append(__mll_tail(xs), ys_thunk)
-    end)
+    if xs == nil then
+        -- The suffix suspension arrives as a closure (called) or as a
+        -- closure-free thunk struct (forced) — same one evaluation.
+        if getmetatable(ys_thunk) == __thunk_mt then return __force(ys_thunk) end
+        return ys_thunk()
+    end
+    return __mll_lazy_consg(__mll_head(xs), __mll_gen2(__mll_append_step, xs, ys_thunk))
 end
+__mll_append_step = function(xs, ys_thunk) return __mll_list_append(__mll_tail(xs), ys_thunk) end
 
 local function __mll_list_index(xs, n)
     n = __force(n)
@@ -1378,14 +1439,19 @@ end
 -- is exactly what __mll_head would redo. The per-element forces this
 -- removes were measured at 17 __force calls per element on the list
 -- pipeline, 94% of them landing on already-plain values.
+-- The shared per-element suspension of the lazy list producers: call the
+-- continuation with the forced tail. A closure-free thunk carrying
+-- (k, xs) replaces the `function() return go(__mll_tail(xs)) end` closure
+-- each produced cell used to allocate — the FNEW that broke every LuaJIT
+-- trace through a lazy pipeline.
+local function __mll_step_tail(k, xs) return k(__mll_tail(xs)) end
+local function __mll_step_tail2(k, xs, ys) return k(__mll_tail(xs), __mll_tail(ys)) end
 local function map(f, xs)
     f = __force(f)
     local function go(xs)
         xs = __force(xs)
         if xs == nil then return nil end
-        return __mll_lazy_cons(f(xs[1]), function()
-            return go(__mll_tail(xs))
-        end)
+        return __mll_lazy_consg(f(xs[1]), __mll_gen2(__mll_step_tail, go, xs))
     end
     return go(xs)
 end
@@ -1396,13 +1462,14 @@ local function filter(pred, xs)
         if xs == nil then return nil end
         local h = xs[1]
         if pred(h) then
-            return __mll_lazy_cons(h, function() return go(__mll_tail(xs)) end)
+            return __mll_lazy_consg(h, __mll_gen2(__mll_step_tail, go, xs))
         else
             return go(__mll_tail(xs))
         end
     end
     return go(xs)
 end
+local __mll_take_step
 local function take(n, xs)
     -- GHC: `take n _ | n <= 0 = []` — do NOT force the list when nothing is
     -- taken, so `take 0 (error "x")` is `[]`, not a crash.
@@ -1416,7 +1483,7 @@ local function take(n, xs)
     -- cell past the n requested. For n - 1 > 0 the recursive call forces the
     -- extracted tail at entry, so nothing is delayed that GHC demands.
     if xs.__lazy then
-        return __mll_lazy_cons(__mll_head(xs), function() return take(n - 1, __mll_tail_lazy(xs)) end)
+        return __mll_lazy_consg(__mll_head(xs), __mll_gen2(__mll_take_step, n - 1, xs))
     else
         -- Realized spine: build the taken prefix ITERATIVELY. The recursive
         -- form (`__mll_cons(h, take(n - 1, tail))`) cost one Lua frame per
@@ -1445,6 +1512,7 @@ local function take(n, xs)
         return first
     end
 end
+__mll_take_step = function(n, xs) return take(n, __mll_tail_lazy(xs)) end
 local function drop(n, xs)
     n = __force(n); xs = __force(xs)
     while n > 0 and xs ~= nil do
@@ -1458,9 +1526,7 @@ local function zipWith(f, xs, ys)
     local function go(xs, ys)
         xs = __force(xs); ys = __force(ys)
         if xs == nil or ys == nil then return nil end
-        return __mll_lazy_cons(f(xs[1], ys[1]), function()
-            return go(__mll_tail(xs), __mll_tail(ys))
-        end)
+        return __mll_lazy_consg(f(xs[1], ys[1]), __mll_gen3(__mll_step_tail2, go, xs, ys))
     end
     return go(xs, ys)
 end
@@ -2196,21 +2262,27 @@ local function __assert_purebare(x)
 end
 local function __force_checked(x)
     -- TEST-ONLY checked twin of __force (defined near the top of this file;
-    -- keep the memoization protocol in step with it). The WHNF-refutation
-    -- mode rebinds `__force = __force_checked` after the prelude block:
-    -- every prelude caller closes over the VARIABLE __force, so the rebind
-    -- covers them all. The added check is the one prose invariant __force
-    -- relies on (see the comment block above __mll_head): a thunk body must
-    -- return WHNF, never a raw thunk, because __force unwraps exactly one
-    -- level. A nested thunk here is a codegen site that forgot a force.
+    -- keep the memoization protocol — the closure-free arity dispatch
+    -- included — in step with it). The WHNF-refutation mode rebinds
+    -- `__force = __force_checked` after the prelude block: every prelude
+    -- caller closes over the VARIABLE __force, so the rebind covers them
+    -- all. The added check is the one prose invariant __force relies on
+    -- (see the comment block above __mll_head): a thunk body must return
+    -- WHNF, never a raw thunk, because __force unwraps exactly one level.
+    -- A nested thunk here is a codegen site that forgot a force.
     if getmetatable(x) == __thunk_mt then
         if x[2] then return x[1] end
-        local val = x[1]()
+        local n = x[3]
+        local val
+        if n == nil then val = x[1]()
+        else val = x[1](x[4], x[5], x[6])
+        end
         if getmetatable(val) == __thunk_mt then
             error("one level force invariant refuted: a thunk body returned a raw thunk", 2)
         end
         x[1] = val
         x[2] = true
+        if n ~= nil then x[3], x[4], x[5], x[6] = nil, nil, nil, nil end
         return val
     end
     return x

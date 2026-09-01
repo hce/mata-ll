@@ -662,8 +662,11 @@ fn shadowed_where_local_row_keeps_binding_lazy() {
     let result = compile(shadowed, Path::new("tests/cases"), &[])
         .expect("compiles");
     assert!(
-        result.lua_code.contains("bad = __thunk("),
-        "a binding passed to the shadowing case binder must stay lazy:\n{}",
+        result.lua_code.contains("bad = __thunk(")
+            || result.lua_code.contains("bad = __mll_tk"),
+        "a binding passed to the shadowing case binder must stay lazy \
+         (either suspension form — the closure thunk or the closure-free \
+         lifted one):\n{}",
         result.lua_code
     );
 

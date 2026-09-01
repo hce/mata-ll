@@ -79,6 +79,7 @@ mod pattern;
 mod runtime;
 mod strictness;
 mod tailloop;
+mod thunklift;
 mod thunks;
 mod util;
 

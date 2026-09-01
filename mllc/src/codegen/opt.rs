@@ -118,6 +118,7 @@ use super::hoist;
 use super::ioloop;
 use super::lua::{Block, Expr, FnTarget, FuncBody, Item, Stmt, render_stmts};
 use super::tailloop;
+use super::thunklift;
 
 /// Which passes to skip; see the module comment.
 #[derive(Default)]
@@ -129,6 +130,7 @@ struct Disable {
     tailloop: bool,
     ioloop: bool,
     hoist: bool,
+    thunklift: bool,
 }
 
 impl Disable {
@@ -158,9 +160,10 @@ impl Disable {
                 "tailloop" => d.tailloop = true,
                 "hoist" => d.hoist = true,
                 "ioloop" => d.ioloop = true,
+                "thunklift" => d.thunklift = true,
                 other => eprintln!(
                     "warning: MLL_OPT_DISABLE: unknown pass name '{}' \
-                     (known: parens, dead, iife, force, tailloop, ioloop, hoist)",
+                     (known: parens, dead, iife, force, tailloop, ioloop, hoist, thunklift)",
                     other
                 ),
             }
@@ -180,6 +183,13 @@ pub(super) fn run(stmts: &mut Vec<Stmt>, opt_disable: Option<&str>) {
 /// engine of a structured rewrite that came after it), plus whether the
 /// force pass ran — that decides the refutation's residual-force check.
 fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool) {
+    if !d.thunklift {
+        // Pass 0 — closure-free thunk lifting (thunklift.rs). Runs FIRST:
+        // it rewrites suspension shapes wholesale, so every engine and
+        // stamp the later passes carry is computed over the final shapes
+        // and nothing is invalidated after the fact.
+        thunklift::run(stmts);
+    }
     // The expression passes enable one another — flattening an IIFE exposes
     // redundant parens, stripping a paren exposes a flattenable IIFE — so
     // they run to a FIXPOINT: the idempotence refutation demands the final
@@ -672,7 +682,19 @@ fn normalize_parens_stmt(stmt: &mut Stmt, ret_ctx: Ctx) {
         }
         Stmt::ReturnNone | Stmt::Goto(_) | Stmt::Label(_) => {}
         Stmt::Do(b) | Stmt::WhileTrue(b) => normalize_parens_block_ret(&mut b.0, ret_ctx),
-        Stmt::Function { body, .. } => normalize_parens_block(&mut body.0),
+        Stmt::Function { target, body, .. } => {
+            // A lifted thunk body (`__mll_tkf[k] = function…`, thunklift.rs)
+            // has exactly one consumer: __force's `val = x[1](…)` line,
+            // which truncates to one value — the same Delim return context
+            // the `__thunk(function() … end)` rule below grants closure
+            // thunk bodies, and what keeps deep lazy force chains in
+            // proper tail calls.
+            let ret = match target {
+                FnTarget::Assigned(n) if n.starts_with("__mll_tkf[") => Ctx::Delim,
+                _ => Ctx::DelimLast,
+            };
+            normalize_parens_block_ret(&mut body.0, ret);
+        }
         Stmt::ReturnTable(entries) => {
             for (_, e) in entries {
                 normalize_expr(e, Ctx::Delim);
