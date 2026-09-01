@@ -493,6 +493,10 @@ mll_test!(hashmap_nil_values, "hashmap_nil_values.mll");
 // hit/miss/stored-nil-sentinel, both branch orders, wildcard, and the
 // guarded shape that must NOT fuse.
 mll_test!(hm_lookup_case_fused, "hm_lookup_case_fused.mll");
+// The list-pipeline fusion (fuse.rs): foldl' over map/filter/range
+// chains as one loop — range/leaf sources, nesting on both sides of a
+// filter, empty sources, argument order of the fold step.
+mll_test!(list_pipeline_fused, "list_pipeline_fused.mll");
 // A18: Foldable/Traversable-generic Prelude functions.
 mll_test!(foldable_generic, "foldable_generic.mll");
 // Data.IORef: basics + pointer-identity Eq, and GHC laziness parity

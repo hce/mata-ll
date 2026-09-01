@@ -68,6 +68,7 @@ mod annot;
 mod expr;
 mod ffi;
 mod function;
+mod fuse;
 mod hoist;
 mod inline;
 mod ioloop;
@@ -324,6 +325,11 @@ struct CodeGen {
     /// same name (codegen emits it after the runtime block), so the prelude's
     /// parameter count must not be applied to it.
     module_fn_names: std::collections::HashSet<String>,
+    /// Mangled specialization name -> the SOURCE name mono generated it
+    /// from (`foldl'_IntT…` -> `foldl'`), read off TFunction::spec_origin.
+    /// `fn_origin` resolves through it so passes that key on a Prelude
+    /// function's identity never parse mangled spellings.
+    spec_origins: std::collections::HashMap<String, String>,
     /// Emitted parameter counts of where-local functions in scope — the
     /// local analog of `fixed_arity`, kept by ScopeSnapshot exactly like
     /// `local_strict_params` (see function.rs). A19 made where-fns
@@ -402,6 +408,7 @@ impl CodeGen {
             direct_perform_fns: std::collections::HashMap::new(),
             fixed_arity: std::collections::HashMap::new(),
             module_fn_names: std::collections::HashSet::new(),
+            spec_origins: std::collections::HashMap::new(),
             local_fn_arity: std::collections::HashMap::new(),
             direct_perform_conflicts: std::collections::HashSet::new(),
             embed_var_export: false,

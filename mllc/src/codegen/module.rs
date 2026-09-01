@@ -344,6 +344,9 @@ impl CodeGen {
                 std::collections::HashSet::new();
             for f in module.functions.iter().chain(module.instance_fns.iter()) {
                 self.module_fn_names.insert(f.name.clone());
+                if let Some(origin) = &f.spec_origin {
+                    self.spec_origins.insert(f.name.clone(), origin.clone());
+                }
                 if !f.dict_params.is_empty() {
                     conflicts.insert(f.name.clone());
                     continue;

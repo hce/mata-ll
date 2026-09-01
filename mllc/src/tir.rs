@@ -105,6 +105,12 @@ pub struct TFunction {
     pub clauses: Vec<TClause>,
     /// If true, this is a monomorphized specialization
     pub specialized: bool,
+    /// The SOURCE name a monomorphized specialization was generated from
+    /// (`foldl'` for `foldl'_IntT…`) — set only by mono's
+    /// generate_specialization. Consumers that key behavior on a Prelude
+    /// function's identity (the list-pipeline fusion) resolve through
+    /// this instead of parsing the mangled spelling.
+    pub spec_origin: Option<String>,
     /// Dictionary parameters for polymorphic-recursive functions
     /// Each entry is (class_name, param_name), e.g. ("Show", "__dict_Show")
     pub dict_params: Vec<(String, String)>,

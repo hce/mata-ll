@@ -365,6 +365,7 @@ impl Checker {
             ty: fn_ty,
             clauses,
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         }]
@@ -481,6 +482,7 @@ impl Checker {
             ty: fn_ty,
             clauses,
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             // Strict in both operands by construction: every per-constructor
             // clause matches a constructor pattern on BOTH positions, and the
@@ -627,6 +629,7 @@ impl Checker {
             ty: compare_fn_ty.clone(),
             clauses: compare_clauses,
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             // Strict in both operands by construction: the clauses cover every
             // (constructor, constructor) pair, each matching a constructor
@@ -729,6 +732,7 @@ impl Checker {
                 ty: fn_ty.clone(),
                 clauses,
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 // Strict in both operands by construction, in both shapes: the
                 // enum clauses match constructor patterns on both positions,
@@ -796,6 +800,7 @@ impl Checker {
                     where_binds: vec![],
                 }],
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 // Strict in both operands: the body immediately scrutinizes
                 // `compare _a _b`, whose derived implementation forces both —
@@ -864,6 +869,7 @@ impl Checker {
                 ty: Ty::arrow(result_type.clone(), int_ty.clone()),
                 clauses,
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -902,6 +908,7 @@ impl Checker {
                 ty: Ty::arrow(int_ty.clone(), result_type.clone()),
                 clauses,
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -941,6 +948,7 @@ impl Checker {
                 ty: Ty::arrow(result_type.clone(), result_type.clone()),
                 clauses,
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -980,6 +988,7 @@ impl Checker {
                 ty: Ty::arrow(result_type.clone(), result_type.clone()),
                 clauses,
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -1066,6 +1075,7 @@ impl Checker {
                     guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -1095,6 +1105,7 @@ impl Checker {
                     guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -1181,6 +1192,7 @@ impl Checker {
                     guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -1214,6 +1226,7 @@ impl Checker {
                     guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -1241,6 +1254,7 @@ impl Checker {
                     guards: vec![], body: Some(body), where_binds: vec![],
                 }],
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
@@ -1308,6 +1322,7 @@ impl Checker {
                         where_binds: vec![],
                     }],
                     specialized: false,
+                    spec_origin: None,
                     dict_params: vec![],
                     derived_strict: false,
                 });
@@ -1351,6 +1366,7 @@ impl Checker {
                 where_binds: vec![],
             }],
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         });
@@ -1368,6 +1384,7 @@ impl Checker {
                 where_binds: vec![],
             }],
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         });
@@ -1759,6 +1776,7 @@ impl Checker {
             ty: fn_ty,
             clauses,
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         }]
@@ -1791,6 +1809,7 @@ impl Checker {
                 where_binds: vec![],
             }],
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         }
@@ -2085,12 +2104,14 @@ impl Checker {
         out_fns.push(TFunction {
             name: from_fn.clone(),
             ty: Ty::arrow(result_type.clone(), rep_type.clone()),
-            clauses: from_clauses, specialized: false, dict_params: vec![], derived_strict: false,
+            clauses: from_clauses, specialized: false, spec_origin: None,
+            dict_params: vec![], derived_strict: false,
         });
         out_fns.push(TFunction {
             name: to_fn.clone(),
             ty: Ty::arrow(rep_type.clone(), result_type.clone()),
-            clauses: to_clauses, specialized: false, dict_params: vec![], derived_strict: false,
+            clauses: to_clauses, specialized: false, spec_origin: None,
+            dict_params: vec![], derived_strict: false,
         });
         self.register_instance(InstanceInfo {
             class_name: "Generic".to_string(),
@@ -2872,6 +2893,7 @@ impl Checker {
                 where_binds: vec![],
             }],
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         },
@@ -2889,6 +2911,7 @@ impl Checker {
                 where_binds: vec![],
             }],
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         }]
@@ -3097,6 +3120,7 @@ impl Checker {
             ty: Ty::arrow(result_ty, json),
             clauses,
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         }]

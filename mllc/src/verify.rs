@@ -230,6 +230,7 @@ mod tests {
                     patterns: vec![], guards: vec![], body: Some(body), where_binds: vec![], span: None,
                 }],
                 specialized: false,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             }],

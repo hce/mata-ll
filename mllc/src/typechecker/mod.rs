@@ -2890,6 +2890,7 @@ impl Checker {
                             where_binds: vec![],
                         }],
                         specialized: false,
+                        spec_origin: None,
                         dict_params: vec![],
                         derived_strict: false,
                     });

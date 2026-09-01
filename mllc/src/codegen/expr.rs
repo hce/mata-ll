@@ -155,6 +155,9 @@ impl CodeGen {
                 if let Some(e) = self.try_inline_call(f, &args) {
                     return e;
                 }
+                if let Some(e) = self.try_fused_list_pipeline(f, &args) {
+                    return e;
+                }
 
                 self.general_call_ast(expr, f, &args)
             }

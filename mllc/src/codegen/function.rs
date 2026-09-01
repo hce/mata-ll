@@ -1166,6 +1166,7 @@ mod tests {
             ty: crate::types::Ty::Unit,
             clauses: vec![],
             specialized: false,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         };

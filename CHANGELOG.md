@@ -184,6 +184,22 @@ API of the `mllc` library crate.)
   Lua 5.5 (44x → 28x speed-of-light); LuaJIT is unchanged (its traces
   already sank the allocation).
 
+- **List-pipeline fusion.** `foldl' f z` over chains of `map`/`filter`
+  stages ending in a range (`[a .. b]` at `Int`) or any list expression
+  compiles to ONE loop with no intermediate lists — the deforestation
+  the handwritten twin does by hand. It fires when the fold function is
+  a named function provably strict in both parameters (its demand row);
+  then everything the loop computes eagerly is exactly what the lazy
+  pipeline forced, elements flow in the same order, and a filter guards
+  only the stages outside it. Mono specializations resolve through a
+  new `TFunction::spec_origin` (the mangled `foldl'_IntT…` carries its
+  source name), so identity is never parsed out of a spelling. Pinned
+  byte-exact against GHC by `list_pipeline_fused` (range and leaf
+  sources, stage nesting on both sides of a filter, empty sources, seed
+  and argument-order checks). list_pipeline: Lua 5.5 −83% (0.213s →
+  0.036s, 162x → 27x speed-of-light), LuaJIT −97% (0.031s → 0.001s —
+  2x, the handwritten twin's speed).
+
 - **The boxed-Integer ops take small-magnitude fast paths.** When both
   operands fit two limbs (< 2^48), add/sub/mul/divmod compute natively
   and box the result, skipping the limb walks — divmod's bit-by-bit

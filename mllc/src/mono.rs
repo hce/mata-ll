@@ -842,7 +842,8 @@ impl Monomorphizer {
         let body = TExpr::new(
             TExprKind::SpecCall {
                 original: mangled.clone(),
-                specialized: SpecKind::HmOp { op: op.to_string(), enc, cmp },
+                specialized: SpecKind::HmOp { op: op.to_string(),
+                enc, cmp },
                 args,
             },
             result_ty.clone(),
@@ -860,6 +861,7 @@ impl Monomorphizer {
                 where_binds: vec![],
             }],
             specialized: true,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         };
@@ -1108,6 +1110,7 @@ impl Monomorphizer {
             .map(|c| c.apply_subst(&subst))
             .collect();
         spec_fn.specialized = true;
+        spec_fn.spec_origin = Some(name.to_string());
         self.gen_stack.push((name.to_string(), mangled.to_string()));
         let spec_fn = self.mono_function(spec_fn);
         self.gen_stack.pop();
@@ -1940,6 +1943,7 @@ impl Monomorphizer {
                 where_binds: vec![],
             }],
             specialized: true,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         };
@@ -2111,6 +2115,7 @@ impl Monomorphizer {
                 where_binds: vec![],
             }],
             specialized: true,
+            spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
         };
@@ -3429,6 +3434,7 @@ impl Monomorphizer {
                     where_binds: vec![],
                 }],
                 specialized: true,
+                spec_origin: None,
                 dict_params: vec![],
                 derived_strict: false,
             });
