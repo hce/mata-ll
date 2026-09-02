@@ -42,7 +42,8 @@ min of 5; after the site-forced calling convention, the WHNF-return
 claim for direct calls, the closure-free IO self-loops, the
 mconcat@String builder, the HashMap strictness rows, the closure-free
 thunk representation, the case-of-hmLookup fusion, the list-pipeline
-fusion, and the persistent diff+reroot HashMap representation — the
+fusion with inlined stage/fold bodies, and the persistent diff+reroot
+HashMap representation — the
 pre-round numbers were string_build 14.1/16.3, arith_loop 22.5/1.0,
 ioref 110/27, generics 148/54, list_pipeline 215/179,
 integer_arith 1436/717, and the RETIRED original hm_churn 59/39,
@@ -51,7 +52,7 @@ it split into hm_lookup and a rebuilt hm_churn that actually churns):
 
 | workload      | Lua 5.5 | LuaJIT  |
 |---------------|--------:|--------:|
-| list_pipeline |   29.0x |    2.1x |
+| list_pipeline |    8.1x |    1.4x |
 | arith_loop    |    3.3x |    1.0x |
 | ioref_loop    |   30.5x |    1.1x |
 | string_build  |    7.1x |    6.0x |
@@ -60,9 +61,12 @@ it split into hm_lookup and a rebuilt hm_churn that actually churns):
 | integer_arith |  213.8x |  100.6x |
 | hm_churn      |   55.9x |   44.3x |
 
-list_pipeline's walls after fusion are 0.038s (5.5) and 0.001s
-(LuaJIT), from 0.213s/0.031s before it; the residual 5.5 ratio is the
-per-element function calls (step, odd) the twin inlines by hand.
+list_pipeline's walls after fusion are 0.010s (5.5) and 0.001s
+(LuaJIT), from 0.213s/0.031s before it. The fused loop now inlines the
+stage and fold BODIES (`a = (a + x0) % p`, the twin's own shape); the
+residual 5.5 ratio is the `__mll_rem` helper call per element (`rem`
+is truncated where Lua's `%` floors, so it cannot lower to the bare
+operator) plus interpreter loop overhead.
 
 The diff+reroot HashMap representation (one mutable store per version
 family, old versions replayed on demand) took hm_churn from 803x/834x

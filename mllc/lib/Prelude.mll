@@ -178,7 +178,7 @@ even :: Integral a => a -> Bool
 even n = n `rem` 2 == 0
 
 odd :: Integral a => a -> Bool
-odd = not . even
+odd n = n `rem` 2 /= 0
 
 -- Largest / smallest element. Both error on an empty structure.
 maximum :: (Ord a, Foldable t) => t a -> a

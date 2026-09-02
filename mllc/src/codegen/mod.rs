@@ -111,7 +111,7 @@ pub(crate) fn is_cheap(e: &crate::tir::TExpr) -> bool {
 /// eagerness for shapes `arg_ast` thunks). Exposed like `is_cheap` above so
 /// the demand pass derives the predicate instead of mirroring it (G5).
 pub(crate) fn is_cheap_context_free(e: &crate::tir::TExpr) -> bool {
-    CodeGen::is_cheap_with(e, &|_| false)
+    CodeGen::is_cheap_with(e, &|_| false, &|_| false)
 }
 use runtime::ondemand_prelude;
 
@@ -281,6 +281,17 @@ struct CodeGen {
     /// where-bound name first) and restored at the same scope exits as
     /// `local_strict_params`, so a row never leaks across clauses.
     local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
+    /// Where-bound inline candidates currently in scope, keyed by source
+    /// name: parameter names and body of a single-definition, simple-
+    /// parameter, cheap, non-recursive local function whose body
+    /// references nothing but its parameters and module-level names (no
+    /// sibling bindings, no enclosing locals — relocating such a body
+    /// would need scope tracking its consumer does not have). Consulted
+    /// by the fused-pipeline inliner ONLY (`try_fused_list_pipeline`);
+    /// ordinary call sites keep going through `inline_fns`. Installed by
+    /// where_binds_stmts alongside `local_strict_params` and restored at
+    /// the same scope exits.
+    local_inline_fns: std::collections::HashMap<String, (Vec<String>, crate::tir::TExpr)>,
     /// The demand the program provably places on the CURRENT function's
     /// result (see `Rows::result_demand`): deep for functions in the
     /// whole-program deep-result set, plain WHNF otherwise. Seeds the
@@ -404,6 +415,7 @@ impl CodeGen {
             },
             local_strict_params: std::collections::HashMap::new(),
             local_demand_rows: std::collections::HashMap::new(),
+            local_inline_fns: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
             direct_perform_fns: std::collections::HashMap::new(),
             fixed_arity: std::collections::HashMap::new(),

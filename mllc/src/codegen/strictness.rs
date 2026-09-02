@@ -31,7 +31,25 @@ impl CodeGen {
     /// - `is_cheap_to_force` (var_ok = provably WHNF): "safe to evaluate
     ///   eagerly" — evaluating the expression now cannot force a suspended
     ///   computation, so it cannot raise or diverge where GHC would not.
-    pub(crate) fn is_cheap_with(expr: &TExpr, var_ok: &dyn Fn(&str) -> bool) -> bool {
+    ///
+    /// `prim_ok` is the local-shadow question for a saturated primitive
+    /// typeclass method application (`eq_Int a b`, `ord_gt__Int a b`, …):
+    /// such an App emits as one native Lua operator over forced operands
+    /// (try_primitive_method_app) — the App spelling of exactly the
+    /// comparisons the InfixApp arm already counts cheap — but ONLY when
+    /// no local binding shadows the method name; shadowed, it is an
+    /// arbitrary call. `is_cheap_to_force` answers with
+    /// `is_local_shadowed`, matching the emitter; `is_cheap` passes true
+    /// (its consumers weigh size/duplication, where the pathological
+    /// shadow only costs precision, and inline-candidate bodies at module
+    /// scope have no locals to shadow with); the context-free floor
+    /// passes false (the demand mirror must UNDER-claim eagerness — the
+    /// drift bugs were all over-claims).
+    pub(crate) fn is_cheap_with(
+        expr: &TExpr,
+        var_ok: &dyn Fn(&str) -> bool,
+        prim_ok: &dyn Fn(&str) -> bool,
+    ) -> bool {
         match &expr.kind {
             TExprKind::Lit(_) | TExprKind::Con(_)
             | TExprKind::Lambda { .. } | TExprKind::OpFunc(_) => true,
@@ -44,8 +62,8 @@ impl CodeGen {
             // a function is expected).
             TExprKind::DictAccess { .. } => true,
             TExprKind::Var(name) => var_ok(name),
-            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap_with(inner, var_ok),
-            TExprKind::Tuple(elems) => elems.iter().all(|e| Self::is_cheap_with(e, var_ok)),
+            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap_with(inner, var_ok, prim_ok),
+            TExprKind::Tuple(elems) => elems.iter().all(|e| Self::is_cheap_with(e, var_ok, prim_ok)),
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // `$` IS application: `f $ x` calls f, so it is neither small
                 // to duplicate nor safe to evaluate eagerly — a possibly-⊥
@@ -58,28 +76,66 @@ impl CodeGen {
                 // through `$` (`Just $ x`) is just table creation.
                 if op == "$" {
                     return Self::is_con_app(lhs)
-                        && Self::is_cheap_with(lhs, var_ok)
-                        && Self::is_cheap_with(rhs, var_ok);
+                        && Self::is_cheap_with(lhs, var_ok, prim_ok)
+                        && Self::is_cheap_with(rhs, var_ok, prim_ok);
                 }
                 // Builtin ops (arithmetic, comparison, concat) are cheap
                 // if their operands are cheap. `.` stays: composition only
                 // BUILDS a closure — no operand is called.
-                is_builtin_op(op) && Self::is_cheap_with(lhs, var_ok) && Self::is_cheap_with(rhs, var_ok)
+                is_builtin_op(op) && Self::is_cheap_with(lhs, var_ok, prim_ok) && Self::is_cheap_with(rhs, var_ok, prim_ok)
             }
             TExprKind::App(func, arg) => {
                 // Constructor applications are cheap (just table creation).
                 // General function applications are NOT cheap — the function
                 // body might be expensive even if the args are cheap.
                 if Self::is_con_app(expr) {
-                    Self::is_cheap_with(arg, var_ok) && Self::is_cheap_with(func, var_ok)
-                } else {
-                    false
+                    return Self::is_cheap_with(arg, var_ok, prim_ok)
+                        && Self::is_cheap_with(func, var_ok, prim_ok);
                 }
+                // A saturated primitive typeclass method — the App spelling
+                // (`ord_gt__Int x 5` for `x > 5` at Int) of the comparisons
+                // the InfixApp arm above already counts cheap; it emits as
+                // one native Lua operator over forced operands
+                // (try_primitive_method_app), gated by `prim_ok` on the
+                // same shadow question the emitter asks.
+                let mut h: &TExpr = expr;
+                let mut argc = 0usize;
+                loop {
+                    match &h.kind {
+                        TExprKind::App(f2, _) => {
+                            argc += 1;
+                            h = f2.as_ref();
+                        }
+                        TExprKind::Paren(i) => h = i.as_ref(),
+                        _ => break,
+                    }
+                }
+                if argc == 2
+                    && let TExprKind::Var(name) = &h.kind
+                    && super::names::primitive_method_lua_op(name).is_some()
+                    && prim_ok(name)
+                    && let TExprKind::App(inner, arg1) = &func.kind
+                {
+                    // Exactly App(App(Var, arg1), arg): judge both operands.
+                    let _ = inner;
+                    return Self::is_cheap_with(arg1, var_ok, prim_ok)
+                        && Self::is_cheap_with(arg, var_ok, prim_ok);
+                }
+                // Saturated Prelude `not` → `(operand == false)` native
+                // boolean (try_native_not_app), same prim_ok shadow gate.
+                if argc == 1
+                    && let TExprKind::Var(name) = &h.kind
+                    && name == "not"
+                    && prim_ok(name)
+                {
+                    return Self::is_cheap_with(arg, var_ok, prim_ok);
+                }
+                false
             }
             TExprKind::If { cond, then_branch, else_branch } => {
-                Self::is_cheap_with(cond, var_ok)
-                    && Self::is_cheap_with(then_branch, var_ok)
-                    && Self::is_cheap_with(else_branch, var_ok)
+                Self::is_cheap_with(cond, var_ok, prim_ok)
+                    && Self::is_cheap_with(then_branch, var_ok, prim_ok)
+                    && Self::is_cheap_with(else_branch, var_ok, prim_ok)
             }
             // Function calls, case, let — potentially expensive, thunk them
             _ => false,
@@ -89,7 +145,7 @@ impl CodeGen {
     /// "Small to duplicate/evaluate": `is_cheap_with` with every variable
     /// counted cheap (see there for the two notions).
     pub(super) fn is_cheap(expr: &TExpr) -> bool {
-        Self::is_cheap_with(expr, &|_| true)
+        Self::is_cheap_with(expr, &|_| true, &|_| true)
     }
 
     /// True when evaluating `expr` right now is *sound*, not just cheap:
@@ -116,13 +172,17 @@ impl CodeGen {
         if self.integer_lit_app(expr).is_some() {
             return true;
         }
-        Self::is_cheap_with(expr, &|name| {
-            // Prelude `otherwise` is the literal `true` — unless a local
-            // binder shadows it, in which case it is an ordinary (possibly
-            // thunked) variable like any other.
-            (name == "otherwise" && !self.is_local_shadowed(name))
-                || self.concrete_vars.contains(&sanitize_name(name))
-        }) && !Self::contains_trapping_op(expr)
+        Self::is_cheap_with(
+            expr,
+            &|name| {
+                // Prelude `otherwise` is the literal `true` — unless a local
+                // binder shadows it, in which case it is an ordinary (possibly
+                // thunked) variable like any other.
+                (name == "otherwise" && !self.is_local_shadowed(name))
+                    || self.concrete_vars.contains(&sanitize_name(name))
+            },
+            &|name| !self.is_local_shadowed(name),
+        ) && !Self::contains_trapping_op(expr)
     }
 
     /// The decimal string of an Integer-literal conversion: `expr` (parens

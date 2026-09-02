@@ -259,7 +259,11 @@ pub(super) fn is_builtin_op(op: &str) -> bool {
     // NOTE: `^` is deliberately NOT here — Lua's `^` is float power. It is a
     // Prelude function ((^), exponentiation by squaring over `*`), emitted as a
     // call like any user operator.
+    // `div`/`mod`/`quot`/`rem` never reach operator_infix_ast (the InfixApp
+    // arm dispatches all four to intdiv_infix_ast first); they are listed
+    // for the cheapness/WHNF predicates — their zero-divisor trap is
+    // contains_trapping_op's separate question, same as `div` always was.
     matches!(op, "+" | "-" | "*" | "/" | "%" | "==" | "/=" | "~="
         | "<" | ">" | "<=" | ">=" | "++" | "<>" | "&&" | "||" | ".." | "$" | "."
-        | "div" | "mod")
+        | "div" | "mod" | "quot" | "rem")
 }

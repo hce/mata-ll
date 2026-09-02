@@ -59,7 +59,7 @@ impl CodeGen {
 
     /// Every identifier-shaped InfixApp operator used in `expr` (backtick
     /// operators — symbolic ones cannot collide with parameter names).
-    fn collect_infix_op_uses(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
+    pub(super) fn collect_infix_op_uses(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
         if let TExprKind::InfixApp { op, .. } = &expr.kind
             && op.starts_with(|c: char| c.is_alphabetic() || c == '_') {
                 out.insert(op.clone());
@@ -70,7 +70,7 @@ impl CodeGen {
     /// Every variable occurrence in `expr` (an over-approximation of its
     /// free variables: bound occurrences are included, which only widens
     /// the capture check).
-    fn collect_var_refs(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
+    pub(super) fn collect_var_refs(expr: &TExpr, out: &mut std::collections::HashSet<String>) {
         if let TExprKind::Var(name) = &expr.kind {
             out.insert(name.clone());
         }
@@ -118,7 +118,7 @@ impl CodeGen {
     /// capture-avoiding: the caller must decline substitutions whose
     /// argument variables collide with body binders (subst_would_capture)
     /// — there is no alpha-renaming here.
-    fn subst_texpr(expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) -> TExpr {
+    pub(super) fn subst_texpr(expr: &TExpr, subst: &std::collections::HashMap<String, &TExpr>) -> TExpr {
         if subst.is_empty() {
             return expr.clone();
         }

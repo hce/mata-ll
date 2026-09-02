@@ -48,6 +48,20 @@
 //! emission is structured statements: no `Raw`, so every later pass
 //! (paren, dead-branch, hoist) analyzes it like any other tree.
 //!
+//! INLINED STAGE/FOLD BODIES. When a stage or fold function is an inline
+//! candidate (module-level via `inline_fns`, where-local via
+//! `local_inline_fns`) or a direct cheap lambda, its BODY is emitted in
+//! place of the per-element call, parameters substituted with the loop
+//! locals — the handwritten twin's shape (`a = (a + x0) % p` instead of
+//! `a = f(a, x0)`). The strictness gates are computed on the original
+//! function value exactly as before; only the call's emission changes,
+//! and the body is the same function body, so per-element semantics are
+//! unchanged. `pipe_inline_target` carries the relocation gates (shadow
+//! and capture questions); the loop locals are registered as TIR-visible
+//! (concrete when WHNF-known) so the substituted parameters emit as bare
+//! reads, and an unproven-WHNF body result is force-wrapped wherever the
+//! loop needs the value natively (filter conditions, the accumulator).
+//!
 //! SOUNDNESS.
 //!
 //! * WHEN IT RUNS — the IIFE evaluates where the original call expression
@@ -180,6 +194,14 @@ enum Consumer<'a> {
 enum StepKind {
     /// `a = __mll_fu_f(a, x)`
     CallF,
+    /// The fold function's BODY emitted in place of the call — an inline
+    /// candidate (module or where-local) or a direct cheap lambda, its
+    /// parameters substituted with the accumulator and element locals
+    /// (see `pipe_inline_target`). `tys` are the two parameter types
+    /// from the fold function's own arrow type, stamped on the
+    /// substituted variables so the body's operators weigh them as the
+    /// originals.
+    InlineF { params: Vec<String>, body: TExpr, tys: Vec<Ty> },
     /// `a = a <op> x` — a native scalar operator fold (`(+)` at Int).
     Native(&'static str),
     /// `a = a + 1` — length's count; the element value is unused.
@@ -195,6 +217,11 @@ enum StepKind {
 enum StageLocal {
     Filter(String),
     Map(String, bool),
+    /// A filter whose predicate BODY is emitted in place of the call
+    /// (param, body, the parameter's type).
+    FilterInline(String, TExpr, Ty),
+    /// A map whose function BODY is emitted in place of the call.
+    MapInline(String, TExpr, Ty),
     /// A take budget counter (checked at loop top, decremented in place).
     Take(String),
 }
@@ -357,6 +384,205 @@ impl CodeGen {
         None
     }
 
+    /// A pipeline function VALUE whose body can be emitted in place of
+    /// its per-element call: a bare Var naming an inline candidate (a
+    /// where-local one, or a module-level one when no local binding
+    /// shadows the name), or a direct lambda with a cheap body (sections
+    /// desugar to lambdas, so `(* 3)` qualifies). Cheap bodies contain
+    /// no binders, so the substitution cannot capture; two relocation
+    /// gates remain: a parameter used as a backtick OPERATOR is not
+    /// substitutable (an InfixApp op is a string, not a Var node), and
+    /// every OTHER name the body references must not be locally shadowed
+    /// at this site — the body must resolve its module-level names here
+    /// exactly as at its definition (the where-local registration
+    /// already refused bodies referencing any local). The fusion
+    /// strictness gates are untouched — inlining only replaces the
+    /// call's emission with the same body.
+    fn pipe_inline_target(&self, e: &TExpr, arity: usize) -> Option<(Vec<String>, TExpr)> {
+        let e = strip_parens(e);
+        let (params, body) = match &e.kind {
+            TExprKind::Lambda { params, body } if params.len() == arity => (
+                params.iter().map(|(n, _)| n.clone()).collect::<Vec<_>>(),
+                body.as_ref().clone(),
+            ),
+            TExprKind::Var(n) => {
+                let (params, body) = self.local_inline_fns.get(n).cloned().or_else(|| {
+                    if self.is_local_shadowed(n) {
+                        None
+                    } else {
+                        self.inline_fns.get(n).map(|(p, b, _)| (p.clone(), b.clone()))
+                    }
+                })?;
+                if params.len() != arity {
+                    return None;
+                }
+                (params, body)
+            }
+            _ => return None,
+        };
+        if !Self::is_cheap(&body) {
+            return None;
+        }
+        let mut op_uses = std::collections::HashSet::new();
+        Self::collect_infix_op_uses(&body, &mut op_uses);
+        if params.iter().any(|p| op_uses.contains(p)) {
+            return None;
+        }
+        let mut fv = std::collections::HashSet::new();
+        Self::collect_var_refs(&body, &mut fv);
+        if fv.iter().any(|v| !params.contains(v) && self.is_local_shadowed(v)) {
+            return None;
+        }
+        Some((params, body))
+    }
+
+    /// The inline target's body emitted with its parameters substituted
+    /// by the named loop locals (typed as the original parameters).
+    /// Returns the emission and whether its VALUE is provably WHNF
+    /// (`expr_yields_whnf` on the substituted body — a substituted
+    /// parameter emits as a bare concrete read or a `__force`, WHNF
+    /// either way, so cheap op-tree bodies qualify; an unproven body is
+    /// force-wrapped by the caller wherever the loop needs the value
+    /// natively).
+    fn pipe_inline_emit(
+        &mut self,
+        params: &[String],
+        body: &TExpr,
+        args: &[(&str, &Ty)],
+    ) -> (Expr, bool) {
+        let arg_texprs: Vec<TExpr> = args
+            .iter()
+            .map(|(n, ty)| TExpr::new(TExprKind::Var((*n).to_string()), (*ty).clone()))
+            .collect();
+        let mut subst = std::collections::HashMap::new();
+        for (p, a) in params.iter().zip(arg_texprs.iter()) {
+            subst.insert(p.clone(), a);
+        }
+        let body2 = Self::subst_texpr(body, &subst);
+        let whnf = self.expr_yields_whnf(&body2);
+        (self.expr_ast(&body2), whnf)
+    }
+
+    /// The accumulator step for one surviving element (`cur` is always a
+    /// bare loop local).
+    fn fused_step_stmt(&mut self, step: &StepKind, cur: &str, cur_whnf: bool) -> Stmt {
+        match step {
+            StepKind::CallF => Stmt::Assign(
+                "__mll_fu_a".into(),
+                Expr::call_named(
+                    "__mll_fu_f",
+                    vec![Expr::name("__mll_fu_a"), Expr::name(cur)],
+                ),
+            ),
+            // The fold body in place of the call. The accumulator local
+            // is registered concrete, so an unproven-WHNF body is
+            // force-wrapped to keep that claim true for the next
+            // iteration's substituted reads.
+            StepKind::InlineF { params, body, tys } => {
+                let (e, whnf) = self.pipe_inline_emit(
+                    params,
+                    body,
+                    &[("__mll_fu_a", &tys[0]), (cur, &tys[1])],
+                );
+                let e = if whnf { e } else { Expr::force(e) };
+                Stmt::Assign("__mll_fu_a".into(), e)
+            }
+            // The native operator needs a WHNF operand; a lambda map
+            // stage's result can be a raw captured thunk.
+            StepKind::Native(op) => Stmt::Assign(
+                "__mll_fu_a".into(),
+                Expr::binop(
+                    *op,
+                    Expr::name("__mll_fu_a"),
+                    if cur_whnf { Expr::name(cur) } else { Expr::force(Expr::name(cur)) },
+                ),
+            ),
+            StepKind::Count => Stmt::Assign(
+                "__mll_fu_a".into(),
+                Expr::binop("+", Expr::name("__mll_fu_a"), Expr::lit("1")),
+            ),
+        }
+    }
+
+    /// The per-element body: stages applied source-first (reverse of the
+    /// collected outermost-first order), the accumulator step innermost.
+    /// A map binds a fresh element local; a filter nests everything
+    /// after it; a take decrements its budget (exhaustion is checked at
+    /// the loop top). Inlined stages emit their substituted bodies in
+    /// place of the calls; a filter condition must be an actual boolean
+    /// (a thunk table is truthy), so an unproven-WHNF predicate body is
+    /// force-wrapped.
+    fn fused_body_stmts(
+        &mut self,
+        source_first: &[StageLocal],
+        cur: &str,
+        cur_whnf: bool,
+        next_x: &mut usize,
+        step: &StepKind,
+    ) -> Vec<Stmt> {
+        match source_first.split_first() {
+            None => vec![self.fused_step_stmt(step, cur, cur_whnf)],
+            Some((StageLocal::Filter(n), rest)) => vec![Stmt::If {
+                cond: Expr::call_named(n, vec![Expr::name(cur)]),
+                then_b: Block(self.fused_body_stmts(rest, cur, cur_whnf, next_x, step)),
+                elseifs: vec![],
+                else_b: None,
+            }],
+            Some((StageLocal::FilterInline(param, body, ty), rest)) => {
+                let (ce, whnf) = self.pipe_inline_emit(
+                    std::slice::from_ref(param),
+                    body,
+                    &[(cur, ty)],
+                );
+                let cond = if whnf { ce } else { Expr::force(ce) };
+                vec![Stmt::If {
+                    cond,
+                    then_b: Block(self.fused_body_stmts(rest, cur, cur_whnf, next_x, step)),
+                    elseifs: vec![],
+                    else_b: None,
+                }]
+            }
+            Some((StageLocal::Map(n, whnf_result), rest)) => {
+                let xn = format!("__mll_fu_x{next_x}");
+                *next_x += 1;
+                let mut out = vec![Stmt::Local(
+                    vec![xn.clone()],
+                    Some(Expr::call_named(n, vec![Expr::name(cur)])),
+                )];
+                self.local_vars.insert(xn.clone());
+                if *whnf_result {
+                    self.concrete_vars.insert(xn.clone());
+                }
+                out.extend(self.fused_body_stmts(rest, &xn, *whnf_result, next_x, step));
+                out
+            }
+            Some((StageLocal::MapInline(param, body, ty), rest)) => {
+                let xn = format!("__mll_fu_x{next_x}");
+                *next_x += 1;
+                let (e, whnf) = self.pipe_inline_emit(
+                    std::slice::from_ref(param),
+                    body,
+                    &[(cur, ty)],
+                );
+                let mut out = vec![Stmt::Local(vec![xn.clone()], Some(e))];
+                self.local_vars.insert(xn.clone());
+                if whnf {
+                    self.concrete_vars.insert(xn.clone());
+                }
+                out.extend(self.fused_body_stmts(rest, &xn, whnf, next_x, step));
+                out
+            }
+            Some((StageLocal::Take(n), rest)) => {
+                let mut out = vec![Stmt::Assign(
+                    n.clone(),
+                    Expr::binop("-", Expr::name(n), Expr::lit("1")),
+                )];
+                out.extend(self.fused_body_stmts(rest, cur, cur_whnf, next_x, step));
+                out
+            }
+        }
+    }
+
     pub(super) fn try_fused_list_pipeline(
         &mut self,
         f: &TExpr,
@@ -405,7 +631,17 @@ impl CodeGen {
                     if !(row[0] && row[1]) {
                         return None;
                     }
-                    StepKind::CallF
+                    // Gated strict in both — now try to emit the body in
+                    // place of the per-element call. The parameter types
+                    // come from the fold value's own arrow type.
+                    match (self.pipe_inline_target(fold_f, 2), arrow_args(&strip_parens(fold_f).ty, 2)) {
+                        (Some((params, body)), Some(tys)) => StepKind::InlineF {
+                            params,
+                            body,
+                            tys: tys.into_iter().cloned().collect(),
+                        },
+                        _ => StepKind::CallF,
+                    }
                 }
             }
             Consumer::Sum { .. } => StepKind::Native("+"),
@@ -511,8 +747,11 @@ impl CodeGen {
                     stmts.push(Stmt::Local(vec!["__mll_fu_f".into()], Some(f_e)));
                 }
                 // CallF's F forces the accumulator itself (row[0]); a
-                // NATIVE step uses it raw in an operator, so it must
-                // arrive WHNF (a do-bound `z` is a thunk otherwise).
+                // NATIVE step uses it raw in an operator, and an INLINED
+                // body reads it as a bare concrete local — both need it
+                // delivered WHNF (a do-bound `z` is a thunk otherwise;
+                // the fold is gated strict in the accumulator, so every
+                // demanded result forced z anyway).
                 let z_e = if matches!(step, StepKind::CallF) {
                     self.arg_ast(z, true)
                 } else {
@@ -539,6 +778,20 @@ impl CodeGen {
         for (i, st) in stages.iter().enumerate() {
             match st {
                 Stage::Map(g) => {
+                    // An inlinable stage function never evaluates its
+                    // expression at all — a bare Var or lambda is a
+                    // closure build with no observable evaluation, so
+                    // skipping the binding leaves no trace.
+                    if let (Some((params, body)), Some(tys)) =
+                        (self.pipe_inline_target(g, 1), arrow_args(&strip_parens(g).ty, 1))
+                    {
+                        stage_locals.push(StageLocal::MapInline(
+                            params.into_iter().next().expect("arity-1 inline target"),
+                            body,
+                            tys[0].clone(),
+                        ));
+                        continue;
+                    }
                     let n = format!("__mll_fu_s{i}");
                     let whnf_result = {
                         let (h, _) = spine(strip_parens(g));
@@ -550,6 +803,16 @@ impl CodeGen {
                     stage_locals.push(StageLocal::Map(n, whnf_result));
                 }
                 Stage::Filter(p) => {
+                    if let (Some((params, body)), Some(tys)) =
+                        (self.pipe_inline_target(p, 1), arrow_args(&strip_parens(p).ty, 1))
+                    {
+                        stage_locals.push(StageLocal::FilterInline(
+                            params.into_iter().next().expect("arity-1 inline target"),
+                            body,
+                            tys[0].clone(),
+                        ));
+                        continue;
+                    }
                     let n = format!("__mll_fu_s{i}");
                     let fe = self.forced_ast(p);
                     stmts.push(Stmt::Local(vec![n.clone()], Some(fe)));
@@ -567,86 +830,28 @@ impl CodeGen {
             }
         }
 
-        // The per-element body: stages applied source-first (reverse of the
-        // collected outermost-first order), the accumulator step innermost.
-        // A map binds a fresh element local; a filter nests everything
-        // after it; a take decrements its budget (exhaustion is checked at
-        // the loop top).
-        fn step_stmt(step: &StepKind, cur: Expr, cur_whnf: bool) -> Stmt {
-            match step {
-                StepKind::CallF => Stmt::Assign(
-                    "__mll_fu_a".into(),
-                    Expr::call_named(
-                        "__mll_fu_f",
-                        vec![Expr::name("__mll_fu_a"), cur],
-                    ),
-                ),
-                // The native operator needs a WHNF operand; a lambda map
-                // stage's result can be a raw captured thunk.
-                StepKind::Native(op) => Stmt::Assign(
-                    "__mll_fu_a".into(),
-                    Expr::binop(
-                        *op,
-                        Expr::name("__mll_fu_a"),
-                        if cur_whnf { cur } else { Expr::force(cur) },
-                    ),
-                ),
-                StepKind::Count => Stmt::Assign(
-                    "__mll_fu_a".into(),
-                    Expr::binop("+", Expr::name("__mll_fu_a"), Expr::lit("1")),
-                ),
-            }
-        }
-        fn build_body(
-            source_first: &[StageLocal],
-            cur: Expr,
-            cur_whnf: bool,
-            next_x: &mut usize,
-            step: &StepKind,
-        ) -> Vec<Stmt> {
-            match source_first.split_first() {
-                None => vec![step_stmt(step, cur, cur_whnf)],
-                Some((StageLocal::Filter(n), rest)) => vec![Stmt::If {
-                    cond: Expr::call_named(n, vec![cur.clone()]),
-                    then_b: Block(build_body(rest, cur, cur_whnf, next_x, step)),
-                    elseifs: vec![],
-                    else_b: None,
-                }],
-                Some((StageLocal::Map(n, whnf_result), rest)) => {
-                    let xn = format!("__mll_fu_x{next_x}");
-                    *next_x += 1;
-                    let mut out = vec![Stmt::Local(
-                        vec![xn.clone()],
-                        Some(Expr::call_named(n, vec![cur])),
-                    )];
-                    out.extend(build_body(
-                        rest,
-                        Expr::name(xn),
-                        *whnf_result,
-                        next_x,
-                        step,
-                    ));
-                    out
-                }
-                Some((StageLocal::Take(n), rest)) => {
-                    let mut out = vec![Stmt::Assign(
-                        n.clone(),
-                        Expr::binop("-", Expr::name(n), Expr::lit("1")),
-                    )];
-                    out.extend(build_body(rest, cur, cur_whnf, next_x, step));
-                    out
-                }
-            }
-        }
+        // TIR-visible loop locals for the inlined bodies: registered so a
+        // substituted parameter emits as a bare (concrete) local read.
+        // The accumulator and source element are WHNF by construction
+        // (site-forced z, force-wrapped step results, range integers /
+        // forced leaf extraction); a map result's concreteness follows
+        // its provable WHNF-ness, and an unproven one is read through
+        // `__force` exactly like any lazy local. The scope snapshot
+        // captured above unregisters everything on exit.
+        self.local_vars.insert("__mll_fu_a".to_string());
+        self.concrete_vars.insert("__mll_fu_a".to_string());
+        self.local_vars.insert("__mll_fu_x".to_string());
+        self.concrete_vars.insert("__mll_fu_x".to_string());
         let source_first: Vec<StageLocal> =
             stage_locals.into_iter().rev().collect();
         let mut next_x = 0usize;
         // The initial element is WHNF for a range (a native integer) and
         // for a forced leaf extraction; length's unforced extraction never
-        // feeds a Native step (its step is Count).
-        let body = build_body(
+        // feeds a Native step (its step is Count) and, with every leading
+        // map dropped, never feeds an inlined body either.
+        let body = self.fused_body_stmts(
             &source_first,
-            Expr::name("__mll_fu_x"),
+            "__mll_fu_x",
             true,
             &mut next_x,
             &step,

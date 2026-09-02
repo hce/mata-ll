@@ -49,6 +49,8 @@ pub(super) struct ScopeSnapshot {
     local_strict_params: std::collections::HashMap<String, Vec<bool>>,
     /// Structured twin of `local_strict_params`: their demand rows.
     local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
+    /// Where-bound inline candidates in scope (fused-pipeline inliner).
+    local_inline_fns: std::collections::HashMap<String, (Vec<String>, crate::tir::TExpr)>,
     /// Emitted parameter counts of the where-local functions in scope (the
     /// local analog of `fixed_arity`): a GENERALIZED where-fn (A19) can be
     /// used at an instantiation with more arrows than its emitted closure
@@ -69,6 +71,7 @@ impl ScopeSnapshot {
             var_table_emitted: cg.var_table_emitted,
             local_strict_params: cg.local_strict_params.clone(),
             local_demand_rows: cg.local_demand_rows.clone(),
+            local_inline_fns: cg.local_inline_fns.clone(),
             local_fn_arity: cg.local_fn_arity.clone(),
         }
     }
@@ -83,6 +86,7 @@ impl ScopeSnapshot {
         cg.var_table_emitted = self.var_table_emitted;
         cg.local_strict_params = self.local_strict_params;
         cg.local_demand_rows = self.local_demand_rows;
+        cg.local_inline_fns = self.local_inline_fns;
         cg.local_fn_arity = self.local_fn_arity;
     }
 
@@ -97,6 +101,7 @@ impl ScopeSnapshot {
         cg.concrete_vars = self.concrete_vars;
         cg.local_strict_params = self.local_strict_params;
         cg.local_demand_rows = self.local_demand_rows;
+        cg.local_inline_fns = self.local_inline_fns;
         cg.local_fn_arity = self.local_fn_arity;
     }
 
@@ -896,6 +901,7 @@ impl CodeGen {
         for b in binds {
             self.local_strict_params.remove(&b.name);
             self.local_fn_arity.remove(&b.name);
+            self.local_inline_fns.remove(&b.name);
         }
         // Register each function group's emitted arity — patterns plus eta
         // padding, the formula where_func_group_body_stmts emits — AFTER the
@@ -922,6 +928,57 @@ impl CodeGen {
         let local_rows =
             crate::demand::local_fn_strict_params(clause, &self.demand_info.strict_params, &|n| self.is_local_shadowed(n));
         self.local_strict_params.extend(local_rows);
+        // Where-local inline candidates for the fused-pipeline inliner:
+        // the same shape find_inline_candidates admits at module level
+        // (single definition, simple parameters, cheap non-recursive
+        // body, no remaining arrows), plus a no-environment gate — the
+        // body may reference only its parameters and names that are NOT
+        // local here (module-level resolution survives relocation into
+        // the loop; module names are re-checked against site shadowing
+        // at the use). The forward declarations above have already
+        // registered every where name and the clause's own parameters
+        // are locals too, so a reference to a sibling binding or an
+        // enclosing local declines by this one membership test.
+        {
+            let mut i = 0;
+            while i < binds.len() {
+                if binds[i].patterns.is_empty() {
+                    i += 1;
+                    continue;
+                }
+                let name = binds[i].name.clone();
+                let gstart = i;
+                while i < binds.len() && binds[i].name == name && !binds[i].patterns.is_empty() {
+                    i += 1;
+                }
+                if i - gstart != 1 {
+                    continue;
+                }
+                let b = &binds[gstart];
+                if !b.patterns.iter().all(|p| matches!(p, TPattern::Var(_, _)))
+                    || count_arrows(&b.body.ty) != 0
+                    || !Self::is_cheap(&b.body)
+                    || expr_references_name(&b.body, &name)
+                {
+                    continue;
+                }
+                let params: Vec<String> = b
+                    .patterns
+                    .iter()
+                    .map(|p| {
+                        if let TPattern::Var(n, _) = p { n.clone() } else { unreachable!() }
+                    })
+                    .collect();
+                let mut fv = std::collections::HashSet::new();
+                Self::collect_var_refs(&b.body, &mut fv);
+                if fv.iter().any(|v| {
+                    !params.contains(v) && self.local_vars.contains(&sanitize_name(v))
+                }) {
+                    continue;
+                }
+                self.local_inline_fns.insert(name, (params, b.body.clone()));
+            }
+        }
         // Structured twin: install the clause's demand rows before the
         // demanded_bindings closure below, so a sibling RHS that routes
         // demand through a local function is seen (see local_demand_rows).

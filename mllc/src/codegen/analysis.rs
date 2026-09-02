@@ -438,7 +438,7 @@ impl CodeGen {
             for (i, arg) in args.iter().enumerate() {
                 if i < thunked.len() {
                     called[i] = true;
-                    if !Self::is_cheap_with(arg, &|_| false)
+                    if !Self::is_cheap_with(arg, &|_| false, &|_| false)
                         || Self::contains_trapping_op(arg)
                     {
                         thunked[i] = true;

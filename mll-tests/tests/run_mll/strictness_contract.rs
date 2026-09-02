@@ -304,7 +304,7 @@ main = do
   print (hmKeys (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
   print (hmValues (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
   print (hmToList (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
-  print (not False)
+  print (map not [False])  -- first-class: saturated `not` emits natively
   if bsNull b then error "empty" else pure ()
   print (head [1 :: Int, 2])
   print (tail [1 :: Int, 2])

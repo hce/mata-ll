@@ -149,6 +149,9 @@ impl CodeGen {
                 if let Some(e) = self.try_exception_app(f, &args) {
                     return e;
                 }
+                if let Some(e) = self.try_native_not_app(f, &args) {
+                    return e;
+                }
                 if let Some(e) = self.try_primitive_method_app(f, &args) {
                     return e;
                 }
@@ -1247,6 +1250,26 @@ impl CodeGen {
     /// inline as Lua operators (primitive_method_lua_op is also what
     /// expr_yields_whnf keys on to know this emission is a forced native
     /// operation).
+    /// A saturated Prelude `not` → `(<operand> == false)`: the operand is
+    /// typed Bool, on which the comparison IS Lua's `not` (no Expr node for
+    /// a unary `not` exists, and a Binop rides every downstream pass
+    /// unchanged). Same strictness as the Prelude function (`not_` forces
+    /// its argument), same shadow gate as the primitive methods —
+    /// `expr_yields_whnf` and the `is_cheap_with` App arm make the twin
+    /// claims for this emission. Prelude names are not shadowable at top
+    /// level, so only a local binder can take the name.
+    fn try_native_not_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
+        if args.len() == 1
+            && let TExprKind::Var(name) = &f.kind
+            && name == "not"
+            && !self.is_local_shadowed(name)
+        {
+            let e = self.forced_ast(args[0]);
+            return Some(Expr::paren(Expr::binop("==", e, Expr::lit("false"))));
+        }
+        None
+    }
+
     fn try_primitive_method_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
         if args.len() == 2
             && let TExprKind::Var(name) = &f.kind {

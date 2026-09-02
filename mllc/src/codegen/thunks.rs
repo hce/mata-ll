@@ -328,6 +328,15 @@ impl CodeGen {
                 {
                     return true;
                 }
+                // Saturated Prelude `not` → `(operand == false)`, a native
+                // boolean — same gate as try_native_not_app (a locally
+                // shadowed `not` is an unknown local value, no claim).
+                if n_args == 1
+                    && matches!(&f.kind, TExprKind::Var(name)
+                        if name == "not" && !self.is_local_shadowed(name))
+                {
+                    return true;
+                }
                 // A direct application of a module-level function yields
                 // WHNF by the runtime's WHNF-return invariant (see the
                 // head-consumption contract in runtime.lua): every compiled

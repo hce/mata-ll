@@ -54,6 +54,32 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Fused pipelines inline small stage and fold bodies — the loop IS
+  the handwritten one.** When a `map`/`filter` stage or the fold
+  function of a fused pipeline is a small pure function (a module or
+  where-bound single-clause definition with a cheap body, a lambda, a
+  section), its body is emitted in place of the per-element call with
+  the parameters substituted by the loop locals:
+  `foldl' step 0 (filter odd (map (* 3) [1 .. n]))` with a where-bound
+  `step a x = (a + x) \`mod\` p` now compiles to
+  `a = (a + x0) % p` under `if x0 % 2 ~= 0`-style native tests — zero
+  per-element calls, exactly the twin. The fusion strictness gates are
+  computed on the original function values, unchanged; only the call's
+  emission is replaced by the same body. Relocation is gated: a body
+  referencing any local at its definition, or a name locally shadowed
+  at the fusion site, keeps the closure call (pinned by the shadow trap
+  in `cases/list_fusion_inline.mll`, byte-exact against GHC).
+  list_pipeline drops from 29x to 8.1x the handwritten twin on Lua 5.5
+  (wall 0.038s -> 0.010s) and from 2.1x to 1.4x on LuaJIT. Three
+  general improvements feed the same rewrite and help all code:
+  Prelude `odd` is a direct definition (`n \`rem\` 2 /= 0`,
+  extensionally identical to `not . even`), saturated Prelude `not`
+  emits natively (`(operand == false)` — the operand is typed `Bool`,
+  on which that comparison IS Lua's `not`), and the cheapness
+  predicates now recognize `rem`/`quot` and saturated primitive
+  typeclass-method applications (`x > 5` reaches codegen as
+  `ord_gt__Int x 5`) as the operator expressions they emit as.
+
 - **Integer division of multi-limb operands is schoolbook (Knuth
   Algorithm D), replacing the bit-by-bit binary loop.** The magnitude
   divide now runs O(#dividend-limbs × #divisor-limbs) limb steps
