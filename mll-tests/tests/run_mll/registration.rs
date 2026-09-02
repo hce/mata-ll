@@ -502,6 +502,12 @@ mll_test!(hashmap_versions, "hashmap_versions.mll");
 // chains as one loop — range/leaf sources, nesting on both sides of a
 // filter, empty sources, argument order of the fold step.
 mll_test!(list_pipeline_fused, "list_pipeline_fused.mll");
+// Fusion growth: sum/length consumers, the take stage (budget semantics
+// at both loop positions), operator/lambda/partial-application fold
+// functions, the stage-strictness gates (a lazy map/filter function
+// declines — the round-1 fusion miscompiled those), and the demand
+// analyzer's composition + eta-padded rows that feed the gates.
+mll_test!(list_fusion_growth, "list_fusion_growth.mll");
 // A18: Foldable/Traversable-generic Prelude functions.
 mll_test!(foldable_generic, "foldable_generic.mll");
 // Data.IORef: basics + pointer-identity Eq, and GHC laziness parity

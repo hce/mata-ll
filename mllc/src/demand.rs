@@ -242,12 +242,66 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("ord_compare__Integer", &[true, true]),
 ];
 
+/// Count top-level arrows (codegen::util::count_arrows's rule: the N-ary
+/// convention's emitted arity is the declared type's arrow count).
+fn ty_arrow_count(ty: &Ty) -> usize {
+    match ty {
+        Ty::Arrow(_, rest, _) => 1 + ty_arrow_count(rest),
+        _ => 0,
+    }
+}
+
+/// The clause as codegen emits it: patterns padded to the type's arrow
+/// count with `__mll_eta_d*` variables and the body APPLIED to them (the
+/// eta-padded emission applies the callee — see `emitted_value_arity`).
+/// `None` when no clause needs padding, so `analyze` borrows the original.
+fn eta_padded_view(func: &TFunction) -> Option<TFunction> {
+    let arrows = ty_arrow_count(&func.ty);
+    if !func.clauses.iter().any(|c| {
+        c.patterns.len() < arrows && c.body.is_some()
+    }) {
+        return None;
+    }
+    let mut padded = func.clone();
+    for clause in &mut padded.clauses {
+        let missing = arrows.saturating_sub(clause.patterns.len());
+        let Some(body) = clause.body.take() else { continue };
+        let mut body = body;
+        for i in 0..missing {
+            let name = format!("__mll_eta_d{i}");
+            clause.patterns.push(TPattern::Var(name.clone(), Ty::Unit));
+            let result_ty = match &body.ty {
+                Ty::Arrow(_, r, _) => (**r).clone(),
+                _ => Ty::Unit,
+            };
+            let arg = TExpr::new(TExprKind::Var(name), Ty::Unit);
+            body = TExpr::new(
+                TExprKind::App(Box::new(body), Box::new(arg)),
+                result_ty,
+            );
+        }
+        clause.body = Some(body);
+    }
+    Some(padded)
+}
+
 /// Run demand analysis on a typed module with cross-function propagation.
 /// Iterates to a fixed point: each round may discover new strict params
 /// by looking through call sites to already-known-strict callees.
 pub fn analyze(module: &TModule) -> DemandInfo {
-    let functions: Vec<&TFunction> = module.functions.iter()
+    // Analyze each clause AS EMITTED: codegen eta-pads a clause with fewer
+    // patterns than its type has arrows (the N-ary convention — the padded
+    // body APPLIES the callee), so the analysis view pads identically and
+    // the derived row covers the padded parameters too. Without this, a
+    // point-free definition (`odd = not . even`, zero patterns) had an
+    // empty row and every caller treated its parameter as lazy.
+    let raw: Vec<&TFunction> = module.functions.iter()
         .chain(module.instance_fns.iter())
+        .collect();
+    let padded_store: Vec<Option<TFunction>> =
+        raw.iter().map(|f| eta_padded_view(f)).collect();
+    let functions: Vec<&TFunction> = raw.iter().zip(&padded_store)
+        .map(|(f, p)| p.as_ref().unwrap_or(f))
         .collect();
 
     // Seed FFI functions as strict in all parameters.
@@ -715,7 +769,7 @@ enum OpOperands {
 fn shared_op_operands(op: &str, lhs: &TExpr) -> Option<OpOperands> {
     Some(match op {
         // Arithmetic/comparison operators force both sides.
-        "+" | "-" | "*" | "/" | "^" | "div" | "mod"
+        "+" | "-" | "*" | "/" | "^" | "div" | "mod" | "rem" | "quot"
         | "==" | "/=" | "<" | ">" | "<=" | ">=" => OpOperands::Both,
         // Short-circuit: the right side runs only when the left
         // allows it (Lua `and`/`or`; GHC agrees).
@@ -1303,6 +1357,59 @@ fn demanded_vars_in(
                 && let Some(callee_strict) = env.get(name) {
                     demand_strict_args(&mut s, callee_strict, args_rev.iter().copied(), &rec);
                 }
+
+            // Composition propagation: `(f . g) x` is `f (g x)` — the
+            // saturated call runs f, whose strict first parameter demands
+            // `g x`, whose strict first parameter demands x. So when BOTH
+            // sides of the composition are provably strict unary values
+            // (named rows, through nested `.`), the argument is demanded.
+            // Point-free definitions (`odd = not . even`) eta-pad into
+            // exactly this shape, and without the rule their parameters
+            // were judged lazy. Both prefix spellings are covered:
+            // `(f . g) x` (an InfixApp head) and `(.) f g x`.
+            {
+                fn comp_value_strict1(
+                    e: &TExpr,
+                    env: &HashMap<String, Vec<bool>>,
+                    shadowed: &dyn Fn(&str) -> bool,
+                ) -> bool {
+                    let mut e = e;
+                    while let TExprKind::Paren(p) = &e.kind {
+                        e = p.as_ref();
+                    }
+                    match &e.kind {
+                        TExprKind::Var(n) => {
+                            !shadowed(n)
+                                && env.get(n).is_some_and(|r| r.len() == 1 && r[0])
+                        }
+                        TExprKind::InfixApp { op, lhs, rhs } if op == "." => {
+                            comp_value_strict1(lhs, env, shadowed)
+                                && comp_value_strict1(rhs, env, shadowed)
+                        }
+                        _ => false,
+                    }
+                }
+                let mut head = f;
+                while let TExprKind::Paren(p) = &head.kind {
+                    head = p.as_ref();
+                }
+                let comp_arg = match (&head.kind, args_rev.len()) {
+                    (TExprKind::InfixApp { op, lhs, rhs }, 1) if op == "." => {
+                        (comp_value_strict1(lhs, env, &shadowed)
+                            && comp_value_strict1(rhs, env, &shadowed))
+                        .then_some(args_rev[0])
+                    }
+                    (TExprKind::OpFunc(op), 3) if op == "." => {
+                        (comp_value_strict1(args_rev[0], env, &shadowed)
+                            && comp_value_strict1(args_rev[1], env, &shadowed))
+                        .then_some(args_rev[2])
+                    }
+                    _ => None,
+                };
+                if let Some(arg) = comp_arg {
+                    s.extend(whnf_only_demands(arg, &rec));
+                }
+            }
 
             // Captured-demand propagation: a call to a where-bound local
             // function runs its body whenever the call's result is demanded

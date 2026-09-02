@@ -243,7 +243,51 @@ API of the `mllc` library crate.)
   runtime first, so it was a trustworthy oracle for the representation
   change, and 2000 programs pass against the new one.
 
+- **List fusion grew consumers, a stage, and fold-function forms.**
+  `sum` (at Int/Number — native `+`, GHC's left-associated walk) and
+  `length` (a pure count: map stages with no filter outside them are
+  dropped, exactly the demand lazy `length` exerts, and elements are
+  extracted unforced unless a filter's strict predicate demands them)
+  now fuse like `foldl'`; a `take` stage fuses with its budget counter
+  decremented at the stage's pipeline position and checked before the
+  source advances — a spent budget stops the loop before the next cell
+  is pulled or forced, exactly where laziness stopped, including the
+  cell *after* the element that spends the last budget. The fold
+  function may now be a first-class operator (`foldl' (+) 0 …` becomes a
+  native in-place step, no call), a lambda or section (a conservative
+  syntactic walk proves the body forces its parameters), or a partial
+  application (the named row's tail covers the remaining parameters).
+  Everything the loop consumes natively — range bounds, take budgets, a
+  native step's initial accumulator — is delivered WHNF, and a native
+  step forces elements produced by lambda map stages (their result can
+  be a raw captured thunk). GHC-goldened across all of it
+  (`list_fusion_growth`, 24 pinned lines including bottoms the loop must
+  not touch).
+
+- **The demand analyzer sees definitions as emitted.** Two growth items
+  with effect beyond fusion: clauses with fewer patterns than their type
+  has arrows are analyzed in their eta-padded form (the padded parameter
+  applied to the body — codegen's N-ary emission), so point-free
+  definitions (`odd = not . even`) finally carry real strictness rows;
+  and `(f . g) x` propagates demand through the composition when both
+  sides are provably strict unary values. `rem`/`quot` joined the
+  strict-operator table (they were missing — `even`'s row was lazy).
+  Rows feed the site-forced calling convention everywhere, so these
+  widen that optimization too; bench rows and the tracker canary are
+  unchanged (7.9x).
+
 ### Fixed
+
+- **Fused pipelines no longer force what laziness would not have.** The
+  round-1 list fusion gated only the FOLD function's strictness; a lazy
+  map or filter function (`map (\_ -> 1)`, `filter (\_ -> False)`) left
+  elements undemanded in the lazy pipeline that the fused loop computed
+  eagerly — `foldl' step 0 (map (\_ -> 1) [error "boom"])` crashed where
+  GHC prints the fold of ones (found by predicting the divergence, then
+  confirming against runghc). Every stage function is now gated exactly
+  like the fold's: a named row, an operator at native scalars, or a
+  provably strict lambda — anything unproven declines to the general
+  path, whose demand behavior is the reference.
 
 - **A zero-arg `LuaPure` declaration now decodes its result.** A
   host-value read (`props :: LuaPure "system_properties" (HashMap
