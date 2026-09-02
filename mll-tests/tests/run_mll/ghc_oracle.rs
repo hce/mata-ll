@@ -178,6 +178,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ioref_laziness, "cases", "ioref_laziness.mll"),
         (ghc_oracle_let_seq_pure_function, "cases", "let_seq_pure_function.mll"),
         (ghc_oracle_integer_smallpath_bounds, "cases", "integer_smallpath_bounds.mll"),
+        (ghc_oracle_integer_bigdiv, "cases", "integer_bigdiv.mll"),
+        (ghc_oracle_integer_show_subtype, "cases", "integer_show_subtype.mll"),
         (ghc_oracle_partial_app_uncovered_param, "cases", "partial_app_uncovered_param.mll"),
         (ghc_oracle_mconcat_method, "cases", "mconcat_method.mll"),
         (ghc_oracle_list_pipeline_fused, "cases", "list_pipeline_fused.mll"),

@@ -54,6 +54,25 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Integer division of multi-limb operands is schoolbook (Knuth
+  Algorithm D), replacing the bit-by-bit binary loop.** The magnitude
+  divide now runs O(#dividend-limbs × #divisor-limbs) limb steps
+  instead of O(dividend-bits) shift-subtract rounds, with a dedicated
+  single-limb short-division path; every intermediate stays below 2^49,
+  so the routine is exact on integer-Lua and doubles-only hosts alike.
+  Dividing a ~9600-bit number by a ~4800-bit one is 16x faster on
+  Lua 5.5 and 45x on LuaJIT (the gap grows with operand size), and
+  decimal `show` of large Integers — repeated division — speeds up with
+  it. Small-operand division keeps its native fast path unchanged.
+  Pinned by `cases/integer_bigdiv.mll`: a byte-exact GHC (GMP) golden
+  over every algorithm path — one-limb divisors, top-heavy divisors
+  whose quotient estimate clamps, the add-back shape (2^95 over
+  2^71+1), exact multiples and their ±1 neighbors — across all four
+  sign combinations, with the divMod/quotRem and remainder-sign laws
+  asserted per pair; the algorithm core was additionally verified
+  against Python bignum on 6738 magnitude pairs (481 of them through
+  the rare add-back branch) on both VMs.
+
 - **Generated code allocates less and forces less on hot paths.** Four
   measurement-driven codegen changes, semantics unchanged (all pinned by
   the strictness-contract harness and the GHC goldens): references to
@@ -277,6 +296,19 @@ API of the `mllc` library crate.)
   unchanged (7.9x).
 
 ### Fixed
+
+- **`show` of an Integer no longer leaks Lua's float subtype as a
+  trailing `.0`.** Integer limbs may carry the float subtype on 5.3+
+  hosts (carry propagation and machine-number decomposition divide with
+  `/`), and `__int_tostring` printed its top decimal group with
+  `tostring` — so a float-typed limb reaching a value with a single
+  decimal group printed `6.0`. Reachable on the committed runtime
+  (`(16777217 - 16777211) :: Integer` printed `6.0` via the
+  small-magnitude subtraction fast path) and surfaced by the fuzzer the
+  moment the new short division handed a big dividend's limbs to a
+  small remainder. The top group is now formatted with `%d` like every
+  other group (each group is < 10^7, exact on every host). Pinned by
+  `cases/integer_show_subtype.mll` against the GHC golden.
 
 - **The runtime generics have GHC's laziness in their function
   argument and heads.** Day-one behavior, surfaced while auditing the

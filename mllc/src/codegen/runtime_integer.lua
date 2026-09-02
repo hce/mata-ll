@@ -80,45 +80,92 @@ local function __int_umul(a, b)
     end
     return __int_utrim(r)
 end
-local function __int_ushl1(m)  -- magnitude * 2
+local function __int_umul1(a, d)  -- magnitude * single limb d (0 < d < B); fresh table
     local r, carry = {}, 0
-    for i = 1, #m do
-        local v = m[i] * 2 + carry
-        if v >= __INT_B then r[i] = v - __INT_B; carry = 1 else r[i] = v; carry = 0 end
+    for i = 1, #a do
+        local p = a[i] * d + carry   -- < 2^48 + 2^24, exact in a double
+        local lo = p % __INT_B
+        r[i] = lo
+        carry = (p - lo) / __INT_B
     end
-    if carry > 0 then r[#m + 1] = carry end
+    if carry > 0 then r[#a + 1] = carry end
     return r
 end
-local function __int_ubits(m)  -- position of highest set bit + 1 (0 for zero)
-    local n = #m
-    if n == 0 then return 0 end
-    local top, bits = m[n], (n - 1) * 24
-    while top > 0 do bits = bits + 1; top = (top - top % 2) / 2 end
-    return bits
-end
-local function __int_ubit(m, i)  -- bit i (0-based)
-    local v = m[math.floor(i / 24) + 1] or 0
-    local p = 1
-    for _ = 1, i % 24 do p = p * 2 end
-    return math.floor(v / p) % 2
-end
--- Binary long division of magnitudes (V nonzero): returns quotient, remainder.
--- O(bits) — correct and simple; a schoolbook base-2^24 divide is a later
--- optimization alongside the small-int fast path.
+-- Schoolbook base-2^24 division of magnitudes (V nonzero): returns quotient,
+-- remainder. Knuth's Algorithm D — O(#U * #V) limb operations, where the old
+-- bit-by-bit binary loop was O(bits(U) * #V). Every intermediate stays below
+-- 2^49, so the whole routine is exact in IEEE doubles; the floor of a native
+-- float division is trusted only where the true quotient's distance to the
+-- next integer (>= 1/divisor > 2^-24) exceeds the rounding error (< 2^-28).
 local function __int_udivmod(U, V)
     if __int_ucmp(U, V) < 0 then return {}, U end
-    local q, r = {}, {}
-    for i = 1, #U do q[i] = 0 end   -- dense: quotient has at most #U limbs
-    for i = __int_ubits(U) - 1, 0, -1 do
-        r = __int_ushl1(r)
-        if __int_ubit(U, i) == 1 then r[1] = (r[1] or 0) + 1 end
-        if __int_ucmp(r, V) >= 0 then
-            r = __int_usub(r, V)
-            local limb = math.floor(i / 24) + 1
-            local p = 1
-            for _ = 1, i % 24 do p = p * 2 end
-            q[limb] = (q[limb] or 0) + p
+    local n = #V
+    if n == 1 then
+        -- Short division by one limb: carry < v the whole way down.
+        local v, q, rem = V[1], {}, 0
+        for i = #U, 1, -1 do
+            local cur = rem * __INT_B + U[i]   -- < v*B < 2^48, exact
+            local qd = math.floor(cur / v)     -- < B by the rem < v invariant
+            q[i] = qd
+            rem = cur - qd * v
         end
+        if rem == 0 then return __int_utrim(q), {} end
+        return __int_utrim(q), {rem}
+    end
+    -- D1 normalize: scale both by d so the divisor's top limb is >= B/2 —
+    -- that is what makes the two-limb qhat estimate at most 1 too large.
+    -- v keeps exactly n limbs (v[n]*d + carry <= d*(V[n]+1) - 1 < B); u gets
+    -- one extra slot for the window top (u is a fresh copy — D4 mutates it).
+    local d = math.floor(__INT_B / (V[n] + 1))
+    local u = __int_umul1(U, d)
+    local v = __int_umul1(V, d)
+    local m = #U - n                 -- quotient limb count - 1 (0-based j below)
+    if u[#U + 1] == nil then u[#U + 1] = 0 end
+    local q = {}
+    for j = m, 0, -1 do
+        -- D3 estimate: qhat = floor of the window's top two limbs over v[n],
+        -- then correct against the third limb until at most 1 too large.
+        local num = u[j + n + 1] * __INT_B + u[j + n]   -- < 2^49, exact
+        local qhat = math.floor(num / v[n])
+        if qhat >= __INT_B then qhat = __INT_B - 1 end
+        local rhat = num - qhat * v[n]
+        while rhat < __INT_B and qhat * v[n - 1] > rhat * __INT_B + u[j + n - 1] do
+            qhat = qhat - 1
+            rhat = rhat + v[n]
+        end
+        -- D4 multiply-subtract qhat*v from the window u[j+1 .. j+n+1].
+        local borrow, carry = 0, 0
+        for i = 1, n do
+            local p = qhat * v[i] + carry   -- < 2^48, exact
+            local plo = p % __INT_B
+            carry = (p - plo) / __INT_B
+            local t = u[j + i] - plo - borrow
+            if t < 0 then u[j + i] = t + __INT_B; borrow = 1
+            else u[j + i] = t; borrow = 0 end
+        end
+        local top = u[j + n + 1] - carry - borrow
+        if top < 0 then
+            -- D6 add back (qhat was 1 too large; top == -1 and the add's
+            -- final carry restores it to 0). Rare: ~2/B of the steps.
+            qhat = qhat - 1
+            local c = 0
+            for i = 1, n do
+                local s = u[j + i] + v[i] + c
+                if s >= __INT_B then u[j + i] = s - __INT_B; c = 1
+                else u[j + i] = s; c = 0 end
+            end
+            top = top + c
+        end
+        u[j + n + 1] = top
+        q[j + 1] = qhat
+    end
+    -- D8 denormalize: the remainder is u[1..n] / d (short division; exact).
+    local r, rem = {}, 0
+    for i = n, 1, -1 do
+        local cur = rem * __INT_B + u[i]   -- < d*B < 2^47, exact
+        local qd = math.floor(cur / d)
+        r[i] = qd
+        rem = cur - qd * d
     end
     return __int_utrim(q), __int_utrim(r)
 end
@@ -161,7 +208,10 @@ local function __int_tostring(x)
         while n > 0 and m[n] == 0 do n = n - 1 end
         groups[#groups + 1] = rem
     end
-    local s = tostring(groups[#groups])
+    -- %d, not tostring: limbs can carry Lua's float subtype (see
+    -- __int_limb), and a float-typed group would print "6.0". Every
+    -- group is < 10^7, so %d is exact on every host.
+    local s = string.format("%d", groups[#groups])
     for i = #groups - 1, 1, -1 do s = s .. string.format("%07d", groups[i]) end
     if sign < 0 then s = "-" .. s end
     return s
@@ -210,8 +260,7 @@ end
 -- (< 2^48 — exact in an IEEE double and in a Lua 5.3+ integer alike), or
 -- nil for anything larger. The representation stays always-boxed; these
 -- only let add/sub/mul/divmod compute natively when the VALUES are small,
--- which skips the limb walks (divmod's bit-by-bit long division above is
--- the expensive one) and their per-op table traffic.
+-- which skips the limb walks and their per-op table traffic.
 local function __int_small(x)
     local n = #x
     if n == 2 then return x[1] * x[2] end
