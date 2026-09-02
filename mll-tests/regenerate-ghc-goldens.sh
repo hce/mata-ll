@@ -73,6 +73,7 @@ excluded_reason() {
         cases/hashmap_nil_values)        echo "HashMap builtins (Lua tables)";;
         cases/hm_lookup_case_fused)      echo "HashMap builtins (Lua tables)";;
         cases/hashmap_structural_keys)   echo "HashMap builtins (Lua tables)";;
+        cases/hashmap_versions)          echo "HashMap builtins (Lua tables)";;
         cases/integer_json)              echo "Generics substrate + JSON FFI library";;
         cases/json_codec)                echo "JSON FFI library";;
         cases/lbit_64bit_boundary)       echo "LBit (Lua bit-op semantics, deliberately not Data.Bits)";;

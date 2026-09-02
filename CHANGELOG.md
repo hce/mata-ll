@@ -213,7 +213,49 @@ API of the `mllc` library crate.)
   integer_arith benchmark drops another 5.1x on Lua 5.5 (1.72s →
   0.34s; 2.10s → 0.34s for the round) and 4x under LuaJIT.
 
+- **HashMaps are persistent diff+reroot tables.** A map value is now a
+  handle onto one mutable Lua store per version family
+  (Conchon–Filliâtre persistent hash tables): a write mutates the store
+  in place and flips the old handle into a diff recording the previous
+  value, so linear derivation — each new map built from the last, the
+  shape accumulation folds produce — costs O(1) per write instead of
+  copying the whole table, and reads on the newest version stay one raw
+  index behind a root check. Reading an *old* version reroots (replays
+  the diff chain, reversing it); a chain longer than the map is
+  materialized into a fresh store instead, so ping-ponging reads between
+  far-apart versions degrade to the old copy-per-op cost rather than
+  thrashing. Observationally nothing changes — every version keeps
+  answering as an independent value (pinned by `hashmap_versions` across
+  read orders, forks, overwrites, stored-`Nothing`, structural keys, and
+  the materialize path, and probed by the grown fuzzer below); `hmSize`
+  is now O(1) from the handle's maintained count. Bench: hm_churn wall
+  time drops ~13x on Lua 5.5 and ~40x under LuaJIT (803x/834x → 56x/44x
+  speed-of-light), and hm_lookup *improves* to 23x/1.2x (from 28x/7.4x)
+  — under LuaJIT the persistent map now reads at near-native-table
+  speed.
+
+- **The backend fuzzer holds map versions.** `HashMap` is a first-class
+  type in the fuzz fragment: maps are let-bound, forked, derived
+  through insert/delete chains, and read again *after* later versions
+  exist — in both read orders, against the reference evaluator's
+  independent map values — rather than only built and observed inline.
+  The versioned vocabulary ran green against the old copy-on-write
+  runtime first, so it was a trustworthy oracle for the representation
+  change, and 2000 programs pass against the new one.
+
 ### Fixed
+
+- **A zero-arg `LuaPure` declaration now decodes its result.** A
+  host-value read (`props :: LuaPure "system_properties" (HashMap
+  String String)`) compiled to a bare global access with no boundary
+  conversion, so a raw host table leaked into pure code as if it were
+  the internal representation: a host array declared `[Int]` arrived
+  as a Lua array instead of a cons list, a bare value declared
+  `Maybe a` was never wrapped in `Just`, and a keyed table declared
+  `HashMap` stopped working the moment the map representation changed.
+  The constant read now runs through the same result decoder as every
+  FFI call (scalars still pass through bare). Caught by the proprietary
+  acceptance suite; pinned by `ffi_constant_values_decoded`.
 
 - **A partial application no longer defeats the always-cheap parameter
   judgment.** The whole-program call-site analysis lets a function skip

@@ -493,6 +493,11 @@ mll_test!(hashmap_nil_values, "hashmap_nil_values.mll");
 // hit/miss/stored-nil-sentinel, both branch orders, wildcard, and the
 // guarded shape that must NOT fuse.
 mll_test!(hm_lookup_case_fused, "hm_lookup_case_fused.mll");
+// Persistent-map versioning (the diff+reroot representation): held old
+// versions, forks, overwrite diffs, the materialize path past the
+// reroot cap, stored-Nothing across flips, the frozen shared empty,
+// and the encoded-structural-key family — in every read order.
+mll_test!(hashmap_versions, "hashmap_versions.mll");
 // The list-pipeline fusion (fuse.rs): foldl' over map/filter/range
 // chains as one loop — range/leaf sources, nesting on both sides of a
 // filter, empty sources, argument order of the fold step.

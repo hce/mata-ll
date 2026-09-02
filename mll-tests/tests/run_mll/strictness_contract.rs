@@ -133,7 +133,9 @@ const PROBES: &[Probe] = &[
     probe("show_List_", &[ILIST], &[Strict]),
     probe("show_Maybe", &["nil"], &[Strict]),
     probe("show_ByteString", &["\"s\""], &[Strict]),
-    probe("show_HashMap", &["({})"], &[Strict]),
+    // A map is a persistent-map HANDLE, not a raw keyed table — probe
+    // with the real shared empty, like the hm ops below.
+    probe("show_HashMap", &["hashmap_empty"], &[Strict]),
     probe("not", &["true"], &[Strict]),
     Probe {
         name: "error",

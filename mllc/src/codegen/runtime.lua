@@ -15,6 +15,17 @@ local __just_mt = {}
 -- boxing. Declared this early so the FFI marshallers can translate it at
 -- the host boundary.
 local __mll_hm_nilv = {}
+-- Tags a SCALAR-key HashMap handle (the structural-key flavor carries
+-- __mll_hme_mt instead). Declared this early so the generic __mll_to_lua
+-- walker can recognize a map handle — a handle's field names would
+-- otherwise be mistaken for a LuaDict record's.
+local __mll_hm_mt = {}
+-- Its structural-key sibling (see the HashMap runtime below).
+local __mll_hme_mt = {}
+-- Forward declaration: the persistent-map reroot (defined with the
+-- HashMap runtime below) is needed by the FFI marshallers, which are
+-- defined first.
+local __mll_hm_reroot
 -- Tags a suspended `pure`/`return` value — a "pure action" that has escaped its
 -- defining function. `__mll_run` unwraps it WITHOUT forcing
 -- or calling the payload, so a `pure ⊥` bound across a function boundary does
@@ -385,6 +396,7 @@ local function __mll_ffi_decode(desc, v, root, dir)
                 "a HashMap must arrive from the host as a keyed Lua table", dir)
         end
         local r = {}
+        local n = 0
         for key, val in pairs(v) do
             local kt = type(key)
             if (desc.kt == "String" or desc.kt == "ByteString") and kt ~= "string" then
@@ -402,8 +414,10 @@ local function __mll_ffi_decode(desc, v, root, dir)
             -- store it boxed or the entry would vanish.
             if val == nil then val = __mll_hm_nilv end
             r[key] = val
+            n = n + 1
         end
-        return r
+        -- A fresh persistent-map root handle (see the HashMap runtime).
+        return setmetatable({t = r, n = n}, __mll_hm_mt)
     elseif k == "tuple" then
         if type(v) ~= "table" then
             __mll_ffi_mismatch(desc, v, root,
@@ -564,7 +578,7 @@ local function __mll_arg_marshal(v, d)
     elseif d.k == "hashmap" then
         if v == nil then return nil end
         local t = {}
-        for k, val in pairs(v) do
+        for k, val in pairs(__mll_hm_reroot(v)) do
             local x = __force(val)
             -- Unbox a stored-nil value: the host convention for an absent
             -- payload is nil (the key stays absent host-side, exactly how
@@ -615,6 +629,24 @@ local function __mll_to_lua(x)
     -- v)` flattens to v at the boundary — this unwrap keeps the common single
     -- level `Just v -> v` interop, which is all Lua can faithfully carry.
     if getmetatable(x) == __just_mt then return __mll_to_lua(x[1]) end
+    -- HashMap handle: hand Lua the keyed store (rerooted to this
+    -- version), stored-nil sentinels unboxed to absent keys — the same
+    -- convention as the typed hashmap marshalling arm. A structural-key
+    -- map has no faithful Lua-side representation (its store is keyed by
+    -- an internal encoding), and the typechecker's FFI rules exclude it,
+    -- so reaching one here is an internal error.
+    if getmetatable(x) == __mll_hm_mt then
+        local result = {}
+        for k, v in pairs(__mll_hm_reroot(x)) do
+            if not rawequal(v, __mll_hm_nilv) then
+                result[k] = __mll_to_lua(v)
+            end
+        end
+        return result
+    end
+    if getmetatable(x) == __mll_hme_mt then
+        error("internal: a structural-key HashMap reached the untyped FFI boundary", 2)
+    end
     -- Cons list: identified by __cons_mt metatable
     if getmetatable(x) == __cons_mt then
         local result = {}
@@ -1590,9 +1622,79 @@ end
 -- Hash helper
 local function __mll_hashstr(s) s = __force(s); local h = 5381 for i = 1, #s do h = ((h * 33) + string.byte(s, i)) % 2147483647 end return h end
 
--- HashMap runtime (backed by Lua tables)
-local __mll_hme_mt = {}
-local hashmap_empty = {}
+-- HashMap runtime: persistent maps over ONE mutable Lua table per version
+-- family (Conchon–Filliâtre persistent hash tables — diff + reroot). A map
+-- value is a HANDLE: a root `{t = store, n = size}` owning the live table,
+-- or a diff `{k = key, v = old-value-or-nil, p = next-handle-toward-root}`
+-- recording how its version differs from the neighbor one step closer to
+-- the root (v == nil means the key is ABSENT in this version — safe
+-- because stored values are never Lua nil, the __mll_hm_nilv sentinel
+-- boxes those). A write mutates the live table and flips the old handle
+-- into a diff, so linear derivation (each new map built from the last, the
+-- shape folds produce) costs O(1) per write and reads on the newest
+-- version stay one raw index. Reading an OLD version reroots first:
+-- replays the diff chain onto the store, reversing each link, so that
+-- version becomes the root. Purely internal — observationally the maps
+-- are as persistent as before; single-threaded Lua makes the mutation
+-- safe, and no runtime function yields mid-operation.
+-- (__mll_hm_mt / __mll_hme_mt are declared at the top of the runtime:
+-- __mll_to_lua and the FFI marshallers close over them.)
+-- The shared canonical empty map (hmEmpty is one value program-wide). It
+-- is FROZEN: writes copy instead of mutating/flipping it, so no diff
+-- chain ever runs through it and every build from empty gets its own
+-- store. Both key flavors share it (no metatable: the scalar-flavor
+-- observers handle an empty store, and the flavored inserts create the
+-- properly tagged root themselves).
+local hashmap_empty = setmetatable({t = {}, n = 0, frozen = true}, __mll_hm_mt)
+-- Make `m` the root of its version family and return the live store.
+-- The one non-local-cost path: replaying a chain longer than the map
+-- itself would cost more than a copy, so past that cap the version is
+-- MATERIALIZED (fresh store cloned from the root, diffs applied onto it,
+-- old root untouched) — two roots then coexist and ping-ponging reads
+-- between far-apart versions degrade to the old copy-per-op behavior
+-- instead of thrashing the chain.
+__mll_hm_reroot = function(m)
+    if m.t ~= nil then return m.t end
+    local path, cur = {}, m
+    while cur.t == nil do path[#path + 1] = cur; cur = cur.p end
+    local t, n = cur.t, cur.n
+    local cap = n < 16 and 16 or n
+    if #path > cap then
+        local c = {}
+        for a, b in pairs(t) do c[a] = b end
+        for i = #path, 1, -1 do
+            local d = path[i]
+            local old = c[d.k]
+            if d.v == nil then
+                if old ~= nil then n = n - 1 end
+            elseif old == nil then
+                n = n + 1
+            end
+            c[d.k] = d.v
+        end
+        m.k, m.v, m.p = nil, nil, nil
+        m.t, m.n = c, n
+        return c
+    end
+    local holder = cur
+    for i = #path, 1, -1 do
+        local d = path[i]
+        local key = d.k
+        local old = t[key]
+        if d.v == nil then
+            if old ~= nil then n = n - 1 end
+        elseif old == nil then
+            n = n + 1
+        end
+        t[key] = d.v
+        holder.t, holder.n = nil, nil
+        holder.k, holder.v, holder.p = key, old, d
+        holder = d
+    end
+    m.k, m.v, m.p = nil, nil, nil
+    m.t, m.n = t, n
+    return t
+end
 -- The scalar keyed ops reject a table key loudly: a structural key that
 -- slipped past the threading rewrite (a purged specialization, a dict-form
 -- body) would otherwise key by Lua table IDENTITY, a silent wrong-answer.
@@ -1603,17 +1705,66 @@ local function __mll_hm_scalar_key(k)
     end
     return k
 end
-local function hashmap_insert(k, v, m) k = __mll_hm_scalar_key(k); v = __force(v); m = __force(m); if v == nil then v = __mll_hm_nilv end local t = {} for a,b in pairs(m) do t[a] = b end t[k] = v return t end
-local function hashmap_lookup(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local v = m[k] if v == nil then return nil elseif rawequal(v, __mll_hm_nilv) then return Just(nil) else return Just(v) end end
+local function hashmap_insert(k, v, m)
+    k = __mll_hm_scalar_key(k); v = __force(v); m = __force(m)
+    if v == nil then v = __mll_hm_nilv end
+    if m.frozen then
+        local t = {}
+        local n = m.n
+        for a, b in pairs(m.t) do t[a] = b end
+        if t[k] == nil then n = n + 1 end
+        t[k] = v
+        return setmetatable({t = t, n = n}, __mll_hm_mt)
+    end
+    local t = __mll_hm_reroot(m)
+    local old = t[k]
+    t[k] = v
+    local h = setmetatable({t = t, n = old == nil and m.n + 1 or m.n}, __mll_hm_mt)
+    m.t, m.n = nil, nil
+    m.k, m.v, m.p = k, old, h
+    return h
+end
+local function hashmap_lookup(k, m)
+    k = __mll_hm_scalar_key(k); m = __force(m)
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
+    local v = t[k]
+    if v == nil then return nil elseif rawequal(v, __mll_hm_nilv) then return Just(nil) else return Just(v) end
+end
 -- The fused `case hmLookup k m of Just v -> …; Nothing -> …` scrutinee
 -- (see try_fused_hm_lookup_case in codegen): the raw slot, sentinel
 -- preserved — nil means ABSENT (the Nothing branch); the emitted Just
 -- branch unwraps the sentinel to the stored nil. Skips the Just cell
 -- hashmap_lookup allocates per hit for a result the case tears apart
 -- on the next line.
-local function __mll_hm_slot(k, m) k = __mll_hm_scalar_key(k); m = __force(m); return m[k] end
-local function hashmap_delete(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local t = {} for a,b in pairs(m) do t[a] = b end t[k] = nil return t end
-local function hashmap_size(m) m = __force(m); local n = 0 for _ in pairs(m) do n = n + 1 end return n end
+local function __mll_hm_slot(k, m)
+    k = __mll_hm_scalar_key(k); m = __force(m)
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
+    return t[k]
+end
+local function hashmap_delete(k, m)
+    k = __mll_hm_scalar_key(k); m = __force(m)
+    local t = __mll_hm_reroot(m)
+    local old = t[k]
+    if old == nil then return m end
+    if m.frozen then
+        local c = {}
+        for a, b in pairs(t) do c[a] = b end
+        c[k] = nil
+        return setmetatable({t = c, n = m.n - 1}, __mll_hm_mt)
+    end
+    t[k] = nil
+    local h = setmetatable({t = t, n = m.n - 1}, __mll_hm_mt)
+    m.t, m.n = nil, nil
+    m.k, m.v, m.p = k, old, h
+    return h
+end
+local function hashmap_size(m)
+    m = __force(m)
+    if m.t == nil then __mll_hm_reroot(m) end
+    return m.n
+end
 -- Key sort comparator: Bool is a legal key type but Lua cannot `<`
 -- booleans; order false < true. (Keys within one map share one type.)
 local function __mll_hm_lt(a, b)
@@ -1622,22 +1773,21 @@ local function __mll_hm_lt(a, b)
     end
     return a < b
 end
-local function hashmap_keys(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons(ks[i], r) end return r end
-local function hashmap_values(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = m[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons(v, r) end return r end
-local function hashmap_member(k, m) k = __mll_hm_scalar_key(k); m = __force(m); return m[k] ~= nil end
-local function show_HashMap(m) m = __force(m); local parts = {} if getmetatable(m) == __mll_hme_mt then for _, e in pairs(m) do parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end else for k, v in pairs(m) do if rawequal(v, __mll_hm_nilv) then v = nil end parts[#parts+1] = show(k) .. " -> " .. show(v) end end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
-local function hashmap_fromList(xs) xs = __force(xs); local t = {} local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end t[__mll_hm_scalar_key(pair[1])] = v cur = __mll_tail(cur) end return t end
+local function hashmap_keys(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons(ks[i], r) end return r end
+local function hashmap_values(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = t[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons(v, r) end return r end
+local function hashmap_member(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[k] ~= nil end
+local function show_HashMap(m) m = __force(m); local t = __mll_hm_reroot(m) local parts = {} if getmetatable(m) == __mll_hme_mt then for _, e in pairs(t) do parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end else for k, v in pairs(t) do if rawequal(v, __mll_hm_nilv) then v = nil end parts[#parts+1] = show(k) .. " -> " .. show(v) end end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
+local function hashmap_fromList(xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end local k = __mll_hm_scalar_key(pair[1]) if t[k] == nil then n = n + 1 end t[k] = v cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hm_mt) end
 
--- Structural-key HashMaps (A17). A scalar key indexes the Lua table
--- directly (the functions above, unchanged); a STRUCTURAL key (tuple, list,
--- Maybe of hashables) is a Lua table with identity semantics, so the
--- threaded variants below key on an injective string ENCODING of the key
--- and store {key, value} entries. The metatable marks the flavor (show
--- branches on it). Encoders are type-directed and generated by mono like
--- the eq/ord/show threading; iteration sorts by the threaded structural
--- COMPARE (A16), so hmKeys and friends come back in true Ord order.
--- (__mll_hme_mt itself is declared above hashmap_empty: show_HashMap
--- closes over it, and a Lua local must be declared before its reader.)
+-- Structural-key HashMaps (A17). A scalar key indexes the store table
+-- directly (the functions above); a STRUCTURAL key (tuple, list, Maybe of
+-- hashables) is a Lua table with identity semantics, so the threaded
+-- variants below key the store on an injective string ENCODING of the key
+-- and hold {key, value} entries. The handle metatable marks the flavor
+-- (show and the dyn family branch on it). Encoders are type-directed and
+-- generated by mono like the eq/ord/show threading; iteration sorts by
+-- the threaded structural COMPARE (A16), so hmKeys and friends come back
+-- in true Ord order.
 local function __mll_key_scalar(x)
     x = __force(x)
     local t = type(x)
@@ -1648,18 +1798,57 @@ local function __mll_key_scalar(x)
 end
 local function __mll_key_list(enc, l) l = __force(l); local parts = {} local cur = l while cur ~= nil do parts[#parts+1] = enc(__force(cur[1])) cur = __mll_tail(cur) end return "[" .. table.concat(parts, ",") .. "]" end
 local function __mll_key_maybe(enc, x) x = __force(x); if x == nil then return "N" end return "J(" .. enc(x[1]) .. ")" end
-local function __mll_hme_insert(enc, k, v, m) k = __force(k); v = __force(v); m = __force(m); local t = setmetatable({}, __mll_hme_mt) for a, b in pairs(m) do t[a] = b end t[enc(k)] = {k, v} return t end
-local function __mll_hme_lookup(enc, k, m) m = __force(m); local e = m[enc(k)] if e == nil then return nil else return Just(e[2]) end end
-local function __mll_hme_delete(enc, k, m) m = __force(m); local t = setmetatable({}, __mll_hme_mt) for a, b in pairs(m) do t[a] = b end t[enc(k)] = nil return t end
-local function __mll_hme_member(enc, k, m) m = __force(m); return m[enc(k)] ~= nil end
-local function __mll_hme_fromList(enc, xs) xs = __force(xs); local t = setmetatable({}, __mll_hme_mt) local cur = xs while cur ~= nil do local p = __force(__mll_head(cur)) local k = __force(p[1]) t[enc(k)] = {k, __force(p[2])} cur = __mll_tail(cur) end return t end
-local function __mll_hme_sorted(cmp, m) m = __force(m); local es = {} for _, e in pairs(m) do es[#es+1] = e end table.sort(es, function(x, y) return cmp(x[1], y[1]) == 1 end) return es end
+-- The flavor tag lives on the HANDLE (roots and diffs both carry it:
+-- flips and materializations mutate handles in place, so a handle keeps
+-- its metatable for life). Entries {key, value} are never nil, so the
+-- diff convention (v == nil means absent) holds here too.
+local function __mll_hme_insert(enc, k, v, m)
+    k = __force(k); v = __force(v); m = __force(m)
+    local ek = enc(k)
+    if m.frozen then
+        local t = {}
+        local n = m.n
+        for a, b in pairs(m.t) do t[a] = b end
+        if t[ek] == nil then n = n + 1 end
+        t[ek] = {k, v}
+        return setmetatable({t = t, n = n}, __mll_hme_mt)
+    end
+    local t = __mll_hm_reroot(m)
+    local old = t[ek]
+    t[ek] = {k, v}
+    local h = setmetatable({t = t, n = old == nil and m.n + 1 or m.n}, __mll_hme_mt)
+    m.t, m.n = nil, nil
+    m.k, m.v, m.p = ek, old, h
+    return h
+end
+local function __mll_hme_lookup(enc, k, m) m = __force(m); local t = m.t if t == nil then t = __mll_hm_reroot(m) end local e = t[enc(k)] if e == nil then return nil else return Just(e[2]) end end
+local function __mll_hme_delete(enc, k, m)
+    m = __force(m)
+    local ek = enc(__force(k))
+    local t = __mll_hm_reroot(m)
+    local old = t[ek]
+    if old == nil then return m end
+    if m.frozen then
+        local c = {}
+        for a, b in pairs(t) do c[a] = b end
+        c[ek] = nil
+        return setmetatable({t = c, n = m.n - 1}, __mll_hme_mt)
+    end
+    t[ek] = nil
+    local h = setmetatable({t = t, n = m.n - 1}, __mll_hme_mt)
+    m.t, m.n = nil, nil
+    m.k, m.v, m.p = ek, old, h
+    return h
+end
+local function __mll_hme_member(enc, k, m) m = __force(m); local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[enc(k)] ~= nil end
+local function __mll_hme_fromList(enc, xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local p = __force(__mll_head(cur)) local k = __force(p[1]) local ek = enc(k) if t[ek] == nil then n = n + 1 end t[ek] = {k, __force(p[2])} cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hme_mt) end
+local function __mll_hme_sorted(cmp, m) m = __force(m); local t = __mll_hm_reroot(m) local es = {} for _, e in pairs(t) do es[#es+1] = e end table.sort(es, function(x, y) return cmp(x[1], y[1]) == 1 end) return es end
 local function __mll_hme_keys(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][1], r) end return r end
 local function __mll_hme_values(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][2], r) end return r end
 local function __mll_hme_toList(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons({es[i][1], es[i][2]}, r) end return r end
 
 
-local function hashmap_toList(m) m = __force(m); local r = nil local ks = {} for k in pairs(m) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = m[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons({ks[i], v}, r) end return r end
+local function hashmap_toList(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = t[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons({ks[i], v}, r) end return r end
 
 -- Specialized list show: uses a typed element show function
 local function __mll_list_eq(elem_eq, a, b)
