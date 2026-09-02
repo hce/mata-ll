@@ -524,6 +524,7 @@ mll_test!(integer_smallpath_bounds, "integer_smallpath_bounds.mll");
 mll_test!(integer_bigdiv, "integer_bigdiv.mll");
 mll_test!(integer_show_subtype, "integer_show_subtype.mll");
 mll_test!(list_fusion_inline, "list_fusion_inline.mll");
+mll_test!(inline_shadowed_free_var, "inline_shadowed_free_var.mll");
 mll_test!(partial_app_uncovered_param, "partial_app_uncovered_param.mll");
 mll_test!(mconcat_method, "mconcat_method.mll");
 // A19: where-binding generalization.

@@ -1303,6 +1303,21 @@ impl CodeGen {
                 && args.iter().zip(occ_counts.iter())
                     .all(|(a, &n)| n <= 1 || Self::is_trivial_arg(a)) {
                     let (params, body) = (params.clone(), body.clone());
+                    // Relocation check: the body's OTHER free names (module
+                    // constants, primitive method heads) must resolve here
+                    // exactly as at the definition — a call site whose LOCAL
+                    // binding shadows one of them would capture it (`addP x
+                    // = x + p` inlined under `let p = …` read the local p:
+                    // wrong value, and a crash when the local's type
+                    // differed). Same gate as the fused-pipeline inliner;
+                    // collect_var_refs over-approximates (body binders
+                    // included), which only declines, and the site falls
+                    // back to the ordinary call.
+                    let mut fv = std::collections::HashSet::new();
+                    Self::collect_var_refs(&body, &mut fv);
+                    if fv.iter().any(|v| !params.contains(v) && self.is_local_shadowed(v)) {
+                        return None;
+                    }
                     let mut subst = std::collections::HashMap::new();
                     for (param, arg) in params.iter().zip(args.iter()) {
                         subst.insert(param.clone(), *arg);

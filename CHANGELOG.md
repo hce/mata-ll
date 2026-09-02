@@ -323,6 +323,17 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **The call-site inliner no longer captures a body's free names under
+  a site local (miscompile).** `addP x = x + p` with a computed module
+  constant `p`, called under `let p = 100`, inlined to `x + p` reading
+  the LOCAL `p` — the wrong value, and a crash when the local's type
+  differed (the pinned shape: the let-bound `p` defaults to Integer,
+  a table fed into native arithmetic). Found by reasoning from the
+  fused-pipeline inliner's relocation gate, confirmed against runghc;
+  the same free-variable gate now declines the inline and the ordinary
+  call resolves the module constant. Pinned by
+  `cases/inline_shadowed_free_var.mll` against the GHC golden.
+
 - **`show` of an Integer no longer leaks Lua's float subtype as a
   trailing `.0`.** Integer limbs may carry the float subtype on 5.3+
   hosts (carry propagation and machine-number decomposition divide with
