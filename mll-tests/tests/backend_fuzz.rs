@@ -28,7 +28,10 @@
 //! stays exact), Ordering, structural Eq/Ord operators and
 //! sort/elem/max/min/compare at every fun-free type, HashMap operations
 //! through both the scalar and the encoded-structural key paths (iteration
-//! is Ord-sorted, so it is deterministic), generated top-level helpers
+//! is Ord-sorted, so it is deterministic; maps are first-class values —
+//! let-bound bases derived from and read again AFTER later inserts and
+//! deletes, so held old versions and forked futures are probed, not just
+//! inline build-observe chains), generated top-level helpers
 //! (guard chains, where-binds, eta-padded definitions, and a polymorphic
 //! where-bind instantiated at several types — the A19 generalization), and
 //! do-blocks with `let` statements and pattern binds through `return`.
@@ -77,11 +80,21 @@ enum Ty {
     Pair(Box<Ty>, Box<Ty>),
     Maybe(Box<Ty>),
     Fun(Box<Ty>, Box<Ty>),
+    /// `HashMap k v` — a first-class map VALUE (not just the inline
+    /// composites): let-bound, passed, and read at several derivation
+    /// depths, so generated programs hold OLD versions of a map across
+    /// later inserts/deletes and read them back. Never produced by
+    /// `gen_ty` (maps have no Show/Eq/Ord in the fragment); only the hm
+    /// sites construct it.
+    Hm(Box<Ty>, Box<Ty>),
 }
 
 impl Ty {
     fn list(t: Ty) -> Ty {
         Ty::List(Box::new(t))
+    }
+    fn hm(k: Ty, v: Ty) -> Ty {
+        Ty::Hm(Box::new(k), Box::new(v))
     }
     fn pair(a: Ty, b: Ty) -> Ty {
         Ty::Pair(Box::new(a), Box::new(b))
@@ -101,6 +114,7 @@ impl Ty {
             Ty::Pair(a, b) => format!("({}, {})", a.render(), b.render()),
             Ty::Maybe(t) => format!("(Maybe {})", t.render()),
             Ty::Fun(a, b) => format!("({} -> {})", a.render(), b.render()),
+            Ty::Hm(k, v) => format!("(HashMap {} {})", k.render(), v.render()),
         }
     }
     /// Is a value of this type printable (has a derived Show the reference
@@ -112,7 +126,7 @@ impl Ty {
             Ty::Int | Ty::Integer | Ty::Bool | Ty::Str | Ty::Ordering => true,
             Ty::List(t) | Ty::Maybe(t) => t.showable(),
             Ty::Pair(a, b) => a.showable() && b.showable(),
-            Ty::Fun(..) => false,
+            Ty::Fun(..) | Ty::Hm(..) => false,
         }
     }
     /// May this type key a HashMap? Scalars Int/Bool/String take the
@@ -124,7 +138,7 @@ impl Ty {
             Ty::Int | Ty::Bool | Ty::Str => true,
             Ty::List(t) | Ty::Maybe(t) => t.keyable(),
             Ty::Pair(a, b) => a.keyable() && b.keyable(),
-            Ty::Integer | Ty::Ordering | Ty::Fun(..) => false,
+            Ty::Integer | Ty::Ordering | Ty::Fun(..) | Ty::Hm(..) => false,
         }
     }
 }
@@ -233,8 +247,9 @@ enum P {
     AbsI,
     Even,
     Odd,
-    // --- HashMap (A17/A20); rendered as composites over hmFromList so the
-    // map value never needs a Show — iteration output is Ord-sorted ---
+    // --- HashMap (A17/A20); maps are first-class Ty::Hm values (never in
+    // a printed position — the map value needs no Show), observed through
+    // the Ord-sorted iteration ops and lookup/member/size ---
     HmToList,
     HmKeys,
     HmValues,
@@ -243,6 +258,11 @@ enum P {
     HmMember,
     HmDelete,
     HmInsert,
+    HmFromList,
+    HmEmpty,
+    /// `(++)` — rendered infix; list concatenation (Semigroup `<>` is
+    /// String-only in mata-ll, the documented deviation).
+    AppendList,
 }
 
 #[derive(Clone, Debug)]
@@ -434,26 +454,11 @@ fn render(e: &Expr) -> String {
             match p {
                 P::CompApp => format!("(({} . {}) {})", rendered[0], rendered[1], rendered[2]),
                 P::DollarApp => format!("({} $ {})", rendered[0], rendered[1]),
+                P::AppendList => {
+                    format!("({} ++ {})", rendered[0], rendered[1])
+                }
                 P::Seq => format!("(seq {} {})", rendered[0], rendered[1]),
                 P::Append => format!("({} <> {})", rendered[0], rendered[1]),
-                P::HmToList => format!("(hmToList (hmFromList {}))", rendered[0]),
-                P::HmKeys => format!("(hmKeys (hmFromList {}))", rendered[0]),
-                P::HmValues => format!("(hmValues (hmFromList {}))", rendered[0]),
-                P::HmSize => format!("(hmSize (hmFromList {}))", rendered[0]),
-                P::HmLookup => {
-                    format!("(hmLookup {} (hmFromList {}))", rendered[0], rendered[1])
-                }
-                P::HmMember => {
-                    format!("(hmMember {} (hmFromList {}))", rendered[0], rendered[1])
-                }
-                P::HmDelete => format!(
-                    "(hmToList (hmDelete {} (hmFromList {})))",
-                    rendered[0], rendered[1]
-                ),
-                P::HmInsert => format!(
-                    "(hmToList (hmInsert {} {} (hmFromList {})))",
-                    rendered[0], rendered[1], rendered[2]
-                ),
                 _ => {
                     let mut s = format!("({}", p_name(p));
                     for a in &rendered {
@@ -508,7 +513,7 @@ fn p_name(p: &P) -> &'static str {
         P::AbsI => "abs",
         P::Even => "even",
         P::Odd => "odd",
-        // hm ops are only ever rendered through their Call composites
+        // hm ops are only ever rendered saturated (never as a FunRef)
         P::HmToList => "hmToList",
         P::HmKeys => "hmKeys",
         P::HmValues => "hmValues",
@@ -517,6 +522,9 @@ fn p_name(p: &P) -> &'static str {
         P::HmMember => "hmMember",
         P::HmDelete => "hmDelete",
         P::HmInsert => "hmInsert",
+        P::HmFromList => "hmFromList",
+        P::HmEmpty => "hmEmpty",
+        P::AppendList => "(++)", // never a FunRef; Call renders infix
     }
 }
 
@@ -539,6 +547,10 @@ enum Value {
     List(Vec<Value>),
     Pair(Box<Value>, Box<Value>),
     Maybe(Option<Box<Value>>),
+    /// A HashMap value: key/value entries, key-deduplicated, in no
+    /// particular order (observation sorts). Never printed or compared —
+    /// the fragment gives maps no Show/Eq/Ord.
+    Hm(Vec<(Value, Value)>),
     Closure(Vec<String>, Rc<Expr>, Env),
     /// A prelude/scaffold function value, possibly partially applied.
     Builtin(P, Vec<Value>),
@@ -705,7 +717,9 @@ fn p_arity(p: &P) -> usize {
         | P::HmToList
         | P::HmKeys
         | P::HmValues
-        | P::HmSize => 1,
+        | P::HmSize
+        | P::HmFromList => 1,
+        P::HmEmpty => 0,
         P::Map
         | P::Filter
         | P::Take
@@ -720,8 +734,16 @@ fn p_arity(p: &P) -> usize {
         | P::Append
         | P::HmLookup
         | P::HmMember
-        | P::HmDelete => 2,
+        | P::HmDelete
+        | P::AppendList => 2,
         P::Foldr | P::Foldl | P::ZipWith | P::Flip | P::Twice | P::CompApp | P::HmInsert => 3,
+    }
+}
+
+fn as_hm(v: &Value) -> Vec<(Value, Value)> {
+    match v {
+        Value::Hm(m) => m.clone(),
+        other => panic!("hm op on a non-map value: {other:?}"),
     }
 }
 
@@ -905,6 +927,11 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             let y = as_str(&args[1]);
             Value::Str(as_str(&args[0]) + &y)
         }
+        P::AppendList => {
+            let mut xs = as_list(&args[0]);
+            xs.extend(as_list(&args[1]));
+            Value::List(xs)
+        }
         P::Mconcat => Value::Str(
             as_list(&args[0]).iter().map(as_str).collect::<Vec<_>>().concat(),
         ),
@@ -925,37 +952,37 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             };
             Value::Bool(if matches!(p, P::Even) { even } else { !even })
         }
-        P::HmToList => pairs_to_list(hm_sorted(build_hm(&args[0]))),
+        P::HmToList => pairs_to_list(hm_sorted(as_hm(&args[0]))),
         P::HmKeys => Value::List(
-            hm_sorted(build_hm(&args[0])).into_iter().map(|(k, _)| k).collect(),
+            hm_sorted(as_hm(&args[0])).into_iter().map(|(k, _)| k).collect(),
         ),
         P::HmValues => Value::List(
-            hm_sorted(build_hm(&args[0])).into_iter().map(|(_, v)| v).collect(),
+            hm_sorted(as_hm(&args[0])).into_iter().map(|(_, v)| v).collect(),
         ),
-        P::HmSize => Value::Int(build_hm(&args[0]).len() as i64),
+        P::HmSize => Value::Int(as_hm(&args[0]).len() as i64),
         P::HmLookup => {
-            let m = build_hm(&args[1]);
+            let m = as_hm(&args[1]);
             let hit = m
                 .into_iter()
                 .find(|(k, _)| ghc_cmp(k, &args[0]) == std::cmp::Ordering::Equal);
             Value::Maybe(hit.map(|(_, v)| b2(v)))
         }
         P::HmMember => {
-            let m = build_hm(&args[1]);
+            let m = as_hm(&args[1]);
             Value::Bool(
                 m.iter().any(|(k, _)| ghc_cmp(k, &args[0]) == std::cmp::Ordering::Equal),
             )
         }
         P::HmDelete => {
-            let mut m = build_hm(&args[1]);
+            let mut m = as_hm(&args[1]);
             m.retain(|(k, _)| ghc_cmp(k, &args[0]) != std::cmp::Ordering::Equal);
-            pairs_to_list(hm_sorted(m))
+            Value::Hm(m)
         }
         P::HmInsert => {
-            let entries = args.pop().unwrap();
+            let m = args.pop().unwrap();
             let v = args.pop().unwrap();
             let k = args.pop().unwrap();
-            let mut m = build_hm(&entries);
+            let mut m = as_hm(&m);
             if let Some(slot) = m
                 .iter_mut()
                 .find(|(ek, _)| ghc_cmp(ek, &k) == std::cmp::Ordering::Equal)
@@ -964,8 +991,10 @@ fn call_builtin(p: &P, mut args: Vec<Value>) -> Value {
             } else {
                 m.push((k, v));
             }
-            pairs_to_list(hm_sorted(m))
+            Value::Hm(m)
         }
+        P::HmFromList => Value::Hm(build_hm(&args[0])),
+        P::HmEmpty => Value::Hm(Vec::new()),
     }
 }
 
@@ -1091,7 +1120,7 @@ fn show_val(v: &Value) -> String {
         Value::Pair(a, x) => format!("({},{})", show_val(a), show_val(x)),
         Value::Maybe(None) => "Nothing".into(),
         Value::Maybe(Some(x)) => format!("Just {}", show_prec11(x)),
-        v => panic!("show of a function value: {v:?}"),
+        v => panic!("show of an unshowable value: {v:?}"),
     }
 }
 
@@ -1347,6 +1376,49 @@ impl Gen {
             ),
             Ty::Maybe(t) => self.maybe_expr(t, depth),
             Ty::Fun(a, bt) => self.fun_expr(a, bt, depth),
+            Ty::Hm(k, v) => {
+                let (k, v) = ((**k).clone(), (**v).clone());
+                self.hm_expr(&k, &v, depth)
+            }
+        }
+    }
+
+    /// A map-typed expression: insert/delete chains over let-bound bases,
+    /// fromList leaves, annotated hmEmpty. Reaches back into `expr`, so
+    /// the generic wrappers (if/let/case arms, scoped-variable reuse, $,
+    /// id/const) apply at map type too — a let-bound map read again after
+    /// later derivations is exactly the held-old-version shape the
+    /// persistent representation must honor.
+    fn hm_expr(&mut self, k: &Ty, v: &Ty, depth: usize) -> Expr {
+        let mty = Ty::hm(k.clone(), v.clone());
+        match self.r.below(8) {
+            0 | 1 => {
+                let key = self.expr(k, depth - 1);
+                let val = self.expr(v, depth - 1);
+                let m = self.expr(&mty, depth - 1);
+                Expr::Call(P::HmInsert, vec![key, val, m])
+            }
+            2 => {
+                let key = self.expr(k, depth - 1);
+                let m = self.expr(&mty, depth - 1);
+                Expr::Call(P::HmDelete, vec![key, m])
+            }
+            3 => {
+                // A map-typed let: the bound base stays in scope for the
+                // body's whole derivation, so it can be reused at several
+                // depths (scoped_var picks it up inside `expr`).
+                let name = self.fresh_var();
+                let rhs = self.expr(&mty, depth - 1);
+                self.scope.push((name.clone(), mty.clone()));
+                let body = self.expr(&mty, depth - 1);
+                self.scope.pop();
+                Expr::Let(name, b(rhs), b(body))
+            }
+            4..=6 => Expr::Call(
+                P::HmFromList,
+                vec![self.hm_entries(k, v, depth - 1)],
+            ),
+            _ => Expr::Annot(b(Expr::Call(P::HmEmpty, vec![])), mty),
         }
     }
 
@@ -1384,6 +1456,26 @@ impl Gen {
                 } else {
                     Expr::Just(b(self.atom(t)))
                 }
+            }
+            Ty::Hm(k, v) => {
+                // hmEmpty (annotated: nothing else pins the key/value
+                // types) or a literal fromList.
+                if self.r.chance(1, 3) {
+                    return Expr::Annot(
+                        b(Expr::Call(P::HmEmpty, vec![])),
+                        ty.clone(),
+                    );
+                }
+                let pair = Ty::pair((**k).clone(), (**v).clone());
+                let n = self.r.below(4);
+                let entries = (0..n).map(|_| self.atom(&pair)).collect();
+                Expr::Call(
+                    P::HmFromList,
+                    vec![Expr::Annot(
+                        b(Expr::ListLit(entries)),
+                        Ty::list(pair),
+                    )],
+                )
             }
             Ty::Fun(a, bt) => {
                 // Prefer a first-class prelude reference when one fits —
@@ -1479,11 +1571,28 @@ impl Gen {
                 }
             }
             9 => {
-                // hmSize: neither key nor value flows anywhere — pinned.
+                // hmSize: neither key nor value flows anywhere — the map
+                // expression pins itself. Half the time, sizes of a base
+                // AND a derivation of it — the size counter must survive
+                // rerooting in both directions.
                 let k = gen_key_ty(&mut self.r, 1);
                 let v = gen_ty(&mut self.r, 1, false);
-                let entries = self.hm_entries(&k, &v, depth - 1);
-                Expr::Call(P::HmSize, vec![entries])
+                let mty = Ty::hm(k, v);
+                if self.r.chance(1, 2) {
+                    let name = self.fresh_var();
+                    let base = self.expr(&mty, depth - 1);
+                    self.scope.push((name.clone(), mty.clone()));
+                    let derived = self.expr(&mty, depth - 1);
+                    self.scope.pop();
+                    let body = Expr::Bin(
+                        Bin::Add,
+                        b(Expr::Call(P::HmSize, vec![derived])),
+                        b(Expr::Call(P::HmSize, vec![Expr::Var(name.clone())])),
+                    );
+                    return Expr::Let(name, b(base), b(body));
+                }
+                let m = self.expr(&mty, depth - 1);
+                Expr::Call(P::HmSize, vec![m])
             }
             _ => self.atom(&Ty::Int),
         }
@@ -1565,8 +1674,8 @@ impl Gen {
                 let k = gen_key_ty(&mut self.r, 1);
                 let v = gen_ty(&mut self.r, 1, false);
                 let key = self.pinned(&k, depth - 1);
-                let entries = self.hm_entries(&k, &v, depth - 1);
-                Expr::Call(P::HmMember, vec![key, entries])
+                let m = self.expr(&Ty::hm(k, v), depth - 1);
+                Expr::Call(P::HmMember, vec![key, m])
             }
             7 => {
                 let p = if self.r.chance(1, 2) { P::Even } else { P::Odd };
@@ -1661,36 +1770,48 @@ impl Gen {
                 )
             }
             8 | 9 => {
-                // HashMap composites, when the element type fits one:
-                // entry pairs iterate/mutate, keyable elements come back
-                // out of hmKeys, anything comes back out of hmValues.
+                // HashMap observers, when the element type fits one:
+                // entry pairs come back out of hmToList, keyable elements
+                // out of hmKeys, anything out of hmValues.
                 if let Ty::Pair(k, v) = elem
                     && k.keyable() {
-                        let entries = self.hm_entries(k, v, depth - 1);
-                        return match self.r.below(3) {
-                            0 => Expr::Call(P::HmToList, vec![entries]),
-                            1 => {
-                                let key = self.pinned(&k.clone(), depth - 1);
-                                Expr::Call(P::HmDelete, vec![key, entries])
-                            }
-                            _ => {
-                                let key = self.pinned(&k.clone(), depth - 1);
-                                let val = self.expr(v, depth - 1);
-                                Expr::Call(P::HmInsert, vec![key, val, entries])
-                            }
-                        };
+                        let mty = Ty::hm((**k).clone(), (**v).clone());
+                        if self.r.chance(1, 2) {
+                            // The versioned probe: bind a base map, derive
+                            // two futures from it, and read BOTH toLists
+                            // (plus sometimes the base itself) — the
+                            // printed result demands old versions after
+                            // newer ones exist, in both read orders.
+                            let name = self.fresh_var();
+                            let base = self.expr(&mty, depth - 1);
+                            self.scope.push((name.clone(), mty.clone()));
+                            let d1 = self.expr(&mty, depth - 1);
+                            let d2 = if self.r.chance(1, 3) {
+                                Expr::Var(name.clone())
+                            } else {
+                                self.expr(&mty, depth - 1)
+                            };
+                            self.scope.pop();
+                            let body = Expr::Call(P::AppendList, vec![
+                                Expr::Call(P::HmToList, vec![d1]),
+                                Expr::Call(P::HmToList, vec![d2]),
+                            ]);
+                            return Expr::Let(name, b(base), b(body));
+                        }
+                        let m = self.expr(&mty, depth - 1);
+                        return Expr::Call(P::HmToList, vec![m]);
                     }
                 if elem.keyable() && self.r.chance(1, 2) {
-                    // hmKeys: the VALUE type flows nowhere — pinned via
-                    // the entries annotation.
+                    // hmKeys: the VALUE type flows nowhere in the result —
+                    // the map expression's own pins carry it.
                     let v = gen_ty(&mut self.r, 1, false);
-                    let entries = self.hm_entries(elem, &v, depth - 1);
-                    return Expr::Call(P::HmKeys, vec![entries]);
+                    let m = self.expr(&Ty::hm(elem.clone(), v), depth - 1);
+                    return Expr::Call(P::HmKeys, vec![m]);
                 }
                 // hmValues: the KEY type flows nowhere — pinned likewise.
                 let k = gen_key_ty(&mut self.r, 1);
-                let entries = self.hm_entries(&k, elem, depth - 1);
-                Expr::Call(P::HmValues, vec![entries])
+                let m = self.expr(&Ty::hm(k, elem.clone()), depth - 1);
+                Expr::Call(P::HmValues, vec![m])
             }
             _ => {
                 let n = self.r.below(4);
@@ -1703,12 +1824,12 @@ impl Gen {
     fn maybe_expr(&mut self, t: &Ty, depth: usize) -> Expr {
         match self.r.below(8) {
             0 => {
-                // hmLookup: the key type flows nowhere — both the key and
-                // the entries are pinned.
+                // hmLookup: the key type flows nowhere — the key is
+                // pinned, the map expression pins itself.
                 let k = gen_key_ty(&mut self.r, 1);
                 let key = self.pinned(&k, depth - 1);
-                let entries = self.hm_entries(&k, t, depth - 1);
-                Expr::Call(P::HmLookup, vec![key, entries])
+                let m = self.expr(&Ty::hm(k, t.clone()), depth - 1);
+                Expr::Call(P::HmLookup, vec![key, m])
             }
             1 | 2 => Expr::Nothing,
             _ => Expr::Just(b(self.expr(t, depth - 1))),
