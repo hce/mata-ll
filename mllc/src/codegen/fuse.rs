@@ -101,12 +101,14 @@
 //!   budget expression evaluates where the original `take n …` call did.
 //! * LENGTH — `length` forces the spine, never the elements: a Map stage
 //!   with no Filter outside it produces values nothing demands, so those
-//!   stages are DROPPED from the loop (their function expressions still
-//!   evaluate and force in place, mirroring the general path's
-//!   once-per-call function force). Elements are extracted UNFORCED
-//!   unless a Filter remains (a strict P is then the demand, as in the
-//!   lazy pipeline); with no remaining stage the loop just counts the
-//!   source. The count starts at 0 and the result is a native Int.
+//!   stages are DROPPED from the loop entirely — the lazy pipeline
+//!   passes their functions as unforced thunks and never applies them,
+//!   so a dropped stage leaves no trace and needs no strictness gate
+//!   (`length (map ⊥ xs)` fuses to a pure count, as GHC computes it).
+//!   Elements are extracted UNFORCED unless a Filter remains (a strict
+//!   P is then the demand, as in the lazy pipeline); with no remaining
+//!   stage the loop just counts the source. The count starts at 0 and
+//!   the result is a native Int.
 //! * SUM — `sum` at Int/Number is the strict left fold with native `+`
 //!   (GHC's list sum is the same left-associated walk; Int wraps like
 //!   every native Int op, Number is IEEE addition in GHC's order). The
@@ -452,30 +454,18 @@ impl CodeGen {
         if stages.is_empty() && matches!(source, Source::Leaf(_)) {
             return None;
         }
-        // Gate every stage function (see SOUNDNESS: a lazy G or P would
-        // leave elements the loop computes undemanded).
-        for st in &stages {
-            match st {
-                Stage::Map(g) | Stage::Filter(g) => {
-                    if self.fn_value_strictness(g, 1) != Some(vec![true]) {
-                        return None;
-                    }
-                }
-                Stage::Take(_) => {}
-            }
-        }
 
         // length demands no element values: a Map with no Filter outside
-        // it is dropped from the loop (its function expression still
-        // evaluates and forces in place, like the general path's map).
-        // `dropped` keeps those expressions for the binding sequence.
-        let mut dropped: Vec<&TExpr> = Vec::new();
+        // it is DROPPED from the loop entirely — the lazy pipeline passes
+        // its function as an unforced thunk and never applies it, so the
+        // dropped stage leaves no trace (not even an evaluation of its
+        // function expression), and it needs no strictness gate.
         if matches!(consumer, Consumer::Length) {
             let mut seen_filter = false;
             let mut kept = Vec::new();
             for st in stages {
                 match st {
-                    Stage::Map(g) if !seen_filter => dropped.push(g),
+                    Stage::Map(_) if !seen_filter => {}
                     Stage::Filter(_) => {
                         seen_filter = true;
                         kept.push(st);
@@ -488,6 +478,18 @@ impl CodeGen {
                 // A pure spine count of a leaf is what the runtime length
                 // already does; nothing to deforest.
                 return None;
+            }
+        }
+        // Gate every REMAINING stage function (see SOUNDNESS: a lazy G or
+        // P would leave elements the loop computes undemanded).
+        for st in &stages {
+            match st {
+                Stage::Map(g) | Stage::Filter(g) => {
+                    if self.fn_value_strictness(g, 1) != Some(vec![true]) {
+                        return None;
+                    }
+                }
+                Stage::Take(_) => {}
             }
         }
         // For foldl'/sum the gated pipeline forces every element; for
@@ -531,13 +533,6 @@ impl CodeGen {
                     Some(Expr::lit("0")),
                 ));
             }
-        }
-        // Dropped length maps: evaluate and force their function
-        // expressions in place (the general path's map forces its
-        // function once per call), unused thereafter.
-        for (i, g) in dropped.iter().enumerate() {
-            let fe = self.forced_ast(g);
-            stmts.push(Stmt::Local(vec![format!("__mll_fu_d{i}")], Some(fe)));
         }
         let mut stage_locals: Vec<StageLocal> = Vec::new();
         let mut take_counters: Vec<String> = Vec::new();

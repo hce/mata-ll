@@ -159,13 +159,17 @@ const PROBES: &[Probe] = &[
     probe("hmValues", &["hashmap_empty"], &[Strict]),
     probe("hmToList", &["hashmap_empty"], &[Strict]),
     probe("hmFromList", &["__mll_cons({1, 2}, nil)"], &[Strict]),
-    probe("map", &[IDF, ILIST], &[Strict, Strict]),
-    probe("filter", &[TRUEF, ILIST], &[Strict, Strict]),
+    // The lazy generics are lazy in f (GHC parity): map suspends `f x`
+    // per head and never forces f itself; filter forces pred only when
+    // an element exists to test (the mask under-claims, so with this
+    // non-empty sample it is ForcedOnRun).
+    probe("map", &[IDF, ILIST], &[Lazy, Strict]),
+    probe("filter", &[TRUEF, ILIST], &[ForcedOnRun, Strict]),
     // take is LAZY in the list when n <= 0 — `take 0 undefined` is `[]`
     // (the mask's one deliberate laziness hole; GHC-visible).
     probe("take", &["0", ILIST], &[Strict, Lazy]),
     probe("drop", &["1", ILIST], &[Strict, Strict]),
-    probe("zipWith", &[ADD2, ILIST, ILIST], &[Strict, Strict, Strict]),
+    probe("zipWith", &[ADD2, ILIST, ILIST], &[Lazy, Strict, Strict]),
     // --- the boxed-Integer core (strict in every position — a limb walk
     // cannot go through a thunk; see the demand.rs block comment) ---
     probe("fromInteger_Integer", &["5"], &[Strict]),

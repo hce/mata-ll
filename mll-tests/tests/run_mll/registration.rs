@@ -508,6 +508,11 @@ mll_test!(list_pipeline_fused, "list_pipeline_fused.mll");
 // declines — the round-1 fusion miscompiled those), and the demand
 // analyzer's composition + eta-padded rows that feed the gates.
 mll_test!(list_fusion_growth, "list_fusion_growth.mll");
+// GHC laziness of the runtime generics: map/zipWith lazy in f with
+// per-head suspensions (call-by-need, shared), filter/foldr/foldl lazy
+// in f until a structure exists — every error in the case must stay
+// untouched.
+mll_test!(lazy_generics_parity, "lazy_generics_parity.mll");
 // A18: Foldable/Traversable-generic Prelude functions.
 mll_test!(foldable_generic, "foldable_generic.mll");
 // Data.IORef: basics + pointer-identity Eq, and GHC laziness parity

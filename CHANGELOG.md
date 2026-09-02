@@ -278,6 +278,27 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **The runtime generics have GHC's laziness in their function
+  argument and heads.** Day-one behavior, surfaced while auditing the
+  fusion gates: `map` applied `f` per cell at SPINE demand (heads were
+  computed eagerly, one demand-level early) and `map`/`filter`/`zipWith`
+  forced `f` itself once per call — so `length (map ⊥ xs)` crashed where
+  GHC prints the length, and `filter (const False) (map (\_ -> ⊥) xs)`
+  crashed where GHC folds nothing. Now `map`/`zipWith` build each head
+  as a call-by-need suspension of `f x` (the closure-free `__mll_tk`
+  carriers; applied once per demanded head, shared thereafter) and never
+  force `f` themselves; `filter` forces its predicate only when an
+  element exists to test; the type-erased `foldr`/`foldl` fallbacks
+  force `f` only when there is a structure to fold. Demand rows and the
+  strictness-contract probes updated to match (`map` is Lazy in `f`;
+  `filter` is the mask's second deliberate under-claim). The fused
+  pipelines absorb the cost where it would matter — every bench row and
+  the tracker canary (7.9x) are unchanged, and fused `length` now drops
+  undemanded map stages without evaluating their function expressions
+  at all, exactly the lazy demand. Pinned GHC-goldened
+  (`lazy_generics_parity`: nine shapes whose errors must stay
+  untouched, including head-sharing under a double fold).
+
 - **Fused pipelines no longer force what laziness would not have.** The
   round-1 list fusion gated only the FOLD function's strictness; a lazy
   map or filter function (`map (\_ -> 1)`, `filter (\_ -> False)`) left

@@ -1478,17 +1478,24 @@ end
 -- trace through a lazy pipeline.
 local function __mll_step_tail(k, xs) return k(__mll_tail(xs)) end
 local function __mll_step_tail2(k, xs, ys) return k(__mll_tail(xs), __mll_tail(ys)) end
+-- Suspended head application for the lazy generics: `f x` (and `f x y`)
+-- per element, built WITHOUT running or even forcing f — GHC's
+-- `map f (x:xs) = f x : map f xs` runs f only when a head is demanded,
+-- so `length (map ⊥ xs)` is `length xs` and a filter/spine consumer of
+-- a map never applies f to the elements it skips. The __force inside is
+-- the application's own demand on f (one type probe when f is already a
+-- function value).
+local function __mll_ap1(f, x) return __force(f)(x) end
+local function __mll_ap2(f, x, y) return __force(f)(x, y) end
 local function map(f, xs)
-    f = __force(f)
     local function go(xs)
         xs = __force(xs)
         if xs == nil then return nil end
-        return __mll_lazy_consg(f(xs[1]), __mll_gen2(__mll_step_tail, go, xs))
+        return __mll_lazy_consg(__mll_tk2(__mll_ap1, f, xs[1]), __mll_gen2(__mll_step_tail, go, xs))
     end
     return go(xs)
 end
 local function filter(pred, xs)
-    pred = __force(pred)
     local function go(xs)
         xs = __force(xs)
         if xs == nil then return nil end
@@ -1499,6 +1506,11 @@ local function filter(pred, xs)
             return go(__mll_tail(xs))
         end
     end
+    -- GHC parity: pred is forced only when there is an element to test
+    -- (`filter ⊥ []` is []); the one force serves the whole walk.
+    xs = __force(xs)
+    if xs == nil then return nil end
+    pred = __force(pred)
     return go(xs)
 end
 local __mll_take_step
@@ -1554,11 +1566,11 @@ local function drop(n, xs)
     return xs
 end
 local function zipWith(f, xs, ys)
-    f = __force(f)
+    -- Lazy in f, heads suspended — see map.
     local function go(xs, ys)
         xs = __force(xs); ys = __force(ys)
         if xs == nil or ys == nil then return nil end
-        return __mll_lazy_consg(f(xs[1], ys[1]), __mll_gen3(__mll_step_tail2, go, xs, ys))
+        return __mll_lazy_consg(__mll_tk3(__mll_ap2, f, xs[1], ys[1]), __mll_gen3(__mll_step_tail2, go, xs, ys))
     end
     return go(xs, ys)
 end
@@ -1572,8 +1584,10 @@ end
 -- foldr keeps the compiled version's laziness: the recursive fold is a
 -- thunk, so a short-circuiting f terminates on infinite lists.
 local function foldr(f, z, t)
-    f = __force(f); t = __force(t)
+    -- Lazy in f until there is a structure to fold (foldr ⊥ z [] is z).
+    t = __force(t)
     if t == nil then return __force(z) end
+    f = __force(f)
     local mt = getmetatable(t)
     if mt == __just_mt then return f(t[1], z) end
     if mt == __cons_mt then
@@ -1584,8 +1598,10 @@ local function foldr(f, z, t)
     error("foldr: type-erased fold over a structure that is not a list or Maybe")
 end
 local function foldl(f, z, t)
-    f = __force(f); t = __force(t)
+    -- Lazy in f until there is a structure to fold (foldl ⊥ z [] is z).
+    t = __force(t)
     if t == nil then return __force(z) end
+    f = __force(f)
     local mt = getmetatable(t)
     if mt == __just_mt then return f(z, t[1]) end
     if mt ~= __cons_mt then

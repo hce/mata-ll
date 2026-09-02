@@ -182,6 +182,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_mconcat_method, "cases", "mconcat_method.mll"),
         (ghc_oracle_list_pipeline_fused, "cases", "list_pipeline_fused.mll"),
         (ghc_oracle_list_fusion_growth, "cases", "list_fusion_growth.mll"),
+        (ghc_oracle_lazy_generics_parity, "cases", "lazy_generics_parity.mll"),
         // Excluded as un-twinnable while mata-ll had no Integer; the case
         // (and fromInteger) became GHC-true when Integer arrived, and the
         // A8 doc sweep caught the stale exclusion.

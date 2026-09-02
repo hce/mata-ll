@@ -203,11 +203,16 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("hmValues", &[true]),
     ("hmToList", &[true]),
     ("hmFromList", &[true]),
-    ("map", &[true, true]),
-    ("filter", &[true, true]),
+    // The lazy generics are LAZY in their function argument, as in GHC:
+    // map/zipWith suspend `f x` per head and never force f themselves
+    // (`length (map ⊥ xs)` is `length xs`); filter forces pred only when
+    // an element exists to test (`filter ⊥ []` is []) — conditional, so
+    // the row under-claims it.
+    ("map", &[false, true]),
+    ("filter", &[false, true]),
     ("take", &[true, false]), // n always; the list NOT when n <= 0
     ("drop", &[true, true]),
-    ("zipWith", &[true, true, true]),
+    ("zipWith", &[false, true, true]),
     // The boxed-Integer core (runtime_integer.lua). Every body forces every
     // argument on every path before any arithmetic — a limb walk cannot go
     // through a thunk — so call sites may pass raw expressions instead of
