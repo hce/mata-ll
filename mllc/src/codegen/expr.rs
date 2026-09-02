@@ -2142,8 +2142,27 @@ impl CodeGen {
                 Expr::call_named("__mll_show_maybe", vec![Expr::name(show_ref), a0])
             }
             SpecKind::Const(lua_name) => {
-                // Constant access: math.pi (no function call)
-                Expr::name(lua_name.as_str())
+                // Constant access: math.pi (no function call). The read is
+                // still an FFI boundary, so the result decodes exactly like
+                // a call's would (a scalar's descriptor is None and the
+                // bare name passes through): a host table declared
+                // `HashMap k v` must become a map handle, a host array
+                // declared `[a]` a cons list, a bare value declared
+                // `Maybe a` a tagged Just. The enclosing CAF thunk
+                // memoizes, so the decode runs once per program.
+                let decode = self.ffi_decode_desc(&expr.ty);
+                let name = Expr::name(lua_name.as_str());
+                match &decode {
+                    Some(desc) => Expr::call_named(
+                        "__mll_ffi_decode",
+                        vec![
+                            Expr::raw(desc.clone()),
+                            name,
+                            Expr::raw(format!("{:?}", Self::ffi_root_name(lua_name))),
+                        ],
+                    ),
+                    None => name,
+                }
             }
             SpecKind::TupGet(idx) => {
                 // Tuple field access for the derived tuple `show`: force

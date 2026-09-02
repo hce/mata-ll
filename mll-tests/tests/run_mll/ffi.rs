@@ -301,6 +301,55 @@ main = do
         .expect("ffi hashmap program should run and pass its assertions");
 }
 
+// A zero-arg LuaPure declaration is a host VALUE read (SpecKind::Const —
+// no call), but it is still an FFI boundary: the result must decode like a
+// call's would. A raw host table declared `HashMap k v` becomes a map
+// handle, a host array declared `[a]` a cons list, a bare host value
+// declared `Maybe a` a tagged Just (nil -> Nothing). Before the decode was
+// added, all three leaked their raw host representation into pure code
+// (caught by the proprietary acceptance suite when the map representation
+// stopped being a raw keyed table).
+#[test]
+fn ffi_constant_values_decoded() {
+    let source = r#"
+hostMap  :: LuaPure "host_map" (HashMap String Int)
+hostArr  :: LuaPure "host_arr" [Int]
+hostOpt  :: LuaPure "host_opt" (Maybe Int)
+hostNone :: LuaPure "host_none" (Maybe Int)
+hostPi   :: LuaPure "host_pi" Number
+
+fromMaybe :: a -> Maybe a -> a
+fromMaybe def Nothing = def
+fromMaybe _ (Just x) = x
+
+main :: IO ()
+main = do
+  assert (hmSize hostMap == 2) "constant map size"
+  assert (fromMaybe 0 (hmLookup "a" hostMap) == 1) "constant map lookup"
+  assert (hmSize (hmInsert "c" 3 hostMap) == 3) "constant map derivable"
+  assert (sum hostArr == 6) "constant array -> cons list"
+  assert (length hostArr == 3) "constant array length"
+  assert (fromMaybe 0 hostOpt == 7) "constant Just"
+  assert (fromMaybe 9 hostNone == 9) "constant Nothing"
+  assert (hostPi > 3.0) "scalar constant passes through"
+  putStrLn "ffi constant-values ok"
+"#;
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("ffi constant program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let host = r#"
+        host_map = { a = 1, b = 2 }
+        host_arr = { 1, 2, 3 }
+        host_opt = 7
+        host_none = nil
+        host_pi = 3.14159
+    "#;
+    lua.load(host).set_name("ffi_constant_host").exec().expect("host definitions load");
+    lua.load(&lua_code).set_name("ffi_constant_values_decoded").exec()
+        .expect("ffi constant program should run and pass its assertions");
+}
+
 // Parity test: the argument marshaller is a COMPLETE structural dual of the
 // result decoder, so a value built in mata-ll, passed to an echo host (which
 // returns it unchanged), and decoded back is IDENTICAL — for every container
