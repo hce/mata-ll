@@ -417,7 +417,7 @@ struct LinearInfo {
 fn pattern_has_as(p: &TPattern) -> bool {
     match p {
         TPattern::As(..) => true,
-        TPattern::Var(..) | TPattern::Wildcard | TPattern::LitPat(_) => false,
+        TPattern::Var(..) | TPattern::Wildcard | TPattern::LitPat(..) => false,
         TPattern::Paren(inner) => pattern_has_as(inner),
         TPattern::Constructor { args, .. } => args.iter().any(pattern_has_as),
         TPattern::Tuple(elems) => elems.iter().any(pattern_has_as),
@@ -439,7 +439,7 @@ fn inner_ty_of(p: &TPattern) -> Ty {
 fn pattern_has_wildcard(p: &TPattern) -> bool {
     match p {
         TPattern::Wildcard => true,
-        TPattern::Var(..) | TPattern::LitPat(_) => false,
+        TPattern::Var(..) | TPattern::LitPat(..) => false,
         // As-pattern: the outer binder holds the whole value, but a `_`
         // inside still stands for a part the inner match discards — keep
         // the conservative rejection (linear code should bind the part).
@@ -468,7 +468,7 @@ fn pattern_binders(p: &TPattern, direct: bool, out: &mut Vec<(String, Ty, bool)>
             out.push((n.clone(), inner_ty_of(inner), direct));
             pattern_binders(inner, false, out);
         }
-        TPattern::Wildcard | TPattern::LitPat(_) => {}
+        TPattern::Wildcard | TPattern::LitPat(..) => {}
         TPattern::Paren(inner) => pattern_binders(inner, direct, out),
         TPattern::Constructor { args, .. } => {
             for a in args {

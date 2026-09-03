@@ -522,16 +522,35 @@ impl CodeGen {
                 self.collect_pattern_conditions(scrutinee, inner, conditions, bindings);
             }
             TPattern::Wildcard => {}
-            TPattern::LitPat(lit) => {
+            TPattern::LitPat(lit, pat_ty) => {
                 // An integer literal pattern is Num-polymorphic: the scrutinee
                 // may be a machine Int or a boxed Integer, so compare through the
-                // type-directed __mll_lit_eq. Other literals keep native `==`.
+                // type-directed __mll_lit_eq — UNLESS the pattern's carried type
+                // resolved to machine Int, where the scrutinee is a plain Lua
+                // number and the condition is a native `==` (a call per match
+                // otherwise; it was a fifth of the hm_churn loop). Every
+                // scrutinee expression reaching a literal condition is forced —
+                // the same invariant the Str/Bool `==` arm below always relied
+                // on — so the comparison never sees a thunk table.
+                // Other literals keep native `==`.
                 match lit {
-                    // See literal_ast: i64::MIN has no decimal Lua spelling.
+                    // See literal_ast: i64::MIN has no decimal Lua spelling
+                    // (kept type-directed: the hex spelling reads as a large
+                    // POSITIVE double on LuaJIT either way, and the MIN
+                    // corner is not worth a second spelling analysis).
                     TLiteral::Integer(i64::MIN) => conditions.push(Expr::call_named(
                         "__mll_lit_eq",
                         vec![scrutinee.clone(), Expr::lit("0x8000000000000000")],
                     )),
+                    TLiteral::Integer(n)
+                        if matches!(pat_ty, crate::types::Ty::Con(c) if c == "Int") =>
+                    {
+                        conditions.push(Expr::binop(
+                            "==",
+                            scrutinee.clone(),
+                            Expr::lit(n.to_string()),
+                        ));
+                    }
                     TLiteral::Integer(n) => conditions.push(Expr::call_named(
                         "__mll_lit_eq",
                         vec![scrutinee.clone(), Expr::lit(n.to_string())],

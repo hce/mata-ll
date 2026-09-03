@@ -459,3 +459,42 @@ local function __probe_bomb() return __thunk(function() error("BOMB", 0) end) en
     lua.load(&probed_src).set_name("strictness_contract").exec()
         .expect("every strictness mask must match the emitted runtime body");
 }
+
+/// The entry-forced table (demand::ENTRY_FORCED, consumed by the
+/// exact-first-force eagerization) STRENGTHENS the strictness rows — it
+/// claims "forced before any of the callee's own work", where the row
+/// claims only "forced during the run" — so it must never contradict
+/// them: every entry must name a function that has a row, at the same
+/// arity, and may claim entry-forcing only at positions the row already
+/// marks strict. The entry-forcing itself (the ordering half of the
+/// claim) is prose verified against the runtime bodies; this check pins
+/// the mechanical half so the two tables cannot drift apart silently.
+#[test]
+fn entry_forced_masks_are_within_the_strictness_rows() {
+    let rows: std::collections::HashMap<&str, &[bool]> = mllc::demand::STRICT_BUILTINS
+        .iter()
+        .chain(mllc::demand::RUNTIME_PRELUDE_STRICTNESS)
+        .map(|(n, m)| (*n, *m))
+        .collect();
+    for (name, mask) in mllc::demand::ENTRY_FORCED {
+        let row = rows.get(name).unwrap_or_else(|| {
+            panic!("ENTRY_FORCED '{name}' has no strictness row — the eagerization \
+                    would claim forcing the demand analysis never promised")
+        });
+        assert_eq!(row.len(), mask.len(),
+            "ENTRY_FORCED '{name}': arity {} != row arity {}", mask.len(), row.len());
+        for (i, ef) in mask.iter().enumerate() {
+            assert!(!*ef || row[i],
+                "ENTRY_FORCED '{name}' claims entry-forcing at position {i}, \
+                 but the strictness row does not even mark it strict");
+        }
+    }
+    // The primitive binop methods get their entry-forced mask directly
+    // from entry_forced_mask; their rows are seeded strict-strict by the
+    // boolean analysis, which the mask test above cannot see — pin the
+    // shape here instead.
+    for name in mllc::demand::PRIMITIVE_BINOP_METHODS {
+        assert_eq!(mllc::demand::entry_forced_mask(name), Some(&[true, true][..]),
+            "primitive binop method '{name}' must be entry-forced strict-strict");
+    }
+}

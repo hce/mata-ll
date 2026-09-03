@@ -785,6 +785,15 @@ impl CodeGen {
                         &self.cur_result_demand,
                     ));
                     let demanded = self.demanded_bindings(binds, seed);
+                    // Beyond demanded+cheap: bindings on the body's
+                    // first-force chain may be eagerized even with an
+                    // EXPENSIVE RHS (see exact_demanded_bindings — its
+                    // walker declines action-typed anchors, and a Case/If
+                    // body's scrutinee evaluation is the very next thing
+                    // this chain emits after the binding group, so the
+                    // anchor argument holds here exactly as in the value
+                    // Let arm).
+                    let exact = self.exact_demanded_bindings(binds, body);
                     for (i, bind) in binds.iter().enumerate() {
                         let bname = sanitize_name(&bind.name);
                         let lval = self.local_lvalue(&bname);
@@ -818,6 +827,14 @@ impl CodeGen {
                                 &mut self.cur_result_demand, crate::demand::Demand::Head);
                             if self.strict_binding_ok(bind, &demanded) && strict_ok {
                                 let rhs_e = self.expr_ast(&bind.body);
+                                stmts.push(Stmt::Assign(lval, rhs_e));
+                                self.concrete_vars.insert(bname);
+                            } else if exact.contains(&bind.name) && strict_ok {
+                                // Exact-first-force eagerization: forced, so
+                                // the binding holds a WHNF value from here on
+                                // (the force is the one the body was proven
+                                // to perform first anyway).
+                                let rhs_e = self.forced_ast(&bind.body);
                                 stmts.push(Stmt::Assign(lval, rhs_e));
                                 self.concrete_vars.insert(bname);
                             } else {

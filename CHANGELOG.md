@@ -54,6 +54,55 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **Exact-first-force let/where eagerization: hot bindings with
+  EXPENSIVE right-hand sides stop allocating thunks.** The strict-let
+  rule used to require a structurally cheap RHS even for a provably
+  demanded binding, because eagerly running an expensive RHS past other
+  computation could surface a different bottom than (unoptimized) GHC —
+  so the persistent-map churn loop built a thunk per derived map
+  version and forced it one line later. The new analysis
+  (`exact_demanded_bindings`) proves the stronger property that makes
+  eager evaluation EXACT, not just eventually-equivalent: the group
+  body's evaluation forces the binding before anything else can bottom,
+  walking case/if scrutinees and the strict argument positions of
+  entry-forcing runtime callees (`demand::ENTRY_FORCED`, a stronger
+  contract than the strictness rows — a row says "forced during the
+  run", the mask says "forced before any of the callee's own work" —
+  with every sibling argument bottom-free-to-force), chaining through
+  sibling RHSes and aliases. Bindings on the chain emit as direct eager
+  assignments in all three let emitters (value position, where groups,
+  and the do-block chain clause bodies route through). hm_churn's loop
+  went from two thunk allocations + forces per iteration to two direct
+  calls (56x -> 30x over the mutating twin on Lua 5.5, 44x -> 12x on
+  LuaJIT), and ioref_loop halved on PUC (30.5x -> 15.5x). A
+  contract test pins `ENTRY_FORCED` inside the strictness rows, and
+  `exact_let_eager`/`exact_let_eager_hm` pin the semantics — including
+  that off-chain bindings still never run.
+
+- **HashMap runtime ops inline their entry fast paths.** The
+  scalar-key check is gated on `type(k) == "table"` (a scalar key skips
+  the helper call), argument forces are gated on the thunk metatable
+  (`__force`'s own first test, so semantics are identical and the
+  strictness rows still hold — a thunked argument is still forced), and
+  the write bodies (`hmInsert`/`hmDelete`, both key flavors) read the
+  newest-version store behind one inline `m.t` check instead of an
+  unconditional reroot call — the shape `hmLookup` always had. Together
+  with the eagerization and the fused-lookup slot this puts the churn
+  loop's per-iteration cost at: two runtime calls, two handle
+  allocations (a persistent version IS a fresh handle), three table
+  ops.
+
+- **Int literal patterns compare natively.** A numeric literal pattern
+  is Num-polymorphic, so every match went through the type-directed
+  `__mll_lit_eq` helper (the scrutinee may be a boxed Integer). The TIR
+  literal pattern now carries its checked type, and a pattern resolved
+  to machine `Int` emits a native `==` — one call per iteration gone
+  from every counting loop's base case (`go 0 acc = …`); unresolved,
+  defaulted (Integer), `Number`, and `i64::MIN` patterns keep the
+  helper. Pinned byte-exact against GHC in `lit_pat_native_eq`
+  (negative literals, big-Integer magnitudes beyond double precision,
+  nested tuple/cons/Just positions over lazy fields, a defaulted local).
+
 - **Fused pipelines inline small stage and fold bodies — the loop IS
   the handwritten one.** When a `map`/`filter` stage or the fold
   function of a fused pipeline is a small pure function (a module or

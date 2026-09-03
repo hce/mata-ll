@@ -247,6 +247,93 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("ord_compare__Integer", &[true, true]),
 ];
 
+/// Runtime callees that force each masked argument AT ENTRY — before any
+/// of the callee's own possibly-bottoming work — which is a STRONGER
+/// contract than the strictness rows above: a row says "forced during the
+/// run", this mask says "forced first". The distinction is what the
+/// exact-first-force eagerization (codegen's exact_demanded_bindings)
+/// needs: it may only move a binding's evaluation to binding time when
+/// the lazy program would have forced it before any other bottom could
+/// surface, and an analyzed module function's row cannot promise that
+/// (`f a = case loop of _ -> a` is strict in `a` but bottoms first).
+///
+/// Every mask below restates a claim the runtime body's own comment
+/// already makes: the hm family "forces every argument on every path
+/// first thing", the Integer core forces "before any arithmetic" (the
+/// division family raises on zero only AFTER forcing), and the show/list
+/// heads force their argument in the first statement. A position is true
+/// only under that entry-forcing claim; extending this table requires
+/// reading the runtime body, not the strictness row.
+/// (`PRIMITIVE_BINOP_METHODS` are covered by `entry_forced_mask` directly:
+/// their emission is a native operator over inline forces, and the
+/// runtime fallbacks force both operands in the first statement.)
+/// Public for the strictness-contract check in mll-tests: an
+/// entry-forced position must also be strict in the demand row (this
+/// table strengthens the row, never contradicts it). Not API.
+#[doc(hidden)]
+pub const ENTRY_FORCED: &[(&str, &[bool])] = &[
+    ("hmInsert", &[true, true, true]),
+    ("hmLookup", &[true, true]),
+    ("hmDelete", &[true, true]),
+    ("hmMember", &[true, true]),
+    ("hmSize", &[true]),
+    ("hmKeys", &[true]),
+    ("hmValues", &[true]),
+    ("hmToList", &[true]),
+    ("hmFromList", &[true]),
+    ("show", &[true]),
+    ("show_Int", &[true]),
+    ("show_Number", &[true]),
+    ("show_String", &[true]),
+    ("show_Bool", &[true]),
+    ("show_List_", &[true]),
+    ("show_Maybe", &[true]),
+    ("show_ByteString", &[true]),
+    ("show_HashMap", &[true]),
+    ("show_Integer", &[true]),
+    ("not", &[true]),
+    ("head", &[true]),
+    ("tail", &[true]),
+    ("string_mconcat_prim", &[true]),
+    ("fromInteger_Integer", &[true]),
+    ("toInteger_Integer", &[true]),
+    ("toInteger_Int", &[true]),
+    ("negate_Integer", &[true]),
+    ("abs_Integer", &[true]),
+    ("signum_Integer", &[true]),
+    ("add_Integer", &[true, true]),
+    ("sub_Integer", &[true, true]),
+    ("mul_Integer", &[true, true]),
+    ("quot_Integer", &[true, true]),
+    ("rem_Integer", &[true, true]),
+    ("quotRem_Integer", &[true, true]),
+    ("div_Integer", &[true, true]),
+    ("mod_Integer", &[true, true]),
+    ("divMod_Integer", &[true, true]),
+    ("eq_Integer", &[true, true]),
+    ("ord_lt__Integer", &[true, true]),
+    ("ord_gt__Integer", &[true, true]),
+    ("ord_le__Integer", &[true, true]),
+    ("ord_ge__Integer", &[true, true]),
+    ("ord_max__Integer", &[true, true]),
+    ("ord_min__Integer", &[true, true]),
+    ("ord_compare__Integer", &[true, true]),
+];
+
+/// The entry-forced mask for `name`, if the runtime body carries the
+/// forces-first contract (see [`ENTRY_FORCED`]). The primitive binop
+/// methods all force both operands inline as part of the native operator
+/// emission, so they share one static mask.
+pub fn entry_forced_mask(name: &str) -> Option<&'static [bool]> {
+    if PRIMITIVE_BINOP_METHODS.contains(&name) {
+        return Some(&[true, true]);
+    }
+    ENTRY_FORCED
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, mask)| *mask)
+}
+
 /// Count top-level arrows (codegen::util::count_arrows's rule: the N-ary
 /// convention's emitted arity is the declared type's arrow count).
 fn ty_arrow_count(ty: &Ty) -> usize {
@@ -1200,8 +1287,9 @@ fn local_fn_demand(
 /// Names bound by an inner construct anywhere inside `expr`: lambda
 /// parameters, case-pattern variables, and let-bound names. Used by
 /// `local_fn_strict_params` to drop rows whose bare-name keying would be
-/// ambiguous at some call site.
-fn collect_rebound_names(expr: &TExpr, out: &mut HashSet<String>) {
+/// ambiguous at some call site, and by codegen's exact_demanded_bindings
+/// to refuse candidates whose name is rebound anywhere in the walk.
+pub(crate) fn collect_rebound_names(expr: &TExpr, out: &mut HashSet<String>) {
     // The names THIS node binds; the children follow through for_each_child.
     match &expr.kind {
         TExprKind::Lambda { params, .. } => {
@@ -2013,7 +2101,7 @@ fn pattern_demand(pat: &TPattern, body: &DemandMap) -> Option<Demand> {
             pattern_demand(inner, body).or_else(|| body.get(name).cloned())
         }
         TPattern::Wildcard => None,
-        TPattern::LitPat(_) => Some(Demand::Head),
+        TPattern::LitPat(..) => Some(Demand::Head),
         TPattern::Paren(inner) => pattern_demand(inner, body),
         TPattern::Tuple(ps) => Some(Demand::Fields(
             ps.iter().map(|p| pattern_demand(p, body)).collect(),

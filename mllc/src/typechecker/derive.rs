@@ -881,7 +881,7 @@ impl Checker {
             let mut clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
                 TClause {
                     span: None,
-                    patterns: vec![TPattern::LitPat(TLiteral::Integer(i as i64))],
+                    patterns: vec![TPattern::LitPat(TLiteral::Integer(i as i64), Ty::Con("Int".into()))],
                     guards: vec![],
                     body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&con.name).to_string()), result_type.clone())),
                     where_binds: vec![],

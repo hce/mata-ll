@@ -557,7 +557,8 @@ impl TPattern {
             TPattern::Paren(p) => TPattern::Paren(Box::new(p.apply_subst(subst))),
             TPattern::Tuple(ps) => TPattern::Tuple(ps.into_iter().map(|p| p.apply_subst(subst)).collect()),
             TPattern::As(n, p) => TPattern::As(n, Box::new(p.apply_subst(subst))),
-            other => other, // Wildcard, LitPat
+            TPattern::LitPat(l, ty) => TPattern::LitPat(l, ty.apply_subst(subst)),
+            other => other, // Wildcard
         }
     }
 
@@ -570,7 +571,8 @@ impl TPattern {
             TPattern::Paren(p) => p.demote_skolems(demote),
             TPattern::As(_, p) => p.demote_skolems(demote),
             TPattern::Tuple(ps) => { for p in ps.iter_mut() { p.demote_skolems(demote); } }
-            _ => {} // Wildcard, LitPat carry no type
+            TPattern::LitPat(_, ty) => *ty = ty.demote_skolems(demote),
+            _ => {} // Wildcard carries no type
         }
     }
 }
@@ -842,7 +844,12 @@ pub enum TPattern {
         name: String,
         args: Vec<TPattern>,
     },
-    LitPat(TLiteral),
+    /// Literal pattern with the TYPE the scrutinee was checked at. The
+    /// type is what lets codegen pick the comparison: an integer literal
+    /// pattern is Num-polymorphic in the source, so without it every
+    /// match went through the type-directed `__mll_lit_eq` — at a known
+    /// machine type the emitted condition is a native `==`.
+    LitPat(TLiteral, Ty),
     Paren(Box<TPattern>),
     Tuple(Vec<TPattern>),
     /// As-pattern: `xs@(x : rest)` — binds the name to the whole scrutinee
@@ -864,7 +871,7 @@ impl TPattern {
             TPattern::Var(..) | TPattern::Wildcard => false,
             TPattern::Paren(inner) => inner.forces_scrutinee(),
             TPattern::As(_, inner) => inner.forces_scrutinee(),
-            TPattern::Constructor { .. } | TPattern::LitPat(_) | TPattern::Tuple(_) => true,
+            TPattern::Constructor { .. } | TPattern::LitPat(..) | TPattern::Tuple(_) => true,
         }
     }
 
@@ -890,7 +897,7 @@ impl TPattern {
                 f(name);
                 inner.for_each_var(f);
             }
-            TPattern::Wildcard | TPattern::LitPat(_) => {}
+            TPattern::Wildcard | TPattern::LitPat(..) => {}
             TPattern::Constructor { args, .. } => {
                 for a in args { a.for_each_var(f); }
             }

@@ -525,6 +525,9 @@ mll_test!(integer_bigdiv, "integer_bigdiv.mll");
 mll_test!(integer_show_subtype, "integer_show_subtype.mll");
 mll_test!(list_fusion_inline, "list_fusion_inline.mll");
 mll_test!(inline_shadowed_free_var, "inline_shadowed_free_var.mll");
+mll_test!(exact_let_eager, "exact_let_eager.mll");
+mll_test!(exact_let_eager_hm, "exact_let_eager_hm.mll");
+mll_test!(lit_pat_native_eq, "lit_pat_native_eq.mll");
 mll_test!(partial_app_uncovered_param, "partial_app_uncovered_param.mll");
 mll_test!(mconcat_method, "mconcat_method.mll");
 // A19: where-binding generalization.

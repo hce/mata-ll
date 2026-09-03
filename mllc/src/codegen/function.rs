@@ -987,6 +987,16 @@ impl CodeGen {
         // Close the demand seed over sibling RHSes: if the body demands z and
         // z's RHS demands y, y is demanded too (see demanded_bindings).
         let demanded = self.demanded_bindings(binds, demanded);
+        // Beyond demanded+cheap: bindings on the clause body's first-force
+        // chain may be eagerized even with an EXPENSIVE RHS (see
+        // exact_demanded_bindings). Guarded clauses do not anchor — the
+        // first guard's condition, not the body, is what runs next, and
+        // the chain walker does not model guard chains.
+        let exact = if clause.guards.is_empty() {
+            self.exact_demanded_bindings(binds, clause.plain_body())
+        } else {
+            std::collections::HashSet::new()
+        };
 
         // Now build all bindings in source order — functions and values
         // interleaved as written. The forward declarations above ensure
@@ -994,7 +1004,7 @@ impl CodeGen {
         let mut i = 0;
         while i < binds.len() {
             if binds[i].patterns.is_empty() {
-                stmts.push(self.where_value_stmt(binds, i, &demanded));
+                stmts.push(self.where_value_stmt(binds, i, &demanded, &exact));
                 i += 1;
             } else {
                 stmts.extend(self.where_func_group_assign_stmts(binds, i));
@@ -1012,6 +1022,7 @@ impl CodeGen {
         binds: &[TLocalDef],
         i: usize,
         demanded: &std::collections::HashSet<String>,
+        exact: &std::collections::HashSet<String>,
     ) -> Stmt {
         let bind = &binds[i];
         let sname = sanitize_name(&bind.name);
@@ -1036,6 +1047,13 @@ impl CodeGen {
             Stmt::Assign(lref, Expr::inline_fn0(self.action_run_ast(&bind.body, false)))
         } else if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
             let rhs = self.expr_ast(&bind.body);
+            self.concrete_vars.insert(sname);
+            Stmt::Assign(lref, rhs)
+        } else if exact.contains(&bind.name) && strict_binding_safe(binds, i) {
+            // Exact-first-force eagerization: forced, so the binding holds
+            // a WHNF value from here on (the force is the one the clause
+            // body was proven to perform first anyway).
+            let rhs = self.forced_ast(&bind.body);
             self.concrete_vars.insert(sname);
             Stmt::Assign(lref, rhs)
         } else {

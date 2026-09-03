@@ -402,6 +402,186 @@ impl CodeGen {
         self.is_cheap_to_force(&bind.body)
             || (demanded.contains(&bind.name) && Self::is_cheap(&bind.body))
     }
+
+    /// Bindings of a let/where group that may be evaluated eagerly with
+    /// EXACT bottom identity — the generalization of
+    /// try_let_seq_strict_ast's seq shape to first-force chains.
+    /// strict_binding_ok's demanded+cheap rule reorders only bottom-free
+    /// computation; this set admits EXPENSIVE RHSes (persistent-map
+    /// writes, Integer arithmetic) by proving the lazy program forces the
+    /// binding before any other bottom could surface, so evaluating the
+    /// RHS at binding time runs the same computation at the same program
+    /// point and bottom identity is preserved exactly (the discipline the
+    /// general Let arm documents: never surface a different bottom than
+    /// unoptimized GHC, the goldens oracle).
+    ///
+    /// The chain: the group body's evaluation must force a candidate as
+    /// its FIRST possibly-bottoming act (walking case/if scrutinees and
+    /// the strict positions of entry-forcing callees —
+    /// demand::entry_forced_mask, a stronger contract than the strictness
+    /// rows, whose "forced during the run" admits `f a = case loop of _ ->
+    /// a`); that binding's RHS may then force a sibling the same way, and
+    /// so on. Membership is independent of whether an intermediate link is
+    /// itself emitted eagerly: a thunked link's RHS still runs, unchanged,
+    /// at the moment the proven first force reaches it — eagerization only
+    /// ever moves a force earlier past provably-bottom-free work (sibling
+    /// thunk allocations, the group's own declarations).
+    ///
+    /// Callers must still apply strict_binding_safe (a forward reference
+    /// reads a nil slot regardless of demand). All three Let emitters
+    /// consult this set — the value Let arm (expr.rs), the where path
+    /// (function.rs), and bind_chain_block's Let arm (action.rs, which
+    /// clause bodies route through): in each, the group body's emission
+    /// is the very next thing after the binding group, so the anchor
+    /// argument is the same. A body that continues an ACTION chain
+    /// (`>>=`/`>>`) declines in the walker (InfixApp is not an anchor),
+    /// and action-typed anchors decline on their type.
+    pub(super) fn exact_demanded_bindings(
+        &self,
+        binds: &[TLocalDef],
+        body: &TExpr,
+    ) -> std::collections::HashSet<String> {
+        use std::collections::HashSet;
+        // Candidates: uniquely named value bindings whose name is not
+        // rebound by any inner construct in the walk (a rebound name would
+        // make the walker's Var test resolve to the wrong binder) and
+        // whose RHS is not an action value (those emit as re-performable
+        // closures, never eager values).
+        let mut rebound = HashSet::new();
+        crate::demand::collect_rebound_names(body, &mut rebound);
+        for b in binds {
+            crate::demand::collect_rebound_names(&b.body, &mut rebound);
+        }
+        let mut counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for b in binds {
+            *counts.entry(b.name.as_str()).or_default() += 1;
+        }
+        let candidates: HashSet<&str> = binds
+            .iter()
+            .filter(|b| {
+                b.patterns.is_empty()
+                    && counts[b.name.as_str()] == 1
+                    && !rebound.contains(&b.name)
+                    && !Self::is_nullary_action_type(&b.body.ty)
+            })
+            .map(|b| b.name.as_str())
+            .collect();
+        if candidates.is_empty() {
+            return HashSet::new();
+        }
+        let mut exact: HashSet<String> = HashSet::new();
+        let mut frontier = self.first_forced_candidate(body, &candidates, false);
+        while let Some(x) = frontier {
+            if !exact.insert(x.clone()) {
+                break; // self-sustaining chain: stop
+            }
+            let bind = binds
+                .iter()
+                .find(|b| b.name == x)
+                .expect("chain names come from candidates, which come from binds");
+            // The RHS walk starts from "this binding is being forced":
+            // a bare-variable alias RHS is a valid link here (forcing the
+            // alias forces the referent with nothing in between).
+            frontier = self.first_forced_candidate(&bind.body, &candidates, true);
+        }
+        exact
+    }
+
+    /// The candidate binding that evaluating `e` forces before any
+    /// possible bottom — None when the first possibly-bottoming act cannot
+    /// be pinned on one candidate. Walks case/if scrutinees (a case whose
+    /// first branch is irrefutable never forces its scrutinee, so it does
+    /// not anchor) and saturated calls to entry-forcing runtime callees.
+    /// Every sibling argument of a carrier position must be
+    /// bottom-free-to-force AND reference no candidate: all argument
+    /// expressions run before the call, and a candidate's slot is still
+    /// nil/unforced at that point (a stale concreteness claim from an
+    /// outer same-named binding must not count it cheap).
+    ///
+    /// `whnf_taken` says the context takes `e`'s WHNF at this very point
+    /// (a scrutinee, an entry-forced argument, a chained RHS). A bare Var
+    /// answers only under it: the group body being a bare variable proves
+    /// nothing — the emitted IIFE returns that thunk to a consumer that
+    /// may force it arbitrarily later.
+    fn first_forced_candidate(
+        &self,
+        e: &TExpr,
+        candidates: &std::collections::HashSet<&str>,
+        whnf_taken: bool,
+    ) -> Option<String> {
+        let mut e = e;
+        while let TExprKind::Paren(p) = &e.kind {
+            e = p.as_ref();
+        }
+        if Self::is_nullary_action_type(&e.ty) {
+            return None; // suspended: evaluating it performs nothing now
+        }
+        match &e.kind {
+            TExprKind::Var(n) if whnf_taken => {
+                candidates.get(n.as_str()).map(|s| s.to_string())
+            }
+            TExprKind::Case { scrutinee, branches } => {
+                if branches.first().is_some_and(|b| b.pattern.forces_scrutinee()) {
+                    self.first_forced_candidate(scrutinee, candidates, true)
+                } else {
+                    None
+                }
+            }
+            TExprKind::If { cond, .. } => {
+                self.first_forced_candidate(cond, candidates, true)
+            }
+            TExprKind::App(_, _) => {
+                // Flatten the spine, looking through parens at the head.
+                let mut args_rev: Vec<&TExpr> = Vec::new();
+                let mut f = e;
+                loop {
+                    match &f.kind {
+                        TExprKind::App(func, arg) => {
+                            args_rev.push(arg.as_ref());
+                            f = func.as_ref();
+                        }
+                        TExprKind::Paren(i) => f = i.as_ref(),
+                        _ => break,
+                    }
+                }
+                let TExprKind::Var(g) = &f.kind else { return None };
+                if self.is_local_shadowed(g) {
+                    return None; // a local binding, not the runtime callee
+                }
+                let mask = crate::demand::entry_forced_mask(g)?;
+                if mask.len() != args_rev.len() {
+                    // Partial application runs nothing; over-application
+                    // is a different emitted shape. Neither anchors.
+                    return None;
+                }
+                let args: Vec<&TExpr> = args_rev.into_iter().rev().collect();
+                // Exactly one argument may carry the chain, in an
+                // entry-forced position; every other argument must be
+                // bottom-free (their site evaluation runs before the
+                // call, and the callee's entry force of an already-WHNF
+                // value cannot bottom either).
+                let mut carrier: Option<usize> = None;
+                for (i, a) in args.iter().enumerate() {
+                    if self.is_cheap_to_force(a)
+                        && candidates.iter().all(|c| !expr_references_name(a, c))
+                    {
+                        continue;
+                    }
+                    if carrier.is_some() {
+                        return None;
+                    }
+                    carrier = Some(i);
+                }
+                let j = carrier?;
+                if !mask[j] {
+                    return None;
+                }
+                self.first_forced_candidate(args[j], candidates, true)
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Whether `binds[i]` may be emitted as a *strict* (immediately-evaluated,

@@ -1714,12 +1714,20 @@ impl Checker {
                     // codegen compares it type-directed (see __mll_lit_eq).
                     Literal::Integer(_) | Literal::BigInteger(_) => {
                         self.wanted.push(("Num".to_string(), expected.clone()));
-                        Ok((TPattern::LitPat(Self::convert_literal(lit)), Subst::empty()))
+                        // The carried type is the EXPECTED type, resolved by
+                        // whatever substitution closes over it later
+                        // (TPattern::apply_subst) — Int lets codegen emit a
+                        // native ==, anything unresolved keeps __mll_lit_eq.
+                        Ok((
+                            TPattern::LitPat(Self::convert_literal(lit), expected.clone()),
+                            Subst::empty(),
+                        ))
                     }
                     _ => {
                         let lit_ty = self.literal_type(lit);
                         let s = self.unify(expected, &lit_ty)?;
-                        Ok((TPattern::LitPat(Self::convert_literal(lit)), s))
+                        let ty = expected.clone().apply_subst(&s);
+                        Ok((TPattern::LitPat(Self::convert_literal(lit), ty), s))
                     }
                 }
             }

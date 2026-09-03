@@ -442,6 +442,11 @@ impl CodeGen {
                         &crate::demand::Demand::Head,
                     ),
                 );
+                // Beyond demanded+cheap: bindings on the body's first-force
+                // chain may be eagerized even with an EXPENSIVE RHS — the
+                // lazy program runs the same computation at the same point
+                // (see exact_demanded_bindings).
+                let exact = self.exact_demanded_bindings(binds, body);
                 for (i, bind) in binds.iter().enumerate() {
                     let sname = sanitize_name(&bind.name);
                     // The assignment target may be a spill slot (`_vN[k]`)
@@ -461,6 +466,14 @@ impl CodeGen {
                         self.concrete_vars.insert(sname);
                     } else if self.strict_binding_ok(bind, &demanded) && strict_binding_safe(binds, i) {
                         let rhs = self.expr_ast(&bind.body);
+                        stmts.push(Stmt::Assign(lval, rhs));
+                        self.concrete_vars.insert(sname);
+                    } else if exact.contains(&bind.name) && strict_binding_safe(binds, i) {
+                        // Exact-first-force eagerization: forced, so the
+                        // binding holds a WHNF value from here on (the
+                        // force is the one the body was proven to perform
+                        // first anyway).
+                        let rhs = self.forced_ast(&bind.body);
                         stmts.push(Stmt::Assign(lval, rhs));
                         self.concrete_vars.insert(sname);
                     } else {

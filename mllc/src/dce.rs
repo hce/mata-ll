@@ -145,7 +145,7 @@ fn collect_pattern(p: &TPattern, refs: &mut HashSet<String>) {
                 collect_pattern(e, refs);
             }
         }
-        TPattern::Var(_, _) | TPattern::Wildcard | TPattern::LitPat(_) => {}
+        TPattern::Var(_, _) | TPattern::Wildcard | TPattern::LitPat(..) => {}
     }
 }
 
