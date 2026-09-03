@@ -152,7 +152,7 @@ impl CodeGen {
             "__mll_bool_n", "ord_lt__Bool", "ord_gt__Bool", "ord_le__Bool",
             "ord_ge__Bool", "ord_compare__Bool", "ord_max__Bool", "ord_min__Bool",
             "head", "tail", "map", "filter", "take", "drop", "zipWith",
-            "foldr", "foldl",
+            "foldr", "foldl", "foldl_prime",
             "__mll_hashstr", "__mll_hm_lt", "hashmap_empty", "hashmap_insert", "hashmap_lookup", "__mll_hm_slot",
             "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
             "hashmap_member", "hashmap_fromList", "hashmap_toList",
@@ -213,6 +213,7 @@ impl CodeGen {
             self.register_data_type(def);
         }
         self.newtypes = module.newtypes.clone();
+        self.newtype_types = module.newtype_types.clone();
 
         // Record field accessors: inline as direct table indexing instead of
         // emitting local functions (saves Lua local variable slots)
@@ -412,19 +413,28 @@ impl CodeGen {
             stmts.extend(self.data_constructor_stmts(def));
         }
 
-        // Emit newtype constructors (identity functions, now using fn_table slots)
+        // Emit newtype constructors as FIRST-CLASS values (`map N xs`,
+        // `N . f`): the identity — but a forcing one. A saturated `N e` is
+        // erased to `e` before codegen (newtype_erase.rs), so this function
+        // is only ever CALLED by generic code (`map`'s `f x`, a callback),
+        // which relies on the runtime's WHNF-return invariant: every call
+        // returns a value, never a raw thunk. `return _v` handed a lazy
+        // argument straight back — a thunk in a cons head, a thunk where a
+        // number was due. Forcing here is exactly GHC's semantics (demanding
+        // `N x` to WHNF demands `x`), and the call itself only runs when the
+        // context demands the result.
         for name in &module.newtypes {
             if let Some(&slot) = self.fn_table.get(name.as_str()) {
                 stmts.push(Stmt::Assign(
                     format!("__mll_fn[{}]", slot),
                     Expr::Func(
                         vec!["_v".into()],
-                        FuncBody::Inline(vec![Stmt::Return(Expr::name("_v"))]),
+                        FuncBody::Inline(vec![Stmt::Return(Expr::force(Expr::name("_v")))]),
                     ),
                 ));
             } else {
                 stmts.push(Stmt::Raw(format!(
-                    "local function {}(_v) return _v end",
+                    "local function {}(_v) return __force(_v) end",
                     sanitize_name(name)
                 )));
             }

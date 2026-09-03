@@ -55,8 +55,8 @@ pub fn split_module(mut module: TModule) -> TModule {
     // chains it would otherwise split).
     debug_assert_eq!(
         module.passes_run.last(),
-        Some(&"fold"),
-        "split must run on the folded module"
+        Some(&"newtype_erase"),
+        "split must run on the folded, newtype-erased module"
     );
     module.passes_run.push("split");
     for f in module.functions.iter_mut() {

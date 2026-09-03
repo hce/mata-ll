@@ -297,9 +297,10 @@ fn repeat_safe_expr(e: &Expr) -> bool {
                     // table (thunklift.rs) — the same pure allocation.
                     | "__thunk" | "__mll_tk1" | "__mll_tk2" | "__mll_tk3"
                     | "__mll_gen1" | "__mll_gen2" | "__mll_gen3"
-                    // The fused hmLookup slot read: hm tables are
-                    // persistent (writers copy, never mutate a published
-                    // map) and the sentinel compare is pure — both
+                    // The fused hmLookup slot read: a map handle is a
+                    // persistent VERSION (the diff+reroot store underneath
+                    // mutates, but every read of one version answers the
+                    // same) and the sentinel compare is pure — both
                     // repeat-deterministic.
                     | "__mll_hm_slot" | "rawequal"
                     | "__mll_cons" | "__mll_lazy_cons" | "__mll_lazy_consg" | "__mll_pure"

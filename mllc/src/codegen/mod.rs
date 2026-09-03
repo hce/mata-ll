@@ -184,8 +184,13 @@ struct CodeGen {
     internal_error: Option<String>,
     /// (con_name, type_name, variant_index, total, is_enum)
     constructors: Vec<(String, String, usize, usize, bool)>,
-    /// Newtype constructor names (identity at runtime)
+    /// Newtype constructor names (a forcing identity at runtime; saturated
+    /// applications are erased before codegen — see newtype_erase.rs)
     newtypes: Vec<String>,
+    /// Newtype TYPE names, for the result-WHNF type gate
+    /// (`ty_app_result_whnf`): a function whose result type is a newtype
+    /// may return the wrapped value's raw thunk (a bare pattern variable).
+    newtype_types: Vec<String>,
     /// Names that have been forward-declared (skip `local` on definition)
     forward_declared: std::collections::HashSet<String>,
     /// Variables known to hold concrete values (not thunks), skip __force
@@ -389,7 +394,7 @@ impl CodeGen {
             depth_error: None,
             name_collision_error: None,
             internal_error: None,
-            constructors: Vec::new(), newtypes: Vec::new(),
+            constructors: Vec::new(), newtypes: Vec::new(), newtype_types: Vec::new(),
             forward_declared: std::collections::HashSet::new(),
             concrete_vars: std::collections::HashSet::new(),
             params_always_cheap: std::collections::HashMap::new(),
@@ -466,6 +471,12 @@ impl CodeGen {
 
     fn is_newtype(&self, name: &str) -> bool {
         self.newtypes.iter().any(|n| n == name)
+    }
+
+    /// Whether TYPE `name` is a newtype (the type-side twin of `is_newtype`,
+    /// which answers for constructor names).
+    fn is_newtype_type(&self, name: &str) -> bool {
+        self.newtype_types.iter().any(|n| n == name)
     }
 
     /// True when `name` (SOURCE spelling) is bound by an enclosing local
@@ -664,10 +675,10 @@ pub(crate) fn generate(
     whnf_assert: bool,
 ) -> Result<GeneratedLua, String> {
     // Pass-order witness (see TModule::passes_run): codegen consumes the
-    // fully processed module — monomorphized, folded, split, DCE'd.
+    // fully processed module — monomorphized, folded, newtype-erased, split, DCE'd.
     debug_assert_eq!(
         module.passes_run,
-        ["mono", "fold", "split", "dce"],
+        ["mono", "fold", "newtype_erase", "split", "dce"],
         "codegen must run on the final TIR module"
     );
     let mut cg = CodeGen::new();

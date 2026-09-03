@@ -21,6 +21,11 @@ file only records the measured facts.
 
 ## Pinned runtime divergences
 
+(Scope: "none" is measured over the goldened corpus — every case in
+`tests/cases` and `tests/ghc` that is not listed in EXCLUDED.tsv. The
+excluded areas — FFI surfaces, HashMap builtins, Lua-specific modules —
+are checked by self-asserting cases, not by a GHC twin.)
+
 None. The nineteen divergences this file used to carry (four pinned
 runtime ones and fifteen assertion-level ones) all reduced to three `show`
 behaviors — unquoted `String` show, `", "` list/tuple separators, and

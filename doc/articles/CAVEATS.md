@@ -129,12 +129,13 @@ conversions go through exactly this pair (see HASKDIFF.md, "Integers").
 ## `Floating` and `RealFrac` are functions, not classes
 
 The higher rungs of the numeric tower are not yet typeclasses. `pi`, `exp`,
-`log`, `sqrt`, `sin`, `cos`, … exist as `Number`-typed functions (in `LMath`),
-and rounding/truncation (`floor`, `ceiling`, `truncate`, `round`) likewise
-operate on `Number`. So you can compute with them at `Number`, but you cannot
-yet write code generic over `Floating a`/`RealFrac a`, nor give those classes a
-user instance. Generalising them is deferred; the underlying operations are all
-present, so this is a missing abstraction, not missing functionality.
+`log`, `sqrt`, `sin`, `cos`, … exist as `Number`-typed functions (in `LMath`;
+`sqrt` also in the Prelude), and rounding is `LMath.floor` / `LMath.ceil`
+(`Number -> Int`). GHC's `round`, `truncate` and `ceiling` are not provided
+(`truncate` is `LMath.floor` on a non-negative value; `round` — half to even
+in GHC — has no shim yet). So you can compute with these at `Number`, but
+you cannot yet write code generic over `Floating a`/`RealFrac a`, nor give
+those classes a user instance. Generalising them is deferred.
 
 ## Some literal type errors defer to the enclosing binding
 
@@ -175,13 +176,14 @@ the new value would have to match was erased when the record was packed.
 Pattern-match the constructor positionally, and rebuild with the
 constructor instead of updating. GHC restricts both the same way.
 
-One adjacent divergence to know about: `where`-bindings are monomorphic in
-mata-ll, so a polymorphic where-helper (`where ident v = v`) applied to
-values unpacked from two *different* existential boxes is rejected — the
-first use pins the helper to the first box's hidden type, and the second
-box's hidden type is a different rigid type. GHC generalizes
-where-bindings and accepts this. Inline the helper or make it a top-level
-function with a signature.
+One adjacent limit to know about: an UNCONSTRAINED polymorphic
+where-helper (`where ident v = v`) generalizes as in GHC and may be
+applied to values unpacked from two *different* existential boxes. A
+where- or let-helper that carries a class constraint does not generalize
+(a local binding is one Lua closure, see HASKDIFF.md "Existentials, and
+how far where-bindings generalize"): `where describe v = show v` used on
+two boxes' values is rejected. Make such a helper a top-level function
+with a signature.
 
 ## `try (pure e)` does not catch an error inside `e`
 

@@ -178,8 +178,11 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("show_Number", &[true]),
     ("show_String", &[true]),
     ("show_Bool", &[true]),
-    ("show_List_", &[true]),
-    ("show_Maybe", &[true]),
+    // (`show_List_`/`show_Maybe`, the type-erased container-show shims,
+    // carry no row: no well-typed program reaches them since the
+    // dictionary-form container show composes a real dictionary — see
+    // mono's structural_show_dict. Left without a row they are weighed
+    // lazily, which is always sound.)
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),
     ("not", &[true]),         // return not __force(x)
@@ -286,8 +289,11 @@ pub const ENTRY_FORCED: &[(&str, &[bool])] = &[
     ("show_Number", &[true]),
     ("show_String", &[true]),
     ("show_Bool", &[true]),
-    ("show_List_", &[true]),
-    ("show_Maybe", &[true]),
+    // (`show_List_`/`show_Maybe`, the type-erased container-show shims,
+    // carry no row: no well-typed program reaches them since the
+    // dictionary-form container show composes a real dictionary — see
+    // mono's structural_show_dict. Left without a row they are weighed
+    // lazily, which is always sound.)
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),
     ("show_Integer", &[true]),

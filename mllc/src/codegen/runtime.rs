@@ -397,7 +397,7 @@ mod tests {
         for (name, arity) in [
             ("head", 1), ("tail", 1), ("map", 2), ("filter", 2),
             ("take", 2), ("drop", 2), ("zipWith", 3), ("foldr", 3),
-            ("foldl", 3), ("not_", 1), ("error_", 1), ("show", 1),
+            ("foldl", 3), ("foldl_prime", 3), ("not_", 1), ("error_", 1), ("show", 1),
         ] {
             assert_eq!(prelude_arity(name), Some(arity), "arity of runtime '{name}'");
         }

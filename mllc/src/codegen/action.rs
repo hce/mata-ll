@@ -52,19 +52,47 @@ impl CodeGen {
     /// bare `v + 1` → "attempt to perform arithmetic on a table value").
     /// Being conservative here only costs an idempotent `__force` probe at the
     /// use sites; being aggressive miscompiles.
+    /// A discarded effect as a Lua statement. Lua accepts only a call as an
+    /// expression statement; any other shape (a bare value some arm handed
+    /// back for an effect-free action) is bound to a throwaway local so the
+    /// emitted module always loads — the load-time failure this guards was
+    /// a discarded `return $ 5` emitted as the statement `5`.
+    fn effect_stmt(action: Expr) -> Stmt {
+        match action {
+            Expr::Call(..) | Expr::Method(..) => Stmt::Expr(action),
+            other => Stmt::Local(vec!["_".to_string()], Some(other)),
+        }
+    }
+
+    /// The payload `x` of a `pure x` / `return x` action, seen through
+    /// parentheses and the `$` spelling (`return $ x`); `None` for every
+    /// other action. THE one recogniser of the pure-action shape: every
+    /// emitter arm and every claim predicate that treats `pure`/`return`
+    /// specially goes through it, so a spelling one arm accepted and
+    /// another did not (the `$` form once reached the statement emitter
+    /// as a bare payload — a Lua load error) cannot recur.
+    pub(super) fn pure_payload(action: &TExpr) -> Option<&TExpr> {
+        let mut a = action;
+        while let TExprKind::Paren(inner) = &a.kind {
+            a = inner.as_ref();
+        }
+        let is_pure = |f: &TExpr| matches!(&f.kind, TExprKind::Var(n) if n == "pure" || n == "return");
+        match &a.kind {
+            TExprKind::App(func, arg) if is_pure(func) => Some(arg.as_ref()),
+            TExprKind::InfixApp { op, lhs, rhs } if op == "$" && is_pure(lhs) => Some(rhs.as_ref()),
+            _ => None,
+        }
+    }
+
     pub(super) fn action_result_is_whnf(&self, action: &TExpr) -> bool {
+        if let Some(payload) = Self::pure_payload(action) {
+            return self.is_cheap_to_force(payload);
+        }
         let mut a = action;
         while let TExprKind::Paren(inner) = &a.kind {
             a = inner.as_ref();
         }
         match &a.kind {
-            TExprKind::App(func, arg)
-                if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
-                self.is_cheap_to_force(arg),
-            TExprKind::InfixApp { op, lhs, rhs }
-                if op == "$"
-                    && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
-                self.is_cheap_to_force(rhs),
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => true,
             TExprKind::SpecCall { specialized: SpecKind::Io(_), .. } => true,
             // Every fused intrinsic result is WHNF except __mll_ioref_read:
@@ -167,17 +195,7 @@ impl CodeGen {
         while let TExprKind::Paren(inner) = &a.kind {
             a = inner.as_ref();
         }
-        let payload = match &a.kind {
-            TExprKind::App(func, arg)
-                if matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
-                Some(arg.as_ref()),
-            TExprKind::InfixApp { op, lhs, rhs }
-                if op == "$"
-                    && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") =>
-                Some(rhs.as_ref()),
-            _ => None,
-        };
-        match payload {
+        match Self::pure_payload(a) {
             Some(p) => self.arg_ast(p, false),
             None => self.action_run_ast(a, false),
         }
@@ -213,15 +231,10 @@ impl CodeGen {
         // value while `return (error "x")` / `return (n `div` 0)` become inert.
         // A bind site marks the resulting `<-` variable concrete only when this
         // yields WHNF (see action_result_is_whnf).
-        if let TExprKind::App(func, arg) = &expr.kind
-            && matches!(&func.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                return self.pure_action_ast(arg);
-            }
-        // return $ x / pure $ x: same as return(x)
-        if let TExprKind::InfixApp { op, lhs, rhs } = &expr.kind
-            && op == "$" && matches!(&lhs.kind, TExprKind::Var(n) if n == "pure" || n == "return") {
-                return self.pure_action_ast(rhs);
-            }
+        // (`return $ x` and a parenthesised form included — pure_payload.)
+        if let Some(payload) = Self::pure_payload(expr) {
+            return self.pure_action_ast(payload);
+        }
         // ST primitive calls now return closures — go through __mll_run like everything else
         if !Self::is_nullary_action_type(&expr.ty) {
             // If the type is concretely non-IO (resolved to a known type),
@@ -649,10 +662,10 @@ impl CodeGen {
                         // consumed cells are collectable as the walk moves.
                         if params.len() == 1 && params[0].0 == "_" {
                             let lhs_unwrapped = if let TExprKind::Paren(inner) = &lhs.kind { inner.as_ref() } else { lhs.as_ref() };
-                            let is_pure_discard = matches!(&lhs_unwrapped.kind,
-                                TExprKind::App(func, _) if matches!(&func.kind,
-                                    TExprKind::Var(n) if n == "pure" || n == "return"));
-                            if !is_pure_discard {
+                            // A discarded `pure x` / `return x` (any
+                            // spelling) has no effect and yields nothing
+                            // observable: emit no statement at all.
+                            if Self::pure_payload(lhs_unwrapped).is_none() {
                                 if let Some(mut fused) = self.try_fused_ioref_modify_stmts(lhs_unwrapped) {
                                     stmts.append(&mut fused);
                                 } else {
@@ -660,7 +673,7 @@ impl CodeGen {
                                         &mut self.cur_result_demand, crate::demand::Demand::Head);
                                     let action = self.action_run_ast(lhs_unwrapped, true);
                                     self.cur_result_demand = saved_rd;
-                                    stmts.push(Stmt::Expr(action));
+                                    stmts.push(Self::effect_stmt(action));
                                 }
                             }
                             expr = body;
@@ -696,11 +709,9 @@ impl CodeGen {
                 }
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>" => {
                     let lhs_unwrapped = if let TExprKind::Paren(inner) = &lhs.kind { inner.as_ref() } else { lhs.as_ref() };
-                    // return/pure on the LHS of >> is a no-op (pure value discarded)
-                    let is_pure_discard = matches!(&lhs_unwrapped.kind,
-                        TExprKind::App(func, _) if matches!(&func.kind,
-                            TExprKind::Var(n) if n == "pure" || n == "return"));
-                    if !is_pure_discard {
+                    // return/pure on the LHS of >> is a no-op (pure value
+                    // discarded) — every spelling, see pure_payload.
+                    if Self::pure_payload(lhs_unwrapped).is_none() {
                         // Statement position — see the ">>=" arm above. The
                         // result is DISCARDED, so the forwarding runner is
                         // used: identical forcing/effect behaviour, and it
@@ -713,7 +724,7 @@ impl CodeGen {
                                 &mut self.cur_result_demand, crate::demand::Demand::Head);
                             let action = self.action_run_ast(lhs_unwrapped, true);
                             self.cur_result_demand = saved_rd;
-                            stmts.push(Stmt::Expr(action));
+                            stmts.push(Self::effect_stmt(action));
                         }
                     }
                     expr = rhs;

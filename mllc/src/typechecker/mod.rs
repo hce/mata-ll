@@ -344,6 +344,10 @@ pub(super) enum SkolemOrigin {
     /// rigid while its body is checked. `fn_name` is the function being
     /// checked.
     Signature { fn_name: String },
+    /// A variable of a type ascription (`e :: a -> a`), rigid while `e` is
+    /// checked against it; the ascribed value is then instantiated afresh
+    /// for its use, as GHC quantifies it.
+    Ascription,
     /// A variable bound by a higher-rank argument type (`f :: (forall a. …) ->
     /// …`), rigid while the *argument* is checked against it. The argument must
     /// work for every `a`, so any class constraint its body demands of `a` is
@@ -524,6 +528,11 @@ pub struct Checker {
     checked_instance_heads: HashSet<(String, InstHead)>,
     /// Record field accessors: field_name -> (type_name, lua_index)
     pub record_fields: HashMap<String, (String, usize)>,
+    /// Each record constructor's OWN field names in declaration order:
+    /// `data T = A { x :: Int } | B { y :: Int }` gives A -> [x], B -> [y].
+    /// Record construction (`B { y = 1 }`) is checked against this, not
+    /// the type-wide `record_fields` (which would demand A's fields too).
+    con_record_fields: HashMap<String, Vec<String>>,
     /// Type names that derive `LuaDict` (validated in `derive_luadict`): their
     /// constructor emits a name-keyed Lua table rather than a positional one.
     luadict_types: HashSet<String>,
@@ -733,6 +742,7 @@ impl Checker {
             instances: HashMap::new(),
             checked_instance_heads: HashSet::new(),
             record_fields: HashMap::new(),
+            con_record_fields: HashMap::new(),
             luadict_types: HashSet::new(),
             newtype_types: HashSet::new(),
             newtype_shapes: HashMap::new(),
@@ -1506,6 +1516,13 @@ impl Checker {
                     if !notes.contains(&note) { notes.push(note); }
                     continue;
                 }
+                if info.origin == SkolemOrigin::Ascription {
+                    let note = format!(
+                        "'{}' is a rigid type variable of a type ascription (`e :: … {} …`): the ascription claims the expression has that type for EVERY '{}', so the expression must be polymorphic enough — a value of one specific type, or one needing a class instance for '{}', does not qualify",
+                        info.var, info.var, info.var, info.var);
+                    if !notes.contains(&note) { notes.push(note); }
+                    continue;
+                }
                 if info.origin == SkolemOrigin::Rank2Arg {
                     let note = format!(
                         "'{}' is bound by a higher-rank argument type (forall {}. …): the value must work for EVERY type, so it cannot demand any class instance for '{}' — a lambda like `\\x -> x + 1` (needing `Num`) or one calling `show x` (needing `Show`) is not polymorphic enough. Pass a value that uses '{}' only as an opaque token.",
@@ -2088,6 +2105,10 @@ impl Checker {
 
             // Register record field accessors
             if let ConstructorFields::Named(fields) = &con.fields {
+                self.con_record_fields.insert(
+                    con.name.clone(),
+                    fields.iter().map(|f| f.name.clone()).collect(),
+                );
                 for (fi, field) in fields.iter().enumerate() {
                     // A field name already registered by ANOTHER type would
                     // silently overwrite that type's accessor and
@@ -2424,8 +2445,10 @@ impl Checker {
         self.validate_export_types(&exports, &functions, &constrained_exports);
 
         let newtypes = self.collect_newtype_keys(module);
+        let mut newtype_types: Vec<String> = self.newtype_types.iter().cloned().collect();
+        newtype_types.sort();
 
-        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, record_accessors, newtypes, passes_run: vec![] }
+        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, record_accessors, newtypes, newtype_types, passes_run: vec![] }
     }
 
     /// Register type families and aliases and lower the families to `Ty`
@@ -3162,6 +3185,25 @@ impl Checker {
             } else { None }
         }).collect()
     }
+}
+
+/// Every method name the BUILTIN classes define (`show`, `==`, `abs`,
+/// `foldr`, …) plus the derived operator `/=`: the names an unqualified
+/// import must not redefine. The Prelude source's signature shapes form the
+/// rest of the import-collision baseline; these live in Rust and were
+/// missing from it, so a library declaring `abs :: Number -> …` (LMath did)
+/// silently shadowed the Num method for every importer.
+pub fn builtin_method_names() -> Vec<String> {
+    let checker = Checker::new();
+    let mut names: Vec<String> = checker
+        .classes
+        .values()
+        .flat_map(|ci| ci.methods.iter().map(|(m, _)| m.clone()))
+        .collect();
+    names.push("/=".to_string());
+    names.sort();
+    names.dedup();
+    names
 }
 
 /// Classes whose list/tuple/Maybe instances mata-ll synthesizes structurally

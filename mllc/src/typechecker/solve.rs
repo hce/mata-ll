@@ -924,6 +924,13 @@ impl Checker {
         &self.instances
     }
 
+    /// Expose the constructor table for the monomorphizer (the existential
+    /// constructors' declared field types and contexts drive dictionary
+    /// capture — see mono's `ex_ctors`).
+    pub fn get_constructors(&self) -> &HashMap<String, ConInfo> {
+        &self.constructors
+    }
+
     /// Typeclass constraints per function for dictionary passing, in the
     /// declared (source) spelling. A view synthesized from `fn_contexts`:
     /// each constraint's `type_var` is its argument variable's name, or an

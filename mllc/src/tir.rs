@@ -25,8 +25,15 @@ pub struct TModule {
     pub exports: Vec<String>,
     /// Record field accessors: (field_name, lua_index)
     pub record_accessors: Vec<(String, usize)>,
-    /// Newtype names (zero-cost wrappers, constructor = identity)
+    /// Newtype CONSTRUCTOR names (zero-cost wrappers: a saturated
+    /// application is erased by newtype_erase.rs; the unapplied constructor
+    /// is a forcing identity function).
     pub newtypes: Vec<String>,
+    /// Newtype TYPE names — the type-side twin of `newtypes` (a constructor
+    /// may be named differently from its type: `newtype Rad = MkRad Double`).
+    /// Codegen's result-WHNF gate consults this; keying it on the
+    /// constructor list silently mis-claimed WHNF for such newtypes.
+    pub newtype_types: Vec<String>,
     /// TIR pass-order witnesses: each pass records itself here and
     /// debug_asserts its prerequisite ran (the dependency order
     /// compile_impl's pipeline comment states — mono, fold, split, dce; the

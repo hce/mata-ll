@@ -42,6 +42,8 @@ cases/generic_json_decode	Generics substrate + JSON FFI library
 cases/generic_json_many	Generics substrate + JSON FFI library
 cases/getline	reads stdin; LuaUserData FFI
 cases/hashmap	HashMap builtins (Lua tables)
+cases/hashmap_enum_reroot	HashMap builtins (Lua tables)
+cases/hashmap_key_defaulting	HashMap builtins (Lua tables)
 cases/hashmap_nil_values	HashMap builtins (Lua tables)
 cases/hashmap_structural_keys	HashMap builtins (Lua tables)
 cases/hashmap_versions	HashMap builtins (Lua tables)

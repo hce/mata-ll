@@ -53,17 +53,28 @@ flip f b a = f a b
 -- is the bare, unapplied list constructor (kind Type -> Type), and
 -- `Either c` is the partially applied Either — both must match the kind of
 -- Foldable's class variable, which the compiler checks.
+-- foldl' is the third Foldable method (GHC's Foldable has it too): the
+-- STRICT left fold. The list instance is the direct loop — the seq'd value
+-- and the passed accumulator must be the SAME binding: two textual
+-- `f acc x` are two separate thunks, so forcing one and passing the other
+-- UNforced gives no strictness (the accumulator chain still grows) and
+-- does the work twice. Instances that omit foldl' get the class default
+-- (a continuation-passing fold over foldr, GHC's definition).
 instance Foldable [] where
     foldr _ acc [] = acc
     foldr f acc (x:xs) = f x (foldr f acc xs)
     foldl _ acc [] = acc
     foldl f acc (x:xs) = foldl f (f acc x) xs
+    foldl' _ acc [] = acc
+    foldl' f acc (x:xs) = let z = f acc x in seq z (foldl' f z xs)
 
 instance Foldable Maybe where
     foldr _ acc Nothing = acc
     foldr f acc (Just x) = f x acc
     foldl _ acc Nothing = acc
     foldl f acc (Just x) = f acc x
+    foldl' _ acc Nothing = acc
+    foldl' f acc (Just x) = f acc x
 
 -- Folding an Either folds over Right and ignores Left, like GHC.
 instance Foldable (Either c) where
@@ -71,11 +82,18 @@ instance Foldable (Either c) where
     foldr f acc (Right x) = f x acc
     foldl _ acc (Left _) = acc
     foldl f acc (Right x) = f acc x
+    foldl' _ acc (Left _) = acc
+    foldl' f acc (Right x) = f acc x
 
--- Length-generic Foldable functions, defined over foldr/foldl.
+-- Length-generic Foldable functions. length/sum/product/maximum/minimum
+-- are STRICT left folds (the foldl' method), as in GHC (base's
+-- `length`/`sum`/`product` are foldl', its list `maximum`/`minimum`
+-- strict) — over the lazy `foldl` they built an O(n) thunk chain that
+-- overflowed the Lua stack on large unfused lists (2.4e5 elements on Lua
+-- 5.4, ~3e4 on LuaJIT).
 -- (toList lives in Data.Foldable, matching GHC's Prelude exports.)
 length :: Foldable t => t a -> Int
-length t = foldl (\n _ -> n + 1) 0 t
+length t = foldl' (\n _ -> n + 1) 0 t
 
 reverse :: [a] -> [a]
 reverse xs = go [] xs
@@ -122,6 +140,18 @@ concat t = foldr (\xs acc -> xs ++ acc) [] t
 replicate :: Int -> a -> [a]
 replicate n x = if n <= 0 then [] else x : replicate (n - 1) x
 
+-- Infinite lists, as in GHC. `repeat x` is one shared cyclic cell (the
+-- tail refers to the list itself), so it costs no allocation per element
+-- consumed; `cycle` ties the knot the same way.
+repeat :: a -> [a]
+repeat x = xs
+  where xs = x : xs
+
+cycle :: [a] -> [a]
+cycle [] = error "Prelude.cycle: empty list"
+cycle xs = ys
+  where ys = xs ++ ys
+
 -- The infinite list [x, f x, f (f x), ...]. Lazy in the spine.
 iterate :: (a -> a) -> a -> [a]
 iterate f x = x : iterate f (f x)
@@ -165,10 +195,10 @@ all p t = foldr (\x acc -> if p x then acc else False) True t
 -- Sum and product of any Foldable of numbers, generic over Num exactly as
 -- GHC. The `0`/`1` seeds are polymorphic numeric literals (`fromInteger`).
 sum :: (Foldable t, Num a) => t a -> a
-sum t = foldl (\acc x -> acc + x) 0 t
+sum t = foldl' (\acc x -> acc + x) 0 t
 
 product :: (Foldable t, Num a) => t a -> a
-product t = foldl (\acc x -> acc * x) 1 t
+product t = foldl' (\acc x -> acc * x) 1 t
 
 -- Parity predicates over any Integral, defined via `rem` exactly as GHC:
 -- `rem` truncates toward zero, so the sign of a negative argument never
@@ -184,12 +214,12 @@ odd n = n `rem` 2 /= 0
 maximum :: (Ord a, Foldable t) => t a -> a
 maximum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "maximum: empty structure"
-    (x:xs) -> foldl (\m y -> if y > m then y else m) x xs
+    (x:xs) -> foldl' (\m y -> if y > m then y else m) x xs
 
 minimum :: (Ord a, Foldable t) => t a -> a
 minimum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "minimum: empty structure"
-    (x:xs) -> foldl (\m y -> if y < m then y else m) x xs
+    (x:xs) -> foldl' (\m y -> if y < m then y else m) x xs
 
 -- Stable sort (GHC's Data.List.sort/sortBy; mata-ll's flat namespace puts
 -- them in the Prelude like the other list functions). Bottom-up mergesort:

@@ -79,7 +79,7 @@ pub fn check_stamps(module: &TModule) -> Vec<String> {
     // codegen will see, after every TIR pass.
     debug_assert_eq!(
         module.passes_run,
-        ["mono", "fold", "split", "dce"],
+        ["mono", "fold", "newtype_erase", "split", "dce"],
         "verify::check_stamps must run on the final (post-dce) module"
     );
     crate::codegen::stamp_violations(module)
@@ -239,6 +239,7 @@ mod tests {
             exports: vec![],
             record_accessors: vec![],
             newtypes: vec![],
+            newtype_types: vec![],
             passes_run: vec!["mono"],
         }
     }

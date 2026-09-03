@@ -69,6 +69,18 @@ main = do
 // table.sort crashed. The method-less Hashable marker class constrains
 // the key-taking hm* functions; Integer is deliberately not an
 // instance.
+// A map key type nothing determines is an ambiguity error (GHC: `Map.fromList
+// []` alone is ambiguous in `k`). It used to compile with an unresolved key
+// type because a let-binder mentioning the variable counted as determining it.
+#[test]
+fn hashmap_undetermined_key_is_ambiguous() {
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n    let e = hmFromList []\n    print (hmSize e)\n",
+        &[],
+        &["Ambiguous type", "Hashable"],
+    );
+}
+
 #[test]
 fn hashmap_integer_keys_are_rejected() {
     expect_compile_error(
@@ -234,10 +246,11 @@ fn partial_type_alias_application_is_rejected() {
 // expression has EVERY type `a`, which only a genuinely polymorphic
 // expression satisfies — GHC rejects it. Regression: the variables were
 // freshened FLEXIBLE, so the literal unified with `a` and numeric
-// defaulting accepted it. Deliberate approximation (noted in the fix):
-// the skolem persists, so a polymorphic ascribed value stays rigid
-// downstream — `(Nothing :: Maybe a) == (Nothing :: Maybe Int)` is
-// rejected here where GHC re-generalizes.
+// defaulting accepted it. After the rigid check the variables are
+// instantiated afresh for the use (GHC quantifies the ascription), so
+// `(id :: a -> a) 5` and `(Nothing :: Maybe a) == (Nothing :: Maybe Int)`
+// are accepted — the former was rejected as a rigid mismatch blaming the
+// enclosing function's signature.
 #[test]
 fn ascription_variables_are_rigid() {
     expect_compile_error("main :: IO ()\nmain = print (5 :: a)\n", &[], &[
@@ -253,6 +266,13 @@ fn ascription_variables_are_rigid() {
         &[],
     )
     .expect("a polymorphic expression must satisfy a variable ascription");
+    // The instantiation side: the ascribed value is used at a concrete type.
+    compile(
+        "main :: IO ()\nmain = print ((id :: a -> a) (5 :: Int), (Nothing :: Maybe a) == (Nothing :: Maybe Int))\n",
+        Path::new("."),
+        &[],
+    )
+    .expect("an ascribed polymorphic value is instantiated afresh at its use");
 }
 
 // sanitize_name is not injective (`f'` -> f_prime): two distinct source

@@ -10,6 +10,15 @@ use crate::types::Diagnostic;
 type PResult<T> = Result<T, Box<Diagnostic>>;
 
 /// List comprehension qualifier (internal to parser, desugared before AST)
+/// What a class/instance member line starts with (`parse_method_name`).
+enum MethodHead {
+    /// A method name: an identifier or a parenthesised operator (`(+)`).
+    Name(String),
+    /// A parenthesised PATTERN — the left operand of an infix definition
+    /// (`(K a) + (K b) = …`); the operator follows.
+    Infix(Pattern),
+}
+
 enum ListCompQual {
     Generator { pattern: Pattern, expr: Expr },
     Guard(Expr),
@@ -921,18 +930,32 @@ impl Parser {
     /// `Ok(None)` when the line starts with neither — the member block ends
     /// there. `what` names the construct for the error when the parentheses
     /// hold something other than an operator.
-    fn parse_method_name(&mut self, what: &str) -> PResult<Option<String>> {
+    fn parse_method_name(&mut self, what: &str) -> PResult<Option<MethodHead>> {
         if self.at(&Token::LeftParen) {
+            // `(+)`: the operator being defined, prefix form. Anything else
+            // in the parentheses is the LEFT OPERAND PATTERN of an infix
+            // definition — `(K a) + (K b) = …`, the common spelling of a
+            // wrapper type's Num/Semigroup instance — so parse it as a
+            // pattern and let the caller take the infix branch. (This used
+            // to fail with "Expected operator in instance method".)
+            let cp = self.checkpoint();
             self.advance();
-            let op = match self.peek().clone() {
-                Token::Operator(op) => { self.advance(); op }
-                _ => return Err(self.err_here(format!("Expected operator in {}", what))),
-            };
-            self.expect(&Token::RightParen)?;
-            Ok(Some(op))
+            if let Token::Operator(op) = self.peek().clone() {
+                self.advance();
+                self.expect(&Token::RightParen)?;
+                return Ok(Some(MethodHead::Name(op)));
+            }
+            self.rewind(cp);
+            let left = self.parse_pattern_atom()?;
+            if !matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
+                return Err(self.err_here(format!(
+                    "Expected operator in {} (a parenthesised pattern here must be the \
+                     left operand of an infix definition, `(K a) + (K b) = …`)", what)));
+            }
+            Ok(Some(MethodHead::Infix(left)))
         } else if let Token::Ident(name) = self.peek().clone() {
             self.advance();
-            Ok(Some(name))
+            Ok(Some(MethodHead::Name(name)))
         } else {
             Ok(None)
         }
@@ -944,12 +967,11 @@ impl Parser {
     /// parse_value_decl's top-level infix branch; class and instance
     /// bodies used to lack it, so the spelling the top level accepts died
     /// there with "Expected '='".
-    fn parse_infix_method_clause(&mut self, left_name: String) -> PResult<(String, Clause)> {
+    fn parse_infix_method_clause(&mut self, left: Pattern) -> PResult<(String, Clause)> {
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
         let saved_block = self.block_indent;
         self.block_indent = self.current_indent;
-        let left = Pattern::Var(left_name);
         let op = match self.peek().clone() {
             Token::Operator(op) => {
                 self.advance();
@@ -1066,38 +1088,43 @@ impl Parser {
 
             // Parse method name: a `name :: type` signature line or a
             // default method clause. Could be an operator like (+) :: ...
-            let Some(name) = self.parse_method_name("class method")? else { break };
+            let Some(head) = self.parse_method_name("class method")? else { break };
 
-            // A `::` after the name makes it a type signature; an operator
-            // (or backtick) makes it the INFIX definition form (`x <> y =
-            // …` — the identifier was the left operand); anything else is
-            // a prefix default method clause — `parse_clause` picks up
-            // right after the already-consumed name, exactly like a
-            // top-level function clause.
-            if self.at(&Token::DblColon) {
-                self.advance();
-                let ty = self.parse_type()?;
-                methods.push(ClassMethod { name, ty, default_clauses: None });
-            } else {
-                let (name, clause) =
+            // A `::` after a plain name makes it a type signature; an
+            // operator (or backtick) makes it the INFIX definition form
+            // (`x <> y = …` — the identifier was the left operand; a
+            // parenthesised pattern head, `(K a) <> (K b) = …`, is always
+            // this form); anything else is a prefix default method clause —
+            // `parse_clause` picks up right after the already-consumed name,
+            // exactly like a top-level function clause.
+            let (name, clause) = match head {
+                MethodHead::Infix(left) => self.parse_infix_method_clause(left)?,
+                MethodHead::Name(name) => {
+                    if self.at(&Token::DblColon) {
+                        self.advance();
+                        let ty = self.parse_type()?;
+                        methods.push(ClassMethod { name, ty, default_clauses: None });
+                        continue;
+                    }
                     if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                        self.parse_infix_method_clause(name)?
+                        self.parse_infix_method_clause(Pattern::Var(name))?
                     } else {
                         (name.clone(), self.parse_clause()?)
-                    };
-
-                // Attach to the matching method signature
-                if let Some(m) = methods.iter_mut().find(|m| m.name == name) {
-                    match &mut m.default_clauses {
-                        Some(clauses) => clauses.push(clause),
-                        None => m.default_clauses = Some(vec![clause]),
                     }
-                } else {
-                    return Err(Box::new(Diagnostic::parse_at(format!(
-                        "Default implementation for '{}' has no preceding type signature in class '{}'",
-                        name, class_name
-                    ), clause.span)));
                 }
+            };
+
+            // Attach to the matching method signature
+            if let Some(m) = methods.iter_mut().find(|m| m.name == name) {
+                match &mut m.default_clauses {
+                    Some(clauses) => clauses.push(clause),
+                    None => m.default_clauses = Some(vec![clause]),
+                }
+            } else {
+                return Err(Box::new(Diagnostic::parse_at(format!(
+                    "Default implementation for '{}' has no preceding type signature in class '{}'",
+                    name, class_name
+                ), clause.span)));
             }
         }
 
@@ -1146,17 +1173,22 @@ impl Parser {
                 break;
             }
 
-            let Some(name) = self.parse_method_name("instance method")? else { break };
+            let Some(head) = self.parse_method_name("instance method")? else { break };
 
             // Collect all clauses for this method. An operator (or
             // backtick) after the identifier is the INFIX definition form
-            // (`x <> y = …` — the identifier was the left operand).
-            let (name, clause) =
-                if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                    self.parse_infix_method_clause(name)?
-                } else {
-                    (name, self.parse_clause()?)
-                };
+            // (`x <> y = …` — the identifier was the left operand); a
+            // parenthesised pattern head is always that form.
+            let (name, clause) = match head {
+                MethodHead::Infix(left) => self.parse_infix_method_clause(left)?,
+                MethodHead::Name(name) => {
+                    if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
+                        self.parse_infix_method_clause(Pattern::Var(name))?
+                    } else {
+                        (name, self.parse_clause()?)
+                    }
+                }
+            };
 
             // Check if there's an existing method we should add a clause to
             if let Some(existing) = methods.iter_mut().find(|m: &&mut InstanceMethod| m.name == name) {
@@ -2687,6 +2719,12 @@ impl Parser {
             if self.at(&Token::In) {
                 break;
             }
+            // Explicit `;` between bindings (`let a = 1; b = 2 in …`) — the
+            // Haskell 2010 separator, accepted alongside layout.
+            if self.at(&Token::Semicolon) {
+                self.advance();
+                continue;
+            }
             // Tuple pattern: let (a, b) = expr. Desugared into the
             // SAME recursive binding group as one fresh binding for
             // the scrutinee plus one lazy SELECTOR binding per
@@ -3044,6 +3082,34 @@ impl Parser {
     /// forward pass (see the section-vs-expression notes inside; parsing
     /// speculatively per alternative would be exponential in nesting
     /// depth). Consumes the opening `(` itself.
+    /// At a `.` inside parentheses: the hugging field chain `.a.b` up to
+    /// the closing parenthesis, consumed together with that parenthesis;
+    /// `None` (nothing consumed) when the shape is anything else.
+    fn field_selector_chain(&mut self) -> Option<Vec<String>> {
+        let cp = self.checkpoint();
+        let mut chain = Vec::new();
+        loop {
+            let dot = self.tokens[self.pos].clone();
+            if !matches!(dot.token, Token::Operator(ref o) if o == ".") {
+                break;
+            }
+            let Some(next) = self.tokens.get(self.pos + 1) else { break };
+            let Token::Ident(name) = &next.token else { break };
+            if next.line != dot.line || next.col != dot.end_col
+                || !name.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_') {
+                break;
+            }
+            chain.push(name.clone());
+            self.pos += 2;
+            if self.at(&Token::RightParen) {
+                self.advance();
+                return Some(chain);
+            }
+        }
+        self.rewind(cp);
+        None
+    }
+
     fn parse_paren_expr(&mut self) -> PResult<Expr> {
         self.advance();
 
@@ -3062,6 +3128,23 @@ impl Parser {
             let elems: Vec<Expr> =
                 params.iter().map(|p| Expr::Var(p.clone())).collect();
             return Ok(Expr::Lambda { params, body: Box::new(Expr::Tuple(elems)) });
+        }
+
+        // `(.field)` / `(.a.b)` — a record field selector section
+        // (OverloadedRecordDot): the dot hugs a lowercase identifier and
+        // the parentheses close right after the chain. Desugars to
+        // `\r -> r.a.b`, i.e. `\r -> b (a r)` (field access is
+        // accessor application). With a space (`(. f)`) it is the
+        // composition section below, exactly GHC's whitespace rule.
+        if let Token::Operator(op) = self.peek()
+            && op == "."
+            && let Some(chain) = self.field_selector_chain()
+        {
+            let mut body = Expr::Var("__sec".into());
+            for field in chain {
+                body = Expr::App(Box::new(Expr::Var(field)), Box::new(body));
+            }
+            return Ok(Expr::Lambda { params: vec!["__sec".into()], body: Box::new(body) });
         }
 
         // Check for operator-starting forms: (+), (+1), (-).

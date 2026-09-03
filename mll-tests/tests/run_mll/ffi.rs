@@ -852,6 +852,35 @@ main = pure ()
 }
 
 #[test]
+fn ffi_export_hashmap_version_crossing_values() {
+    // A HashMap crossing OUT to the host is enumerated while its values are
+    // forced; a value that reads another version of the same map family
+    // reroots the shared store mid-walk. The marshaller must snapshot the
+    // entries first (otherwise the host saw the OTHER version's keys).
+    let source = r#"
+build :: Int -> HashMap Int [Int]
+build n =
+    let m1 = hmFromList [(1, [n]), (2, [n])]
+        m2 = hmInsert 3 [n] m1
+    in hmInsert 2 [hmSize m2] m1
+
+export exported :: Int -> HashMap Int [Int]
+exported n = build n
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+    let exported: mlua::Function = module.get("exported").unwrap();
+    let result: mlua::Table = exported.call(0).unwrap();
+    let mut keys: Vec<i64> = result.clone().pairs::<i64, mlua::Table>().map(|p| p.unwrap().0).collect();
+    keys.sort();
+    assert_eq!(keys, vec![1, 2], "host sees exactly the exported version's keys");
+    let v2: Vec<i64> = result.get::<mlua::Table>(2).unwrap().sequence_values().map(|v| v.unwrap()).collect();
+    assert_eq!(v2, vec![3], "value forced across the version boundary");
+}
+
+#[test]
 fn ffi_export_thunked_values() {
     // Regression: top-level values defined via point-free or partial
     // application are thunks — export wrapper must __force before calling

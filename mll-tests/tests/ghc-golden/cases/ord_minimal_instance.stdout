@@ -1,0 +1,10 @@
+(False,False,True,True,True)
+(GT,EQ)
+(T 1,T 2)
+[T 3,T 2,T 1]
+(T 1,T 3)
+(True,False,True,True,False)
+(LT,GT,EQ)
+(U 2,U 1,[U 1,U 2,U 3])
+(V "ab",V "a",True)
+[V "a",V "b",V "c"]

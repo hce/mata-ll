@@ -50,11 +50,17 @@ difference is the failure mode of a space leak. A thunk is forced by
 recursing on the Lua interpreter stack, which is fixed-size, so a leaked
 deep thunk chain that GHC's growable RTS stack would force to completion
 (slowly, at leaked-heap cost) instead dies here with a Lua `stack
-overflow` once the chain is around 10^6 deep (10^5 completes). The leak is
-the same bug in both systems and takes the same fix — `foldl (+) 0 [1..n]`
-wants `foldl'`, a value built lazily inside `return` wants
-`` x `seq` return x `` (GHC's `return $!`) — but Lua turns it into a crash
-sooner rather than a slow completion.
+overflow`. The depth that fits is the interpreter's: on Lua 5.4/5.5 a chain
+of a few hundred thousand pending applications overflows (10^5 completes,
+10^6 does not); LuaJIT's C stack is smaller and overflows an order of
+magnitude sooner (a few times 10^4). The leak is the same bug in both
+systems and takes the same fix — `foldl (+) 0 [1..n]` wants `foldl'`, a
+value built lazily inside `return` wants `` x `seq` return x `` (GHC's
+`return $!`) — but Lua turns it into a crash sooner rather than a slow
+completion. The Prelude's own folds do not leak: `length`, `sum`,
+`product`, `maximum` and `minimum` are strict left folds (the Foldable
+`foldl'` method), as in GHC, so they complete on lists of any length the
+heap can hold.
 
 ## Strings and ByteStrings
 
@@ -217,6 +223,12 @@ type-directed injective encoding, and `hmKeys`/`hmValues`/`hmToList`
 enumerate them in structural Ord order (scalar-keyed maps sort keys
 natively, as before). `Integer` keys remain rejected: the boxed bignum
 has table identity and no scalar encoding.
+
+A numeric literal used as a key without an annotation (`hmFromList [(1,
+"x")]`) defaults to `Int` — a mata-ll deviation: GHC's Data.Map twin
+defaults the key to Integer, which has no `Hashable` instance here
+(Integer keys are rejected by design). A key type nothing determines
+(`hmFromList []` alone) is an ambiguity error, as in GHC.
 
 ## Data.IORef is the five-function core; no atomics, no weak refs
 
@@ -525,8 +537,10 @@ generic over them, as in GHC. The differences:
 
 Existential types behave as in GHC: unpacking skolemizes the hidden
 variable, escapes are rejected, constructor contexts
-(`forall a. Show a => …`) are enforced at pack and unpack, and record
-fields with existential types have no selector and no record update.
+(`forall a. Show a => …`) are enforced at pack and unpack and their
+class dictionaries are captured in the constructor (so `show x` on the
+unpacked value prints as GHC does), and record fields with existential
+types have no selector and no record update.
 
 `where`-bindings generalize like `let`-bindings: an unconstrained
 polymorphic helper used at two types works (`go y = [y]` at `Int` and

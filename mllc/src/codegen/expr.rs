@@ -707,18 +707,7 @@ impl CodeGen {
                         ])),
                     );
                 }
-                let lua_op = match op.as_str() {
-                    "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
-                    other => other,
-                };
-                Expr::Func(
-                    vec!["_a".into(), "_b".into()],
-                    FuncBody::Inline(vec![Stmt::Return(Expr::binop(
-                        lua_op,
-                        Expr::force(Expr::name("_a")),
-                        Expr::force(Expr::name("_b")),
-                    ))]),
-                )
+                Self::builtin_op_lambda(op)
             }
             TExprKind::SpecCall { specialized, args, .. } => self.spec_call_ast(specialized, args, expr),
             TExprKind::Tuple(elems) => {
@@ -1930,6 +1919,25 @@ impl CodeGen {
         }
     }
 
+    /// The first-class VALUE of a Lua-native binary operator (`(+)`, `(<)`,
+    /// `(&&)`, …): a two-argument closure forcing both operands, the exact
+    /// forcing the inline infix emission does. Shared by the `OpFunc` arm
+    /// and the dictionary builder (a builtin instance's self-mapped method).
+    fn builtin_op_lambda(op: &str) -> Expr {
+        let lua_op = match op {
+            "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
+            other => other,
+        };
+        Expr::Func(
+            vec!["_a".into(), "_b".into()],
+            FuncBody::Inline(vec![Stmt::Return(Expr::binop(
+                lua_op,
+                Expr::force(Expr::name("_a")),
+                Expr::force(Expr::name("_b")),
+            ))]),
+        )
+    }
+
     /// The SpecCall arms of the expression walk, split out only to keep
     /// `expr_ast_inner` readable — one arm per `SpecKind` variant (the
     /// former `helper:payload` string protocol, now typed in tir.rs).
@@ -1939,11 +1947,27 @@ impl CodeGen {
                 // Dictionary table literal: { method1 = impl1, method2 = impl2 }
                 let mut items = Vec::new();
                 for (m, f) in methods {
-                    let sv = sanitize_name(f);
-                    items.push(Item::KV(
-                        format!("{} = ", sanitize_name(m)),
-                        Expr::name(self.lua_ref(&sv)),
-                    ));
+                    // A method the builtin instances map to ITSELF (`+` at
+                    // Int/Number, `div` at Int, `/` at Number) has no
+                    // runtime function — applied uses are inlined as Lua
+                    // operators. The dictionary needs a callable, so it
+                    // gets the same value a first-class `(+)`/`div` gets
+                    // (the forcing operator lambda / the forcing wrapper);
+                    // the old `lua_ref("+")` named a global that does not
+                    // exist and crashed with a nil call at the first use
+                    // past the specialization limit.
+                    let value = match f.as_str() {
+                        "div" => Expr::name("__mll_div_fn"),
+                        "mod" => Expr::name("__mll_mod_fn"),
+                        "quot" => Expr::name("__mll_quot_fn"),
+                        "rem" => Expr::name("__mll_rem_fn"),
+                        op if is_builtin_op(op) => Self::builtin_op_lambda(op),
+                        _ => {
+                            let sv = sanitize_name(f);
+                            Expr::name(self.lua_ref(&sv))
+                        }
+                    };
+                    items.push(Item::KV(format!("{} = ", sanitize_name(m)), value));
                 }
                 Expr::TableSpaced(items)
             }

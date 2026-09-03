@@ -105,11 +105,28 @@ impl ModuleLoader {
 
         for search_dir in &self.search_paths {
             let full_path = search_dir.join(&filename);
-            if full_path.exists() {
+            if full_path.exists() && Self::exact_case_exists(&full_path) {
                 return Some(full_path);
             }
         }
         None
+    }
+
+    /// Does the file exist under exactly this spelling? `Path::exists` says
+    /// yes for `lmath.mll` when only `LMath.mll` exists on a
+    /// case-insensitive filesystem (macOS, Windows), so a root file named
+    /// like an imported module in another case resolved the import to
+    /// ITSELF ("module imports form a cycle: LMath -> LMath"). The
+    /// directory listing carries the on-disk spelling.
+    fn exact_case_exists(path: &Path) -> bool {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { return true };
+        let dir = if dir.as_os_str().is_empty() { Path::new(".") } else { dir };
+        match std::fs::read_dir(dir) {
+            Ok(entries) => entries.flatten().any(|e| e.file_name() == name),
+            // Unreadable directory: trust `exists` (the load reports the
+            // real error).
+            Err(_) => true,
+        }
     }
 
     /// Load and parse a module, caching the result
@@ -437,6 +454,14 @@ impl ModuleLoader {
                 let qual = Qual { alias, names: &names };
                 for d in &all_decls {
                     imported_decls.push(qual.decl(d));
+                }
+                // The copy is the same declarations from the same files:
+                // record its origin runs so diagnostics inside it are
+                // attributed to those files. (Without an entry the spans
+                // under-covered the import region and EVERY imported
+                // declaration's error rendered with the root file's text.)
+                for (okey, len) in &child_spans {
+                    out_spans.push((okey.clone(), *len));
                 }
             }
         }

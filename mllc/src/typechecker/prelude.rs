@@ -80,6 +80,35 @@ impl Checker {
         });
     }
 
+    /// Attach a DEFAULT method body to a builtin class, written as mata-ll
+    /// source (one function definition). Builtin classes are registered
+    /// from Rust, where a method body has no natural home; the parsed
+    /// clauses take exactly the path a source class's defaults take
+    /// (`ClassInfo::default_methods`, consumed when an instance omits the
+    /// method), so a user instance that leaves the method out gets GHC's
+    /// default instead of a per-use "No instance" error. The snippet is
+    /// compiler-owned text: a parse failure is a compiler bug, reported as
+    /// a panic with the source.
+    fn register_builtin_default(&mut self, class: &str, method: &str, source: &str) {
+        let tokens = crate::lexer::lex(source)
+            .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not lex: {e:?}\n{source}"));
+        let module = crate::parser::parse(tokens)
+            .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not parse: {e:?}\n{source}"));
+        let clauses = module
+            .decls
+            .into_iter()
+            .find_map(|d| match d {
+                Decl::FunDef { name, clauses } if name == method => Some(clauses),
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("builtin default for {class}.{method}: snippet defines no `{method}`"));
+        self.classes
+            .get_mut(class)
+            .unwrap_or_else(|| panic!("builtin default for unregistered class {class}"))
+            .default_methods
+            .insert(method.to_string(), clauses);
+    }
+
     /// Register one builtin instance: `class` at `target`, each method mapped
     /// to its runtime implementation name. `context: None` — the structural
     /// fallback rule applies (every type argument needs the class itself),
@@ -484,10 +513,23 @@ impl Checker {
         // a Foldable instance — or an ambiguous one like `Right 5` with an
         // undetermined Left type — is a compile error with the annotation
         // hint, not a deferred dispatch that fails at runtime.
+        // foldl' :: (b -> a -> b) -> b -> t a -> b — the strict left fold is
+        // a class method as in GHC's Foldable (so an instance can supply a
+        // direct loop: the list instance in Prelude.mll does), with GHC's
+        // own default over foldr for every other instance: a continuation
+        // per element applied to the accumulator forced by `seq`, each call
+        // a tail call. length/sum/product/maximum/minimum are defined over
+        // it (GHC's are strict too).
         self.register_builtin_class("Foldable", "t", &[], vec![
             ("foldr", foldr_ty, Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
-            ("foldl", foldl_ty, Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
+            ("foldl", foldl_ty.clone(), Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
+            ("foldl'", foldl_ty, Some(vec![a.clone(), b.clone(), t.clone()]), vec![("Foldable", "t")]),
         ]);
+        self.register_builtin_default(
+            "Foldable",
+            "foldl'",
+            "foldl' f z0 t = foldr (\\x k acc -> let acc' = f acc x in seq acc' (k acc')) (\\acc -> acc) t z0",
+        );
 
         // The Foldable instances for [], Maybe and Either (folds over Right,
         // like GHC) are ordinary `instance Foldable …` declarations in
@@ -650,6 +692,21 @@ impl Checker {
             ("max", sel_ty.clone(), Some(vec![a.clone()]), vec![("Ord", "a")]),
             ("min", sel_ty, Some(vec![a.clone()]), vec![("Ord", "a")]),
         ]);
+        // GHC's Ord defaults: an instance may give `compare` alone or `<=`
+        // alone (the minimal complete definitions) and every other method
+        // follows. Without these a `compare`-only instance failed at each
+        // use of `<`/`max`/… as "No instance for '<'".
+        for (method, source) in [
+            ("compare", "compare x y = if x == y then EQ else if x <= y then LT else GT"),
+            ("<", "x < y = case compare x y of { LT -> True; _ -> False }"),
+            ("<=", "x <= y = case compare x y of { GT -> False; _ -> True }"),
+            (">", "x > y = case compare x y of { GT -> True; _ -> False }"),
+            (">=", "x >= y = case compare x y of { LT -> False; _ -> True }"),
+            ("max", "max x y = if x <= y then y else x"),
+            ("min", "min x y = if x <= y then x else y"),
+        ] {
+            self.register_builtin_default("Ord", method, source);
+        }
 
         // Ord instances for base types
         // Bool included: GHC has Ord Bool (False < True); it was missing.

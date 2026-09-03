@@ -1,0 +1,37 @@
+Circle 3
+[Square 1 2] Just (Square 1 2) (Square 1 2,Square 1 2) <Square 1 2>
+[Wrap 7] Just (Wrap 7) (Wrap 7,Wrap 7) <Wrap 7>
+v=Circle 9/l=[Circle 9]
+(LT,False,Square 1 2,True)
+(EQ,True,Wrap 5,False)
+(GT,False,"b",False)
+Circle 2&"s"
+Just (Circle 4)
+Just (Just 3)
+three
+other:Wrap 3
+[Just (Wrap 1)]!
+circle:Circle 8
+Circle 5
+Circle 6
+Wrap 2
+unpacked without forcing
+2
+[K1,K1]
+[K2,K2]
+[K3,K3]
+[K4,K4]
+[K5,K5]
+[K6,K6]
+[K7,K7]
+[K8,K8]
+[K9,K9]
+[K10,K10]
+[K11,K11]
+[K12,K12]
+[K13,K13]
+[K14,K14]
+[K15,K15]
+[K16,K16]
+[K17,K17]
+[Circle 17,Circle 17]

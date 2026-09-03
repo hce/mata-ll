@@ -11,7 +11,7 @@ module Data.Foldable
     , find
     ) where
 
-import Data.List (foldl', find)
+import Data.List (find)
 
 -- foldr/foldl are Foldable class methods; foldMap, null, length, elem,
 -- sum, product, maximum and minimum are length-generic functions in the

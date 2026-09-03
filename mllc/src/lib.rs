@@ -40,6 +40,7 @@ pub mod fold;
 pub mod lexer;
 pub mod modules;
 pub mod mono;
+pub mod newtype_erase;
 pub mod parser;
 pub mod split;
 mod stdlib;
@@ -287,7 +288,13 @@ fn compile_impl(
     // Parse the prelude up-front: its signature shapes are the baseline against
     // which unqualified imports are checked for incompatible-type collisions.
     let prelude_decls = parse_prelude()?;
-    let prelude_shapes = modules::signature_shapes(&prelude_decls);
+    let mut prelude_shapes = modules::signature_shapes(&prelude_decls);
+    // The builtin classes' methods are Prelude names too (defined in Rust,
+    // so absent from the source shapes); an import redefining one of them
+    // (a `Number`-only `abs`) must be reported, not silently win.
+    for m in typechecker::builtin_method_names() {
+        prelude_shapes.entry(m).or_insert_with(|| "<builtin class method>".to_string());
+    }
     let module = loader.resolve_imports(&parsed).map_err(CompileError::Import)?;
     // Non-fatal resolution diagnostics (an import alias shadowed by a data
     // constructor) — carried into CompileResult.warnings below.
@@ -475,6 +482,12 @@ fn compile_impl(
 
     // Constant folding
     let mono_module = fold::fold_module(mono_module);
+
+    // Newtype constructor erasure: a saturated `N e` IS `e` (see
+    // newtype_erase.rs) — after folding (which recognizes mono's shapes)
+    // and before split/dce/codegen, so every later pass weighs the
+    // expression actually computed.
+    let mono_module = newtype_erase::erase(mono_module);
 
     // Bound emitted-expression nesting depth: pull deep pure sub-expressions
     // into `let` bindings so the generated Lua stays within Lua's own parser

@@ -61,6 +61,17 @@ impl CodeGen {
             // value directly (`__mll_list_eq(elem_eq, …)` — a table where
             // a function is expected).
             TExprKind::DictAccess { .. } => true,
+            // A method read off a dictionary EXPRESSION (a captured
+            // existential dictionary in a pattern binder, a composed
+            // container dictionary): the dictionary is a total construction
+            // — forcing it builds a method table, never ⊥ — so the read is
+            // as cheap as the parameter case above, and for the same reason
+            // must not reach a runtime helper wrapped in a thunk.
+            TExprKind::DictMethod { .. } => true,
+            // A dictionary construction itself (`{ show = …, == = … }`, or a
+            // composed dictionary closed over its sub-dictionaries): a
+            // table build with no evaluation of user code.
+            TExprKind::SpecCall { specialized: SpecKind::Dict { .. } | SpecKind::DictCtor { .. }, .. } => true,
             TExprKind::Var(name) => var_ok(name),
             TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::is_cheap_with(inner, var_ok, prim_ok),
             TExprKind::Tuple(elems) => elems.iter().all(|e| Self::is_cheap_with(e, var_ok, prim_ok)),

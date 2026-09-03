@@ -25,6 +25,342 @@ MATA-LL TODO
       hardened hosts load text-only; `mlua`-based precompile covers the
       load-time case if ever wanted).
 
+## Fresh-eyes review 2026-09-03 — open queue
+
+Third isolated review (dev @ e05194e, after perf rounds 1-11). Working tree
+only, no history, ~250 probe expressions against GHC 9.14.1 on Lua 5.5 and
+LuaJIT. Perf rounds introduced no miscompile. B1/B3/B5 re-verified from the
+generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
+
+### Miscompiles
+
+- [x] **B1 HashMap enumerators reroot the store mid-iteration — fixed
+      (2026-09-03, uncommitted): `__mll_hm_snapshot` collects the entries
+      before any force in show_HashMap, the typed FFI marshal arm and
+      `__mll_to_lua`; case hashmap_enum_reroot.mll + FFI test
+      ffi_export_hashmap_version_crossing_values; ioloop.rs comment fixed.**
+      `show_HashMap` (runtime.lua ~1812), the hashmap arm of
+      `__mll_arg_marshal` (~578-590) and `__mll_to_lua` (~636-643) all do
+      `for k, v in pairs(__mll_hm_reroot(m)) do ... force(v)`. Forcing a
+      value that reads another version of the same family calls
+      `__mll_hm_reroot`, which mutates the table `pairs` is walking.
+      Repro: `m1 = hmFromList [(1,[0]),(2,[0])]; m2 = hmInsert 3 [0] m1;
+      m3 = hmInsert 2 [hmSize m2] m1; print m3` → `{1 -> [0], 2 -> [3],
+      3 -> [0]}` while `hmKeys m3` is `[1,2]`. Same through the FFI export.
+      `Data.Map.toList` is correct (collects before forcing). Fix: snapshot
+      `(k, v)` pairs before forcing in all three enumerators; debug check
+      that the root did not move during enumeration. Update the stale
+      comment at ioloop.rs:301 ("writers copy, never mutate"). Add oracle
+      cases via `Data.Map` whose values reference other versions; the
+      backend fuzzer never forces a value during map enumeration.
+- [x] **B2 Constrained existentials carry no dictionary — fixed (2026-09-03,
+      uncommitted).** GHC's representation, done in mono.rs (`ExCtor`,
+      `skolem_dicts`, the `ex_*` helpers): a constrained existential
+      constructor gets one hidden trailing field per (class, variable) of
+      its context plus superclasses (TDataDef extended in `run`); a
+      saturated pack appends the dictionaries (`ex_pack_saturated`, in the
+      first pass at concrete/skolem bindings and in the dictionary-form pass
+      at the body's class variable), an unsaturated constructor eta-expands
+      (`ex_eta_expand`); a pattern appends the binders and records (class,
+      skolem id) -> binder for the scope of the clause/branch/binding
+      (`ex_rewrite_pattern`, `with_ex_scope`); a method use whose binding is
+      a skolem dispatches via `DictMethod` on the binder (Var arm, InfixApp
+      arm, `dict_method_use` Skolem arm), containers over skolems compose
+      dictionaries (`build_dict_expr` skolem arms + new
+      `structural_show_dict`, the Show twin of structural_eq_dict), and a
+      constrained polymorphic call at a skolem type takes dictionary passing
+      (`ex_dict_call_wanted` + dictify_use). Two gates keep the rewrite
+      idempotent (the dictionary-form pass revisits packed spines): a head
+      with the extended type is neither re-packed nor eta-expanded. Codegen:
+      `DictMethod` and `Dict`/`DictCtor` constructions are cheap
+      (strictness.rs). Case existential_dicts.mll (GHC-goldened). SPEC and
+      HASKDIFF updated (H1/H2).
+      `data Showable = forall a. Show a => Showable a; describe (Showable x)
+      = show x` typechecks (solve.rs:64-72 accepts the constructor context),
+      mono `resolve_method_use` returns Deferred on the skolem
+      (mono.rs:583-596), codegen falls to the erased runtime `show`:
+      `Circle 3` prints `(1,3)`, `[] :: [Int]` prints `Nothing`, `3.0`
+      prints `3` on LuaJIT. Fix: pack the class dictionary into the
+      constructor at pack time and dispatch skolem methods through it
+      (dict-passing machinery exists). Until then reject constrained
+      existentials with a `note:`. SPEC.md (~210-218) and HASKDIFF.md
+      (526-529) currently promise this works.
+- [x] **B3 `compare` on NaN returns EQ — fixed (2026-09-03, uncommitted;
+      pinned in hashmap_enum_reroot.mll).** runtime.lua:1397
+      `ord_compare__Number` is `a<b → LT; b<a → GT; else EQ`; GHC gives GT
+      for every NaN comparison. Fix: `a<b → LT; a==b → EQ; else GT`.
+      `max`/`min`/`==`/`<` already match GHC. Add NaN cases for
+      compare/sort.
+
+### Crashes
+
+- [x] **B4 Num dictionary at Int/Number past SPEC_LIMIT — fixed (2026-09-03,
+      uncommitted): codegen's `SpecKind::Dict` arm emits the forcing operator
+      lambda (`builtin_op_lambda`, shared with the OpFunc arm) for a
+      self-mapped builtin operator and the `__mll_div_fn`… wrappers for
+      div/mod/quot/rem; case dict_builtin_operators.mll. Fixing it exposed
+      B18 and B19 below.** mono.rs:17
+      `SPEC_LIMIT = 16`; `resolve_at_type` (~697) maps `+` at Int/Number to
+      itself, `build_concrete_dict` (~3071-3110) accepts the bare operator
+      name, expr.rs:1938-1949 emits `_usr_plus_ = <global "+">` → "attempt
+      to call a nil value". Repro: `twice :: Num a => a -> a` used at 15
+      newtypes, then Integer, Number, Int — crashes at the Number use.
+      Eq/Ord at 18 types and a user class at 17 are fine. Fix: emit a
+      wrapper lambda (`function(a,b) return __force(a)+__force(b) end`) for
+      primitive binops in `build_concrete_dict`; extend the F6a guard to
+      reject bare operator names. Then re-probe `-`, `*`, `negate`,
+      `fromInteger` at builtin types past the limit (suspicion C1).
+- [x] **B5 `return $ e` as a discarded do-statement does not load — fixed
+      (2026-09-03, uncommitted): one recogniser `pure_payload` for every
+      spelling, used by all five arms; `effect_stmt` binds a non-call
+      expression statement to a throwaway local so the module always
+      loads; case pure_discard_spellings.mll.**
+      action.rs `is_pure_discard` (652-655, 700-703) matches only
+      `App(Var return|pure, _)`; the `$` spelling reaches `pure_action_ast`
+      (143) and a bare literal is emitted as a statement: `do { return $
+      (5 :: Int); putStrLn "ok" }` → `unexpected symbol near '5'`. Fix:
+      normalise `$`/`Paren` before the discard check; assert that an
+      expression statement is a call before printing.
+- [x] **B6 Prelude folds are lazy left folds — fixed (2026-09-03,
+      uncommitted).** `foldl'` is now a Foldable CLASS METHOD (GHC's shape):
+      the `[]` instance is the direct strict loop (the former Data.List
+      definition), Maybe/Either one step, and every other instance takes
+      GHC's default over foldr — the first default body a BUILTIN class
+      carries (`register_builtin_default` in typechecker/prelude.rs parses a
+      mata-ll snippet into `ClassInfo::default_methods`; the mechanism B9
+      needs). length/sum/product/maximum/minimum are defined over it.
+      Fusion recognizes the instance's origin `foldl'_[a]` (fuse.rs).
+      Measured on 1e6 unfused elements: correct on Lua 5.5 and LuaJIT, the
+      list path as fast as the old Data.List foldl'. Case strict_folds.mll
+      (3e5 elements, both interpreters via lua-compat). HASKDIFF depth text
+      corrected. `length`/`sum`/`product`
+      (Prelude.mll 56-60, 78, 168, 171) and `maximum`/`minimum` (185, 190)
+      build O(n) thunk chains when the loop is not fused: Lua 5.5 `sum`
+      overflows at 2.4e5, `length (reverse [1..1000000])` at 1e6; LuaJIT
+      at ~3e4. GHC folds these strictly (`sum`/`product` are `foldl'` since
+      base-4.16). Fix: strict accumulator (`seq` / strict fold builtin in
+      the `[]` Foldable path); add a 1e6-element canary to lua-compat on
+      all three interpreters; correct the HASKDIFF thunk-depth numbers
+      (44-57), which are interpreter-specific and lower than stated.
+
+- [x] **B18 Newtype constructor returned a raw thunk (miscompile) — fixed
+      (2026-09-03, uncommitted).** Found while pinning B4. A saturated `N e`
+      was emitted as the identity function over a LAZILY suspended `e`, so
+      `negate (N a) = N (negate a)` returned a thunk — a breach of the
+      runtime's WHNF-return invariant that concrete call sites masked
+      through the `ty_app_result_whnf` type gate but dictionary-passing
+      callers (result type = class variable) and the FIRST-CLASS
+      constructor (`map N (map f xs)`, whose `f x` inside `map` returned
+      the element's raw thunk into the cons head) did not: "attempt to
+      perform arithmetic on a table value". Also `case lazy of N _ -> …`
+      forced `lazy` (GHC: irrefutable). Fix: new TIR pass
+      `mllc/src/newtype_erase.rs` (after fold, before split) erases every
+      saturated `App(Con N, e)` to `e` and every pattern `N p` to `p`, so
+      codegen and the demand/WHNF/cheapness predicates see what is
+      computed; the unapplied constructor is emitted as
+      `function(_v) return __force(_v) end`; codegen's type gate now keys on
+      newtype TYPE names (`TModule::newtype_types`) — it compared type
+      names against constructor keys, wrong for `newtype Rad = MkRad
+      Double`. Case newtype_whnf.mll.
+- [x] **B19 Overloaded literal in a dictionary-passing body emitted raw
+      (miscompile) — fixed (2026-09-03, uncommitted).** `arith x y = (x + y)
+      * 2` compiled with dictionary passing passed the machine `2` to the
+      dictionary's `*`: mono_expr's literal conversion is keyed on a
+      concrete type and the type here is the class variable, and
+      `rewrite_dict_expr` had no literal arm. At `Integer` the instance's
+      `*` crashed ("attempt to index a number value"); at a `data` Num
+      instance the pattern match read fields of a number. Fix: a `Lit` arm
+      in `rewrite_dict_expr` (`dict_literal`) rewrites an integer literal at
+      the class variable to `<dict>.fromInteger (n :: Integer)` (interned
+      bignum, decimal form past 2^53) and a fractional one to
+      `<dict>.fromRational (r :: Number)`, through the same
+      `dict_method_use` every method use takes. Pinned in
+      dict_builtin_operators.mll (Integer, a data instance, Integral- and
+      Fractional-constrained literals).
+
+### Rejections of valid programs / wrong diagnostics
+
+- [ ] **B7 Same module imported unqualified and qualified is rejected.**
+      `import Q (T(..))` + `import qualified Q as Q` (or two aliases) →
+      false "Duplicate data constructor 'MkT'" and "Cannot unify 'T' with
+      'Q.T'". modules.rs:430-441 `Qual::decl` COPIES declarations,
+      prefixing the type but not its constructors. Fix: resolve qualified
+      references through an alias table to the single merged declaration
+      instead of copying (the `merged_origins` dedup exists for the
+      unqualified path). This is the standard `import Data.Map (Map);
+      import qualified Data.Map as M` idiom.
+- [x] **B8 Errors inside a qualified-imported module render with the root
+      file's line and excerpt — fixed (2026-09-03, uncommitted): the alias
+      copy pushes its origin runs (modules.rs), so the spans cover the import
+      region and every imported declaration is attributed to its file.** Alias copies push no `out_spans`, so
+      lib.rs:342-359 leaves the whole import region `file: None` and
+      `attach_excerpts` (759-761) treats None as the root source. With one
+      alias present EVERY imported module misattributes. Fix: push an
+      `out_spans` entry per alias copy; longer term carry `Option<FileId>`
+      per declaration. Add a test asserting file + excerpt of an error
+      raised inside an imported module, plain and qualified.
+- [~] **B9 Builtin Eq/Ord/Show have no default methods.** PARTLY FIXED
+      (2026-09-03, uncommitted): the builtin Ord class now carries GHC's
+      seven defaults via `register_builtin_default` (compare-only and
+      (<=)-only instances work; case ord_minimal_instance.mll). Still open:
+      `/=` is not an Eq method (an instance defining only `/=` is rejected
+      as "not a method"; making it a method with the two-way defaults is
+      the fix), and Show has no `showsPrec`/`showList` methods.
+      typechecker/prelude.rs:644-651 registers Ord with seven methods and
+      `default_methods` empty, so `instance Ord T where compare ... = ...`
+      yields 13 "No instance for '<' on type 'T'" errors (one at a Prelude
+      line with no file). Same for Eq with only `(/=)` and Show with
+      `showsPrec` ("not a method of class"). Fix: register GHC's defaults
+      (ideally as Prelude-source class declarations like Semigroup/Monoid);
+      report a missing method without default at the instance.
+- [x] **B10 Multi-constructor record construction rejected — fixed
+      (2026-09-03, uncommitted): `Checker::con_record_fields` (per-constructor
+      field names) drives `Expr::RecordCon`; case record_multi_constructor.mll.**
+      infer.rs:2350-2395 `Expr::RecordCon` collects the TYPE's fields:
+      `data T = A { x :: Int } | B { y :: Int }; B { y = 1 }` → "Missing
+      field 'x' in constructor 'B'". Fix: use the constructor's own fields.
+- [x] **B11 `import LMath` shadows the Num method `abs` — fixed (2026-09-03,
+      uncommitted): LMath's `abs` removed (the Num method covers Number);
+      the import-collision baseline now includes every builtin class method
+      (`typechecker::builtin_method_names`, lib.rs); lib_lmath.mll asserts
+      `abs` at Int after the import.** lib/LMath.mll:35
+      `abs :: Number -> LuaPure ...` (and :25 `sqrt` duplicates the
+      Prelude's); `check_import_collisions` (modules.rs:528-570) baselines
+      only Prelude.mll signature shapes, so builtins/class methods are not
+      protected: `import LMath; abs (-3 :: Int)` → unify error. Fix: rename
+      LMath's `abs`; build the collision baseline from the checker's full
+      initial environment.
+- [x] **B12 `(id :: a -> a) 5` rejected with the wrong blame — fixed
+      (2026-09-03, uncommitted): after the rigid check the ascription's
+      variables are instantiated afresh (`demote_skolems` to fresh vars);
+      new `SkolemOrigin::Ascription` note; case ascription_instantiation.mll;
+      compile_errors::ascription_variables_are_rigid extended.**
+      infer.rs:2305-2348 turns ascription variables into skolems whose
+      origin is the enclosing function's signature: "'a' is a rigid type
+      variable from the signature of 'main'". GHC accepts. Fix: check
+      rigidly, then instantiate the ascription's variables freshly for the
+      use; give the skolem an "ascription" origin text.
+- [x] **B13 `(.field)` record-dot section — fixed (2026-09-03, uncommitted):
+      `field_selector_chain` in the parser, GHC's whitespace rule; case
+      record_dot_sections.mll.** parses as a right section of
+      `(.)`: `map (.px) ps` → "Cannot unify 'Int -> a' with 'P'". Parse
+      `(.name)` as a field selector when `name` is a lowercase identifier
+      directly after `(.`, or reject with a note.
+- [x] **B14 Infix instance method clauses with constructor patterns — fixed
+      (2026-09-03, uncommitted): `parse_method_name` returns a `MethodHead`;
+      a parenthesised non-operator is parsed as the left operand PATTERN of
+      an infix clause (`parse_infix_method_clause` takes a Pattern), in
+      class and instance bodies; case instance_infix_pattern_methods.mll.**
+      parser.rs:947 `parse_infix_method_clause`: `instance Num K where
+      (K a) + (K b) = K (a + b)` → "Expected operator in instance method".
+      Prefix form works. Accept a parenthesised/constructor pattern as the
+      left operand.
+- [x] **B15 Case-insensitive self-import — fixed (2026-09-03, uncommitted):
+      `resolve_path` accepts a hit only when the directory listing carries
+      the exact spelling (`exact_case_exists`).** modules.rs:102-113
+      `resolve_path` uses `Path::exists`; root file `lmath.mll` with
+      `import LMath` → "module imports form a cycle: LMath -> LMath" on
+      macOS. Verify the on-disk name's case before accepting a hit.
+- [x] **B16 `let a = 1; b = 2 in ...` — fixed (2026-09-03, uncommitted):
+      `parse_let_binds` accepts `;` between bindings; case
+      let_semicolon_separators.mll. Explicit brace blocks stay unsupported
+      (documented).** is a parse error "Expected 'in',
+      found ';'". HASKDIFF documents the brace-layout gap for `do`/`where`
+      only: accept `;` in let groups or document it.
+
+- [x] **B17 Ambiguous HashMap key variable accepted; show erases — fixed
+      (2026-09-03, uncommitted): `discharge_wanted_constraints` no longer
+      counts a variable as determined because a local binder's type mentions
+      it (the whole run_mll suite passed without the rule except three
+      HashMap cases with unannotated literal keys); those keys now DEFAULT to
+      Int (`Hashable` joins the standard-class list and puts Int first in the
+      candidate order — a documented deviation, HASKDIFF "HashMap"). Case
+      hashmap_key_defaulting.mll; compile_errors::hashmap_undetermined_key_is_ambiguous.** Found
+      while pinning B1: `let d1 = hmFromList [(1, "x")]; print d1` — the
+      key variable carries `Hashable a, Num a, Show a`. Hashable is not a
+      standard class, so `compute_numeric_defaults` (infer.rs ~1101) does
+      not default it (correct, GHC would report an ambiguity), but
+      `discharge_wanted_constraints` (infer.rs ~1000) treats the variable
+      as "determined" because it is free in a let-binder's type
+      (`binder_types`), so no ambiguity error is raised either. The program
+      compiles with an unresolved key type: the literal is emitted as a
+      native Lua number, `hmLookup` happens to work, and `show d1` falls to
+      the erased runtime `show`, which prints `()` for a map handle. GHC
+      rejects the program ("Ambiguous type variable"). Fix: a variable
+      that is free ONLY in local binder types (not in the signature, not
+      fixed by any use) is still ambiguous at the end of the binding —
+      report it with a note suggesting an annotation; alternatively make
+      the erased `show` recognise `__mll_hm_mt`/`__mll_hme_mt` so an
+      erased map at least prints correctly.
+
+### Unconfirmed suspicions (confirm or refute before acting)
+
+- [ ] C1 `-`, `*`, `negate`, `fromInteger` at builtin types past SPEC_LIMIT
+      (same root as B4). C2 erased runtime `foldl`/`foldr` strictness vs
+      compiled Foldable instances in dict-passing contexts (bottom element,
+      >16 types). C3 types.rs:1563 `Forall` unify arm strips the quantifier
+      and binds the bound variable like a flexible one (data field of type
+      `forall a. a -> a` unified at two monotypes in one clause). C4 NaN as
+      a HashMap key → Lua "table index is NaN". C5 mono.rs Var-arm
+      "lexically-smallest specialization" fallback inside a live generic
+      copy. C6 `compute_body_subst` name-keyed fallback when a where-helper
+      signature reuses the outer `a`. C7 codegen/module.rs `concrete_vars`
+      name seeds (e.g. `eq_Ordering`) vs runtime.lua drift — add a test
+      that every seed is defined in the runtime text. C8 fold.rs
+      `fold_num_num "^"` powf arm looks dead. C9 `__mll_hm_reroot`
+      materialisation path with two enumerated roots in one family (after
+      B1). C10 `Either e` has no Monad instance (`>>=` on `Either String`
+      → "No instance") — gap, undocumented.
+
+### Weak seams (structural remedies, beyond the items above)
+
+- [ ] Mirror tables kept by hand: demand.rs:172
+      `RUNTIME_PRELUDE_STRICTNESS`, opt.rs:485 `SHOW_HELPERS`, split.rs:288
+      `operand_strictness`, `ENTRY_FORCED`/`STRICT_BUILTINS`/
+      `PRIMITIVE_BINOP_METHODS`, `concrete_vars` seeds, `sanitize_name`'s
+      special map, the WHNF-claim predicates in action.rs:32-38 that must
+      mirror `action_run_ast`'s arms. Build-time check that every mirrored
+      name exists in runtime.lua; emitters and claims as one exhaustive
+      match over a shared enum rather than parallel lists.
+- [ ] Run the strictness-contract test after EVERY optimisation pass in
+      test builds (fusion inlining, thunklift, exact-first-force all
+      re-derive demand assumptions), not only at the end.
+- [ ] The type-erased container-show shims `show_List_`/`show_Maybe`
+      (runtime.lua, demand rows, SHOW_HELPERS, concrete_vars seeds) are no
+      longer reachable from a well-typed program (dictionary-form container
+      show composes a real dictionary since B2); their strictness-probe rows
+      were dropped. Delete the shims and their table entries once B17 (the
+      one remaining erased-element path) is closed.
+- [ ] mll-tests/lua-compat.sh:24 prefers `target/release/mll`; refuse a
+      binary older than `mllc/src` (a stale release binary passes silently
+      locally).
+
+### Documentation drift
+
+- [x] Documentation drift (2026-09-03, uncommitted): SPEC/HASKDIFF existential
+      text now true (B2); ioloop.rs:301 comment (B1); HASKDIFF thunk-depth
+      paragraph (B6); `repeat` and `cycle` ADDED to the Prelude (GHC parity;
+      case repeat_cycle.mll) so the `or (repeat True)` citations hold; CAVEATS
+      rounding paragraph states what exists (LMath.floor/ceil; no
+      round/truncate/ceiling — parity gap, see below); CAVEATS where-helper
+      paragraph corrected; COMPILER.md count; DIVERGENCES.md scope note.
+      Still to add: `round` (half-to-even), `truncate`, `ceiling` as Prelude
+      functions on Number (would need LMath.floor/ceil reconciled first).
+- [ ] (details of the original drift list) SPEC.md ~210-218 and HASKDIFF.md
+      526-529: existential `show` promised (B2). ioloop.rs:301 hm-persistence comment (B1). HASKDIFF
+      44-57 thunk-depth thresholds (B6). HASKDIFF 484 + Prelude.mll:150
+      cite `repeat`, which does not exist. CAVEATS "rounding/truncation
+      (floor, ceiling, truncate, round)": only `LMath.floor`/`LMath.ceil`
+      exist. CAVEATS says a where-helper over two existential boxes is
+      rejected and infer.rs:1512-1519 says where-bindings are monomorphic;
+      measured: accepted and correct, HASKDIFF 531-541 is the accurate one.
+      COMPILER.md:285 "880+ tests" is 1273. DIVERGENCES.md "None" is
+      relative to the twinned corpus only (HashMap, existential show, NaN
+      excluded) — say so. HASKDIFF brace-layout gap should name `let`
+      (B16). HASKDIFF should document the dual-import limitation (B7) and
+      the missing `Monad (Either e)` (C10). lib.rs:337-341 "misattribution
+      is the one failure mode this construction must not have" (B8).
+
 ## Completed
 
 - [x] **Type-erased generic `show` cannot split Integer/Double on LuaJIT —

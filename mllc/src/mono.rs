@@ -54,7 +54,34 @@ enum MethodDispatch {
     Missing(Ty),
 }
 
+/// A constrained existential constructor (`data Box = forall a. Show a =>
+/// MkBox a`), as the monomorphizer sees it. GHC's representation is the
+/// model: the constructor CAPTURES the class dictionaries for its hidden
+/// type at pack time — one hidden trailing field per (class, variable) in
+/// `captures` — and a match binds them back, so a method used at the hidden
+/// type (a skolem inside the match) dispatches through the captured
+/// dictionary. Without the capture the solver's "satisfied" for `Show a`
+/// had no runtime evidence, and `show x` on the unpacked value fell to the
+/// type-erased runtime `show` (a user ADT printed as a tuple).
+#[derive(Debug, Clone)]
+struct ExCtor {
+    /// The declared field types, over the existential variables by NAME.
+    field_types: Vec<Ty>,
+    /// The dictionaries captured, in order: each declared constraint's
+    /// (class, existential variable) followed by the class's superclasses
+    /// (an `Ord a` given also answers `==`), deduplicated.
+    captures: Vec<(String, String)>,
+}
+
 pub struct Monomorphizer {
+    /// Constrained existential constructors by name (see `ExCtor`).
+    ex_ctors: HashMap<String, ExCtor>,
+    /// Captured dictionaries in scope, innermost last: (class, skolem id)
+    /// -> the pattern-bound variable holding the dictionary (pushed by the
+    /// pattern rewrite for the clause/branch/binding it scopes over).
+    skolem_dicts: Vec<((String, u32), String)>,
+    /// Counter for fresh dictionary binder names.
+    ex_binder_counter: usize,
     /// Known polymorphic functions (name -> TFunction)
     poly_fns: HashMap<String, TFunction>,
     /// Set of prelude/built-in names (don't try to specialize these)
@@ -271,7 +298,40 @@ impl Monomorphizer {
             }
         }
 
+        // Constrained existential constructors: the dictionaries each one
+        // captures (declared constraints plus superclasses, deduplicated,
+        // in declaration order).
+        let classes_ref = checker.get_classes();
+        let mut ex_ctors: HashMap<String, ExCtor> = HashMap::new();
+        for (cname, info) in checker.get_constructors() {
+            if info.existential_constraints.is_empty() {
+                continue;
+            }
+            let mut captures: Vec<(String, String)> = Vec::new();
+            for c in &info.existential_constraints {
+                let mut queue = vec![c.class_name.clone()];
+                while let Some(cls) = queue.pop() {
+                    if captures.iter().any(|(k, v)| *k == cls && *v == c.type_var) {
+                        continue;
+                    }
+                    captures.push((cls.clone(), c.type_var.clone()));
+                    if let Some(ci) = classes_ref.get(&cls) {
+                        for sup in ci.superclasses.iter().rev() {
+                            queue.push(sup.clone());
+                        }
+                    }
+                }
+            }
+            ex_ctors.insert(cname.clone(), ExCtor {
+                field_types: info.field_types.clone(),
+                captures,
+            });
+        }
+
         Monomorphizer {
+            ex_ctors,
+            skolem_dicts: Vec::new(),
+            ex_binder_counter: 0,
             poly_fns: HashMap::new(),
             builtins,
             arity_only_fns: HashSet::new(),
@@ -348,6 +408,31 @@ impl Monomorphizer {
     }
 
     pub fn run(&mut self, mut module: TModule) -> TModule {
+        // A constrained existential constructor carries its captured
+        // dictionaries as hidden TRAILING fields: extend the data
+        // definitions so codegen's constructor functions take them and the
+        // declared fields keep their positions.
+        for def in module.data_defs.iter_mut().chain(module.dropped_data_defs.iter_mut()) {
+            for con in def.constructors.iter_mut() {
+                let Some(ex) = self.ex_ctors.get(&con.name) else { continue };
+                match &mut con.fields {
+                    TConFields::Positional(tys) => {
+                        for _ in &ex.captures {
+                            tys.push(Ty::Unit);
+                        }
+                    }
+                    TConFields::Named(fs) => {
+                        for (i, (cls, var)) in ex.captures.iter().enumerate() {
+                            fs.push(TRecordField {
+                                name: format!("__exdict_{}_{}_{}", cls, var, i),
+                                external_key: None,
+                                ty: Ty::Unit,
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // Collect polymorphic user-defined functions
         for func in &module.functions {
             if self.is_polymorphic(&func.ty) {
@@ -486,6 +571,7 @@ impl Monomorphizer {
             exports: module.exports,
             record_accessors: module.record_accessors,
             newtypes: module.newtypes,
+            newtype_types: module.newtype_types,
             passes_run: vec!["mono"],
         }
     }
@@ -1261,10 +1347,12 @@ impl Monomorphizer {
                 let group: Vec<String> = binds.iter().map(|b| b.name.clone()).collect();
                 self.with_locals(group, |m| {
                     let binds = binds.into_iter().map(|ld| {
+                        let mut caps = Vec::new();
+                        let patterns = m.ex_rewrite_patterns(ld.patterns, &mut caps);
                         let params: Vec<String> =
-                            ld.patterns.iter().flat_map(TPattern::bound_vars).collect();
-                        let body = m.with_locals(params, |m| f(m, ld.body));
-                        TLocalDef { name: ld.name, patterns: ld.patterns, body }
+                            patterns.iter().flat_map(TPattern::bound_vars).collect();
+                        let body = m.with_ex_scope(caps, |m| m.with_locals(params, |m| f(m, ld.body)));
+                        TLocalDef { name: ld.name, patterns, body }
                     }).collect();
                     let body = f(m, *body);
                     TExprKind::Let { binds, body: Box::new(body) }
@@ -1273,14 +1361,17 @@ impl Monomorphizer {
             TExprKind::Case { scrutinee, branches } => {
                 let scrutinee = f(self, *scrutinee);
                 let branches = branches.into_iter().map(|br| {
-                    self.with_locals(br.pattern.bound_vars(), |m| TCaseBranch {
+                    let mut caps = Vec::new();
+                    let pattern = self.ex_rewrite_pattern(br.pattern, &mut caps);
+                    let names = pattern.bound_vars();
+                    self.with_ex_scope(caps, |m| m.with_locals(names, |m| TCaseBranch {
                         guards: br.guards.into_iter().map(|g| TGuard {
                             condition: f(m, g.condition),
                             body: f(m, g.body),
                         }).collect(),
                         body: br.body.map(|b| f(m, b)),
-                        pattern: br.pattern,
-                    })
+                        pattern,
+                    }))
                 }).collect();
                 TExprKind::Case { scrutinee: Box::new(scrutinee), branches }
             }
@@ -1293,19 +1384,26 @@ impl Monomorphizer {
     /// local inside its body (the binding's NAME is put in scope by the
     /// caller, for the whole recursive group).
     fn mono_local_def(&mut self, ld: TLocalDef) -> TLocalDef {
-        let params: Vec<String> = ld.patterns.iter().flat_map(TPattern::bound_vars).collect();
-        let body = self.with_locals(params, |m| m.mono_expr(ld.body));
-        TLocalDef { name: ld.name, patterns: ld.patterns, body }
+        let mut caps = Vec::new();
+        let patterns = self.ex_rewrite_patterns(ld.patterns, &mut caps);
+        let params: Vec<String> = patterns.iter().flat_map(TPattern::bound_vars).collect();
+        let body = self.with_ex_scope(caps, |m| m.with_locals(params, |m| m.mono_expr(ld.body)));
+        TLocalDef { name: ld.name, patterns, body }
     }
 
     fn mono_clause(&mut self, mut clause: TClause) -> TClause {
+        // An existential constructor pattern binds its captured
+        // dictionaries too (hidden trailing binders); they scope over
+        // exactly what the pattern's own variables scope over.
+        let mut caps = Vec::new();
+        clause.patterns = self.ex_rewrite_patterns(std::mem::take(&mut clause.patterns), &mut caps);
         // Clause pattern variables and where-bound names are local in the
         // body, the guards and the where bodies (a where group is one
         // recursive scope, like a let group).
         let scope: Vec<String> = clause.patterns.iter().flat_map(TPattern::bound_vars)
             .chain(clause.where_binds.iter().map(|ld| ld.name.clone()))
             .collect();
-        self.with_locals(scope, |m| {
+        self.with_ex_scope(caps, |m| m.with_locals(scope, |m| {
             clause.body = clause.body.take().map(|b| m.mono_expr(b));
             clause.guards = clause.guards.into_iter().map(|g| TGuard {
                 condition: m.mono_expr(g.condition),
@@ -1314,7 +1412,7 @@ impl Monomorphizer {
             clause.where_binds = clause.where_binds.into_iter()
                 .map(|ld| m.mono_local_def(ld)).collect();
             clause
-        })
+        }))
     }
 
     fn mono_expr(&mut self, expr: TExpr) -> TExpr {
@@ -1436,8 +1534,25 @@ impl Monomorphizer {
                         MethodDispatch::Missing(binding) => {
                             self.push_no_instance(name, &binding);
                         }
-                        MethodDispatch::Deferred => {}
+                        MethodDispatch::Deferred => {
+                            // A method at an EXISTENTIAL type (a skolem
+                            // bound by an enclosing constructor match):
+                            // dispatch through the dictionary the
+                            // constructor captured for it.
+                            if let Some(kind) = self.ex_method_use(name, &ty) {
+                                return TExpr { kind, ty };
+                            }
+                        }
                     }
+                }
+                // A constrained polymorphic function used FIRST-CLASS at an
+                // existential type: no specialization can be compiled for a
+                // skolem, so the use takes dictionary passing with the
+                // captured dictionaries (eta-expanded over its parameters).
+                if self.ex_dict_call_wanted(name, &ty) {
+                    let name = name.clone();
+                    self.dict_passing_fns.insert(name.clone());
+                    return self.dictify_use(&name, Vec::new(), ty);
                 }
                 // 2. Check for polymorphic function specialization
                 // Handle calls inside specializations: if the type is still
@@ -1566,6 +1681,32 @@ impl Monomorphizer {
                 }
             }
             TExprKind::App(func, arg) => {
+                let whole = TExpr { kind: TExprKind::App(func, arg), ty: ty.clone() };
+                // A SATURATED constrained-existential constructor: pack the
+                // dictionaries for the hidden type as hidden trailing
+                // arguments (see ExCtor). Checked on the un-rewritten spine
+                // so an infeasible pack leaves the node untouched.
+                if let Some(ex_name) = self.ex_saturated_ctor(&whole)
+                    && let Some(packed) = self.ex_pack_saturated(ex_name, whole.clone(), true, &HashMap::new(), &HashMap::new())
+                {
+                    return packed;
+                }
+                // A constrained polymorphic function applied at an
+                // existential type: dictionary passing with the captured
+                // dictionaries (a specialization cannot be compiled for a
+                // skolem — its body would have nothing to dispatch on).
+                if let Some(call_name) = Self::app_head_name(&whole)
+                    && self.ex_dict_call_wanted(&call_name, &ty)
+                {
+                    let n_args = Self::app_chain_len(&whole);
+                    if self.dictify_feasible(&call_name, n_args, &ty) {
+                        self.dict_passing_fns.insert(call_name.clone());
+                        let (_head, args) = Self::split_app_chain(whole);
+                        let args: Vec<TExpr> = args.into_iter().map(|a| self.mono_expr(a)).collect();
+                        return self.dictify_use(&call_name, args, ty);
+                    }
+                }
+                let TExprKind::App(func, arg) = whole.kind else { unreachable!() };
                 // A class method in head position is dispatched by the Var
                 // case when `func` is monomorphized — the method node's own
                 // type is the full instantiated method type, which determines
@@ -1575,6 +1716,17 @@ impl Monomorphizer {
                     Box::new(self.mono_expr(*func)),
                     Box::new(self.mono_expr(*arg)),
                 )
+            }
+            // A constrained-existential constructor used UNSATURATED (`map
+            // MkBox xs`, `MkBox . f`): eta-expand over its declared fields so
+            // the saturated application inside can pack the dictionaries
+            // (the field types are read off this node's instantiated type).
+            TExprKind::Con(ref name) if self.ex_ctors.contains_key(name) => {
+                let name = name.clone();
+                match self.ex_eta_expand(&name, ty.clone(), &HashMap::new(), &HashMap::new()) {
+                    Some(kind) => kind,
+                    None => TExprKind::Con(name),
+                }
             }
             TExprKind::OpFunc(ref op) => {
                 // A FIRST-CLASS section of a class-method operator
@@ -1616,16 +1768,26 @@ impl Monomorphizer {
                     let lookup_op = if op == "/=" { "==".to_string() } else { op.clone() };
                     let use_ty = Ty::fun(&[lhs.ty.clone(), rhs.ty.clone()], ty.clone());
 
-                    let resolved = match self.resolve_op_use(&lookup_op, &use_ty) {
-                        MethodDispatch::Resolved(mangled) => Some(mangled),
+                    // The resolved method as an expression: the mangled
+                    // implementation name, or — at an existential skolem
+                    // with a captured dictionary — the dictionary method
+                    // read (see ex_method_use). `self_mapped` marks a
+                    // builtin whose implementation IS the operator.
+                    let resolved: Option<(TExpr, bool)> = match self.resolve_op_use(&lookup_op, &use_ty) {
+                        MethodDispatch::Resolved(mangled) => {
+                            let self_mapped = mangled == op;
+                            Some((TExpr::new(TExprKind::Var(mangled), Ty::Unit), self_mapped))
+                        }
                         MethodDispatch::Missing(binding) => {
                             self.push_no_instance(&op, &binding);
                             None
                         }
-                        MethodDispatch::Deferred => None,
+                        MethodDispatch::Deferred => self
+                            .ex_method_use(&lookup_op, &use_ty)
+                            .map(|kind| (TExpr::new(kind, use_ty.clone()), false)),
                     };
 
-                    if let Some(mangled) = resolved {
+                    if let Some((method_expr, self_mapped)) = resolved {
                         // For /= operators, wrap in not
                         if op == "/=" {
                             let mono_lhs = self.mono_expr(*lhs);
@@ -1634,7 +1796,7 @@ impl Monomorphizer {
                                 kind: TExprKind::App(
                                     Box::new(TExpr::new(
                                         TExprKind::App(
-                                            Box::new(TExpr::new(TExprKind::Var(mangled), Ty::Unit)),
+                                            Box::new(method_expr),
                                             Box::new(mono_lhs),
                                         ),
                                         Ty::Unit,
@@ -1660,7 +1822,7 @@ impl Monomorphizer {
                         }
                         // If the mangled name matches the operator, keep as InfixApp
                         // (e.g. IO monad's >>= stays >>=)
-                        if mangled == op {
+                        if self_mapped {
                             // fall through to normal InfixApp handling below
                         } else {
                             let mono_lhs = self.mono_expr(*lhs);
@@ -1669,7 +1831,7 @@ impl Monomorphizer {
                                 kind: TExprKind::App(
                                     Box::new(TExpr::new(
                                         TExprKind::App(
-                                            Box::new(TExpr::new(TExprKind::Var(mangled), Ty::Unit)),
+                                            Box::new(method_expr),
                                             Box::new(mono_lhs),
                                         ),
                                         Ty::Unit,
@@ -1741,15 +1903,19 @@ impl Monomorphizer {
                 TExprKind::Case {
                     scrutinee: Box::new(self.mono_expr(*scrutinee)),
                     branches: branches.into_iter().map(|b| {
-                        let pat_vars = b.pattern.bound_vars();
-                        self.with_locals(pat_vars, |m| TCaseBranch {
-                            pattern: b.pattern,
+                        // An existential constructor pattern binds its
+                        // captured dictionaries over the guards and body.
+                        let mut caps = Vec::new();
+                        let pattern = self.ex_rewrite_pattern(b.pattern, &mut caps);
+                        let pat_vars = pattern.bound_vars();
+                        self.with_ex_scope(caps, |m| m.with_locals(pat_vars, |m| TCaseBranch {
+                            pattern,
                             guards: b.guards.into_iter().map(|g| TGuard {
                                 condition: m.mono_expr(g.condition),
                                 body: m.mono_expr(g.body),
                             }).collect(),
                             body: b.body.map(|bb| m.mono_expr(bb)),
-                        })
+                        }))
                     }).collect(),
                 }
             }
@@ -2433,6 +2599,17 @@ impl Monomorphizer {
                 return expr;
             }
             TExprKind::App(_, _) => {
+                // A saturated constrained-existential constructor whose hidden
+                // type is this body's class variable: the first pass could not
+                // build the dictionary (no concrete type); here it is the
+                // body's own dictionary parameter.
+                if let Some(ex_name) = self.ex_saturated_ctor(&expr)
+                    && let Some(packed) = self.ex_pack_saturated(ex_name, expr.clone(), false, class_to_dict, env)
+                {
+                    return self.map_children_scoped(packed, &mut |m, c| {
+                        m.rewrite_dict_expr(c, func_name, class_to_dict, env)
+                    });
+                }
                 let head_name = Self::app_head_name(&expr);
                 // A call to the function itself, OR to any OTHER constrained
                 // polymorphic function at a still-polymorphic type. Both need
@@ -2576,11 +2753,87 @@ impl Monomorphizer {
                 // descent below, like every other structural node.
                 TExprKind::InfixApp { op, lhs, rhs }
             }
+            // An unsaturated constrained-existential constructor at this
+            // body's class variable (see the Con arm of mono_expr_node).
+            TExprKind::Con(ref name) if self.ex_ctors.contains_key(name) => {
+                let name = name.clone();
+                match self.ex_eta_expand(&name, ty.clone(), class_to_dict, env) {
+                    Some(kind) => kind,
+                    None => TExprKind::Con(name),
+                }
+            }
+            // A numeric literal at this body's class type variable is
+            // `fromInteger n` / `fromRational r` through the DICTIONARY —
+            // GHC's overloaded-literal semantics. mono_expr left it raw
+            // (its conversion is keyed on a concrete type, and here the
+            // type is the variable), and a raw machine literal reaching an
+            // Integer instance's `*` ("attempt to index a number") or a
+            // user data instance's pattern match was a crash / wrong
+            // answer past the specialization limit.
+            TExprKind::Lit(lit @ (TLiteral::Integer(_) | TLiteral::Number(_)))
+                if matches!(ty, Ty::Var(_)) =>
+            {
+                match self.dict_literal(&lit, &ty, class_to_dict, env) {
+                    Some(e) => return e,
+                    None => TExprKind::Lit(lit),
+                }
+            }
             other => other,
         };
         self.map_children_scoped(TExpr { kind, ty }, &mut |m, c| {
             m.rewrite_dict_expr(c, func_name, class_to_dict, env)
         })
+    }
+
+    /// The dictionary-form of a numeric literal at class type variable `ty`:
+    /// `<dict>.fromInteger (n :: Integer)` for an integer literal (the
+    /// Integer built exactly — the interned bignum for a machine-range
+    /// value, the decimal-string form past 2^53, the same split as
+    /// mono_expr's concrete-type conversion), `<dict>.fromRational (r ::
+    /// Number)` for a fractional one. `None` when no dictionary in scope
+    /// provides the class (the literal then stays raw, as it always did).
+    fn dict_literal(
+        &mut self,
+        lit: &TLiteral,
+        ty: &Ty,
+        class_to_dict: &HashMap<String, String>,
+        env: &HashMap<(String, String), String>,
+    ) -> Option<TExpr> {
+        let (class_name, method, src_ty, arg) = match lit {
+            TLiteral::Integer(n) => {
+                let integer = Ty::Con("Integer".into());
+                let arg = if n.unsigned_abs() > (1u64 << 53) {
+                    TExpr::new(TExprKind::Lit(TLiteral::BigInteger(n.to_string())), integer.clone())
+                } else {
+                    TExpr::new(
+                        TExprKind::App(
+                            Box::new(TExpr::new(TExprKind::Var("fromInteger_Integer".into()), Ty::Unit)),
+                            Box::new(TExpr::new(TExprKind::Lit(TLiteral::Integer(*n)), Ty::Con("Int".into()))),
+                        ),
+                        integer.clone(),
+                    )
+                };
+                ("Num", "fromInteger", integer, arg)
+            }
+            TLiteral::Number(x) => {
+                let number = Ty::Con("Number".into());
+                let arg = TExpr::new(TExprKind::Lit(TLiteral::Number(*x)), number.clone());
+                ("Fractional", "fromRational", number, arg)
+            }
+            _ => return None,
+        };
+        let use_ty = Ty::arrow(src_ty, ty.clone());
+        let conv = self.dict_method_use(class_name, method, &use_ty, class_to_dict, env);
+        // No dictionary in scope for the class: dict_method_use falls back
+        // to the bare method name, which has nothing to call — keep the raw
+        // literal instead of emitting a nil call.
+        if matches!(conv, TExprKind::Var(_)) {
+            return None;
+        }
+        Some(TExpr::new(
+            TExprKind::App(Box::new(TExpr::new(conv, use_ty)), Box::new(arg)),
+            ty.clone(),
+        ))
     }
 
     /// Dictionary arguments for a use of a dict-passing function INSIDE a
@@ -3203,6 +3456,17 @@ impl Monomorphizer {
                     None => TExprKind::Var(method.to_string()),
                 }
             }
+            // An existential skolem: the dictionary the enclosing
+            // constructor match bound. Read through DictMethod on the
+            // binder (a lazily-bound pattern variable, forced at the read),
+            // not DictAccess (a raw parameter index).
+            Some(Ty::Skolem(_, id)) => match self.skolem_dict_for(class_name, id) {
+                Some(binder) => TExprKind::DictMethod {
+                    dict: Box::new(TExpr::new(TExprKind::Var(binder), Ty::Unit)),
+                    method_name: method.to_string(),
+                },
+                None => TExprKind::Var(method.to_string()),
+            },
             Some(bound) => {
                 // A compound binding (`Rep a`) that IS one of this function's
                 // constraints (`GEncode (Rep a)`) takes the dictionary PARAMETER
@@ -3277,7 +3541,17 @@ impl Monomorphizer {
             }
             return TExpr::new(TExprKind::Lit(TLiteral::Unit), Ty::Unit);
         }
-        if !ty.free_vars().is_empty() || self.head_method_is_dict_passing(class_name, ty) {
+        // An existential skolem with a captured dictionary in scope: the
+        // binder IS the dictionary. (Without one — a rank-2 skolem, or a
+        // class the constructor's context does not guarantee — fall
+        // through to the static path, as before.)
+        if let Ty::Skolem(_, id) = ty
+            && let Some(binder) = self.skolem_dict_for(class_name, *id)
+        {
+            return TExpr::new(TExprKind::Var(binder), Ty::Unit);
+        }
+        let over_hidden = Self::contains_skolem(ty) && self.has_skolem_dicts(ty);
+        if !ty.free_vars().is_empty() || over_hidden || self.head_method_is_dict_passing(class_name, ty) {
             // Structured over the constrained variable(s) — OR a concrete
             // structured type whose instance method is itself dictionary-passing
             // (purged for tripping the specialization cap, as the generic
@@ -3319,8 +3593,13 @@ impl Monomorphizer {
             // head-keyed static dictionary (builtin classes whose runtime
             // methods are shape-generic, e.g. show).
         }
-        if class_name == "Eq" && !ty.free_vars().is_empty()
+        if class_name == "Eq" && (!ty.free_vars().is_empty() || over_hidden)
             && let Some(dict) = self.structural_eq_dict(ty, class_to_dict, env)
+        {
+            return dict;
+        }
+        if class_name == "Show" && (!ty.free_vars().is_empty() || over_hidden)
+            && let Some(dict) = self.structural_show_dict(ty, class_to_dict, env)
         {
             return dict;
         }
@@ -3545,6 +3824,429 @@ impl Monomorphizer {
         self.cur_dict_params = saved_dict_params;
         self.cur_dict_by_arg = saved_dict_by_arg;
         Some(names)
+    }
+}
+
+// ---- Constrained existentials: dictionary capture (see `ExCtor`) ----
+impl Monomorphizer {
+    /// Push captured-dictionary bindings for the duration of `f`.
+    fn with_ex_scope<T>(
+        &mut self,
+        caps: Vec<((String, u32), String)>,
+        f: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        let mark = self.skolem_dicts.len();
+        self.skolem_dicts.extend(caps);
+        let out = f(self);
+        self.skolem_dicts.truncate(mark);
+        out
+    }
+
+    /// The binder holding the captured `class` dictionary for skolem `id`,
+    /// innermost binding first.
+    fn skolem_dict_for(&self, class: &str, id: u32) -> Option<String> {
+        self.skolem_dicts.iter().rev()
+            .find(|((c, i), _)| c == class && *i == id)
+            .map(|(_, b)| b.clone())
+    }
+
+    /// Does every skolem in `ty` have SOME captured dictionary in scope?
+    /// (The class-specific check happens per skolem in `build_dict_expr`;
+    /// this gates whether composing a dictionary over the type can succeed
+    /// at all, so a rank-2 skolem keeps the static path.)
+    fn has_skolem_dicts(&self, ty: &Ty) -> bool {
+        let mut ids = Vec::new();
+        Self::collect_skolem_ids(ty, &mut ids);
+        !ids.is_empty()
+            && ids.iter().all(|id| self.skolem_dicts.iter().any(|((_, i), _)| i == id))
+    }
+
+    fn collect_skolem_ids(ty: &Ty, out: &mut Vec<u32>) {
+        match ty {
+            Ty::Skolem(_, id) => out.push(*id),
+            Ty::Con(_) | Ty::Var(_) | Ty::Unit | Ty::Promoted(_) => {}
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => {
+                Self::collect_skolem_ids(a, out);
+                Self::collect_skolem_ids(b, out);
+            }
+            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => Self::collect_skolem_ids(a, out),
+            Ty::Tuple(es) => es.iter().for_each(|e| Self::collect_skolem_ids(e, out)),
+        }
+    }
+
+    /// Skolems by NAME in a type (the checker names an existential skolem
+    /// after the constructor's variable, `Ty::Skolem(tv.name, id)`).
+    fn collect_skolems_by_name(ty: &Ty, out: &mut HashMap<String, u32>) {
+        match ty {
+            Ty::Skolem(name, id) => { out.entry(name.clone()).or_insert(*id); }
+            Ty::Con(_) | Ty::Var(_) | Ty::Unit | Ty::Promoted(_) => {}
+            Ty::Arrow(a, b, _) | Ty::App(a, b) => {
+                Self::collect_skolems_by_name(a, out);
+                Self::collect_skolems_by_name(b, out);
+            }
+            Ty::List(a) | Ty::IO(a) | Ty::LuaIO(_, a) | Ty::Forall(_, a) => Self::collect_skolems_by_name(a, out),
+            Ty::Tuple(es) => es.iter().for_each(|e| Self::collect_skolems_by_name(e, out)),
+        }
+    }
+
+    fn pattern_skolems(pat: &TPattern, out: &mut HashMap<String, u32>) {
+        match pat {
+            TPattern::Var(_, ty) => Self::collect_skolems_by_name(ty, out),
+            TPattern::Wildcard | TPattern::LitPat(..) => {}
+            TPattern::Constructor { args, .. } | TPattern::Tuple(args) => {
+                args.iter().for_each(|a| Self::pattern_skolems(a, out))
+            }
+            TPattern::Paren(inner) | TPattern::As(_, inner) => Self::pattern_skolems(inner, out),
+        }
+    }
+
+    fn ex_rewrite_patterns(
+        &mut self,
+        pats: Vec<TPattern>,
+        caps: &mut Vec<((String, u32), String)>,
+    ) -> Vec<TPattern> {
+        pats.into_iter().map(|p| self.ex_rewrite_pattern(p, caps)).collect()
+    }
+
+    /// Give every constrained-existential constructor pattern its hidden
+    /// dictionary binders (trailing, one per capture) and record which
+    /// (class, skolem) each binder answers for — read off the skolems the
+    /// checker put in the sub-patterns' variable types. A pattern that binds
+    /// no variable at the hidden type gets the binders (the field positions
+    /// must line up) but no mapping (nothing can use it).
+    fn ex_rewrite_pattern(
+        &mut self,
+        pat: TPattern,
+        caps: &mut Vec<((String, u32), String)>,
+    ) -> TPattern {
+        match pat {
+            TPattern::Constructor { name, args } => {
+                let args: Vec<TPattern> = args.into_iter().map(|a| self.ex_rewrite_pattern(a, caps)).collect();
+                let Some(ex) = self.ex_ctors.get(&name).cloned() else {
+                    return TPattern::Constructor { name, args };
+                };
+                // Only a pattern at the DECLARED arity is rewritten (a
+                // pattern this pass already extended is left alone).
+                if args.len() != ex.field_types.len() {
+                    return TPattern::Constructor { name, args };
+                }
+                let mut skolems: HashMap<String, u32> = HashMap::new();
+                for a in &args {
+                    Self::pattern_skolems(a, &mut skolems);
+                }
+                let mut args = args;
+                for (i, (cls, var)) in ex.captures.iter().enumerate() {
+                    let binder = format!("__exd{}_{}", self.ex_binder_counter, i);
+                    if let Some(id) = skolems.get(var) {
+                        caps.push(((cls.clone(), *id), binder.clone()));
+                    }
+                    args.push(TPattern::Var(binder, Ty::Unit));
+                }
+                self.ex_binder_counter += 1;
+                TPattern::Constructor { name, args }
+            }
+            TPattern::Paren(inner) => TPattern::Paren(Box::new(self.ex_rewrite_pattern(*inner, caps))),
+            TPattern::As(n, inner) => TPattern::As(n, Box::new(self.ex_rewrite_pattern(*inner, caps))),
+            TPattern::Tuple(ps) => TPattern::Tuple(self.ex_rewrite_patterns(ps, caps)),
+            other => other,
+        }
+    }
+
+    /// The constrained-existential constructor at the head of a spine that
+    /// applies exactly its declared fields.
+    fn ex_saturated_ctor(&self, expr: &TExpr) -> Option<String> {
+        let head = Self::app_head(expr);
+        let TExprKind::Con(name) = &head.kind else { return None };
+        let ex = self.ex_ctors.get(name)?;
+        let n = ex.field_types.len();
+        // The head must still carry its DECLARED type: a packed spine's head
+        // has the extended one, and the dictionary-form pass revisits a
+        // packed spine's children — the sub-spine below the appended
+        // dictionaries applies exactly the declared fields and would
+        // otherwise be packed again, without end.
+        (Self::app_chain_len(expr) == n && Self::spine_arrow_count(&head.ty) == n).then(|| name.clone())
+    }
+
+    /// The dictionary arguments a pack of `ex_name` needs, from the ARGUMENT
+    /// types: each field type (over the existential variables) is matched
+    /// against the argument's type to bind the variables, then a dictionary
+    /// is built per capture. `None` when some binding is a still-free type
+    /// variable with no dictionary parameter for it (the first pass over a
+    /// body that later goes dictionary-form: that pass packs it) or a
+    /// skolem without a captured dictionary.
+    fn ex_pack_dicts(
+        &mut self,
+        ex_name: &str,
+        arg_tys: &[Ty],
+        class_to_dict: &HashMap<String, String>,
+        env: &HashMap<(String, String), String>,
+    ) -> Option<Vec<TExpr>> {
+        let ex = self.ex_ctors.get(ex_name)?.clone();
+        let mut bind: HashMap<String, Ty> = HashMap::new();
+        for (fty, aty) in ex.field_types.iter().zip(arg_tys) {
+            Self::collect_subst_by_name(fty, aty, &mut bind);
+        }
+        let mut dicts = Vec::with_capacity(ex.captures.len());
+        for (cls, var) in &ex.captures {
+            let bound = bind.get(var).cloned()?;
+            let feasible = match &bound {
+                Ty::Var(v) => env.contains_key(&(cls.clone(), v.name.clone()))
+                    || class_to_dict.contains_key(cls),
+                Ty::Skolem(_, id) => self.skolem_dict_for(cls, *id).is_some(),
+                t if !t.free_vars().is_empty() =>
+                    t.free_vars().iter().all(|v| env.contains_key(&(cls.clone(), v.name.clone())))
+                        || class_to_dict.contains_key(cls),
+                t if Self::contains_skolem(t) => self.has_skolem_dicts(t),
+                _ => true,
+            };
+            if !feasible {
+                return None;
+            }
+            dicts.push(self.build_dict_expr(cls, &bound, class_to_dict, env));
+        }
+        Some(dicts)
+    }
+
+    /// The constructor's type with `k` hidden `()` parameters appended
+    /// after its `n` declared fields.
+    fn ex_extend_ctor_ty(ty: &Ty, n: usize, k: usize) -> Ty {
+        let mut params = Vec::with_capacity(n + k);
+        let mut t = ty;
+        for _ in 0..n {
+            match t {
+                Ty::Arrow(a, b, _) => { params.push((**a).clone()); t = b; }
+                _ => break,
+            }
+        }
+        params.extend(std::iter::repeat_n(Ty::Unit, k));
+        Ty::fun(&params, t.clone())
+    }
+
+    /// Rewrite a saturated pack: monomorphize the arguments (first pass
+    /// only — the dictionary-form pass receives already-processed
+    /// arguments), append the captured dictionaries, and give the head the
+    /// extended constructor type so codegen sees a saturated application.
+    fn ex_pack_saturated(
+        &mut self,
+        ex_name: String,
+        whole: TExpr,
+        mono_args: bool,
+        class_to_dict: &HashMap<String, String>,
+        env: &HashMap<(String, String), String>,
+    ) -> Option<TExpr> {
+        let ty = whole.ty.clone();
+        let arg_tys: Vec<Ty> = {
+            let mut tys = Vec::new();
+            let mut e = &whole;
+            while let TExprKind::App(f, a) = &e.kind {
+                tys.push(a.ty.clone());
+                e = f.as_ref();
+            }
+            tys.reverse();
+            tys
+        };
+        let dicts = self.ex_pack_dicts(&ex_name, &arg_tys, class_to_dict, env)?;
+        let (head, args) = Self::split_app_chain(whole);
+        let args: Vec<TExpr> = if mono_args {
+            args.into_iter().map(|a| self.mono_expr(a)).collect()
+        } else {
+            args
+        };
+        let n = args.len();
+        let head = TExpr::new(head.kind, Self::ex_extend_ctor_ty(&head.ty, n, dicts.len()));
+        let mut e = head;
+        let total = n + dicts.len();
+        for (i, a) in args.into_iter().chain(dicts).enumerate() {
+            let node_ty = if i + 1 == total { ty.clone() } else { Ty::Unit };
+            e = TExpr::new(TExprKind::App(Box::new(e), Box::new(a)), node_ty);
+        }
+        Some(e)
+    }
+
+    /// An unsaturated constructor reference as a lambda over its declared
+    /// fields whose body is the packed application. `None` when the
+    /// dictionaries cannot be built here (see `ex_pack_dicts`).
+    fn ex_eta_expand(
+        &mut self,
+        name: &str,
+        ty: Ty,
+        class_to_dict: &HashMap<String, String>,
+        env: &HashMap<(String, String), String>,
+    ) -> Option<TExprKind> {
+        let ex = self.ex_ctors.get(name)?.clone();
+        let n = ex.field_types.len();
+        // A constructor reference has exactly its declared arrows; the head
+        // of an already-packed spine carries the EXTENDED type (declared
+        // fields plus dictionaries) and must not be expanded again — the
+        // dictionary-form pass revisits a packed spine's children.
+        if Self::spine_arrow_count(&ty) != n {
+            return None;
+        }
+        let mut params: Vec<(String, Ty)> = Vec::with_capacity(n);
+        let mut t = &ty;
+        for i in 0..n {
+            let Ty::Arrow(a, b, _) = t else { return None };
+            params.push((format!("__exp{}_{}", self.ex_binder_counter, i), (**a).clone()));
+            t = b;
+        }
+        self.ex_binder_counter += 1;
+        let result_ty = t.clone();
+        let mut app = TExpr::new(TExprKind::Con(name.to_string()), ty.clone());
+        for (i, (p, pty)) in params.iter().enumerate() {
+            let node_ty = if i + 1 == n { result_ty.clone() } else { Ty::Unit };
+            app = TExpr::new(
+                TExprKind::App(Box::new(app), Box::new(TExpr::new(TExprKind::Var(p.clone()), pty.clone()))),
+                node_ty,
+            );
+        }
+        let packed = self.ex_pack_saturated(name.to_string(), app, false, class_to_dict, env)?;
+        Some(TExprKind::Lambda { params, body: Box::new(packed) })
+    }
+
+    /// A class-method use whose class-variable binding is (or contains) an
+    /// existential skolem with captured dictionaries: the dictionary-form
+    /// method use over those dictionaries. `None` when no captured
+    /// dictionary applies (the erased fallback stands, as before).
+    fn ex_method_use(&mut self, method: &str, use_ty: &Ty) -> Option<TExprKind> {
+        if self.skolem_dicts.is_empty() {
+            return None;
+        }
+        let class = self.method_to_class.get(method)?.clone();
+        let binding = self.class_var_binding(method, use_ty)?;
+        let binding = self.reduce_families(&binding).unwrap_or(binding);
+        if !Self::contains_skolem(&binding) || !self.has_skolem_dicts(&binding) {
+            return None;
+        }
+        let kind = self.dict_method_use(&class, method, use_ty, &HashMap::new(), &HashMap::new());
+        (!matches!(kind, TExprKind::Var(_))).then_some(kind)
+    }
+
+    /// Is this a use of a constrained polymorphic function at a type that
+    /// instantiates it over an existential skolem with captured
+    /// dictionaries? Such a use cannot be specialized (nothing inside a
+    /// copy at a skolem could dispatch) and takes dictionary passing.
+    fn ex_dict_call_wanted(&self, name: &str, use_ty: &Ty) -> bool {
+        !self.skolem_dicts.is_empty()
+            && !self.locals.contains(name)
+            && self.poly_fns.contains_key(name)
+            && self.fn_constraints.get(name).is_some_and(|c| !c.is_empty())
+            && Self::contains_skolem(use_ty)
+            && self.has_skolem_dicts(use_ty)
+    }
+
+    /// A composed Show dictionary for a container over still-polymorphic or
+    /// existential elements — `[a]`, `Maybe a`, tuples — the Show twin of
+    /// `structural_eq_dict`: a synthesized dictionary-form function per
+    /// shape that threads the element dictionaries' `show` through the same
+    /// runtime helpers the specialized path uses (`__mll_show_list`,
+    /// `__mll_show_maybe`, the tuple's concatenation). Without it a
+    /// `show [x]` at a hidden type bottomed out at the type-erased `show`
+    /// (a user ADT element printed as a tuple).
+    fn structural_show_dict(
+        &mut self,
+        ty: &Ty,
+        class_to_dict: &HashMap<String, String>,
+        env: &HashMap<(String, String), String>,
+    ) -> Option<TExpr> {
+        let str_ty = Ty::Con("String".into());
+        let (shape, elems): (Ty, Vec<Ty>) = match ty {
+            Ty::List(e) => (Ty::List(Box::new(Ty::Unit)), vec![(**e).clone()]),
+            Ty::App(f, e) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") => (
+                Ty::App(Box::new(Ty::Con("Maybe".into())), Box::new(Ty::Unit)),
+                vec![(**e).clone()],
+            ),
+            Ty::Tuple(es) if !es.is_empty() => (Ty::Tuple(vec![Ty::Unit; es.len()]), es.clone()),
+            _ => return None,
+        };
+        let n_dicts = elems.len();
+        let key = ("show_structural".to_string(), shape.clone());
+        let fname = if let Some(existing) = self.generated_impls.get(&key) {
+            existing.clone()
+        } else {
+            let fname = self.mangle_name("show_dictform", &shape);
+            self.generated_impls.insert(key, fname.clone());
+            let dict_params: Vec<String> = (0..n_dicts).map(|i| format!("__d{}", i)).collect();
+            let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+            // The dictionaries are this function's own PARAMETERS: read
+            // them as DictAccess, exactly as structural_eq_dict does.
+            let show_of = |d: &str| TExpr::new(
+                TExprKind::DictAccess {
+                    dict_param: d.to_string(),
+                    method_name: "show".to_string(),
+                },
+                Ty::Unit,
+            );
+            let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(
+                TExprKind::App(Box::new(f), Box::new(a)), t);
+            let body = match &shape {
+                Ty::Tuple(es) => {
+                    // "(" <> d0.show (tup_get 1 x) <> "," <> … <> ")"
+                    let lit = |s: &str| TExpr::new(TExprKind::Lit(TLiteral::Str(s.as_bytes().to_vec())), str_ty.clone());
+                    let cat = |l: TExpr, r: TExpr| TExpr::new(TExprKind::InfixApp {
+                        op: "<>".to_string(), lhs: Box::new(l), rhs: Box::new(r),
+                    }, str_ty.clone());
+                    let mut acc = lit("(");
+                    for i in 0..es.len() {
+                        if i > 0 {
+                            acc = cat(acc, lit(","));
+                        }
+                        let proj = TExpr::new(
+                            TExprKind::SpecCall {
+                                original: "__mll_tup_get".to_string(),
+                                specialized: SpecKind::TupGet(i + 1),
+                                args: vec![var("_x")],
+                            },
+                            Ty::Unit,
+                        );
+                        let shown = app(show_of(&dict_params[i]), proj, str_ty.clone());
+                        acc = cat(acc, shown);
+                    }
+                    cat(acc, lit(")"))
+                }
+                Ty::List(_) => app(
+                    app(var("__mll_show_list"), show_of("__d0"), Ty::Unit),
+                    var("_x"), str_ty.clone(),
+                ),
+                _ => app(
+                    app(var("__mll_show_maybe"), show_of("__d0"), Ty::Unit),
+                    var("_x"), str_ty.clone(),
+                ),
+            };
+            let param_tys: Vec<Ty> = vec![Ty::Unit; n_dicts + 1];
+            let mut patterns: Vec<TPattern> = dict_params.iter()
+                .map(|d| TPattern::Var(d.clone(), Ty::Unit)).collect();
+            patterns.push(TPattern::Var("_x".to_string(), Ty::Unit));
+            self.generated.push(TFunction {
+                name: fname.clone(),
+                ty: Ty::fun(&param_tys, str_ty.clone()),
+                clauses: vec![TClause {
+                    span: None,
+                    patterns,
+                    guards: vec![],
+                    body: Some(body),
+                    where_binds: vec![],
+                }],
+                specialized: true,
+                spec_origin: None,
+                dict_params: vec![],
+                derived_strict: false,
+            });
+            fname
+        };
+        let sub_dicts: Vec<TExpr> = elems.iter()
+            .map(|e| self.build_dict_expr("Show", e, class_to_dict, env))
+            .collect();
+        Some(TExpr::new(
+            TExprKind::SpecCall {
+                original: "__dict_Show".to_string(),
+                specialized: SpecKind::DictCtor {
+                    class: "Show".to_string(),
+                    methods: vec![("show".to_string(), fname, 1)],
+                },
+                args: sub_dicts,
+            },
+            Ty::Unit,
+        ))
     }
 }
 

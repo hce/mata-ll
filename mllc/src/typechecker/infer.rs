@@ -991,16 +991,16 @@ impl Checker {
         // A set, not a Vec: with one binder per statement (a long do-block of
         // `let`s), the membership probes below are per-wanted-constraint ×
         // per-binder, and Vec::contains made that quadratic.
-        let mut determined: HashSet<TyVar> = type_vars.iter().cloned().collect();
-        for bt in &self.binder_types {
-            // Demote any body skolem back to its flexible variable first: a
-            // parameter bound at a signature-variable type resolves through
-            // `overall_subst` to that variable's skolem, whose `free_vars` are
-            // empty — without demotion it would drop from `determined`.
-            for v in bt.apply_subst(&overall_subst).demote_skolems(&demote).free_vars() {
-                determined.insert(v);
-            }
-        }
+        // Only the binding's own type determines a variable. A variable that
+        // is free merely in some local binder's type (`let d = hmFromList
+        // [(1, "x")]` — the key type of `d`) is NOT determined by that: at
+        // the end of this binding nothing will ever fix it, so a class
+        // constraint on it is ambiguous exactly as GHC says. (Binder types
+        // used to count, which let such programs through with an unresolved
+        // type: the literal compiled to a raw Lua number and `show d`
+        // reached the type-erased runtime show, printing `()`.) A variable
+        // a use DOES fix has been substituted away and is not free here.
+        let determined: HashSet<TyVar> = type_vars.iter().cloned().collect();
         for (class, cty) in std::mem::take(&mut self.wanted) {
             let rty = cty.apply_subst(&overall_subst).demote_skolems(&demote);
             if !self.has_instance(&class, &rty) {
@@ -1157,8 +1157,18 @@ impl Checker {
             if !info.classes.iter().all(|c| Self::is_standard_class(c)) { continue; }
             if !info.classes.iter().any(|c| Self::is_numeric_class(c)) { continue; }
             // Try the default types in order; pick the first for which EVERY
-            // original constraint on the variable has an instance.
-            for cand in &["Integer", "Number"] {
+            // original constraint on the variable has an instance. mata-ll
+            // deviation: a HASHMAP KEY literal (`hmFromList [(1, "x")]`,
+            // the variable carries `Hashable`) defaults to Int. GHC's
+            // Data.Map twin needs `Ord`, a standard class, and defaults the
+            // key to Integer; mata-ll's Hashable has no Integer instance
+            // (Integer keys are rejected by design), and treating Hashable
+            // as non-standard made every unannotated literal key an
+            // ambiguity error. Int is the type such a key has always had at
+            // runtime (see HASKDIFF, "HashMap").
+            let hashable = info.classes.iter().any(|c| c == "Hashable");
+            let candidates: &[&str] = if hashable { &["Int", "Integer", "Number"] } else { &["Integer", "Number"] };
+            for cand in candidates {
                 let ct = Ty::Con((*cand).to_string());
                 let sub = Subst::singleton(v.clone(), ct.clone());
                 if info.full.iter().all(|(class, fty)| self.has_instance(class, &fty.apply_subst(&sub))) {
@@ -1177,6 +1187,8 @@ impl Checker {
     fn is_standard_class(c: &str) -> bool {
         Self::is_numeric_class(c)
             || matches!(c, "Eq" | "Ord" | "Show" | "Read" | "Enum" | "Bounded")
+            // mata-ll's marker class for map keys (see compute_numeric_defaults).
+            || c == "Hashable"
     }
 
     pub(super) fn check_clause(&mut self, clause: &Clause, fun_ty: &Ty, sig_skolems: &HashMap<TyVar, Ty>, ctx: &str) -> Result<(TClause, Subst), DiagnosticKind> {
@@ -1511,12 +1523,13 @@ impl Checker {
 
         if is_function {
             // A skolem this where-function unpacked must not appear in its
-            // own type: mata-ll where-bindings are monomorphic, so every
-            // CALL of the function shares one type — a where-fn returning
-            // its unpacked existential (`unpack (Foo x) = x`) would claim
-            // two calls on two different boxes yield the SAME hidden type,
-            // which is false (and, with an Eq-style constrained
-            // existential, exploitable). GHC rejects this the same way.
+            // own type: the skolem is bound inside the function's match,
+            // so a where-fn returning its unpacked existential (`unpack
+            // (Foo x) = x`) would let the hidden type escape to its callers
+            // — two calls on two different boxes would claim the SAME
+            // hidden type, which is false (and, with an Eq-style
+            // constrained existential, exploitable). GHC rejects this the
+            // same way.
             self.check_existential_escape(
                 &inferred_ty.apply_subst(subst), where_skolems_before)?;
         }
@@ -2318,10 +2331,13 @@ impl Checker {
                 // literal's type and numeric defaulting then accepted it.
                 // Each variable becomes a skolem with no givens, so a class
                 // wanted landing on it fails with the rigid-variable
-                // provenance note. (The skolem persists — a polymorphic
-                // ascribed value stays rigid downstream, a deliberate
-                // approximation noted in the regression test.)
+                // provenance note. Once the expression has been checked
+                // against the rigid type, the ascription's variables are
+                // INSTANTIATED afresh for the use — `(id :: a -> a) 5` is
+                // legal in GHC (the ascription quantifies `a`), and used to
+                // be rejected here as "cannot match rigid 'a' with Int".
                 let mut sk_map = HashMap::new();
+                let mut demote: HashMap<u32, Ty> = HashMap::new();
                 for v in expected.free_vars() {
                     let sk_id = self.next_var;
                     self.next_var += 1;
@@ -2333,35 +2349,47 @@ impl Checker {
                         var: sname,
                         con: "a type ascription".to_string(),
                         givens: vec![],
-                        origin: SkolemOrigin::Signature {
-                            fn_name: self.current_fn.clone()
-                                .unwrap_or_else(|| "this expression".to_string()),
-                        },
+                        origin: SkolemOrigin::Ascription,
                     });
+                    // The fresh flexible variable each skolem becomes for
+                    // the use of the ascribed value.
+                    let fresh_id = self.next_var;
+                    self.next_var += 1;
+                    demote.insert(sk_id, Ty::Var(TyVar { name: v.name.clone(), id: fresh_id }));
                 }
                 let expected = expected.apply_subst(&Subst::from_map(sk_map));
                 let (te, inferred, subst) = self.infer_expr(inner, env)?;
                 let s = self.unify(&inferred, &expected)?;
-                let final_ty = inferred.apply_subst(&s);
                 let full_subst = subst.compose(&s);
-                let resolved_te = te.apply_subst(&full_subst);
+                // Instantiate: the checked value's type and TIR carry the
+                // fresh variables. A class constraint the inner expression
+                // emitted ON the skolem stays on it and is reported as
+                // rigid (`(show :: a -> String)` needs `Show a` — GHC
+                // rejects it too).
+                let final_ty = inferred.apply_subst(&s).demote_skolems(&demote);
+                let mut resolved_te = te.apply_subst(&full_subst);
+                if !demote.is_empty() { resolved_te.demote_skolems(&demote); }
                 Ok((resolved_te, final_ty, full_subst))
             }
             Expr::RecordCon { constructor, fields } => {
                 // Desugar to positional application by reordering fields
                 // to match the data declaration order
-                let con_info = self.constructors.get(self.resolve_con_name(constructor))
-                    .ok_or_else(|| DiagnosticKind::UnboundConstructor(constructor.clone()))?.clone();
-
-                // Collect field names with their index from the record_fields table
-                let mut field_order: Vec<(String, usize)> = Vec::new();
-                for (field_name, (type_name, idx)) in &self.record_fields {
-                    if *type_name == con_info.type_name {
-                        field_order.push((field_name.clone(), *idx));
-                    }
+                if !self.constructors.contains_key(self.resolve_con_name(constructor)) {
+                    return Err(DiagnosticKind::UnboundConstructor(constructor.clone()));
                 }
-                // Sort by index to get declaration order
-                field_order.sort_by_key(|(_, idx)| *idx);
+
+                // The CONSTRUCTOR's own fields in declaration order. (The
+                // type-wide `record_fields` table once served here: for a
+                // multi-constructor record `data T = A { x } | B { y }` it
+                // demanded A's field of a `B { y = 1 }` construction —
+                // "Missing field 'x' in constructor 'B'" — a valid program
+                // rejected.)
+                let con_key = self.resolve_con_name(constructor).to_string();
+                let field_order: Vec<(String, usize)> = self
+                    .con_record_fields
+                    .get(&con_key)
+                    .map(|names| names.iter().cloned().enumerate().map(|(i, n)| (n, i)).collect())
+                    .unwrap_or_default();
 
                 // Build positional arguments in declaration order
                 let num_fields = field_order.len();

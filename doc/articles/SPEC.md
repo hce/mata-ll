@@ -219,6 +219,15 @@ still known. Unpacking makes exactly the declared classes (and their
 superclasses) available on the skolem, and nothing else: `show x` works
 inside a match on `Showable x`; `x + 1` does not.
 
+At runtime the constructor carries the evidence, as in GHC: packing
+stores the class dictionaries for the hidden type (one hidden trailing
+field per declared class and superclass), a match binds them back, and
+every method use at the hidden type — direct (`show x`, `a < b`),
+through a container (`show [x]`), or through a constrained helper
+(`f :: Show b => b -> String` applied to `x`) — dispatches through the
+captured dictionary. The monomorphizer performs the capture
+(`mono.rs`, `ExCtor`); no other representation detail leaks.
+
 GADT syntax declares existentials implicitly: a signature variable that
 occurs in the constructor's fields but not in its result type is
 existential (`MkBox :: Show a => a -> Box` hides `a`, with the context

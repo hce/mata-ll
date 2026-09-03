@@ -593,7 +593,12 @@ impl CodeGen {
             return None;
         }
         let consumer = match (self.fn_origin(name), args.len()) {
-            ("foldl'", 3) => Consumer::Fold { f: args[0], z: args[1] },
+            // `foldl'` is a Foldable class method: at list type mono
+            // dispatches it to the `[]` instance's implementation, named
+            // `foldl'_[a]` by the checker's instance-method mangling, and a
+            // specialization of that records it as its origin. Both
+            // spellings are the list strict fold.
+            ("foldl'", 3) | ("foldl'_[a]", 3) => Consumer::Fold { f: args[0], z: args[1] },
             ("sum", 1) => {
                 // The element/result type: sum :: [a] -> a.
                 let Ty::Arrow(_, ret, _) = &f.ty else { return None };

@@ -32,7 +32,9 @@ frexp :: Number -> LuaPure "__mll_frexp" (Number, Int)
 modf :: Number -> LuaPure "math.modf" (Number, Number)
 
 -- Rounding / remainder
-abs :: Number -> LuaPure "math.abs" Number
+-- (No `abs` here: `abs` is the Prelude's Num method, which covers Number.
+-- An LMath `abs :: Number -> Number` shadowed it for every importer, so
+-- `abs (-3 :: Int)` failed to typecheck after `import LMath`.)
 ceil :: Number -> LuaPure "math.ceil" Int
 floor :: Number -> LuaPure "math.floor" Int
 fmod :: Number -> Number -> LuaPure "math.fmod" Number

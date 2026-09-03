@@ -498,6 +498,48 @@ mll_test!(hm_lookup_case_fused, "hm_lookup_case_fused.mll");
 // reroot cap, stored-Nothing across flips, the frozen shared empty,
 // and the encoded-structural-key family — in every read order.
 mll_test!(hashmap_versions, "hashmap_versions.mll");
+// Forcing enumerators (show, toList) over a version whose values read
+// OTHER versions of the same family: the force reroots the shared store,
+// so enumeration must snapshot first. Also pins compare-on-NaN = GT.
+mll_test!(hashmap_enum_reroot, "hashmap_enum_reroot.mll");
+// A discarded `pure x`/`return x` in every spelling (`return $ e` once
+// emitted a bare payload as a Lua statement — a load failure).
+mll_test!(pure_discard_spellings, "pure_discard_spellings.mll");
+// Dictionary passing past the specialization limit at the BUILTIN numeric
+// types: the Int/Number instances map `+`/`-`/`*`/`/`/`div`… to themselves
+// (inlined operators), so the dictionary must carry a callable for them.
+mll_test!(dict_builtin_operators, "dict_builtin_operators.mll");
+// Newtype transparency: saturated constructor applications erased in the
+// IR, the first-class constructor a forcing identity — a newtype-typed
+// result is never a raw thunk (map N over lazy elements, dict-passing
+// instance methods), laziness of the payload kept, seq forces it.
+mll_test!(newtype_whnf, "newtype_whnf.mll");
+// Strict Prelude folds (length/sum/product/maximum/minimum via the foldl'
+// class method) over 3e5-element unfused lists on which the lazy-foldl
+// definitions overflowed the Lua stack; the builtin-class default body
+// (a Foldable instance without foldl'); foldl stays lazy.
+mll_test!(strict_folds, "strict_folds.mll");
+// Constrained existentials capture their class dictionaries: method uses
+// at the hidden type (named, infix, via containers, helpers, superclasses)
+// dispatch through them; unsaturated/re-packed constructors, case guards,
+// record syntax, payload laziness, and a pack inside a dict-passing body.
+mll_test!(existential_dicts, "existential_dicts.mll");
+// GHC's Ord defaults on the builtin class: compare-only and (<=)-only
+// instances, with the other methods (and sort/maximum) following.
+mll_test!(ord_minimal_instance, "ord_minimal_instance.mll");
+// Record construction against the constructor's own fields (multi-
+// constructor records) and infix method clauses with pattern operands.
+mll_test!(record_multi_constructor, "record_multi_constructor.mll");
+mll_test!(instance_infix_pattern_methods, "instance_infix_pattern_methods.mll");
+// `;` separators in let groups; the Prelude's repeat/cycle.
+mll_test!(let_semicolon_separators, "let_semicolon_separators.mll");
+mll_test!(repeat_cycle, "repeat_cycle.mll");
+// Ascription variables instantiated afresh after the rigid check; record
+// field selector sections `(.field)`.
+mll_test!(ascription_instantiation, "ascription_instantiation.mll");
+mll_test!(record_dot_sections, "record_dot_sections.mll");
+// Unannotated literal HashMap keys default to Int (and show as such).
+mll_test!(hashmap_key_defaulting, "hashmap_key_defaulting.mll");
 // The list-pipeline fusion (fuse.rs): foldl' over map/filter/range
 // chains as one loop — range/leaf sources, nesting on both sides of a
 // filter, empty sources, argument order of the fold step.

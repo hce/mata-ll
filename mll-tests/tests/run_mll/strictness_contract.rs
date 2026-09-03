@@ -130,8 +130,12 @@ const PROBES: &[Probe] = &[
     probe("show_Number", &["1.5"], &[Strict]),
     probe("show_String", &["\"s\""], &[Strict]),
     probe("show_Bool", &["true"], &[Strict]),
-    probe("show_List_", &[ILIST], &[Strict]),
-    probe("show_Maybe", &["nil"], &[Strict]),
+    // `show_List_`/`show_Maybe` — the type-erased container-show shims — are
+    // not probed: a dictionary-passing `show [x]` / `show (Just x)` now
+    // composes a real dictionary (mono's structural_show_dict), so no
+    // well-typed program reaches them any more (only a container whose
+    // element type never resolved would, and that is an ambiguity the
+    // checker reports). They stay in the runtime as last-resort fallbacks.
     probe("show_ByteString", &["\"s\""], &[Strict]),
     // A map is a persistent-map HANDLE, not a raw keyed table — probe
     // with the real shared empty, like the hm ops below.

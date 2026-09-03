@@ -375,11 +375,14 @@ impl CodeGen {
                 // re-emits the candidate's body, so the result is the
                 // body's emission, not a function return); and any result
                 // TYPE that can be a transparent newtype wrap or an action
-                // (`ty_app_result_whnf`) — the one systematic breach of the
-                // invariant: a newtype constructor erases to the identity,
-                // so `fromInteger n = Z5 (…lazy…)` returns a raw thunk
-                // (num_user_instance caught exactly this). Refutation
-                // builds check the claim at every site (whnf_claim_checked).
+                // (`ty_app_result_whnf`). A saturated newtype constructor
+                // application is erased before codegen (newtype_erase.rs),
+                // so `fromInteger n = Z5 (…)` now returns what `(…)`
+                // returns; the gate stays for the residual shape — a
+                // newtype-typed result that is a bare pattern variable
+                // (`unwrap (Z5 x) = …; rewrap = …`) can still be the
+                // wrapped value's raw thunk. Refutation builds check the
+                // claim at every site (whnf_claim_checked).
                 self.ty_app_result_whnf(&expr.ty)
                     && matches!(&f.kind, TExprKind::Var(name)
                         if self.module_fn_names.contains(name.as_str())
@@ -403,14 +406,14 @@ impl CodeGen {
     fn ty_app_result_whnf(&self, ty: &crate::types::Ty) -> bool {
         use crate::types::Ty;
         match ty {
-            Ty::Con(name) => !self.is_newtype(name),
+            Ty::Con(name) => !self.is_newtype_type(name),
             Ty::List(_) | Ty::Tuple(_) | Ty::Unit | Ty::Arrow(..) => true,
             Ty::App(head, _) => {
                 let mut h = head.as_ref();
                 while let Ty::App(inner, _) = h {
                     h = inner.as_ref();
                 }
-                matches!(h, Ty::Con(name) if !self.is_newtype(name))
+                matches!(h, Ty::Con(name) if !self.is_newtype_type(name))
             }
             _ => false,
         }

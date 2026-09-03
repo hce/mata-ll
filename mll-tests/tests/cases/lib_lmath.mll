@@ -10,8 +10,10 @@ main = do
     assert (approx pi 3.14159265) "pi approx"
     assert (huge > 999999999999.0) "huge is large"
 
-    -- abs
+    -- abs is the Prelude's Num method (LMath once shadowed it with a
+    -- Number-only binding, breaking `abs` at Int for every importer).
     assert (abs 5.0 == 5.0) "abs positive"
+    assert (abs (-3 :: Int) == 3) "abs at Int after import LMath"
     assert (abs (-3.0) == 3.0) "abs negative"
     assert (abs 0.0 == 0.0) "abs zero"
 

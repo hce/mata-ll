@@ -26,6 +26,7 @@ local __mll_hme_mt = {}
 -- HashMap runtime below) is needed by the FFI marshallers, which are
 -- defined first.
 local __mll_hm_reroot
+local __mll_hm_snapshot
 -- Tags a suspended `pure`/`return` value — a "pure action" that has escaped its
 -- defining function. `__mll_run` unwraps it WITHOUT forcing
 -- or calling the payload, so a `pure ⊥` bound across a function boundary does
@@ -578,8 +579,13 @@ local function __mll_arg_marshal(v, d)
     elseif d.k == "hashmap" then
         if v == nil then return nil end
         local t = {}
-        for k, val in pairs(__mll_hm_reroot(v)) do
-            local x = __force(val)
+        -- Snapshot the store BEFORE forcing any value: forcing may read
+        -- another version of the same map family, which reroots (mutates)
+        -- the very table a live `pairs` would be walking.
+        local ks, vs = __mll_hm_snapshot(__mll_hm_reroot(v))
+        for i = 1, #ks do
+            local k = ks[i]
+            local x = __force(vs[i])
             -- Unbox a stored-nil value: the host convention for an absent
             -- payload is nil (the key stays absent host-side, exactly how
             -- the decoder above reads it back).
@@ -637,9 +643,13 @@ local function __mll_to_lua(x)
     -- so reaching one here is an internal error.
     if getmetatable(x) == __mll_hm_mt then
         local result = {}
-        for k, v in pairs(__mll_hm_reroot(x)) do
+        -- Snapshot before converting: __mll_to_lua forces values, and a
+        -- forced value may reroot this family's shared store.
+        local ks, vs = __mll_hm_snapshot(__mll_hm_reroot(x))
+        for i = 1, #ks do
+            local v = vs[i]
             if not rawequal(v, __mll_hm_nilv) then
-                result[k] = __mll_to_lua(v)
+                result[ks[i]] = __mll_to_lua(v)
             end
         end
         return result
@@ -1394,7 +1404,8 @@ local function ord_le__ByteString(a, b) a = __force(a); b = __force(b); return a
 local function ord_ge__ByteString(a, b) a = __force(a); b = __force(b); return a >= b end
 -- compare returns the Ordering enum: LT=1, EQ=2, GT=3 (constructor index)
 local function ord_compare__Int(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
-local function ord_compare__Number(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
+-- GHC's Double compare: `<` then `==` then GT — so every NaN comparison is GT.
+local function ord_compare__Number(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif a == b then return 2 else return 3 end end
 local function ord_compare__String(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function ord_compare__ByteString(a, b) a = __force(a); b = __force(b); if a < b then return 1 elseif b < a then return 3 else return 2 end end
 local function semigroup_String(a, b) a = __force(a); b = __force(b); return a .. b end
@@ -1615,6 +1626,28 @@ local function foldl(f, z, t)
     end
     return __force(acc)
 end
+-- The type-erased twin of the Foldable `foldl'` method (its Lua name:
+-- sanitize_name turns the prime into `_prime`), reached exactly like the
+-- erased foldl/foldr above — a use whose element type never resolved
+-- (`length [error "x"]`) cannot dispatch to the `[]` instance. Strict in
+-- the accumulator at every step, as the instance is.
+local function foldl_prime(f, z, t)
+    t = __force(t)
+    if t == nil then return __force(z) end
+    f = __force(f)
+    local mt = getmetatable(t)
+    if mt == __just_mt then return __force(f(z, t[1])) end
+    if mt ~= __cons_mt then
+        error("foldl': type-erased fold over a structure that is not a list or Maybe")
+    end
+    local acc = __force(z)
+    local cur = t
+    while cur ~= nil do
+        acc = __force(f(acc, __mll_head(cur)))
+        cur = __mll_tail(cur)
+    end
+    return acc
+end
 -- Currying adapters for the hand-written generic builtins above. Compiled
 -- mata-ll functions are N-ary (all count_arrows(type) arguments in one call),
 -- and compiled generic code is specialized per instantiation so its call
@@ -1710,6 +1743,17 @@ __mll_hm_reroot = function(m)
     m.k, m.v, m.p = nil, nil, nil
     m.t, m.n = t, n
     return t
+end
+-- Copy a live store's entries into parallel key/value arrays. Every
+-- enumerator that FORCES values while walking a store must walk this
+-- snapshot instead: forcing a value can read another version of the same
+-- family, and that read reroots — mutates — the store `pairs` would be
+-- iterating (a silent wrong-answer, not a Lua error, since the keys
+-- being changed are ones the walk has not reached yet).
+__mll_hm_snapshot = function(t)
+    local ks, vs, n = {}, {}, 0
+    for k, v in pairs(t) do n = n + 1; ks[n] = k; vs[n] = v end
+    return ks, vs
 end
 -- The scalar keyed ops reject a table key loudly: a structural key that
 -- slipped past the threading rewrite (a purged specialization, a dict-form
@@ -1809,7 +1853,21 @@ end
 local function hashmap_keys(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons(ks[i], r) end return r end
 local function hashmap_values(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = t[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons(v, r) end return r end
 local function hashmap_member(k, m) if type(k) == "table" then k = __mll_hm_scalar_key(k) end if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[k] ~= nil end
-local function show_HashMap(m) m = __force(m); local t = __mll_hm_reroot(m) local parts = {} if getmetatable(m) == __mll_hme_mt then for _, e in pairs(t) do parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end else for k, v in pairs(t) do if rawequal(v, __mll_hm_nilv) then v = nil end parts[#parts+1] = show(k) .. " -> " .. show(v) end end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
+-- show forces every value; a forced value may read another version of
+-- this family and reroot the store, so the entries are snapshotted first
+-- (never `pairs` over the live store across a force).
+local function show_HashMap(m)
+    m = __force(m)
+    local ks, vs = __mll_hm_snapshot(__mll_hm_reroot(m))
+    local parts = {}
+    if getmetatable(m) == __mll_hme_mt then
+        for i = 1, #vs do local e = vs[i]; parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end
+    else
+        for i = 1, #ks do local v = vs[i]; if rawequal(v, __mll_hm_nilv) then v = nil end; parts[#parts+1] = show(ks[i]) .. " -> " .. show(v) end
+    end
+    table.sort(parts)
+    return "{" .. table.concat(parts, ", ") .. "}"
+end
 local function hashmap_fromList(xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end local k = __mll_hm_scalar_key(pair[1]) if t[k] == nil then n = n + 1 end t[k] = v cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hm_mt) end
 
 -- Structural-key HashMaps (A17). A scalar key indexes the store table
