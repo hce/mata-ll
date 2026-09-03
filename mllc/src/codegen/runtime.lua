@@ -1721,8 +1721,20 @@ local function __mll_hm_scalar_key(k)
     end
     return k
 end
+-- The write/read bodies below inline their entry forces: a key is a
+-- table only when it is a thunk (or a structural key that slipped the
+-- threading rewrite — scalar_key's loud error), so the type gate skips
+-- the scalar_key call for the common already-scalar key, and the
+-- metatable gates skip the __force call for already-WHNF values (the
+-- gate is __force's own first test, so semantics are identical — every
+-- argument is still forced before use, which is what the strictness
+-- rows promise). Writes also take the newest-version store directly
+-- (m.t) instead of paying a reroot call that would return it anyway —
+-- the shape hashmap_lookup always had.
 local function hashmap_insert(k, v, m)
-    k = __mll_hm_scalar_key(k); v = __force(v); m = __force(m)
+    if type(k) == "table" then k = __mll_hm_scalar_key(k) end
+    if getmetatable(v) == __thunk_mt then v = __force(v) end
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
     if v == nil then v = __mll_hm_nilv end
     if m.frozen then
         local t = {}
@@ -1732,7 +1744,8 @@ local function hashmap_insert(k, v, m)
         t[k] = v
         return setmetatable({t = t, n = n}, __mll_hm_mt)
     end
-    local t = __mll_hm_reroot(m)
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
     local old = t[k]
     t[k] = v
     local h = setmetatable({t = t, n = old == nil and m.n + 1 or m.n}, __mll_hm_mt)
@@ -1741,7 +1754,8 @@ local function hashmap_insert(k, v, m)
     return h
 end
 local function hashmap_lookup(k, m)
-    k = __mll_hm_scalar_key(k); m = __force(m)
+    if type(k) == "table" then k = __mll_hm_scalar_key(k) end
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
     local t = m.t
     if t == nil then t = __mll_hm_reroot(m) end
     local v = t[k]
@@ -1754,14 +1768,17 @@ end
 -- hashmap_lookup allocates per hit for a result the case tears apart
 -- on the next line.
 local function __mll_hm_slot(k, m)
-    k = __mll_hm_scalar_key(k); m = __force(m)
+    if type(k) == "table" then k = __mll_hm_scalar_key(k) end
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
     local t = m.t
     if t == nil then t = __mll_hm_reroot(m) end
     return t[k]
 end
 local function hashmap_delete(k, m)
-    k = __mll_hm_scalar_key(k); m = __force(m)
-    local t = __mll_hm_reroot(m)
+    if type(k) == "table" then k = __mll_hm_scalar_key(k) end
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
     local old = t[k]
     if old == nil then return m end
     if m.frozen then
@@ -1777,7 +1794,7 @@ local function hashmap_delete(k, m)
     return h
 end
 local function hashmap_size(m)
-    m = __force(m)
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
     if m.t == nil then __mll_hm_reroot(m) end
     return m.n
 end
@@ -1791,7 +1808,7 @@ local function __mll_hm_lt(a, b)
 end
 local function hashmap_keys(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons(ks[i], r) end return r end
 local function hashmap_values(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = t[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons(v, r) end return r end
-local function hashmap_member(k, m) k = __mll_hm_scalar_key(k); m = __force(m); local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[k] ~= nil end
+local function hashmap_member(k, m) if type(k) == "table" then k = __mll_hm_scalar_key(k) end if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[k] ~= nil end
 local function show_HashMap(m) m = __force(m); local t = __mll_hm_reroot(m) local parts = {} if getmetatable(m) == __mll_hme_mt then for _, e in pairs(t) do parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end else for k, v in pairs(t) do if rawequal(v, __mll_hm_nilv) then v = nil end parts[#parts+1] = show(k) .. " -> " .. show(v) end end table.sort(parts) return "{" .. table.concat(parts, ", ") .. "}" end
 local function hashmap_fromList(xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end local k = __mll_hm_scalar_key(pair[1]) if t[k] == nil then n = n + 1 end t[k] = v cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hm_mt) end
 
@@ -1818,8 +1835,13 @@ local function __mll_key_maybe(enc, x) x = __force(x); if x == nil then return "
 -- flips and materializations mutate handles in place, so a handle keeps
 -- its metatable for life). Entries {key, value} are never nil, so the
 -- diff convention (v == nil means absent) holds here too.
+-- The encoded twins inline their entry forces exactly like the scalar
+-- write bodies above (a structural key stays a table, so its force is
+-- gated on the thunk metatable, not on type).
 local function __mll_hme_insert(enc, k, v, m)
-    k = __force(k); v = __force(v); m = __force(m)
+    if getmetatable(k) == __thunk_mt then k = __force(k) end
+    if getmetatable(v) == __thunk_mt then v = __force(v) end
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
     local ek = enc(k)
     if m.frozen then
         local t = {}
@@ -1829,7 +1851,8 @@ local function __mll_hme_insert(enc, k, v, m)
         t[ek] = {k, v}
         return setmetatable({t = t, n = n}, __mll_hme_mt)
     end
-    local t = __mll_hm_reroot(m)
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
     local old = t[ek]
     t[ek] = {k, v}
     local h = setmetatable({t = t, n = old == nil and m.n + 1 or m.n}, __mll_hme_mt)
@@ -1837,11 +1860,12 @@ local function __mll_hme_insert(enc, k, v, m)
     m.k, m.v, m.p = ek, old, h
     return h
 end
-local function __mll_hme_lookup(enc, k, m) m = __force(m); local t = m.t if t == nil then t = __mll_hm_reroot(m) end local e = t[enc(k)] if e == nil then return nil else return Just(e[2]) end end
+local function __mll_hme_lookup(enc, k, m) if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end local e = t[enc(k)] if e == nil then return nil else return Just(e[2]) end end
 local function __mll_hme_delete(enc, k, m)
-    m = __force(m)
+    if getmetatable(m) == __thunk_mt then m = __force(m) end
     local ek = enc(__force(k))
-    local t = __mll_hm_reroot(m)
+    local t = m.t
+    if t == nil then t = __mll_hm_reroot(m) end
     local old = t[ek]
     if old == nil then return m end
     if m.frozen then
@@ -1856,7 +1880,7 @@ local function __mll_hme_delete(enc, k, m)
     m.k, m.v, m.p = ek, old, h
     return h
 end
-local function __mll_hme_member(enc, k, m) m = __force(m); local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[enc(k)] ~= nil end
+local function __mll_hme_member(enc, k, m) if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[enc(k)] ~= nil end
 local function __mll_hme_fromList(enc, xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local p = __force(__mll_head(cur)) local k = __force(p[1]) local ek = enc(k) if t[ek] == nil then n = n + 1 end t[ek] = {k, __force(p[2])} cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hme_mt) end
 local function __mll_hme_sorted(cmp, m) m = __force(m); local t = __mll_hm_reroot(m) local es = {} for _, e in pairs(t) do es[#es+1] = e end table.sort(es, function(x, y) return cmp(x[1], y[1]) == 1 end) return es end
 local function __mll_hme_keys(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][1], r) end return r end

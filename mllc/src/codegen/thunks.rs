@@ -337,6 +337,30 @@ impl CodeGen {
                 {
                     return true;
                 }
+                // A saturated call to a scalar-HashMap runtime function
+                // returns a built value, never a thunk: the bodies return
+                // a fresh handle table (insert/delete/fromList), a
+                // Just-cell or nil (lookup), a number (size), a boolean
+                // (member), or a cons spine built with __mll_cons
+                // (keys/values/toList). Suppressed when the name denotes
+                // anything but the runtime function (a module definition,
+                // an inline candidate, a local binding). NOT a blanket
+                // runtime-prelude claim: some runtime bodies hand back raw
+                // thunks by design (__mll_head returns the head unforced).
+                if let TExprKind::Var(name) = &f.kind
+                    && matches!(
+                        (name.as_str(), n_args),
+                        ("hmInsert", 3)
+                            | ("hmLookup" | "hmDelete" | "hmMember", 2)
+                            | ("hmSize" | "hmKeys" | "hmValues" | "hmToList"
+                                | "hmFromList", 1)
+                    )
+                    && !self.module_fn_names.contains(name.as_str())
+                    && !self.inline_fns.contains_key(name.as_str())
+                    && !self.is_local_shadowed(name)
+                {
+                    return true;
+                }
                 // A direct application of a module-level function yields
                 // WHNF by the runtime's WHNF-return invariant (see the
                 // head-consumption contract in runtime.lua): every compiled
