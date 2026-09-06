@@ -97,6 +97,7 @@ excluded_reason() {
         cases/string_escapes)            echo "imports LString (Lua string FFI)";;
         cases/export_module)             echo "'export' keyword (Lua module export)";;
         cases/lib_data_map)              echo "mata-ll Data.Map API (values/mapPairs/...) is its own library, not containers";;
+        cases/lib_data_map_idiom)        echo "mata-ll Data.Map API is its own library, not containers";;
         cases/lib_data_set)              echo "mata-ll Data.Set/Data.Map API is its own library, not containers";;
         ghc/ghc_regr005)                 echo "HashMap builtins (Lua tables)";;
 
@@ -135,6 +136,7 @@ excluded_reason() {
         # Same twin module-resolution gap as qualified_import_instances (Q77
         # seam) — the case mixes a qualified alias with unqualified imports.
         cases/import_merge)              echo "qualified import: twin module resolution gap (Q77 seam)";;
+        cases/import_dual_forms)         echo "qualified import: twin module resolution gap (Q77 seam)";;
         # Same twin module-resolution gap as qualified_import_instances (the
         # known Q77 seam: the runghc twin cannot find qualified-imported
         # sibling modules). Lift this exclusion when Q77 fixes the seam.
@@ -144,6 +146,7 @@ excluded_reason() {
         # until the Q77 seam is fixed, so it is recorded here rather than in
         # the helper loop.
         cases/QualShapes)                echo "helper module for qualified twins (Q77 seam)";;
+        cases/DualForms)                 echo "helper module (twinned for import, no main)";;
 
         *) : ;;
     esac

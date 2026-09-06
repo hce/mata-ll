@@ -2301,6 +2301,13 @@ impl Checker {
                 Ok((TExpr::new(TExprKind::Paren(Box::new(te)), ty.clone()), ty, s))
             }
             Expr::OpFunc(op) => {
+                // A hidden operator (`import M hiding ((&))`) is reported
+                // as hidden, like a hidden Var, before the lookup — its
+                // declaration was renamed out of scope, so it is unbound.
+                if self.enforce_hidden && self.hidden_names.contains(op) {
+                    return Err(DiagnosticKind::Other(
+                        format!("'{}' is not exported by its module", op)));
+                }
                 if let Some(scheme) = env.lookup(op) {
                     let scheme = scheme.clone();
                     // A first-class operator section is a USE of the operator

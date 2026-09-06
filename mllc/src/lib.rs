@@ -319,7 +319,17 @@ fn compile_impl(
     let own_count = parsed.decls.iter()
         .filter(|d| !matches!(d, ast::Decl::Import { .. }))
         .count();
-    let hidden = module.hidden.clone();
+    // Names selection-hidden by an import (`import M (a)` leaves M's other
+    // names out of scope) are reported as "not exported" when used bare —
+    // unless the Prelude defines the same name, which is then simply what
+    // the bare name means (`import Data.Map (Map)` and a bare `filter`).
+    // The hidden declaration itself was renamed out of the way by module
+    // resolution, so nothing shadows the Prelude's.
+    let prelude_names = modules::declared_names(&prelude_decls);
+    let hidden: std::collections::HashSet<String> = module.hidden.iter()
+        .filter(|n| !prelude_names.contains(*n))
+        .cloned()
+        .collect();
     let prelude_count = prelude_decls.len();
     // Captured before the Prelude merge below discards it: provenance of the
     // resolved decl list, for per-declaration file attribution (`decl_files`).
@@ -340,12 +350,11 @@ fn compile_impl(
     // resolved path (spans index that file's text), and the root file's
     // display name (`CompileOptions::source_name`) for the user's own
     // region. `origin_spans` records (module_key, decl_count) runs in decl
-    // order, ending with the root's own region — but the qualified-alias
-    // copies an `import M as A` splices in carry NO span entry, so when the
-    // spans under-cover the import region the whole region is left
-    // unattributed (`None`, the historical rendering) rather than shifted
-    // onto the wrong file. Misattribution is the one failure mode this
-    // construction must not have.
+    // order, ending with the root's own region. Should the spans ever
+    // under-cover the import region, the whole region is left unattributed
+    // (`None`, the historical rendering) rather than shifted onto the wrong
+    // file. Misattribution is the one failure mode this construction must
+    // not have.
     let decl_files: Vec<Option<String>> = {
         let import_region = module.decls.len() - prelude_count - own_count;
         let import_spans = &origin_spans[..origin_spans.len().saturating_sub(1)];

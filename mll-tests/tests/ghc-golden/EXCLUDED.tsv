@@ -4,6 +4,7 @@ cases/DiamondLeaf	helper module (twinned for import, no main)
 cases/DiamondMid	helper module (twinned for import, no main)
 cases/DiamondShared	helper module (twinned for import, no main)
 cases/DiamondWest	helper module (twinned for import, no main)
+cases/DualForms	helper module (twinned for import, no main)
 cases/DupConEast	helper module (twinned for import, no main)
 cases/DupConWest	helper module (twinned for import, no main)
 cases/ExportHelper	helper module (twinned for import, no main)
@@ -48,12 +49,14 @@ cases/hashmap_nil_values	HashMap builtins (Lua tables)
 cases/hashmap_structural_keys	HashMap builtins (Lua tables)
 cases/hashmap_versions	HashMap builtins (Lua tables)
 cases/hm_lookup_case_fused	HashMap builtins (Lua tables)
+cases/import_dual_forms	qualified import: twin module resolution gap (Q77 seam)
 cases/import_merge	qualified import: twin module resolution gap (Q77 seam)
 cases/integer_json	Generics substrate + JSON FFI library
 cases/json_codec	JSON FFI library
 cases/lbit_64bit_boundary	LBit (Lua bit-op semantics, deliberately not Data.Bits)
 cases/lbit_strict_primitive_arg	LBit (Lua bit-op semantics)
 cases/lib_data_map	mata-ll Data.Map API (values/mapPairs/...) is its own library, not containers
+cases/lib_data_map_idiom	mata-ll Data.Map API is its own library, not containers
 cases/lib_data_set	mata-ll Data.Set/Data.Map API is its own library, not containers
 cases/lib_json	JSON FFI library
 cases/lib_lbit	LBit (Lua bit-op semantics)

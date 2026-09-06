@@ -2376,8 +2376,15 @@ impl Checker {
     /// needs from the passes before it and what it provides to the ones
     /// after. Do not reorder the calls without re-reading those contracts.
     pub fn check_module(&mut self, module: &Module) -> TModule {
-        // Register hidden names from import export control
-        self.hidden_names.extend(module.hidden.iter().cloned());
+        // Register hidden names from import export control. A builtin of
+        // the same name is what the bare name means (lib.rs drops the
+        // Prelude.mll-defined ones the same way): the hidden declaration
+        // was renamed out of the way by module resolution.
+        let hidden: Vec<String> = module.hidden.iter()
+            .filter(|n| !self.is_builtin(n))
+            .cloned()
+            .collect();
+        self.hidden_names.extend(hidden);
 
         self.preregister_families_and_aliases(module);
         self.scan_promotable_kinds(module);

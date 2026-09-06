@@ -243,13 +243,6 @@ impl ModuleLoader {
     }
 
     fn resolve_imports_keyed(&mut self, module: &Module, own_key: &str) -> Result<Module, String> {
-        let mut imported_decls: Vec<Decl> = Vec::new();
-        let mut own_decls: Vec<Decl> = Vec::new();
-        // Provenance of imported_decls (see Module::origin_spans) and the
-        // module keys already merged: a diamond's shared module arrives
-        // through every path, and must contribute its declarations once.
-        let mut out_spans: Vec<(String, usize)> = Vec::new();
-        let mut merged_origins: HashSet<String> = HashSet::new();
         // Import declarations grouped per module, in first-appearance order.
         // GHC MERGES repeated imports — each one contributes visibility
         // (`import M (a)` + `import M (b)` makes both visible; qualified
@@ -270,34 +263,16 @@ impl ModuleLoader {
                 import_forms.entry(key).or_default().push(items.clone());
             }
         }
-        // Aliases introduced by `import qualified X as M`. A use-site `M.foo`
-        // parses as the field-access shape `App(Var "foo", Con "M")`; once we
-        // know which `Con`s are really module aliases, we rewrite those into a
-        // single qualified `Var "M.foo"` that matches the prefixed declaration.
-        let qualified_aliases: HashSet<String> = module.decls.iter()
-            .filter_map(|d| match d {
-                Decl::Import { items: ImportItems::Qualified(alias), .. } => Some(alias.clone()),
-                _ => None,
-            })
-            .collect();
-        let mut hidden_names: HashSet<String> = module.hidden.clone();
-        // Names explicitly requested by a Specific import. A name can be
-        // merged in transitively by one import (and hidden because that import
-        // didn't request it) yet be explicitly imported by another; an
-        // explicit import must win, so these are subtracted from hidden_names
-        // at the end. Without this, `import M (a)` followed by `import L (b)`
-        // fails when M transitively pulls in b — b stays hidden forever.
-        let mut visible_names: HashSet<String> = HashSet::new();
-        // Names hidden because their defining module has an export list that
-        // omits them (genuinely private). Unlike selection-hiding, this is
-        // never overridden by an explicit import elsewhere.
-        let mut private_names: HashSet<String> = HashSet::new();
 
+        // Phase 1: resolve every imported module (recursively, through the
+        // cache) and capture its REGION — the declaration list with the
+        // origin runs that partition it — before any naming decision is
+        // made. Decisions are per origin module and must see every edge
+        // (a module can arrive directly, through several forms, and
+        // transitively through other imports, all in one importer).
+        let mut edges: Vec<Edge> = Vec::new();
         for key in &import_order {
             let module_path = &import_paths[key];
-            let forms = &import_forms[key];
-
-            // Recursively resolve imports in the imported module
             let resolved = if self.resolved.contains_key(key) {
                 self.resolved.get(key).unwrap().clone()
             } else if self.in_progress.contains(key) {
@@ -331,140 +306,209 @@ impl ModuleLoader {
             };
 
             // Include ALL non-import declarations for compilation
-            // (exported functions may depend on internal helpers).
-            // Track hidden names for typechecker enforcement. The
-            // resolved module is ours (one clone out of the cache
-            // above); its declarations move into the import list.
+            // (exported functions may depend on internal helpers). The
+            // resolved module is ours (one clone out of the cache above);
+            // its declarations move into the edge.
             let child_spans = resolved.origin_spans;
-            let all_decls: Vec<Decl> = resolved.decls.into_iter()
+            let decls: Vec<Decl> = resolved.decls.into_iter()
                 .filter(|d| !matches!(d, Decl::Import { .. }))
                 .collect();
             // The child's provenance spans, when they cover its
             // declaration list exactly (a resolved module always does; a
             // raw one — no spans — counts as one span of its own).
-            let child_spans: Vec<(String, usize)> =
-                if child_spans.iter().map(|(_, n)| n).sum::<usize>() == all_decls.len()
+            let spans: Vec<(String, usize)> =
+                if child_spans.iter().map(|(_, n)| n).sum::<usize>() == decls.len()
                     && !child_spans.is_empty()
                 {
                     child_spans
                 } else {
-                    vec![(key.clone(), all_decls.len())]
+                    vec![(key.clone(), decls.len())]
                 };
-
-            // Compute hidden names: names the module itself defines but
-            // does not export. Only the module's OWN declarations count
-            // — names merged in transitively from its imports are not
-            // "private to" this module just because its export list
-            // omits them, so we look at the loaded (pre-merge) module.
-            let parsed_exports = self.loaded.get(key).and_then(|m| m.exports.clone());
-            let own_decl_names: Vec<String> = self.loaded.get(key)
-                .map(|m| m.decls.iter()
-                    .filter(|d| !matches!(d, Decl::Import { .. }))
-                    .filter_map(decl_name)
-                    .collect())
-                .unwrap_or_default();
-            if let Some(ref exports) = parsed_exports {
-                for name in &own_decl_names {
-                    if !exports.contains(name) {
-                        private_names.insert(name.clone());
-                        hidden_names.insert(name.clone());
-                    }
-                }
-            }
-
-            // Split this module's import forms: the unqualified ones merge
-            // into ONE unqualified copy of the declarations (visibility is
-            // the union of what each form admits), and each distinct alias
-            // gets its own prefixed copy.
-            let item_names = |items: &[ImportItem]| -> HashSet<String> {
-                items.iter().map(|item| match item {
-                    ImportItem::Value(n) => n.clone(),
-                    ImportItem::TypeAll(n) => n.clone(),
-                    ImportItem::TypeOnly(n) => n.clone(),
-                }).collect()
-            };
-            let mut aliases: Vec<&String> = Vec::new();
-            let mut unqual: Vec<&ImportItems> = Vec::new();
-            for form in forms {
+            let mut unqual: Vec<ImportItems> = Vec::new();
+            let mut aliases: Vec<String> = Vec::new();
+            for form in &import_forms[key] {
                 match form {
                     ImportItems::Qualified(alias) => {
-                        if !aliases.contains(&alias) {
-                            aliases.push(alias);
+                        if !aliases.contains(alias) {
+                            aliases.push(alias.clone());
                         }
                     }
-                    other => unqual.push(other),
+                    other => unqual.push(other.clone()),
                 }
             }
+            edges.push(Edge { key: key.clone(), unqual, aliases, decls, spans });
+        }
 
-            if !unqual.is_empty() {
-                // Every explicitly requested name is recorded (the
-                // explicit-import-overrides-transitive-hiding rule below).
-                for form in &unqual {
-                    if let ImportItems::Specific(items) = form {
-                        for w in item_names(items) {
-                            visible_names.insert(w);
-                        }
-                    }
-                }
-                // A name is selection-hidden only when EVERY unqualified
-                // form hides it: a Specific list hides what it doesn't
-                // request, a Hiding list hides what it excludes, and a
-                // plain `import M` hides nothing.
-                let hidden_by_all = |n: &String| {
-                    unqual.iter().all(|form| match form {
-                        ImportItems::All => false,
-                        ImportItems::Specific(items) => !item_names(items).contains(n),
-                        ImportItems::Hiding(items) => item_names(items).contains(n),
-                        ImportItems::Qualified(_) => unreachable!("split above"),
-                    })
-                };
-                // The hidden bookkeeping is name-based and runs over EVERY
-                // declaration; the decl push dedups by origin module — a
-                // span whose module was already merged through an earlier
-                // import edge contributes nothing (its declarations are
-                // identical; a second copy tripped the duplicate-instance
-                // check and re-checked/re-generated every function).
-                let mut idx = 0;
-                for (okey, len) in &child_spans {
-                    let slice = &all_decls[idx..idx + len];
-                    idx += len;
-                    let fresh = merged_origins.insert(okey.clone());
-                    for d in slice {
-                        if let Some(n) = decl_name(d)
-                            && hidden_by_all(&n) {
-                                hidden_names.insert(n);
-                            }
-                        if fresh {
-                            imported_decls.push(d.clone());
-                        }
-                    }
-                    if fresh {
-                        out_spans.push((okey.clone(), *len));
-                    }
-                }
-                debug_assert_eq!(idx, all_decls.len(), "origin spans cover the decl list");
+        // Phase 2: decide, per origin module and declaration, whether the
+        // declaration is VISIBLE UNQUALIFIED here. A visible declaration
+        // keeps its bare name; one that is not (selection-hidden, private
+        // to its module's export list, or reachable only through an alias)
+        // is renamed to `Origin.name` — a canonical, importer-independent
+        // spelling that cannot collide with the Prelude, this module, or
+        // another import in the flattened namespace, and that every alias
+        // of the module resolves to. There is exactly ONE copy of every
+        // origin's declarations whatever the import forms: the former
+        // per-alias copies duplicated constructors and instances (B7).
+        //
+        // Explicit hiding on a direct import wins over transitive
+        // visibility through another import; an explicit request (`import
+        // M (a)`) wins over transitive hiding; a module's own export list
+        // wins over both. A declaration with an `export` signature keeps
+        // its bare name regardless — the Lua host's contract names it.
+        let mut hidden_names: HashSet<String> = module.hidden.clone();
+        // Names explicitly requested by a Specific import (see above).
+        let mut visible_names: HashSet<String> = HashSet::new();
+        // (origin, name) pairs, by the rule that decides them.
+        let mut private: HashSet<(String, String)> = HashSet::new();
+        let mut private_bases: HashSet<String> = HashSet::new();
+        let mut direct_hidden: HashSet<(String, String)> = HashSet::new();
+        let mut bare_votes: HashSet<(String, String)> = HashSet::new();
+        let mut exported: HashSet<(String, String)> = HashSet::new();
+
+        for edge in &edges {
+            // Names the directly imported module defines but does not
+            // export (genuinely private). Only the module's OWN
+            // declarations count: names merged in transitively are not
+            // "private to" it because its export list omits them.
+            for name in self.private_names_of(&edge.key) {
+                private.insert((edge.key.clone(), name.clone()));
+                private_bases.insert(name.clone());
+                hidden_names.insert(name);
             }
-            for alias in aliases {
-                // Prefix every declaration to `alias.name` AND rewrite
-                // intra-module references (a sibling function call, a
-                // reference to the module's own types) to the prefixed
-                // names, so the qualified namespace is self-contained
-                // and never collides with the Prelude.
-                let names = collect_module_names(&all_decls);
-                let qual = Qual { alias, names: &names };
-                for d in &all_decls {
-                    imported_decls.push(qual.decl(d));
+            for form in &edge.unqual {
+                if let ImportItems::Specific(items) = form {
+                    visible_names.extend(item_names(items));
                 }
-                // The copy is the same declarations from the same files:
-                // record its origin runs so diagnostics inside it are
-                // attributed to those files. (Without an entry the spans
-                // under-covered the import region and EVERY imported
-                // declaration's error rendered with the root file's text.)
-                for (okey, len) in &child_spans {
-                    out_spans.push((okey.clone(), *len));
+            }
+            for (okey, slice) in runs(&edge.spans, &edge.decls) {
+                for d in slice {
+                    let Some((n, _)) = renamable(d) else {
+                        // Class and instance names: global, never renamed;
+                        // the hidden bookkeeping still records them (as it
+                        // always did; only value uses are enforced).
+                        if !edge.unqual.is_empty()
+                            && let Some(n) = decl_name(d)
+                            && hidden_by_forms(&edge.unqual, &n)
+                        {
+                            hidden_names.insert(n);
+                        }
+                        continue;
+                    };
+                    let base = base_of(okey, n);
+                    if matches!(d, Decl::ExportSig { .. }) {
+                        exported.insert((okey.to_string(), base.to_string()));
+                    }
+                    // Prefixed by the child already: not visible through
+                    // this edge, whatever its forms say.
+                    if base != n || edge.unqual.is_empty() {
+                        continue;
+                    }
+                    if hidden_by_forms(&edge.unqual, base) {
+                        if okey == edge.key {
+                            direct_hidden.insert((okey.to_string(), base.to_string()));
+                        }
+                        hidden_names.insert(base.to_string());
+                    } else {
+                        bare_votes.insert((okey.to_string(), base.to_string()));
+                    }
                 }
             }
         }
+        let is_bare = |okey: &str, base: &str| -> bool {
+            let k = (okey.to_string(), base.to_string());
+            if exported.contains(&k) { return true; }
+            if private.contains(&k) { return false; }
+            if visible_names.contains(base) { return true; }
+            if direct_hidden.contains(&k) { return false; }
+            bare_votes.contains(&k)
+        };
+
+        // Phase 3: merge. Each edge's region is renamed from the child's
+        // spelling to this level's canonical one (both directions — the
+        // child may have hidden what we see, or see what we hide), then
+        // its runs go in once: a diamond's shared module arrives through
+        // every path and must contribute its declarations once.
+        let mut imported_decls: Vec<Decl> = Vec::new();
+        let mut out_spans: Vec<(String, usize)> = Vec::new();
+        let mut merged_origins: HashSet<String> = HashSet::new();
+        // alias -> (value name -> canonical, type name -> canonical)
+        let mut alias_table: HashMap<String, AliasNames> = HashMap::new();
+        // Bare canonical names decided by visibility (not by an export
+        // signature): these are in scope, so a hidden entry recorded for
+        // the same name by another edge or origin must not reject them.
+        let mut bare_seen: HashSet<String> = HashSet::new();
+        for edge in &edges {
+            let mut vals: HashMap<String, String> = HashMap::new();
+            let mut tys: HashMap<String, String> = HashMap::new();
+            for (okey, slice) in runs(&edge.spans, &edge.decls) {
+                for d in slice {
+                    let Some((n, is_ty)) = renamable(d) else { continue };
+                    let base = base_of(okey, n);
+                    let bare = is_bare(okey, base);
+                    if bare && !exported.contains(&(okey.to_string(), base.to_string())) {
+                        bare_seen.insert(base.to_string());
+                    }
+                    let canon = if bare { base.to_string() } else { format!("{okey}.{base}") };
+                    if canon != n {
+                        let map = if is_ty { &mut tys } else { &mut vals };
+                        map.insert(n.to_string(), canon);
+                    }
+                }
+            }
+            let renamed: Vec<Decl> = if vals.is_empty() && tys.is_empty() {
+                edge.decls.clone()
+            } else {
+                let no_cons = HashMap::new();
+                let rn = Rename { vals: &vals, tys: &tys, cons: &no_cons };
+                edge.decls.iter().map(|d| rn.decl(d)).collect()
+            };
+            for (okey, slice) in runs(&edge.spans, &renamed) {
+                if merged_origins.insert(okey.to_string()) {
+                    imported_decls.extend(slice.iter().cloned());
+                    out_spans.push((okey.to_string(), slice.len()));
+                }
+                for alias in &edge.aliases {
+                    let entry = alias_table.entry(alias.clone()).or_default();
+                    for d in slice {
+                        match d {
+                            // Class methods and record fields are global
+                            // names; `A.method` / `A.field` name them.
+                            Decl::ClassDecl { methods, .. } => {
+                                for m in methods {
+                                    entry.vals.entry(m.name.clone()).or_insert_with(|| m.name.clone());
+                                }
+                            }
+                            _ => {}
+                        }
+                        for f in con_record_fields(d) {
+                            entry.vals.entry(f.clone()).or_insert(f);
+                        }
+                        for c in decl_constructors(d) {
+                            entry.cons.entry(c.clone()).or_insert(c);
+                        }
+                        if let Some((n, is_ty)) = renamable(d) {
+                            let base = base_of(okey, n).to_string();
+                            // A name the module keeps private is not
+                            // reachable through an alias either.
+                            if private.contains(&(okey.to_string(), base.clone())) {
+                                continue;
+                            }
+                            let map = if is_ty { &mut entry.tys } else { &mut entry.vals };
+                            map.entry(base).or_insert_with(|| n.to_string());
+                        }
+                    }
+                }
+            }
+        }
+        // An explicit import of a name overrides transitive selection-hiding,
+        // but never a module's own export-list privacy; and a name that
+        // resolves to a visible declaration is not hidden.
+        for v in &visible_names {
+            if !private_bases.contains(v) {
+                hidden_names.remove(v);
+            }
+        }
+        hidden_names.retain(|n| !bare_seen.contains(n));
 
         // A constructor use `f M` and a qualified reference `M.f` parse to
         // the SAME shape — `App(Var "f", Con "M")` (field access desugars
@@ -488,9 +532,9 @@ impl ModuleLoader {
                 }
             })
             .collect();
-        let qualified_aliases: HashSet<String> = qualified_aliases.into_iter()
+        let qualified_aliases: HashSet<String> = alias_table.keys()
             .filter(|a| {
-                let keep = !ctor_names.contains(a);
+                let keep = !ctor_names.contains(*a);
                 if !keep {
                     self.warnings.push(crate::types::Diagnostic {
                         kind: crate::types::DiagnosticKind::Other(format!(
@@ -512,7 +556,32 @@ impl ModuleLoader {
                 }
                 keep
             })
+            .cloned()
             .collect();
+        // Use sites in this module: `A.f` (collapsed from the field-access
+        // shape), `A.T` and `A.C` resolve through the alias table to the one
+        // canonical declaration. A qualified TYPE or CONSTRUCTOR is
+        // unambiguous, so it resolves through every alias, including one a
+        // constructor shadows at the value level. An unknown `A.f` stays as written
+        // and is reported as unbound.
+        let mut own_vals: HashMap<String, String> = HashMap::new();
+        let mut own_tys: HashMap<String, String> = HashMap::new();
+        let mut own_cons: HashMap<String, String> = HashMap::new();
+        for (alias, names) in &alias_table {
+            for (base, canon) in &names.tys {
+                own_tys.insert(format!("{alias}.{base}"), canon.clone());
+            }
+            for (base, canon) in &names.cons {
+                own_cons.insert(format!("{alias}.{base}"), canon.clone());
+            }
+            if qualified_aliases.contains(alias) {
+                for (base, canon) in &names.vals {
+                    own_vals.insert(format!("{alias}.{base}"), canon.clone());
+                }
+            }
+        }
+        let own_rename = Rename { vals: &own_vals, tys: &own_tys, cons: &own_cons };
+        let mut own_decls: Vec<Decl> = Vec::new();
         for decl in &module.decls {
             if matches!(decl, Decl::Import { .. }) {
                 continue;
@@ -522,15 +591,12 @@ impl ModuleLoader {
             } else {
                 rewrite_qualified_uses_decl(decl.clone(), &qualified_aliases)
             };
+            let d = if own_vals.is_empty() && own_tys.is_empty() && own_cons.is_empty() {
+                d
+            } else {
+                own_rename.decl(&d)
+            };
             own_decls.push(d);
-        }
-
-        // An explicit import of a name overrides transitive selection-hiding,
-        // but never a module's own export-list privacy.
-        for v in &visible_names {
-            if !private_names.contains(v) {
-                hidden_names.remove(v);
-            }
         }
 
         // Merge: imported first, then own. The own span is keyed by this
@@ -541,15 +607,31 @@ impl ModuleLoader {
         Ok(Module { decls: imported_decls, exports: None, hidden: hidden_names, origin_spans: out_spans })
     }
 
+    /// The names a loaded module defines itself but leaves out of its
+    /// header export list (`module M (a, b) where`): private to it. Empty
+    /// without an export list, or for a module that is not loaded.
+    fn private_names_of(&self, key: &str) -> Vec<String> {
+        let Some(m) = self.loaded.get(key) else { return Vec::new() };
+        let Some(exports) = &m.exports else { return Vec::new() };
+        m.decls.iter()
+            .filter(|d| !matches!(d, Decl::Import { .. }))
+            .filter_map(decl_name)
+            .filter(|n| !exports.contains(n))
+            .collect()
+    }
+
     /// Flag unqualified imports that redefine an existing name *with an
     /// incompatible type* (against the Prelude, this file, or an earlier
     /// import). Because mata-ll flattens every import into one namespace, such a
     /// clash otherwise surfaces later as a baffling unification error deep inside
     /// the imported module. A matching type shape (an FFI re-declaration like
     /// `sqrt`, or the same definition re-exported through a diamond import) is
-    /// harmless and not flagged. Call after `resolve_imports`, which populates
-    /// the resolved-module cache this reads. `reserved` maps globally-provided
-    /// names (the Prelude's) to their type shapes.
+    /// harmless and not flagged. Only the names the import form makes VISIBLE
+    /// take part: a name the form hides, or that the module keeps private, is
+    /// renamed out of the way by `resolve_imports` (an `export`ed name keeps
+    /// its bare name and is checked). Call after `resolve_imports`, which
+    /// populates the resolved-module cache this reads. `reserved` maps
+    /// globally-provided names (the Prelude's) to their type shapes.
     pub fn check_import_collisions(
         &self,
         module: &Module,
@@ -565,18 +647,30 @@ impl ModuleLoader {
 
         for d in &module.decls {
             let Decl::Import { module_path, items } = d else { continue };
-            // Qualified imports are renamed to `Alias.name` and can't collide.
+            // Qualified imports are renamed to `Module.name` and can't collide.
             if matches!(items, ImportItems::Qualified(_)) {
                 continue;
             }
             let key = module_path.join(".");
             // Skip if the module didn't resolve (e.g. an import cycle).
             let Some(resolved) = self.resolved.get(&key) else { continue };
+            let private: HashSet<String> = self.private_names_of(&key).into_iter().collect();
+            let exported: HashSet<String> = resolved.decls.iter()
+                .filter_map(|d| match d {
+                    Decl::ExportSig { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
+            let visible = |name: &String| -> bool {
+                exported.contains(name)
+                    || (!private.contains(name) && !hidden_by_forms(std::slice::from_ref(items), name))
+            };
 
             let shapes = signature_shapes(&resolved.decls);
             let mut collisions: Vec<(String, String)> = Vec::new();
             for (name, shape) in &shapes {
-                if let Some((src, claimed_shape)) = claimed.get(name)
+                if visible(name)
+                    && let Some((src, claimed_shape)) = claimed.get(name)
                     && claimed_shape != shape
                 {
                     collisions.push((name.clone(), src.clone()));
@@ -588,70 +682,175 @@ impl ModuleLoader {
             }
             // Later imports compare against this one too.
             for (name, shape) in shapes {
-                claimed.entry(name).or_insert((key.clone(), shape));
+                if visible(&name) {
+                    claimed.entry(name).or_insert((key.clone(), shape));
+                }
             }
         }
         Ok(())
     }
 }
 
-/// The top-level names a module defines, split by namespace. Used to rewrite
-/// intra-module references when the module is imported `qualified`: only names
-/// the module actually defines get the alias prefix — references to the Prelude
-/// or to intrinsics (`elem`, `zip`, `hmInsert`, …) are left alone.
-struct ModuleNames {
-    /// Value-level bindings: functions, type signatures, exports.
-    vals: HashSet<String>,
-    /// Type-level names: data, newtype, alias, type-family.
-    tys: HashSet<String>,
+/// One import edge of the module being resolved: the imported module, the
+/// forms it is imported through, and its resolved region — the child's
+/// declarations (its own and its imports') with the origin runs that
+/// partition them, in the CHILD's spelling.
+struct Edge {
+    key: String,
+    unqual: Vec<ImportItems>,
+    aliases: Vec<String>,
+    decls: Vec<Decl>,
+    spans: Vec<(String, usize)>,
 }
 
-fn collect_module_names(decls: &[Decl]) -> ModuleNames {
-    let mut vals = HashSet::new();
-    let mut tys = HashSet::new();
-    for d in decls {
-        match d {
-            Decl::FunDef { name, .. }
-            | Decl::TypeSig { name, .. }
-            | Decl::ExportSig { name, .. } => { vals.insert(name.clone()); }
-            Decl::DataDef { name, .. } | Decl::NewtypeDef { name, .. }
-            | Decl::TypeAlias { name, .. } | Decl::TypeFamily { name, .. } => {
-                tys.insert(name.clone());
-            }
-            _ => {}
+/// What an alias names: the base name of every declaration in its module's
+/// region, by namespace, mapped to that declaration's canonical name here.
+#[derive(Default)]
+struct AliasNames {
+    vals: HashMap<String, String>,
+    tys: HashMap<String, String>,
+    /// Constructors are global names: `A.C` names `C`.
+    cons: HashMap<String, String>,
+}
+
+/// The origin runs of a region: `(origin key, declarations)` slices.
+fn runs<'a>(spans: &'a [(String, usize)], decls: &'a [Decl]) -> Vec<(&'a str, &'a [Decl])> {
+    let mut out = Vec::with_capacity(spans.len());
+    let mut idx = 0;
+    for (okey, len) in spans {
+        out.push((okey.as_str(), &decls[idx..idx + len]));
+        idx += len;
+    }
+    debug_assert_eq!(idx, decls.len(), "origin spans cover the decl list");
+    out
+}
+
+/// The declarations a naming decision applies to: value bindings (function,
+/// signature, export signature — `false`) and type-level names (data,
+/// newtype, alias, family — `true`). Constructors, classes, instances and
+/// class methods are global names and never renamed.
+fn renamable(decl: &Decl) -> Option<(&str, bool)> {
+    match decl {
+        Decl::FunDef { name, .. } | Decl::TypeSig { name, .. } | Decl::ExportSig { name, .. } =>
+            Some((name, false)),
+        Decl::DataDef { name, .. } | Decl::NewtypeDef { name, .. }
+        | Decl::TypeAlias { name, .. } | Decl::TypeFamily { name, .. } => Some((name, true)),
+        _ => None,
+    }
+}
+
+/// The bare name of a declaration of origin `okey`, whether the level that
+/// spelled it saw it bare or had renamed it to `okey.name`.
+fn base_of<'n>(okey: &str, name: &'n str) -> &'n str {
+    name.strip_prefix(okey)
+        .and_then(|rest| rest.strip_prefix('.'))
+        .filter(|rest| !rest.is_empty())
+        .unwrap_or(name)
+}
+
+/// Record field names declared by a data or newtype declaration.
+fn con_record_fields(decl: &Decl) -> Vec<String> {
+    match decl {
+        Decl::DataDef { constructors, .. } => constructors.iter()
+            .flat_map(|c| match &c.fields {
+                ConstructorFields::Named(fs) => fs.iter().map(|f| f.name.clone()).collect(),
+                ConstructorFields::Positional(_) => Vec::new(),
+            })
+            .collect(),
+        Decl::NewtypeDef { field: Some(f), .. } => vec![f.clone()],
+        _ => Vec::new(),
+    }
+}
+
+fn item_names(items: &[ImportItem]) -> HashSet<String> {
+    items.iter().map(|item| match item {
+        ImportItem::Value(n) => n.clone(),
+        ImportItem::TypeAll(n) => n.clone(),
+        ImportItem::TypeOnly(n) => n.clone(),
+    }).collect()
+}
+
+/// A name is selection-hidden only when EVERY unqualified form hides it: a
+/// Specific list hides what it doesn't request, a Hiding list hides what it
+/// excludes, and a plain `import M` hides nothing. (No forms hide nothing.)
+fn hidden_by_forms(forms: &[ImportItems], n: &str) -> bool {
+    !forms.is_empty() && forms.iter().all(|form| match form {
+        ImportItems::All => false,
+        ImportItems::Specific(items) => !item_names(items).contains(n),
+        ImportItems::Hiding(items) => item_names(items).contains(n),
+        ImportItems::Qualified(_) => unreachable!("qualified forms are split off"),
+    })
+}
+
+/// Renames declarations and the references to them by two name maps (values
+/// and types), scope-aware: a reference is rewritten only when it names a
+/// module-level binding, never a local that shadows it. Used to move a
+/// region between one level's spelling and another's (`filter` <->
+/// `Data.Map.filter`) and to resolve an importer's qualified uses (`M.filter`
+/// -> the canonical name). Constructors, classes, instances and class
+/// methods are global names and are never touched.
+struct Rename<'a> {
+    vals: &'a HashMap<String, String>,
+    tys: &'a HashMap<String, String>,
+    /// Qualified constructor spellings (`A.C`) to the global constructor;
+    /// empty for a region rename.
+    cons: &'a HashMap<String, String>,
+}
+
+impl Rename<'_> {
+    fn v(&self, name: &str, bound: &HashSet<String>) -> String {
+        if !bound.contains(name)
+            && let Some(c) = self.vals.get(name)
+        {
+            c.clone()
+        } else {
+            name.to_string()
         }
     }
-    ModuleNames { vals, tys }
-}
 
-/// Prefixes a `qualified`-imported module's declarations with its alias and
-/// rewrites references among them. Constructors and class/instance names are
-/// left global (a qualified `Con` can't be written at a use site anyway), so
-/// only value and type references are prefixed.
-struct Qual<'a> {
-    alias: &'a str,
-    names: &'a ModuleNames,
-}
+    /// A declared value name: never shadowed.
+    fn dv(&self, name: &str) -> String {
+        self.vals.get(name).cloned().unwrap_or_else(|| name.to_string())
+    }
 
-impl Qual<'_> {
-    fn q(&self, name: &str) -> String {
-        format!("{}.{}", self.alias, name)
+    fn t(&self, name: &str) -> String {
+        self.tys.get(name).cloned().unwrap_or_else(|| name.to_string())
+    }
+
+    fn c(&self, name: &str) -> String {
+        self.cons.get(name).cloned().unwrap_or_else(|| name.to_string())
+    }
+
+    fn pattern(&self, p: &Pattern) -> Pattern {
+        if self.cons.is_empty() {
+            return p.clone();
+        }
+        match p {
+            Pattern::Constructor { name, args } => Pattern::Constructor {
+                name: self.c(name),
+                args: args.iter().map(|a| self.pattern(a)).collect(),
+            },
+            Pattern::Paren(inner) => Pattern::Paren(Box::new(self.pattern(inner))),
+            Pattern::Tuple(elems) => Pattern::Tuple(elems.iter().map(|e| self.pattern(e)).collect()),
+            Pattern::As(n, inner) => Pattern::As(n.clone(), Box::new(self.pattern(inner))),
+            Pattern::Var(_) | Pattern::Wildcard | Pattern::LitPat(_) => p.clone(),
+        }
     }
 
     fn decl(&self, decl: &Decl) -> Decl {
         match decl {
             Decl::TypeSig { name, ty } => Decl::TypeSig {
-                name: self.q(name), ty: self.ty(ty),
+                name: self.dv(name), ty: self.ty(ty),
             },
             Decl::FunDef { name, clauses } => Decl::FunDef {
-                name: self.q(name),
+                name: self.dv(name),
                 clauses: clauses.iter().map(|c| self.clause(c)).collect(),
             },
             Decl::ExportSig { name, ty } => Decl::ExportSig {
-                name: self.q(name), ty: self.ty(ty),
+                name: self.dv(name), ty: self.ty(ty),
             },
             Decl::DataDef { name, type_vars, constructors, deriving } => Decl::DataDef {
-                name: self.q(name),
+                name: self.t(name),
                 type_vars: type_vars.clone(),
                 // Rewrite field types (sibling type references) but leave the
                 // constructor names global.
@@ -659,20 +858,20 @@ impl Qual<'_> {
                 deriving: deriving.clone(),
             },
             Decl::NewtypeDef { name, type_vars, con_name, field, inner, deriving } => Decl::NewtypeDef {
-                name: self.q(name),
+                name: self.t(name),
                 type_vars: type_vars.clone(),
-                // The constructor and selector are values, not sibling type
-                // references; the deriving classes are global names.
+                // The constructor and selector are global names; the
+                // deriving classes too.
                 con_name: con_name.clone(),
                 field: field.clone(),
                 inner: self.ty(inner),
                 deriving: deriving.clone(),
             },
             Decl::TypeAlias { name, params, ty } => Decl::TypeAlias {
-                name: self.q(name), params: params.clone(), ty: self.ty(ty),
+                name: self.t(name), params: params.clone(), ty: self.ty(ty),
             },
             Decl::TypeFamily { name, params, equations } => Decl::TypeFamily {
-                name: self.q(name),
+                name: self.t(name),
                 params: params.clone(),
                 equations: equations.iter().map(|eq| TypeFamilyEq {
                     args: eq.args.iter().map(|t| self.ty(t)).collect(),
@@ -681,10 +880,10 @@ impl Qual<'_> {
             },
             // Class and instance NAMES stay global (a qualified class name
             // can't be written at a use site anyway), but their heads and
-            // bodies refer to the module's own types and values, which ARE
-            // prefixed — so an instance head names the prefixed type and
-            // its method bodies (and class default bodies) call the
-            // prefixed siblings.
+            // bodies refer to the module's own types and values, which
+            // may be renamed — so an instance head names the renamed type
+            // and its method bodies (and class default bodies) call the
+            // renamed siblings.
             Decl::InstanceDecl { class_name, target_type, context, methods } => Decl::InstanceDecl {
                 class_name: class_name.clone(),
                 target_type: self.ty(target_type),
@@ -731,18 +930,19 @@ impl Qual<'_> {
             fields,
             gadt_type: c.gadt_type.as_ref().map(|t| self.ty(t)),
             existential_vars: c.existential_vars.clone(),
-            existential_constraints: c.existential_constraints.clone(),
+            existential_constraints: c.existential_constraints.iter()
+                .map(|c| self.constraint(c)).collect(),
         }
     }
 
     fn clause(&self, c: &Clause) -> Clause {
         // Clause parameters and where-bound names shadow module-level names,
-        // so references to them must not be prefixed.
+        // so references to them must not be renamed.
         let mut bound = HashSet::new();
         for p in &c.patterns { collect_pattern_vars(p, &mut bound); }
         for ld in &c.where_binds { bound.insert(ld.name.clone()); }
         Clause {
-            patterns: c.patterns.clone(),
+            patterns: c.patterns.iter().map(|p| self.pattern(p)).collect(),
             guards: c.guards.iter().map(|g| Guard {
                 condition: self.expr(&g.condition, &bound),
                 body: self.expr(&g.body, &bound),
@@ -758,50 +958,37 @@ impl Qual<'_> {
         for p in &ld.patterns { collect_pattern_vars(p, &mut bound); }
         LocalDef {
             name: ld.name.clone(),
-            patterns: ld.patterns.clone(),
+            patterns: ld.patterns.iter().map(|p| self.pattern(p)).collect(),
             body: self.expr(&ld.body, &bound),
         }
     }
 
     fn expr(&self, e: &Expr, bound: &HashSet<String>) -> Expr {
         match e {
-            // The rename decisions: qualify a name only when it refers to a
-            // module-level sibling, not a local binding.
-            Expr::Var(n) => {
-                if !bound.contains(n) && self.names.vals.contains(n) {
-                    Expr::Var(self.q(n))
-                } else {
-                    Expr::Var(n.clone())
-                }
-            }
-            Expr::OpFunc(n) => {
-                // Backtick sections `(`f`)` carry a plain function name here.
-                if !bound.contains(n) && self.names.vals.contains(n) {
-                    Expr::OpFunc(self.q(n))
-                } else {
-                    Expr::OpFunc(n.clone())
-                }
-            }
+            // The rename decisions: a name is rewritten only when it refers
+            // to a module-level binding, not a local one.
+            Expr::Var(n) => Expr::Var(self.v(n, bound)),
+            // Constructors are global; only a qualified spelling changes.
+            Expr::Con(n) => Expr::Con(self.c(n)),
+            Expr::RecordCon { constructor, fields } => Expr::RecordCon {
+                constructor: self.c(constructor),
+                fields: fields.iter().map(|(f, e)| (f.clone(), self.expr(e, bound))).collect(),
+            },
+            // Backtick sections `(`f`)` carry a plain function name here.
+            Expr::OpFunc(n) => Expr::OpFunc(self.v(n, bound)),
             // An InfixApp's op is a NAME too — a sibling operator (`a <+> b`)
             // or a sibling function used backtick-infix (`a `combine` b`).
-            // Their DEFINITIONS are prefixed like every value, so in-module
-            // infix uses must follow; this arm was missing, and the uniform
-            // descent below only visits subEXPRESSIONS, so the op stayed
-            // bare and resolved to nothing ("undefined '<+>'").
-            Expr::InfixApp { op, lhs, rhs } => {
-                let op = if !bound.contains(op) && self.names.vals.contains(op) {
-                    self.q(op)
-                } else {
-                    op.clone()
-                };
-                Expr::InfixApp {
-                    op,
-                    lhs: Box::new(self.expr(lhs, bound)),
-                    rhs: Box::new(self.expr(rhs, bound)),
-                }
-            }
+            // Their DEFINITIONS are renamed like every value, so in-module
+            // infix uses must follow; the uniform descent below only visits
+            // subEXPRESSIONS, so without this arm the op stayed bare and
+            // resolved to nothing ("undefined '<+>'").
+            Expr::InfixApp { op, lhs, rhs } => Expr::InfixApp {
+                op: self.v(op, bound),
+                lhs: Box::new(self.expr(lhs, bound)),
+                rhs: Box::new(self.expr(rhs, bound)),
+            },
             // Ascriptions carry a type; the generic descent visits only
-            // expressions, and sibling type names need qualifying too.
+            // expressions, and type names need renaming too.
             Expr::Ascription(x, t) =>
                 Expr::Ascription(Box::new(self.expr(x, bound)), self.ty(t)),
             // Binder nodes: their children see an extended (or, for do-blocks,
@@ -818,7 +1005,7 @@ impl Qual<'_> {
                     let mut b = bound.clone();
                     collect_pattern_vars(&br.pattern, &mut b);
                     CaseBranch {
-                        pattern: br.pattern.clone(),
+                        pattern: self.pattern(&br.pattern),
                         guards: br.guards.iter().map(|g| Guard {
                             condition: self.expr(&g.condition, &b),
                             body: self.expr(&g.body, &b),
@@ -839,7 +1026,7 @@ impl Qual<'_> {
                 let mut b = bound.clone();
                 Expr::Do(stmts.iter().map(|s| self.dostmt(s, &mut b)).collect())
             }
-            // Everything else neither names a sibling nor binds anything:
+            // Everything else neither names a binding nor binds anything:
             // descend uniformly with the current scope.
             other => other.clone().map_subexprs(&mut |c| self.expr(&c, bound)),
         }
@@ -863,7 +1050,7 @@ impl Qual<'_> {
             DoStmt::PatternBind { pattern, expr, span } => {
                 let e = self.expr(expr, bound);
                 collect_pattern_vars(pattern, bound);
-                DoStmt::PatternBind { pattern: pattern.clone(), expr: e, span: *span }
+                DoStmt::PatternBind { pattern: self.pattern(pattern), expr: e, span: *span }
             }
         }
     }
@@ -871,7 +1058,7 @@ impl Qual<'_> {
     fn ty(&self, t: &Type) -> Type {
         match t {
             Type::Con(n) => {
-                if self.names.tys.contains(n) { Type::Con(self.q(n)) } else { Type::Con(n.clone()) }
+                Type::Con(self.t(n))
             }
             Type::Var(_) | Type::Unit | Type::Promoted(_) => t.clone(),
             Type::App(a, b) => Type::App(Box::new(self.ty(a)), Box::new(self.ty(b))),
@@ -1122,5 +1309,20 @@ fn decl_name(decl: &Decl) -> Option<String> {
         Decl::Import { .. } => None,
         Decl::FixityDecl { .. } => None,
         Decl::TypeAlias { name, .. } => Some(name.clone()),
+    }
+}
+
+/// Every name a group of declarations declares (values, types, classes),
+/// as `decl_name` sees them.
+pub fn declared_names(decls: &[Decl]) -> HashSet<String> {
+    decls.iter().filter_map(decl_name).collect()
+}
+
+/// Constructor names declared by a data or newtype declaration.
+fn decl_constructors(decl: &Decl) -> Vec<String> {
+    match decl {
+        Decl::DataDef { constructors, .. } => constructors.iter().map(|c| c.name.clone()).collect(),
+        Decl::NewtypeDef { con_name: Some(c), .. } => vec![c.clone()],
+        _ => Vec::new(),
     }
 }

@@ -163,6 +163,12 @@ span :: (a -> Bool) -> [a] -> ([a], [a])
 span p xs = (takeWhile p xs, dropWhile p xs)
 
 -- Pair up two lists element-wise, stopping at the shorter. Lazy in the spine.
+-- Association-list lookup: the first pair whose key matches (GHC's
+-- `lookup`, in the Prelude). Data.Map's `lookup` is the alias-qualified one.
+lookup :: Eq a => a -> [(a, b)] -> Maybe b
+lookup _ [] = Nothing
+lookup k ((k2, v) : rest) = if k == k2 then Just v else lookup k rest
+
 zip :: [a] -> [b] -> [(a, b)]
 zip [] _ = []
 zip _ [] = []

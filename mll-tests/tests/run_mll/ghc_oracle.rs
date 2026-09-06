@@ -363,6 +363,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_instance_infix_pattern_methods, "cases", "instance_infix_pattern_methods.mll"),
         (ghc_oracle_let_semicolon_separators, "cases", "let_semicolon_separators.mll"),
         (ghc_oracle_repeat_cycle, "cases", "repeat_cycle.mll"),
+        (ghc_oracle_prelude_lookup, "cases", "prelude_lookup.mll"),
         (ghc_oracle_ascription_instantiation, "cases", "ascription_instantiation.mll"),
         (ghc_oracle_record_dot_sections, "cases", "record_dot_sections.mll"),
         (ghc_oracle_pure_discard_spellings, "cases", "pure_discard_spellings.mll"),

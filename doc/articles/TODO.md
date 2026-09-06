@@ -180,7 +180,21 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
 
 ### Rejections of valid programs / wrong diagnostics
 
-- [ ] **B7 Same module imported unqualified and qualified is rejected.**
+- [x] **B7 Same module imported unqualified and qualified is rejected —
+      fixed (2026-09-06, uncommitted): module resolution keeps ONE canonical
+      copy per origin module (`Edge`/`runs`/`renamable`/`base_of` in
+      modules.rs). A declaration visible unqualified keeps its bare name;
+      one that is not (selection-hidden, private, alias-only) is renamed
+      to `Origin.name` — importer-independent, so every alias resolves to
+      it through the alias table (`AliasNames`), and it cannot collide
+      with the Prelude or another import. `Rename` (was `Qual`) moves a
+      region between spellings, scope-aware. The collision check only
+      sees visible names; hidden names that a builtin or Prelude function
+      also defines keep that meaning (`import Data.Map (Map)` + bare
+      `filter`). Qualified constructors (`M.C`, expressions and patterns),
+      class methods and record fields resolve through the alias. Prelude
+      gained the association-list `lookup`. Cases import_dual_forms.mll,
+      lib_data_map_idiom.mll, prelude_lookup.mll.**
       `import Q (T(..))` + `import qualified Q as Q` (or two aliases) →
       false "Duplicate data constructor 'MkT'" and "Cannot unify 'T' with
       'Q.T'". modules.rs:430-441 `Qual::decl` COPIES declarations,
@@ -357,8 +371,8 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       COMPILER.md:285 "880+ tests" is 1273. DIVERGENCES.md "None" is
       relative to the twinned corpus only (HashMap, existential show, NaN
       excluded) — say so. HASKDIFF brace-layout gap should name `let`
-      (B16). HASKDIFF should document the dual-import limitation (B7) and
-      the missing `Monad (Either e)` (C10). lib.rs:337-341 "misattribution
+      (B16). HASKDIFF documents the dual-import forms (B7, fixed) and should
+      document the missing `Monad (Either e)` (C10). lib.rs:337-341 "misattribution
       is the one failure mode this construction must not have" (B8).
 
 ## Completed

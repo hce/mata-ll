@@ -263,6 +263,7 @@ mll_test!(gadt_unnamed_universal, "gadt_unnamed_universal.mll");
 mll_test!(radix_literals, "radix_literals.mll");
 mll_test!(qualified_operator_module, "qualified_operator_module.mll");
 mll_test!(import_merge, "import_merge.mll");
+mll_test!(import_dual_forms, "import_dual_forms.mll");
 mll_test!(alias_ctor_collision, "alias_ctor_collision.mll");
 mll_test!(dot_spacing, "dot_spacing.mll");
 mll_test!(infix_method_defs, "infix_method_defs.mll");
@@ -534,6 +535,7 @@ mll_test!(instance_infix_pattern_methods, "instance_infix_pattern_methods.mll");
 // `;` separators in let groups; the Prelude's repeat/cycle.
 mll_test!(let_semicolon_separators, "let_semicolon_separators.mll");
 mll_test!(repeat_cycle, "repeat_cycle.mll");
+mll_test!(prelude_lookup, "prelude_lookup.mll");
 // Ascription variables instantiated afresh after the rigid check; record
 // field selector sections `(.field)`.
 mll_test!(ascription_instantiation, "ascription_instantiation.mll");
@@ -702,6 +704,7 @@ ghc_test!(ghc_regr020, "ghc_regr020.mll");
 
 // Library module tests (need lib/ search path)
 mll_lib_test!(lib_lstring, "lib_lstring.mll");
+mll_lib_test!(lib_data_map_idiom, "lib_data_map_idiom.mll");
 // GHC-parity string escape decoding on the lexer side: shorthand \a \b \f \v,
 // decimal/octal/hex numeric escapes with maximal munch (the \05-is-one-byte
 // fix), named control escapes (\SOH..\US, \SP, \DEL), the \& empty separator,
@@ -777,6 +780,7 @@ fn mll_case_registry_is_complete() {
         "AliasCtor.mll",
         "DupConEast.mll",
         "DupConWest.mll",
+        "DualForms.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")

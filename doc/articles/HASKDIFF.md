@@ -198,6 +198,16 @@ one form it does *not* support is an unqualified rename: `import Module as M`
 without `qualified` is a parse error. Names from a plain (non-qualified)
 import go directly into scope.
 
+One module may be imported through several forms at once, as in GHC:
+`import Data.Map (Map)` next to `import qualified Data.Map as M`, or two
+aliases of one module. All forms name the same declarations — the type
+is one type, instances are declared once — and only the names a form
+makes visible unqualified enter the flat namespace; the rest are
+reachable through an alias (`M.filter`) while a bare `filter` keeps its
+Prelude meaning. Qualified constructors (`M.Just`, `M.Rect 1 2`, in
+expressions and patterns), class methods and record fields resolve
+through an alias too.
+
 ## HashMap, Data.Map, and Data.Set
 
 `HashMap k v` is the primitive, backed by Lua tables — and since the
@@ -213,8 +223,9 @@ typeclass-based interface. (The `hashmap_*` names visible in emitted
 Lua are runtime internals, not source names.) For the familiar
 `Data.Map` spelling, `import qualified Data.Map as M` provides
 `M.lookup`, `M.insert`, and friends as a thin wrapper over `HashMap`
-— the import must be qualified; a plain `import Data.Map` is rejected
-because its names clash with the Prelude.
+— the operations must come in qualified (a plain `import Data.Map` is
+rejected because its names clash with the Prelude); the type may be
+imported unqualified next to the alias, `import Data.Map (Map)`.
 
 Keys are any `Hashable` type: the scalars, and structurally tuples,
 lists, and `Maybe` of hashables — `HashMap (Int, Int) v` (grids,

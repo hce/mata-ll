@@ -1517,6 +1517,7 @@ impl Parser {
                 let pat = match self.peek().clone() {
                     Token::UpperIdent(name) => {
                         self.advance();
+                        let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
                         match name.as_str() {
                             "True" => Pattern::LitPat(Literal::Bool(true)),
                             "False" => Pattern::LitPat(Literal::Bool(false)),
@@ -3825,6 +3826,8 @@ impl Parser {
             }
             Token::UpperIdent(name) => {
                 self.advance();
+                // A module-qualified constructor: `M.Just`, `M.Rect`.
+                let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
                 match name.as_str() {
                     "True" => Ok(Expr::Lit(Literal::Bool(true))),
                     "False" => Ok(Expr::Lit(Literal::Bool(false))),
@@ -3879,6 +3882,7 @@ impl Parser {
     fn parse_pattern_inner(&mut self) -> PResult<Pattern> {
         let lhs = if let Token::UpperIdent(name) = self.peek().clone() {
             self.advance();
+            let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
             // True/False are literal patterns, not constructors
             match name.as_str() {
                 "True" => Pattern::LitPat(Literal::Bool(true)),
@@ -4059,6 +4063,7 @@ impl Parser {
             // appear in argument position, e.g. `(T R a x b)`.
             Token::UpperIdent(name) => {
                 self.advance();
+                let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
                 match name.as_str() {
                     "True" => Ok(Pattern::LitPat(Literal::Bool(true))),
                     "False" => Ok(Pattern::LitPat(Literal::Bool(false))),

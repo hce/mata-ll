@@ -442,6 +442,42 @@ fn single_specific_import_still_hides_unrequested_names() {
     );
 }
 
+// A name an import list leaves out is renamed out of the flat namespace
+// (so it cannot clash with the Prelude or another import), yet a bare use
+// must still be diagnosed as the hidden name it is — not as an unbound
+// variable — and the alias form of the same module must reach it.
+#[test]
+fn dual_form_import_keeps_hidden_name_diagnostic() {
+    let source = "import DualForms (Shape(..))\n\
+                  import qualified DualForms as D\n\
+                  main :: IO ()\n\
+                  main = print (scale 1)\n";
+    let msg = match compile(source, Path::new("tests/cases"), &[]) {
+        Err(e) => format!("{}", e),
+        Ok(_) => panic!("expected scale to stay hidden behind the specific import list"),
+    };
+    assert!(
+        msg.contains("'scale' is not exported"),
+        "expected a hidden-name error for scale: {msg}"
+    );
+    let ok = "import DualForms (Shape(..))\n\
+              import qualified DualForms as D\n\
+              main :: IO ()\n\
+              main = print (D.scale 1)\n";
+    assert!(compile(ok, Path::new("tests/cases"), &[]).is_ok(),
+        "the alias must reach the name the list hid");
+    // A hidden name the module keeps PRIVATE is unreachable through the
+    // alias too, and reported as unbound under its qualified spelling.
+    let private = "import qualified DualForms as D\n\
+                   main :: IO ()\n\
+                   main = print D.hidden\n";
+    let msg = match compile(private, Path::new("tests/cases"), &[]) {
+        Err(e) => format!("{}", e),
+        Ok(_) => panic!("expected the private name to be unreachable"),
+    };
+    assert!(msg.contains("D.hidden"), "expected the qualified spelling in: {msg}");
+}
+
 // A digit of the wrong base directly after a radix literal (`0o18`,
 // `0b102`) can only be a mistake: lexing it as two adjacent numbers
 // would surface as an application and a baffling type error, so it is

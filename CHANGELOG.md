@@ -31,6 +31,24 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **One module through several import forms at once.** `import Data.Map
+  (Map)` next to `import qualified Data.Map as M`, or two aliases of one
+  module, now name the SAME declarations: module resolution keeps one
+  canonical copy per origin module and resolves every alias to it, so the
+  type is one type and its instances are declared once. Before, each
+  alias spliced in a prefixed COPY of the module, which duplicated the
+  constructors ("Duplicate data constructor"), made `T` and `M.T`
+  different types, and declared an instance on a builtin type once per
+  form. Only the names an import form makes visible enter the flat
+  namespace (the collision check used to reject `import Data.Map (Map)`
+  over `null`); the rest are renamed out of the way and stay reachable
+  through the alias, while a bare `filter` or `null` keeps its Prelude
+  meaning. Qualified constructors (`M.Rect 1 2`, in expressions, record
+  construction and patterns), class methods and record fields resolve
+  through an alias as in GHC.
+- **Prelude `lookup`** — GHC's association-list lookup, `Eq a => a ->
+  [(a, b)] -> Maybe b`, which did not exist (only Data.Map's qualified
+  one did).
 - **`Data.IORef`** — GHC's plain mutable IO cell: `newIORef`, `readIORef`,
   `writeIORef`, `modifyIORef`, `modifyIORef'`, with GHC's exact laziness
   (writes don't force the value; `modifyIORef` stores the unevaluated
