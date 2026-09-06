@@ -1,0 +1,18 @@
+Cx 1 (-2)
+Just (Cx 1 2)
+(1 :+: 2,(-1) :+: 2)
+Just (1 :+: 2)
+(Raw 3,Just Raw 3)
+Wrap (Cx 0 1) (1 :+: (-1)) Raw 2 (Just (Cx 3 4))
+Rec {rc = Cx 1 1, rs = 2 :+: 2}
+[Cx 1 2,Cx 3 4]
+(Cx 1 2)!
+1 :+: 2|(1 :+: 2)
+Raw 1 and more
+(-1)(-1)-1
+(-1.5)(-12345678901234567890)
+(Just 1)Just 1Nothing
+[1,2](1,"a")"s"True
+Tag(Tagged 1)Tagged (-1)
+(Just (Just (Tagged 2)))(Rec {rc = Cx 0 0, rs = 0 :+: 0})
+(Just (Just (-1)),Just [Just (Cx 1 1)])

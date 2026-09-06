@@ -60,8 +60,22 @@ pickgc n h
        _ -> False) = h
   | otherwise = \_ y -> show (y + 4)
 
+-- A single clause with a CONSTRUCTOR pattern (the destructuring emitter)
+-- and a function-valued body: the padding must be consumed there too.
+data Box = Box Int
+
+unbox :: Box -> (Int -> Int -> String) -> Int -> String
+unbox (Box n) h = h n
+
+-- The same shape whose body is a partial application (a hand-written
+-- showsPrec's `showParen (d > 10) (…)` at three arrows).
+addTo :: Box -> Int -> Int
+addTo (Box n) = (+ n)
+
 main :: IO ()
 main = do
+  putStrLn (unbox (Box 5) (\a b -> show (a * b)) 6)
+  print (addTo (Box 3) 4)
   putStrLn (pick True (\a b -> show (a + b)) 1 2)
   putStrLn (pick False (\a b -> show (a + b)) 1 2)
   putStrLn (pickg True (\a b -> show (a - b)) 5 2)
@@ -83,6 +97,8 @@ main = do
   putStrLn (pickgc 0 (\a b -> show (a + b)) 40 3)
   putStrLn (pickgc 9 (\a b -> show (a + b)) 40 3)
 
+-- expect: 30
+-- expect: 7
 -- expect: 3
 -- expect: 2
 -- expect: 3

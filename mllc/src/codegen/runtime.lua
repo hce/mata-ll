@@ -1169,6 +1169,26 @@ local function engage(f, ...)
     if select('#', ...) > 0 then return __force(f)(...) else return __force(f) end
 end
 local function liftIO(action) return action end
+-- GHC's precedence rule for a shown value, read off the string a builtin
+-- or derived `show` produced (exact for those strings: a negative number
+-- is the only value whose show starts with '-', a constructor application
+-- the only one starting with an uppercase letter and containing a space —
+-- strings are quoted, lists bracketed, tuples parenthesized). A negative
+-- number is parenthesized above precedence 6 (GHC's `showSignedInt`), a
+-- constructor application — record syntax included — at 11. This is what
+-- every builtin, derived and structural `showsPrec` applies; a
+-- hand-written showsPrec decides for itself.
+local function __mll_shows_prec(d, s, tail)
+    d = __force(d); s = __force(s); tail = __force(tail)
+    local c = string.byte(s, 1)
+    if c == 45 then
+        if d > 6 then return "(" .. s .. ")" .. tail end
+    elseif c ~= nil and c >= 65 and c <= 90 and d > 10 and string.find(s, " ", 1, true) then
+        return "(" .. s .. ")" .. tail
+    end
+    if tail == "" then return s end
+    return s .. tail
+end
 local function __mll_show_arg(s)
     s = __force(s)
     -- Parenthesize a derived-Show field at argument position: a constructor
@@ -1357,12 +1377,28 @@ local function show_Maybe(x) return show(x) end
 -- Unit's runtime rep is nil (same as Nothing/[]), so the type-erased generic
 -- `show` cannot render it; the Show () instance dispatches here type-directedly.
 local function show_Unit(x) return "()" end
+-- showsPrec: the precedence rule over each type's show. The bare
+-- `showsPrec` is the type-erased fallback (the showsPrec twin of `show`).
+local function showsPrec(d, x, s) return __mll_shows_prec(d, show(x), s) end
+local function showsPrec_Int(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_Int(x), s) end
+local function showsPrec_Number(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_Number(x), s) end
+local function showsPrec_String(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_String(x), s) end
+local function showsPrec_Bool(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_Bool(x), s) end
+local function showsPrec_List_(d, x, s) return __mll_shows_prec(d, show(x), s) end
+local function showsPrec_Maybe(d, x, s) return __mll_shows_prec(d, show(x), s) end
+local function showsPrec_Unit(d, x, s) d = __force(d); return "()" .. __force(s) end
 local function eq_Int(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Number(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_String(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Bool(a, b) a = __force(a); b = __force(b); return a == b end
 -- () == () is always True; both sides are nil at runtime.
 local function eq_Unit(a, b) return true end
+-- `/=` twins (inlined to Lua's ~= at saturated call sites, like eq_* to ==).
+local function ne_Int(a, b) a = __force(a); b = __force(b); return a ~= b end
+local function ne_Number(a, b) a = __force(a); b = __force(b); return a ~= b end
+local function ne_String(a, b) a = __force(a); b = __force(b); return a ~= b end
+local function ne_Bool(a, b) a = __force(a); b = __force(b); return a ~= b end
+local function ne_Unit(a, b) return false end
 -- Ord (): the single inhabitant compares EQ to itself (Ordering EQ = 2).
 local function ord_lt__Unit(a, b) return false end
 local function ord_gt__Unit(a, b) return false end
@@ -1868,6 +1904,7 @@ local function show_HashMap(m)
     table.sort(parts)
     return "{" .. table.concat(parts, ", ") .. "}"
 end
+local function showsPrec_HashMap(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_HashMap(x), s) end
 local function hashmap_fromList(xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end local k = __mll_hm_scalar_key(pair[1]) if t[k] == nil then n = n + 1 end t[k] = v cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hm_mt) end
 
 -- Structural-key HashMaps (A17). A scalar key indexes the store table
@@ -2054,13 +2091,16 @@ local function __mll_hm_dyn_fromList(xs) local x = __force(xs) if x == nil then 
 local function __mll_hm_dyn_keys(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_keys(__mll_cmp, m) end return hashmap_keys(m) end
 local function __mll_hm_dyn_values(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_values(__mll_cmp, m) end return hashmap_values(m) end
 local function __mll_hm_dyn_toList(m) m = __force(m) if getmetatable(m) == __mll_hme_mt then return __mll_hme_toList(__mll_cmp, m) end return hashmap_toList(m) end
-local function __mll_show_maybe(elem_show, x)
+local function __mll_show_maybe(elem_shows_prec, x)
     -- Type-directed Maybe show. `Nothing` is nil; `Just p` is a tagged wrapper
     -- whose payload is field [1] (itself possibly nil, e.g. `Just Nothing`), so
-    -- nesting renders faithfully: `Just Nothing`, `Just (Just 5)`, etc.
+    -- nesting renders faithfully: `Just Nothing`, `Just (Just 5)`, etc. The
+    -- payload is shown at precedence 11 through ITS type's showsPrec (GHC's
+    -- derived `Show (Maybe a)`): a hand-written showsPrec decides its own
+    -- parentheses, a show-only instance gets none.
     x = __force(x)
     if x == nil then return "Nothing" end
-    return "Just " .. __mll_show_arg(elem_show(x[1]))
+    return "Just " .. elem_shows_prec(11, x[1], "")
 end
 local function __mll_show_list(elem_show, xs)
     xs = __force(xs)
@@ -2384,7 +2424,9 @@ local __mll_bs; do
     }
 end
 local function show_ByteString(s) s = __force(s); local t = {} for i = 1, #s do t[i] = string.format("%02x", string.byte(s, i)) end return "ByteString " .. table.concat(t) end
+local function showsPrec_ByteString(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_ByteString(x), s) end
 local function eq_ByteString(a, b) return __force(a) == __force(b) end
+local function ne_ByteString(a, b) return __force(a) ~= __force(b) end
 
 -- MutArray runtime (mutable integer arrays, backed by Lua tables)
 -- Operations are effectful and run inside LuaIO s.
@@ -2526,6 +2568,7 @@ local function __mll_ioref_modify_strict(r, f)
     local c = __force(r)
     c[1] = __force(__force(f)(c[1]))
 end
+local function ne_IORef(a, b) return __force(a) ~= __force(b) end
 local function eq_IORef(a, b)
     -- Pointer identity (GHC: two refs are == iff they are the same ref).
     -- No __eq metamethod exists on __mll_ioref_mt, so == is raw identity.

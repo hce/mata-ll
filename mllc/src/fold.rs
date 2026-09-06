@@ -456,6 +456,7 @@ fn resolved_method_to_op(name: &str) -> Option<&'static str> {
     match name {
         // Eq instances
         "eq_Int" | "eq_Number" | "eq_String" | "eq_Bool" => Some("=="),
+        "ne_Int" | "ne_Number" | "ne_String" | "ne_Bool" => Some("/="),
         // Ord instances
         "ord_lt__Int"  | "ord_lt__Number"  | "ord_lt__String"  => Some("<"),
         "ord_gt__Int"  | "ord_gt__Number"  | "ord_gt__String"  => Some(">"),

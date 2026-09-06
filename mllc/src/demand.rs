@@ -137,6 +137,7 @@ pub const STRICT_BUILTINS: &[(&str, &[bool])] = &[
 #[doc(hidden)]
 pub const PRIMITIVE_BINOP_METHODS: &[&str] = &[
     "eq_Int", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
+    "ne_Int", "ne_Number", "ne_String", "ne_Bool", "ne_ByteString",
     "ord_lt__Int", "ord_lt__Number", "ord_lt__String", "ord_lt__ByteString",
     "ord_gt__Int", "ord_gt__Number", "ord_gt__String", "ord_gt__ByteString",
     "ord_le__Int", "ord_le__Number", "ord_le__String", "ord_le__ByteString",
@@ -185,6 +186,16 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     // lazily, which is always sound.)
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),
+    // showsPrec shims: each forces the precedence, the value and the tail
+    // in argument order first thing, then applies the precedence rule
+    // (`__mll_shows_prec`, which forces all three of its own arguments).
+    ("showsPrec_Int", &[true, true, true]),
+    ("showsPrec_Number", &[true, true, true]),
+    ("showsPrec_String", &[true, true, true]),
+    ("showsPrec_Bool", &[true, true, true]),
+    ("showsPrec_ByteString", &[true, true, true]),
+    ("showsPrec_HashMap", &[true, true, true]),
+    ("__mll_shows_prec", &[true, true, true]),
     ("not", &[true]),         // return not __force(x)
     ("error", &[true]),       // error(__force(msg)) — forces before raising
     ("head", &[true]),        // __mll_head forces the cell (l = __force(l))
@@ -241,6 +252,7 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("mod_Integer", &[true, true]),
     ("divMod_Integer", &[true, true]),
     ("eq_Integer", &[true, true]),
+    ("ne_Integer", &[true, true]),
     ("ord_lt__Integer", &[true, true]),
     ("ord_gt__Integer", &[true, true]),
     ("ord_le__Integer", &[true, true]),
@@ -248,6 +260,7 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("ord_max__Integer", &[true, true]),
     ("ord_min__Integer", &[true, true]),
     ("ord_compare__Integer", &[true, true]),
+    ("showsPrec_Integer", &[true, true, true]),
 ];
 
 /// Runtime callees that force each masked argument AT ENTRY — before any
@@ -297,6 +310,14 @@ pub const ENTRY_FORCED: &[(&str, &[bool])] = &[
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),
     ("show_Integer", &[true]),
+    ("showsPrec_Int", &[true, true, true]),
+    ("showsPrec_Number", &[true, true, true]),
+    ("showsPrec_String", &[true, true, true]),
+    ("showsPrec_Bool", &[true, true, true]),
+    ("showsPrec_ByteString", &[true, true, true]),
+    ("showsPrec_HashMap", &[true, true, true]),
+    ("showsPrec_Integer", &[true, true, true]),
+    ("__mll_shows_prec", &[true, true, true]),
     ("not", &[true]),
     ("head", &[true]),
     ("tail", &[true]),
@@ -317,6 +338,7 @@ pub const ENTRY_FORCED: &[(&str, &[bool])] = &[
     ("mod_Integer", &[true, true]),
     ("divMod_Integer", &[true, true]),
     ("eq_Integer", &[true, true]),
+    ("ne_Integer", &[true, true]),
     ("ord_lt__Integer", &[true, true]),
     ("ord_gt__Integer", &[true, true]),
     ("ord_le__Integer", &[true, true]),

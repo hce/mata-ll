@@ -695,7 +695,16 @@ impl CodeGen {
                 }
                 let demanded = self.clause_demanded(clause);
                 body.extend(self.where_binds_stmts(clause, demanded));
+                // The eta padding must be CONSUMED here too (G9): the match
+                // tail applies the clause result to it via clause_eta_params.
+                // This arm never set it, so a destructuring single-clause
+                // function with fewer patterns than arrows and a
+                // function-valued body (`showsPrec d (Cx a b) = showParen …`
+                // at three arrows) declared `_eta0` and returned the closure
+                // unapplied — a saturated call yielded a function value.
+                self.clause_eta_params = eta_params.clone();
                 body.extend(self.pattern_match_block(&params, clauses).0);
+                self.clause_eta_params.clear();
             }
             let stmts = vec![
                 Stmt::Function { target, params: all_params, body: Block(body) },

@@ -197,8 +197,10 @@ fn collect_expr(e: &TExpr, refs: &mut HashSet<String>) {
                 }
                 SpecKind::ListEq(name)
                 | SpecKind::MaybeEq(name)
+                | SpecKind::NotEq(name)
                 | SpecKind::ShowList(name)
                 | SpecKind::ShowMaybe(name)
+                | SpecKind::ShowsPrecOf(name)
                 | SpecKind::ListCmp(name)
                 | SpecKind::MaybeCmp(name)
                 | SpecKind::OrdFromCmp { cmp: name, .. }

@@ -1272,6 +1272,15 @@ impl CodeGen {
         None
     }
 
+    /// The Lua reference for a mata-ll function name embedded in a
+    /// specialization payload (an element eq/show/compare, a key encoder):
+    /// the payload carries the MONO name, which must be sanitized before
+    /// the slot lookup exactly as a `Var` reference is — a user instance's
+    /// operator method (`==_T`) embedded raw was a Lua syntax error.
+    fn spec_ref(&self, mono_name: &str) -> String {
+        self.lua_ref(&sanitize_name(mono_name))
+    }
+
     fn try_primitive_method_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
         if args.len() == 2
             && let TExprKind::Var(name) = &f.kind {
@@ -2029,26 +2038,50 @@ impl CodeGen {
             }
             SpecKind::ListEq(elem_eq) => {
                 // List eq: recursive element-wise comparison
-                let eq_ref = self.lua_ref(elem_eq);
+                let eq_ref = self.spec_ref(elem_eq);
                 let a0 = self.expr_ast(&args[0]);
                 let a1 = self.expr_ast(&args[1]);
                 Expr::call_named("__mll_list_eq", vec![Expr::name(eq_ref), a0, a1])
             }
             SpecKind::MaybeEq(elem_eq) => {
                 // Maybe eq: Nothing==Nothing, Just a == Just b iff a==b
-                let eq_ref = self.lua_ref(elem_eq);
+                let eq_ref = self.spec_ref(elem_eq);
                 let a0 = self.expr_ast(&args[0]);
                 let a1 = self.expr_ast(&args[1]);
                 Expr::call_named("__mll_maybe_eq", vec![Expr::name(eq_ref), a0, a1])
             }
+            SpecKind::NotEq(eq) => {
+                // `not (a == b)`: the structural eq returns a Lua boolean,
+                // so its negation is a native comparison against false.
+                let eq_ref = self.spec_ref(eq);
+                let a0 = self.expr_ast(&args[0]);
+                let a1 = self.expr_ast(&args[1]);
+                Expr::paren(Expr::binop(
+                    "==",
+                    Expr::call_named(&eq_ref, vec![a0, a1]),
+                    Expr::lit("false"),
+                ))
+            }
+            SpecKind::ShowsPrecOf(show) => {
+                // __mll_shows_prec(d, show(x), s): the precedence rule over
+                // the shape's typed show.
+                let show_ref = self.spec_ref(show);
+                let d = self.expr_ast(&args[0]);
+                let x = self.expr_ast(&args[1]);
+                let s = self.expr_ast(&args[2]);
+                Expr::call_named(
+                    "__mll_shows_prec",
+                    vec![d, Expr::call_named(&show_ref, vec![x]), s],
+                )
+            }
             SpecKind::ListCmp(elem_cmp) => {
-                let cmp_ref = self.lua_ref(elem_cmp);
+                let cmp_ref = self.spec_ref(elem_cmp);
                 let a0 = self.expr_ast(&args[0]);
                 let a1 = self.expr_ast(&args[1]);
                 Expr::call_named("__mll_list_cmp", vec![Expr::name(cmp_ref), a0, a1])
             }
             SpecKind::MaybeCmp(elem_cmp) => {
-                let cmp_ref = self.lua_ref(elem_cmp);
+                let cmp_ref = self.spec_ref(elem_cmp);
                 let a0 = self.expr_ast(&args[0]);
                 let a1 = self.expr_ast(&args[1]);
                 Expr::call_named("__mll_maybe_cmp", vec![Expr::name(cmp_ref), a0, a1])
@@ -2064,7 +2097,7 @@ impl CodeGen {
                 let mut stmts: Vec<Stmt> = Vec::new();
                 let n = cmp_fns.len();
                 for (i, cmp_fn) in cmp_fns.iter().enumerate() {
-                    let cmp_ref = self.lua_ref(cmp_fn);
+                    let cmp_ref = self.spec_ref(cmp_fn);
                     let l = self.forced_prefix_ast(&args[0]);
                     let r = self.forced_prefix_ast(&args[1]);
                     let call = Expr::call_named(
@@ -2093,12 +2126,12 @@ impl CodeGen {
                 )
             }
             SpecKind::KeyEncList(elem) => {
-                let e_ref = self.lua_ref(elem);
+                let e_ref = self.spec_ref(elem);
                 let a0 = self.expr_ast(&args[0]);
                 Expr::call_named("__mll_key_list", vec![Expr::name(e_ref), a0])
             }
             SpecKind::KeyEncMaybe(elem) => {
-                let e_ref = self.lua_ref(elem);
+                let e_ref = self.spec_ref(elem);
                 let a0 = self.expr_ast(&args[0]);
                 Expr::call_named("__mll_key_maybe", vec![Expr::name(e_ref), a0])
             }
@@ -2108,7 +2141,7 @@ impl CodeGen {
                 // arguments.
                 let mut acc = Expr::lit("\"(\"");
                 for (i, enc_fn) in enc_fns.iter().enumerate() {
-                    let e_ref = self.lua_ref(enc_fn);
+                    let e_ref = self.spec_ref(enc_fn);
                     let k = self.forced_prefix_ast(&args[0]);
                     let call = Expr::call_named(
                         &e_ref,
@@ -2132,7 +2165,7 @@ impl CodeGen {
                     suffix[..1].to_lowercase(), &suffix[1..]);
                 let mut cargs = Vec::new();
                 if let Some(name) = enc.as_ref().or(cmp.as_ref()) {
-                    cargs.push(Expr::name(self.lua_ref(name)));
+                    cargs.push(Expr::name(self.spec_ref(name)));
                 }
                 for a in args {
                     cargs.push(self.expr_ast(a));
@@ -2147,7 +2180,7 @@ impl CodeGen {
                 // mis-select on false/Nothing). The operands are the
                 // synthetic function's parameters: reading one twice repeats
                 // no work.
-                let cmp_ref = self.lua_ref(cmp);
+                let cmp_ref = self.spec_ref(cmp);
                 let a0 = self.expr_ast(&args[0]);
                 let a1 = self.expr_ast(&args[1]);
                 let call = Expr::call_named(&cmp_ref, vec![a0.clone(), a1.clone()]);
@@ -2183,7 +2216,7 @@ impl CodeGen {
                 // Tuple eq: compare element-wise
                 let mut acc: Option<Expr> = None;
                 for (i, eq_fn) in eq_fns.iter().enumerate() {
-                    let eq_ref = self.lua_ref(eq_fn);
+                    let eq_ref = self.spec_ref(eq_fn);
                     // Indexing base: the tuple cell must be WHNF, but a
                     // concrete variable / already-forcing emission needs
                     // no extra wrapper (see forced_prefix_ast).
@@ -2205,14 +2238,14 @@ impl CodeGen {
             }
             SpecKind::ShowList(elem_show) => {
                 // Specialized list show: iterate with element show function
-                let show_ref = self.lua_ref(elem_show);
+                let show_ref = self.spec_ref(elem_show);
                 let a0 = self.expr_ast(&args[0]);
                 Expr::call_named("__mll_show_list", vec![Expr::name(show_ref), a0])
             }
             SpecKind::ShowMaybe(elem_show) => {
                 // Specialized Maybe show: type-directed, so Just/Nothing are
                 // recovered from the element type (nil == Nothing).
-                let show_ref = self.lua_ref(elem_show);
+                let show_ref = self.spec_ref(elem_show);
                 let a0 = self.expr_ast(&args[0]);
                 Expr::call_named("__mll_show_maybe", vec![Expr::name(show_ref), a0])
             }

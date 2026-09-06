@@ -278,29 +278,53 @@ impl Checker {
             // show field_i — precedence depends on the syntax (see below).
             let show_field = |i: usize, pname: &String, arg_prec: bool| {
                 let field_ty = field_tys.get(i).cloned().unwrap_or(Ty::Unit);
-                let shown = TExpr::new(
-                    TExprKind::App(
-                        Box::new(TExpr::new(
-                            TExprKind::Var("show".into()),
-                            Ty::arrow(field_ty.clone(), Ty::Con("String".into())),
-                        )),
-                        Box::new(TExpr::new(TExprKind::Var(pname.clone()), field_ty)),
-                    ),
-                    Ty::Con("String".into()),
-                );
                 if !arg_prec {
-                    return shown;
+                    // A record field's value is shown at precedence 0:
+                    // `show`, which every lawful instance's `showsPrec 0`
+                    // equals (GHC's derived code calls showsPrec 0 there).
+                    return TExpr::new(
+                        TExprKind::App(
+                            Box::new(TExpr::new(
+                                TExprKind::Var("show".into()),
+                                Ty::arrow(field_ty.clone(), Ty::Con("String".into())),
+                            )),
+                            Box::new(TExpr::new(TExprKind::Var(pname.clone()), field_ty)),
+                        ),
+                        Ty::Con("String".into()),
+                    );
                 }
-                // __mll_show_arg (show field_i) — parenthesize the field if
-                // it is a constructor application or negative number (GHC
-                // showsPrec 11).
+                // showsPrec 11 field_i "" — GHC's derived Show shows a
+                // positional field at argument precedence through the
+                // field type's OWN showsPrec: a builtin/derived instance
+                // parenthesizes a constructor application or a negative
+                // number, a hand-written showsPrec decides for itself, and
+                // a hand-written show-only instance is never parenthesized
+                // (its showsPrec is the precedence-ignoring default).
                 TExpr::new(
                     TExprKind::App(
                         Box::new(TExpr::new(
-                            TExprKind::Var("__mll_show_arg".into()),
+                            TExprKind::App(
+                                Box::new(TExpr::new(
+                                    TExprKind::App(
+                                        Box::new(TExpr::new(
+                                            TExprKind::Var("showsPrec".into()),
+                                            Ty::fun(
+                                                &[Ty::Con("Int".into()), field_ty.clone(), str_ty.clone()],
+                                                str_ty.clone(),
+                                            ),
+                                        )),
+                                        Box::new(TExpr::new(
+                                            TExprKind::Lit(TLiteral::Integer(11)),
+                                            Ty::Con("Int".into()),
+                                        )),
+                                    ),
+                                    Ty::fun(&[field_ty.clone(), str_ty.clone()], str_ty.clone()),
+                                )),
+                                Box::new(TExpr::new(TExprKind::Var(pname.clone()), field_ty)),
+                            ),
                             Ty::arrow(str_ty.clone(), str_ty.clone()),
                         )),
-                        Box::new(shown),
+                        Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(Vec::new())), str_ty.clone())),
                     ),
                     Ty::Con("String".into()),
                 )
@@ -350,9 +374,65 @@ impl Checker {
             });
         }
 
+        // showsPrec_T d x s = __mll_shows_prec d (show x) s — GHC's derived
+        // showsPrec (parenthesize a non-nullary constructor application at
+        // precedence 11), decided by the runtime rule on the shown string:
+        // a derived show yields "Con" for a nullary constructor and
+        // "Con …"/"Con {…}" otherwise, which is exactly what the rule
+        // reads. `show x` resolves to this type's own show at the concrete
+        // argument types (mono specializes the instance method per use).
+        let str_ty = Ty::Con("String".into());
+        let int_ty = Ty::Con("Int".into());
+        let shows_prec_mangled = format!("showsPrec_{}", type_name);
+        let shows_prec_ty = Ty::fun(&[int_ty.clone(), result_type.clone(), str_ty.clone()], str_ty.clone());
+        let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(TExprKind::App(Box::new(f), Box::new(a)), t);
+        let shown = app(
+            TExpr::new(TExprKind::Var("show".into()), Ty::arrow(result_type.clone(), str_ty.clone())),
+            TExpr::new(TExprKind::Var("_x".into()), result_type.clone()),
+            str_ty.clone(),
+        );
+        let shows_prec_body = app(
+            app(
+                app(
+                    TExpr::new(
+                        TExprKind::Var("__mll_shows_prec".into()),
+                        Ty::fun(&[int_ty.clone(), str_ty.clone(), str_ty.clone()], str_ty.clone()),
+                    ),
+                    TExpr::new(TExprKind::Var("_d".into()), int_ty.clone()),
+                    Ty::fun(&[str_ty.clone(), str_ty.clone()], str_ty.clone()),
+                ),
+                shown,
+                Ty::arrow(str_ty.clone(), str_ty.clone()),
+            ),
+            TExpr::new(TExprKind::Var("_s".into()), str_ty.clone()),
+            str_ty.clone(),
+        );
+        let shows_prec_fn = TFunction {
+            name: shows_prec_mangled.clone(),
+            ty: shows_prec_ty,
+            clauses: vec![TClause {
+                span: None,
+                patterns: vec![
+                    TPattern::Var("_d".into(), int_ty),
+                    TPattern::Var("_x".into(), result_type.clone()),
+                    TPattern::Var("_s".into(), str_ty.clone()),
+                ],
+                guards: vec![],
+                body: Some(shows_prec_body),
+                where_binds: vec![],
+            }],
+            specialized: false,
+            spec_origin: None,
+            dict_params: vec![],
+            // Strict in all three: the precedence is compared, the value
+            // shown (a derived show matches on it), the tail concatenated.
+            derived_strict: true,
+        };
+
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert("show".to_string(), mangled.clone());
+        method_fns.insert("showsPrec".to_string(), shows_prec_mangled);
         self.register_instance(InstanceInfo {
             class_name: "Show".to_string(),
             target_type: result_type.clone(),
@@ -368,7 +448,7 @@ impl Checker {
             spec_origin: None,
             dict_params: vec![],
             derived_strict: false,
-        }]
+        }, shows_prec_fn]
     }
 
     /// Generate `==` for a data type.
@@ -467,9 +547,54 @@ impl Checker {
             });
         }
 
+        // ne_T a b = not (a == b) — GHC's class default for `/=`, generated
+        // here as the derived instance's own method (the `==` dispatches to
+        // eq_T; at a parameterized type it is specialized per use like the
+        // field comparisons above).
+        let bool_ty = Ty::Con("Bool".into());
+        let ne_mangled = format!("ne_{}", type_name);
+        let ne_body = TExpr::new(
+            TExprKind::App(
+                Box::new(TExpr::new(
+                    TExprKind::Var("not".into()),
+                    Ty::arrow(bool_ty.clone(), bool_ty.clone()),
+                )),
+                Box::new(TExpr::new(
+                    TExprKind::InfixApp {
+                        op: "==".into(),
+                        lhs: Box::new(TExpr::new(TExprKind::Var("_a".into()), result_type.clone())),
+                        rhs: Box::new(TExpr::new(TExprKind::Var("_b".into()), result_type.clone())),
+                    },
+                    bool_ty.clone(),
+                )),
+            ),
+            bool_ty,
+        );
+        let ne_fn = TFunction {
+            name: ne_mangled.clone(),
+            ty: fn_ty.clone(),
+            clauses: vec![TClause {
+                span: None,
+                patterns: vec![
+                    TPattern::Var("_a".into(), result_type.clone()),
+                    TPattern::Var("_b".into(), result_type.clone()),
+                ],
+                guards: vec![],
+                body: Some(ne_body),
+                where_binds: vec![],
+            }],
+            specialized: false,
+            spec_origin: None,
+            dict_params: vec![],
+            // `not` forces its argument, and the derived `==` is strict in
+            // both operands (below).
+            derived_strict: true,
+        };
+
         // Register the instance
         let mut method_fns = HashMap::new();
         method_fns.insert("==".to_string(), mangled.clone());
+        method_fns.insert("/=".to_string(), ne_mangled);
         self.register_instance(InstanceInfo {
             class_name: "Eq".to_string(),
             target_type: result_type.clone(),
@@ -491,7 +616,7 @@ impl Checker {
             // inspected by clause 1, and whichever constructor it is, that
             // constructor's own clause then inspects the second argument).
             derived_strict: true,
-        }]
+        }, ne_fn]
     }
 
     pub(super) fn derive_ord(

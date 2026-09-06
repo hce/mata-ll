@@ -712,6 +712,10 @@ impl Monomorphizer {
             && let Some(name) = self.structural_eq_impl(&binding) {
                 return MethodDispatch::Resolved(name);
             }
+        if method == "/="
+            && let Some(name) = self.structural_ne_impl(&binding) {
+                return MethodDispatch::Resolved(name);
+            }
         if matches!(method, "compare" | "<" | "<=" | ">" | ">=" | "max" | "min")
             && let Some(name) = self.structural_ord_impl(method, &binding) {
                 return MethodDispatch::Resolved(name);
@@ -740,11 +744,21 @@ impl Monomorphizer {
                     return Some(name);
                 }
             }
+            "/=" => {
+                if let Some(name) = self.structural_ne_impl(binding) {
+                    return Some(name);
+                }
+            }
             "show" => {
                 if let Ty::Tuple(elem_tys) = binding {
                     return Some(self.generate_tuple_show(&elem_tys.clone()));
                 }
                 if let Some(name) = self.generate_container_show(binding) {
+                    return Some(name);
+                }
+            }
+            "showsPrec" => {
+                if let Some(name) = self.structural_shows_prec_impl(binding) {
                     return Some(name);
                 }
             }
@@ -1043,6 +1057,40 @@ impl Monomorphizer {
             return Some(self.generate_tuple_eq(&elem_tys.clone()));
         }
         None
+    }
+
+    /// The structural `/=` for a compiler-owned shape: GHC's class default
+    /// (`not (a == b)`) over the structural `==` of the same shape, one
+    /// generated function per shape (`SpecKind::NotEq`).
+    fn structural_ne_impl(&mut self, binding: &Ty) -> Option<String> {
+        if !(matches!(binding, Ty::List(_) | Ty::Tuple(_)) || Self::is_maybe_type(binding)) {
+            return None;
+        }
+        let eq = self.structural_eq_impl(binding)?;
+        Some(self.synthetic_spec_fn("/=", "ne", binding, &["_a", "_b"], Ty::Con("Bool".into()),
+            move |_| SpecKind::NotEq(eq)))
+    }
+
+    /// The structural `showsPrec` for a compiler-owned shape (list, Maybe,
+    /// tuple): the runtime precedence rule (`__mll_shows_prec`) over the
+    /// shape's typed `show` — the same rule every builtin and derived
+    /// instance's showsPrec applies, so `showsPrec 11 (Just 1)` is
+    /// "(Just 1)" and a list or tuple is never parenthesized.
+    fn structural_shows_prec_impl(&mut self, binding: &Ty) -> Option<String> {
+        if !(matches!(binding, Ty::List(_) | Ty::Tuple(_)) || Self::is_maybe_type(binding)) {
+            return None;
+        }
+        let show_use_ty = Ty::arrow(binding.clone(), Ty::Con("String".into()));
+        let show = self.resolve_at_type("show", binding, &show_use_ty)?;
+        let str_ty = Ty::Con("String".into());
+        Some(self.synthetic_spec_fn_typed(
+            "showsPrec",
+            "showsPrec",
+            binding,
+            &[("_d", Ty::Con("Int".into())), ("_x", binding.clone()), ("_s", str_ty.clone())],
+            str_ty,
+            move |_| SpecKind::ShowsPrecOf(show),
+        ))
     }
 
     /// True if the type contains a rigid skolem anywhere — dispatch on those
@@ -1762,10 +1810,8 @@ impl Monomorphizer {
                 // the operator's own instantiated type, but it is exactly
                 // `lhs.ty -> rhs.ty -> result_ty` — reconstruct it and
                 // dispatch the same way as a named method use.
-                if (self.class_methods.contains(&op) || (op == "/=" && self.class_methods.contains("==")))
-                    && !self.locals.contains(&op) {
-                    // For /=, resolve via == (the registered method) and wrap in not later
-                    let lookup_op = if op == "/=" { "==".to_string() } else { op.clone() };
+                if self.class_methods.contains(&op) && !self.locals.contains(&op) {
+                    let lookup_op = op.clone();
                     let use_ty = Ty::fun(&[lhs.ty.clone(), rhs.ty.clone()], ty.clone());
 
                     // The resolved method as an expression: the mangled
@@ -1788,38 +1834,6 @@ impl Monomorphizer {
                     };
 
                     if let Some((method_expr, self_mapped)) = resolved {
-                        // For /= operators, wrap in not
-                        if op == "/=" {
-                            let mono_lhs = self.mono_expr(*lhs);
-                            let mono_rhs = self.mono_expr(*rhs);
-                            let eq_call = TExpr {
-                                kind: TExprKind::App(
-                                    Box::new(TExpr::new(
-                                        TExprKind::App(
-                                            Box::new(method_expr),
-                                            Box::new(mono_lhs),
-                                        ),
-                                        Ty::Unit,
-                                    )),
-                                    Box::new(mono_rhs),
-                                ),
-                                ty: ty.clone(),
-                            };
-                            return TExpr {
-                                // SOURCE spelling ("not"): sanitize renames
-                                // it to Lua's not_ at emission. Emitting the
-                                // sanitized name here disagreed with every
-                                // name-keyed table (demand rows key "not"),
-                                // so the strictness row never applied — a
-                                // harmless under-claim, but a standing
-                                // spelling mismatch.
-                                kind: TExprKind::App(
-                                    Box::new(TExpr::new(TExprKind::Var("not".to_string()), Ty::Unit)),
-                                    Box::new(eq_call),
-                                ),
-                                ty,
-                            };
-                        }
                         // If the mangled name matches the operator, keep as InfixApp
                         // (e.g. IO monad's >>= stays >>=)
                         if self_mapped {
@@ -2078,14 +2092,30 @@ impl Monomorphizer {
         result_ty: Ty,
         build_spec: impl FnOnce(&mut Self) -> SpecKind,
     ) -> String {
+        let params: Vec<(&str, Ty)> = param_names.iter().map(|p| (*p, ty.clone())).collect();
+        self.synthetic_spec_fn_typed(method, base, ty, &params, result_ty, build_spec)
+    }
+
+    /// `synthetic_spec_fn` with one type per parameter, for a helper whose
+    /// parameters are not all the shape itself (`showsPrec`'s precedence
+    /// and tail).
+    fn synthetic_spec_fn_typed(
+        &mut self,
+        method: &str,
+        base: &str,
+        ty: &Ty,
+        params: &[(&str, Ty)],
+        result_ty: Ty,
+        build_spec: impl FnOnce(&mut Self) -> SpecKind,
+    ) -> String {
         let mangled = match self.memo_or_mangle(method, base, ty) {
             Ok(existing) => return existing,
             Err(fresh) => fresh,
         };
 
         let spec = build_spec(self);
-        let args: Vec<TExpr> = param_names.iter()
-            .map(|p| TExpr::new(TExprKind::Var((*p).to_string()), ty.clone()))
+        let args: Vec<TExpr> = params.iter()
+            .map(|(p, pty)| TExpr::new(TExprKind::Var((*p).to_string()), pty.clone()))
             .collect();
         let body = TExpr::new(
             TExprKind::SpecCall {
@@ -2095,14 +2125,14 @@ impl Monomorphizer {
             },
             result_ty.clone(),
         );
-        let param_tys: Vec<Ty> = param_names.iter().map(|_| ty.clone()).collect();
+        let param_tys: Vec<Ty> = params.iter().map(|(_, pty)| pty.clone()).collect();
         let func = TFunction {
             name: mangled.clone(),
             ty: Ty::fun(&param_tys, result_ty),
             clauses: vec![TClause {
                 span: None,
-                patterns: param_names.iter()
-                    .map(|p| TPattern::Var((*p).to_string(), Ty::Unit))
+                patterns: params.iter()
+                    .map(|(p, _)| TPattern::Var((*p).to_string(), Ty::Unit))
                     .collect(),
                 guards: vec![],
                 body: Some(body),
@@ -2174,28 +2204,37 @@ impl Monomorphizer {
 
     fn generate_container_show(&mut self, ty: &Ty) -> Option<String> {
         match ty {
+            // A list shows its elements at precedence 0: the element show.
             Ty::List(elem_ty) =>
-                Some(self.generate_threaded_show(ty, elem_ty, SpecKind::ShowList)),
+                Some(self.generate_threaded_show(ty, elem_ty, false, SpecKind::ShowList)),
             // Maybe is type-directed: Just x and x share a runtime rep, so the
             // element show plus the type recover the structure (nil == Nothing).
+            // `Just x` shows its payload at precedence 11 through the
+            // payload type's own showsPrec (GHC's derived `Show (Maybe a)`).
             Ty::App(f, elem_ty) if matches!(f.as_ref(), Ty::Con(n) if n == "Maybe") =>
-                Some(self.generate_threaded_show(ty, elem_ty, SpecKind::ShowMaybe)),
+                Some(self.generate_threaded_show(ty, elem_ty, true, SpecKind::ShowMaybe)),
             _ => None,
         }
     }
 
-    /// Generate a `show` wrapper that threads the element show into a runtime
-    /// helper (`make` is `SpecKind::ShowList` / `SpecKind::ShowMaybe`).
-    /// Shared by the container arms above so list and Maybe stay in lockstep.
+    /// Generate a `show` wrapper that threads the element show (or, with
+    /// `prec`, the element showsPrec) into a runtime helper (`make` is
+    /// `SpecKind::ShowList` / `SpecKind::ShowMaybe`). Shared by the
+    /// container arms above so list and Maybe stay in lockstep.
     fn generate_threaded_show(
         &mut self,
         ty: &Ty,
         elem_ty: &Ty,
+        prec: bool,
         make: fn(String) -> SpecKind,
     ) -> String {
         let elem_ty = elem_ty.clone();
         self.synthetic_spec_fn("show", "show", ty, &["_x"], Ty::Con("String".into()),
-            move |slf| make(slf.resolve_show_for(&elem_ty)))
+            move |slf| make(if prec {
+                slf.resolve_shows_prec_for(&elem_ty)
+            } else {
+                slf.resolve_show_for(&elem_ty)
+            }))
     }
 
     /// Resolve the show function name for a given type.
@@ -2206,6 +2245,19 @@ impl Monomorphizer {
             // Fallback to generic runtime show (primitives, or genuinely
             // unresolved/polymorphic types).
             None => "show".to_string(),
+        }
+    }
+
+    /// Resolve the showsPrec function name for a given type — the
+    /// precedence twin of `resolve_show_for`, falling back to the
+    /// type-erased runtime `showsPrec` (the precedence rule over the
+    /// generic show).
+    fn resolve_shows_prec_for(&mut self, ty: &Ty) -> String {
+        let str_ty = Ty::Con("String".into());
+        let use_ty = Ty::fun(&[Ty::Con("Int".into()), ty.clone(), str_ty.clone()], str_ty);
+        match self.resolve_at_type("showsPrec", ty, &use_ty) {
+            Some(name) => name,
+            None => "showsPrec".to_string(),
         }
     }
 
@@ -2311,8 +2363,10 @@ impl Monomorphizer {
                 match &mut specialized {
                     SpecKind::ListEq(n)
                     | SpecKind::MaybeEq(n)
+                    | SpecKind::NotEq(n)
                     | SpecKind::ShowList(n)
-                    | SpecKind::ShowMaybe(n) => fix(n),
+                    | SpecKind::ShowMaybe(n)
+                    | SpecKind::ShowsPrecOf(n) => fix(n),
                     SpecKind::TupleEq(ns) => ns.iter_mut().for_each(&mut { fix }),
                     SpecKind::Dict { methods, .. } => {
                         for (_, impl_name) in methods.iter_mut() {
@@ -2712,16 +2766,14 @@ impl Monomorphizer {
                 expr.kind
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                // `/=` is not a registered method — Eq registers only `==`,
-                // and the specialization path (mono_expr_node's InfixApp arm)
-                // resolves it via `==` and wraps the call in `not`. The
-                // dictionary rewrite must mirror that: left unrewritten, a
-                // dict-form `x /= y` reached codegen as a raw InfixApp and
-                // compiled to Lua's `~=` — table identity, ignoring the
-                // instance's `==` entirely (F6d).
-                let lookup_op = if op == "/=" { "==" } else { op.as_str() };
+                // An operator that is a class method of a dictionary this
+                // body carries (`==`, `/=`, `<>`, a user class's operator):
+                // read it from the dictionary. Left unrewritten, a dict-form
+                // `x /= y` reached codegen as a raw InfixApp and compiled to
+                // Lua's `~=` — table identity, ignoring the instance's
+                // method entirely (F6d).
                 if !self.locals.contains(&op)
-                    && let Some(class_name) = self.method_to_class.get(lookup_op).cloned()
+                    && let Some(class_name) = self.method_to_class.get(op.as_str()).cloned()
                     && class_to_dict.contains_key(&class_name)
                         && self.is_polymorphic(&lhs.ty) {
                             let op_ty = Ty::arrow(
@@ -2729,25 +2781,12 @@ impl Monomorphizer {
                                 Ty::arrow(rhs.ty.clone(), ty.clone()),
                             );
                             let access_kind = self.dict_method_use(
-                                &class_name, lookup_op, &op_ty, class_to_dict, env);
+                                &class_name, &op, &op_ty, class_to_dict, env);
                             let dict_access = TExpr::new(access_kind, Ty::Unit);
                             let lhs = self.rewrite_dict_expr(*lhs, func_name, class_to_dict, env);
                             let rhs = self.rewrite_dict_expr(*rhs, func_name, class_to_dict, env);
                             let app1 = TExpr::new(TExprKind::App(Box::new(dict_access), Box::new(lhs)), Ty::Unit);
-                            let eq_app = TExpr::new(TExprKind::App(Box::new(app1), Box::new(rhs)), ty.clone());
-                            if op == "/=" {
-                                // SOURCE spelling ("not") — same rationale
-                                // as the specialization arm: name-keyed
-                                // tables key the source name.
-                                return TExpr::new(
-                                    TExprKind::App(
-                                        Box::new(TExpr::new(TExprKind::Var("not".to_string()), Ty::Unit)),
-                                        Box::new(eq_app),
-                                    ),
-                                    ty,
-                                );
-                            }
-                            return eq_app;
+                            return TExpr::new(TExprKind::App(Box::new(app1), Box::new(rhs)), ty);
                         }
                 // An InfixApp whose operator is not a dict method: generic
                 // descent below, like every other structural node.
@@ -3704,7 +3743,7 @@ impl Monomorphizer {
             patterns.push(TPattern::Var("_b".to_string(), Ty::Unit));
             self.generated.push(TFunction {
                 name: fname.clone(),
-                ty: Ty::fun(&param_tys, bool_ty),
+                ty: Ty::fun(&param_tys, bool_ty.clone()),
                 clauses: vec![TClause {
                     span: None,
                     patterns,
@@ -3719,6 +3758,24 @@ impl Monomorphizer {
             });
             fname
         };
+        // `/=` for the same shape: GHC's class default over the dictform
+        // `==` — the element dictionaries are forwarded unchanged.
+        let ne_fname = self.derived_default_dictform(
+            ("/=__dictform", shape.clone()),
+            "ne_dictform",
+            elems.len(),
+            &["_a", "_b"],
+            &["_a", "_b"],
+            bool_ty.clone(),
+            |base_call| TExpr::new(
+                TExprKind::App(
+                    Box::new(TExpr::new(TExprKind::Var("not".to_string()), Ty::Unit)),
+                    Box::new(base_call),
+                ),
+                bool_ty.clone(),
+            ),
+            &fname,
+        );
         let sub_dicts: Vec<TExpr> = elems.iter()
             .map(|e| self.build_dict_expr("Eq", e, class_to_dict, env))
             .collect();
@@ -3727,12 +3784,71 @@ impl Monomorphizer {
                 original: "__dict_Eq".to_string(),
                 specialized: SpecKind::DictCtor {
                     class: "Eq".to_string(),
-                    methods: vec![("==".to_string(), fname, 2)],
+                    methods: vec![("==".to_string(), fname, 2), ("/=".to_string(), ne_fname, 2)],
                 },
                 args: sub_dicts,
             },
             Ty::Unit,
         ))
+    }
+
+    /// A dictionary-form method that is a class DEFAULT over another
+    /// dictform method of the same shape (`/=` over `==`, `showsPrec` over
+    /// `show`): `name(dicts…, params…) = wrap(base(dicts…, base_args…))`,
+    /// where the base call forwards the same context dictionaries and the
+    /// value parameters named in `base_args`. Memoized per (key, shape)
+    /// like the base dictforms.
+    #[allow(clippy::too_many_arguments)]
+    fn derived_default_dictform(
+        &mut self,
+        key: (&str, Ty),
+        base_name: &str,
+        n_dicts: usize,
+        params: &[&str],
+        base_args: &[&str],
+        result_ty: Ty,
+        wrap: impl FnOnce(TExpr) -> TExpr,
+        base_fn: &str,
+    ) -> String {
+        let (key_method, shape) = key;
+        let memo_key = (key_method.to_string(), shape.clone());
+        if let Some(existing) = self.generated_impls.get(&memo_key) {
+            return existing.clone();
+        }
+        let fname = self.mangle_name(base_name, &shape);
+        self.generated_impls.insert(memo_key, fname.clone());
+        let dict_params: Vec<String> = (0..n_dicts).map(|i| format!("__d{i}")).collect();
+        let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+        // base(dicts…, base_args…): the base dictform's parameter list is
+        // its dictionaries followed by its value parameters.
+        let mut call = var(base_fn);
+        for d in &dict_params {
+            call = TExpr::new(TExprKind::App(Box::new(call), Box::new(var(d))), Ty::Unit);
+        }
+        for p in base_args {
+            call = TExpr::new(TExprKind::App(Box::new(call), Box::new(var(p))), Ty::Unit);
+        }
+        let body = wrap(call);
+        let mut patterns: Vec<TPattern> = dict_params.iter()
+            .map(|d| TPattern::Var(d.clone(), Ty::Unit)).collect();
+        patterns.extend(params.iter().map(|p| TPattern::Var((*p).to_string(), Ty::Unit)));
+        let param_tys: Vec<Ty> = vec![Ty::Unit; n_dicts + params.len()];
+        self.generated.push(TFunction {
+            name: fname.clone(),
+            ty: Ty::fun(&param_tys, result_ty),
+            clauses: vec![TClause {
+                span: None,
+                patterns,
+                guards: vec![],
+                body: Some(body),
+                where_binds: vec![],
+            }],
+            specialized: true,
+            spec_origin: None,
+            dict_params: vec![],
+            derived_strict: false,
+        });
+        fname
     }
 
     /// Make sure dictionary-form methods exist for the parameterized
@@ -4207,8 +4323,20 @@ impl Monomorphizer {
                     app(var("__mll_show_list"), show_of("__d0"), Ty::Unit),
                     var("_x"), str_ty.clone(),
                 ),
+                // `Just x` shows its payload at precedence 11: the element
+                // dictionary's showsPrec (see generate_container_show).
                 _ => app(
-                    app(var("__mll_show_maybe"), show_of("__d0"), Ty::Unit),
+                    app(
+                        var("__mll_show_maybe"),
+                        TExpr::new(
+                            TExprKind::DictAccess {
+                                dict_param: "__d0".to_string(),
+                                method_name: "showsPrec".to_string(),
+                            },
+                            Ty::Unit,
+                        ),
+                        Ty::Unit,
+                    ),
                     var("_x"), str_ty.clone(),
                 ),
             };
@@ -4233,6 +4361,25 @@ impl Monomorphizer {
             });
             fname
         };
+        // `showsPrec` for the same shape: the runtime precedence rule over
+        // the dictform `show` (what every builtin/derived showsPrec is).
+        let sp_str_ty = str_ty.clone();
+        let sp_fname = self.derived_default_dictform(
+            ("showsPrec__dictform", shape.clone()),
+            "showsPrec_dictform",
+            elems.len(),
+            &["_d", "_x", "_s"],
+            &["_x"],
+            str_ty.clone(),
+            |shown| {
+                let var = |n: &str| TExpr::new(TExprKind::Var(n.to_string()), Ty::Unit);
+                let app = |f: TExpr, a: TExpr| TExpr::new(
+                    TExprKind::App(Box::new(f), Box::new(a)), Ty::Unit);
+                let call = app(app(app(var("__mll_shows_prec"), var("_d")), shown), var("_s"));
+                TExpr { kind: call.kind, ty: sp_str_ty }
+            },
+            &fname,
+        );
         let sub_dicts: Vec<TExpr> = elems.iter()
             .map(|e| self.build_dict_expr("Show", e, class_to_dict, env))
             .collect();
@@ -4241,7 +4388,7 @@ impl Monomorphizer {
                 original: "__dict_Show".to_string(),
                 specialized: SpecKind::DictCtor {
                     class: "Show".to_string(),
-                    methods: vec![("show".to_string(), fname, 1)],
+                    methods: vec![("show".to_string(), fname, 1), ("showsPrec".to_string(), sp_fname, 3)],
                 },
                 args: sub_dicts,
             },

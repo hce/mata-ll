@@ -126,6 +126,14 @@ const PROBES: &[Probe] = &[
     st_probe("modifyIORef'", &[REF, IDF], &[Strict, Strict]),
     // --- runtime-implemented prelude functions ---
     probe("show", &["1"], &[Strict]),
+    probe("showsPrec_Int", &["11", "1", "\"\""], &[Strict, Strict, Strict]),
+    probe("showsPrec_Number", &["11", "1.5", "\"\""], &[Strict, Strict, Strict]),
+    probe("showsPrec_String", &["11", "\"s\"", "\"\""], &[Strict, Strict, Strict]),
+    probe("showsPrec_Bool", &["11", "true", "\"\""], &[Strict, Strict, Strict]),
+    probe("showsPrec_ByteString", &["11", "\"hi\"", "\"\""], &[Strict, Strict, Strict]),
+    probe("showsPrec_HashMap", &["11", "hashmap_empty", "\"\""], &[Strict, Strict, Strict]),
+    probe("showsPrec_Integer", &["11", INTG, "\"\""], &[Strict, Strict, Strict]),
+    probe("__mll_shows_prec", &["11", "\"Just 1\"", "\"\""], &[Strict, Strict, Strict]),
     probe("show_Int", &["1"], &[Strict]),
     probe("show_Number", &["1.5"], &[Strict]),
     probe("show_String", &["\"s\""], &[Strict]),
@@ -193,6 +201,7 @@ const PROBES: &[Probe] = &[
     probe("mod_Integer", &[INTG, INTG2], &[Strict, Strict]),
     probe("divMod_Integer", &[INTG, INTG2], &[Strict, Strict]),
     probe("eq_Integer", &[INTG, INTG2], &[Strict, Strict]),
+    probe("ne_Integer", &[INTG, INTG2], &[Strict, Strict]),
     probe("ord_lt__Integer", &[INTG, INTG2], &[Strict, Strict]),
     probe("ord_gt__Integer", &[INTG, INTG2], &[Strict, Strict]),
     probe("ord_le__Integer", &[INTG, INTG2], &[Strict, Strict]),
@@ -241,19 +250,19 @@ run2 :: [a -> a -> b] -> a -> a -> [b]
 run2 fs x y = map (\f -> f x y) fs
 
 opsI :: [Int -> Int -> Bool]
-opsI = [(==), (<), (>), (<=), (>=)]
+opsI = [(==), (/=), (<), (>), (<=), (>=)]
 
 opsN :: [Number -> Number -> Bool]
-opsN = [(==), (<), (>), (<=), (>=)]
+opsN = [(==), (/=), (<), (>), (<=), (>=)]
 
 opsS :: [String -> String -> Bool]
-opsS = [(==), (<), (>), (<=), (>=)]
+opsS = [(==), (/=), (<), (>), (<=), (>=)]
 
 opsB :: [ByteString -> ByteString -> Bool]
-opsB = [(==), (<), (>), (<=), (>=)]
+opsB = [(==), (/=), (<), (>), (<=), (>=)]
 
 opsBool :: [Bool -> Bool -> Bool]
-opsBool = [(==)]
+opsBool = [(==), (/=)]
 
 mmI :: [Int -> Int -> Int]
 mmI = [max, min]
@@ -301,6 +310,13 @@ main = do
   print [4 :: Int]
   print (Just (3 :: Int))
   print b
+  -- `Just x` shows its payload through the payload type's showsPrec:
+  -- each Just below reaches one typed showsPrec shim.
+  print (Just (1.5 :: Number))
+  print (Just "s")
+  print (Just True)
+  print (Just b)
+  print (Just (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
   print (hmInsert (1 :: Int) (2 :: Int) hmEmpty)
   print (hmLookup (1 :: Int) (hmInsert (1 :: Int) (2 :: Int) hmEmpty))
   print (hmSize (hmDelete (1 :: Int) (hmInsert (1 :: Int) (2 :: Int) hmEmpty)))
@@ -337,8 +353,9 @@ main = do
   print (divMod gi 3)
   print (quotRem gi 3)
   print (toInteger gi + toInteger (5 :: Int))
-  print (gi == gi, gi < gi, gi > gi, gi <= gi, gi >= gi)
+  print (gi == gi, gi /= gi, gi < gi, gi > gi, gi <= gi, gi >= gi)
   print (max gi gi, min gi gi, compare gi gi)
+  print (Just gi)
 "#;
 
 /// One position's probe: `args` with a fresh bomb spliced at `bomb_at`.

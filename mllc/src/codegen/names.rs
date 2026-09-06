@@ -246,6 +246,7 @@ pub fn sanitize_name(name: &str) -> String {
 pub(super) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
     match name {
         "eq_Int" | "eq_Number" | "eq_String" | "eq_Bool" | "eq_ByteString" => Some("=="),
+        "ne_Int" | "ne_Number" | "ne_String" | "ne_Bool" | "ne_ByteString" => Some("~="),
         "ord_lt__Int" | "ord_lt__Number" | "ord_lt__String" | "ord_lt__ByteString" => Some("<"),
         "ord_gt__Int" | "ord_gt__Number" | "ord_gt__String" | "ord_gt__ByteString" => Some(">"),
         "ord_le__Int" | "ord_le__Number" | "ord_le__String" | "ord_le__ByteString" => Some("<="),

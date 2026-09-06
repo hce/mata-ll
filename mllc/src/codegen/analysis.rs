@@ -404,8 +404,8 @@ impl CodeGen {
     /// and never key the scan maps anyway.
     fn spec_embedded_fn_names(spec: &SpecKind) -> Vec<&str> {
         match spec {
-            SpecKind::ListEq(n) | SpecKind::MaybeEq(n)
-            | SpecKind::ShowList(n) | SpecKind::ShowMaybe(n)
+            SpecKind::ListEq(n) | SpecKind::MaybeEq(n) | SpecKind::NotEq(n)
+            | SpecKind::ShowList(n) | SpecKind::ShowMaybe(n) | SpecKind::ShowsPrecOf(n)
             | SpecKind::ListCmp(n) | SpecKind::MaybeCmp(n)
             | SpecKind::KeyEncList(n) | SpecKind::KeyEncMaybe(n) => vec![n.as_str()],
             SpecKind::TupleEq(ns) | SpecKind::TupleCmp(ns) | SpecKind::KeyEncTuple(ns) =>

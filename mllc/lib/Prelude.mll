@@ -49,6 +49,19 @@ const x _ = x
 flip :: (a -> b -> c) -> b -> a -> c
 flip f b a = f a b
 
+-- The show combinators (GHC's Prelude): the building blocks of a
+-- hand-written `showsPrec`. `shows` is showsPrec at precedence 0.
+type ShowS = String -> String
+
+shows :: Show a => a -> ShowS
+shows x s = showsPrec 0 x s
+
+showString :: String -> ShowS
+showString str s = str <> s
+
+showParen :: Bool -> ShowS -> ShowS
+showParen b p s = if b then "(" <> p (")" <> s) else p s
+
 -- Foldable instances for the builtin containers. `[]` in an instance head
 -- is the bare, unapplied list constructor (kind Type -> Type), and
 -- `Either c` is the partially applied Either — both must match the kind of

@@ -1623,6 +1623,7 @@ impl Checker {
             method_fns: {
                 let mut m = HashMap::new();
                 m.insert("show".to_string(), "show_HashMap".to_string());
+                m.insert("showsPrec".to_string(), "showsPrec_HashMap".to_string());
                 m
             },
             context: None,
@@ -3194,9 +3195,8 @@ impl Checker {
     }
 }
 
-/// Every method name the BUILTIN classes define (`show`, `==`, `abs`,
-/// `foldr`, …) plus the derived operator `/=`: the names an unqualified
-/// import must not redefine. The Prelude source's signature shapes form the
+/// Every method name the BUILTIN classes define (`show`, `==`, `/=`, `abs`,
+/// `foldr`, …): the names an unqualified import must not redefine. The Prelude source's signature shapes form the
 /// rest of the import-collision baseline; these live in Rust and were
 /// missing from it, so a library declaring `abs :: Number -> …` (LMath did)
 /// silently shadowed the Num method for every importer.
@@ -3207,7 +3207,6 @@ pub fn builtin_method_names() -> Vec<String> {
         .values()
         .flat_map(|ci| ci.methods.iter().map(|(m, _)| m.clone()))
         .collect();
-    names.push("/=".to_string());
     names.sort();
     names.dedup();
     names

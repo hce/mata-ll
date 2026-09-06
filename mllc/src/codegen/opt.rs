@@ -482,10 +482,14 @@ enum Ctx {
 /// runtime.lua / runtime_integer.lua text. Every other show-spelled name
 /// reaching a callee position is emitted through an `__mll_fn` slot — or
 /// is a HOST FFI callee, which may multi-return.
-const SHOW_HELPERS: [&str; 11] = [
+const SHOW_HELPERS: [&str; 23] = [
     "show", "show_Int", "show_Number", "show_String", "show_Bool",
     "show_List_", "show_Maybe", "show_Unit", "show_HashMap",
     "show_ByteString", "show_Integer",
+    "showsPrec", "showsPrec_Int", "showsPrec_Number", "showsPrec_String",
+    "showsPrec_Bool", "showsPrec_List_", "showsPrec_Maybe", "showsPrec_Unit",
+    "showsPrec_HashMap", "showsPrec_ByteString", "showsPrec_Integer",
+    "__mll_shows_prec",
 ];
 
 /// Callees whose calls provably return exactly one value: the runtime

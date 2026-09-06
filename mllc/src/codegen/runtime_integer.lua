@@ -432,7 +432,9 @@ local function div_Integer(a, b) local p = divMod_Integer(a, b); return p[1] end
 mod_Integer = function(a, b) local p = divMod_Integer(a, b); return p[2] end
 
 local function show_Integer(x) return __int_tostring(__force(x)) end
+local function showsPrec_Integer(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_Integer(x), s) end
 local function eq_Integer(a, b) return __int_cmp(__force(a), __force(b)) == 0 end
+local function ne_Integer(a, b) return __int_cmp(__force(a), __force(b)) ~= 0 end
 local function ord_lt__Integer(a, b) return __int_cmp(__force(a), __force(b)) < 0 end
 local function ord_gt__Integer(a, b) return __int_cmp(__force(a), __force(b)) > 0 end
 local function ord_le__Integer(a, b) return __int_cmp(__force(a), __force(b)) <= 0 end

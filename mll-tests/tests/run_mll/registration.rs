@@ -528,6 +528,11 @@ mll_test!(existential_dicts, "existential_dicts.mll");
 // GHC's Ord defaults on the builtin class: compare-only and (<=)-only
 // instances, with the other methods (and sort/maximum) following.
 mll_test!(ord_minimal_instance, "ord_minimal_instance.mll");
+// GHC's Eq and Show defaults on the builtin classes: a `/=`-only Eq
+// instance, a showsPrec-only Show instance with showParen precedence,
+// and show-only instances left unparenthesized inside derived fields/Just.
+mll_test!(eq_minimal_instance, "eq_minimal_instance.mll");
+mll_test!(show_shows_prec_instance, "show_shows_prec_instance.mll");
 // Record construction against the constructor's own fields (multi-
 // constructor records) and infix method clauses with pattern operands.
 mll_test!(record_multi_constructor, "record_multi_constructor.mll");

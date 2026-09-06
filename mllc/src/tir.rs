@@ -680,6 +680,13 @@ pub enum SpecKind {
     ShowMaybe(String),
     /// Tuple `==`: one eq function per element, in element order.
     TupleEq(Vec<String>),
+    /// Structural `/=`: GHC's class default `not (a == b)` over the named
+    /// structural `==` of the same shape.
+    NotEq(String),
+    /// Structural `showsPrec`: the runtime precedence rule
+    /// (`__mll_shows_prec d (show x) s`) over the named typed `show` of
+    /// the same shape.
+    ShowsPrecOf(String),
     /// Structural Ord (A16), mirroring the Eq family: lexicographic list /
     /// Maybe `compare` threading the element comparator.
     ListCmp(String),

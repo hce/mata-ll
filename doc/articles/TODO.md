@@ -213,13 +213,25 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       `out_spans` entry per alias copy; longer term carry `Option<FileId>`
       per declaration. Add a test asserting file + excerpt of an error
       raised inside an imported module, plain and qualified.
-- [~] **B9 Builtin Eq/Ord/Show have no default methods.** PARTLY FIXED
-      (2026-09-03, uncommitted): the builtin Ord class now carries GHC's
-      seven defaults via `register_builtin_default` (compare-only and
-      (<=)-only instances work; case ord_minimal_instance.mll). Still open:
-      `/=` is not an Eq method (an instance defining only `/=` is rejected
-      as "not a method"; making it a method with the two-way defaults is
-      the fix), and Show has no `showsPrec`/`showList` methods.
+- [x] **B9 Builtin Eq/Ord/Show have no default methods — fixed.** Ord
+      (2026-09-03): GHC's seven defaults via `register_builtin_default`
+      (case ord_minimal_instance.mll). Eq/Show (2026-09-06): `/=` is an Eq
+      METHOD with the two-way defaults (builtin `ne_*` runtime twins
+      inlining to `~=`, derived `ne_T`, structural `SpecKind::NotEq`, the
+      `/=`-via-`==`+`not` special case in mono removed); `showsPrec` is a
+      Show method with GHC's mutual defaults (`showsPrec_*` shims over
+      the runtime rule `__mll_shows_prec`, derived `showsPrec_T`,
+      structural `SpecKind::ShowsPrecOf`; derived positional fields and
+      `Just` show through the field type's showsPrec at 11), plus Prelude
+      `ShowS`/`shows`/`showString`/`showParen`; `showList` deliberately
+      absent (HASKDIFF). Cases eq_minimal_instance.mll,
+      show_shows_prec_instance.mll. Found on the way: (a) the
+      single-clause DESTRUCTURING emitter never consumed its eta padding
+      (G9's third shape — `showsPrec d (Cx a b) = showParen …` returned a
+      closure; eta_padding_consumed.mll extended); (b) a hand-written
+      instance's operator method (`==_T`) embedded raw in a threading
+      payload (`__mll_list_eq(==_T, …)`, a Lua syntax error for
+      `[T] == [T]`) — `spec_ref` sanitizes payload names.
       typechecker/prelude.rs:644-651 registers Ord with seven methods and
       `default_methods` empty, so `instance Ord T where compare ... = ...`
       yields 13 "No instance for '<' on type 'T'" errors (one at a Prelude

@@ -31,6 +31,19 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **GHC's Eq and Show class shapes.** `/=` is a method of the builtin
+  `Eq` class and `showsPrec` a method of `Show`, each pair defaulting
+  through the other exactly as in base, so an instance may define
+  either one (`/=` alone used to be rejected as "not a method";
+  `showsPrec` did not exist). The Prelude gains `ShowS`, `shows`,
+  `showString` and `showParen`. A derived `Show` shows a positional
+  field, and `Just` its payload, at precedence 11 through the field
+  type's own `showsPrec`: a hand-written precedence-aware instance
+  decides its own parentheses, and a `show`-only instance is never
+  parenthesized — `Just Raw 3`, as under GHC (it used to be
+  parenthesized by inspecting the string). `showList` is deliberately
+  absent (see HASKDIFF).
+
 - **One module through several import forms at once.** `import Data.Map
   (Map)` next to `import qualified Data.Map as M`, or two aliases of one
   module, now name the SAME declarations: module resolution keeps one
@@ -69,6 +82,21 @@ API of the `mllc` library crate.)
   (interleaved persistent insert/delete): the split surfaced that
   value-semantics write turnover really costs ~800x the mutating twin,
   a number the old blend hid at 47x.
+
+### Fixed
+
+- **A hand-written `Eq` instance inside a list, `Maybe` or tuple was a
+  Lua syntax error.** The structural `==` embeds the element's method
+  by its compiler name, and a user instance's operator method (`==_T`)
+  was spliced in unsanitized (`__mll_list_eq(==_T, …)`), so `[T] == [T]`
+  with an `instance Eq T` failed to load. Every specialization payload
+  name now goes through the same sanitizer as a reference.
+- **A single-clause function with a constructor pattern, fewer patterns
+  than arrows and a function-valued body returned the function
+  unapplied** (`addTo (Box n) = (+ n)`; `addTo (Box 3) 4` printed a
+  function value): the destructuring emitter declared its eta padding
+  but never consumed it — the third shape of the N-ary convention bug
+  fixed for multi-clause and where-local functions earlier.
 
 ### Changed
 

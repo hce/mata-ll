@@ -446,6 +446,31 @@ it — and, structurally, the compiler-owned containers: `Ord [a]`
 `sortBy` (stable mergesort, GHC's `Data.List` behavior) live in the flat
 Prelude namespace like the other list functions.
 
+## Show and Eq carry GHC's methods and defaults; `showList` is absent
+
+The builtin `Eq` class has GHC's two methods, `==` and `/=`, each
+defaulting through the other, and `Ord` carries GHC's seven defaults —
+an instance may give any minimal complete definition (`==` alone, `/=`
+alone, `compare` alone, `<=` alone). `Show` has `show` and `showsPrec`,
+again with GHC's mutual defaults, plus the Prelude's `ShowS`, `shows`,
+`showString` and `showParen`, so a hand-written `showsPrec d x =
+showParen (d > 10) …` behaves as under GHC: a derived `Show` shows a
+positional field at precedence 11 through the field type's own
+`showsPrec` (`Just x` likewise), so a precedence-aware instance decides
+its own parentheses and a `show`-only instance is never parenthesized —
+`Just (Raw 3)` prints `Just Raw 3`, as in GHC. The builtin, derived and
+structural instances' `showsPrec` apply GHC's rule (a negative number is
+parenthesized above precedence 6, a constructor application — record
+syntax included — at 11).
+
+`showList` does not exist: in GHC it serves one purpose, letting `[Char]`
+render as a string literal, and mata-ll's `String` is a primitive type
+(see "Strings and ByteStrings"). A record field and a list element are
+shown with `show` rather than `showsPrec 0`; the two coincide for every
+lawful instance. An instance that defines neither method of a pair
+(`==`/`/=`, `show`/`showsPrec`) is accepted as GHC accepts it (GHC warns
+under `-Wmissing-methods`) and loops at the first use.
+
 ## The Prelude is a curated subset
 
 The auto-imported `Prelude` is a small, hand-maintained subset

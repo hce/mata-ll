@@ -637,11 +637,22 @@ impl Checker {
         // function, an IO action, a type without the relevant deriving) is
         // rejected at the function boundary.
 
-        // Built-in Show typeclass
+        // Built-in Show typeclass: GHC's two methods `show` and `showsPrec`
+        // (`showList` is not carried — it exists in base only so that
+        // `[Char]` prints as a string literal, and mata-ll's String is a
+        // primitive type). Each defaults through the other exactly as in
+        // base, so an instance may define either one.
         let show_ty = Ty::arrow(ta.clone(), Ty::Con("String".into()));
+        let shows_prec_ty = Ty::fun(
+            &[Ty::Con("Int".into()), ta.clone(), Ty::Con("String".into())],
+            Ty::Con("String".into()),
+        );
         self.register_builtin_class("Show", "a", &[], vec![
             ("show", show_ty, Some(vec![a.clone()]), vec![("Show", "a")]),
+            ("showsPrec", shows_prec_ty, Some(vec![a.clone()]), vec![("Show", "a")]),
         ]);
+        self.register_builtin_default("Show", "showsPrec", "showsPrec _ x s = show x <> s");
+        self.register_builtin_default("Show", "show", "show x = showsPrec 0 x \"\"");
 
         // Built-in Read typeclass
         let read_ty = Ty::arrow(Ty::Con("String".into()), ta.clone());
@@ -654,28 +665,31 @@ impl Checker {
                 &[("read", format!("read_{}", type_name))]);
         }
 
-        // Built-in Eq typeclass
+        // Built-in Eq typeclass: GHC's two methods, each defaulting through
+        // the other (`x /= y = not (x == y)`, `x == y = not (x /= y)`), so an
+        // instance may define either one. `/=` used to be a free function
+        // resolved through `==` in the monomorphizer; an instance defining
+        // only `/=` was rejected as "not a method".
         let eq_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
         self.register_builtin_class("Eq", "a", &[], vec![
-            ("==", eq_ty, Some(vec![a.clone()]), vec![("Eq", "a")]),
+            ("==", eq_ty.clone(), Some(vec![a.clone()]), vec![("Eq", "a")]),
+            ("/=", eq_ty, Some(vec![a.clone()]), vec![("Eq", "a")]),
         ]);
-        // /= is derived from ==
-        self.env_scheme("/=", vec![a.clone()], Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into())));
-        self.method_constraints.insert("/=".to_string(), vec![TyConstraint {
-            class_name: "Eq".to_string(),
-            type_var: "a".to_string(),
-        }]);
+        self.register_builtin_default("Eq", "/=", "x /= y = not (x == y)");
+        self.register_builtin_default("Eq", "==", "x == y = not (x /= y)");
 
-        // Eq instances for base types
+        // Eq instances for base types. The runtime `ne_*` twins of `eq_*`
+        // inline to Lua's `~=` exactly as `eq_*` inline to `==`
+        // (primitive_method_lua_op); Integer's is a bignum comparison.
         for type_name in &["Int", "Integer", "Number", "String", "Bool", "ByteString"] {
             self.register_builtin_instance("Eq", Ty::Con(type_name.to_string()),
-                &[("==", format!("eq_{}", type_name))]);
+                &[("==", format!("eq_{}", type_name)), ("/=", format!("ne_{}", type_name))]);
         }
         // Eq (IORef a) — pointer identity, context-free like GHC's instance
         // (no `Eq a` demanded of the element; two refs are == iff they are
         // the same cell, whatever they hold).
         self.register_builtin_instance_empty_ctx("Eq", Ty::Con("IORef".to_string()),
-            &[("==", "eq_IORef")]);
+            &[("==", "eq_IORef"), ("/=", "ne_IORef")]);
 
         // Built-in Ord typeclass (superclass: Eq)
         let cmp_ty = Ty::fun(&[ta.clone(), ta.clone()], Ty::Con("Bool".into()));
@@ -871,10 +885,18 @@ impl Checker {
         // ambiguity error via the constraint `register_class` synthesizes for
         // it, exactly as for the builtin `mempty` before.
 
-        // Show instances for base types and parameterized types
+        // Show instances for base types and parameterized types. Each
+        // `showsPrec_*` is the runtime's `__mll_shows_prec` over the type's
+        // `show`: GHC's derived/builtin precedence rule (parenthesize a
+        // negative number above precedence 6, a constructor application
+        // at 11) read off the shown string — exact for every string a
+        // builtin or derived show produces. (`[]`/`Maybe` here are the
+        // type-erased shims; the typed path synthesizes per element type
+        // in the monomorphizer, as for `show`.)
         for type_name in &["Int", "Integer", "Number", "String", "Bool", "[]", "Maybe", "ByteString"] {
             self.register_builtin_instance("Show", Ty::Con(type_name.to_string()),
-                &[("show", format!("show_{}", type_name))]);
+                &[("show", format!("show_{}", type_name)),
+                  ("showsPrec", format!("showsPrec_{}", type_name))]);
         }
 
         // `()` is a base type like any other and carries the GHC base
@@ -883,8 +905,9 @@ impl Checker {
         // `format!("{}", Ty::Unit)`) while its mangled runtime names must be
         // identifier-safe (`show_Unit`, not `show_()`). Runtime rep is nil,
         // so eq/ord are trivial (nil == nil; compare is always EQ).
-        self.register_builtin_instance("Show", Ty::Unit, &[("show", "show_Unit")]);
-        self.register_builtin_instance("Eq", Ty::Unit, &[("==", "eq_Unit")]);
+        self.register_builtin_instance("Show", Ty::Unit,
+            &[("show", "show_Unit"), ("showsPrec", "showsPrec_Unit")]);
+        self.register_builtin_instance("Eq", Ty::Unit, &[("==", "eq_Unit"), ("/=", "ne_Unit")]);
         self.register_builtin_instance("Ord", Ty::Unit, &[
             ("<", "ord_lt__Unit"), (">", "ord_gt__Unit"),
             ("<=", "ord_le__Unit"), (">=", "ord_ge__Unit"),

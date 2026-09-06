@@ -800,6 +800,7 @@ mod contract_tests {
         let mut candidates: Vec<String> = Vec::new();
         for t in tys {
             candidates.push(format!("eq_{t}"));
+            candidates.push(format!("ne_{t}"));
             for op in ["lt", "gt", "le", "ge", "max", "min", "compare"] {
                 candidates.push(format!("ord_{op}__{t}"));
             }

@@ -359,6 +359,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_strict_folds, "cases", "strict_folds.mll"),
         (ghc_oracle_existential_dicts, "cases", "existential_dicts.mll"),
         (ghc_oracle_ord_minimal_instance, "cases", "ord_minimal_instance.mll"),
+        (ghc_oracle_eq_minimal_instance, "cases", "eq_minimal_instance.mll"),
+        (ghc_oracle_show_shows_prec_instance, "cases", "show_shows_prec_instance.mll"),
         (ghc_oracle_record_multi_constructor, "cases", "record_multi_constructor.mll"),
         (ghc_oracle_instance_infix_pattern_methods, "cases", "instance_infix_pattern_methods.mll"),
         (ghc_oracle_let_semicolon_separators, "cases", "let_semicolon_separators.mll"),
