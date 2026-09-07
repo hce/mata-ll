@@ -1632,78 +1632,78 @@ impl Monomorphizer {
                         let mangled = self.hm_threaded_impl(op, &key_ty, &ty);
                         return TExpr { kind: TExprKind::Var(mangled), ty };
                     }
-                if self.poly_fns.contains_key(name) && !self.locals.contains(name)
-                    && !self.dict_passing_fns.contains(name) && self.is_polymorphic(&ty)
-                    && !self.arity_only_fns.contains(name)
+                let poly_use = self.poly_fns.contains_key(name)
+                    && !self.locals.contains(name)
+                    && !self.dict_passing_fns.contains(name);
+                let residual = self.is_polymorphic(&ty);
+                // A still-polymorphic use whose residual variables are all
+                // DEAD (see `residual_vars_dead`) specializes exactly like
+                // a concrete one, at the canonicalized type, below. One
+                // whose residual variables are LIVE — a variable the
+                // context constrains never got instantiated — cannot be
+                // specialized: the copy would need a dictionary nobody can
+                // name. Inside a specialization of `name` such a use is
+                // the recursive/sibling call sharing the enclosing copy's
+                // type (top-most on the generation stack); inside a
+                // DICTIONARY-FORM body it stays by name, and the dictionary
+                // rewrite that follows routes it through the context's
+                // dictionaries; anywhere else it stays on the generic copy,
+                // whose type-erased dispatch is the only implementation
+                // that fits every instantiation. It is never pointed at an
+                // arbitrary sibling specialization: the old fallback took
+                // the lexically-smallest one, which welded one use's type
+                // into another's — `f (1 :: Int) []` with `f :: Show a =>
+                // a -> b -> String` ran the String or Number copy of `f`
+                // (`"1"` shown as `1.0`, or "attempt to get length of a
+                // number"), and gdTag-for-every-type once called
+                // gdConBody-for-BlueC. A dead residual variable (the `b`
+                // there) used to be what sent a use down that fallback.
+                if poly_use && residual && !self.residual_vars_dead(name, &ty) {
                     // A WIDENING use is excluded for the same reason the
-                    // arity-only builtins are: the enclosing/arbitrary
-                    // specialization was compiled at its own arrow count,
-                    // which is the wrong one for this use. It takes the
-                    // canonicalized widening specialization below instead.
-                    && !self.arity_widening(name, &ty) {
-                    // Resolve to the enclosing specialization of this function
-                    // (top-most on the generation stack). The HashMap of all
-                    // specializations has no meaningful order, so fall back to
-                    // the lexically-smallest one only if this call is somehow
-                    // not inside a specialization of `name`.
-                    let chosen = self.gen_stack.iter().rev()
-                        .find(|(n, _)| n == name)
-                        .map(|(_, m)| m.clone())
-                        .or_else(|| {
-                            // Inside a DICTIONARY-FORM body the call must stay
-                            // by name: the dictionary rewrite that follows
-                            // routes it through the context's dictionaries.
-                            // Pointing it at an arbitrary specialization here
-                            // would weld one constructor's baked metadata into
-                            // the shared dictform (gdTag-for-every-type calling
-                            // gdConBody-for-BlueC).
-                            if self.in_dictform {
-                                return None;
-                            }
-                            let mut specs: Vec<String> = self.specializations.iter()
-                                .filter(|(k, _)| k.name == *name)
-                                .map(|(_, v)| v.clone())
-                                .collect();
-                            specs.sort();
-                            specs.into_iter().next()
-                        });
-                    if let Some(mangled) = chosen {
-                        return TExpr { kind: TExprKind::Var(mangled), ty };
+                    // arity-only builtins are: the enclosing specialization
+                    // was compiled at its own arrow count, which is the
+                    // wrong one for this use.
+                    if !self.arity_only_fns.contains(name)
+                        && !self.arity_widening(name, &ty)
+                        && let Some((_, mangled)) = self.gen_stack.iter().rev()
+                            .find(|(n, _)| n == name)
+                    {
+                        return TExpr { kind: TExprKind::Var(mangled.clone()), ty };
                     }
+                    return TExpr { kind: expr.kind, ty };
                 }
-                // A still-polymorphic use normally cannot be specialized
-                // (no concrete type to key on) — EXCEPT an arity-WIDENING
-                // use of a shared builtin whose leftover variables are dead
-                // (unconstrained; codegen erases them, nothing dispatches
-                // on them). There the ARROW STRUCTURE is the whole point of
-                // the copy, and it is concrete even when an element type is
-                // not. The key is canonicalized (variables renamed in
-                // first-occurrence order) so every use of the same shape
-                // shares one copy. Refuted by backend_fuzz index 66:
-                // `(flip const True (\v -> False)) []` — the dead `[]`
-                // element type kept `flip` on the generic copy, whose body
-                // calls `f(a, b)` flat, while the first-class `const` was
-                // (rightly) widened to three parameters: f consumed its eta
-                // slot as nil and flip's real result was applied to a
-                // boolean. The copy and the widened value must agree, so
-                // the copy must exist.
-                // Not just the shared builtins: a USER polymorphic function
-                // hits the same hole (backend_fuzz index 123 — `fuzzTwice`
-                // at `a := t1 -> t2 -> R` with a dead variable left in the
-                // use type kept the generic copy, whose body applies `f` one
-                // argument at a time, against a 3-parameter flattened lambda
-                // argument: the flat lambda ran on nils and the caller
-                // applied its table result). Constrained functions are
-                // excluded — their specializations must build dictionaries,
-                // which residual variables cannot name.
-                let widened_poly = self.is_polymorphic(&ty)
-                    && self.arity_widening(name, &ty)
-                    && self.fn_constraints.get(name).is_none_or(|c| c.is_empty());
-                if self.poly_fns.contains_key(name) && !self.locals.contains(name)
-                    && !self.dict_passing_fns.contains(name)
-                    && ((!self.is_polymorphic(&ty) && self.specialization_wanted(name, &ty))
-                        || widened_poly) {
-                    let spec_ty = if widened_poly {
+                // A concrete use specializes at its type. A still-polymorphic
+                // use with only dead residual variables specializes at the
+                // CANONICALIZED type (variables renamed in first-occurrence
+                // order), so every use of one shape shares one copy: the
+                // dead variables do not reach the body, so the copy compiled
+                // for `Int -> [_w0] -> String` is the right code for every
+                // list type in that slot. Keying on the use type as written
+                // would mint a copy per fresh unification variable.
+                // The arity-WIDENING use of a shared builtin is the shape
+                // that first demanded this: its leftover variables are dead,
+                // but the ARROW STRUCTURE is the whole point of the copy,
+                // and it is concrete even when an element type is not.
+                // Refuted by backend_fuzz index 66: `(flip const True (\v ->
+                // False)) []` — the dead `[]` element type kept `flip` on
+                // the generic copy, whose body calls `f(a, b)` flat, while
+                // the first-class `const` was (rightly) widened to three
+                // parameters: f consumed its eta slot as nil and flip's real
+                // result was applied to a boolean. The copy and the widened
+                // value must agree, so the copy must exist. Not just the
+                // shared builtins: a USER polymorphic function hits the same
+                // hole (backend_fuzz index 123 — `fuzzTwice` at `a := t1 ->
+                // t2 -> R` with a dead variable left in the use type kept
+                // the generic copy, whose body applies `f` one argument at a
+                // time, against a 3-parameter flattened lambda argument: the
+                // flat lambda ran on nils and the caller applied its table
+                // result). And a constrained function is no different once
+                // its residual variables are known dead: `f (T 1) []` with
+                // `f :: Show a => a -> b -> String` must run `show` at `T`,
+                // which only a copy specialized at `T -> [_w0] -> String`
+                // does — the generic copy's erased `show` printed `(1)`.
+                if poly_use && self.specialization_wanted(name, &ty) {
+                    let spec_ty = if residual {
                         Self::canonicalize_vars(&ty)
                     } else {
                         ty.clone()
@@ -3024,13 +3024,61 @@ impl Monomorphizer {
             Self::spine_arrow_count(use_ty) > Self::spine_arrow_count(&f.ty))
     }
 
+    /// Are all the type variables still free in `use_ty` DEAD for a use of
+    /// polymorphic `name` there? A residual variable is dead when it lies
+    /// only in the image of declared type variables the function's context
+    /// leaves unconstrained. Such a variable cannot reach the body: no
+    /// method dispatches on an unconstrained signature variable (the
+    /// checker rejects `show x` at a bare `a` without `Show a` in the
+    /// context), and no dictionary is ever built for it — so the body
+    /// compiled at `use_ty` is the same code for every instantiation of the
+    /// variable, and the use can be specialized at the canonicalized type
+    /// exactly as a concrete use would be. A residual variable inside the
+    /// image of a CONSTRAINED declared variable (`a := Maybe t1` under
+    /// `Show a`) is live: the specialization would need a `Show t1`
+    /// dictionary nobody can name. Constraint arguments count as
+    /// constraining every variable they mention (`GEncode (Rep a)`). A
+    /// residual variable no declared variable accounts for (the declared
+    /// type could not be matched against the use type) is treated as live
+    /// — the conservative answer.
+    fn residual_vars_dead(&self, name: &str, use_ty: &Ty) -> bool {
+        let Some(poly_fn) = self.poly_fns.get(name) else { return false };
+        let residual = use_ty.free_vars();
+        if residual.is_empty() {
+            return true;
+        }
+        let mut live: HashSet<String> = HashSet::new();
+        if let Some(cs) = self.fn_constraints.get(name) {
+            live.extend(cs.iter().map(|c| c.type_var.clone()));
+        }
+        if let Some(args) = self.fn_constraint_args.get(name) {
+            for (_, arg) in args {
+                live.extend(arg.free_vars().into_iter().map(|v| v.name));
+            }
+        }
+        let mut images: HashMap<String, Ty> = HashMap::new();
+        Self::collect_subst_by_name(&poly_fn.ty, use_ty, &mut images);
+        let mut accounted: HashSet<TyVar> = HashSet::new();
+        for (declared, image) in &images {
+            let vars = image.free_vars();
+            if vars.is_empty() {
+                continue;
+            }
+            if live.contains(declared) {
+                return false;
+            }
+            accounted.extend(vars);
+        }
+        residual.iter().all(|v| accounted.contains(v))
+    }
+
     /// Rename every type variable to a canonical one in first-occurrence
     /// order, so two structurally identical still-polymorphic types key the
-    /// SAME arity-widening specialization (see the `widened_poly` branch of
-    /// the Var arm) regardless of which fresh unification variables the
-    /// checker happened to mint. Structure is untouched — only `Var`
-    /// identities change — so the canonical type has exactly the arrow
-    /// shape the copy exists to fix.
+    /// SAME dead-variable specialization (see the Var arm) regardless of
+    /// which fresh unification variables the checker happened to mint.
+    /// Structure is untouched — only `Var` identities change — so the
+    /// canonical type has exactly the arrow shape an arity-widening copy
+    /// exists to fix.
     fn canonicalize_vars(ty: &Ty) -> Ty {
         fn walk(ty: &Ty, map: &mut HashMap<(String, u32), u32>) -> Ty {
             match ty {

@@ -321,6 +321,36 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
 
 ### Unconfirmed suspicions (confirm or refute before acting)
 
+- Suspicions C1-C9 verdicts 2026-09-06 (isolated investigation, confirmed
+  by reasoning to a prediction and then by repro against runghc):
+  * C5 CONFIRMED, FIXED 2026-09-07: mono.rs Var arm — a use of a
+    polymorphic function whose use type kept a DEAD variable (a signature
+    variable the context leaves unconstrained, `f (1 :: Int) []` with
+    `f :: Show a => a -> b -> String`) was "cannot specialize" and took
+    the lexically-smallest sibling specialization (Number copy printed
+    `1.0`, String copy crashed) or the generic copy (derived `T 1` shown
+    as `(1)`). Dead residual variables now specialize at the
+    canonicalized use type (`residual_vars_dead`); the sibling fallback
+    is deleted. Case dead_var_specialization.mll (GHC-goldened).
+  * C2 CONFIRMED, FIXED 2026-09-07: the erased runtime `foldl` applied
+    `f` eagerly per element where the compiled `[]` instance suspends
+    `f acc x`; `lastOr [undefined, []]` raised through the generic copy
+    C5 kept alive. Runtime `foldl` now suspends each step like the
+    instance. `foldr` erased was already lazy and `foldl'` already
+    strict at every step; both left as they are. Case
+    foldl_lazy_accumulator.mll (GHC-goldened).
+  * C4 CONFIRMED, OPEN: a NaN HashMap key — the scalar hashmap path
+    keys the Lua table by the value itself and Lua refuses NaN as a
+    table index ("table index is NaN").
+  * C6 CONFIRMED, OPEN: a type signature inside a `where`/`let` block is
+    not parsed, so a where-bound helper's declared signature (and the
+    outer `a` it reuses) never reaches the checker; the helper is
+    inferred instead.
+  * C1, C3, C7, C8, C9 REFUTED. C8's `fold_num_num "^"` powf arm was
+    dead code (`^` needs an Integral exponent, which no Number literal
+    is) and is deleted.
+  * Noted on the way: `fromIntegral` is missing from the Prelude.
+
 - [ ] C1 `-`, `*`, `negate`, `fromInteger` at builtin types past SPEC_LIMIT
       (same root as B4). C2 erased runtime `foldl`/`foldr` strictness vs
       compiled Foldable instances in dict-passing contexts (bottom element,

@@ -160,8 +160,12 @@ pub const PRIMITIVE_BINOP_METHODS: &[&str] = &[
 ///     without touching it, and the runtime checks `n <= 0` before
 ///     `__force(xs)`, so `take 0 undefined` must stay `[]`.
 ///   * `show_Unit` is omitted entirely: it returns "()" without forcing.
-///   * `foldr`/`foldl` are omitted: their seed argument is forced only on the
-///     empty-structure path, and the accumulator must stay lazy.
+///   * `foldr`/`foldl`/`foldl'` are omitted: their seed argument is forced
+///     only on the empty-structure path, the function only on the non-empty
+///     one, and `foldl`'s accumulator must stay lazy — each step suspends
+///     `f acc x` exactly as the compiled `[]` instance does (GHC: `foldl
+///     (\_ x -> x `seq` 1) 0 [undefined, []]` is 1). A row states "forced
+///     on EVERY path", which none of these positions is.
 ///
 /// `map`/`filter`/`zipWith` force their FUNCTION argument too (`f = __force(f)`
 /// runs before the nil check), so that position is strict as well.

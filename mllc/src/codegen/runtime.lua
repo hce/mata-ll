@@ -1664,10 +1664,18 @@ local function foldl(f, z, t)
     if mt ~= __cons_mt then
         error("foldl: type-erased fold over a structure that is not a list or Maybe")
     end
+    -- Each step SUSPENDS `f acc x`, exactly as the compiled `[]` instance
+    -- does (`foldl f (f acc x) xs` builds a thunk carrier per element):
+    -- GHC's foldl is lazy in the accumulator, so `foldl (\_ x -> x `seq`
+    -- 1) 0 [undefined, []]` is 1 — the first application is never
+    -- demanded. Applying f eagerly per element ran it on `undefined`.
+    -- The chain is forced once, at the end, like the instance's
+    -- `__force(acc)` on the empty-structure path.
     local acc = z
     local cur = t
     while cur ~= nil do
-        acc = f(acc, __mll_head(cur))
+        local prev, x = acc, __mll_head(cur)
+        acc = __thunk(function() return f(prev, x) end)
         cur = __mll_tail(cur)
     end
     return __force(acc)

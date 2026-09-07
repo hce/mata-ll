@@ -90,6 +90,30 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A polymorphic function used with a dead type variable no longer
+  runs a sibling's specialization (miscompile).** With `f :: Show a =>
+  a -> b -> String; f x _ = show x`, a use such as `f (1 :: Int) []`
+  leaves `b` uninstantiated — a DEAD variable, unconstrained and never
+  reaching the body. Monomorphization treated the use as "cannot
+  specialize" and pointed it at the lexically-smallest specialization
+  of `f` that happened to exist, whatever its type: the Number copy
+  printed `1.0`, the String copy died with "attempt to get length of a
+  number value", and with no sibling the generic copy's type-erased
+  `show` printed a derived `T 1` as `(1)`. A use whose residual
+  variables are all dead now specializes at the canonicalized use type
+  exactly as a concrete use does (the route arity-widening uses already
+  took), and the sibling fallback is gone: a use with a LIVE residual
+  variable resolves to the enclosing specialization or stays on the
+  generic copy, never on an arbitrary sibling. Pinned by
+  `cases/dead_var_specialization.mll` against the GHC golden.
+- **The type-erased runtime `foldl` is lazy in its accumulator, like
+  the compiled `[]` instance and GHC.** It applied `f` eagerly per
+  element, so `foldl (\_ x -> x `seq` 1) 0 [undefined, []]` raised
+  `Prelude.undefined` through a generic copy (the one the dead-variable
+  bug above kept alive) where GHC prints `1`. Each step now suspends
+  `f acc x` and the chain is forced once at the end, so the two twins
+  share one strictness. Pinned by `cases/foldl_lazy_accumulator.mll`
+  against the GHC golden.
 - **STArray stores are lazy, like GHC's boxed arrays.** `newSTArray`,
   `writeSTArray` and `newSTArrayFromList` used to evaluate the stored
   value, so `writeSTArray arr i (error …)` raised even when the slot

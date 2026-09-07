@@ -880,7 +880,9 @@ fn fold_num_num(op: &str, a: f64, b: f64, ty: &Ty) -> Option<TExpr> {
         "-"  => lit(a - b),
         "*"  => lit(a * b),
         "/"  => if b != 0.0 { lit(a / b) } else { None },
-        "^"  => lit(a.powf(b)),
+        // No `^` arm: `(^) :: (Num a, Integral b) => a -> b -> a` never
+        // sees a Number literal in its exponent (Number has no Integral
+        // instance), so the Number-op-Number fold cannot meet it.
         "==" => cmp(a == b),
         "/=" => cmp(a != b),
         "<"  => cmp(a < b),
