@@ -22,6 +22,24 @@ local __mll_hm_nilv = {}
 local __mll_hm_mt = {}
 -- Its structural-key sibling (see the HashMap runtime below).
 local __mll_hme_mt = {}
+-- NaN keys. Lua refuses NaN as a table index ("table index is NaN"), and
+-- GHC's Data.Map — `compare nan _ = GT`, `nan == nan = False` — makes a
+-- NaN key one that LANDS (the insert grows the map) and that no lookup,
+-- member, delete or later insert ever matches. A scalar-path write of a
+-- NaN key therefore stores under a fresh BOX `{nan, seq}` instead of the
+-- NaN itself: a read with a NaN key indexes the raw NaN (allowed; it finds
+-- nothing), the enumerators unbox the NaN back and place the boxes after
+-- every ordinary key in insertion order (a NaN compares GT both ways, so
+-- GHC enumerates a NaN inserted after the ordinary keys last), and the
+-- structural encoder (__mll_key_scalar) mints a fresh token per NaN it
+-- meets, which gives an encoded key the same unmatchable identity. This
+-- counter numbers both. Declared this early so the FFI marshallers can
+-- recognize a box.
+local __mll_hm_nan_seq = 0
+local function __mll_hm_nan_box(k)
+    __mll_hm_nan_seq = __mll_hm_nan_seq + 1
+    return {k, __mll_hm_nan_seq}
+end
 -- Forward declaration: the persistent-map reroot (defined with the
 -- HashMap runtime below) is needed by the FFI marshallers, which are
 -- defined first.
@@ -595,6 +613,9 @@ local function __mll_arg_marshal(v, d)
         local ks, vs = __mll_hm_snapshot(__mll_hm_reroot(v))
         for i = 1, #ks do
             local k = ks[i]
+            if type(k) == "table" then
+                error("a HashMap holding a NaN key cannot cross the FFI boundary: a Lua table cannot be indexed by NaN", 2)
+            end
             local x = __force(vs[i])
             -- Unbox a stored-nil value: the host convention for an absent
             -- payload is nil (the key stays absent host-side, exactly how
@@ -658,6 +679,9 @@ local function __mll_to_lua(x)
         local ks, vs = __mll_hm_snapshot(__mll_hm_reroot(x))
         for i = 1, #ks do
             local v = vs[i]
+            if type(ks[i]) == "table" then
+                error("a HashMap holding a NaN key cannot cross the FFI boundary: a Lua table cannot be indexed by NaN", 2)
+            end
             if not rawequal(v, __mll_hm_nilv) then
                 result[ks[i]] = __mll_to_lua(v)
             end
@@ -1831,6 +1855,7 @@ end
 -- the shape hashmap_lookup always had.
 local function hashmap_insert(k, v, m)
     if type(k) == "table" then k = __mll_hm_scalar_key(k) end
+    if k ~= k then k = __mll_hm_nan_box(k) end
     if getmetatable(v) == __thunk_mt then v = __force(v) end
     if getmetatable(m) == __thunk_mt then m = __force(m) end
     if v == nil then v = __mll_hm_nilv end
@@ -1897,14 +1922,21 @@ local function hashmap_size(m)
     return m.n
 end
 -- Key sort comparator: Bool is a legal key type but Lua cannot `<`
--- booleans; order false < true. (Keys within one map share one type.)
+-- booleans; order false < true. (Keys within one map share one type.) A
+-- NaN box sorts after every ordinary key, boxes among themselves by
+-- insertion sequence — a total order, which the raw NaN would not give.
 local function __mll_hm_lt(a, b)
+    if type(a) == "table" then
+        return type(b) == "table" and a[2] < b[2]
+    end
+    if type(b) == "table" then return true end
     if type(a) == "boolean" then
         return (a and 1 or 0) < (b and 1 or 0)
     end
     return a < b
 end
-local function hashmap_keys(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do r = __mll_cons(ks[i], r) end return r end
+-- The enumerators hand a NaN box back as the NaN it boxes.
+local function hashmap_keys(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local k = ks[i] if type(k) == "table" then k = k[1] end r = __mll_cons(k, r) end return r end
 local function hashmap_values(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = t[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons(v, r) end return r end
 local function hashmap_member(k, m) if type(k) == "table" then k = __mll_hm_scalar_key(k) end if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[k] ~= nil end
 -- show forces every value; a forced value may read another version of
@@ -1917,13 +1949,13 @@ local function show_HashMap(m)
     if getmetatable(m) == __mll_hme_mt then
         for i = 1, #vs do local e = vs[i]; parts[#parts+1] = show(e[1]) .. " -> " .. show(e[2]) end
     else
-        for i = 1, #ks do local v = vs[i]; if rawequal(v, __mll_hm_nilv) then v = nil end; parts[#parts+1] = show(ks[i]) .. " -> " .. show(v) end
+        for i = 1, #ks do local k, v = ks[i], vs[i]; if rawequal(v, __mll_hm_nilv) then v = nil end; if type(k) == "table" then k = k[1] end; parts[#parts+1] = show(k) .. " -> " .. show(v) end
     end
     table.sort(parts)
     return "{" .. table.concat(parts, ", ") .. "}"
 end
 local function showsPrec_HashMap(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_HashMap(x), s) end
-local function hashmap_fromList(xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end local k = __mll_hm_scalar_key(pair[1]) if t[k] == nil then n = n + 1 end t[k] = v cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hm_mt) end
+local function hashmap_fromList(xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local pair = __force(__mll_head(cur)) local v = __force(pair[2]) if v == nil then v = __mll_hm_nilv end local k = __mll_hm_scalar_key(pair[1]) if k ~= k then k = __mll_hm_nan_box(k) end if t[k] == nil then n = n + 1 end t[k] = v cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hm_mt) end
 
 -- Structural-key HashMaps (A17). A scalar key indexes the store table
 -- directly (the functions above); a STRUCTURAL key (tuple, list, Maybe of
@@ -1939,6 +1971,10 @@ local function __mll_key_scalar(x)
     local t = type(x)
     if t == "string" then return "s" .. #x .. ":" .. x end
     if t == "boolean" then return x and "b1" or "b0" end
+    -- A NaN encodes to a fresh token per call (see __mll_hm_nan_seq at the
+    -- top): the key lands and nothing ever matches it. "u" is no other
+    -- encoding's prefix (s/b/i/n/N/J/[/( are taken).
+    if x ~= x then __mll_hm_nan_seq = __mll_hm_nan_seq + 1; return "u" .. __mll_hm_nan_seq end
     if math.type ~= nil and math.type(x) == "integer" then return "i" .. x end
     return "n" .. string.format("%.17g", x)
 end
@@ -1955,19 +1991,24 @@ local function __mll_hme_insert(enc, k, v, m)
     if getmetatable(k) == __thunk_mt then k = __force(k) end
     if getmetatable(v) == __thunk_mt then v = __force(v) end
     if getmetatable(m) == __thunk_mt then m = __force(m) end
+    local seq = __mll_hm_nan_seq
     local ek = enc(k)
+    -- An entry whose key holds a NaN records the token sequence (slot 3)
+    -- so the enumerators can order it after the ordinary entries.
+    local e = {k, v}
+    if __mll_hm_nan_seq ~= seq then e[3] = __mll_hm_nan_seq end
     if m.frozen then
         local t = {}
         local n = m.n
         for a, b in pairs(m.t) do t[a] = b end
         if t[ek] == nil then n = n + 1 end
-        t[ek] = {k, v}
+        t[ek] = e
         return setmetatable({t = t, n = n}, __mll_hme_mt)
     end
     local t = m.t
     if t == nil then t = __mll_hm_reroot(m) end
     local old = t[ek]
-    t[ek] = {k, v}
+    t[ek] = e
     local h = setmetatable({t = t, n = old == nil and m.n + 1 or m.n}, __mll_hme_mt)
     m.t, m.n = nil, nil
     m.k, m.v, m.p = ek, old, h
@@ -1994,14 +2035,17 @@ local function __mll_hme_delete(enc, k, m)
     return h
 end
 local function __mll_hme_member(enc, k, m) if getmetatable(m) == __thunk_mt then m = __force(m) end local t = m.t if t == nil then t = __mll_hm_reroot(m) end return t[enc(k)] ~= nil end
-local function __mll_hme_fromList(enc, xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local p = __force(__mll_head(cur)) local k = __force(p[1]) local ek = enc(k) if t[ek] == nil then n = n + 1 end t[ek] = {k, __force(p[2])} cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hme_mt) end
-local function __mll_hme_sorted(cmp, m) m = __force(m); local t = __mll_hm_reroot(m) local es = {} for _, e in pairs(t) do es[#es+1] = e end table.sort(es, function(x, y) return cmp(x[1], y[1]) == 1 end) return es end
+local function __mll_hme_fromList(enc, xs) xs = __force(xs); local t = {} local n = 0 local cur = xs while cur ~= nil do local p = __force(__mll_head(cur)) local k = __force(p[1]) local seq = __mll_hm_nan_seq local ek = enc(k) local e = {k, __force(p[2])} if __mll_hm_nan_seq ~= seq then e[3] = __mll_hm_nan_seq end if t[ek] == nil then n = n + 1 end t[ek] = e cur = __mll_tail(cur) end return setmetatable({t = t, n = n}, __mll_hme_mt) end
+-- NaN-bearing entries (slot 3 set) are kept out of the compare sort — a
+-- NaN compares GT both ways, which is no order at all — and appended after
+-- the ordinary entries in insertion sequence, like the scalar boxes.
+local function __mll_hme_sorted(cmp, m) m = __force(m); local t = __mll_hm_reroot(m) local es, ns = {}, {} for _, e in pairs(t) do if e[3] == nil then es[#es+1] = e else ns[#ns+1] = e end end table.sort(es, function(x, y) return cmp(x[1], y[1]) == 1 end) if #ns > 0 then table.sort(ns, function(x, y) return x[3] < y[3] end) for i = 1, #ns do es[#es+1] = ns[i] end end return es end
 local function __mll_hme_keys(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][1], r) end return r end
 local function __mll_hme_values(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons(es[i][2], r) end return r end
 local function __mll_hme_toList(cmp, m) local es = __mll_hme_sorted(cmp, m) local r = nil for i = #es, 1, -1 do r = __mll_cons({es[i][1], es[i][2]}, r) end return r end
 
 
-local function hashmap_toList(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local v = t[ks[i]] if rawequal(v, __mll_hm_nilv) then v = nil end r = __mll_cons({ks[i], v}, r) end return r end
+local function hashmap_toList(m) m = __force(m); local t = __mll_hm_reroot(m) local r = nil local ks = {} for k in pairs(t) do ks[#ks+1] = k end table.sort(ks, __mll_hm_lt) for i = #ks, 1, -1 do local k = ks[i] local v = t[k] if rawequal(v, __mll_hm_nilv) then v = nil end if type(k) == "table" then k = k[1] end r = __mll_cons({k, v}, r) end return r end
 
 -- Specialized list show: uses a typed element show function
 local function __mll_list_eq(elem_eq, a, b)

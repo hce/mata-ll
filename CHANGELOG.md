@@ -114,6 +114,21 @@ API of the `mllc` library crate.)
   `f acc x` and the chain is forced once at the end, so the two twins
   share one strictness. Pinned by `cases/foldl_lazy_accumulator.mll`
   against the GHC golden.
+- **A NaN key no longer crashes `hmInsert`/`hmFromList` with "table
+  index is NaN".** Lua refuses NaN as a table index, and the scalar
+  HashMap path indexed the store by the raw key; a structural key
+  carrying a NaN encoded to the fixed string `nnan`, so every NaN was
+  one key and `hmLookup (nan, 1)` FOUND an earlier `(nan, 1)` where
+  `Data.Map` (`compare nan _ = GT`, `nan == nan = False`) answers
+  Nothing. A NaN key now lands under a fresh per-insert box (a fresh
+  encoding token for structural keys): the size grows, nothing ever
+  matches the entry, `keys`/`toList` hand the NaN back, and NaN-bearing
+  keys enumerate after the ordinary ones in insertion order — GHC's
+  order when the NaN keys come last (HASKDIFF records where GHC's
+  history-dependent tree order differs). A map holding a NaN key is
+  refused at the FFI boundary with a plain error (a Lua host table
+  cannot hold it). Pinned by `cases/nan_map_keys.mll` (Data.Map and
+  Data.Set) against the GHC golden.
 - **STArray stores are lazy, like GHC's boxed arrays.** `newSTArray`,
   `writeSTArray` and `newSTArrayFromList` used to evaluate the stored
   value, so `writeSTArray arr i (error …)` raised even when the slot

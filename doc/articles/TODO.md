@@ -339,9 +339,17 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
     instance. `foldr` erased was already lazy and `foldl'` already
     strict at every step; both left as they are. Case
     foldl_lazy_accumulator.mll (GHC-goldened).
-  * C4 CONFIRMED, OPEN: a NaN HashMap key — the scalar hashmap path
-    keys the Lua table by the value itself and Lua refuses NaN as a
-    table index ("table index is NaN").
+  * C4 CONFIRMED, FIXED 2026-09-07: a NaN HashMap key — the scalar
+    hashmap path keyed the Lua table by the value itself and Lua refuses
+    NaN as a table index ("table index is NaN"); the structural encoder
+    made every NaN the one key `nnan`. Scalar writes now box a NaN key
+    under a fresh `{nan, seq}` per insert and `__mll_key_scalar` mints a
+    fresh token per NaN, so the entry lands and nothing matches it
+    (Data.Map's compare/== on NaN); enumerators unbox and order NaN keys
+    last by insertion sequence; the FFI marshallers refuse such a map.
+    Case nan_map_keys.mll (GHC-goldened, Data.Map + Data.Set) and
+    ffi_hashmap_nan_key_refused. The backend fuzzer has no Number type,
+    so it was not extended.
   * C6 CONFIRMED, OPEN: a type signature inside a `where`/`let` block is
     not parsed, so a where-bound helper's declared signature (and the
     outer `a` it reuses) never reaches the checker; the helper is
@@ -356,8 +364,8 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       compiled Foldable instances in dict-passing contexts (bottom element,
       >16 types). C3 types.rs:1563 `Forall` unify arm strips the quantifier
       and binds the bound variable like a flexible one (data field of type
-      `forall a. a -> a` unified at two monotypes in one clause). C4 NaN as
-      a HashMap key → Lua "table index is NaN". C5 mono.rs Var-arm
+      `forall a. a -> a` unified at two monotypes in one clause). ~~C4 NaN as
+      a HashMap key → Lua "table index is NaN"~~ (fixed 2026-09-07). C5 mono.rs Var-arm
       "lexically-smallest specialization" fallback inside a live generic
       copy. C6 `compute_body_subst` name-keyed fallback when a where-helper
       signature reuses the outer `a`. C7 codegen/module.rs `concrete_vars`

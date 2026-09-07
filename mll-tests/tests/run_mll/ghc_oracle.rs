@@ -367,6 +367,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_either_monad, "cases", "either_monad.mll"),
         (ghc_oracle_dead_var_specialization, "cases", "dead_var_specialization.mll"),
         (ghc_oracle_foldl_lazy_accumulator, "cases", "foldl_lazy_accumulator.mll"),
+        (ghc_oracle_nan_map_keys, "cases", "nan_map_keys.mll"),
         (ghc_oracle_record_multi_constructor, "cases", "record_multi_constructor.mll"),
         (ghc_oracle_instance_infix_pattern_methods, "cases", "instance_infix_pattern_methods.mll"),
         (ghc_oracle_let_semicolon_separators, "cases", "let_semicolon_separators.mll"),

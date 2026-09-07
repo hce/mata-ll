@@ -301,6 +301,66 @@ main = do
         .expect("ffi hashmap program should run and pass its assertions");
 }
 
+// C4: a NaN key has no host-side representation — a Lua table cannot be
+// indexed by NaN — so a map holding one is refused at the FFI boundary
+// with a plain error instead of being silently dropped (inside mata-ll
+// the same map is fine: the entry lands under a per-insert box, as
+// cases/nan_map_keys.mll pins against the GHC golden). Both marshalling
+// arms — the typed argument marshaller and the untyped __mll_to_lua walker
+// (the list-of-maps route) — raise the same message.
+#[test]
+fn ffi_hashmap_nan_key_refused() {
+    let source = r#"
+sumMap  :: HashMap Number Int -> LuaPure "sum_map" Int
+sumMaps :: [HashMap Number Int] -> LuaPure "sum_maps" Int
+
+main :: IO ()
+main = do
+  let nan = 0.0 / 0.0 :: Number
+  assert (sumMap (hmFromList [(1.5, 2), (2.5, 3)]) == 5) "ordinary keys cross"
+  assert (sumMaps [hmFromList [(1.5, 2)], hmFromList [(2.5, 3)]] == 5) "ordinary keys cross (list route)"
+  r <- try (print (sumMap (hmInsert nan 1 (hmFromList [(1.5, 2)]))))
+  case r of
+    Left msg -> putStrLn msg
+    Right () -> putStrLn "no error (typed arm)"
+  r2 <- try (print (sumMaps [hmInsert nan 1 (hmFromList [(1.5, 2)])]))
+  case r2 of
+    Left msg -> putStrLn msg
+    Right () -> putStrLn "no error (untyped arm)"
+"#;
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("ffi nan-key program should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let host = r#"
+        function sum_map(m)
+            local s = 0
+            for _, v in pairs(m) do s = s + v end
+            return s
+        end
+        function sum_maps(ms)
+            local s = 0
+            for _, m in ipairs(ms) do s = s + sum_map(m) end
+            return s
+        end
+        __out = {}
+        print = function(x) __out[#__out + 1] = tostring(x) end
+    "#;
+    lua.load(host).set_name("ffi_nan_host").exec().expect("host definitions load");
+    lua.load(&lua_code).set_name("ffi_hashmap_nan_key_refused").exec()
+        .expect("ffi nan-key program should run: the NaN maps are refused with a catchable error");
+    let out: Vec<String> = lua.load("return __out").eval().expect("captured output");
+    // The two passing asserts print "." each; the two refusals follow.
+    let errors: Vec<&String> = out.iter().filter(|l| l.as_str() != ".").collect();
+    assert_eq!(errors.len(), 2, "two error lines expected, got {:?}", out);
+    for line in errors {
+        assert!(
+            line.contains("a HashMap holding a NaN key cannot cross the FFI boundary"),
+            "expected the NaN-key boundary error, got: {line}"
+        );
+    }
+}
+
 // A zero-arg LuaPure declaration is a host VALUE read (SpecKind::Const —
 // no call), but it is still an FFI boundary: the result must decode like a
 // call's would. A raw host table declared `HashMap k v` becomes a map

@@ -235,6 +235,21 @@ enumerate them in structural Ord order (scalar-keyed maps sort keys
 natively, as before). `Integer` keys remain rejected: the boxed bignum
 has table identity and no scalar encoding.
 
+A NaN `Number` key behaves as it does under `Data.Map` — `compare nan _`
+is `GT` and `nan == nan` is `False`, so an insert under a NaN key lands
+(the size grows) and no later lookup, member, delete or insert ever
+matches it; `keys`/`toList` show it as `NaN`. Lua refuses NaN as a table
+index, so the runtime stores each NaN key under a fresh box (and a
+structural key carrying a NaN under a fresh encoding token). Enumeration
+places NaN-bearing keys after every ordinary key, in insertion order —
+which is GHC's order when the NaN keys are inserted after the ordinary
+ones; GHC's own order otherwise depends on the tree's history (a NaN
+inserted first sits at the root and later keys go to its right), and
+under GHC a second NaN key can even rotate above an ordinary key and hide
+it from `lookup`, which the hash-backed map never does. A map holding a
+NaN key cannot cross the FFI boundary (a Lua host table cannot hold the
+entry); the marshaller raises a plain error rather than dropping it.
+
 A numeric literal used as a key without an annotation (`hmFromList [(1,
 "x")]`) defaults to `Int` — a mata-ll deviation: GHC's Data.Map twin
 defaults the key to Integer, which has no `Hashable` instance here
