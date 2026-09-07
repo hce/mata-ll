@@ -179,6 +179,7 @@ fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
                     name: b.name,
                     patterns: b.patterns,
                     body: desugar_expr(b.body),
+                    sig: b.sig,
                 }).collect();
                 Expr::Let { binds, body: Box::new(result) }
             }

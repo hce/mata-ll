@@ -1683,7 +1683,85 @@ impl Parser {
         // the module rewriter scopes their names, and the marker is the
         // honest record of what the user wrote. The emitted TIR bind
         // stays patternless.
-        Ok(LocalDef { name, patterns, body })
+        Ok(LocalDef { name, patterns, body, sig: None })
+    }
+
+    /// The tail of a binding-group SIGNATURE line, once `parse_binding_head`
+    /// has read `first` and the next token is `::` (or `,` — GHC's
+    /// `a, b :: Int` names several bindings at once): `[, name]* :: type`.
+    /// The signatures are collected and attached to their bindings when the
+    /// group closes (`attach_local_sigs`), so a signature may precede or
+    /// follow its equations, as at the top level.
+    fn parse_local_sig_tail(
+        &mut self,
+        first: String,
+        patterns: &[Pattern],
+        loc: &Located,
+        sigs: &mut Vec<(String, Type, Span)>,
+    ) -> PResult<()> {
+        let span = Span::new(loc.line, loc.col);
+        if !patterns.is_empty() {
+            let mut diag = Diagnostic::parse_at(
+                format!(
+                    "a type signature names the binding alone: '{} :: type' on its own line, \
+                     with the equations ('{} {} = …') separate",
+                    first, first,
+                    patterns.iter().map(|_| "…").collect::<Vec<_>>().join(" "),
+                ),
+                span,
+            );
+            diag.notes.push(
+                "as in Haskell, a signature declares a NAME's type; the argument patterns \
+                 belong to the equations that define it"
+                    .to_string(),
+            );
+            return Err(Box::new(diag));
+        }
+        let mut names = vec![first];
+        while self.at(&Token::Comma) {
+            self.advance();
+            names.push(self.expect_ident()?);
+        }
+        self.expect(&Token::DblColon)?;
+        let ty = self.parse_type()?;
+        for name in names {
+            sigs.push((name, ty.clone(), span));
+        }
+        Ok(())
+    }
+
+    /// Attach a binding group's signature lines to their bindings: every
+    /// LocalDef of the named binding (a multi-equation local function is
+    /// several) gets the type. A signature with no equation, or a second
+    /// signature for one name, is an error — the same two GHC reports.
+    fn attach_local_sigs(binds: &mut [LocalDef], sigs: Vec<(String, Type, Span)>) -> PResult<()> {
+        for (name, ty, span) in sigs {
+            let mut found = false;
+            for ld in binds.iter_mut().filter(|ld| ld.name == name) {
+                if ld.sig.is_some() {
+                    return Err(Box::new(Diagnostic::parse_at(
+                        format!("Duplicate type signatures for '{}'", name),
+                        span,
+                    )));
+                }
+                ld.sig = Some(ty.clone());
+                found = true;
+            }
+            if !found {
+                let mut diag = Diagnostic::parse_at(
+                    format!("The type signature for '{}' lacks an accompanying binding", name),
+                    span,
+                );
+                diag.notes.push(
+                    "a signature line inside a 'where' or 'let' block declares the type of a \
+                     binding defined in that same block; add the equation(s) for it, or \
+                     remove the signature"
+                        .to_string(),
+                );
+                return Err(Box::new(diag));
+            }
+        }
+        Ok(())
     }
 
     fn parse_where(&mut self) -> PResult<Vec<LocalDef>> {
@@ -1705,6 +1783,7 @@ impl Parser {
         self.block_indent = where_indent;
 
         let mut fresh_counter = 0usize;
+        let mut sigs: Vec<(String, Type, Span)> = Vec::new();
         loop {
             self.skip_newlines_and_indent();
             if self.at_eof() || self.current_indent < where_indent {
@@ -1725,7 +1804,7 @@ impl Parser {
                         let rhs = self.parse_stmt_expr()?;
                         let fresh = format!("__wtup_{}", fresh_counter);
                         fresh_counter += 1;
-                        binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
+                        binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs, sig: None });
                         for v in pat.var_names() {
                             binds.push(LocalDef {
                                 name: v.clone(),
@@ -1738,6 +1817,7 @@ impl Parser {
                                         body: Some(Expr::Var(v)),
                                     }],
                                 },
+                                sig: None,
                             });
                         }
                         continue;
@@ -1751,7 +1831,14 @@ impl Parser {
             if !matches!(self.peek(), Token::Ident(_)) {
                 break;
             }
+            let head_loc = self.peek_loc().clone();
             let (name, patterns) = self.parse_binding_head()?;
+            // A signature line, `h :: Bool -> String` (C6): recorded now,
+            // attached to h's equations when the block closes.
+            if self.at(&Token::DblColon) || (patterns.is_empty() && self.at(&Token::Comma)) {
+                self.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
+                continue;
+            }
 
             // Handle guards: go acc i | i <= 0 = acc | otherwise = ...
             self.skip_newlines_and_indent();
@@ -1768,14 +1855,15 @@ impl Parser {
                         else_branch: Box::new(else_branch),
                     },
                 );
-                binds.push(LocalDef { name, patterns, body });
+                binds.push(LocalDef { name, patterns, body, sig: None });
             } else {
                 self.expect(&Token::Eq)?;
                 let body = self.parse_stmt_expr()?;
-                binds.push(LocalDef { name, patterns, body });
+                binds.push(LocalDef { name, patterns, body, sig: None });
             }
         }
         self.block_indent = saved_block;
+        Self::attach_local_sigs(&mut binds, sigs)?;
 
         Ok(binds)
     }
@@ -2711,6 +2799,7 @@ impl Parser {
         let let_indent = self.open_item_block();
         // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
         let mut fresh_counter = 0usize;
+        let mut sigs: Vec<(String, Type, Span)> = Vec::new();
 
         loop {
             self.skip_newlines_and_indent();
@@ -2741,7 +2830,7 @@ impl Parser {
                     let rhs = self.parse_expr()?;
                     let fresh = format!("__tup_{}", fresh_counter);
                     fresh_counter += 1;
-                    binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs });
+                    binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs, sig: None });
                     for v in pat.var_names() {
                         binds.push(LocalDef {
                             name: v.clone(),
@@ -2754,6 +2843,7 @@ impl Parser {
                                     body: Some(Expr::Var(v)),
                                 }],
                             },
+                            sig: None,
                         });
                     }
                     continue;
@@ -2763,7 +2853,13 @@ impl Parser {
             if !matches!(self.peek(), Token::Ident(_)) {
                 break;
             }
+            let head_loc = self.peek_loc().clone();
             let (name, patterns) = self.parse_binding_head()?;
+            // A signature line (C6), as in a where block.
+            if self.at(&Token::DblColon) || (patterns.is_empty() && self.at(&Token::Comma)) {
+                self.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
+                continue;
+            }
             self.expect(&Token::Eq)?;
             let body = self.parse_stmt_expr()?;
             binds.push(self.group_binding(name, patterns, body)?);
@@ -2771,6 +2867,7 @@ impl Parser {
 
         self.skip_newlines_and_indent();
         self.block_indent = saved_block;
+        Self::attach_local_sigs(&mut binds, sigs)?;
         Ok(binds)
     }
 

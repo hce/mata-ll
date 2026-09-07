@@ -768,6 +768,8 @@ mll_lib_test!(lib_liolinear, "lib_liolinear.mll");
 // A20: Data.Set + Data.Map ordered enumeration and additions.
 mll_lib_test!(lib_data_set, "lib_data_set.mll");
 mll_lib_test!(nan_map_keys, "nan_map_keys.mll");
+// C6: type signatures on where/let/do-let bindings.
+mll_test!(local_signatures, "local_signatures.mll");
 
 /// Mirror of `ghc_oracle_registry_is_complete` for the runnable-case lists:
 /// every .mll file under tests/cases/ must be registered via `mll_test!` or

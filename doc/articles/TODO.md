@@ -350,10 +350,22 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
     Case nan_map_keys.mll (GHC-goldened, Data.Map + Data.Set) and
     ffi_hashmap_nan_key_refused. The backend fuzzer has no Number type,
     so it was not extended.
-  * C6 CONFIRMED, OPEN: a type signature inside a `where`/`let` block is
-    not parsed, so a where-bound helper's declared signature (and the
-    outer `a` it reuses) never reaches the checker; the helper is
-    inferred instead.
+  * C6 CONFIRMED, FIXED 2026-09-07: a type signature inside a
+    `where`/`let` block was not parsed ("Expected '=', found '::'"). The
+    parser now records signature lines (`name[, name] :: type`, before
+    or after the equations) on `LocalDef.sig`; the checker converts and
+    FRESHENS the signature (its variables are the binding's own, GHC
+    without ScopedTypeVariables), registers the binding at the declared
+    scheme, checks the body rigidly against skolems (mismatch, escape
+    into the enclosing definition, unprovided class use), then demotes
+    the skolems so the clause substitution never carries them. A
+    class-constrained local signature is rejected with a note (the
+    documented local-monomorphism deviation). The `compute_body_subst`
+    name-keyed fallback suspicion is REFUTED by construction: a
+    freshened variable's name carries its id (`a1366`), so a local
+    signature's `a` never shares a name with the enclosing `a`; the
+    polymorphic-recursion shape (generic copy) is in the case. Case
+    local_signatures.mll (GHC-goldened) + local_signature_rejections.
   * C1, C3, C7, C8, C9 REFUTED. C8's `fold_num_num "^"` powf arm was
     dead code (`^` needs an Integral exponent, which no Number literal
     is) and is deleted.
@@ -367,8 +379,9 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       `forall a. a -> a` unified at two monotypes in one clause). ~~C4 NaN as
       a HashMap key → Lua "table index is NaN"~~ (fixed 2026-09-07). C5 mono.rs Var-arm
       "lexically-smallest specialization" fallback inside a live generic
-      copy. C6 `compute_body_subst` name-keyed fallback when a where-helper
-      signature reuses the outer `a`. C7 codegen/module.rs `concrete_vars`
+      copy. ~~C6 `compute_body_subst` name-keyed fallback when a where-helper
+      signature reuses the outer `a`~~ (local signatures fixed 2026-09-07;
+      fallback suspicion refuted — fresh names carry ids). C7 codegen/module.rs `concrete_vars`
       name seeds (e.g. `eq_Ordering`) vs runtime.lua drift — add a test
       that every seed is defined in the runtime text. C8 fold.rs
       `fold_num_num "^"` powf arm looks dead. C9 `__mll_hm_reroot`

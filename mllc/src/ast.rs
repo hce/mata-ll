@@ -176,6 +176,13 @@ pub struct LocalDef {
     pub name: String,
     pub patterns: Vec<Pattern>,
     pub body: Expr,
+    /// The binding's declared type, when its `where`/`let` group carries a
+    /// signature line for it (`h :: Bool -> String`). A multi-equation
+    /// local function has the signature on every one of its LocalDefs.
+    /// The signature's type variables are the binding's own (a local
+    /// signature is read as GHC reads it without ScopedTypeVariables:
+    /// `where h :: a -> a` under `f :: a -> String` names a NEW `a`).
+    pub sig: Option<Type>,
 }
 
 /// A method signature (and optional default implementation) in a class declaration
@@ -385,6 +392,7 @@ impl Expr {
                     name: ld.name,
                     patterns: ld.patterns,
                     body: f(ld.body),
+                    sig: ld.sig,
                 }).collect(),
                 body: Box::new(f(*body)),
             },
@@ -396,6 +404,7 @@ impl Expr {
                         name: ld.name,
                         patterns: ld.patterns,
                         body: f(ld.body),
+                        sig: ld.sig,
                     }).collect(),
                 },
                 DoStmt::PatternBind { pattern, expr, span } =>

@@ -44,6 +44,26 @@ API of the `mllc` library crate.)
   parenthesized by inspecting the string). `showList` is deliberately
   absent (see HASKDIFF).
 
+- **Type signatures on `where`, `let` and do-`let` bindings.** A
+  binding group may carry signature lines (`h :: Bool -> String`,
+  `twice, thrice :: Int -> Int`), before or after the equations they
+  name, for value, function, multi-equation and guarded bindings alike;
+  they used to die in the parser with "Expected '=', found '::'". The
+  body is checked against the signature with its variables rigid, as a
+  top-level body is: a less general body is "Type signature for the
+  local binding 'h' doesn't match", a class use the signature does not
+  provide is "No instance for 'Num a'", a body that ties the local
+  variable to the enclosing definition is rejected, and a signature
+  without a binding or a duplicate signature is a parse error — GHC's
+  four rejections. A local signature's variables are the binding's own
+  (GHC without ScopedTypeVariables), so `tag :: a -> String` under `f
+  :: Show a => a -> String` is a new `a` and `tag` is polymorphic; an
+  unconstrained polymorphic local signature generalizes. A
+  class-constrained local signature is rejected with a note (HASKDIFF:
+  local bindings stay monomorphic in class-constrained variables).
+  Pinned by `cases/local_signatures.mll` against the GHC golden and by
+  `local_signature_rejections`.
+
 - **One module through several import forms at once.** `import Data.Map
   (Map)` next to `import qualified Data.Map as M`, or two aliases of one
   module, now name the SAME declarations: module resolution keeps one

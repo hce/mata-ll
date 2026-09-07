@@ -960,6 +960,9 @@ impl Rename<'_> {
             name: ld.name.clone(),
             patterns: ld.patterns.iter().map(|p| self.pattern(p)).collect(),
             body: self.expr(&ld.body, &bound),
+            // A local signature names types exactly as a top-level one does
+            // (qualified type names included), so it takes the same rewrite.
+            sig: ld.sig.as_ref().map(|t| self.ty(t)),
         }
     }
 
@@ -1153,6 +1156,7 @@ fn rewrite_uses_localdef(ld: LocalDef, aliases: &HashSet<String>) -> LocalDef {
         name: ld.name,
         patterns: ld.patterns,
         body: rewrite_uses_expr(ld.body, aliases),
+        sig: ld.sig,
     }
 }
 

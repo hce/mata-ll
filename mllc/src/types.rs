@@ -849,6 +849,18 @@ impl Subst {
         self.map.keys()
     }
 
+    /// `Ty::demote_skolems` over every image of the substitution. A
+    /// where/let binding checked against its own signature's skolems
+    /// demotes them right after the check (`check_local_sig`), so the
+    /// substitution threaded through the enclosing clause never carries a
+    /// local signature's skolem.
+    pub fn demote_skolems(&self, demote: &HashMap<u32, Ty>) -> Subst {
+        Subst {
+            map: self.map.iter().map(|(k, v)| (k.clone(), v.demote_skolems(demote))).collect(),
+            mults: self.mults.clone(),
+        }
+    }
+
     /// The multiplicity-variable ids this substitution binds.
     pub fn mult_domain(&self) -> impl Iterator<Item = u32> + '_ {
         self.mults.keys().copied()
@@ -1649,6 +1661,21 @@ pub enum DiagnosticKind {
     PatternArgCount { constructor: String, expected: usize, got: usize },
     NonExhaustive(String),
     TypeSigMismatch { name: String, declared: Ty, inferred: Ty },
+    /// A `where`/`let` binding's signature carries a class context
+    /// (`h :: Show a => a -> String`). mata-ll keeps local bindings
+    /// monomorphic in their class-constrained variables (one Lua closure,
+    /// no per-use specialization below the top level — see HASKDIFF), so
+    /// the polymorphism such a signature declares cannot be honored;
+    /// rejected up front rather than accepted at one type and failing
+    /// confusingly at a second. `sig` is the signature as written.
+    LocalSigConstrained { name: String, sig: String },
+    /// A `where`/`let` binding's body does not have its declared type.
+    /// `declared` is the signature as written (source variable names);
+    /// `shadowed` names a signature variable that spells the same as a rigid
+    /// variable of the enclosing signature occurring in `inferred` — the
+    /// two are different variables (a local signature's are its own), which
+    /// the message says outright since both print under one name.
+    LocalSigMismatch { name: String, declared: Ty, inferred: Ty, shadowed: Option<String> },
     /// A class constraint with no matching instance, e.g. `Show (a -> b)`.
     NoInstance { class: String, ty: Ty },
     /// A class constraint left over with a type variable that nothing in the
@@ -1750,6 +1777,13 @@ fn pretty_var_subst(tys: &[&Ty]) -> Subst {
         .filter(|v| !v.name.starts_with('_'))
         .map(|v| v.name.clone())
         .collect();
+    // A skolem prints under its source name; a renamed variable must not
+    // take it, or `a -> a` could show a rigid `a` and an unrelated one alike.
+    for t in tys {
+        let mut sks = Vec::new();
+        t.collect_skolems(&mut sks);
+        for (n, _) in sks { used.insert(n); }
+    }
     let mut map = HashMap::new();
     let mut counter = 0usize;
     for v in &vars {
@@ -1909,6 +1943,19 @@ impl fmt::Display for Diagnostic {
                 let s = pretty_var_subst(&[declared, inferred]);
                 write!(f, "Type signature for '{}' doesn't match: declared {}, inferred {}",
                     name, declared.apply_subst(&s), inferred.apply_subst(&s))?
+            }
+            DiagnosticKind::LocalSigMismatch { name, declared, inferred, shadowed } => {
+                let s = pretty_var_subst(&[declared, inferred]);
+                write!(f, "Type signature for the local binding '{}' doesn't match: declared {}, inferred {}",
+                    name, declared.apply_subst(&s), inferred.apply_subst(&s))?;
+                if let Some(v) = shadowed {
+                    write!(f, " — the '{}' of this local signature is a new type variable, not the '{}' of the enclosing signature: a local signature's variables are its own (as in Haskell without ScopedTypeVariables)",
+                        v, v)?;
+                }
+            }
+            DiagnosticKind::LocalSigConstrained { name, sig } => {
+                write!(f, "The type signature for the local binding '{}' has a class context ('{}'), which a where- or let-bound binding cannot carry: a local binding is one Lua closure, and a class-polymorphic local would need the per-use specialization that only top-level functions get. Bind '{}' at the top level with this signature, or drop the context and let the binding be inferred at the one type it is used at",
+                    name, sig, name)?
             }
             DiagnosticKind::NoInstance { class, ty } => {
                 let s = pretty_var_subst(&[ty]);

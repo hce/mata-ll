@@ -184,7 +184,13 @@ longExpression = 1 + 2
 \subsection{Type Signatures}
 
 All top-level definitions require explicit type signatures.  Local bindings
-(\texttt{let}, \texttt{where}) are inferred automatically.
+(\texttt{let}, \texttt{where}) are inferred automatically; a local binding
+may also carry a signature line (\texttt{h :: Bool -> String}, before or
+after its equations), which is checked like a top-level one.  A local
+signature's type variables are the binding's own, as in Haskell without
+\texttt{ScopedTypeVariables}, and a class context on a local signature
+is rejected --- local bindings stay monomorphic in class-constrained
+variables (see \texttt{HASKDIFF.md}).
 
 \begin{lstlisting}
 double :: Int -> Int

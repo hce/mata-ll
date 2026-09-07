@@ -205,6 +205,13 @@ impl TypeEnv {
         self.bindings.get(name).map(|e| &e.scheme)
     }
 
+    /// Every binding with its scheme. The escape check of a local
+    /// signature (`check_local_sig`) scans the environment outside the
+    /// binding's own group for the signature's skolems.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Scheme)> {
+        self.bindings.iter().map(|(k, e)| (k, &e.scheme))
+    }
+
     /// Is the variable free in (some scheme of) this environment? O(1); the
     /// membership `generalize` needs.
     pub fn is_free_var(&self, v: &TyVar) -> bool {
@@ -1480,6 +1487,16 @@ impl Checker {
     /// `existential_skolems` and get no note.
     fn existential_provenance_notes(&self, kind: &DiagnosticKind) -> Vec<String> {
         let mut sks: Vec<(String, u32)> = Vec::new();
+        if let DiagnosticKind::LocalSigConstrained { .. } = kind {
+            // Not a skolem diagnostic; the note records the GHC deviation.
+            return vec![
+                "GHC accepts a class-constrained signature on a where/let binding and \
+                 generalizes it; mata-ll keeps class-constrained local bindings \
+                 monomorphic (HASKDIFF.md, \"The monomorphism restriction also covers \
+                 let-bound functions\")"
+                    .to_string(),
+            ];
+        }
         match kind {
             DiagnosticKind::Mismatch(a, b) | DiagnosticKind::RigidMismatch(a, b) => {
                 a.collect_skolems(&mut sks);
@@ -1489,7 +1506,8 @@ impl Checker {
             | DiagnosticKind::NoInstance { ty: t, .. }
             | DiagnosticKind::AmbiguousType { ty: t, .. }
             | DiagnosticKind::MissingContextConstraint { ty: t, .. } => t.collect_skolems(&mut sks),
-            DiagnosticKind::TypeSigMismatch { declared, inferred, .. } => {
+            DiagnosticKind::TypeSigMismatch { declared, inferred, .. }
+            | DiagnosticKind::LocalSigMismatch { declared, inferred, .. } => {
                 declared.collect_skolems(&mut sks);
                 inferred.collect_skolems(&mut sks);
             }

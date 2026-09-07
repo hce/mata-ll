@@ -379,6 +379,75 @@ fn binding_guard_qualifiers_are_rejected_with_hints() {
     );
 }
 
+// C6: a signature on a where/let binding is checked like a top-level
+// one (the accept side is cases/local_signatures.mll, GHC-goldened).
+// Rejected shapes: a body less general than its signature; a body that
+// ties the signature's own variable to the enclosing definition (a local
+// signature's variables are its own, as under GHC without
+// ScopedTypeVariables — the same-spelled `a` of the enclosing signature is
+// a different variable, which the message says); a class use the
+// signature does not provide; a class-constrained local signature
+// (mata-ll deviation: local bindings stay monomorphic in class-constrained
+// variables — rejected with the note); and the two GHC parse errors, a
+// signature with no binding and a duplicate signature.
+#[test]
+fn local_signature_rejections() {
+    expect_compile_error(
+        "f :: Int -> String\nf n = h n\n  where\n    h :: Int -> String\n    h y = y\n\nmain :: IO ()\nmain = putStrLn (f 1)\n",
+        &[],
+        &["Type signature for the local binding 'h' doesn't match", "declared Int -> String"],
+    );
+    expect_compile_error(
+        "f :: a -> a -> a\nf x y = h y\n  where\n    h :: a -> a\n    h _ = x\n\nmain :: IO ()\nmain = print (f (1 :: Int) 2)\n",
+        &[],
+        &[
+            "Type signature for the local binding 'h' doesn't match",
+            "the 'a' of this local signature is a new type variable",
+            "rigid type variable from the signature of 'f'",
+        ],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = (\\x -> let h :: b -> b\n                 h y = x\n             in h n) 5\n\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["the local binding 'h' is declared 'b -> b'", "ties the signature's type variable 'b'"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = h n\n  where\n    h :: a -> a\n    h y = y + 1\n\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["No instance for 'Num a'", "rigid type variable from the signature of 'h'"],
+    );
+    expect_compile_error(
+        "f :: Show a => a -> String\nf x = show x <> h True\n  where\n    h :: Show b => b -> String\n    h y = show y\n\nmain :: IO ()\nmain = putStrLn (f (1 :: Int))\n",
+        &[],
+        &[
+            "The type signature for the local binding 'h' has a class context ('Show b => b -> String')",
+            "one Lua closure",
+            "note:",
+            "GHC accepts a class-constrained signature",
+        ],
+    );
+    expect_compile_error(
+        "main :: IO ()\nmain = do\n    let h :: Show a => a -> String\n        h y = show y\n    putStrLn (h True)\n",
+        &[],
+        &["The type signature for the local binding 'h' has a class context"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = n\n  where\n    h :: Int -> Int\n\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["The type signature for 'h' lacks an accompanying binding", "note:"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = h n\n  where\n    h :: Int -> Int\n    h :: Int -> Int\n    h y = y\n\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["Duplicate type signatures for 'h'"],
+    );
+    expect_compile_error(
+        "f :: Int -> Int\nf n = h n\n  where\n    h y :: Int -> Int\n    h y = y\n\nmain :: IO ()\nmain = print (f 1)\n",
+        &[],
+        &["a type signature names the binding alone", "note:"],
+    );
+}
+
 // The hiding list accepts operator items too, and a hidden operator is
 // rejected on use like any hidden name (accept side: import_operator_list
 // corpus case).

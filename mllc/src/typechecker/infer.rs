@@ -5,6 +5,18 @@
 
 use super::*;
 
+/// A `where`/`let` binding's declared type (C6), converted and freshened
+/// by `Checker::local_sig`.
+pub(super) struct LocalSig {
+    /// The signature with each of its variables renamed to a fresh flexible
+    /// variable — the binding's OWN variables (see `local_sig`).
+    ty: Ty,
+    /// The signature as written (source variable names), for diagnostics.
+    declared: Ty,
+    /// Fresh name → source name, so a diagnostic prints what was written.
+    source_names: HashMap<String, String>,
+}
+
 impl Checker {
     // --- Exhaustiveness checking ---
 
@@ -1260,8 +1272,26 @@ impl Checker {
         // saved: generalization below is over the OUTER environment.
         let mut where_reg_tys: Vec<Ty> = Vec::with_capacity(clause.where_binds.len());
         let mut where_shadowed: Vec<Option<Scheme>> = Vec::with_capacity(clause.where_binds.len());
+        let mut where_sigs: Vec<Option<LocalSig>> = Vec::with_capacity(clause.where_binds.len());
         for ld in &clause.where_binds {
-            let reg_ty = if ld.patterns.is_empty() {
+            // A binding with a signature (C6) is registered at its DECLARED
+            // type, generalized over the signature's own variables, so a
+            // sibling checked earlier already uses it polymorphically — the
+            // rigid check against the body comes in check_where_binding.
+            let sig = match self.local_sig(ld) {
+                Ok(sig) => sig,
+                Err(e) => {
+                    self.push_error_span(
+                        e,
+                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        clause.span,
+                    );
+                    None
+                }
+            };
+            let reg_ty = if let Some(sig) = &sig {
+                sig.ty.clone()
+            } else if ld.patterns.is_empty() {
                 self.fresh_var("_wh")
             } else {
                 // Local function: assign a fresh type for each parameter + return
@@ -1276,9 +1306,16 @@ impl Checker {
             // constraints over its variables are not flagged as ambiguous.
             self.binder_types.push(reg_ty.clone());
             where_shadowed.push(local_env.remove(&ld.name));
-            local_env.insert(ld.name.clone(), Scheme::mono(reg_ty.clone()));
+            let scheme = if sig.is_some() {
+                self.generalize(&local_env, &reg_ty)
+            } else {
+                Scheme::mono(reg_ty.clone())
+            };
+            local_env.insert(ld.name.clone(), scheme);
             where_reg_tys.push(reg_ty);
+            where_sigs.push(sig);
         }
+        let where_group: Vec<String> = clause.where_binds.iter().map(|ld| ld.name.clone()).collect();
 
         // A19: the where-bindings are checked BEFORE the clause body — they
         // used to be checked after it, so the body's uses drove their types
@@ -1286,8 +1323,10 @@ impl Checker {
         // used at two types could not exist. Checking the definitions first
         // lets each binding be GENERALIZED like a `let` group.
         let mut twhere = Vec::new();
-        for ld in &clause.where_binds {
-            twhere.push(self.check_where_binding(ld, clause.span, ctx, &local_env, &mut subst)?);
+        for (ld, sig) in clause.where_binds.iter().zip(&where_sigs) {
+            twhere.push(self.check_where_binding(
+                ld, sig.as_ref(), fun_ty, &where_group, clause.span, ctx, &local_env, &mut subst,
+            )?);
         }
 
         // Generalize each where-binding over the outer environment, exactly
@@ -1412,9 +1451,13 @@ impl Checker {
     ///    patterns/body through its own `where_subst` eagerly, while a value
     ///    binding leaves its body raw for the clause-level
     ///    `raw_clause.apply_subst(&subst)` to resolve.
+    #[allow(clippy::too_many_arguments)]
     fn check_where_binding(
         &mut self,
         ld: &LocalDef,
+        sig: Option<&LocalSig>,
+        fun_ty: &Ty,
+        group: &[String],
         clause_span: Span,
         ctx: &str,
         local_env: &TypeEnv,
@@ -1495,6 +1538,31 @@ impl Checker {
         } else {
             body_ty
         };
+
+        // A declared type (C6): the body's inferred type is checked
+        // RIGIDLY against the signature first — every signature variable a
+        // skolem, so `h :: a -> a` with `h y = True` and a body that ties
+        // the signature's variable to the enclosing definition are both
+        // rejected — and the unifier comes back with the skolems demoted,
+        // so the pre-registered unification below is then the identity.
+        if let Some(sig) = sig
+            && !binding_errored
+        {
+            match self.check_local_sig(&ld.name, sig, &inferred_ty, subst, local_env, group, Some(fun_ty)) {
+                Ok(us) => {
+                    *subst = subst.compose(&us);
+                    where_subst = where_subst.compose(&us);
+                }
+                Err(e) => {
+                    self.push_error_span(
+                        e,
+                        format!("the where-binding '{}' ({})", ld.name, ctx),
+                        clause_span,
+                    );
+                    binding_errored = true;
+                }
+            }
+        }
 
         // Unify with the pre-registered fresh type. That fresh type has
         // absorbed how the clause body USES the binding, so a failure here
@@ -1578,15 +1646,27 @@ impl Checker {
         // it.
         let mut fresh_tys: Vec<Ty> = Vec::with_capacity(binds.len());
         let mut shadowed: Vec<Option<Scheme>> = Vec::with_capacity(binds.len());
+        let mut sigs: Vec<Option<LocalSig>> = Vec::with_capacity(binds.len());
         for bind in binds {
-            let fv = self.fresh_var("_let");
+            // A binding with a signature (C6) is registered at its declared
+            // type, generalized over the signature's own variables (a sibling
+            // uses it polymorphically from the start); its body is checked
+            // rigidly against the signature below.
+            let sig = self.local_sig(bind)?;
+            let fv = match &sig {
+                Some(sig) => sig.ty.clone(),
+                None => self.fresh_var("_let"),
+            };
             fresh_tys.push(fv.clone());
             // A let binder's type is determined by its body/uses; record it so a
             // class constraint over its variable is not flagged as ambiguous.
             self.binder_types.push(fv.clone());
             shadowed.push(env.remove(&bind.name));
-            env.insert(bind.name.clone(), Scheme::mono(fv));
+            let scheme = if sig.is_some() { self.generalize(&env, &fv) } else { Scheme::mono(fv) };
+            env.insert(bind.name.clone(), scheme);
+            sigs.push(sig);
         }
+        let group: Vec<String> = binds.iter().map(|b| b.name.clone()).collect();
 
         // Infer each body in the recursive environment and unify its type with
         // the pre-registered variable, keeping the environment substituted as
@@ -1596,6 +1676,14 @@ impl Checker {
             let (te, bind_ty, s) = self.infer_expr(&bind.body, &env)?;
             subst.compose_with(&s);
             env.apply_subst_mut(&s);
+            if let Some(sig) = &sigs[i] {
+                // Rigid check against the declared type (see
+                // check_local_sig); the unifier comes back demoted, so the
+                // pre-registered unification below is then the identity.
+                let us = self.check_local_sig(&bind.name, sig, &bind_ty, &subst, &env, &group, None)?;
+                subst.compose_with(&us);
+                env.apply_subst_mut(&us);
+            }
             let us = self.unify(&fresh_tys[i].apply_subst(&subst), &bind_ty.apply_subst(&subst))?;
             subst.compose_with(&us);
             env.apply_subst_mut(&us);
@@ -1665,6 +1753,150 @@ impl Checker {
         }
 
         Ok((tbinds, env, subst))
+    }
+
+    /// A `where`/`let` binding's declared type (C6), converted and
+    /// freshened — or `None` when the binding has no signature line.
+    ///
+    /// The signature's variables become the binding's OWN fresh variables:
+    /// a local signature is read as GHC reads it without
+    /// ScopedTypeVariables, so `where h :: a -> a` under `f :: a -> String`
+    /// names a new `a`, never the enclosing one (a body that ties the two
+    /// together is rejected by `check_local_sig`'s escape check, as GHC
+    /// rejects it). A class context is rejected here: mata-ll keeps
+    /// class-constrained local bindings monomorphic (one Lua closure; see
+    /// HASKDIFF), so the polymorphism such a signature declares could not
+    /// be honored. A foreign (Lua) declaration is top-level only.
+    fn local_sig(&mut self, ld: &LocalDef) -> Result<Option<LocalSig>, DiagnosticKind> {
+        let Some(sig) = &ld.sig else { return Ok(None) };
+        self.check_type_kind(sig, &format!("the type signature for '{}'", ld.name));
+        if extract_ffi_info(sig).is_some() {
+            return Err(DiagnosticKind::Other(format!(
+                "the local binding '{}' declares a foreign (Lua) type; a foreign declaration \
+                 binds a host function and is top-level only — declare '{}' at the top level \
+                 and call it from here",
+                ld.name, ld.name
+            )));
+        }
+        if let Type::Constrained { constraints, ty } = sig
+            && !constraints.is_empty()
+        {
+            let ctx: Vec<String> = constraints
+                .iter()
+                .map(|c| format!("{} {}", c.class_name, paren_ty(&self.ast_type_to_ty(&c.type_arg))))
+                .collect();
+            let ctx = if ctx.len() == 1 { ctx[0].clone() } else { format!("({})", ctx.join(", ")) };
+            let rendered = format!("{} => {}", ctx, self.ast_type_to_ty(ty));
+            return Err(DiagnosticKind::LocalSigConstrained { name: ld.name.clone(), sig: rendered });
+        }
+        let declared = self.ast_type_to_ty(sig);
+        let (ty, renames) = self.freshen_sig_type_mapped(&declared);
+        let source_names = renames.into_iter().map(|(src, fresh)| (fresh, src)).collect();
+        Ok(Some(LocalSig { ty, declared, source_names }))
+    }
+
+    /// Check a local binding's inferred type against its signature (C6),
+    /// the way `check_function` checks a top-level body: each signature
+    /// variable is a rigid skolem while the two are unified, so a body
+    /// less general than its signature (`h :: a -> a; h y = True`) is a
+    /// signature mismatch; a skolem that reaches the environment outside
+    /// the binding's `group` (or `outer`, the enclosing function's type) is
+    /// the body tying the signature's variable to the enclosing definition
+    /// (`h :: b -> b; h y = x` with `x` a parameter of the enclosing
+    /// function), rejected as GHC rejects it; a wanted class constraint on
+    /// a skolem is a class use the signature does not provide (`h :: a ->
+    /// a; h y = y + 1`). On success the unifier is returned with the
+    /// skolems demoted back to the signature's flexible variables, so the
+    /// enclosing substitution never carries them and generalization sees
+    /// ordinary variables.
+    #[allow(clippy::too_many_arguments)]
+    fn check_local_sig(
+        &mut self,
+        name: &str,
+        sig: &LocalSig,
+        inferred: &Ty,
+        subst: &Subst,
+        env: &TypeEnv,
+        group: &[String],
+        outer: Option<&Ty>,
+    ) -> Result<Subst, DiagnosticKind> {
+        let sig_ty = sig.ty.apply_subst(subst);
+        let mut sk_map: HashMap<TyVar, Ty> = HashMap::new();
+        let mut demote: HashMap<u32, Ty> = HashMap::new();
+        let mut ids: Vec<u32> = Vec::new();
+        for v in sig_ty.free_vars() {
+            let id = self.next_var;
+            self.next_var += 1;
+            let sname = sig.source_names.get(&v.name).cloned().unwrap_or_else(|| {
+                v.name.trim_end_matches(|ch: char| ch.is_ascii_digit()).to_string()
+            });
+            sk_map.insert(v.clone(), Ty::Skolem(sname.clone(), id));
+            demote.insert(id, Ty::Var(v.clone()));
+            ids.push(id);
+            // Registered so a diagnostic mentioning the skolem gets the
+            // signature-variable provenance note (never removed: the note is
+            // computed when the error is pushed, after this returns).
+            self.existential_skolems.insert(id, ExSkolemInfo {
+                var: sname,
+                con: format!("the signature of '{}'", name),
+                givens: vec![],
+                origin: SkolemOrigin::Signature { fn_name: name.to_string() },
+            });
+        }
+        let rigid = sig_ty.apply_subst(&Subst::from_map(sk_map));
+        let inferred = inferred.apply_subst(subst);
+        let us = match self.unify(&inferred, &rigid) {
+            Ok(us) => us,
+            Err(_) => {
+                // A rigid variable of the ENCLOSING signature in the inferred
+                // type that spells like one of this signature's variables:
+                // both print as `a`, so the message must say they differ.
+                let mut sks = Vec::new();
+                inferred.collect_skolems(&mut sks);
+                let shadowed = sks.into_iter()
+                    .map(|(n, _)| n)
+                    .find(|n| sig.source_names.values().any(|src| src == n));
+                return Err(DiagnosticKind::LocalSigMismatch {
+                    name: name.to_string(),
+                    declared: sig.declared.clone(),
+                    inferred,
+                    shadowed,
+                });
+            }
+        };
+        let probe = subst.compose(&us);
+        let local_skolem = |t: &Ty| -> Option<String> {
+            let mut sks = Vec::new();
+            t.collect_skolems(&mut sks);
+            sks.into_iter().find(|(_, i)| ids.contains(i)).map(|(n, _)| n)
+        };
+        let escaped = env
+            .applied(&probe)
+            .iter()
+            .filter(|(n, _)| !group.contains(n))
+            .find_map(|(_, s)| local_skolem(&s.ty))
+            .or_else(|| outer.and_then(|t| local_skolem(&t.apply_subst(&probe))));
+        if let Some(var) = escaped {
+            return Err(DiagnosticKind::Other(format!(
+                "the local binding '{}' is declared '{}', but its body ties the signature's \
+                 type variable '{}' to a type from the enclosing definition; the variables \
+                 of a local signature are the binding's own, universally quantified, so \
+                 nothing outside '{}' may fix them — give the signature the concrete type, \
+                 or pass the enclosing value to '{}' as an argument",
+                name, sig.declared, var, name, name
+            )));
+        }
+        for (class, cty) in &self.wanted {
+            let t = cty.apply_subst(&probe);
+            if let Some(var) = local_skolem(&t) {
+                let id = ids.iter().copied().find(|i| t.contains_skolem(&var, *i)).unwrap_or(0);
+                return Err(DiagnosticKind::MissingContextConstraint {
+                    class: class.clone(),
+                    ty: Ty::Skolem(var, id),
+                });
+            }
+        }
+        Ok(us.demote_skolems(&demote))
     }
 
     /// Reject a type that mentions an existential skolem minted after

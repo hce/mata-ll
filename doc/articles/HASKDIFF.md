@@ -620,6 +620,29 @@ confirmed by repro). `inc x = x + 1` used at `Int` and `Number` is
 therefore rejected where GHC accepts it: bind at the top level for
 class-polymorphic reuse.
 
+A `where`, `let` or do-`let` binding may carry a type signature
+(`h :: Bool -> String`, `twice, thrice :: Int -> Int`), before or after
+its equations, as in Haskell. The body is checked against it with the
+signature's variables rigid, exactly like a top-level binding: a body
+less general than its signature is a mismatch, a class use the
+signature does not provide is "No instance for 'Num a'", and a
+signature that names a binding the block does not define, or two
+signatures for one name, are the parse errors GHC reports. The
+variables of a local signature are the binding's own — GHC's reading
+without ScopedTypeVariables — so `where tag :: a -> String` under `f ::
+Show a => a -> String` declares a NEW `a`, `tag` is polymorphic and
+serves at every type, and a body that ties the local `a` to the
+enclosing one (`h :: a -> a; h _ = x` with `x :: a` from the enclosing
+signature) is rejected, as GHC rejects it. An unconstrained polymorphic
+local signature generalizes like an unannotated one. The deviation is
+the class-constrained local signature (`h :: Show b => b -> String`):
+GHC accepts and generalizes it; mata-ll rejects it with a note, for the
+reason above — the polymorphism such a signature declares cannot be
+honored by one Lua closure, so it is refused up front rather than
+accepted at one type and failing at a second. Drop the context (the
+binding is then inferred at the one type it is used at) or bind at the
+top level.
+
 ## Linear types match GHC's `LinearTypes`
 
 mata-ll implements GHC's linear arrows. A function arrow may carry a
