@@ -171,6 +171,23 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **ST array reads are spelled inline, and a read settles its slot.** A
+  do-block `x <- readSTArray arr i` compiles to the slot load and a thunk
+  test at its site (`__mll_st_settle` is the arm a stored suspension
+  takes: forced, written back into the slot, returned) instead of a call
+  to the `__mll_st_read` helper, which now serves only an index the
+  emitted operand cannot duplicate (a `div` call). Same values, same
+  laziness (a stored bottom is still silent until read); one call fewer
+  per read on every VM, and the LuaJIT tracker canary no longer runs in
+  two modes: the helper's hot-function trace was specialized to whichever
+  slot type — number or suspension — its recording call happened to
+  load, and the other type left the trace on every read for the rest of
+  the run, decided per process by the hotcount hash under ASLR (8x or
+  6.6x realtime). Thunklift now settles a declared name once every
+  assignment to it has passed, a preceding branch's included, so a
+  suspension over such a binding still lifts to a carrier.
+
+
 - **Closure-free thunks for the multi-binding `let` shape, and four
   captures.** A `let` with several bindings is emitted as forward-declared
   locals assigned in order, and the thunk-lift pass declined every

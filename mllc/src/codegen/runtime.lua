@@ -3,6 +3,10 @@ local __unpack = table.unpack or unpack
 
 -- Thunk infrastructure (non-strict evaluation)
 local __thunk_mt = {}
+-- The thunk test as emitted USER code spells it (an inline ST read, see
+-- codegen action.rs try_inline_st_read): an upvalue alias, so a user
+-- binding that happens to be named `getmetatable` cannot shadow it.
+local __mll_getmt = getmetatable
 local __cons_mt = {}
 -- Tags a `Just` wrapper (see the Maybe constructor below); declared here so the
 -- generic `show`/`__mll_to_lua` can identify it as an upvalue.
@@ -2505,6 +2509,20 @@ local function ne_ByteString(a, b) return __force(a) ~= __force(b) end
 -- GHC hands the thunk back unforced), so a bound read is WHNF and its
 -- uses stay force-free; `modifySTArray` calls f on the stored value and
 -- stores f's result forced to WHNF (a strict modify, like modifyIORef').
+--
+-- A read that forces a slot's thunk WRITES THE VALUE BACK into the slot.
+-- Observationally nothing changes (the thunk is memoized either way, and
+-- an element is an Int, never a nil-represented value, so no hole can
+-- appear); what changes is the slot's TYPE as the JIT sees it. A slot
+-- holds a thunk only between its store and its first read, so with the
+-- write-back the reads a hot loop performs see numbers, and the read
+-- helper is monomorphic where it matters. Without it every re-read of a
+-- stored suspension went through the thunk table, the read helper's
+-- root trace on LuaJIT was specialized to whichever slot type the
+-- recording call happened to load (a number or a thunk), and the other
+-- type left the trace on every call for the rest of the run — the
+-- tracker canary sat at 6.6x in a third of runs and 8x in the rest,
+-- decided by hotcount-hash collisions under ASLR (2026-09-07).
 local function __mll_ma_new(size, init)
     return function()
         size = __force(size)
@@ -2513,8 +2531,9 @@ local function __mll_ma_new(size, init)
 end
 local function __mll_ma_read(arr, idx)
     return function()
-        local v = __force(arr)[__force(idx) + 1]
-        if getmetatable(v) == __thunk_mt then return __force(v) end
+        local t, i = __force(arr), __force(idx) + 1
+        local v = t[i]
+        if getmetatable(v) == __thunk_mt then v = __force(v); t[i] = v end
         return v
     end
 end
@@ -2558,10 +2577,30 @@ local function __mll_st_new(size, init)
 end
 local function __mll_st_read(arr, idx)
     -- The slot's thunk check inline (one call level less than an outer
-    -- __force on the hot read path; a number slot returns directly).
-    local v = __force(arr)[__force(idx) + 1]
-    if getmetatable(v) == __thunk_mt then return __force(v) end
+    -- __force on the hot read path; a number slot returns directly), and
+    -- the forced value written back (see the laziness note above). A
+    -- bind-chain read whose array and index are duplicable expressions
+    -- is not spelled as this call at all but INLINE at its site (codegen
+    -- action.rs try_inline_st_read) with __mll_st_settle as its thunk
+    -- arm; this helper serves the remaining shapes.
+    local t, i = __force(arr), __force(idx) + 1
+    local v = t[i]
+    if getmetatable(v) == __thunk_mt then v = __force(v); t[i] = v end
     return v
+end
+-- The thunk arm of an inline read: `x <- readSTArray arr i` is emitted at
+-- its site as the slot load and the thunk test, and only a slot still
+-- holding its stored suspension comes here — forced, written back,
+-- returned. The rare arm out of line keeps the site small; the common
+-- arm inline is what matters on LuaJIT: a small polymorphic helper
+-- called from interpreted code gets a function-root trace specialized
+-- to whichever slot type the recording call loaded, and the other type
+-- exits that trace on every call, its side traces running off into the
+-- caller and aborting — the bimodal tracker canary. With the load in the
+-- caller's own bytecode the type split lives where side traces can
+-- attach (inside the caller's loop) or costs nothing (interpreted).
+local function __mll_st_settle(t, i, v)
+    v = __force(v); t[i] = v; return v
 end
 local function __mll_st_write(arr, idx, val)
     __force(arr)[__force(idx) + 1] = val

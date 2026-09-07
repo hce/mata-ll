@@ -33,18 +33,26 @@
 //! included; an assignment THROUGH a captured table, `_v[3] = …`, is not
 //! an assignment of `_v` — the table's identity is what both capture forms
 //! share, so mutations stay visible either way), or has SETTLED it: the
-//! name was forward-declared in the block being walked (`local a` — the
-//! multi-binding let shape, `local a; local b; a = …; b = __thunk(… a …)`)
-//! and its ONE assignment in the whole frame is a statement of that same
-//! block that precedes the site. A block's statements run in order once
-//! per execution of the block and a block-scoped `local` is a fresh
-//! variable per execution, so the value the site sees is the variable's
-//! final value — exactly what the closure would read. A name assigned in a
-//! nested block (a branch, a loop body) is never settled: some path to the
-//! site may not have assigned it. Tail-loop parameters (`_arg0`,
-//! reassigned by the loop update) decline themselves by (b); the
-//! per-iteration `_w` copies those loops make for exactly this capture
-//! reason are single-assignment and lift fine.
+//! name is declared by a `local` of the block being walked (`local a` —
+//! the multi-binding let shape, `local a; local b; a = …; b = __thunk(… a
+//! …)` — or `local x = …`), and EVERY assignment the frame makes to it
+//! has been passed by the walk: each sits in a statement of that same
+//! block that precedes the site, at that level or inside a branch, `do`
+//! or loop body of such a statement. A block's statements run in order
+//! once per execution of the block and a block-scoped `local` is a fresh
+//! variable per execution, so once the last assignment is behind the
+//! site the value it sees is the variable's final value — exactly what
+//! the closure would read. The inline ST read is the branch case:
+//! `local x = arr[i]; if <thunk> then x = __mll_st_settle(…) end`, then
+//! a suspension over `x`. An assignment inside a function body — a
+//! statement-level definition or a literal — runs at some later time or
+//! never, so it is never passed and the name never settles; one in a
+//! nested block that still lies AHEAD of the site (or one the walk is
+//! still inside, a site within the loop body that assigns the name)
+//! leaves the count short, so the name stays unsettled there. Tail-loop
+//! parameters (`_arg0`, reassigned by the loop update) decline
+//! themselves by (b); the per-iteration `_w` copies those loops make for
+//! exactly this capture reason are single-assignment and lift fine.
 //!
 //! The BODY must also be Raw-free (its free names must be trustworthy) and
 //! must not assign any of its captures (the value copy would break the
@@ -80,9 +88,9 @@ struct Frame {
     /// included) makes to each name; a forward-declared name assigned
     /// exactly once can settle (see the module doc).
     assign_counts: HashMap<String, usize>,
-    /// Forward-declared names whose single assignment the walk has passed
-    /// at the level of the block that declared them: their value is final
-    /// at every later site of that block.
+    /// Names declared by a `local` of a walked block whose every
+    /// assignment the walk has passed within that block: their value is
+    /// final at every later site of that block.
     settled: HashSet<String>,
     /// The function contains a Raw STATEMENT: its rendered text could
     /// declare or assign locals invisibly, so nothing bound here lifts.
@@ -215,39 +223,70 @@ fn push_frame(params: &[String], body: &[Stmt], frames: &mut Vec<Frame>) {
 
 fn walk_block(stmts: &mut Vec<Stmt>, st: &mut Lift, frames: &mut Vec<Frame>) {
     let save = frames.last().map(|f| (f.bound.clone(), f.settled.clone()));
-    // The forward declarations of THIS block: an assignment to one of
-    // them at this block level settles it (see the module doc); the same
-    // name assigned in a nested block never does.
+    // The `local`s of THIS block and, per name, how many of the frame's
+    // assignments the walk has passed at this level (nested branches and
+    // loop bodies of a passed statement included, function bodies never
+    // — see the module doc): a declared name whose passed count reaches
+    // the frame's total is settled for the rest of the block.
     let mut declared_here: HashSet<String> = HashSet::new();
+    let mut passed: HashMap<String, usize> = HashMap::new();
     for s in stmts.iter_mut() {
         walk_stmt(s, st, frames);
         let Some(f) = frames.last_mut() else { continue };
-        match s {
-            Stmt::Local(names, None) => declared_here.extend(names.iter().cloned()),
-            Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => {
-                if is_plain_ident(lhs)
-                    && declared_here.contains(lhs)
-                    && f.assign_counts.get(lhs) == Some(&1)
-                {
-                    f.settled.insert(lhs.clone());
-                }
+        if let Stmt::Local(names, _) = s {
+            declared_here.extend(names.iter().cloned());
+        }
+        let mut here: HashMap<String, usize> = HashMap::new();
+        stmt_assigns(s, &mut here);
+        for (name, n) in here {
+            let p = passed.entry(name.clone()).or_insert(0);
+            *p += n;
+            if declared_here.contains(&name) && f.assign_counts.get(&name) == Some(p) {
+                f.settled.insert(name);
             }
-            Stmt::MultiAssign(lhs, _) => {
-                for l in lhs {
-                    if is_plain_ident(l)
-                        && declared_here.contains(l)
-                        && f.assign_counts.get(l) == Some(&1)
-                    {
-                        f.settled.insert(l.clone());
-                    }
-                }
-            }
-            _ => {}
         }
     }
     if let (Some((b, settled)), Some(f)) = (save, frames.last_mut()) {
         f.bound = b;
         f.settled = settled;
+    }
+}
+
+/// The plain-identifier assignments `s` performs when it runs: its own
+/// target(s), plus those of the statements in its branches, `do` block or
+/// loop body. A function body — a statement-level definition or a literal
+/// inside an expression — runs at some later time or never, so its
+/// assignments are not counted here (the frame's prescan total does count
+/// them, which is what keeps such a name from ever settling).
+fn stmt_assigns(s: &Stmt, out: &mut HashMap<String, usize>) {
+    let mut note = |name: &String| {
+        if is_plain_ident(name) {
+            *out.entry(name.clone()).or_insert(0) += 1;
+        }
+    };
+    match s {
+        Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => note(lhs),
+        Stmt::MultiAssign(lhs, _) => {
+            for l in lhs {
+                note(l);
+            }
+        }
+        Stmt::If { then_b, elseifs, else_b, .. } => {
+            let blocks = std::iter::once(then_b)
+                .chain(elseifs.iter().map(|(_, b)| b))
+                .chain(else_b.iter());
+            for b in blocks {
+                for inner in &b.0 {
+                    stmt_assigns(inner, out);
+                }
+            }
+        }
+        Stmt::Do(b) | Stmt::WhileTrue(b) => {
+            for inner in &b.0 {
+                stmt_assigns(inner, out);
+            }
+        }
+        _ => {}
     }
 }
 

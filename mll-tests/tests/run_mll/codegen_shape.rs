@@ -1300,3 +1300,56 @@ main = print (build 1 2 3 4)
     );
 }
 
+
+/// A bind-chain `readSTArray` is spelled INLINE at its site (action.rs
+/// `try_inline_st_read`): the slot load as the binding's initializer and
+/// the thunk arm as a following `if` through `__mll_st_settle`, no
+/// `__mll_st_read` call; the 0-based index folds into the 1-based slot
+/// (`i + 1` reads slot `i + 2`); a suspension capturing the bound name
+/// after the settle arm still lifts to a carrier (thunklift settles a
+/// declared name once every assignment to it has passed, a preceding
+/// branch's included). An index the emitted operand cannot duplicate (a
+/// `div` runtime call) keeps the helper call.
+#[test]
+fn st_read_inlines_at_the_bind_site() {
+    let source = r#"
+step :: Int -> Int
+step x = if length [] == 0 then x * 3 else x
+
+main :: IO ()
+main = print (runST (do
+  arr <- newSTArray 8 (0 :: Int)
+  let i = 3
+  v <- readSTArray arr (i + 1)
+  w <- readSTArray arr (i `div` 2)
+  writeSTArray arr i (step (v + w))
+  readSTArray arr i))
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    // The user body follows the runtime prelude (whose Integer library
+    // has a `local v = …` of its own): anchor on the LAST binding of `v`.
+    let body_start = lua.rfind("local v = ").expect("the read binds v");
+    let body = &lua[body_start..];
+    assert!(
+        body.starts_with("local v = arr[i + 2]"),
+        "the read must load the slot inline, its index folded to the 1-based slot: {body}"
+    );
+    assert!(
+        body.contains("if __mll_getmt(v) == __thunk_mt then") && body.contains("v = __mll_st_settle(arr, i + 2, v)"),
+        "the thunk arm must settle through __mll_st_settle: {body}"
+    );
+    assert!(
+        body.contains("local w = __mll_st_read(arr, __mll_div(i, 2))"),
+        "an index that is a runtime call keeps the helper call: {body}"
+    );
+    assert!(
+        !body.contains("__thunk(function"),
+        "the suspension over v (assigned by the settle arm before it) must lift to a carrier: {body}"
+    );
+    assert!(
+        body.contains("__mll_tk"),
+        "the stored suspension must be a lifted carrier: {body}"
+    );
+}

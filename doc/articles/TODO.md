@@ -459,14 +459,32 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       guard-established nonzero divisors in the eager-evaluation
       judgment (→ 7.6x, in band). Cases guard_nonzero_divisor.mll,
       thunklift_settled_captures.mll; shape tests in codegen_shape.rs.
-      OPEN: the canary is now BIMODAL on LuaJIT (fast mode 7.3-7.8x, a
-      ~6.4x mode in roughly a third of runs; the previous binary shows
-      none). Isolated by hand-patched emissions: the slow mode survives
-      with the `__mll_tk4` sites rewritten back to closures and with the
-      plain outer-force read, so it is neither; suspects are the many
-      newly lifted let-block carriers (allocation pattern → GC pacing)
-      or LuaJIT trace selection under ASLR. Diagnose with `-jv`/`-jp`
-      across runs before touching anything.
+      The canary then ran BIMODAL on LuaJIT (8x, or 6.6x in about a third
+      of runs) — diagnosed and fixed 2026-09-07. `-jp=vl` split by VM
+      state: the slow mode was +20% interpreter time, all of it in
+      `__mll_st_read` and the `__force` it tail-calls, under the mixer's
+      reads of slots that hold a stored suspension. `-jdump=bis` on both
+      modes: the read helper's hot-function root trace was specialized
+      to whichever slot type the recording call loaded — a number
+      (`num ALOAD`, the slow mode: every thunk-slot read exits) or a
+      thunk (`tab ALOAD`, the fast mode: every number-slot read exits);
+      the exit's side traces return into the caller, run into the
+      mixer's FNEW (`when`'s closure) or the blacklisted `__mll_div` and
+      abort four times, then the exit falls back to the interpreter for
+      good. Which type got recorded was decided by the hotcount hash
+      (64 slots keyed by bytecode address, ASLR). Fix in three parts,
+      none touching the canary: a read that forces a slot's suspension
+      writes the value back (steady-state slots are numbers on every
+      VM); a bind-chain `readSTArray` is emitted INLINE at its site
+      (action.rs `try_inline_st_read`, thunk arm `__mll_st_settle`) so
+      the type split lives in the caller's bytecode, where side traces
+      attach inside its loop or cost nothing interpreted — the
+      pathological shape was the small polymorphic helper as a
+      function-root trace; and thunklift settles a declared name once
+      every assignment to it has passed (a preceding branch's included),
+      so a suspension over the read's binding still lifts. 20/20 canary
+      runs at 7.8-8.3x; the ST hammer PUC 0.60s → 0.52s, LuaJIT
+      unchanged. Shape test st_read_inlines_at_the_bind_site.
 
 - [x] **Type-erased generic `show` cannot split Integer/Double on LuaJIT —
       accepted and documented** (2026-08-20; CAVEATS.md, "Int overflow

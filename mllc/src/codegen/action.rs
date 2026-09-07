@@ -624,6 +624,126 @@ impl CodeGen {
         ]))])
     }
 
+    /// `x <- readSTArray arr i` in a bind chain, spelled INLINE at its site
+    /// instead of as a call to the `__mll_st_read` helper:
+    ///
+    ///     local x = arr[i + 1]
+    ///     if __mll_getmt(x) == __thunk_mt then x = __mll_st_settle(arr, i + 1, x) end
+    ///
+    /// `None` for any other action. For a read: the declaration's RHS and
+    /// the settle statement, which assigns through `xref` — the bound
+    /// name's Lua reference, already declared by the caller. The array
+    /// and index expressions appear twice (the load, the settle arm), so
+    /// the inline form is taken only when both EMITTED expressions are
+    /// duplicable (`lua_expr_duplicable`: a name, a literal, arithmetic or
+    /// a force over those — every ST index in practice, including an
+    /// inlined index function's arithmetic, which the source shape does
+    /// not show); the second copy is evaluated only on the thunk arm. Any
+    /// other shape keeps the helper call, built from the same emitted
+    /// operands (`(call, None)`).
+    ///
+    /// Same effect as the helper (the slot forced and written back, the
+    /// value bound WHNF — `action_result_is_whnf` claims it), different
+    /// shape for the JIT. A slot holds a number or, between a store and
+    /// its first read, a thunk, so the read is polymorphic on the loaded
+    /// type. As a shared helper called from interpreted code that
+    /// polymorphism sat in a LuaJIT function-root trace: the trace was
+    /// specialized to whichever slot type the recording call loaded, and
+    /// the other type exited it on every call — the side traces from that
+    /// exit return into the caller, run into an uncompilable shape there
+    /// and abort, so the exit falls back to the interpreter for good.
+    /// Which type got recorded was decided by hotcount-hash collisions
+    /// under ASLR: the tracker canary ran at 8x or 6.6x per run. With the
+    /// load in the caller's own bytecode the split lives where side
+    /// traces can attach (inside the caller's loop) or costs nothing (an
+    /// interpreted caller), and each read is one call fewer on every VM.
+    ///
+    /// The bound name is assigned twice by this shape (the declaration,
+    /// the settle arm); thunklift settles it once the settle statement
+    /// has passed, so a later suspension capturing it still lifts.
+    fn try_inline_st_read(&mut self, action: &TExpr, xref: &str) -> Option<(Expr, Option<Stmt>)> {
+        let mut a = action;
+        while let TExprKind::Paren(inner) = &a.kind {
+            a = inner.as_ref();
+        }
+        let (fused, fargs) = Self::st_intrinsic_fused(a)?;
+        if fused != "__mll_st_read" || fargs.len() != 2 {
+            return None;
+        }
+        // Both positions are strict (the `__mll_st_read` row of the fused
+        // strictness masks): an array and an index are always forced.
+        let arr = self.arg_ast(fargs[0], true);
+        let idx = self.arg_ast(fargs[1], true);
+        if !Self::lua_expr_duplicable(&arr) || !Self::lua_expr_duplicable(&idx) {
+            return Some((Expr::call_named(fused, vec![arr, idx]), None));
+        }
+        let slot = Self::st_slot_index(idx);
+        let mut slot_s = String::new();
+        slot.render(0, &mut slot_s);
+        let read = Expr::index(arr.clone(), format!("[{slot_s}]"));
+        let x = Expr::name(xref);
+        let cond = Expr::binop(
+            "==",
+            Expr::call_named("__mll_getmt", vec![x.clone()]),
+            Expr::name("__thunk_mt"),
+        );
+        let settle = Expr::call_named("__mll_st_settle", vec![arr, slot, x]);
+        let stmt = Stmt::If {
+            cond,
+            then_b: Block(vec![Stmt::Assign(xref.to_string(), settle)]),
+            elseifs: vec![],
+            else_b: None,
+        };
+        Some((read, Some(stmt)))
+    }
+
+    /// The 1-based Lua slot of an emitted 0-based ST index: `idx + 1`,
+    /// folded into the literal when the index is one or ends in one
+    /// (`(ch * 14) + 1` reads slot `(ch * 14) + 2`, `7` reads `8`), and the
+    /// grouping an inlined index function left around its arithmetic
+    /// reduced to the one level the sum needs. The index text is baked
+    /// into the `Index` suffix, past the reach of the later paren cleanup.
+    fn st_slot_index(idx: Expr) -> Expr {
+        let mut inner = idx;
+        while let Expr::Paren(e) = inner {
+            inner = *e;
+        }
+        let bump = |lit: &str| lit.parse::<i64>().ok().map(|n| Expr::lit((n + 1).to_string()));
+        match inner {
+            Expr::Lit(ref n) if bump(n).is_some() => bump(n).unwrap(),
+            Expr::Binop(ref op, ref l, ref r) if op == "+" && matches!(r.as_ref(), Expr::Lit(n) if bump(n).is_some()) => {
+                let Expr::Lit(n) = r.as_ref() else { unreachable!() };
+                Expr::binop("+", (**l).clone(), bump(n).unwrap())
+            }
+            Expr::Name(_) | Expr::Lit(_) | Expr::Call(..) => Expr::binop("+", inner, Expr::lit("1")),
+            other => Expr::binop("+", Expr::paren(other), Expr::lit("1")),
+        }
+    }
+
+    /// May this emitted operand be spelled twice (see try_inline_st_read)?
+    /// A name or literal, `+`/`-`/`*`/negation over those, or `__force` of
+    /// such (idempotent on a value): pure, cheap, allocation-free, so the
+    /// copy on the thunk arm is a recomputation at most. A call (a
+    /// `div`/`mod` runtime call, an index function that did not inline),
+    /// a table or anything else is not.
+    fn lua_expr_duplicable(e: &Expr) -> bool {
+        match e {
+            Expr::Name(_) | Expr::Lit(_) => true,
+            Expr::Paren(inner) | Expr::Neg(inner) => Self::lua_expr_duplicable(inner),
+            Expr::Binop(op, l, r) => {
+                matches!(op.as_str(), "+" | "-" | "*")
+                    && Self::lua_expr_duplicable(l)
+                    && Self::lua_expr_duplicable(r)
+            }
+            Expr::Call(f, args) => {
+                matches!(f.as_ref(), Expr::Name(n) if n == "__force")
+                    && args.len() == 1
+                    && Self::lua_expr_duplicable(&args[0])
+            }
+            _ => false,
+        }
+    }
+
     pub(super) fn bind_chain_block(&mut self, expr: &TExpr, inside_action: bool) -> Block {
         // Iterative loop for right-spine bind chains to avoid stack overflow
         // on deeply nested do-blocks. Only recurses for non-spine children
@@ -687,9 +807,18 @@ impl CodeGen {
                         // result — no deep result demand inside it.
                         let saved_rd = std::mem::replace(
                             &mut self.cur_result_demand, crate::demand::Demand::Head);
-                        let rhs_e = self.bound_action_ast(lhs);
+                        // An ST array read spelled at its site (the slot
+                        // load as the declaration's RHS, the thunk arm as
+                        // a following statement); every other action is a
+                        // single RHS expression.
+                        let xref = self.lua_ref(&param_name);
+                        let (rhs_e, settle) = match self.try_inline_st_read(lhs, &xref) {
+                            Some(read) => read,
+                            None => (self.bound_action_ast(lhs), None),
+                        };
                         self.cur_result_demand = saved_rd;
                         stmts.push(decl.stmt(rhs_e));
+                        stmts.extend(settle);
                         // The bound value is force-free downstream only if the
                         // action yields WHNF. A `return ⊥` binds a thunk (kept
                         // lazy per the eagerness contract), so its uses must
