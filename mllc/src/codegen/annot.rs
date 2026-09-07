@@ -1495,7 +1495,8 @@ fn call_stamp(f: &Expr, args: &[StampNode]) -> Stamp {
             if (n == "__thunk" && args.len() == 1)
                 || (n == "__mll_tk1" && args.len() == 2)
                 || (n == "__mll_tk2" && args.len() == 3)
-                || (n == "__mll_tk3" && args.len() == 4) =>
+                || (n == "__mll_tk3" && args.len() == 4)
+                || (n == "__mll_tk4" && args.len() == 5) =>
         {
             let mut stamp = Stamp::new(Shape::Thunk, true, false, true);
             for a in args {

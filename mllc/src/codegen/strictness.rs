@@ -12,6 +12,7 @@
 //! with the free functions `strict_binding_safe` and `bare_var_alias`.
 
 use crate::tir::*;
+use crate::types::Ty;
 use super::CodeGen;
 use super::names::{is_builtin_op, sanitize_name};
 use super::util::{expr_references_name};
@@ -243,6 +244,16 @@ impl CodeGen {
     /// is deliberately excluded — `1/0` is `inf`, matching Haskell's `Double`,
     /// not an error.
     pub(super) fn contains_trapping_op(expr: &TExpr) -> bool {
+        Self::contains_trapping_op_under(expr, &[])
+    }
+
+    /// `contains_trapping_op` under `nonzero`: expressions a surrounding
+    /// guard has established nonzero (see `guard_nonzero_facts`). A
+    /// divisor syntactically equal to one of them cannot trap — `if le > ls
+    /// then x mod (le - ls) else …` is as safe to evaluate eagerly as a
+    /// literal divisor, which is what keeps the guarded-modulus shape (a
+    /// loop-wrapped position) out of a thunk.
+    fn contains_trapping_op_under(expr: &TExpr, nonzero: &[&TExpr]) -> bool {
         match &expr.kind {
             TExprKind::InfixApp { op, lhs, rhs } => {
                 // The integer division family's ONE trap is the zero
@@ -254,31 +265,145 @@ impl CodeGen {
                 // mod-by-nonzero-literal to native `%`; without it every
                 // such expression was thunked in a lazy argument position
                 // (a closure per loop iteration on the hm_churn lookup
-                // path).
+                // path). A divisor a guard established nonzero is as good.
                 let trapping_divisor = matches!(op.as_str(),
                         "div" | "mod" | "quot" | "rem" | "%")
                     && {
-                        let mut r = rhs.as_ref();
-                        while let TExprKind::Paren(p) = &r.kind {
-                            r = p.as_ref();
-                        }
+                        let r = Self::strip_parens(rhs);
                         !matches!(&r.kind,
                             TExprKind::Lit(TLiteral::Integer(n)) if *n != 0)
+                            && !nonzero.iter().any(|f| Self::same_pure_expr(f, r))
                     };
                 trapping_divisor
-                    || Self::contains_trapping_op(lhs)
-                    || Self::contains_trapping_op(rhs)
+                    || Self::contains_trapping_op_under(lhs, nonzero)
+                    || Self::contains_trapping_op_under(rhs, nonzero)
             }
-            TExprKind::Paren(inner) | TExprKind::Negate(inner) => Self::contains_trapping_op(inner),
-            TExprKind::Tuple(elems) => elems.iter().any(Self::contains_trapping_op),
+            TExprKind::Paren(inner) | TExprKind::Negate(inner) => {
+                Self::contains_trapping_op_under(inner, nonzero)
+            }
+            TExprKind::Tuple(elems) => {
+                elems.iter().any(|e| Self::contains_trapping_op_under(e, nonzero))
+            }
             TExprKind::App(func, arg) => {
-                Self::contains_trapping_op(func) || Self::contains_trapping_op(arg)
+                Self::contains_trapping_op_under(func, nonzero)
+                    || Self::contains_trapping_op_under(arg, nonzero)
             }
             TExprKind::If { cond, then_branch, else_branch } => {
-                Self::contains_trapping_op(cond)
-                    || Self::contains_trapping_op(then_branch)
-                    || Self::contains_trapping_op(else_branch)
+                // The then-branch runs only when `cond` held: what the
+                // condition establishes nonzero holds there. The shapes
+                // this walker descends (operators, applications, tuples,
+                // conditionals) bind no names, so a fact stays about the
+                // same variables throughout.
+                let mut facts: Vec<&TExpr> = nonzero.to_vec();
+                Self::guard_nonzero_facts(cond, &mut facts);
+                Self::contains_trapping_op_under(cond, nonzero)
+                    || Self::contains_trapping_op_under(then_branch, &facts)
+                    || Self::contains_trapping_op_under(else_branch, nonzero)
             }
+            _ => false,
+        }
+    }
+
+    fn strip_parens(e: &TExpr) -> &TExpr {
+        let mut r = e;
+        while let TExprKind::Paren(p) = &r.kind {
+            r = p.as_ref();
+        }
+        r
+    }
+
+    /// The Int-typed expressions `cond` establishes nonzero when it holds:
+    /// for each conjunct `a > b`, `a < b` or `a /= b` on Ints, `a - b` and
+    /// `b - a` (two Ints that compare unequal differ by a nonzero amount,
+    /// wrapping included), and the non-literal side when the other side is
+    /// the literal 0 (`a /= 0`, `a > 0`, `0 < a`). Conjuncts only: an `||`
+    /// establishes nothing.
+    fn guard_nonzero_facts<'a>(cond: &'a TExpr, out: &mut Vec<&'a TExpr>) {
+        let c = Self::strip_parens(cond);
+        if let TExprKind::InfixApp { op, lhs, rhs } = &c.kind
+            && op == "&&"
+        {
+            Self::guard_nonzero_facts(lhs, out);
+            Self::guard_nonzero_facts(rhs, out);
+            return;
+        }
+        let Some((op, lhs, rhs)) = Self::int_comparison_view(c) else { return };
+        if !matches!(op, ">" | "<" | "/=") {
+            return;
+        }
+        let l = Self::strip_parens(lhs);
+        let r = Self::strip_parens(rhs);
+        let zero = |e: &TExpr| matches!(&e.kind, TExprKind::Lit(TLiteral::Integer(0)));
+        // Either side compared unequal to the literal 0 is itself nonzero
+        // (for `<`/`>` the unequal side is whichever is not the zero).
+        if zero(r) { out.push(l); }
+        if zero(l) { out.push(r); }
+        out.push(c);
+    }
+
+    /// A comparison of two Ints as (operator, lhs, rhs), in either spelling
+    /// the TIR carries after monomorphization: the InfixApp itself, or the
+    /// saturated primitive method application (`ord_gt__Int a b` for
+    /// `a > b`, `ne_Int a b` for `a /= b`) mono rewrites the operator to.
+    fn int_comparison_view(e: &TExpr) -> Option<(&'static str, &TExpr, &TExpr)> {
+        let is_int = |t: &Ty| matches!(t, Ty::Con(n) if n == "Int");
+        match &e.kind {
+            TExprKind::InfixApp { op, lhs, rhs } if is_int(&lhs.ty) => {
+                let op: &'static str = match op.as_str() {
+                    ">" => ">",
+                    "<" => "<",
+                    "/=" => "/=",
+                    _ => return None,
+                };
+                Some((op, lhs, rhs))
+            }
+            TExprKind::App(f1, rhs) => {
+                let TExprKind::App(f0, lhs) = &f1.kind else { return None };
+                let TExprKind::Var(name) = &f0.kind else { return None };
+                if !name.ends_with("_Int") || !is_int(&lhs.ty) {
+                    return None;
+                }
+                let op: &'static str = match super::names::primitive_method_lua_op(name) {
+                    Some(">") => ">",
+                    Some("<") => "<",
+                    Some("~=") => "/=",
+                    _ => return None,
+                };
+                Some((op, lhs, rhs))
+            }
+            _ => None,
+        }
+    }
+
+    /// Structural equality of two pure expression shapes — the divisor
+    /// against a guard fact. A fact pushed as the whole comparison `a OP b`
+    /// matches the divisors `a - b` and `b - a`; otherwise the shapes must
+    /// agree node for node (variables by name, literals by value, operators
+    /// with both operands, parentheses transparent). Anything else is not
+    /// equal — conservative.
+    fn same_pure_expr(fact: &TExpr, divisor: &TExpr) -> bool {
+        let f = Self::strip_parens(fact);
+        let d = Self::strip_parens(divisor);
+        if let Some((_, fl, fr)) = Self::int_comparison_view(f)
+            && let TExprKind::InfixApp { op: dop, lhs: dl, rhs: dr } = &d.kind
+            && dop == "-"
+        {
+            return (Self::same_pure_expr(fl, dl) && Self::same_pure_expr(fr, dr))
+                || (Self::same_pure_expr(fl, dr) && Self::same_pure_expr(fr, dl));
+        }
+        match (&f.kind, &d.kind) {
+            (TExprKind::Var(a), TExprKind::Var(b)) => a == b,
+            (TExprKind::Lit(a), TExprKind::Lit(b)) => match (a, b) {
+                (TLiteral::Integer(x), TLiteral::Integer(y)) => x == y,
+                (TLiteral::Bool(x), TLiteral::Bool(y)) => x == y,
+                (TLiteral::Str(x), TLiteral::Str(y)) => x == y,
+                _ => false,
+            },
+            (TExprKind::Negate(a), TExprKind::Negate(b)) => Self::same_pure_expr(a, b),
+            (
+                TExprKind::InfixApp { op: a, lhs: al, rhs: ar },
+                TExprKind::InfixApp { op: b, lhs: bl, rhs: br },
+            ) => a == b && Self::same_pure_expr(al, bl) && Self::same_pure_expr(ar, br),
             _ => false,
         }
     }

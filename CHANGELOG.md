@@ -85,6 +85,13 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **STArray stores are lazy, like GHC's boxed arrays.** `newSTArray`,
+  `writeSTArray` and `newSTArrayFromList` used to evaluate the stored
+  value, so `writeSTArray arr i (error …)` raised even when the slot
+  was never read, where GHC is silent. A slot now holds the value as
+  given; `readSTArray` forces the slot it returns (the one remaining
+  read-side difference is documented in HASKDIFF), and `modifySTArray`
+  stores its result evaluated to WHNF.
 - **A hand-written `Eq` instance inside a list, `Maybe` or tuple was a
   Lua syntax error.** The structural `==` embeds the element's method
   by its compiler name, and a user instance's operator method (`==_T`)
@@ -99,6 +106,28 @@ API of the `mllc` library crate.)
   fixed for multi-clause and where-local functions earlier.
 
 ### Changed
+
+- **Closure-free thunks for the multi-binding `let` shape, and four
+  captures.** A `let` with several bindings is emitted as forward-declared
+  locals assigned in order, and the thunk-lift pass declined every
+  suspension capturing one of them (a forward-declared name is
+  reassigned after its declaration, and value capture must equal the
+  closure's variable capture). A name declared in the block being
+  walked and assigned exactly once, at that block level, before the
+  suspension, is now recognized as settled — its value is final — so
+  those suspensions lift to the table carriers LuaJIT traces through
+  (a `__thunk(function() … end)` closure aborts the trace). The carrier
+  family grew to four captures (`__mll_tk4`). Measured on the tracker
+  canary, whose lazy array stores (above) had turned three hot bindings
+  into closures: 6.2-6.6x → 7.2x realtime on LuaJIT.
+- **A conditional whose guard establishes its divisor nonzero is
+  evaluated eagerly in a lazy position.** `if … && le > ls then x mod
+  (le - ls) else …` cannot trap (two Ints that compare unequal differ by
+  a nonzero amount, wrapping included), so it is as safe to evaluate at
+  binding time as a literal divisor; `a /= 0`, `0 < a` and `a > 0`
+  establish `a` nonzero the same way. A `>=` guard establishes nothing
+  and that shape stays suspended (pinned: an undemanded `x mod (a - b)`
+  with `a == b` never runs). Tracker canary: 7.2x → 7.6x realtime.
 
 - **Exact-first-force let/where eagerization: hot bindings with
   EXPENSIVE right-hand sides stop allocating thunks.** The strict-let

@@ -505,10 +505,12 @@ main = putStrLn (show (f 10 + g False))
         "binding over provably-WHNF variables must stay eagerly assigned:\n{}",
         lua
     );
-    // z reads y, a thunked bottom: z itself must be thunked, and y must
+    // z reads y, a thunked bottom: z itself must be thunked (in either
+    // spelling — the closure, or the closure-free carrier the thunk-lift
+    // pass produces now that y settles before z's allocation), and y must
     // never be forced outside a thunk body at binding time.
     assert!(
-        lua.contains("z = __thunk"),
+        lua.contains("z = __thunk") || lua.contains("z = __mll_tk"),
         "binding over a non-WHNF variable must be thunked:\n{}",
         lua
     );
@@ -1219,3 +1221,82 @@ main = if field1 (Rec 5) == 5
         .exec()
         .expect("the emitted Lua must load and the renamed field must round-trip");
 }
+
+/// Guard-established nonzero divisors (strictness.rs
+/// `contains_trapping_op_under`): `if … && le > ls then x mod (le - ls)`
+/// in a lazy position is evaluated eagerly (an `if` statement assigning
+/// the binding), while the `>=` shape — which establishes nothing — keeps
+/// its suspension.
+#[test]
+fn guard_established_divisor_is_eager() {
+    let source = r#"
+main :: IO ()
+main = print (runST (do
+  arr <- newSTArray 4 (0 :: Int)
+  hl <- readSTArray arr 0
+  nPos <- readSTArray arr 1
+  leFP <- readSTArray arr 2
+  lsFP <- readSTArray arr 3
+  let fPos = if hl == 1 && nPos >= leFP && leFP > lsFP then lsFP + ((nPos - lsFP) `mod` (leFP - lsFP)) else nPos
+  let gPos = if leFP >= lsFP then (nPos - lsFP) `mod` (leFP - lsFP) else nPos
+  writeSTArray arr 1 fPos
+  writeSTArray arr 2 gPos
+  readSTArray arr 1))
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    assert!(
+        lua.contains("then fPos = "),
+        "the guarded modulus must be assigned eagerly: {lua}"
+    );
+    assert!(
+        !lua.contains("fPos = __mll_tk") && !lua.contains("fPos = __thunk"),
+        "the guarded modulus must not be suspended: {lua}"
+    );
+    assert!(
+        lua.contains("gPos = __mll_tk") || lua.contains("gPos = __thunk"),
+        "a `>=` guard establishes no nonzero fact — the modulus must stay suspended: {lua}"
+    );
+}
+
+/// Closure-free lifting for the multi-binding let shape (thunklift.rs,
+/// settled captures): the forward-declared bindings assigned in order
+/// lift to `__mll_tk*` carriers instead of per-allocation closures, and a
+/// four-capture suspension takes the `__mll_tk4` carrier. A binding whose
+/// suspension references ITSELF (assigned after the allocation) keeps the
+/// closure form.
+#[test]
+fn settled_let_bindings_lift_closure_free() {
+    let source = r#"
+opaque :: Int -> Int
+opaque v = if length [] == 0 then v else v
+
+build :: Int -> Int -> Int -> Int -> Int
+build a b c d =
+    let s1 = opaque (a + b)
+        s2 = opaque (s1 * c)
+        four = if s1 > 0 then opaque (a * 10 + b) else s2
+        pick = if d > 0 then four else s2
+    in pick
+
+main :: IO ()
+main = print (build 1 2 3 4)
+"#;
+    let lua = compile(source, Path::new("tests/cases"), &[])
+        .expect("compile should succeed")
+        .lua_code;
+    let body_start = lua.find("local s1").expect("the let block is emitted with forward declarations");
+    let body = &lua[body_start..];
+    let body_end = body.find("\nend").unwrap_or(body.len());
+    let body = &body[..body_end];
+    assert!(
+        !body.contains("__thunk(function"),
+        "every let-block suspension must lift (its captures settle before the allocation): {body}"
+    );
+    assert!(
+        body.contains("__mll_tk4("),
+        "the four-capture suspension (`four`: s1, a, b, s2) must take the __mll_tk4 carrier: {body}"
+    );
+}
+

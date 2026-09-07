@@ -295,7 +295,7 @@ fn repeat_safe_expr(e: &Expr) -> bool {
                     // Pure allocators and inspectors. The __mll_tk* forms
                     // are __thunk with the captured values carried in the
                     // table (thunklift.rs) — the same pure allocation.
-                    | "__thunk" | "__mll_tk1" | "__mll_tk2" | "__mll_tk3"
+                    | "__thunk" | "__mll_tk1" | "__mll_tk2" | "__mll_tk3" | "__mll_tk4"
                     | "__mll_gen1" | "__mll_gen2" | "__mll_gen3"
                     // The fused hmLookup slot read: a map handle is a
                     // persistent VERSION (the diff+reroot store underneath

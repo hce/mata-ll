@@ -261,6 +261,19 @@ pointer identity with no context. What GHC has and mata-ll does not:
 - `mkWeakIORef` — Lua exposes no weak-reference hook the runtime
   could attach a finalizer through.
 
+## STArray stores are lazy like GHC's boxed arrays; a read forces the slot
+
+`newSTArray`, `writeSTArray` and `newSTArrayFromList` store the element
+as given — `writeSTArray arr i undefined` never read is silent, exactly
+GHC's boxed `STArray` (the runtime used to force every stored value on
+write). The one deviation is on the read side: `readSTArray` forces the
+slot it returns, where GHC's `readArray` hands the suspension back
+unevaluated. Observable only for a bottom that is read and then never
+used (`x <- readSTArray arr i; pure 5` raises in mata-ll, is silent in
+GHC); in exchange a bound read is a value, so its uses need no force.
+`modifySTArray` is mata-ll's own operation (GHC's `MArray` has none):
+it applies `f` when it runs and stores the result evaluated to WHNF.
+
 ## No lazy I/O
 
 There is no `hGetContents`, `readFile` returning a lazy String, or

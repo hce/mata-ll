@@ -38,7 +38,8 @@
 --                   — mata-ll's monomorphic read helpers.
 --   * ST, runST, STArray and the STArray operations
 --                   — mata-ll's builtin mutable Int array
---                     (newSTArray size init, 0-based indices).
+--                     (newSTArray size init, 0-based indices), lazy in
+--                     the stored elements like GHC's boxed STArray.
 module MllShim
   ( Number
   , assert
@@ -67,7 +68,7 @@ import Control.Monad.ST (ST, runST)
 import GHC.Exts (Multiplicity (..))
 import System.Environment (getArgs)
 import Data.STRef (STRef, newSTRef, readSTRef, modifySTRef')
-import qualified Data.Map.Strict as Map
+import qualified Data.Map as Map
 
 type Number = Double
 
@@ -145,8 +146,12 @@ read_String :: String -> String
 read_String s = s
 
 -- mata-ll's STArray: a mutable, 0-indexed Int array scoped to ST s.
--- Backed here by an STRef over Map Int Int; the corpus only uses
--- small arrays, so the representation cost is irrelevant.
+-- Backed here by an STRef over a LAZY Map Int Int — the values are
+-- stored as given, like GHC's boxed STArray and mata-ll's runtime
+-- (`writeSTArray a i undefined` never read is silent on both sides);
+-- the corpus only uses small arrays, so the representation cost is
+-- irrelevant. modifySTArray is mata-ll's own operation: it applies f
+-- when run and stores the result evaluated to WHNF (a strict modify).
 newtype STArray s = STArray (STRef s (Map.Map Int Int))
 
 -- newSTArray size init: indices 0 .. size-1, all set to init.
@@ -161,7 +166,8 @@ writeSTArray :: STArray s -> Int -> Int -> ST s ()
 writeSTArray (STArray r) i v = modifySTRef' r (Map.insert i v)
 
 modifySTArray :: STArray s -> Int -> (Int -> Int) -> ST s ()
-modifySTArray (STArray r) i f = modifySTRef' r (Map.adjust f i)
+modifySTArray (STArray r) i f =
+  modifySTRef' r (\m -> let v = f (m Map.! i) in v `seq` Map.insert i v m)
 
 stArrayLength :: STArray s -> ST s Int
 stArrayLength (STArray r) = Map.size <$> readSTRef r

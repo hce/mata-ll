@@ -14,14 +14,12 @@
 //! mask without one fails the test), and every probe must match its mask's
 //! arity and strictness shape.
 //!
-//! Two deliberate mask/behavior gaps are encoded as `ForcedOnRun`: the
-//! first-class ST closures (`__mll_ma_new`/`__mll_ma_write`) DO force the
-//! initializer/stored value when the action runs, but their masks keep
-//! those positions lazy because a built-but-never-run action must not
-//! force anything (see the fused-mask note in codegen/action.rs). GHC
-//! stores array elements lazily even on write, so the run-time force is a
-//! recorded deviation (G8 candidate), asserted here so a change in either
-//! direction is seen.
+//! One deliberate mask/behavior gap is encoded as `ForcedOnRun`: `filter`
+//! forces its predicate on the sampled non-empty path while its mask keeps
+//! the position lazy (the empty path never calls it). The ST array
+//! closures used to be the other gap (they forced the initializer / stored
+//! value when the action ran); they now store the value as it is, like
+//! GHC's boxed STArray, and their value positions are asserted Lazy.
 
 use super::*;
 
@@ -107,18 +105,20 @@ const PROBES: &[Probe] = &[
     probe("bsConcatList", &[SLIST], &[Strict]),
     probe("bsPack", &[ILIST65], &[Strict]),
     // --- first-class ST array closures (built, then run) ---
-    st_probe("newSTArray", &["1", "0"], &[Strict, ForcedOnRun]),
+    // The value positions are Lazy on EVERY path (GHC's boxed STArray
+    // stores the thunk); readSTArray forces the slot it returns.
+    st_probe("newSTArray", &["1", "0"], &[Strict, Lazy]),
     st_probe("readSTArray", &[ARR, "0"], &[Strict, Strict]),
-    st_probe("writeSTArray", &[ARR, "0", "0"], &[Strict, Strict, ForcedOnRun]),
+    st_probe("writeSTArray", &[ARR, "0", "0"], &[Strict, Strict, Lazy]),
     st_probe("modifySTArray", &[ARR, "0", IDF], &[Strict, Strict, Strict]),
     st_probe("stArrayLength", &[ARR], &[Strict]),
     st_probe("newSTArrayFromList", &[ILIST], &[Strict]),
     st_probe("stArrayToList", &[ARR], &[Strict]),
     // --- first-class IORef closures (built, then run) ---
     // The value positions are Lazy on EVERY path — GHC parity (writeIORef
-    // doesn't force the value, modifyIORef stores the suspension), unlike
-    // the ST array ops' ForcedOnRun deviation. modifyIORef' calls f on the
-    // run and forces its result, hence Strict in f.
+    // doesn't force the value, modifyIORef stores the suspension), like
+    // the ST array ops above. modifyIORef' calls f on the run and forces
+    // its result, hence Strict in f.
     st_probe("newIORef", &["0"], &[Lazy]),
     st_probe("readIORef", &[REF], &[Strict]),
     st_probe("writeIORef", &[REF, "0"], &[Strict, Lazy]),

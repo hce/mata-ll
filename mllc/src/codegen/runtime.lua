@@ -53,6 +53,7 @@ local function __thunk(f) return setmetatable({f, false}, __thunk_mt) end
 local function __mll_tk1(f, a) return setmetatable({f, false, 1, a}, __thunk_mt) end
 local function __mll_tk2(f, a, b) return setmetatable({f, false, 2, a, b}, __thunk_mt) end
 local function __mll_tk3(f, a, b, c) return setmetatable({f, false, 3, a, b, c}, __thunk_mt) end
+local function __mll_tk4(f, a, b, c, d) return setmetatable({f, false, 4, a, b, c, d}, __thunk_mt) end
 -- The lazy-cons GENERATOR variants: `{f, caps…}` — no metatable (a
 -- `setmetatable` C call per produced cell was the closure-free tails' one
 -- cost over the closures they replace on PUC Lua) and no arity slot (the
@@ -72,12 +73,21 @@ local function __force(x)
         if x[2] then return x[1] end
         local n = x[3]
         local val
+        -- The four-capture carrier (__mll_tk4) takes its own arm: passing
+        -- a fourth (nil) argument and clearing a fourth slot on EVERY
+        -- carried force measurably slowed the hot three-slot path on
+        -- LuaJIT (tracker canary 8.0x -> 7.5x), so the common shapes keep
+        -- their exact former sequence.
         if n == nil then val = x[1]()
+        elseif n == 4 then val = x[1](x[4], x[5], x[6], x[7])
         else val = x[1](x[4], x[5], x[6])
         end
         x[1] = val
         x[2] = true
-        if n ~= nil then x[3], x[4], x[5], x[6] = nil, nil, nil, nil end
+        if n ~= nil then
+            x[3], x[4], x[5], x[6] = nil, nil, nil, nil
+            if n == 4 then x[7] = nil end
+        end
         return val
     end
     return x
@@ -2433,17 +2443,31 @@ local function ne_ByteString(a, b) return __force(a) ~= __force(b) end
 -- 0-based indexing externally, 1-based internally.
 -- ST array primitives: these run inside runST which provides scoping,
 -- so they perform directly (no action closure wrapping needed).
+--
+-- Laziness is GHC's boxed STArray: a slot holds the value AS STORED —
+-- possibly a thunk — because `newSTArray n x`, `writeSTArray a i x` and
+-- `newSTArrayFromList xs` are lazy in the element (`writeSTArray a i
+-- undefined` never read is silent, as under GHC; the slots of a fresh
+-- array share one initializer thunk, memoized on first force).
+-- `readSTArray` forces the slot it returns (mata-ll's one deviation:
+-- GHC hands the thunk back unforced), so a bound read is WHNF and its
+-- uses stay force-free; `modifySTArray` calls f on the stored value and
+-- stores f's result forced to WHNF (a strict modify, like modifyIORef').
 local function __mll_ma_new(size, init)
     return function()
-        size = __force(size); init = __force(init)
+        size = __force(size)
         local t = {}; for i = 1, size do t[i] = init end; return t
     end
 end
 local function __mll_ma_read(arr, idx)
-    return function() return __force(arr)[__force(idx) + 1] end
+    return function()
+        local v = __force(arr)[__force(idx) + 1]
+        if getmetatable(v) == __thunk_mt then return __force(v) end
+        return v
+    end
 end
 local function __mll_ma_write(arr, idx, val)
-    return function() __force(arr)[__force(idx) + 1] = __force(val) end
+    return function() __force(arr)[__force(idx) + 1] = val end
 end
 local function __mll_ma_modify(arr, idx, f)
     -- The action may run more than once (a stored first-class action, a
@@ -2452,7 +2476,7 @@ local function __mll_ma_modify(arr, idx, f)
     -- made the second run modify index+1, the third index+2.
     return function()
         local a, i = __force(arr), __force(idx) + 1
-        a[i] = __force(f)(a[i])
+        a[i] = __force(__force(f)(a[i]))
     end
 end
 local function __mll_ma_length(arr)
@@ -2461,7 +2485,7 @@ end
 local function __mll_ma_from_list(xs)
     return function()
         xs = __force(xs); local t = {}; local cur = xs
-        while cur ~= nil do t[#t+1] = __force(__mll_head(cur)); cur = __mll_tail(cur) end
+        while cur ~= nil do t[#t+1] = __mll_head(cur); cur = __mll_tail(cur) end
         return t
     end
 end
@@ -2477,25 +2501,29 @@ end
 -- codegen emits these only in run-once do-block position; first-class ST
 -- actions keep the __mll_ma_* closure form. See st_intrinsic_fused.
 local function __mll_st_new(size, init)
-    size = __force(size); init = __force(init)
+    size = __force(size)
     local t = {}; for i = 1, size do t[i] = init end; return t
 end
 local function __mll_st_read(arr, idx)
-    return __force(arr)[__force(idx) + 1]
+    -- The slot's thunk check inline (one call level less than an outer
+    -- __force on the hot read path; a number slot returns directly).
+    local v = __force(arr)[__force(idx) + 1]
+    if getmetatable(v) == __thunk_mt then return __force(v) end
+    return v
 end
 local function __mll_st_write(arr, idx, val)
-    __force(arr)[__force(idx) + 1] = __force(val)
+    __force(arr)[__force(idx) + 1] = val
 end
 local function __mll_st_modify(arr, idx, f)
     arr = __force(arr); idx = __force(idx) + 1
-    arr[idx] = __force(f)(arr[idx])
+    arr[idx] = __force(__force(f)(arr[idx]))
 end
 local function __mll_st_length(arr)
     return #__force(arr)
 end
 local function __mll_st_from_list(xs)
     xs = __force(xs); local t = {}; local cur = xs
-    while cur ~= nil do t[#t+1] = __force(__mll_head(cur)); cur = __mll_tail(cur) end
+    while cur ~= nil do t[#t+1] = __mll_head(cur); cur = __mll_tail(cur) end
     return t
 end
 local function __mll_st_to_list(arr)
@@ -2612,6 +2640,7 @@ local function __force_checked(x)
         local n = x[3]
         local val
         if n == nil then val = x[1]()
+        elseif n == 4 then val = x[1](x[4], x[5], x[6], x[7])
         else val = x[1](x[4], x[5], x[6])
         end
         if getmetatable(val) == __thunk_mt then
@@ -2619,7 +2648,10 @@ local function __force_checked(x)
         end
         x[1] = val
         x[2] = true
-        if n ~= nil then x[3], x[4], x[5], x[6] = nil, nil, nil, nil end
+        if n ~= nil then
+            x[3], x[4], x[5], x[6] = nil, nil, nil, nil
+            if n == 4 then x[7] = nil end
+        end
         return val
     end
     return x

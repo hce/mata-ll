@@ -1690,6 +1690,14 @@ It uses the same rank-2 scope-sealing technique as `LuaIO s`:
 `ST s` is the same runtime as IO but with a type-level distinction.
 The `forall s.` in `runST` prevents mutable state from escaping.
 
+Laziness is GHC's boxed `STArray`: `newSTArray`, `writeSTArray` and
+`newSTArrayFromList` store the element as given, without evaluating
+it (a bottom that is never read is silent; the slots of a fresh array
+share one initializer suspension, evaluated once). `readSTArray`
+forces the slot it returns, so a bound read is a value. `modifySTArray`
+(mata-ll's own operation) applies `f` to the stored value when it runs
+and stores the result evaluated to WHNF.
+
 # IORef (mutable IO cells)
 
 `IORef a` is GHC's plain mutable cell, imported as `Data.IORef`:

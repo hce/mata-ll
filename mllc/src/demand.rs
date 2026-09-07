@@ -85,13 +85,11 @@ pub const STRICT_BUILTINS: &[(&str, &[bool])] = &[
     ("bsFromString", &[true]),
     // ST array primitives. An array and an index are always forced (you cannot
     // allocate/read/write/measure through a thunk). The *stored value* /
-    // *initializer* positions stay `false` because BUILDING the first-class
-    // `__mll_ma_*` action forces nothing, and a built-but-never-run action
-    // must not force anything — but note the RUN does force them on store
-    // (the WHNF-slot invariant; the fused `__mll_st_*` masks in codegen mark
-    // them strict for exactly that reason). GHC's boxed arrays store thunks
-    // even on write, so the run-time force is a recorded deviation — pinned,
-    // as ForcedOnRun, by the strictness-contract harness in mll-tests.
+    // *initializer* positions are `false` on every path: a slot holds the
+    // value AS STORED, like GHC's boxed STArray (`writeSTArray a i undefined`
+    // never read is silent), and `newSTArrayFromList` is lazy in the
+    // elements; `readSTArray` forces the slot it returns. The strictness-
+    // contract harness in mll-tests asserts the lazy value positions.
     // `modifySTArray`'s function argument is forced (it is called).
     ("newSTArray", &[true, false]),
     ("readSTArray", &[true, true]),
@@ -1968,28 +1966,25 @@ fn is_action_value_ty(ty: &Ty) -> bool {
 }
 
 /// Argument demands of a fully-applied ST array intrinsic in RUN position
-/// (the fused `__mll_st_*` form). The fused runtime forces the array, the
-/// index, AND the stored value / initializer on execution (`__mll_st_write`
-/// does `… = __force(val)` — that is what keeps every slot, and hence every
-/// `__mll_st_read` result, in WHNF). So in a position where the intrinsic
-/// provably runs, its value argument is demanded. First-class (suspended)
-/// intrinsic references keep the lazy-value masks of `STRICT_BUILTINS`.
+/// (the fused `__mll_st_*` form). The fused runtime forces the array and
+/// the index on execution, and `newSTArrayFromList` the list SPINE; the
+/// stored value, the initializer and the list's elements are stored as
+/// they are (GHC's boxed-array laziness — `readSTArray` forces the slot it
+/// returns), so those positions carry no demand even where the intrinsic
+/// provably runs. First-class (suspended) intrinsic references keep the
+/// masks of `STRICT_BUILTINS`, which agree.
 fn st_intrinsic_run_row(name: &str, argc: usize) -> Option<Vec<Option<Demand>>> {
-    let row: &[Demand] = match name {
-        "newSTArray" => &[Demand::Head, Demand::Head],
-        "readSTArray" => &[Demand::Head, Demand::Head],
-        "writeSTArray" => &[Demand::Head, Demand::Head, Demand::Head],
-        "modifySTArray" => &[Demand::Head, Demand::Head, Demand::Head],
-        "stArrayLength" => &[Demand::Head],
-        "newSTArrayFromList" => &[Demand::Elems(Box::new(Demand::Head))],
-        "stArrayToList" => &[Demand::Head],
+    let row: Vec<Option<Demand>> = match name {
+        "newSTArray" => vec![Some(Demand::Head), None],
+        "readSTArray" => vec![Some(Demand::Head), Some(Demand::Head)],
+        "writeSTArray" => vec![Some(Demand::Head), Some(Demand::Head), None],
+        "modifySTArray" => vec![Some(Demand::Head), Some(Demand::Head), Some(Demand::Head)],
+        "stArrayLength" => vec![Some(Demand::Head)],
+        "newSTArrayFromList" => vec![Some(Demand::Head)],
+        "stArrayToList" => vec![Some(Demand::Head)],
         _ => return None,
     };
-    if argc == row.len() {
-        Some(row.iter().cloned().map(Some).collect())
-    } else {
-        None
-    }
+    if argc == row.len() { Some(row) } else { None }
 }
 
 /// Signatures of a clause's where-bound local functions (grouped defs).

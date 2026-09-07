@@ -389,6 +389,24 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
 
 ## Completed
 
+- [x] **G8 — ST array stores force the value (GHC's boxed STArray stores
+      thunks) — fixed 2026-09-06, user decision: GHC parity.**
+      `__mll_ma_new`/`__mll_ma_write`/`__mll_ma_from_list` and the fused
+      `__mll_st_*` twins store the value as given; `__mll_ma_read`/
+      `__mll_st_read` force the slot they return (the read-then-unused
+      bottom is the documented residual, HASKDIFF); `modifySTArray` stores
+      f's result forced (strict modify, the GHC twin says so). Codegen's
+      fused masks and demand's run rows carry lazy value positions; the
+      strictness harness asserts them Lazy (ForcedOnRun pin removed); the
+      GHC twin's STArray is a lazy Map. Case st_lazy_store.mll. The lazy
+      stores turned three tracker bindings into closure thunks (canary
+      8.1x → 6.2-6.6x); recovered in the same commit by two general
+      optimizations, not by touching the canary: thunklift's settled
+      forward-declared captures + a four-capture carrier (→ 7.2x), and
+      guard-established nonzero divisors in the eager-evaluation
+      judgment (→ 7.6x, in band). Cases guard_nonzero_divisor.mll,
+      thunklift_settled_captures.mll; shape tests in codegen_shape.rs.
+
 - [x] **Type-erased generic `show` cannot split Integer/Double on LuaJIT —
       accepted and documented** (2026-08-20; CAVEATS.md, "Int overflow
       wraps silently"). LuaJIT has no `math.type` and every number is a

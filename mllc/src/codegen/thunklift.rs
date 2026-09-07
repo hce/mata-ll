@@ -23,28 +23,36 @@
 //!
 //! CAPTURE SEMANTICS. Lua closures capture VARIABLES (upvalues); the lift
 //! captures VALUES at allocation time. The two agree exactly when every
-//! captured local is effectively single-assignment — never reassigned, and
-//! never forward-declared (`local a; … a = …`, the recursive let shape,
-//! whose thunks must see the later assignment). So a candidate lifts only
-//! when every free name of its body that resolves to an enclosing FUNCTION
-//! scope (chunk-level names resolve at the definition site and are left
-//! alone) is bound by a frame that (a) contains no `Raw` statement — a
-//! rendered fragment could assign or declare invisibly — and (b) never
-//! assigns that name (plain-identifier `Assign`/`MultiAssign`/`AssignIf`
-//! targets and initializer-less `local`s, nested literals included; an
-//! assignment THROUGH a captured table, `_v[3] = …`, is not an assignment
-//! of `_v` — the table's identity is what both capture forms share, so
-//! mutations stay visible either way). Tail-loop parameters (`_arg0`,
+//! captured local's value is FINAL at the allocation. So a candidate lifts
+//! only when every free name of its body that resolves to an enclosing
+//! FUNCTION scope (chunk-level names resolve at the definition site and are
+//! left alone) is bound by a frame that (a) contains no `Raw` statement — a
+//! rendered fragment could assign or declare invisibly — and (b) either
+//! never assigns that name (plain-identifier `Assign`/`MultiAssign`/
+//! `AssignIf` targets and initializer-less `local`s, nested literals
+//! included; an assignment THROUGH a captured table, `_v[3] = …`, is not
+//! an assignment of `_v` — the table's identity is what both capture forms
+//! share, so mutations stay visible either way), or has SETTLED it: the
+//! name was forward-declared in the block being walked (`local a` — the
+//! multi-binding let shape, `local a; local b; a = …; b = __thunk(… a …)`)
+//! and its ONE assignment in the whole frame is a statement of that same
+//! block that precedes the site. A block's statements run in order once
+//! per execution of the block and a block-scoped `local` is a fresh
+//! variable per execution, so the value the site sees is the variable's
+//! final value — exactly what the closure would read. A name assigned in a
+//! nested block (a branch, a loop body) is never settled: some path to the
+//! site may not have assigned it. Tail-loop parameters (`_arg0`,
 //! reassigned by the loop update) decline themselves by (b); the
 //! per-iteration `_w` copies those loops make for exactly this capture
 //! reason are single-assignment and lift fine.
 //!
 //! The BODY must also be Raw-free (its free names must be trustworthy) and
 //! must not assign any of its captures (the value copy would break the
-//! write-through). Captures are capped at 3 (`__mll_tk1..3`); richer bodies
-//! keep the closure form. Bodies are processed bottom-up, so a nested
-//! suspension lifts first and the outer body captures whatever the inner
-//! rewrite still references.
+//! write-through). Captures are capped at 4 for a `__thunk` site
+//! (`__mll_tk1..4`) and 3 for a lazy-cons generator (`__mll_gen1..3`, the
+//! tail evaluator's flat call); richer bodies keep the closure form.
+//! Bodies are processed bottom-up, so a nested suspension lifts first and
+//! the outer body captures whatever the inner rewrite still references.
 //!
 //! `__mll_tkf` is one table (a single chunk local) so lifted definitions
 //! respect no per-function local budget; each definition is inserted
@@ -53,7 +61,7 @@
 //! which lives INSIDE that statement), and it executes before any code of
 //! that statement can allocate the thunk.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::annot::is_plain_ident;
 use super::hoist::free_names_func;
@@ -66,8 +74,16 @@ struct Frame {
     bound: HashSet<String>,
     /// Names this function's body (nested literals included) ever assigns
     /// or forward-declares — capturing one by value would diverge from the
-    /// closure's upvalue view.
+    /// closure's upvalue view, unless the walk has settled the name.
     assigned: HashSet<String>,
+    /// How many plain-identifier assignments the body (nested literals
+    /// included) makes to each name; a forward-declared name assigned
+    /// exactly once can settle (see the module doc).
+    assign_counts: HashMap<String, usize>,
+    /// Forward-declared names whose single assignment the walk has passed
+    /// at the level of the block that declared them: their value is final
+    /// at every later site of that block.
+    settled: HashSet<String>,
     /// The function contains a Raw STATEMENT: its rendered text could
     /// declare or assign locals invisibly, so nothing bound here lifts.
     has_raw: bool,
@@ -102,36 +118,49 @@ pub(super) fn run(stmts: &mut Vec<Stmt>) {
     }
 }
 
-/// Whole-body prescan for a function frame: every name it can assign, and
-/// whether any Raw statement hides part of the answer.
-fn prescan(stmts: &[Stmt], assigned: &mut HashSet<String>, has_raw: &mut bool) {
+/// Whole-body prescan for a function frame: every name it can assign (and
+/// how often), and whether any Raw statement hides part of the answer.
+fn prescan(
+    stmts: &[Stmt],
+    assigned: &mut HashSet<String>,
+    counts: &mut HashMap<String, usize>,
+    has_raw: &mut bool,
+) {
+    let note = |name: &String, assigned: &mut HashSet<String>, counts: &mut HashMap<String, usize>| {
+        assigned.insert(name.clone());
+        *counts.entry(name.clone()).or_insert(0) += 1;
+    };
     for s in stmts {
         match s {
             Stmt::Raw(_) => *has_raw = true,
+            // A forward declaration is not an assignment (it does not
+            // count toward the single-assignment settling rule), but the
+            // name is `assigned` in the sense that matters: its value is
+            // not final at declaration.
             Stmt::Local(names, None) => assigned.extend(names.iter().cloned()),
             Stmt::Assign(lhs, _) => {
                 if is_plain_ident(lhs) {
-                    assigned.insert(lhs.clone());
+                    note(lhs, assigned, counts);
                 }
             }
             Stmt::AssignIf { lhs, .. } => {
                 if is_plain_ident(lhs) {
-                    assigned.insert(lhs.clone());
+                    note(lhs, assigned, counts);
                 }
             }
             Stmt::MultiAssign(lhs, _) => {
                 for l in lhs {
                     if is_plain_ident(l) {
-                        assigned.insert(l.clone());
+                        note(l, assigned, counts);
                     }
                 }
             }
             _ => {}
         }
-        s.for_each_block(&mut |b| prescan(b, assigned, has_raw));
+        s.for_each_block(&mut |b| prescan(b, assigned, counts, has_raw));
         // for_each_block covers statement-level bodies (Function, If, Do,
         // WhileTrue); function LITERALS live inside expressions.
-        let mut scan_expr = |e: &Expr| expr_prescan(e, assigned, has_raw);
+        let mut scan_expr = |e: &Expr| expr_prescan(e, assigned, counts, has_raw);
         match s {
             Stmt::Local(_, Some(e)) | Stmt::Assign(_, e) | Stmt::Return(e) | Stmt::Expr(e) => {
                 scan_expr(e)
@@ -157,32 +186,68 @@ fn prescan(stmts: &[Stmt], assigned: &mut HashSet<String>, has_raw: &mut bool) {
     }
 }
 
-fn expr_prescan(e: &Expr, assigned: &mut HashSet<String>, has_raw: &mut bool) {
+fn expr_prescan(
+    e: &Expr,
+    assigned: &mut HashSet<String>,
+    counts: &mut HashMap<String, usize>,
+    has_raw: &mut bool,
+) {
     if let Expr::Func(_, fb) = e {
-        prescan(fb.stmts(), assigned, has_raw);
+        prescan(fb.stmts(), assigned, counts, has_raw);
         return;
     }
-    e.for_each_subexpr(&mut |c| expr_prescan(c, assigned, has_raw));
+    e.for_each_subexpr(&mut |c| expr_prescan(c, assigned, counts, has_raw));
 }
 
 fn push_frame(params: &[String], body: &[Stmt], frames: &mut Vec<Frame>) {
     let mut assigned = HashSet::new();
+    let mut counts = HashMap::new();
     let mut has_raw = false;
-    prescan(body, &mut assigned, &mut has_raw);
+    prescan(body, &mut assigned, &mut counts, &mut has_raw);
     frames.push(Frame {
         bound: params.iter().cloned().collect(),
         assigned,
+        assign_counts: counts,
+        settled: HashSet::new(),
         has_raw,
     });
 }
 
 fn walk_block(stmts: &mut Vec<Stmt>, st: &mut Lift, frames: &mut Vec<Frame>) {
-    let save = frames.last().map(|f| f.bound.clone());
-    for s in stmts {
+    let save = frames.last().map(|f| (f.bound.clone(), f.settled.clone()));
+    // The forward declarations of THIS block: an assignment to one of
+    // them at this block level settles it (see the module doc); the same
+    // name assigned in a nested block never does.
+    let mut declared_here: HashSet<String> = HashSet::new();
+    for s in stmts.iter_mut() {
         walk_stmt(s, st, frames);
+        let Some(f) = frames.last_mut() else { continue };
+        match s {
+            Stmt::Local(names, None) => declared_here.extend(names.iter().cloned()),
+            Stmt::Assign(lhs, _) | Stmt::AssignIf { lhs, .. } => {
+                if is_plain_ident(lhs)
+                    && declared_here.contains(lhs)
+                    && f.assign_counts.get(lhs) == Some(&1)
+                {
+                    f.settled.insert(lhs.clone());
+                }
+            }
+            Stmt::MultiAssign(lhs, _) => {
+                for l in lhs {
+                    if is_plain_ident(l)
+                        && declared_here.contains(l)
+                        && f.assign_counts.get(l) == Some(&1)
+                    {
+                        f.settled.insert(l.clone());
+                    }
+                }
+            }
+            _ => {}
+        }
     }
-    if let (Some(b), Some(f)) = (save, frames.last_mut()) {
+    if let (Some((b, settled)), Some(f)) = (save, frames.last_mut()) {
         f.bound = b;
+        f.settled = settled;
     }
 }
 
@@ -242,7 +307,11 @@ fn walk_expr(e: &mut Expr, st: &mut Lift, frames: &mut Vec<Frame>) {
             push_frame(&[], fb.stmts(), frames);
             walk_block(fb.stmts_mut(), st, frames);
             frames.pop();
-            if let Some((fslot, caps)) = try_lift(fb, st, frames) {
+            // A `__thunk` carrier takes up to four captures (`__mll_tk4`);
+            // the lazy-cons generator family stops at three (the tail
+            // evaluator's flat `g[1](g[2], g[3], g[4])` call).
+            let max_caps = if slot == 0 { 4 } else { 3 };
+            if let Some((fslot, caps)) = try_lift(fb, st, frames, max_caps) {
                 if caps.is_empty() {
                     // The shared function is itself a valid `__thunk`
                     // payload and a valid lazy-cons generator.
@@ -287,7 +356,12 @@ fn carrier(family: &str, fslot: String, caps: Vec<String>) -> Expr {
 /// Attempt to lift one zero-parameter literal body (already walked). On
 /// success the definition statement is queued; returns the `__mll_tkf[k]`
 /// reference and the capture list (the caller picks the carrier family).
-fn try_lift(fb: &mut FuncBody, st: &mut Lift, frames: &[Frame]) -> Option<(String, Vec<String>)> {
+fn try_lift(
+    fb: &mut FuncBody,
+    st: &mut Lift,
+    frames: &[Frame],
+    max_caps: usize,
+) -> Option<(String, Vec<String>)> {
     if frames.is_empty() {
         // Chunk level: the site runs once at load — nothing to save.
         return None;
@@ -301,21 +375,24 @@ fn try_lift(fb: &mut FuncBody, st: &mut Lift, frames: &[Frame]) -> Option<(Strin
         // Innermost binding frame decides; a name no frame binds is
         // chunk-level or global and resolves at the definition site.
         if let Some(frame) = frames.iter().rev().find(|f| f.bound.contains(name)) {
-            if frame.has_raw || frame.assigned.contains(name) {
+            if frame.has_raw
+                || (frame.assigned.contains(name) && !frame.settled.contains(name))
+            {
                 return None;
             }
             captures.push(name.clone());
         }
     }
-    if captures.len() > 3 {
+    if captures.len() > max_caps {
         return None;
     }
     captures.sort();
     // The body must not assign a capture (the lifted parameter is a copy).
     {
         let mut body_assigned = HashSet::new();
+        let mut body_counts = HashMap::new();
         let mut body_raw = false;
-        prescan(fb.stmts(), &mut body_assigned, &mut body_raw);
+        prescan(fb.stmts(), &mut body_assigned, &mut body_counts, &mut body_raw);
         if body_raw || captures.iter().any(|c| body_assigned.contains(c)) {
             return None;
         }

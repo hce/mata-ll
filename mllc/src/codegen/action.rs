@@ -41,8 +41,9 @@ impl CodeGen {
     ///     which is WHNF by construction.
     ///   * FFI SpecCalls (`__mll_io:`): a raw host value (plus decode), never
     ///     a mata-ll thunk.
-    ///   * fused ST intrinsics: `__mll_st_write` forces on store, so reads and
-    ///     the other intrinsics return forced values.
+    ///   * fused ST intrinsics: `__mll_st_read` forces the slot it returns
+    ///     (slots hold values as stored, GHC's boxed-array laziness), and
+    ///     the other intrinsics return a table, a length or `()`.
     ///
     /// Everything else — in particular a call to a USER-DEFINED action, which
     /// goes through `__mll_run` — defaults to `false`: a user function whose
@@ -96,10 +97,11 @@ impl CodeGen {
             TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => true,
             TExprKind::SpecCall { specialized: SpecKind::Io(_), .. } => true,
             // Every fused intrinsic result is WHNF except __mll_ioref_read:
-            // the ST slots store forced values, and the IORef writes/news
-            // return () or the cell itself — but an IORef slot holds the
-            // value AS STORED, possibly a thunk (writeIORef is lazy in the
-            // value, modifyIORef stores a suspension), so a fused read may
+            // `__mll_st_read` forces the slot it returns, and the ST/IORef
+            // writes/news return () or the cell itself — but an IORef
+            // slot holds the value AS STORED, possibly a thunk (writeIORef
+            // is lazy in the value, modifyIORef stores a suspension) and
+            // readIORef hands it back unforced, so that one fused read may
             // hand a raw thunk to its binder.
             _ if Self::st_intrinsic_fused(a)
                 .is_some_and(|(fused, _)| fused != "__mll_ioref_read") => true,
@@ -303,21 +305,17 @@ impl CodeGen {
                 // sound and, on the tracker's hot loop (four writes per note,
                 // every audio frame), removes a thunk allocation per index
                 // expression like `ch * 14 + off`. The *stored value* and the
-                // initializer are strict too: the fused runtime forces them ON
-                // THIS CALL (`__mll_st_write` stores `__force(val)` — that is
-                // the invariant that keeps every slot, and hence every read
-                // result, in WHNF), so evaluating the argument in place only
-                // moves the force a few instructions earlier within the same
-                // run-once statement — it cannot change what is forced. This
-                // applies ONLY to the fused (provably run-once) form; the
-                // first-class `__mll_ma_*` closures keep lazy value arguments
-                // because a built-but-never-run action must not force anything
-                // (see STRICT_BUILTINS in demand.rs).
+                // initializer stay LAZY: a slot holds the value as stored
+                // (GHC's boxed STArray — `writeSTArray a i undefined` never
+                // read is silent), so the value argument is suspended like
+                // any lazy argument and forced by the read that demands it.
+                // The first-class `__mll_ma_*` closures carry the same rows
+                // (STRICT_BUILTINS in demand.rs).
                 let strict_mask: &[bool] = match fused {
-                    "__mll_st_new" => &[true, true],         // size, init (forced on store)
-                    "__mll_st_read" => &[true, true],        // arr, idx
-                    "__mll_st_write" => &[true, true, true], // arr, idx, val (forced on store)
-                    "__mll_st_modify" => &[true, true, true],// arr, idx, f (f is called)
+                    "__mll_st_new" => &[true, false],         // size, init (stored as is)
+                    "__mll_st_read" => &[true, true],         // arr, idx
+                    "__mll_st_write" => &[true, true, false], // arr, idx, val (stored as is)
+                    "__mll_st_modify" => &[true, true, true], // arr, idx, f (f is called)
                     "__mll_st_length" => &[true],
                     "__mll_st_from_list" => &[true],
                     "__mll_st_to_list" => &[true],

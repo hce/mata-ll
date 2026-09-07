@@ -533,6 +533,15 @@ mll_test!(ord_minimal_instance, "ord_minimal_instance.mll");
 // and show-only instances left unparenthesized inside derived fields/Just.
 mll_test!(eq_minimal_instance, "eq_minimal_instance.mll");
 mll_test!(show_shows_prec_instance, "show_shows_prec_instance.mll");
+// GHC's boxed-STArray laziness: stores keep the value as given (a
+// never-read bottom is silent); reads force the slot.
+mll_test!(st_lazy_store, "st_lazy_store.mll");
+// Guard-established nonzero divisors are evaluated eagerly; a `>=` guard
+// establishes nothing and the modulus stays a suspension.
+mll_test!(guard_nonzero_divisor, "guard_nonzero_divisor.mll");
+// Closure-free lifting of let-block suspensions whose captures settle
+// before the allocation (value capture == variable capture there).
+mll_test!(thunklift_settled_captures, "thunklift_settled_captures.mll");
 // Record construction against the constructor's own fields (multi-
 // constructor records) and infix method clauses with pattern operands.
 mll_test!(record_multi_constructor, "record_multi_constructor.mll");
