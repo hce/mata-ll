@@ -364,6 +364,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_st_lazy_store, "cases", "st_lazy_store.mll"),
         (ghc_oracle_guard_nonzero_divisor, "cases", "guard_nonzero_divisor.mll"),
         (ghc_oracle_thunklift_settled_captures, "cases", "thunklift_settled_captures.mll"),
+        (ghc_oracle_either_monad, "cases", "either_monad.mll"),
         (ghc_oracle_record_multi_constructor, "cases", "record_multi_constructor.mll"),
         (ghc_oracle_instance_infix_pattern_methods, "cases", "instance_infix_pattern_methods.mll"),
         (ghc_oracle_let_semicolon_separators, "cases", "let_semicolon_separators.mll"),

@@ -492,6 +492,13 @@ impl Checker {
         self.register_builtin_instance("Monad", Ty::Con("Maybe".to_string()),
             &[(">>=", "bind_Maybe"), (">>", "then_Maybe"), ("return", "pure_Maybe")]);
 
+        // Monad instance for Either e (GHC's base instance: Left short-
+        // circuits). Empty context, not None — see the Functor Either
+        // instance: the class variable binds to the partially applied
+        // `Either e`, which must not demand `Monad e`.
+        self.register_builtin_instance_empty_ctx("Monad", Ty::Con("Either".to_string()),
+            &[(">>=", "bind_Either"), (">>", "then_Either"), ("return", "pure_Either")]);
+
         // Built-in Foldable typeclass
         // foldr :: (a -> b -> b) -> b -> t a -> b
         // foldl :: (b -> a -> b) -> b -> t a -> b

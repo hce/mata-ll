@@ -523,9 +523,11 @@ is a Monad, and the Monad machinery is what the compiler dispatches).
 
 ## Foldable and Traversable are narrower than GHC's
 
-`Foldable` (methods `foldr`/`foldl`) and `Traversable` (method
+`Foldable` (methods `foldr`/`foldl`/`foldl'`) and `Traversable` (method
 `traverse`) exist with instances for `[]`, `Maybe` and `Either`, and
-user types can declare their own instances. `length`, `null`, `elem`,
+user types can declare their own instances. `Either e` also carries
+base's Functor, Applicative and Monad instances (`Left` short-circuits),
+so do-notation and `mapM`/`traverse` work over it as under GHC. `length`, `null`, `elem`,
 `sum`, `product`, `maximum`, `minimum`, `foldMap` and `sequenceA` are
 generic over them, as in GHC. The differences:
 

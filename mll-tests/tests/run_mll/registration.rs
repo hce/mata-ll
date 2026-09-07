@@ -542,6 +542,9 @@ mll_test!(guard_nonzero_divisor, "guard_nonzero_divisor.mll");
 // Closure-free lifting of let-block suspensions whose captures settle
 // before the allocation (value capture == variable capture there).
 mll_test!(thunklift_settled_captures, "thunklift_settled_captures.mll");
+// GHC's `Monad (Either e)`: do-notation, Left short-circuit, mapM/
+// traverse/sequence/forM and Control.Monad combinators over Either.
+mll_test!(either_monad, "either_monad.mll");
 // Record construction against the constructor's own fields (multi-
 // constructor records) and infix method clauses with pattern operands.
 mll_test!(record_multi_constructor, "record_multi_constructor.mll");

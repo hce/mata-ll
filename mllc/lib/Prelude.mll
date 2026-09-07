@@ -415,6 +415,15 @@ then_Maybe :: Maybe a -> Maybe b -> Maybe b
 then_Maybe Nothing _ = Nothing
 then_Maybe (Just _) b = b
 
+-- Monad instance for Either e (GHC's: Left short-circuits, Right binds)
+bind_Either :: Either e a -> (a -> Either e b) -> Either e b
+bind_Either (Left e) _ = Left e
+bind_Either (Right x) f = f x
+
+then_Either :: Either e a -> Either e b -> Either e b
+then_Either (Left e) _ = Left e
+then_Either (Right _) b = b
+
 -- Monad instance for [] (list bind and then)
 bind_List :: [a] -> (a -> [b]) -> [b]
 bind_List xs f = concatMap f xs

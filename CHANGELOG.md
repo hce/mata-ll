@@ -59,6 +59,11 @@ API of the `mllc` library crate.)
   meaning. Qualified constructors (`M.Rect 1 2`, in expressions, record
   construction and patterns), class methods and record fields resolve
   through an alias as in GHC.
+- **`Monad (Either e)`** — base's instance (`Right` binds, `Left`
+  short-circuits), so do-notation, `>>=`/`>>`, `mapM`/`traverse`/
+  `sequence`/`forM` and the `Control.Monad` combinators work over
+  `Either e` as under GHC. `Either e` already had Functor, Applicative,
+  Foldable and Traversable; `>>=` on it was "No instance".
 - **Prelude `lookup`** — GHC's association-list lookup, `Eq a => a ->
   [(a, b)] -> Maybe b`, which did not exist (only Data.Map's qualified
   one did).

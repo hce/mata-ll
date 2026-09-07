@@ -1,0 +1,13 @@
+Right 1
+Left "divide by zero"
+(Left "divide by zero",Right 3)
+(Right 11,Left "divide by zero",Left "divide by zero",Left "negative")
+Left "stop"
+(Right [1,2,0],Left "not a digit: x")
+(Right [12,6,4],Left "divide by zero")
+(Right [1,2],Left "e")
+Right [4,3]
+(Right 7,Left "inner")
+(Right (),Left "v")
+(Right 2,Right 3)
+(Right 4,Right 4)

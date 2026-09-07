@@ -335,8 +335,10 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       that every seed is defined in the runtime text. C8 fold.rs
       `fold_num_num "^"` powf arm looks dead. C9 `__mll_hm_reroot`
       materialisation path with two enumerated roots in one family (after
-      B1). C10 `Either e` has no Monad instance (`>>=` on `Either String`
-      → "No instance") — gap, undocumented.
+      B1). ~~C10 `Either e` has no Monad instance (`>>=` on `Either String`
+      → "No instance")~~ — FIXED 2026-09-07: builtin `Monad Either`
+      instance (empty context, like its Functor/Applicative) over Prelude
+      `bind_Either`/`then_Either`; case either_monad.mll (GHC-goldened).
 
 ### Weak seams (structural remedies, beyond the items above)
 
@@ -384,7 +386,7 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       relative to the twinned corpus only (HashMap, existential show, NaN
       excluded) — say so. HASKDIFF brace-layout gap should name `let`
       (B16). HASKDIFF documents the dual-import forms (B7, fixed) and should
-      document the missing `Monad (Either e)` (C10). lib.rs:337-341 "misattribution
+      ~~document the missing `Monad (Either e)` (C10)~~ (fixed instead). lib.rs:337-341 "misattribution
       is the one failure mode this construction must not have" (B8).
 
 ## Completed
@@ -406,6 +408,14 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       guard-established nonzero divisors in the eager-evaluation
       judgment (→ 7.6x, in band). Cases guard_nonzero_divisor.mll,
       thunklift_settled_captures.mll; shape tests in codegen_shape.rs.
+      OPEN: the canary is now BIMODAL on LuaJIT (fast mode 7.3-7.8x, a
+      ~6.4x mode in roughly a third of runs; the previous binary shows
+      none). Isolated by hand-patched emissions: the slow mode survives
+      with the `__mll_tk4` sites rewritten back to closures and with the
+      plain outer-force read, so it is neither; suspects are the many
+      newly lifted let-block carriers (allocation pattern → GC pacing)
+      or LuaJIT trace selection under ASLR. Diagnose with `-jv`/`-jp`
+      across runs before touching anything.
 
 - [x] **Type-erased generic `show` cannot split Integer/Double on LuaJIT —
       accepted and documented** (2026-08-20; CAVEATS.md, "Int overflow
