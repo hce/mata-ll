@@ -1,0 +1,36 @@
+forms: 32
+fact defined
+120
+2432902008176640000
+fib defined
+610
+map defined
+(1 4 9 16 25)
+compose defined
+41
+25
+make-adder defined
+add10 defined
+15
+-10
+a
+(b c)
+(1 2 3)
+2
+1
+#t
+#f
+error: unbound symbol undefined-thing
+error: arity mismatch: expected 1, got 2
+error: not a number: x
+error: bad arguments to car: (())
+error: not a function: 1
+len defined
+7
+-10
+4
+1
+<lambda/1>
+Left "unterminated list"
+Left "unexpected )"
+Right ["(a (b c) 12 -7 #t)"]

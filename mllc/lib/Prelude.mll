@@ -49,6 +49,11 @@ const x _ = x
 flip :: (a -> b -> c) -> b -> a -> c
 flip f b a = f a b
 
+-- GHC's Prelude `subtract`: the section-friendly spelling of (-), so
+-- `subtract 1` is the function `(- 1)` cannot be.
+subtract :: Num a => a -> a -> a
+subtract x y = y - x
+
 -- The show combinators (GHC's Prelude): the building blocks of a
 -- hand-written `showsPrec`. `shows` is showsPrec at precedence 0.
 type ShowS = String -> String

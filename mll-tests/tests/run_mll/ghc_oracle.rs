@@ -7,13 +7,19 @@ use super::*;
 //
 // The parity suite used to assert what the author believed GHC does; the
 // oracle replaces belief with measurement. For every eligible case in
-// tests/cases/ and tests/ghc/, mll-tests/regenerate-ghc-goldens.sh runs a
-// mechanical GHC twin of the .mll source (real GHC via runghc, shared shim
-// tests/ghc-golden/MllShim.hs) and pins its stdout as
-// tests/ghc-golden/{cases,ghc}/<name>.stdout. The goldens are committed, so
-// these tests never need GHC: each one compiles the .mll with mllc, runs it
-// under mlua with `print`/`io.write` captured, and byte-compares the output
-// against GHC's.
+// tests/cases/, tests/ghc/ and tests/programs/, mll-tests/regenerate-ghc-goldens.sh
+// runs a mechanical GHC twin of the .mll source (real GHC via runghc, shared
+// shim tests/ghc-golden/MllShim.hs) and pins its stdout as
+// tests/ghc-golden/{cases,ghc,programs}/<name>.stdout. The goldens are
+// committed, so these tests never need GHC: each one compiles the .mll with
+// mllc, runs it under mlua with `print`/`io.write` captured, and
+// byte-compares the output against GHC's.
+//
+// tests/programs/ is the differential program corpus (tests/programs/README.md):
+// whole programs in the twinnable subset rather than feature probes. It has
+// no exclusions by construction — the registry test below insists on that —
+// so every file there is goldened, registered and run; it is not listed a
+// second time in registration.rs.
 //
 // Known divergences are pinned, not hidden: if mata-ll's output for a case
 // is KNOWN to differ from GHC's, the exact current mata-ll output lives in
@@ -132,7 +138,8 @@ fn ghc_oracle_case(sub: &str, file: &str) {
     }
 }
 
-/// The full oracle corpus, defined once. `for_each_ghc_oracle_case!` passes
+/// The full oracle corpus, defined once (tests/cases, tests/ghc, and the
+/// program corpus tests/programs under the ghc_oracle_prog_ prefix). `for_each_ghc_oracle_case!` passes
 /// the list to a callback macro: `gen_ghc_oracle_tests` emits one #[test]
 /// per case, `gen_ghc_oracle_index` emits the runtime index the registry
 /// test checks against the files on disk.
@@ -189,6 +196,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_list_pipeline_fused, "cases", "list_pipeline_fused.mll"),
         (ghc_oracle_list_fusion_growth, "cases", "list_fusion_growth.mll"),
         (ghc_oracle_lazy_generics_parity, "cases", "lazy_generics_parity.mll"),
+        (ghc_oracle_program_corpus_regressions, "cases", "program_corpus_regressions.mll"),
         // Excluded as un-twinnable while mata-ll had no Integer; the case
         // (and fromInteger) became GHC-true when Integer arrived, and the
         // A8 doc sweep caught the stale exclusion.
@@ -575,6 +583,32 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ghc_tc010, "ghc", "ghc_tc010.mll"),
         (ghc_oracle_ghc_tc011, "ghc", "ghc_tc011.mll"),
         (ghc_oracle_ghc_tc012, "ghc", "ghc_tc012.mll"),
+        // The differential program corpus (tests/programs/README.md).
+        (ghc_oracle_prog_json_parser, "programs", "json_parser.mll"),
+        (ghc_oracle_prog_sudoku, "programs", "sudoku.mll"),
+        (ghc_oracle_prog_expr_interpreter, "programs", "expr_interpreter.mll"),
+        (ghc_oracle_prog_word_freq, "programs", "word_freq.mll"),
+        (ghc_oracle_prog_lazy_streams, "programs", "lazy_streams.mll"),
+        (ghc_oracle_prog_state_monad, "programs", "state_monad.mll"),
+        (ghc_oracle_prog_rpn_calc, "programs", "rpn_calc.mll"),
+        (ghc_oracle_prog_graph_algos, "programs", "graph_algos.mll"),
+        (ghc_oracle_prog_matrix_integer, "programs", "matrix_integer.mll"),
+        (ghc_oracle_prog_bst_map, "programs", "bst_map.mll"),
+        (ghc_oracle_prog_huffman, "programs", "huffman.mll"),
+        (ghc_oracle_prog_containers_classes, "programs", "containers_classes.mll"),
+        (ghc_oracle_prog_records_inventory, "programs", "records_inventory.mll"),
+        (ghc_oracle_prog_dp_algorithms, "programs", "dp_algorithms.mll"),
+        (ghc_oracle_prog_nqueens, "programs", "nqueens.mll"),
+        (ghc_oracle_prog_brainfuck, "programs", "brainfuck.mll"),
+        (ghc_oracle_prog_mini_lisp, "programs", "mini_lisp.mll"),
+        (ghc_oracle_prog_text_processing, "programs", "text_processing.mll"),
+        (ghc_oracle_prog_bignum_math, "programs", "bignum_math.mll"),
+        (ghc_oracle_prog_validation_monads, "programs", "validation_monads.mll"),
+        (ghc_oracle_prog_game_of_life, "programs", "game_of_life.mll"),
+        (ghc_oracle_prog_dijkstra_heap, "programs", "dijkstra_heap.mll"),
+        (ghc_oracle_prog_sorting_algos, "programs", "sorting_algos.mll"),
+        (ghc_oracle_prog_mutable_algorithms, "programs", "mutable_algorithms.mll"),
+        (ghc_oracle_prog_typeclass_tower, "programs", "typeclass_tower.mll"),
         }
     };
 }
@@ -602,7 +636,7 @@ fn ghc_oracle_registry_is_complete() {
     };
 
     // Goldens on disk == registered cases.
-    for sub in ["cases", "ghc"] {
+    for sub in ["cases", "ghc", "programs"] {
         let on_disk = list_stdout_files(&format!("tests/ghc-golden/{sub}"));
         let registered: BTreeSet<String> = GHC_ORACLE_CASES
             .iter()
@@ -644,7 +678,18 @@ fn ghc_oracle_registry_is_complete() {
              (stale row; re-run mll-tests/regenerate-ghc-goldens.sh)"
         );
     }
-    for sub in ["cases", "ghc"] {
+    // The program corpus is twinnable by construction: a program that
+    // cannot run under GHC does not belong in it (regenerate-ghc-goldens.sh
+    // refuses to exclude one), so every file there carries a golden.
+    let excluded_programs: Vec<_> =
+        excluded.iter().filter(|p| p.starts_with("programs/")).collect();
+    assert!(
+        excluded_programs.is_empty(),
+        "tests/programs/ entries in EXCLUDED.tsv — the program corpus admits no \
+         exclusions (rewrite the program in the twinnable subset, or move it \
+         to tests/cases): {excluded_programs:?}"
+    );
+    for sub in ["cases", "ghc", "programs"] {
         for entry in std::fs::read_dir(format!("tests/{sub}")).expect("corpus dir") {
             let name = entry.expect("entry").file_name().to_string_lossy().into_owned();
             let Some(stem) = name.strip_suffix(".mll") else { continue };
@@ -670,7 +715,7 @@ fn ghc_oracle_registry_is_complete() {
     // Every pinned divergence has a golden and a DIVERGENCES.md entry.
     let divergences_md = std::fs::read_to_string("tests/ghc-golden/DIVERGENCES.md")
         .expect("tests/ghc-golden/DIVERGENCES.md exists");
-    for sub in ["cases", "ghc"] {
+    for sub in ["cases", "ghc", "programs"] {
         for name in list_stdout_files(&format!("tests/ghc-golden/divergent/{sub}")) {
             let stem = name.strip_suffix(".stdout").unwrap();
             assert!(

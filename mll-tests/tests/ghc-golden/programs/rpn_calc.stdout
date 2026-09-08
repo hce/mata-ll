@@ -1,0 +1,26 @@
+3 4 + 2 * => 14
+5 1 2 + 4 * + 3 - => 14
+2 3 ^ 2 ^ => 64
+-7 2 / => -4
+-7 2 % => 1
+7 -2 / => -4
+7 -2 % => -1
+1 dup * dup * => 1
+4 5 swap - => 1
+9 neg 2 ^ => 81
+1 + => error: +: stack underflow
+1 2 3 + => error: leftover values [1,5]
+1 0 / => error: division by zero
+2 -1 ^ => error: negative exponent
+ => error: empty expression
+1 x + => error: unknown token x
+1 + 2 * 3 => 1 2 3 * + => 7
+( 1 + 2 ) * 3 => 1 2 + 3 * => 9
+2 ^ 3 ^ 2 => 2 3 2 ^ ^ => 512
+100 / 10 / 2 => 100 10 / 2 / => 5
+100 - 10 - 2 => 100 10 - 2 - => 88
+( ( 7 ) ) => 7 => 7
+2 * ( 3 + 4 ) ^ 2 - 100 % 7 => 2 3 4 + 2 ^ * 100 7 % - => 96
+( 1 + 2 => error: mismatched (
+1 + 2 ) => error: mismatched )
+1 + + 2 => 1 + 2 + => error: +: stack underflow

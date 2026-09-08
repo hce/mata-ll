@@ -8,6 +8,8 @@
 #                       output (tests/ghc-golden/divergent/ghc/<name>.stdout) —
 #                       the same rule mll-tests/tests/run_mll/ghc_oracle.rs
 #                       applies in-process.
+#   tests/programs/*.mll — the differential program corpus: the same golden
+#                       comparison as tests/ghc (tests/ghc-golden/programs/).
 # A compile error is a FAILURE: every corpus program compiles under
 # `cargo test`, so one failing here means the mll binary is stale or broken.
 # Usage: lua-compat.sh <lua-binary>
@@ -18,6 +20,7 @@ LUA="${1:?Usage: $0 <lua-binary>}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 CASES_DIR="$SCRIPT_DIR/tests/cases"
 GHC_DIR="$SCRIPT_DIR/tests/ghc"
+PROGRAMS_DIR="$SCRIPT_DIR/tests/programs"
 GOLDEN_DIR="$SCRIPT_DIR/tests/ghc-golden"
 MLL="${MLL:-}"
 if [ -z "$MLL" ]; then
@@ -110,61 +113,71 @@ for src in "$CASES_DIR"/*.mll; do
     rm -f "$lua_file"
 done
 
-# --- tests/ghc: stdout against the pinned goldens ---------------------------
+# --- tests/ghc, tests/programs: stdout against the pinned goldens -----------
 actual_out="$(mktemp)"
 trap 'rm -f "$actual_out"' EXIT
-for src in "$GHC_DIR"/*.mll; do
-    name="$(basename "$src" .mll)"
-    lua_file="${src%.mll}.lua"
 
-    if skip_marked "$src" "ghc/$name"; then
-        skipped=$((skipped + 1))
-        continue
-    fi
-    if ! compile_case "$src" "ghc/$name"; then
-        failures=$((failures + 1))
-        continue
-    fi
+# Run one golden-compared corpus directory: $1 = the directory, $2 = its
+# key under tests/ghc-golden ("ghc" or "programs").
+run_golden_corpus() {
+    local dir="$1" sub="$2"
+    local src name lua_file golden divergent expected
+    for src in "$dir"/*.mll; do
+        name="$(basename "$src" .mll)"
+        lua_file="${src%.mll}.lua"
 
-    golden="$GOLDEN_DIR/ghc/$name.stdout"
-    divergent="$GOLDEN_DIR/divergent/ghc/$name.stdout"
-    if [ ! -f "$golden" ]; then
-        # Only a case LISTED in the exclusion manifest (written by
-        # regenerate-ghc-goldens.sh from its excluded_reason table) may run
-        # without a golden — self-asserting, like tests/cases. An UNLISTED
-        # missing golden used to silently demote to this exit-0 check, so a
-        # deleted or never-pinned golden lost its stdout comparison without
-        # any gate noticing.
-        if ! grep -q "^ghc/$name	" "$GOLDEN_DIR/EXCLUDED.tsv" 2>/dev/null; then
-            echo "FAIL ghc/$name: no golden and not listed in EXCLUDED.tsv (run regenerate-ghc-goldens.sh)"
+        if skip_marked "$src" "$sub/$name"; then
+            skipped=$((skipped + 1))
+            continue
+        fi
+        if ! compile_case "$src" "$sub/$name"; then
             failures=$((failures + 1))
+            continue
+        fi
+
+        golden="$GOLDEN_DIR/$sub/$name.stdout"
+        divergent="$GOLDEN_DIR/divergent/$sub/$name.stdout"
+        if [ ! -f "$golden" ]; then
+            # Only a case LISTED in the exclusion manifest (written by
+            # regenerate-ghc-goldens.sh from its excluded_reason table) may run
+            # without a golden — self-asserting, like tests/cases. An UNLISTED
+            # missing golden used to silently demote to this exit-0 check, so a
+            # deleted or never-pinned golden lost its stdout comparison without
+            # any gate noticing.
+            if ! grep -q "^$sub/$name	" "$GOLDEN_DIR/EXCLUDED.tsv" 2>/dev/null; then
+                echo "FAIL $sub/$name: no golden and not listed in EXCLUDED.tsv (run regenerate-ghc-goldens.sh)"
+                failures=$((failures + 1))
+                rm -f "$lua_file"
+                continue
+            fi
+            if "$LUA" "$lua_file" >/dev/null 2>&1 </dev/null; then
+                passed=$((passed + 1))
+            else
+                echo "FAIL $sub/$name ($LUA)"
+                failures=$((failures + 1))
+            fi
             rm -f "$lua_file"
             continue
         fi
-        if "$LUA" "$lua_file" >/dev/null 2>&1 </dev/null; then
+        # A recorded divergence pins mata-ll's own output; otherwise the GHC
+        # golden is the expectation.
+        expected="$golden"
+        if [ -f "$divergent" ]; then expected="$divergent"; fi
+
+        if "$LUA" "$lua_file" >"$actual_out" 2>/dev/null </dev/null \
+            && cmp -s "$actual_out" "$expected"; then
             passed=$((passed + 1))
         else
-            echo "FAIL ghc/$name ($LUA)"
+            echo "FAIL $sub/$name ($LUA): stdout differs from $(basename "$(dirname "$(dirname "$expected")")")/$sub/$name.stdout"
             failures=$((failures + 1))
         fi
+
         rm -f "$lua_file"
-        continue
-    fi
-    # A recorded divergence pins mata-ll's own output; otherwise the GHC
-    # golden is the expectation.
-    expected="$golden"
-    if [ -f "$divergent" ]; then expected="$divergent"; fi
+    done
+}
 
-    if "$LUA" "$lua_file" >"$actual_out" 2>/dev/null </dev/null \
-        && cmp -s "$actual_out" "$expected"; then
-        passed=$((passed + 1))
-    else
-        echo "FAIL ghc/$name ($LUA): stdout differs from $(basename "$(dirname "$(dirname "$expected")")")/ghc/$name.stdout"
-        failures=$((failures + 1))
-    fi
-
-    rm -f "$lua_file"
-done
+run_golden_corpus "$GHC_DIR" ghc
+run_golden_corpus "$PROGRAMS_DIR" programs
 
 echo ""
 echo "$LUA_VERSION: $passed passed, $failures failed, $skipped skipped"

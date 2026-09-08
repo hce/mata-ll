@@ -1,0 +1,54 @@
+words: 42, distinct: 16
+top 8:
+  the 8
+  fox 6
+  dog 4
+  is 3
+  lazy 3
+  over 3
+  a 2
+  and 2
+hapax legomena: 5 ["moves","never","quickest","runs","sleeps"]
+fox: 6, cat: 0
+member dog: True, member cat: False
+longest word: quickest
+total via foldrWithKey: 42
+adjusted the: Just 800, a: Nothing
+union keeps left: Just (-1), adds: Just 9
+bigrams seen more than once:
+  brown fox: 2
+  fox is: 2
+  fox jumps: 2
+  lazy dog: 2
+  over the: 2
+  the fox: 2
+  the lazy: 2
+letters:
+  a *******
+  b **
+  c ***
+  d ******
+  e *****************
+  f ******
+  g ****
+  h ********
+  i ******
+  j **
+  k ***
+  l ****
+  m ***
+  n ******
+  o ****************
+  p ***
+  q ***
+  r *******
+  s **********
+  t *********
+  u ******
+  v *****
+  w **
+  x ******
+  y ***
+  z ***
+letters total: 150
+a,and,brown,dog,fox,

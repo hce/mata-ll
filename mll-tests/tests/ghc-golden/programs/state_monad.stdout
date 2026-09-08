@@ -1,0 +1,14 @@
+Node (Node Leaf (0,"a") (Node Leaf (1,"b") Leaf)) (2,"c") (Node (Node Leaf (3,"d") Leaf) (4,"e") Leaf)
+[(0,"a"),(1,"b"),(2,"c"),(3,"d"),(4,"e")]
+next label: 5
+Node (Node Leaf "a0" (Node Leaf "b1" Leaf)) "c2" (Node (Node Leaf "d3" Leaf) "e4" Leaf)
+[7]
+[1,0]
+[81,33,69,61,56,93,77,0]
+True
+(2,642666333)
+[4,3,2,1,0,100]
+5050
+(10,11)
+34
+2

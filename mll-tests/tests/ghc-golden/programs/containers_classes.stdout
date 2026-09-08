@@ -1,0 +1,19 @@
+[4,3,2,1]
+[1,2,3,4]
+[4,3,2,1]
+[1,2,3,4]
+[1,2,3,10,20,30,100,200]
+[3,30,300,3000,30000,300000,2,1]
+([],[])
+rectangle with area 12.0 and perimeter 14.0
+a round circle of area 13.0
+square with area 6.25 and perimeter 10.0
+rectangle with area 0.125 and perimeter 1.5
+31.375
+circle
+nothing
+[Mon,Tue,Wed,Thu,Fri,Sat,Sun]
+[False,False,False,False,False,True,True]
+[Tue,Sat,Mon]
+(3,Sat,[Mon,Wed,Fri,Sun],Tue,Sat)
+(Sun,Mon,GT)

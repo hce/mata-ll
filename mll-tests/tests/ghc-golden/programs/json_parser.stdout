@@ -1,0 +1,28 @@
+ast:   JNull
+json:  null
+depth: 0
+roundtrip: True
+ast:   JArray [JNumber 1.0,JNumber 2.5,JNumber (-3.0),JNumber 150.0,JNumber 1.0e-3,JBool True,JBool False,JNull]
+json:  [1.0,2.5,-3.0,150.0,1.0e-3,true,false,null]
+depth: 1
+roundtrip: True
+ast:   JObject [("name",JString "mata\tll"),("tags",JArray [JString "a",JString "b\"c"]),("nested",JObject [("deep",JArray [JArray [JArray []]]),("n",JNumber (-0.5))])]
+json:  {"name":"mata\tll","tags":["a","b\"c"],"nested":{"deep":[[[]]],"n":-0.5}}
+depth: 5
+roundtrip: True
+ast:   JString "esc\\aped / slash"
+json:  "esc\\aped / slash"
+depth: 0
+roundtrip: True
+error: expected , or ] in array
+error: expected : after key
+error: expected true
+error: trailing input
+error: unterminated string
+error: bad number
+Just (JString "b\"c")
+Just (JNumber (-0.5))
+Just (JArray [])
+Nothing
+Nothing
+{"deep":[[[]]],"n":-0.5}

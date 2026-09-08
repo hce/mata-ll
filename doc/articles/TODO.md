@@ -25,6 +25,36 @@ MATA-LL TODO
       hardened hosts load text-only; `mlua`-based precompile covers the
       load-time case if ever wanted).
 
+## Differential program corpus 2026-09-08
+
+`mll-tests/tests/programs/` (README there): 25 whole programs in the
+shared subset, goldened against GHC 9.14.1 and run under cargo test and
+lua-compat. First run: 14 of 25 failed on the mata-ll side. Seven were the
+programs' own use of list functions on the opaque `String` (`length (show
+n)`, `intercalate` over `[String]`), which the subset excludes by design
+(HASKDIFF "Strings"); rewritten. Six were compiler defects, all fixed
+(CHANGELOG Unreleased): `data` decl `=`/`|` on continuation lines; case-alt
+guards on the next line + a guard chain swallowing the enclosing clause's
+guard; `<$>` on a user Functor; `Monad (ST s)` inside `runST (do …)` for
+Foldable/Monad-generic calls; `subtract` missing; a newtype-erased nested
+lambda flattened past its type's arity (State monad crash, the one
+miscompile). Regression probes: `tests/cases/program_corpus_regressions.mll`.
+
+- [ ] **Decision: `<>` at list types.** `mono.rs` refuses to dispatch
+      `Semigroup`'s `<>` at a concrete list type ("lists are concatenated
+      with ++"), a deliberate divergence recorded in HASKDIFF. The corpus
+      hit it through a GHC-idiomatic shape: `instance Semigroup e =>
+      Applicative (Validation e)` with `Failure (e1 <> e2)`, used at
+      `e = [String]` — accepted by GHC, rejected here at the use site's
+      specialization (the program now accumulates in a `String`). With
+      `instance Semigroup [a]` already in the Prelude, lifting the refusal
+      is a one-line change in `resolve_concrete_method`; the question is
+      whether the `<>`-for-strings / `++`-for-lists teaching split is worth
+      the parity gap. Not changed here — the user's call.
+- [ ] Pattern guards (`| Just v <- m`) and `let` qualifiers in guards stay
+      unsupported (parser rejects with a rewrite hint); the corpus avoids
+      them. Real programs use pattern guards often; worth a decision.
+
 ## Fresh-eyes review 2026-09-03 — open queue
 
 Third isolated review (dev @ e05194e, after perf rounds 1-11). Working tree

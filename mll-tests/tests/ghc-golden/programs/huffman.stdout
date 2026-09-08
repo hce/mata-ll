@@ -1,0 +1,32 @@
+text: "abracadabra"
+[(97,5),(98,2),(99,1),(100,1),(114,2)]
+codes: a=0 b=110 c=1110 d=1111 r=10 
+bits: 01101001110011110110100
+length: 23 vs 88
+decoded: "abracadabra" ok=True
+Nothing
+text: "mississippi river"
+[(32,1),(101,1),(105,5),(109,1),(112,2),(114,2),(115,4),(118,1)]
+codes:  =0000 e=0001 i=11 m=0010 p=010 r=011 s=10 v=0011 
+bits: 0010111010111010110100101100000111100110001011
+length: 46 vs 136
+decoded: "mississippi river" ok=True
+Nothing
+text: "aaaa"
+[(97,4)]
+codes: a=0 
+bits: 0000
+length: 4 vs 32
+decoded: "aaaa" ok=True
+Nothing
+text: ""
+[]
+empty input
+text: "the quick brown fox jumps over the lazy dog"
+[(32,8),(97,1),(98,1),(99,1),(100,1),(101,3),(102,1),(103,1),(104,2),(105,1),(106,1),(107,1),(108,1),(109,1),(110,1),(111,4),(112,1),(113,1),(114,2),(115,1),(116,2),(117,2),(118,1),(119,1),(120,1),(121,1),(122,1)]
+codes:  =110 a=101100 b=101101 c=101110 d=101111 e=1010 f=111000 g=111001 h=11101 i=111100 j=111101 k=111110 l=111111 m=00000 n=00001 o=001 p=00010 q=00011 r=0100 s=01010 t=0110 u=0111 v=01011 w=10000 x=10001 y=10010 z=10011 
+bits: 011011101101011000011011111110010111011111011010110101000011000000001110111000001100011101111010111000000001001010110001010111010010011001101110110101101111111011001001110010110101111001111001
+length: 192 vs 344
+decoded: "the quick brown fox jumps over the lazy dog" ok=True
+Just [True,False,False,True,True,True,False,False,True,True,True,False,False,True,True]
+HNode 6 (HNode 3 (HLeaf 1 97) (HLeaf 2 98)) (HLeaf 3 99)

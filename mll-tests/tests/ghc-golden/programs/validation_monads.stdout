@@ -1,0 +1,26 @@
+Right (User {userName = "alice", userAge = 30, userEmail = "alice@example.com"})
+Left "name is empty"
+Left "age is not a number: abc"
+Left "age out of range: 200"
+Left "name too long: a-very-long-name-indeed"
+Right (User {userName = "dave", userAge = 0, userEmail = "dave@x.y"})
+Right [User {userName = "alice", userAge = 30, userEmail = "alice@example.com"}]
+Left "name is empty"
+Right ["alice","dave"]
+Left "boom"
+(Just [1,2,3],Nothing)
+(Just [3,2,1],Nothing)
+(Left 3,Right ())
+Success (User {userName = "alice", userAge = 30, userEmail = "alice@example.com"})
+Failure "name is empty; "
+Failure "age is not a number: abc; "
+Failure "age out of range: 200; bad email: carol@example; "
+Failure "name too long: a-very-long-name-indeed; age is not a number: -1; bad email: nope; "
+Success (User {userName = "dave", userAge = 0, userEmail = "dave@x.y"})
+(Just 30,Nothing,Nothing,Nothing)
+([30,7],[12,6,4])
+(-1,True)
+(Right 30,Left "name is empty")
+("failed: age is not a number: abc","ok: alice")
+(Success 2,Failure "no")
+Failure "ab"

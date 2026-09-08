@@ -85,18 +85,35 @@ impl CodeGen {
     /// Walks directly nested lambdas (through source parens) and returns the
     /// flattened parameter list (original names) plus the innermost body. The
     /// caller eta-pads any arrows the type still has beyond these parameters.
+    ///
+    /// The walk stops at `max_params`, the arrow count of the outer lambda's
+    /// TYPE: the convention is "one Lua parameter per arrow of the type", and
+    /// a nested lambda can sit behind a non-arrow type. Newtype erasure
+    /// produces exactly that: `\_ -> pure ()` in a `State s` monad, with
+    /// `pure a = State (\s -> (a, s))` inlined, is `\_ -> (\s -> ((), s))`
+    /// at type `a -> State s ()` — ONE arrow, because `State s ()` is a
+    /// newtype, not a function type, to every call site (`runState (f a) s'`
+    /// emits `f(a)` and applies the result). Flattening it into a
+    /// two-parameter function made that `f(a)` return a bare pair. Found by
+    /// the program corpus (state_monad.mll).
     pub(super) fn flatten_lambda<'a>(
         params: &'a [(String, Ty)],
         body: &'a TExpr,
+        max_params: usize,
     ) -> (Vec<&'a str>, &'a TExpr) {
         let mut names: Vec<&str> = params.iter().map(|(s, _)| s.as_str()).collect();
         let mut b = body;
         loop {
+            if names.len() >= max_params {
+                break;
+            }
             let mut inner = b;
             while let TExprKind::Paren(p) = &inner.kind {
                 inner = p.as_ref();
             }
-            if let TExprKind::Lambda { params, body } = &inner.kind {
+            if let TExprKind::Lambda { params, body } = &inner.kind
+                && names.len() + params.len() <= max_params
+            {
                 names.extend(params.iter().map(|(s, _)| s.as_str()));
                 b = body.as_ref();
             } else {

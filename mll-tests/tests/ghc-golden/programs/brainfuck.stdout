@@ -1,0 +1,28 @@
+hello:
+  output: "Hello World!\n"
+  steps: 906
+adder:
+  output: "7"
+  steps: 314
+adder:
+  output: "B"
+  steps: 339
+upper:
+  output: "HELLO\f\NUL7ORLD"
+  steps: 938
+reverser:
+  output: "desserts"
+  steps: 53
+unmatched:
+  error: unmatched [
+unmatched:
+  error: unmatched ]
+infinite:
+  error: step budget exhausted at pc 2
+wrap:
+  output: "\SOH"
+  steps: 6
+empty:
+  output: ""
+  steps: 0
+Right [(0,5),(1,2),(2,1),(3,4),(4,3),(5,0)]

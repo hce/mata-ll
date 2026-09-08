@@ -1,11 +1,17 @@
 #!/bin/sh
 # regenerate-ghc-goldens.sh — pin real GHC's output for the parity corpus.
 #
-# For every oracle-eligible test case in tests/cases/ and tests/ghc/ this
-# script builds a mechanical GHC twin (the unchanged .mll source, prefixed
-# with a header that imports the shared shim tests/ghc-golden/MllShim.hs),
-# runs it under runghc, and stores its stdout as the golden file
-# tests/ghc-golden/{cases,ghc}/<name>.stdout.
+# For every oracle-eligible test case in tests/cases/, tests/ghc/ and
+# tests/programs/ this script builds a mechanical GHC twin (the unchanged
+# .mll source, prefixed with a header that imports the shared shim
+# tests/ghc-golden/MllShim.hs), runs it under runghc, and stores its stdout
+# as the golden file tests/ghc-golden/{cases,ghc,programs}/<name>.stdout.
+#
+# tests/programs/ is the differential program corpus (see its README): whole
+# programs rather than feature probes, twinnable by construction — none may
+# be excluded, and the loop below refuses an exclusion there. Its programs
+# may `import LString`; the twin resolves that to tests/ghc-golden/LString.hs,
+# a [Char] port of lib/LString.mll with Lua's index rules.
 #
 # The goldens are committed artifacts: CI and `cargo test` never need GHC.
 # Re-run this script (on a machine with GHC in PATH or ~/.ghcup/bin) only to
@@ -249,8 +255,8 @@ for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast Expor
 done
 
 # --- run the corpus ----------------------------------------------------------
-rm -rf "$gold/cases" "$gold/ghc"
-mkdir -p "$gold/cases" "$gold/ghc"
+rm -rf "$gold/cases" "$gold/ghc" "$gold/programs"
+mkdir -p "$gold/cases" "$gold/ghc" "$gold/programs"
 
 # Machine-readable exclusion manifest (committed): "path<TAB>reason" per
 # excluded case, regenerated with the goldens. lua-compat.sh consults it
@@ -264,11 +270,15 @@ manifest=$gold/EXCLUDED.tsv
 total=0; pinned=0; skipped=0; failed=0
 failures=""
 
-for sub in cases ghc; do
+for sub in cases ghc programs; do
     for f in "$tests/$sub"/*.mll; do
         name=$(basename "$f" .mll)
         total=$((total + 1))
         reason=$(excluded_reason "$sub/$name")
+        if [ -n "$reason" ] && [ "$sub" = programs ]; then
+            echo "error: $sub/$name is excluded ($reason) — the program corpus is twinnable by construction" >&2
+            exit 1
+        fi
         if [ -n "$reason" ]; then
             skipped=$((skipped + 1))
             printf '%s\t%s\n' "$sub/$name" "$reason" >> "$manifest"

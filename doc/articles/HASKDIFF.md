@@ -508,7 +508,7 @@ The list functions it provides without any import are:
     map  filter  foldl  foldr  length  reverse  head  tail  elem
     take  drop  takeWhile  dropWhile  zipWith  concatMap
     null  last  init  concat  span  zip  unzip  replicate  iterate
-    and  or  any  all  sum  product
+    and  or  any  all  sum  product  subtract
 
 `Data.List` (explicit `import Data.List`) adds the less common helpers and
 re-exports the Prelude ones, so existing imports keep working:
@@ -591,6 +591,15 @@ generic over them, as in GHC. The differences:
   compile-time "No instance" error. (Previously this ambiguity check
   existed only for the builtin classes; it now applies uniformly to
   every source-defined class.)
+- **User instances of Functor, Applicative and Monad carry GHC's
+  defaults.** An instance writes `fmap`; `pure` and either `<*>` or
+  `liftA2`; and `>>=` — `<$>` defaults to `fmap`, `<*>`/`liftA2` to each
+  other, `>>` to `>>=`, `return` to `pure`. (`<$>` is a class method
+  here, where GHC has a plain `(<$>) = fmap`; the default makes the
+  difference invisible.) A `newtype State s a = State (s -> (a, s))`
+  with the three instances works with do-notation, `mapM`/`mapM_`,
+  `when` and the rest, as under GHC; the program corpus
+  (`mll-tests/tests/programs/state_monad.mll`) is the reference.
 - **`liftA2` is the Applicative method to reach for in generic
   code.** A `f <$> x <*> y` chain routes a function *through* the
   applicative (an `f (b -> c)` intermediate); at `f = IO` the runtime

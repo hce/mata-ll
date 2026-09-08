@@ -130,3 +130,21 @@ partial answer because the *inputs* are still the same corpus, written by the
 same author with the same idioms — the oracle validates what those programs
 print, not which programs exist. The short-program-from-a-different-angle
 lesson stands.
+
+The second half of the answer (2026-09) is the differential program corpus,
+`mll-tests/tests/programs/`: whole programs — a JSON parser, a Sudoku solver,
+two interpreters, a State monad, Dijkstra, Huffman, Life, lazy dynamic
+programming, ST/IORef algorithms — rather than one-feature probes, written
+as ordinary Haskell in the shared subset and run under GHC, under `cargo
+test`, and under the three Lua interpreters with the outputs byte-compared.
+The corpus admits no exclusions, so a program that GHC accepts and mata-ll
+rejects or runs differently is a defect by construction. Its first run found
+six: three parser layout gaps (a `data` declaration's `=` on the next line,
+a case alternative's guards on the next line, a guard chain swallowing the
+enclosing clause's guard), `<$>` not dispatching to a user Functor, `Monad
+(ST s)` unresolvable inside `runST (do …)` for `forM_`/`when`, and a
+miscompile — a curried lambda behind a newtype flattened past its type's
+arity — that crashed the State monad at run time. None of the 1,300 probes
+had hit any of them, because each needs two features to meet: inlining and
+newtype erasure, layout and guards, generic folds and rank-2 skolems. The
+lesson of the fib one-liner again, at the scale of a program.

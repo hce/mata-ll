@@ -770,11 +770,16 @@ mll_lib_test!(lib_data_set, "lib_data_set.mll");
 mll_lib_test!(nan_map_keys, "nan_map_keys.mll");
 // C6: type signatures on where/let/do-let bindings.
 mll_test!(local_signatures, "local_signatures.mll");
+// Fixes found by the differential program corpus (tests/programs).
+mll_test!(program_corpus_regressions, "program_corpus_regressions.mll");
 
 /// Mirror of `ghc_oracle_registry_is_complete` for the runnable-case lists:
 /// every .mll file under tests/cases/ must be registered via `mll_test!` or
 /// `mll_lib_test!`, and every .mll under tests/ghc/ via `ghc_test!` — so a
-/// case file can never sit on disk silently unexecuted. The lists are macro
+/// case file can never sit on disk silently unexecuted. (tests/programs/ is
+/// not listed here: the program corpus admits no exclusions, so the oracle
+/// registry test already forces every file there to be goldened and run.)
+/// The lists are macro
 /// invocations with no runtime index, so this test recovers the registered
 /// set from this module's own source text (the invocations have a rigid
 /// one-per-line shape) and diffs it against the files on disk.

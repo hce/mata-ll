@@ -483,6 +483,14 @@ impl Parser {
             self.advance();
         }
 
+        // The `= …` / `where` may start on a continuation line
+        // (`data T\n    = A\n    | B`), as any Haskell layout allows and
+        // a function clause's `finish_clause` already accepts; a data
+        // declaration always has one of the two (there is no empty data
+        // declaration), so skipping the newlines here cannot swallow a
+        // following declaration.
+        self.skip_newlines_and_indent();
+
         // Check for GADT syntax
         if self.at(&Token::Where) {
             self.advance();
@@ -1547,7 +1555,7 @@ impl Parser {
     ) -> PResult<Clause> {
         // Guards
         self.skip_newlines_and_indent();
-        let guards = self.parse_guard_chain(&Token::Eq)?;
+        let guards = self.parse_guard_chain(&Token::Eq, 0)?;
 
         // A guarded clause has no single body: the guard chain IS the body.
         let body = if guards.is_empty() {
@@ -1576,7 +1584,14 @@ impl Parser {
     /// all three positions; each guard body gets the `Spanned` statement
     /// marker so a type error inside it is reported at the body's own
     /// line, not the clause head.
-    fn parse_guard_chain(&mut self, sep: &Token) -> PResult<Vec<Guard>> {
+    /// `min_indent` bounds a `|` that starts a NEW line: one at that
+    /// column or less belongs to an enclosing construct, not to this chain.
+    /// A case alternative passes its alternatives' column, so the guard of
+    /// a function clause written after a guarded alternative
+    /// (`| c == 92 = case cs of … (e : r) | e == 110 -> … \n | otherwise = …`)
+    /// is left for the clause; a function clause passes 0 (nothing encloses
+    /// a clause's own chain at a smaller indent).
+    fn parse_guard_chain(&mut self, sep: &Token, min_indent: usize) -> PResult<Vec<Guard>> {
         let mut guards = Vec::new();
         while self.at(&Token::Pipe) {
             self.advance();
@@ -1598,7 +1613,14 @@ impl Parser {
             self.expect(sep)?;
             let body = self.parse_stmt_expr()?;
             guards.push(Guard { condition, body });
+            let before = self.checkpoint();
             self.skip_newlines_and_indent();
+            if self.at(&Token::Pipe) && self.current_indent <= min_indent {
+                // The enclosing construct's guard; leave its line break in
+                // place so that construct sees it as before.
+                self.rewind(before);
+                break;
+            }
         }
         Ok(guards)
     }
@@ -1846,7 +1868,7 @@ impl Parser {
                 // Guarded where binding: parse the shared chain, then
                 // desugar to an if/else spine (a where binding is one
                 // equation — no next-clause fall-through to preserve).
-                let guards = self.parse_guard_chain(&Token::Eq)?;
+                let guards = self.parse_guard_chain(&Token::Eq, 0)?;
                 let body = guards.into_iter().rev().fold(
                     Expr::App(Box::new(Expr::Var("error".into())), Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec())))),
                     |else_branch, g| Expr::If {
@@ -3612,9 +3634,22 @@ impl Parser {
             }
             let pattern = self.parse_pattern()?;
 
+            // A guard chain may begin on the line after the pattern
+            // (`Just a\n    | a < 0 -> …`), indented past the
+            // alternatives' column, exactly as a function clause's guards
+            // may. Look past the newlines for the `|`; anything else
+            // rewinds so the `->` check sees the line break as before.
+            if !self.at(&Token::Pipe) {
+                let before = self.checkpoint();
+                self.skip_newlines_and_indent();
+                if !(self.at(&Token::Pipe) && self.current_indent > case_indent) {
+                    self.rewind(before);
+                }
+            }
+
             if self.at(&Token::Pipe) {
                 // Guards on case branch
-                let guards = self.parse_guard_chain(&Token::Arrow)?;
+                let guards = self.parse_guard_chain(&Token::Arrow, case_indent)?;
                 branches.push(CaseBranch {
                     pattern,
                     guards,

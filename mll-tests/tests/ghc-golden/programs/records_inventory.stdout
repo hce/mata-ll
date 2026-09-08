@@ -1,0 +1,33 @@
+Item {name = "hammer", category = Tools, qty = 12, price = 9.5, discount = 0.0}
+Item {name = "wrench", category = Tools, qty = 0, price = 12.25, discount = -0.5}
+Tools: hammer, saw, wrench
+  units 14, value 155.8
+Food: apple, bread
+  units 203, value 60.45
+Toys: kite, yoyo
+  units 45, value 126.25
+total value: 342.5
+out of stock: ["wrench"], in stock: 6
+by value:
+  hammer 114.0
+  yoyo 70.0
+  kite 56.25
+  apple 54.0
+  saw 41.8
+  bread 6.449999999999999
+  wrench 0.0
+Tools: hammer, saw, wrench
+  units 32, value 456.5
+Food: apple, bread
+  units 210, value 75.5
+Toys: kite, yoyo
+  units 50, value 220.0
+total value: 752.0
+[("hammer",12),("wrench",10),("apple",200),("bread",10),("kite",10),("yoyo",40),("saw",10)]
+[0.15,1.075,9.5]
+(Just "kite",Nothing)
+(0.0,12.25)
+Item {name = "sledgehammer", category = Tools, qty = 12, price = 30.0, discount = 0.0}
+(False,True)
+(22.0,0.15)
+[0.0,-0.5,0.1,0.0,0.25,0.0,5.0e-2]

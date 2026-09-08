@@ -1,0 +1,48 @@
+> 1 + 2 * 3 - 4 / 2
+  ast: BinOp "-" (BinOp "+" (Num 1) (BinOp "*" (Num 2) (Num 3))) (BinOp "/" (Num 4) (Num 2))
+  value: 5
+> (1 + 2) * (3 - 4) / 2
+  ast: BinOp "/" (BinOp "*" (BinOp "+" (Num 1) (Num 2)) (BinOp "-" (Num 3) (Num 4))) (Num 2)
+  value: -2
+> let x = 5 in let y = x * 2 in x + y
+  ast: Let "x" (Num 5) (Let "y" (BinOp "*" (Var "x") (Num 2)) (BinOp "+" (Var "x") (Var "y")))
+  value: 15
+> if 3 < 4 then 10 else 20
+  ast: If (BinOp "<" (Num 3) (Num 4)) (Num 10) (Num 20)
+  value: 10
+> if 1 == 2 then 10 else 0 - 7
+  ast: If (BinOp "==" (Num 1) (Num 2)) (Num 10) (BinOp "-" (Num 0) (Num 7))
+  value: -7
+> let twice = \f -> \x -> f (f x) in twice (\n -> n * 3) 7
+  ast: Let "twice" (Lam "f" (Lam "x" (App (Var "f") (App (Var "f") (Var "x"))))) (App (App (Var "twice") (Lam "n" (BinOp "*" (Var "n") (Num 3)))) (Num 7))
+  value: 63
+> let fact = \f -> \n -> if n < 1 then 1 else n * f f (n - 1) in fact fact 20
+  ast: Let "fact" (Lam "f" (Lam "n" (If (BinOp "<" (Var "n") (Num 1)) (Num 1) (BinOp "*" (Var "n") (App (App (Var "f") (Var "f")) (BinOp "-" (Var "n") (Num 1))))))) (App (App (Var "fact") (Var "fact")) (Num 20))
+  value: 2432902008176640000
+> let add = \a -> \b -> a + b in let inc = add 1 in inc (inc 40)
+  ast: Let "add" (Lam "a" (Lam "b" (BinOp "+" (Var "a") (Var "b")))) (Let "inc" (App (Var "add") (Num 1)) (App (Var "inc") (App (Var "inc") (Num 40))))
+  value: 42
+> let x = 1 in y
+  ast: Let "x" (Num 1) (Var "y")
+  error: unbound variable y
+> 10 / (5 - 5)
+  ast: BinOp "/" (Num 10) (BinOp "-" (Num 5) (Num 5))
+  error: division by zero
+> if 1 then 2 else 3
+  ast: If (Num 1) (Num 2) (Num 3)
+  error: if: condition is not a boolean
+> 3 4
+  ast: App (Num 3) (Num 4)
+  error: application of a non-function
+> let x = in 3
+  parse error: unexpected [TIn]
+> 1 + $
+  parse error: unexpected character code 36
+> (1 + 2
+  parse error: expected TRParen but found []
+> let big = 1000000000 in big * big * big * big
+  ast: Let "big" (Num 1000000000) (BinOp "*" (BinOp "*" (BinOp "*" (Var "big") (Var "big")) (Var "big")) (Var "big"))
+  value: 1000000000000000000000000000000000000
+> 1 == 1 == 1
+  ast: BinOp "==" (BinOp "==" (Num 1) (Num 1)) (Num 1)
+  error: operator == applied to mismatched operands

@@ -404,10 +404,23 @@ impl Checker {
             ("fmap", fmap_ty.clone(), Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
             ("<$>", fmap_ty, Some(vec![a.clone(), b.clone(), f.clone()]), vec![]),
         ]);
+        // `<$>` is a method here (dispatch goes through the instance table)
+        // where GHC has `(<$>) = fmap` as a plain function; a user instance
+        // writes only `fmap`, as under GHC, and gets this default. Found by
+        // the program corpus (a State monad's `f <$> m` had no instance).
+        self.register_builtin_default("Functor", "<$>", "f <$> x = fmap f x");
 
-        // Functor instances (fmap and <$> map to same implementations)
+        // Functor instances (fmap and <$> map to same implementations).
+        // Empty context, not None (see the Maybe/Either registrations
+        // below): `ST s` is a partially applied constructor, and the
+        // structural fallback would demand `Functor s` of the state token —
+        // a rank-2 skolem under runST, which can satisfy nothing — so a
+        // Foldable/Monad-generic call inside `runST (do …)` (forM_, when)
+        // failed with "No instance for Monad (ST s)". Found by the program
+        // corpus. IO/LuaIO take no such argument; the empty context is
+        // equivalent for them.
         for tc_name in &["IO", "LuaIO", "ST"] {
-            self.register_builtin_instance("Functor", Ty::Con(tc_name.to_string()),
+            self.register_builtin_instance_empty_ctx("Functor", Ty::Con(tc_name.to_string()),
                 &[("fmap", "fmap_IO"), ("<$>", "fmap_IO")]);
         }
         self.register_builtin_instance("Functor", Ty::Con("[]".to_string()),
@@ -452,10 +465,14 @@ impl Checker {
         // `return`'s env entry is the Applicative `pure` scheme; the Monad
         // method of the same name (below) deliberately adds no second one.
         self.env_scheme("return", vec![a.clone(), f.clone()], pure_ty);
+        // GHC's defaults: a user instance defines `pure` and either `<*>`
+        // or `liftA2` (defining neither loops, as under GHC).
+        self.register_builtin_default("Applicative", "<*>", "f <*> x = liftA2 id f x");
+        self.register_builtin_default("Applicative", "liftA2", "liftA2 f x y = fmap f x <*> y");
 
-        // Applicative instances
+        // Applicative instances (empty context — see the Functor loop).
         for tc_name in &["IO", "LuaIO", "ST"] {
-            self.register_builtin_instance("Applicative", Ty::Con(tc_name.to_string()),
+            self.register_builtin_instance_empty_ctx("Applicative", Ty::Con(tc_name.to_string()),
                 &[("pure", "pure"), ("<*>", "ap_IO"), ("liftA2", "liftA2_IO")]);
         }
         self.register_builtin_instance("Applicative", Ty::Con("[]".to_string()),
@@ -477,10 +494,13 @@ impl Checker {
                 Some(vec![a.clone(), b.clone(), m.clone()]), vec![]),
             ("return", Ty::arrow(ta.clone(), ma.clone()), None, vec![]),
         ]);
+        // GHC's defaults: `>>=` is the one method a user instance must write.
+        self.register_builtin_default("Monad", ">>", "m >> k = m >>= \\_ -> k");
+        self.register_builtin_default("Monad", "return", "return = pure");
 
-        // Monad instances for IO, LuaIO, ST
+        // Monad instances for IO, LuaIO, ST (empty context — see the Functor loop).
         for monad_name in &["IO", "LuaIO", "ST"] {
-            self.register_builtin_instance("Monad", Ty::Con(monad_name.to_string()),
+            self.register_builtin_instance_empty_ctx("Monad", Ty::Con(monad_name.to_string()),
                 &[(">>=", ">>="), (">>", ">>"), ("return", "pure")]);
         }
 

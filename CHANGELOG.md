@@ -31,6 +31,29 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **The differential program corpus** (`mll-tests/tests/programs/`,
+  see its README): twenty-five whole programs in the subset mata-ll
+  and GHC share — a JSON parser, a Sudoku solver, an expression
+  interpreter and a mini Lisp, a hand-rolled State monad, Dijkstra
+  over a leftist heap, Huffman coding, Conway's Life, dynamic
+  programming over lazy tables, IORef/STArray algorithms, a typeclass
+  tower, and more — each run under real GHC, in-process under `cargo
+  test`, and under Lua 5.4/5.5/LuaJIT, with the outputs compared
+  byte for byte. The corpus admits no exclusions (the golden generator
+  and the registry test both refuse one), so it doubles as the 0.2
+  compatibility corpus. Programs may `import LString`; the GHC twin
+  resolves it to `tests/ghc-golden/LString.hs`, a `[Char]` port with
+  Lua's index rules. The first run found the six defects fixed below.
+
+- **GHC's defaults for user Functor/Applicative/Monad instances.** An
+  instance writes `fmap`, `pure` with `<*>` or `liftA2`, and `>>=`, as
+  under GHC: `<$>` defaults to `fmap`, `<*>` and `liftA2` to each other,
+  `>>` to `>>=`, `return` to `pure`. `f <$> m` on a user Functor used to
+  be "No instance for '<$>'", and a Monad instance had to spell out
+  `>>` and `return`.
+
+- **`subtract`** in the Prelude (GHC's section-friendly `(-)`).
+
 - **GHC's Eq and Show class shapes.** `/=` is a method of the builtin
   `Eq` class and `showsPrec` a method of `Show`, each pair defaulting
   through the other exactly as in base, so an instance may define
@@ -109,6 +132,31 @@ API of the `mllc` library crate.)
   a number the old blend hid at 47x.
 
 ### Fixed
+
+- **Layout continuation lines the parser refused.** A data declaration
+  whose `=` and `|` start on the following lines (`data T\n    = A\n
+  | B`), and a case alternative whose guard chain starts on the line
+  after its pattern (`Just a\n    | a < 0 -> …`), were parse errors
+  ("Expected '=' / '->', found start of a new line"). A guard chain now
+  also stops at a `|` that is indented no deeper than the alternatives'
+  column, so the enclosing clause's own `| otherwise = …` after a
+  guarded alternative is parsed as the clause's guard rather than
+  swallowed as one more alternative guard. Found by the program corpus.
+
+- **Foldable/Monad-generic calls inside `runST (do …)`.** `forM_`,
+  `when` and the other `Monad m =>` functions failed with "No instance
+  for 'Monad (ST s)'": the builtin ST instances were registered without
+  a context, so the structural fallback demanded `Monad s` of the
+  rank-2 state token. They now declare the empty context, like
+  `Either e`'s. Found by the program corpus.
+
+- **A curried lambda behind a newtype kept its type's arity.** After
+  newtype erasure and inlining, `\_ -> pure ()` in a `State s` monad is
+  `\_ -> (\s -> ((), s))` at type `a -> State s ()` — one arrow. The
+  emitter flattened it into a two-parameter Lua function, so the bind's
+  `f a` returned a bare pair and the next state step crashed with
+  "attempt to call a table value". Lambda flattening now stops at the
+  type's arrow count. Found by the program corpus (`state_monad.mll`).
 
 - **A polymorphic function used with a dead type variable no longer
   runs a sibling's specialization (miscompile).** With `f :: Show a =>

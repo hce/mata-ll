@@ -505,7 +505,10 @@ impl CodeGen {
                 // eta-pad up to the type's full arrow count, so the emitted
                 // function's arity matches what every call site assumes (see
                 // flatten_lambda for the calling-convention rationale).
-                let (orig, inner_body) = Self::flatten_lambda(params, body);
+                // Never past the type's arrows (see flatten_lambda); the
+                // syntactic parameters always stay.
+                let max_params = count_arrows(&expr.ty).max(params.len());
+                let (orig, inner_body) = Self::flatten_lambda(params, body, max_params);
                 let ps = Self::lambda_param_names(&orig);
                 let eta_count = count_arrows(&expr.ty).saturating_sub(ps.len());
                 let eta_params: Vec<String> =
