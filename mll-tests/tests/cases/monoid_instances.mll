@@ -40,6 +40,11 @@ main = do
     assert (mconcat' rows == [1, 2, 4, 5, 7, 8]) "polymorphic mconcat' at [a]"
     assert (mappend mempty (concatLists rows) == [1, 2, 4, 5, 7, 8]) "mempty is left identity (list)"
 
+    -- <> on constructed lists (GHC parity: for lists, (<>) = (++)).
+    assert ((concatLists rows <> [99]) == [1, 2, 4, 5, 7, 8, 99]) "constructed list <>"
+    assert (([0] <> concatLists rows) == [0, 1, 2, 4, 5, 7, 8]) "list <> left operand"
+    assert ((mempty <> concatLists rows) == [1, 2, 4, 5, 7, 8]) "mempty is left identity via <> (list)"
+
     -- mempty determined by annotation at each element type.
     assert ((mempty :: String) == "") "mempty at String"
     assert ((mempty :: [Int]) == []) "mempty at [Int]"

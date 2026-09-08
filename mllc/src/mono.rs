@@ -22,8 +22,6 @@ const SPEC_LIMIT: usize = 16;
 fn no_instance_parts(method: &str, ty: &Ty) -> (String, Option<&'static str>) {
     let msg = format!("No instance for '{}' on type '{}'", method, ty);
     let hint = match method {
-        "<>" if matches!(ty, Ty::List(_)) =>
-            Some("lists are concatenated with ++ in mata-ll; <> (Semigroup) is only defined for String"),
         ">" | "<" | ">=" | "<=" | "compare" | "max" | "min" if matches!(ty, Ty::Tuple(_)) =>
             Some("tuples have no Ord instance in mata-ll; compare their components individually"),
         _ => None,
@@ -769,16 +767,6 @@ impl Monomorphizer {
                 }
             }
             _ => {}
-        }
-        // mata-ll design divergence, kept from the previous resolver: `<>`
-        // (Semigroup) is deliberately NOT dispatchable at concrete list types
-        // — lists are concatenated with ++ (no_instance_msg carries the note).
-        // The built-in `Semigroup [a]` instance exists only so polymorphic
-        // Semigroup-constrained bodies keep a resolution (`resolve_op_use`'s
-        // head dispatch).
-        if matches!(binding, Ty::List(_))
-            && self.method_to_class.get(method).is_some_and(|c| c == "Semigroup") {
-            return None;
         }
         let head = InstHead::of(binding)?;
         let mangled = self.instance_methods.get(&(method.to_string(), head))?.clone();

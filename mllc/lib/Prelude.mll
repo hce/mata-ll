@@ -303,13 +303,10 @@ class Semigroup a => Monoid a where
 --
 -- String is opaque (Lua's string type), NOT `[Char]`, so it has no `++`:
 -- its append is the runtime string-concatenation primitive `semigroup_String`
--- (Lua `..`), which the compiler exposes for exactly this purpose. Lists use
--- the ordinary `++` operator.
---
--- Note: `<>` on a concrete list is deliberately a compile error in mata-ll
--- (use `++`); the `Semigroup [a]` instance exists so polymorphic
--- Semigroup/Monoid code (e.g. foldMap) still resolves, and `mappend` gives
--- lists a working append.
+-- (Lua `..`), which the compiler exposes for exactly this purpose. Lists have
+-- both `++` and, per GHC, `<>` — the `Semigroup [a]` instance below makes the
+-- two synonyms, and also keeps polymorphic Semigroup/Monoid code (foldMap,
+-- mconcat) resolving at list types.
 instance Semigroup String where
     (<>) x y = semigroup_String x y
 

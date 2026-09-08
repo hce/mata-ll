@@ -3252,25 +3252,20 @@ fn kind_phantom_param_defaults_to_type_and_higher_kinded_use_rejected() {
 }
 
 // --- Semigroup/Monoid instances moved to the Prelude ------------------------
-// The String and [a] Semigroup/Monoid instances are now ordinary source
+// The String and [a] Semigroup/Monoid instances are ordinary source
 // declarations in lib/Prelude.mll (not Rust registrations). These guard the
-// two behaviors that must survive the move: the deliberate `<>`-on-lists
-// rejection, and mempty's ambiguity handling. (Positive runtime behavior over
+// behaviors that must survive the move: `<>` concatenating concrete lists (GHC
+// parity), and mempty's ambiguity handling. (Positive runtime behavior over
 // constructed values is covered by tests/cases/monoid_instances.mll.)
 
 #[test]
-fn list_semigroup_operator_still_rejected_after_move() {
-    // mata-ll deliberately rejects `<>` on a concrete list and directs the
-    // user to `++`, even though a `Semigroup [a]` instance exists (it is there
-    // for polymorphic dispatch and for `mappend`). Moving the instance to the
-    // Prelude must not make `<>` start dispatching on concrete lists — the
-    // rejection lives in the monomorphizer, independent of instance source.
-    let e = expect_compile_error("main :: IO ()\nmain = putStrLn (show ([1, 2] <> [3, 4]))\n", &[], &[]);
-    // Unannotated list literals default to Integer (GHC `default (Integer, …)`).
-    assert!(e.contains("No instance for '<>' on type '[Integer]'"), "got: {e}");
+fn list_semigroup_operator_concatenates() {
+    // GHC parity: `[a]` is a Semigroup with `(<>) = (++)`, so `<>` on a
+    // concrete list must compile and dispatch to the `Semigroup [a]` instance
+    // (mata-ll previously rejected this and directed the user to `++`).
     assert!(
-        e.contains("lists are concatenated with ++"),
-        "the ++ guidance note must still fire, got: {e}"
+        compile("main :: IO ()\nmain = putStrLn (show ([1, 2] <> [3, 4]))\n", Path::new("."), &[]).is_ok(),
+        "`<>` on a concrete list must compile after the GHC-parity change"
     );
 }
 
@@ -4276,17 +4271,15 @@ main = print (length "hello")
     assert!(e.contains("<>") && e.contains("HASKDIFF.md"),
         "note must point at <> and HASKDIFF.md, got: {e}");
 
-    // `<>` on a list should point the user at `++`.
-    expect_compile_error(
-        r#"
-main :: IO ()
-main = print ([1, 2] <> [3, 4] :: [Int])
-"#,
-        &[],
-        &[
-            "No instance for '<>'",
-            "concatenated with ++",
-        ],
+    // `<>` on a list concatenates (GHC parity: `(<>) = (++)` for `[a]`).
+    assert!(
+        compile(
+            "main :: IO ()\nmain = print ([1, 2] <> [3, 4] :: [Int])\n",
+            Path::new("."),
+            &[],
+        )
+        .is_ok(),
+        "`<>` on a list must compile"
     );
 
     // Ordering whole tuples COMPILES since A16 (structural Ord for lists,
@@ -4739,27 +4732,12 @@ main = putStrLn "no"
     );
 }
 
-/// Monomorphization-time errors must carry a source location, like
-/// typechecker errors do. `<>` on lists is rejected during method resolution
-/// in mono (the checker keeps a builtin Semigroup [a] instance for
-/// polymorphic bodies), so its diagnostic is the canonical mono error: it
-/// must name the line/column of the offending clause and its definition,
-/// while keeping the message and the `note:` line verbatim.
-#[test]
-fn mono_error_reports_source_location() {
-    expect_compile_error(
-        r#"
-main :: IO ()
-main = print ([1, 2] <> [3, 4] :: [Int])
-"#,
-        &[],
-        &[
-            "No instance for '<>' on type '[Int]'",
-            "at 3:6, in definition of 'main'",
-            "note: lists are concatenated with ++",
-        ],
-    );
-}
+// (Removed: `mono_error_reports_source_location` used `<>` on a concrete list
+// as its vehicle for checking that mono-time diagnostics carry a use-site
+// location. That rejection was intentionally removed — `[a]` is now a Semigroup
+// with `(<>) = (++)` per GHC (see list_semigroup_operator_concatenates) — and
+// no other value-level construct reaches the mono no-instance path with a
+// use-site location, so the test no longer has a valid trigger.)
 
 /// The parser recovers at declaration boundaries: one run reports every
 /// independent syntax error, not just the first. The first error's message

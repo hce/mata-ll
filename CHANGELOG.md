@@ -31,6 +31,12 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **`<>` concatenates lists** (GHC parity). `[a]` is a `Semigroup` with
+  `(<>) = (++)`, so `xs <> ys` now compiles and concatenates at concrete
+  list types, matching GHC. It previously errored with a note directing
+  the user to `++`; `++` still works and is unchanged, and `<>` on
+  `String` is likewise unchanged.
+
 - **The differential program corpus** (`mll-tests/tests/programs/`,
   see its README): twenty-five whole programs in the subset mata-ll
   and GHC share — a JSON parser, a Sudoku solver, an expression
