@@ -54,8 +54,9 @@ pub struct DemandInfo {
 ///   * ByteString primitives — first-order, strict in every argument (they
 ///     read a ByteString/Int/String immediately; you cannot index/measure/
 ///     slice through a thunk).
-///   * ST array primitives — strict in the array and index (always forced),
-///     lazy in the stored value (matching Haskell's `newArray`/`writeArray`).
+///   * (the ST array and IORef intrinsics live in `crate::intrinsics` —
+///     strict in the array/ref and index, lazy in the stored value — and
+///     are seeded from that table alongside these rows).
 /// Public for the strictness-contract check in mll-tests (G5), which calls
 /// each runtime body with a bomb thunk per position and asserts the mask —
 /// strict positions must force, lazy positions must not. Not API.
@@ -83,35 +84,9 @@ pub const STRICT_BUILTINS: &[(&str, &[bool])] = &[
     ("bsPutI16LE", &[true]),
     ("bsToString", &[true]),
     ("bsFromString", &[true]),
-    // ST array primitives. An array and an index are always forced (you cannot
-    // allocate/read/write/measure through a thunk). The *stored value* /
-    // *initializer* positions are `false` on every path: a slot holds the
-    // value AS STORED, like GHC's boxed STArray (`writeSTArray a i undefined`
-    // never read is silent), and `newSTArrayFromList` is lazy in the
-    // elements; `readSTArray` forces the slot it returns. The strictness-
-    // contract harness in mll-tests asserts the lazy value positions.
-    // `modifySTArray`'s function argument is forced (it is called).
-    ("newSTArray", &[true, false]),
-    ("readSTArray", &[true, true]),
-    ("writeSTArray", &[true, true, false]),
-    ("modifySTArray", &[true, true, true]),
-    ("stArrayLength", &[true]),
-    ("newSTArrayFromList", &[true]),
-    ("stArrayToList", &[true]),
-    // IORef primitives. The ref cell is forced (you cannot read or store
-    // through a thunk), the VALUE positions are lazy on every path — GHC
-    // parity: newIORef/writeIORef don't force the value, and modifyIORef
-    // doesn't call f (it stores the suspension `f old`). Unlike the ST
-    // array ops there is NO ForcedOnRun divergence — running the action
-    // forces exactly what the mask claims — so the fused run row equals
-    // this mask and st_intrinsic_run_row needs no IORef arm.
-    // `modifyIORef'` calls f and forces its result on the run, hence
-    // strict in f.
-    ("newIORef", &[false]),
-    ("readIORef", &[true]),
-    ("writeIORef", &[true, false]),
-    ("modifyIORef", &[true, false]),
-    ("modifyIORef'", &[true, true]),
+    // (The ST array and IORef intrinsics carry their rows in
+    // `crate::intrinsics::ST_INTRINSICS`, the one table every consumer of
+    // the family reads; the seeding below chains them in.)
     // List-consuming ByteString intrinsics: the runtime walks the whole
     // spine and forces every element (see the `__mll_bs` concatList/pack
     // implementations), so the list argument is forced at least to WHNF.
@@ -454,8 +429,8 @@ pub fn analyze(module: &TModule) -> DemandInfo {
     // decoders such as the tracker). Higher-order primitives (bsMap, bsFoldl,
     // bsZipWith) are omitted: their accumulator/element positions may legitimately
     // stay lazy, so leaving them unseeded keeps the safe default.
-    for (name, mask) in STRICT_BUILTINS {
-        strict_params.entry((*name).to_string()).or_insert_with(|| mask.to_vec());
+    for (name, mask) in STRICT_BUILTINS.iter().copied().chain(crate::intrinsics::strictness_rows()) {
+        strict_params.entry(name.to_string()).or_insert_with(|| mask.to_vec());
     }
     for name in PRIMITIVE_BINOP_METHODS {
         strict_params.entry((*name).to_string()).or_insert_with(|| vec![true, true]);
@@ -1969,26 +1944,19 @@ fn is_action_value_ty(ty: &Ty) -> bool {
     }
 }
 
-/// Argument demands of a fully-applied ST array intrinsic in RUN position
-/// (the fused `__mll_st_*` form). The fused runtime forces the array and
-/// the index on execution, and `newSTArrayFromList` the list SPINE; the
-/// stored value, the initializer and the list's elements are stored as
-/// they are (GHC's boxed-array laziness — `readSTArray` forces the slot it
-/// returns), so those positions carry no demand even where the intrinsic
-/// provably runs. First-class (suspended) intrinsic references keep the
-/// masks of `STRICT_BUILTINS`, which agree.
+/// Argument demands of a fully-applied ST array / IORef intrinsic in RUN
+/// position (the fused `__mll_st_*`/`__mll_ioref_*` form): the intrinsic's
+/// strictness mask read as a demand row — head demand where the runtime
+/// forces the position on the run, none where the value is stored as
+/// given (GHC's boxed-array and lazy-IORef laziness; `readSTArray` forces
+/// the slot it returns). The same mask seeds the first-class (suspended)
+/// intrinsic references, so the two positions cannot disagree.
 fn st_intrinsic_run_row(name: &str, argc: usize) -> Option<Vec<Option<Demand>>> {
-    let row: Vec<Option<Demand>> = match name {
-        "newSTArray" => vec![Some(Demand::Head), None],
-        "readSTArray" => vec![Some(Demand::Head), Some(Demand::Head)],
-        "writeSTArray" => vec![Some(Demand::Head), Some(Demand::Head), None],
-        "modifySTArray" => vec![Some(Demand::Head), Some(Demand::Head), Some(Demand::Head)],
-        "stArrayLength" => vec![Some(Demand::Head)],
-        "newSTArrayFromList" => vec![Some(Demand::Head)],
-        "stArrayToList" => vec![Some(Demand::Head)],
-        _ => return None,
-    };
-    if argc == row.len() { Some(row) } else { None }
+    let i = crate::intrinsics::st_intrinsic(name)?;
+    if argc != i.mask.len() {
+        return None;
+    }
+    Some(i.mask.iter().map(|&strict| strict.then_some(Demand::Head)).collect())
 }
 
 /// Signatures of a clause's where-bound local functions (grouped defs).

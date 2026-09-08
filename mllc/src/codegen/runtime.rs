@@ -368,6 +368,63 @@ pub(super) fn runtime_fn_name(lua_name: &str) -> bool {
     RUNTIME_FN_NAMES.contains(lua_name)
 }
 
+/// Every name the prelude chunk binds at its top level, READ OFF the
+/// runtime text: `local function NAME`, every name of a column-0 `local
+/// a, b, c` (with or without an initializer), and the column-0 `NAME =
+/// function` assignments. Broader than [`RUNTIME_FN_NAMES`] (tables,
+/// metatables, thunks and scalars count too); it answers only "is there a
+/// binding of this name", which is what the mirror-table check needs —
+/// every compiler table that names a runtime helper (the strictness rows,
+/// the renames, the known-name seeds) must name one that exists.
+#[cfg(test)]
+static RUNTIME_TOP_NAMES: std::sync::LazyLock<std::collections::HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        let mut s: std::collections::HashSet<&'static str> = RUNTIME_FN_NAMES.iter().copied().collect();
+        for line in PRELUDE.lines() {
+            let Some(rest) = line.strip_prefix("local ") else { continue };
+            if rest.starts_with("function ") {
+                continue;
+            }
+            // `local a, b = …`, `local a`, `local a; do … end`.
+            let names = rest.split_once('=').map_or(rest, |(n, _)| n);
+            let names = names.split_once(';').map_or(names, |(n, _)| n);
+            for name in names.split(',') {
+                let name = name.trim();
+                if is_ident(name) {
+                    s.insert(name);
+                }
+            }
+        }
+        s
+    });
+
+/// The number of entries of the prelude's `__mll_bs` table (the ByteString
+/// primitives, reached as `__mll_bs[k]`), read off the `-- [k]` entry
+/// markers the table carries.
+#[cfg(test)]
+static BS_ENTRY_COUNT: std::sync::LazyLock<usize> = std::sync::LazyLock::new(|| {
+    PRELUDE
+        .lines()
+        .filter_map(|line| {
+            let (_, tag) = line.split_once("-- [")?;
+            let (k, _) = tag.split_once(']')?;
+            k.parse::<usize>().ok()
+        })
+        .max()
+        .unwrap_or(0)
+});
+
+/// Does the prelude bind `lua_name` — a plain name (see
+/// [`RUNTIME_TOP_NAMES`]) or a `__mll_bs[k]` entry within the table?
+#[cfg(test)]
+pub(super) fn prelude_binds(lua_name: &str) -> bool {
+    if let Some(k) = lua_name.strip_prefix("__mll_bs[").and_then(|r| r.strip_suffix(']')) {
+        return RUNTIME_TOP_NAMES.contains("__mll_bs")
+            && k.parse::<usize>().is_ok_and(|k| k >= 1 && k <= *BS_ENTRY_COUNT);
+    }
+    RUNTIME_TOP_NAMES.contains(lua_name)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

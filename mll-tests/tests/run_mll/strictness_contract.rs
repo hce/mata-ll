@@ -1,5 +1,6 @@
 //! G5: the strictness masks in demand.rs (`STRICT_BUILTINS`,
-//! `RUNTIME_PRELUDE_STRICTNESS`, `PRIMITIVE_BINOP_METHODS`) are prose
+//! `RUNTIME_PRELUDE_STRICTNESS`, `PRIMITIVE_BINOP_METHODS`) and the
+//! intrinsics table (`intrinsics::ST_INTRINSICS`) are prose
 //! mirrors of the emitted Lua runtime — each `true` claims the runtime body
 //! forces that position on every path, which is what licenses eager
 //! evaluation at call sites. Nothing machine-checked that claim until now:
@@ -420,6 +421,7 @@ fn strictness_masks_match_the_emitted_runtime() {
         .iter()
         .chain(mllc::demand::RUNTIME_PRELUDE_STRICTNESS)
         .map(|(n, m)| (*n, *m))
+        .chain(mllc::intrinsics::strictness_rows())
         .collect();
     let mut probes: Vec<Probe> = Vec::new();
     for p in PROBES {
@@ -496,6 +498,7 @@ fn entry_forced_masks_are_within_the_strictness_rows() {
         .iter()
         .chain(mllc::demand::RUNTIME_PRELUDE_STRICTNESS)
         .map(|(n, m)| (*n, *m))
+        .chain(mllc::intrinsics::strictness_rows())
         .collect();
     for (name, mask) in mllc::demand::ENTRY_FORCED {
         let row = rows.get(name).unwrap_or_else(|| {

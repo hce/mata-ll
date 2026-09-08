@@ -85,6 +85,7 @@ mod thunks;
 mod util;
 
 pub(crate) use names::is_lua_keyword;
+pub(crate) use names::infix_operand_strictness;
 
 /// Public for the strictness-contract check in mll-tests (G5): the harness
 /// probes runtime functions in emitted Lua by the names codegen actually
@@ -825,6 +826,67 @@ mod contract_tests {
                  primitive method name"
             );
         }
+    }
+
+    /// Every compiler table that names a runtime helper names one the
+    /// prelude text binds. The strictness rows, the entry-forced table and
+    /// the primitive methods (demand.rs), the intrinsics family
+    /// (intrinsics.rs), the renames (names.rs) and the known-name seeds
+    /// (module.rs) are all prose mirrors of runtime.lua; a helper renamed
+    /// or removed in the runtime used to leave a stale row that claimed
+    /// strictness for nothing, or a seed that marked a nil global
+    /// concrete. `prelude_binds` reads the bindings off the runtime text.
+    #[test]
+    fn mirrored_runtime_names_are_bound_by_the_prelude() {
+        let mut missing: Vec<String> = Vec::new();
+        let mut check = |table: &str, source: &str, lua_name: &str| {
+            if !runtime::prelude_binds(lua_name) {
+                missing.push(format!("{table}: '{source}' -> '{lua_name}'"));
+            }
+        };
+        for (name, _) in crate::demand::RUNTIME_PRELUDE_STRICTNESS {
+            check("RUNTIME_PRELUDE_STRICTNESS", name, &sanitize_name(name));
+        }
+        for (name, _) in crate::demand::ENTRY_FORCED {
+            check("ENTRY_FORCED", name, &sanitize_name(name));
+        }
+        for (name, _) in crate::demand::STRICT_BUILTINS {
+            check("STRICT_BUILTINS", name, &sanitize_name(name));
+        }
+        for name in crate::demand::PRIMITIVE_BINOP_METHODS {
+            check("PRIMITIVE_BINOP_METHODS", name, name);
+        }
+        for i in crate::intrinsics::ST_INTRINSICS {
+            check("ST_INTRINSICS (closure)", i.source, i.closure);
+            check("ST_INTRINSICS (fused)", i.source, i.fused);
+        }
+        // A rename whose source is a Prelude.mll definition (`print`, kept
+        // off Lua's global of that name) is bound by the compiled Prelude,
+        // not the runtime text; `main` renames to the entry point the
+        // module emits.
+        let prelude_mll_defines = |name: &str| {
+            crate::stdlib::PRELUDE
+                .lines()
+                .any(|l| l.strip_prefix(name).is_some_and(|r| r.starts_with(" ::")))
+        };
+        for (source, target) in names::RUNTIME_RENAMES {
+            if *source != "main" && !prelude_mll_defines(source) {
+                check("RUNTIME_RENAMES", source, target);
+            }
+        }
+        for name in module::RUNTIME_VALUE_SEEDS {
+            check("RUNTIME_VALUE_SEEDS", name, name);
+        }
+        for name in module::builtin_source_seeds() {
+            if !prelude_mll_defines(name) {
+                check("builtin_source_seeds", name, &sanitize_name(name));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "runtime names mirrored by a compiler table but bound nowhere in the prelude:\n  {}",
+            missing.join("\n  ")
+        );
     }
 
     /// The context-free eager floor (what demand analysis'

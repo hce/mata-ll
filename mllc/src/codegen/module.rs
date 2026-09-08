@@ -27,6 +27,85 @@ use super::names::{lua_field_assign, lua_field_index, lua_quoted_string, sanitiz
 pub(super) const ENTRY_POINT_COMMENT: &str =
     "-- Entry point (run main unless this file was loaded via require)";
 
+/// Runtime prelude names seeded as KNOWN and CONCRETE (never thunks —
+/// plain locals of the runtime chunk), so references skip `__force`
+/// throughout user code. `undefined` must NOT be here: the runtime binds
+/// it to a THUNK (`local undefined = __thunk(...)`), and concreteness
+/// feeds is_cheap_to_force / pure_value_bare_is_safe — seeding it claimed
+/// forcing `undefined` is a harmless no-op, so `pure undefined` escaped
+/// BARE and the consumer's `__mll_run` forced it, raising where GHC binds
+/// the bottom unforced (case_pure_bottom / if_pure_bottom). Every name
+/// here is pinned to a binding in the runtime text by the prelude-name
+/// check (codegen::contract_tests).
+pub(super) const RUNTIME_VALUE_SEEDS: &[&str] = &[
+            "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
+            "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_tail", "__mll_run_st",
+            "__mll_ffi_decode",
+            "not_", "engage", "liftIO", "show", "error_",
+            "pure", "return_", "Just",
+            "minBound_Int", "maxBound_Int", "minBound_Bool", "maxBound_Bool",
+            "show_Int", "show_Number", "show_String", "show_Bool",
+            "show_List_", "show_Maybe", "show_ByteString", "show_HashMap",
+            "show_Unit",
+            "showsPrec", "showsPrec_Int", "showsPrec_Number", "showsPrec_String",
+            "showsPrec_Bool", "showsPrec_List_", "showsPrec_Maybe",
+            "showsPrec_ByteString", "showsPrec_HashMap", "showsPrec_Unit",
+            "__mll_shows_prec",
+            "eq_Int", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
+            "eq_Unit",
+            "ne_Int", "ne_Number", "ne_String", "ne_Bool", "ne_ByteString",
+            "ne_Unit",
+            "ord_lt__Unit", "ord_gt__Unit", "ord_le__Unit", "ord_ge__Unit",
+            "ord_compare__Unit",
+            "ord_lt__Int", "ord_lt__Number", "ord_lt__String",
+            "ord_gt__Int", "ord_gt__Number", "ord_gt__String",
+            "ord_le__Int", "ord_le__Number", "ord_le__String",
+            "ord_ge__Int", "ord_ge__Number", "ord_ge__String",
+            "ord_compare__Int", "ord_compare__Number", "ord_compare__String",
+            "ord_lt__ByteString", "ord_gt__ByteString", "ord_le__ByteString",
+            "ord_ge__ByteString", "ord_compare__ByteString",
+            "ord_max__Int", "ord_max__Number", "ord_max__String",
+            "ord_max__ByteString", "ord_max__Unit",
+            "ord_min__Int", "ord_min__Number", "ord_min__String",
+            "ord_min__ByteString", "ord_min__Unit",
+            "__mll_bool_n", "ord_lt__Bool", "ord_gt__Bool", "ord_le__Bool",
+            "ord_ge__Bool", "ord_compare__Bool", "ord_max__Bool", "ord_min__Bool",
+            "head", "tail", "map", "filter", "take", "drop", "zipWith",
+            "foldr", "foldl", "foldl_prime",
+            "__mll_hashstr", "__mll_hm_lt", "hashmap_empty", "hashmap_insert", "hashmap_lookup", "__mll_hm_slot",
+            "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
+            "hashmap_member", "hashmap_fromList", "hashmap_toList",
+            "__mll_list_append", "__mll_list_index", "semigroup_String",
+            "string_mconcat_prim",
+            "__mll_show_list", "__mll_show_arg", "__mll_show_maybe", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
+            "__mll_try", "__mll_pcall", "__mll_iter", "getArgs", "exit_",
+            "try_", "catch_",
+            "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
+            "__mll_shl", "__mll_shr", "__mll_math_type",
+            "__mll_div", "__mll_mod", "__mll_div_fn", "__mll_mod_fn",
+            "__mll_quot", "__mll_rem", "__mll_quot_fn", "__mll_rem_fn",
+            "negate_Int", "negate_Number", "abs_Int", "abs_Number",
+            "signum_Int", "signum_Number", "fromInteger_Int", "fromInteger_Number",
+            "recip_Number", "fromRational_Number",
+            "quotRem_Int", "divMod_Int",
+            "__mll_array_from_list", "__mll_array_index", "__mll_array_length",
+            "__mll_bs_empty", "__mll_bs",
+];
+
+/// Source names seeded as known top-level functions THROUGH
+/// `sanitize_name` (so has_unknown_call recognizes them): every runtime
+/// rename's source but `main` (names.rs RUNTIME_RENAMES), every ST array /
+/// IORef intrinsic (crate::intrinsics), and the Prelude names that
+/// sanitize to themselves.
+pub(super) fn builtin_source_seeds() -> impl Iterator<Item = &'static str> {
+    super::names::RUNTIME_RENAMES
+        .iter()
+        .map(|(source, _)| *source)
+        .filter(|s| *s != "main")
+        .chain(crate::intrinsics::ST_INTRINSICS.iter().map(|i| i.source))
+        .chain(["pure", "show", "undefined"].iter().copied())
+}
+
 impl CodeGen {
     pub(super) fn register_data_type(&mut self, def: &TDataDef) {
         let is_enum = def.constructors.iter().all(|c| matches!(&c.fields, TConFields::Positional(f) if f.is_empty()));
@@ -124,87 +203,20 @@ impl CodeGen {
         // `g n = ... pure undefined ...` must not raise until r is
         // demanded; runghc-confirmed, pinned as case_pure_bottom /
         // if_pure_bottom).
-        for name in &[
-            "__force", "__thunk", "__mll_seq", "__mll_cons", "__mll_lazy_cons", "__mll_head",
-            "__mll_tail", "__mll_tail_lazy", "__mll_to_lua", "__lua_to_mll", "__mll_wrap_callback", "__mll_run", "__mll_run_tail", "__mll_run_st",
-            "__mll_ffi_decode",
-            "not_", "engage", "liftIO", "show", "error_",
-            "pure", "return_", "Just",
-            "minBound_Int", "maxBound_Int", "minBound_Bool", "maxBound_Bool",
-            "show_Int", "show_Number", "show_String", "show_Bool",
-            "show_List_", "show_Maybe", "show_ByteString", "show_HashMap",
-            "show_Unit",
-            "showsPrec", "showsPrec_Int", "showsPrec_Number", "showsPrec_String",
-            "showsPrec_Bool", "showsPrec_List_", "showsPrec_Maybe",
-            "showsPrec_ByteString", "showsPrec_HashMap", "showsPrec_Unit",
-            "__mll_shows_prec",
-            "eq_Int", "eq_Number", "eq_String", "eq_Bool", "eq_ByteString",
-            "eq_Ordering", "eq_Unit",
-            "ne_Int", "ne_Number", "ne_String", "ne_Bool", "ne_ByteString",
-            "ne_Unit",
-            "ord_lt__Unit", "ord_gt__Unit", "ord_le__Unit", "ord_ge__Unit",
-            "ord_compare__Unit",
-            "ord_lt__Int", "ord_lt__Number", "ord_lt__String",
-            "ord_gt__Int", "ord_gt__Number", "ord_gt__String",
-            "ord_le__Int", "ord_le__Number", "ord_le__String",
-            "ord_ge__Int", "ord_ge__Number", "ord_ge__String",
-            "ord_compare__Int", "ord_compare__Number", "ord_compare__String",
-            "ord_lt__ByteString", "ord_gt__ByteString", "ord_le__ByteString",
-            "ord_ge__ByteString", "ord_compare__ByteString",
-            "ord_max__Int", "ord_max__Number", "ord_max__String",
-            "ord_max__ByteString", "ord_max__Unit",
-            "ord_min__Int", "ord_min__Number", "ord_min__String",
-            "ord_min__ByteString", "ord_min__Unit",
-            "__mll_bool_n", "ord_lt__Bool", "ord_gt__Bool", "ord_le__Bool",
-            "ord_ge__Bool", "ord_compare__Bool", "ord_max__Bool", "ord_min__Bool",
-            "head", "tail", "map", "filter", "take", "drop", "zipWith",
-            "foldr", "foldl", "foldl_prime",
-            "__mll_hashstr", "__mll_hm_lt", "hashmap_empty", "hashmap_insert", "hashmap_lookup", "__mll_hm_slot",
-            "hashmap_delete", "hashmap_size", "hashmap_keys", "hashmap_values",
-            "hashmap_member", "hashmap_fromList", "hashmap_toList",
-            "__mll_list_append", "__mll_list_index", "semigroup_String",
-            "string_mconcat_prim",
-            "__mll_show_list", "__mll_show_arg", "__mll_show_maybe", "__mll_list_eq", "__mll_maybe_eq", "__mll_eq",
-            "__mll_try", "__mll_pcall", "__mll_iter", "getArgs", "exit_",
-            "try_", "catch_",
-            "__mll_bxor", "__mll_band", "__mll_bor", "__mll_bnot",
-            "__mll_shl", "__mll_shr", "__mll_math_type",
-            "__mll_div", "__mll_mod", "__mll_div_fn", "__mll_mod_fn",
-            "__mll_quot", "__mll_rem", "__mll_quot_fn", "__mll_rem_fn",
-            "negate_Int", "negate_Number", "abs_Int", "abs_Number",
-            "signum_Int", "signum_Number", "fromInteger_Int", "fromInteger_Number",
-            "recip_Number", "fromRational_Number",
-            "quotRem_Int", "divMod_Int",
-            "__mll_array_from_list", "__mll_array_index", "__mll_array_length",
-            "__mll_bs_empty", "__mll_bs",
-            "__mll_ma_new", "__mll_ma_read", "__mll_ma_write",
-            "__mll_ma_modify", "__mll_ma_length", "__mll_ma_from_list",
-            "__mll_ma_to_list",
-        ] {
+        for name in RUNTIME_VALUE_SEEDS {
             self.concrete_vars.insert(name.to_string());
             self.top_level_names.insert(name.to_string());
+        }
+        // The ST array / IORef action closures (crate::intrinsics).
+        for i in crate::intrinsics::ST_INTRINSICS {
+            self.concrete_vars.insert(i.closure.to_string());
+            self.top_level_names.insert(i.closure.to_string());
         }
 
         // Also register builtin names that go through sanitize_name mapping
         // (ByteString, MutArray, HashMap ops, etc.) so has_unknown_call
         // recognizes them as known top-level functions.
-        for name in &[
-            "bsEmpty", "bsLength", "bsIndex", "bsSub", "bsSingleton",
-            "bsConcat", "bsNull", "bsHead", "bsTail", "bsCons", "bsSnoc",
-            "bsReplicate", "bsPack", "bsUnpack", "bsMap", "bsFoldl",
-            "bsXor", "bsZipWith", "bsToString", "bsFromString",
-            "bsGetU16LE", "bsGetU32LE", "bsGetI8", "bsGetI16LE",
-            "bsPutI16LE", "bsConcatList",
-            "runST", "newSTArray", "readSTArray", "writeSTArray",
-            "modifySTArray", "stArrayLength", "newSTArrayFromList",
-            "stArrayToList",
-            "newIORef", "readIORef", "writeIORef", "modifyIORef",
-            "modifyIORef'",
-            "hmEmpty", "hmInsert", "hmLookup", "hmDelete", "hmSize",
-            "hmKeys", "hmValues", "hmMember", "hmFromList", "hmToList",
-            "return", "pure", "not", "print", "error", "show", "undefined",
-            "try", "catch",
-        ] {
+        for name in builtin_source_seeds() {
             self.top_level_names.insert(sanitize_name(name));
         }
 

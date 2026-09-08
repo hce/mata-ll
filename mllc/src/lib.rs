@@ -37,6 +37,7 @@ pub mod demand;
 pub mod desugar;
 pub mod embed;
 pub mod fold;
+pub mod intrinsics;
 pub mod lexer;
 pub mod modules;
 pub mod mono;

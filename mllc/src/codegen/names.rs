@@ -103,78 +103,89 @@ pub(super) fn lua_field_assign(name: &str) -> String {
     if lua_bare_key_ok(name) { format!("{} = ", name) } else { format!("{} = ", lua_key_string(name)) }
 }
 
+/// Source names that compile to a DIFFERENTLY-NAMED runtime helper: the
+/// ByteString primitives (entries of the `__mll_bs` table), `runST`, the
+/// HashMap family, `main`, and the Prelude names whose bare spelling is a
+/// Lua keyword or a Lua global the runtime must not shadow (`return`,
+/// `not`, `print`, `error`, `exit`, `try`, `catch`). One table:
+/// `sanitize_name` reads it, module.rs seeds the known top-level names
+/// from its keys, and the prelude-name check pins every target but
+/// `main`'s (the entry point, emitted by the module) to a binding in the
+/// runtime text. (The ST array / IORef intrinsics rename through their
+/// own family table, crate::intrinsics; Lua keywords that are plain user
+/// identifiers — `end`, `then`, `do`, … — are escaped in `sanitize_name`'s
+/// match.)
+pub(super) const RUNTIME_RENAMES: &[(&str, &str)] = &[
+    ("main", "__run"),
+    ("return", "return_"),
+    ("not", "not_"),
+    ("print", "print_"),
+    // error_ forces its message before raising; Lua's bare `error` would
+    // hand a thunk to error() and print "table: 0x...".
+    ("error", "error_"),
+    // exit_ unwraps the ExitValue ADT (Normal / Err code) and calls
+    // os.exit; a bare `exit` would reference an undefined Lua global.
+    ("exit", "exit_"),
+    ("try", "try_"),
+    ("catch", "catch_"),
+    ("bsEmpty", "__mll_bs_empty"),
+    ("bsLength", "__mll_bs[1]"),
+    ("bsIndex", "__mll_bs[2]"),
+    ("bsSub", "__mll_bs[3]"),
+    ("bsSingleton", "__mll_bs[4]"),
+    ("bsConcat", "__mll_bs[5]"),
+    ("bsNull", "__mll_bs[6]"),
+    ("bsHead", "__mll_bs[7]"),
+    ("bsTail", "__mll_bs[8]"),
+    ("bsCons", "__mll_bs[9]"),
+    ("bsSnoc", "__mll_bs[10]"),
+    ("bsReplicate", "__mll_bs[11]"),
+    ("bsPack", "__mll_bs[12]"),
+    ("bsUnpack", "__mll_bs[13]"),
+    ("bsMap", "__mll_bs[14]"),
+    ("bsFoldl", "__mll_bs[15]"),
+    ("bsXor", "__mll_bs[16]"),
+    ("bsZipWith", "__mll_bs[17]"),
+    ("bsToString", "__mll_bs[18]"),
+    ("bsFromString", "__mll_bs[19]"),
+    ("bsGetU16LE", "__mll_bs[20]"),
+    ("bsGetU32LE", "__mll_bs[21]"),
+    ("bsGetI8", "__mll_bs[22]"),
+    ("bsGetI16LE", "__mll_bs[23]"),
+    ("bsPutI16LE", "__mll_bs[24]"),
+    ("bsConcatList", "__mll_bs[25]"),
+    // runST forces the state thread's result to WHNF (GHC: demanding
+    // `runST m` demands the returned value), collapsing a suspended
+    // terminal `pure e` so no raw thunk escapes the ST boundary.
+    ("runST", "__mll_run_st"),
+    ("hmEmpty", "hashmap_empty"),
+    ("hmInsert", "hashmap_insert"),
+    ("hmLookup", "hashmap_lookup"),
+    ("hmDelete", "hashmap_delete"),
+    ("hmSize", "hashmap_size"),
+    ("hmKeys", "hashmap_keys"),
+    ("hmValues", "hashmap_values"),
+    ("hmMember", "hashmap_member"),
+    ("hmFromList", "hashmap_fromList"),
+    ("hmToList", "hashmap_toList"),
+];
+
 pub fn sanitize_name(name: &str) -> String {
+    // The ST array / IORef intrinsics compile to their first-class action
+    // closures (one table for the family: crate::intrinsics).
+    if let Some(i) = crate::intrinsics::st_intrinsic(name) {
+        return i.closure.to_string();
+    }
+    if let Some((_, target)) = RUNTIME_RENAMES.iter().find(|(source, _)| *source == name) {
+        return target.to_string();
+    }
     match name {
-        "main" => "__run".to_string(),
-        "return" => "return_".to_string(),
-        "not" => "not_".to_string(),
-        "print" => "print_".to_string(),
-        // error_ forces its message before raising; Lua's bare `error` would
-        // hand a thunk to error() and print "table: 0x...".
-        "error" => "error_".to_string(),
-        // exit_ unwraps the ExitValue ADT (Normal / Err code) and calls
-        // os.exit; a bare `exit` would reference an undefined Lua global.
-        "exit" => "exit_".to_string(),
         "end" => "end_".to_string(),
         "then" => "then_".to_string(),
         "do" => "do_".to_string(),
         "in" => "in_".to_string(),
         "or" => "or_".to_string(),
         "and" => "and_".to_string(),
-        "try" => "try_".to_string(),
-        "catch" => "catch_".to_string(),
-        "bsEmpty" => "__mll_bs_empty".to_string(),
-        "bsLength" => "__mll_bs[1]".to_string(),
-        "bsIndex" => "__mll_bs[2]".to_string(),
-        "bsSub" => "__mll_bs[3]".to_string(),
-        "bsSingleton" => "__mll_bs[4]".to_string(),
-        "bsConcat" => "__mll_bs[5]".to_string(),
-        "bsNull" => "__mll_bs[6]".to_string(),
-        "bsHead" => "__mll_bs[7]".to_string(),
-        "bsTail" => "__mll_bs[8]".to_string(),
-        "bsCons" => "__mll_bs[9]".to_string(),
-        "bsSnoc" => "__mll_bs[10]".to_string(),
-        "bsReplicate" => "__mll_bs[11]".to_string(),
-        "bsPack" => "__mll_bs[12]".to_string(),
-        "bsUnpack" => "__mll_bs[13]".to_string(),
-        "bsMap" => "__mll_bs[14]".to_string(),
-        "bsFoldl" => "__mll_bs[15]".to_string(),
-        "bsXor" => "__mll_bs[16]".to_string(),
-        "bsZipWith" => "__mll_bs[17]".to_string(),
-        "bsToString" => "__mll_bs[18]".to_string(),
-        "bsFromString" => "__mll_bs[19]".to_string(),
-        "bsGetU16LE" => "__mll_bs[20]".to_string(),
-        "bsGetU32LE" => "__mll_bs[21]".to_string(),
-        "bsGetI8" => "__mll_bs[22]".to_string(),
-        "bsGetI16LE" => "__mll_bs[23]".to_string(),
-        "bsPutI16LE" => "__mll_bs[24]".to_string(),
-        "bsConcatList" => "__mll_bs[25]".to_string(),
-        // runST forces the state thread's result to WHNF (GHC: demanding
-        // `runST m` demands the returned value), collapsing a suspended
-        // terminal `pure e` so no raw thunk escapes the ST boundary.
-        "runST" => "__mll_run_st".to_string(),
-        "newSTArray" => "__mll_ma_new".to_string(),
-        "readSTArray" => "__mll_ma_read".to_string(),
-        "writeSTArray" => "__mll_ma_write".to_string(),
-        "modifySTArray" => "__mll_ma_modify".to_string(),
-        "stArrayLength" => "__mll_ma_length".to_string(),
-        "newSTArrayFromList" => "__mll_ma_from_list".to_string(),
-        "stArrayToList" => "__mll_ma_to_list".to_string(),
-        "newIORef" => "__mll_ref_new".to_string(),
-        "readIORef" => "__mll_ref_read".to_string(),
-        "writeIORef" => "__mll_ref_write".to_string(),
-        "modifyIORef" => "__mll_ref_modify".to_string(),
-        "modifyIORef'" => "__mll_ref_modify_strict".to_string(),
-        "hmEmpty" => "hashmap_empty".to_string(),
-        "hmInsert" => "hashmap_insert".to_string(),
-        "hmLookup" => "hashmap_lookup".to_string(),
-        "hmDelete" => "hashmap_delete".to_string(),
-        "hmSize" => "hashmap_size".to_string(),
-        "hmKeys" => "hashmap_keys".to_string(),
-        "hmValues" => "hashmap_values".to_string(),
-        "hmMember" => "hashmap_member".to_string(),
-        "hmFromList" => "hashmap_fromList".to_string(),
-        "hmToList" => "hashmap_toList".to_string(),
         _ => {
             let mut s = String::new();
             for c in name.chars() {
@@ -253,6 +264,41 @@ pub(super) fn primitive_method_lua_op(name: &str) -> Option<&'static str> {
         "ord_ge__Int" | "ord_ge__Number" | "ord_ge__String" | "ord_ge__ByteString" => Some(">="),
         "semigroup_String" => Some(".."),
         _ => None,
+    }
+}
+
+/// Per-operand strictness of a NON-CONTROL infix operator (`>>=`, `>>`,
+/// `$`, `.` carry effect/closure structure and are not asked): whether
+/// the emitted operator forces that operand when it runs. One statement
+/// of what the InfixApp emitter arms do, read by the split pass (which
+/// may pull a deep operand into an eager binding only where the operator
+/// forces it anyway) and asserted by `operator_infix_ast` for the native
+/// path:
+///
+///   * the native Lua operators (`operator_infix_ast` over `is_builtin_op`)
+///     and the integer division helpers (`intdiv_infix_ast`) force both
+///     operands — a thunk is a table, which corrupts arithmetic and
+///     comparison; `<>` is among them: it exists at String and ByteString
+///     only (Lua `..`), the list Semigroup is rejected by the checker;
+///   * `&&`/`||` emit Lua `and`/`or` over forced operands, and Lua
+///     evaluates the right operand only when the left decided nothing —
+///     left strict, right lazy;
+///   * `++` is the lazy list append (`__mll_list_append`), which forces
+///     its left list at entry and suspends the right — left strict, right
+///     lazy; `!!` forces the index, not the list (`__mll_list_index`);
+///   * `:` and `seq`'s second operand build lazily (`cons_infix_ast`,
+///     `seq_inline_ast` forces only its first); every user or unknown
+///     operator is a call whose convention the callee decides — nothing
+///     is claimed.
+pub(crate) fn infix_operand_strictness(op: &str, lhs_ty: &crate::types::Ty, rhs_ty: &crate::types::Ty) -> (bool, bool) {
+    let string_like = |ty: &crate::types::Ty| matches!(ty, crate::types::Ty::Con(n) if n == "String" || n == "ByteString");
+    match op {
+        "+" | "-" | "*" | "/" | "%" | "==" | "/=" | "~=" | "<" | ">" | "<=" | ">="
+        | "div" | "mod" | "quot" | "rem" => (true, true),
+        "<>" => (string_like(lhs_ty), string_like(rhs_ty)),
+        "&&" | "||" | "++" | "seq" => (true, false),
+        "!!" => (false, true),
+        _ => (false, false),
     }
 }
 

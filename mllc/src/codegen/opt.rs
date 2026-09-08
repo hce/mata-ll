@@ -175,14 +175,30 @@ impl Disable {
 /// Run all passes over the module body. `opt_disable`: see
 /// `Disable::from_spec`.
 pub(super) fn run(stmts: &mut Vec<Stmt>, opt_disable: Option<&str>) {
-    let _ = run_with(stmts, &Disable::from_spec(opt_disable));
+    let _ = run_with(stmts, &Disable::from_spec(opt_disable), None);
 }
 
 /// Run the enabled passes; returns the annotation engine whose mirror is
 /// valid over the FINAL tree (the force-collapse engine, or the recomputed
 /// engine of a structured rewrite that came after it), plus whether the
 /// force pass ran — that decides the refutation's residual-force check.
-fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool) {
+///
+/// `per_pass`: the test entry's collector for the refutation run AFTER
+/// EACH engine-carrying pass, over the tree that pass left (see
+/// `run_refuted`). Production passes `None` and pays nothing.
+fn run_with(
+    stmts: &mut Vec<Stmt>,
+    d: &Disable,
+    mut per_pass: Option<&mut Vec<String>>,
+) -> (Option<annot::Engine>, bool) {
+    // Refute `engine` over the tree as it stands after `pass` (overclaims
+    // only: the residual-force obligation is owed on the FINAL tree, where
+    // the caller checks it).
+    let mut refute_after = |pass: &str, engine: &annot::Engine, stmts: &[Stmt]| {
+        if let Some(v) = per_pass.as_deref_mut() {
+            v.extend(engine.refute(stmts, false).into_iter().map(|m| format!("after {pass}: {m}")));
+        }
+    };
     if !d.thunklift {
         // Pass 0 — closure-free thunk lifting (thunklift.rs). Runs FIRST:
         // it rewrites suspension shapes wholesale, so every engine and
@@ -219,7 +235,13 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
         }
     }
     let mut engine = if !d.force {
-        Some(annot::Engine::run_pass(stmts, &mut ForceCollapse))
+        let e = annot::Engine::run_pass(stmts, &mut ForceCollapse);
+        // Refuted HERE, over the tree it mirrors: a structured rewrite
+        // below replaces this engine with a fresh analysis, so a stamp
+        // it over-claimed would otherwise never be seen — the final
+        // refutation looks at the last engine only.
+        refute_after("force-collapse", &e, stmts);
+        Some(e)
     } else {
         None
     };
@@ -230,6 +252,7 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
         // replaces the force pass's; when it rewrites nothing the earlier
         // engine still mirrors the tree.
         if let Some(fresh) = annot::Engine::run_structured(stmts, &mut tailloop::TailLoop) {
+            refute_after("tailloop", &fresh, stmts);
             engine = Some(fresh);
         }
     }
@@ -238,6 +261,7 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
         // discipline as tailloop: a rewrite invalidates everything, so the
         // recomputed engine replaces whichever one came before.
         if let Some(fresh) = annot::Engine::run_structured(stmts, &mut ioloop::IoLoop) {
+            refute_after("ioloop", &fresh, stmts);
             engine = Some(fresh);
         }
     }
@@ -245,6 +269,7 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
         // Structured tier, pass 7 (see the module comment): hoists out of
         // exactly the loops passes 5 and 6 built, so it runs after both.
         if let Some(fresh) = annot::Engine::run_structured(stmts, &mut hoist::HoistClosures) {
+            refute_after("hoist", &fresh, stmts);
             engine = Some(fresh);
         }
     }
@@ -252,11 +277,24 @@ fn run_with(stmts: &mut Vec<Stmt>, d: &Disable) -> (Option<annot::Engine>, bool)
 }
 
 /// Test-build entry (see verify::check_stamps): run the passes exactly as
-/// `run` would, then refute the carried stamps against a fresh analysis of
-/// the final tree. Empty means clean.
+/// `run` would, refuting the carried stamps against a fresh analysis
+/// after EVERY engine-carrying pass — over the tree that pass left, before
+/// the next pass consumes or discards them — and once more over the final
+/// tree with the residual-force obligation. Empty means clean.
+///
+/// The per-pass half is what makes a wrong intermediate claim visible: a
+/// structured rewrite replaces the engine it found with a fresh analysis,
+/// so an over-claim of the force-collapse pass that a later loop rewrite
+/// happened to erase (or, worse, to act on) left no trace in the final
+/// check. Each finding is prefixed with the pass it followed. (The
+/// emission-time rewrites — fusion inlining, the exact-first-force
+/// eagerization — precede every pass here and are held to their claims by
+/// the WHNF refutation build, which checks each claim where the emitted
+/// code reads it.)
 pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
     let d = Disable::from_spec(None);
-    let mut findings = match run_with(stmts, &d) {
+    let mut per_pass = Vec::new();
+    let mut findings = match run_with(stmts, &d, Some(&mut per_pass)) {
         (Some(engine), force_ran) => engine.refute(stmts, force_ran),
         // With every engine-run pass disabled there are no carried stamps
         // and no collapse obligation; a fresh analysis refuting itself
@@ -264,6 +302,7 @@ pub(super) fn run_refuted(stmts: &mut Vec<Stmt>) -> Vec<String> {
         (None, _) => Vec::new(),
     };
     findings.extend(expression_pass_idempotence(stmts, &d));
+    findings.extend(per_pass);
     findings
 }
 
@@ -478,29 +517,18 @@ enum Ctx {
     Prefix,
 }
 
-/// The show family is a CLOSED set: the single-return helpers defined in
-/// runtime.lua / runtime_integer.lua text. Every other show-spelled name
-/// reaching a callee position is emitted through an `__mll_fn` slot — or
-/// is a HOST FFI callee, which may multi-return.
-const SHOW_HELPERS: [&str; 23] = [
-    "show", "show_Int", "show_Number", "show_String", "show_Bool",
-    "show_List_", "show_Maybe", "show_Unit", "show_HashMap",
-    "show_ByteString", "show_Integer",
-    "showsPrec", "showsPrec_Int", "showsPrec_Number", "showsPrec_String",
-    "showsPrec_Bool", "showsPrec_List_", "showsPrec_Maybe", "showsPrec_Unit",
-    "showsPrec_HashMap", "showsPrec_ByteString", "showsPrec_Integer",
-    "__mll_shows_prec",
-];
-
 /// Callees whose calls provably return exactly one value: the runtime
 /// helpers (all single-return except the excluded forwarders), the show
 /// family, and compiled-function slots. Everything else — host FFI names
-/// in particular — may multi-return. The show test is the exact helper
-/// set, NOT a prefix: a prefix match also claimed host FFI callees
-/// ("showPicker"), and shedding the truncating paren around one in a
-/// spread position (return operand, last argument) forwards a
-/// multi-returning host's extra values into the consumer
-/// (ffi_multi_return.mll pins the truncation contract).
+/// in particular — may multi-return. The show family is the show-spelled
+/// functions the runtime text DEFINES (`runtime_fn_name`, read off
+/// runtime.lua / runtime_integer.lua), NOT a prefix over every name: a
+/// prefix match also claimed host FFI callees ("showPicker"), and
+/// shedding the truncating paren around one in a spread position (return
+/// operand, last argument) forwards a multi-returning host's extra values
+/// into the consumer (ffi_multi_return.mll pins the truncation contract).
+/// Every other show-spelled name reaching a callee position is emitted
+/// through an `__mll_fn` slot or IS such a host callee.
 pub(super) fn single_return_callee(f: &Expr) -> bool {
     match f {
         Expr::Name(n) => {
@@ -512,7 +540,7 @@ pub(super) fn single_return_callee(f: &Expr) -> bool {
                     && n != "__mll_opt_tail"
                     && n != "__mll_run_tail"
                     && n != "__mll_seq")
-                || SHOW_HELPERS.contains(&n.as_str())
+                || (n.starts_with("show") && super::runtime::runtime_fn_name(n))
         }
         Expr::Index(base, _) => matches!(base.as_ref(), Expr::Name(b) if b == "__mll_fn"),
         _ => false,
@@ -1114,7 +1142,7 @@ mod tests {
             )))]
         };
         let mut stmts = host();
-        run_with(&mut stmts, &Disable::default());
+        run_with(&mut stmts, &Disable::default(), None);
         assert!(
             matches!(&stmts[0], Stmt::Return(Expr::Paren(_))),
             "host callee must keep the truncating paren"
@@ -1124,7 +1152,7 @@ mod tests {
             Expr::name("show_Int"),
             vec![Expr::name("x")],
         )))];
-        run_with(&mut stmts, &Disable::default());
+        run_with(&mut stmts, &Disable::default(), None);
         assert!(
             matches!(&stmts[0], Stmt::Return(Expr::Call(..))),
             "runtime show helper may shed"
@@ -1181,10 +1209,10 @@ mod tests {
     fn force_collapse_toggle() {
         let make = || vec![Stmt::Return(Expr::force(Expr::lit("42")))];
         let mut on = make();
-        run_with(&mut on, &Disable::default());
+        run_with(&mut on, &Disable::default(), None);
         assert!(matches!(&on[0], Stmt::Return(Expr::Lit(s)) if s == "42"));
         let mut off = make();
-        run_with(&mut off, &Disable { force: true, ..Disable::default() });
+        run_with(&mut off, &Disable { force: true, ..Disable::default() }, None);
         assert!(
             matches!(&off[0], Stmt::Return(Expr::Call(..))),
             "disabled peephole must leave __force in place"
@@ -1199,7 +1227,7 @@ mod tests {
             Stmt::Local(vec!["x".into()], Some(Expr::force(Expr::name("y")))),
             Stmt::Return(Expr::force(Expr::name("x"))),
         ];
-        run_with(&mut stmts, &Disable::default());
+        run_with(&mut stmts, &Disable::default(), None);
         assert!(matches!(&stmts[1], Stmt::Return(Expr::Name(n)) if n == "x"));
     }
 
@@ -1230,7 +1258,7 @@ mod tests {
     #[test]
     fn force_of_unknown_stays() {
         let mut stmts = vec![Stmt::Return(Expr::force(Expr::call_named("f", vec![])))];
-        run_with(&mut stmts, &Disable::default());
+        run_with(&mut stmts, &Disable::default(), None);
         assert!(matches!(&stmts[0], Stmt::Return(Expr::Call(..))));
     }
 
@@ -1264,7 +1292,7 @@ mod tests {
             ]
         };
         let mut on = make();
-        let (engine, _) = run_with(&mut on, &Disable::default());
+        let (engine, _) = run_with(&mut on, &Disable::default(), None);
         let Stmt::Function { body, .. } = &on[1] else { panic!("shape") };
         assert!(
             matches!(&body.0[0], Stmt::Local(names, _) if names == &vec!["_lp".to_string()]),
@@ -1273,7 +1301,7 @@ mod tests {
         assert!(engine.expect("engine").refute(&on, true).is_empty());
 
         let mut off = make();
-        run_with(&mut off, &Disable { ioloop: true, ..Disable::default() });
+        run_with(&mut off, &Disable { ioloop: true, ..Disable::default() }, None);
         let Stmt::Function { body, .. } = &off[1] else { panic!("shape") };
         assert!(
             matches!(&body.0[0], Stmt::If { .. }),
@@ -1301,13 +1329,13 @@ mod tests {
             }]
         };
         let mut on = make();
-        let (engine, _) = run_with(&mut on, &Disable::default());
+        let (engine, _) = run_with(&mut on, &Disable::default(), None);
         let Stmt::Function { body, .. } = &on[0] else { panic!("shape") };
         assert!(matches!(body.0[0], Stmt::WhileTrue(_)), "enabled pass must convert");
         assert!(engine.expect("engine").refute(&on, true).is_empty());
 
         let mut off = make();
-        run_with(&mut off, &Disable { tailloop: true, ..Disable::default() });
+        run_with(&mut off, &Disable { tailloop: true, ..Disable::default() }, None);
         let Stmt::Function { body, .. } = &off[0] else { panic!("shape") };
         assert!(
             matches!(body.0[0], Stmt::If { .. }),

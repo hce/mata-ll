@@ -171,6 +171,33 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **One table per mirrored family inside the compiler.** The ST array
+  and IORef intrinsics are one table (`intrinsics.rs`: source name,
+  action-closure name, fused name, strictness mask) read by demand
+  analysis, name sanitization, the fused emitter, the known-name seeds
+  and the strictness harness; the runtime renames are a table the
+  known-name seeds derive from; the show family is read off the runtime
+  text; the per-operand strictness the expression-splitting pass uses is
+  codegen's own statement of its operator lowering; and the action
+  emitter and its WHNF claim are two exhaustive matches over one
+  classifier. A test pins every runtime name any compiler table mentions
+  to a binding in the runtime text — its first run found `eq_Ordering`
+  seeded as a runtime value that does not exist. One visible effect: a
+  parenthesised `(readSTArray arr i)` in a do-block now takes the fused
+  direct call like the bare spelling (the claim already treated the
+  parens as transparent; the emitter did not).
+
+- **Stamp refutation after every optimisation pass.** Test builds refute
+  the annotation engine after each engine-carrying Lua pass, over the
+  tree that pass left, instead of only over the final tree — an
+  over-claim a later structured rewrite erased is now reported, prefixed
+  with the pass it followed.
+
+- **lua-compat refuses a stale compiler binary.** The corpus script,
+  which prefers `target/release/mll`, exits with an error when that
+  binary is older than the compiler sources (`MLL_ALLOW_STALE=1`
+  overrides).
+
 - **ST array reads are spelled inline, and a read settles its slot.** A
   do-block `x <- readSTArray arr i` compiles to the slot load and a thunk
   test at its site (`__mll_st_settle` is the arm a stored suspension

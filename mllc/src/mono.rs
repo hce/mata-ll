@@ -245,11 +245,12 @@ impl Monomorphizer {
             "bsReplicate", "bsPack", "bsUnpack", "bsMap", "bsFoldl",
             "bsXor", "bsZipWith", "bsToString", "bsFromString",
             "bsGetU16LE", "bsGetU32LE", "bsGetI8", "bsGetI16LE", "bsPutI16LE",
-            "runST", "newSTArray", "readSTArray", "writeSTArray",
-            "modifySTArray", "stArrayLength", "newSTArrayFromList", "stArrayToList",
-            "newIORef", "readIORef", "writeIORef", "modifyIORef", "modifyIORef'",
+            "runST",
         ] {
             builtins.insert(name.to_string());
+        }
+        for i in crate::intrinsics::ST_INTRINSICS {
+            builtins.insert(i.source.to_string());
         }
 
         // Adopt the typechecker's canonical instance registry: it is already

@@ -35,7 +35,7 @@
 
 use crate::tir::*;
 use crate::types::Ty;
-use crate::codegen::is_cheap;
+use crate::codegen::{infix_operand_strictness, is_cheap};
 
 /// Maximum expression nesting depth left inline. Anything deeper is split out.
 ///
@@ -156,10 +156,11 @@ fn flatten_expr(e: TExpr, binds: &mut Vec<TLocalDef>, ctr: &mut usize) -> TExpr 
                 // Per-operand strictness decides whether an operand may be pulled
                 // out *eagerly*. A strict operand is forced by the operator
                 // anyway, so naming it changes nothing. A non-strict operand
-                // (short-circuited `&&`/`||` rhs, a lazy list `<>`/`++`/`:` tail)
-                // must stay lazy — `hoist` only extracts it if the binding would
-                // be thunked, never eagerly.
-                let (ls, rs) = operand_strictness(&op, &lhs.ty, &rhs.ty);
+                // (short-circuited `&&`/`||` rhs, a lazy `++`/`:` tail) must
+                // stay lazy — `hoist` only extracts it if the binding would be
+                // thunked, never eagerly. The per-operator facts are codegen's
+                // own statement of its InfixApp arms (infix_operand_strictness).
+                let (ls, rs) = infix_operand_strictness(&op, &lhs.ty, &rhs.ty);
                 let lhs = hoist(*lhs, ls, binds, ctr);
                 let rhs = hoist(*rhs, rs, binds, ctr);
                 TExprKind::InfixApp { op, lhs: Box::new(lhs), rhs: Box::new(rhs) }
@@ -280,30 +281,6 @@ fn hoist(child: TExpr, strict: bool, binds: &mut Vec<TLocalDef>, ctr: &mut usize
 fn is_control_op(op: &str) -> bool {
     matches!(op, ">>=" | ">>" | "$" | ".")
 }
-
-/// Per-operand strictness of a (non-control) infix operator: whether codegen
-/// forces that operand. Mirrors codegen's lowering (`^` is NOT here: it is a
-/// Prelude function, emitted as an ordinary call whose arguments codegen does
-/// not force — see `codegen::is_builtin_op`).
-fn operand_strictness(op: &str, lhs_ty: &Ty, rhs_ty: &Ty) -> (bool, bool) {
-    match op {
-        // Arithmetic and comparison force both operands.
-        "+" | "-" | "*" | "/" | "%" | "div" | "mod" | "==" | "/=" | "~="
-        | "<" | ">" | "<=" | ">=" => (true, true),
-        // `<>`/`++` are strict only on strings/bytestrings (Lua `..`); on lists
-        // they build a lazy-tailed append, so the operands stay non-strict.
-        "<>" | "++" => (is_string_type(lhs_ty), is_string_type(rhs_ty)),
-        // `&&`/`||` short-circuit their right operand; `:` keeps both lazy.
-        // Treat all as non-strict — they are only hoisted when kept lazy.
-        _ => (false, false),
-    }
-}
-
-/// String-like types compile to Lua strings and are combined with strict `..`.
-fn is_string_type(ty: &Ty) -> bool {
-    matches!(ty, Ty::Con(n) if n == "String" || n == "ByteString")
-}
-
 
 /// Whether an expression may be named by a `let` binding without changing
 /// semantics or breaking a codegen shape assumption. Only pure values qualify.

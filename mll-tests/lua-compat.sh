@@ -29,6 +29,17 @@ if [ -z "$MLL" ] || [ ! -x "$MLL" ]; then
     echo "Error: mll binary not found. Run 'cargo build' first."
     exit 1
 fi
+# A binary older than the compiler sources tests the wrong compiler: the
+# release binary is preferred above, and a stale one passed silently while
+# the debug build under test had changed. Refuse it; MLL_ALLOW_STALE=1
+# overrides for a deliberate run against an old binary.
+if [ -z "${MLL_ALLOW_STALE:-}" ]; then
+    NEWER="$(find "$SCRIPT_DIR/../mllc/src" "$SCRIPT_DIR/../mllc/lib" "$SCRIPT_DIR/../mll/src" -type f -newer "$MLL" 2>/dev/null | head -1)"
+    if [ -n "$NEWER" ]; then
+        echo "Error: $MLL is older than $NEWER — rebuild first (cargo build --release), or set MLL_ALLOW_STALE=1."
+        exit 1
+    fi
+fi
 
 # Canonical interpreter id for per-case skip markers. Derived from the
 # interpreter's own version string, not the binary name: CI invokes both

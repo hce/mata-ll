@@ -1896,7 +1896,16 @@ impl CodeGen {
         if is_builtin_op(op) {
             // Lua-native operator: emit as infix. Operands are forced —
             // a thunk is a table, which would corrupt arithmetic and
-            // comparison, and is truthy under `and`/`or`.
+            // comparison, and is truthy under `and`/`or`. The shared
+            // statement of this forcing (infix_operand_strictness, what
+            // the split pass reads) must agree with the emission: both
+            // operands forced, except the right operand of the
+            // short-circuiting `and`/`or`, which Lua reaches conditionally.
+            debug_assert_eq!(
+                super::names::infix_operand_strictness(op, &lhs.ty, &rhs.ty),
+                (true, !matches!(op, "&&" | "||")),
+                "infix_operand_strictness disagrees with the native emission of `{op}`"
+            );
             let l = self.forced_ast(lhs);
             let r = self.forced_ast(rhs);
             Expr::paren(Expr::binop(lua_op, l, r))

@@ -393,26 +393,59 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
 
 ### Weak seams (structural remedies, beyond the items above)
 
-- [ ] Mirror tables kept by hand: demand.rs:172
-      `RUNTIME_PRELUDE_STRICTNESS`, opt.rs:485 `SHOW_HELPERS`, split.rs:288
-      `operand_strictness`, `ENTRY_FORCED`/`STRICT_BUILTINS`/
-      `PRIMITIVE_BINOP_METHODS`, `concrete_vars` seeds, `sanitize_name`'s
-      special map, the WHNF-claim predicates in action.rs:32-38 that must
-      mirror `action_run_ast`'s arms. Build-time check that every mirrored
-      name exists in runtime.lua; emitters and claims as one exhaustive
-      match over a shared enum rather than parallel lists.
-- [ ] Run the strictness-contract test after EVERY optimisation pass in
-      test builds (fusion inlining, thunklift, exact-first-force all
-      re-derive demand assumptions), not only at the end.
+- [x] Mirror tables kept by hand — DONE 2026-09-08. What became one
+      source, and how the rest is pinned:
+      * the ST array / IORef family is ONE table, `intrinsics.rs`
+        (source name, closure name, fused name, strictness mask); demand's
+        seeding and run-position rows, `sanitize_name`, action.rs's fused
+        dispatch and fused masks, module.rs's and mono.rs's known-name
+        seeds, and the strictness-contract harness all read it (G8 had to
+        touch five of those in step);
+      * the runtime renames are a table, names.rs `RUNTIME_RENAMES`;
+        module.rs's known-name seeds are derived from it plus the
+        intrinsics; the value seeds are a named constant;
+      * the show family (opt.rs `single_return_callee`) is the
+        show-spelled functions the runtime text defines (`runtime_fn_name`),
+        not a hand list;
+      * the per-operand strictness the split pass consulted is codegen's
+        own statement, names.rs `infix_operand_strictness`, which the
+        native-operator emission asserts against;
+      * the action emitter and its WHNF claim (action.rs `action_run_ast`
+        / `action_result_is_whnf`) are two exhaustive matches over one
+        classifier, `action_shape` — an arm added to one must be decided
+        in the other; grouping parens are transparent in both (they were
+        in the claim only);
+      * `codegen::contract_tests::mirrored_runtime_names_are_bound_by_the_prelude`
+        pins every runtime name any of these tables mentions to a binding
+        in the runtime text (`runtime::prelude_binds`, read off runtime.lua
+        and runtime_integer.lua, `__mll_bs[k]` entries included). Its
+        first run found `eq_Ordering` seeded concrete and defined nowhere.
+      Still hand-kept, by design: `PRIMITIVE_BINOP_METHODS` (already
+      diffed against the operator table by a test) and the strictness
+      rows themselves (behaviourally checked by the G5 harness).
+- [x] Run the strictness-contract test after EVERY optimisation pass —
+      DONE 2026-09-08, as what the pass structure admits: the stamp
+      refutation (`opt::run_refuted`, the test-build entry behind
+      `verify::check_stamps`) now refutes the annotation engine AFTER EACH
+      engine-carrying pass over the tree that pass left — force-collapse,
+      tailloop, ioloop, hoist — before the next pass consumes or discards
+      it, and once more over the final tree with the residual-force
+      obligation; findings are prefixed with the pass. The gap this
+      closes: a structured rewrite replaced the force-collapse engine with
+      a fresh analysis, so an over-claim of that pass which a later loop
+      rewrite erased (or acted on) was never seen. The G5 harness itself
+      bombs runtime bodies and is pass-independent; the emission-time
+      rewrites (fusion inlining, exact-first-force) precede every pass and
+      are held to their claims by the WHNF refutation build.
 - [ ] The type-erased container-show shims `show_List_`/`show_Maybe`
       (runtime.lua, demand rows, SHOW_HELPERS, concrete_vars seeds) are no
       longer reachable from a well-typed program (dictionary-form container
       show composes a real dictionary since B2); their strictness-probe rows
       were dropped. Delete the shims and their table entries once B17 (the
       one remaining erased-element path) is closed.
-- [ ] mll-tests/lua-compat.sh:24 prefers `target/release/mll`; refuse a
-      binary older than `mllc/src` (a stale release binary passes silently
-      locally).
+- [x] mll-tests/lua-compat.sh prefers `target/release/mll`; it now refuses
+      a binary older than any file under `mllc/src`, `mllc/lib` or
+      `mll/src` (`MLL_ALLOW_STALE=1` overrides) — DONE 2026-09-08.
 
 ### Documentation drift
 

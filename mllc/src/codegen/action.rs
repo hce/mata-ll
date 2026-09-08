@@ -24,35 +24,19 @@ use super::lua::{Block, Expr, Stmt};
 use super::names::{sanitize_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
+/// The run-position emission arm of an action — see
+/// `CodeGen::action_shape`. Borrowed from the classified expression.
+enum ActionShape<'a> {
+    Pure(&'a TExpr),
+    Value,
+    PlainValue,
+    MaybeAction,
+    HostCall { host: &'a String, args: &'a [TExpr] },
+    Fused { fused: &'static str, args: Vec<&'a TExpr> },
+    Runner,
+}
+
 impl CodeGen {
-    /// Whether performing `action` yields a value already in WHNF (a forced
-    /// value) rather than a possibly-suspended thunk. A `<-`-bound variable is
-    /// marked `concrete` (read force-free downstream) only when this holds.
-    ///
-    /// This must mirror action_run_ast's emission arms exactly — it is a claim
-    /// about what the emitted code produces, so each `true` arm corresponds to
-    /// an arm of action_run_ast whose result is provably forced:
-    ///
-    ///   * `return e` / `pure e` (prefix or `$`): the result is `e` left
-    ///     UNFORCED per the non-strict contract — WHNF only when `e` is itself
-    ///     provably total (`is_cheap_to_force`); otherwise action_run_ast suspends
-    ///     it in a thunk.
-    ///   * literal / constructor / tuple actions: emitted as the value itself,
-    ///     which is WHNF by construction.
-    ///   * FFI SpecCalls (`__mll_io:`): a raw host value (plus decode), never
-    ///     a mata-ll thunk.
-    ///   * fused ST intrinsics: `__mll_st_read` forces the slot it returns
-    ///     (slots hold values as stored, GHC's boxed-array laziness), and
-    ///     the other intrinsics return a table, a length or `()`.
-    ///
-    /// Everything else — in particular a call to a USER-DEFINED action, which
-    /// goes through `__mll_run` — defaults to `false`: a user function whose
-    /// body ends in `pure <expr>` compiles to an action closure whose result
-    /// `__mll_run` returns UNFORCED, so the bound variable can hold a thunk.
-    /// Claiming WHNF there emitted force-free reads of a thunk table (e.g.
-    /// bare `v + 1` → "attempt to perform arithmetic on a table value").
-    /// Being conservative here only costs an idempotent `__force` probe at the
-    /// use sites; being aggressive miscompiles.
     /// A discarded effect as a Lua statement. Lua accepts only a call as an
     /// expression statement; any other shape (a bare value some arm handed
     /// back for an effect-free action) is bound to a throwaway local so the
@@ -85,28 +69,89 @@ impl CodeGen {
         }
     }
 
+    /// Whether performing `action` yields a value already in WHNF (a forced
+    /// value) rather than a possibly-suspended thunk. A `<-`-bound variable is
+    /// marked `concrete` (read force-free downstream) only when this holds.
+    ///
+    /// This is a claim about what the emitted code produces, so it is made
+    /// per emission arm over the SAME classification `action_run_ast` emits
+    /// by (`action_shape`): an arm is `true` only where its emission is
+    /// provably forced. Adding an arm to the classifier forces a decision
+    /// here — the match is exhaustive — instead of leaving a second
+    /// hand-kept predicate to drift from the emitter.
     pub(super) fn action_result_is_whnf(&self, action: &TExpr) -> bool {
-        if let Some(payload) = Self::pure_payload(action) {
-            return self.is_cheap_to_force(payload);
+        match Self::action_shape(action) {
+            // The payload is left UNFORCED per the non-strict contract —
+            // WHNF only when it is itself provably total.
+            ActionShape::Pure(payload) => self.is_cheap_to_force(payload),
+            // The value itself, WHNF by construction.
+            ActionShape::Value => true,
+            // A raw host value (plus decode), never a mata-ll thunk.
+            ActionShape::HostCall { .. } => true,
+            // Every fused intrinsic result is WHNF except the IORef read:
+            // `__mll_st_read` forces the slot it returns, and the ST/IORef
+            // writes/news return () or the cell itself — but an IORef slot
+            // holds the value AS STORED, possibly a thunk (writeIORef is
+            // lazy in the value, modifyIORef stores a suspension) and
+            // readIORef hands it back unforced, so that one fused read may
+            // hand a raw thunk to its binder.
+            ActionShape::Fused { fused, .. } => fused != "__mll_ioref_read",
+            // A plain expression, a possibly-action expression through the
+            // runner, or a user action through the runner: the result may
+            // be a thunk (a user function whose body ends in `pure <expr>`
+            // compiles to an action closure whose result `__mll_run`
+            // returns UNFORCED). Claiming WHNF here emitted force-free reads
+            // of a thunk table; being conservative only costs an idempotent
+            // `__force` probe at the use sites.
+            ActionShape::PlainValue | ActionShape::MaybeAction | ActionShape::Runner => false,
         }
+    }
+
+    /// The emission arm an action takes in run position — ONE classifier
+    /// for `action_run_ast` (which emits by it) and `action_result_is_whnf`
+    /// (which claims by it), so a claim about what the emitted code
+    /// produces can only be made about the arm that produced it. The
+    /// arms, in dispatch order:
+    ///
+    ///   * `Pure`: `return e` / `pure e` (prefix, `$`, parenthesised —
+    ///     `pure_payload`); performing yields `e` unforced;
+    ///   * `Value`: a literal, constructor or tuple; the value itself;
+    ///   * `PlainValue`: a type that is definitely not an action; the
+    ///     plain expression;
+    ///   * `MaybeAction`: an unresolved type that may be an action; the
+    ///     expression through the runner;
+    ///   * `HostCall`: an FFI SpecCall; the host call itself, decoded;
+    ///   * `Fused`: a fully applied ST array / IORef intrinsic; the fused
+    ///     direct call;
+    ///   * `Runner`: everything else — a direct-perform tail call or the
+    ///     runner over the expression.
+    ///
+    /// Grouping parens are transparent: `(readSTArray arr i)` is the read.
+    fn action_shape(action: &TExpr) -> ActionShape<'_> {
         let mut a = action;
         while let TExprKind::Paren(inner) = &a.kind {
             a = inner.as_ref();
         }
-        match &a.kind {
-            TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => true,
-            TExprKind::SpecCall { specialized: SpecKind::Io(_), .. } => true,
-            // Every fused intrinsic result is WHNF except __mll_ioref_read:
-            // `__mll_st_read` forces the slot it returns, and the ST/IORef
-            // writes/news return () or the cell itself — but an IORef
-            // slot holds the value AS STORED, possibly a thunk (writeIORef
-            // is lazy in the value, modifyIORef stores a suspension) and
-            // readIORef hands it back unforced, so that one fused read may
-            // hand a raw thunk to its binder.
-            _ if Self::st_intrinsic_fused(a)
-                .is_some_and(|(fused, _)| fused != "__mll_ioref_read") => true,
-            _ => false,
+        if let Some(payload) = Self::pure_payload(a) {
+            return ActionShape::Pure(payload);
         }
+        if matches!(&a.kind, TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_)) {
+            return ActionShape::Value;
+        }
+        if !Self::is_nullary_action_type(&a.ty) {
+            return if Self::is_definitely_not_action(&a.ty) {
+                ActionShape::PlainValue
+            } else {
+                ActionShape::MaybeAction
+            };
+        }
+        if let TExprKind::SpecCall { specialized: SpecKind::Io(host), args, .. } = &a.kind {
+            return ActionShape::HostCall { host, args };
+        }
+        if let Some((fused, args)) = Self::st_intrinsic_fused(a) {
+            return ActionShape::Fused { fused, args };
+        }
+        ActionShape::Runner
     }
 
     /// Whether a `pure e` / `return e` value may be emitted as a BARE value in
@@ -223,46 +268,31 @@ impl CodeGen {
     /// chain's root (see the __mll_run contract comment in the runtime).
     pub(super) fn action_run_ast(&mut self, expr: &TExpr, tail: bool) -> Expr {
         let runner = if tail { "__mll_run_tail" } else { "__mll_run" };
-        // Structural checks FIRST — the monad type variable may be
-        // unresolved in bind chains, so we can't rely on the type alone.
-        // pure(x) / return(x): performing it just yields x — and yields it
-        // UNFORCED, per the eagerness contract (`return ⊥` must not raise until
-        // the value is demanded). arg_ast with strict=false suspends a possibly-⊥
-        // x in a thunk and leaves a provably-total x (literal, concrete var,
-        // constructor of such) eager, so the common `return 0` stays a bare
-        // value while `return (error "x")` / `return (n `div` 0)` become inert.
-        // A bind site marks the resulting `<-` variable concrete only when this
-        // yields WHNF (see action_result_is_whnf).
-        // (`return $ x` and a parenthesised form included — pure_payload.)
-        if let Some(payload) = Self::pure_payload(expr) {
-            return self.pure_action_ast(payload);
-        }
-        // ST primitive calls now return closures — go through __mll_run like everything else
-        if !Self::is_nullary_action_type(&expr.ty) {
-            // If the type is concretely non-IO (resolved to a known type),
-            // emit as a plain expression. But if the type is unresolved
-            // (e.g. where-clause function with uninferred return type),
-            // defensively wrap with __mll_run since we may be in a bind chain
-            // where the expression must be an action.
-            if Self::is_definitely_not_action(&expr.ty) {
-                return self.expr_ast(expr);
-            } else {
+        match Self::action_shape(expr) {
+            // pure(x) / return(x): performing it just yields x — and yields it
+            // UNFORCED, per the eagerness contract (`return ⊥` must not raise
+            // until the value is demanded). arg_ast with strict=false suspends
+            // a possibly-⊥ x in a thunk and leaves a provably-total x
+            // (literal, concrete var, constructor of such) eager, so the
+            // common `return 0` stays a bare value while `return (error
+            // "x")` / `return (n `div` 0)` become inert. A bind site marks the
+            // resulting `<-` variable concrete only when this yields WHNF
+            // (see action_result_is_whnf).
+            ActionShape::Pure(payload) => self.pure_action_ast(payload),
+            ActionShape::Value => self.expr_ast(expr),
+            // The type is concretely non-IO (resolved to a known type):
+            // a plain expression.
+            ActionShape::PlainValue => self.expr_ast(expr),
+            // The type is unresolved (e.g. a where-clause function with an
+            // uninferred return type): defensively wrap with the runner,
+            // since this may be a bind chain where the expression must be
+            // an action.
+            ActionShape::MaybeAction => {
                 let e = self.expr_ast(expr);
-                return Expr::call_named(runner, vec![e]);
-            }
-        }
-        // The fused ST-intrinsic classification, computed once: the earlier
-        // arms are structural on `expr.kind` (a literal/constructor/tuple, an
-        // IO SpecCall), so an expression they take is never a fused
-        // intrinsic and evaluating the classification up front changes no
-        // dispatch.
-        let fused_intrinsic = Self::st_intrinsic_fused(expr);
-        match &expr.kind {
-            TExprKind::Lit(_) | TExprKind::Con(_) | TExprKind::Tuple(_) => {
-                self.expr_ast(expr)
+                Expr::call_named(runner, vec![e])
             }
             // IO SpecCall: inline the Lua call directly (skip closure)
-            TExprKind::SpecCall { specialized: SpecKind::Io(host), args, .. } => {
+            ActionShape::HostCall { host, args } => {
                 let lua_func = host.as_str();
                 // Type-directed decode of the FFI result: the host's raw Lua
                 // value (arrays, dicts, nested records) is converted into the
@@ -295,43 +325,23 @@ impl CodeGen {
             // the __mll_run dispatch. This path is only reached where an
             // action runs exactly once, in order, so this is safe by
             // construction. See st_intrinsic_fused.
-            _ if fused_intrinsic.is_some() => {
-                let (fused, fargs) = fused_intrinsic.unwrap();
-                // Per-argument strictness of the ST array intrinsics. These
-                // runtime helpers bypass demand analysis (they are not mata-ll
-                // functions), so their strict positions are stated here. An
-                // array and an index are ALWAYS forced — you cannot allocate,
-                // read, or write through a thunk — so passing them eagerly is
-                // sound and, on the tracker's hot loop (four writes per note,
-                // every audio frame), removes a thunk allocation per index
-                // expression like `ch * 14 + off`. The *stored value* and the
+            ActionShape::Fused { fused, args: fargs } => {
+                // Per-argument strictness of the intrinsic, from the family's
+                // one table (crate::intrinsics). An array/ref and an index
+                // are ALWAYS forced — you cannot allocate, read, or write
+                // through a thunk — so passing them eagerly is sound and, on
+                // the tracker's hot loop (four writes per note, every audio
+                // frame), removes a thunk allocation per index expression
+                // like `ch * 14 + off`. The *stored value* and the
                 // initializer stay LAZY: a slot holds the value as stored
                 // (GHC's boxed STArray — `writeSTArray a i undefined` never
-                // read is silent), so the value argument is suspended like
-                // any lazy argument and forced by the read that demands it.
-                // The first-class `__mll_ma_*` closures carry the same rows
-                // (STRICT_BUILTINS in demand.rs).
-                let strict_mask: &[bool] = match fused {
-                    "__mll_st_new" => &[true, false],         // size, init (stored as is)
-                    "__mll_st_read" => &[true, true],         // arr, idx
-                    "__mll_st_write" => &[true, true, false], // arr, idx, val (stored as is)
-                    "__mll_st_modify" => &[true, true, true], // arr, idx, f (f is called)
-                    "__mll_st_length" => &[true],
-                    "__mll_st_from_list" => &[true],
-                    "__mll_st_to_list" => &[true],
-                    // IORef: the ref cell is forced (you cannot store into a
-                    // thunk), but the VALUE positions stay lazy even in run
-                    // position — GHC's writeIORef/newIORef don't force the
-                    // value, and modifyIORef doesn't call f at modify time (it
-                    // stores the suspension). Only modifyIORef' calls f and
-                    // forces the result on this run.
-                    "__mll_ioref_new" => &[false],           // value (not forced)
-                    "__mll_ioref_read" => &[true],           // ref
-                    "__mll_ioref_write" => &[true, false],   // ref, value (lazy)
-                    "__mll_ioref_modify" => &[true, false],  // ref, f (suspended)
-                    "__mll_ioref_modify_strict" => &[true, true], // ref, f (called)
-                    _ => &[],
-                };
+                // read is silent; writeIORef likewise), so the value argument
+                // is suspended like any lazy argument and forced by the read
+                // that demands it. The first-class closures and the demand
+                // rows read the same table, so no twin of this mask exists.
+                let strict_mask: &[bool] = crate::intrinsics::st_intrinsic_by_fused(fused)
+                    .map(|i| i.mask)
+                    .unwrap_or(&[]);
                 let mut cargs = Vec::new();
                 for (i, a) in fargs.iter().enumerate() {
                     let strict = strict_mask.get(i).copied().unwrap_or(false);
@@ -339,7 +349,7 @@ impl CodeGen {
                 }
                 Expr::call_named(fused, cargs)
             }
-            _ => {
+            ActionShape::Runner => {
                 // Direct-perform tail: a saturated call to a module-level
                 // DIRECT-PERFORM function (its emitted body IS the action —
                 // see direct_perform_arity / direct_perform_fns) PERFORMS
@@ -487,23 +497,12 @@ impl CodeGen {
             TExprKind::Var(n) => n.as_str(),
             _ => return None,
         };
-        let (fused, arity) = match name {
-            "newSTArray" => ("__mll_st_new", 2),
-            "readSTArray" => ("__mll_st_read", 2),
-            "writeSTArray" => ("__mll_st_write", 3),
-            "modifySTArray" => ("__mll_st_modify", 3),
-            "stArrayLength" => ("__mll_st_length", 1),
-            "newSTArrayFromList" => ("__mll_st_from_list", 1),
-            "stArrayToList" => ("__mll_st_to_list", 1),
-            // The IORef intrinsics fuse the same way (IO's bind runs its
-            // continuation exactly once, like ST's).
-            "newIORef" => ("__mll_ioref_new", 1),
-            "readIORef" => ("__mll_ioref_read", 1),
-            "writeIORef" => ("__mll_ioref_write", 2),
-            "modifyIORef" => ("__mll_ioref_modify", 2),
-            "modifyIORef'" => ("__mll_ioref_modify_strict", 2),
-            _ => return None,
-        };
+        // One table for the family (crate::intrinsics): the fused name and
+        // the arity — the mask length — of every ST array and IORef
+        // intrinsic. (IO's bind runs its continuation exactly once, like
+        // ST's, so the IORef intrinsics fuse the same way.)
+        let i = crate::intrinsics::st_intrinsic(name)?;
+        let (fused, arity) = (i.fused, i.mask.len());
         if args.len() == arity {
             Some((fused, args))
         } else {
@@ -627,8 +626,10 @@ impl CodeGen {
     /// `x <- readSTArray arr i` in a bind chain, spelled INLINE at its site
     /// instead of as a call to the `__mll_st_read` helper:
     ///
-    ///     local x = arr[i + 1]
-    ///     if __mll_getmt(x) == __thunk_mt then x = __mll_st_settle(arr, i + 1, x) end
+    /// ```text
+    /// local x = arr[i + 1]
+    /// if __mll_getmt(x) == __thunk_mt then x = __mll_st_settle(arr, i + 1, x) end
+    /// ```
     ///
     /// `None` for any other action. For a read: the declaration's RHS and
     /// the settle statement, which assigns through `xref` — the bound
