@@ -26,6 +26,27 @@ enum ListCompQual {
     Let(Vec<LocalDef>),
 }
 
+/// A parsed guard chain. `Plain` is the all-boolean form every stage
+/// downstream understands (comma qualifiers folded to `&&`, exactly as
+/// before); `Raw` appears when a chain uses a BINDING qualifier (Haskell
+/// 2010 §3.13 pattern guards / `let`) and is lowered by the parser itself
+/// — immediately where the construct is local (case alternatives, where
+/// bindings), or at end of parse for function clause groups, whose
+/// fall-through needs the clauses that follow.
+enum GuardChain {
+    Plain(Vec<Guard>),
+    Raw(Vec<RawGuard>),
+}
+
+impl GuardChain {
+    fn is_empty(&self) -> bool {
+        match self {
+            GuardChain::Plain(g) => g.is_empty(),
+            GuardChain::Raw(r) => r.is_empty(),
+        }
+    }
+}
+
 /// The infix operator whose right-hand side is currently being parsed.
 /// Carried into the recursive infix parse so a same-precedence neighbor can
 /// be checked against it: Haskell only defines a grouping for such a pair
@@ -57,6 +78,10 @@ struct Parser {
     /// `enter_nested`, so absurdly nested input yields a clean diagnostic
     /// instead of overflowing the native stack.
     depth: usize,
+    /// Fresh-name counter for the pattern-guard desugar (`__pg{n}` join
+    /// points and parameters). One counter for the whole parse keeps every
+    /// synthesized name unique across nested desugars.
+    pg_fresh: usize,
 }
 
 /// A parser position to rewind to when a speculative parse fails. Captures
@@ -81,6 +106,7 @@ impl Parser {
             block_indent: 0,
             fixities: HashMap::new(),
             depth: 0,
+            pg_fresh: 0,
         }
     }
 
@@ -410,6 +436,34 @@ impl Parser {
                     }
                 }
                 other => merged.push(other),
+            }
+        }
+
+        // Lower pattern-guard chains now that every clause group is
+        // complete (§3.13 fall-through needs the following clauses) —
+        // see desugar_pattern_guard_clauses. After this walk no clause
+        // anywhere carries `raw_guards`.
+        for decl in &mut merged {
+            let r = match decl {
+                Decl::FunDef { name, clauses } => {
+                    let name = name.clone();
+                    self.desugar_pattern_guard_clauses(&name, clauses)
+                }
+                Decl::ClassDecl { methods, .. } => methods.iter_mut().try_for_each(|m| {
+                    let name = m.name.clone();
+                    match &mut m.default_clauses {
+                        Some(cs) => self.desugar_pattern_guard_clauses(&name, cs),
+                        None => Ok(()),
+                    }
+                }),
+                Decl::InstanceDecl { methods, .. } => methods.iter_mut().try_for_each(|m| {
+                    let name = m.name.clone();
+                    self.desugar_pattern_guard_clauses(&name, &mut m.clauses)
+                }),
+                _ => Ok(()),
+            };
+            if let Err(e) = r {
+                return Err(vec![*e]);
             }
         }
 
@@ -1555,14 +1609,21 @@ impl Parser {
     ) -> PResult<Clause> {
         // Guards
         self.skip_newlines_and_indent();
-        let guards = self.parse_guard_chain(&Token::Eq, 0)?;
+        let chain = self.parse_guard_chain(&Token::Eq, 0)?;
 
         // A guarded clause has no single body: the guard chain IS the body.
-        let body = if guards.is_empty() {
+        let body = if chain.is_empty() {
             self.expect(&Token::Eq)?;
             Some(self.parse_expr()?)
         } else {
             None
+        };
+        // A chain with binding qualifiers is held raw: its fall-through
+        // target is the NEXT clause, which is not parsed yet. The clause
+        // group is lowered at end of parse (desugar_pattern_guards).
+        let (guards, raw_guards) = match chain {
+            GuardChain::Plain(g) => (g, None),
+            GuardChain::Raw(r) => (Vec::new(), Some(r)),
         };
 
         // where clause
@@ -1575,6 +1636,7 @@ impl Parser {
             body,
             where_binds,
             span,
+            raw_guards,
         })
     }
 
@@ -1591,28 +1653,25 @@ impl Parser {
     /// (`| c == 92 = case cs of … (e : r) | e == 110 -> … \n | otherwise = …`)
     /// is left for the clause; a function clause passes 0 (nothing encloses
     /// a clause's own chain at a smaller indent).
-    fn parse_guard_chain(&mut self, sep: &Token, min_indent: usize) -> PResult<Vec<Guard>> {
-        let mut guards = Vec::new();
+    fn parse_guard_chain(&mut self, sep: &Token, min_indent: usize) -> PResult<GuardChain> {
+        let mut raws: Vec<RawGuard> = Vec::new();
+        let mut any_binding = false;
         while self.at(&Token::Pipe) {
             self.advance();
-            let mut condition = self.parse_guard_qualifier()?;
             // Haskell 2010 §3.13: a guard is a comma-separated qualifier
-            // list; the guard succeeds when every qualifier holds. Boolean
-            // qualifiers desugar to `&&` (short-circuit left-to-right, the
-            // same order and laziness as sequential qualifier checking).
-            // These used to die with a bare "Expected '='".
+            // list; the guard succeeds when every qualifier holds, checked
+            // left to right.
+            let mut quals = vec![self.parse_guard_qualifier()?];
             while self.at(&Token::Comma) {
                 self.advance();
-                let next = self.parse_guard_qualifier()?;
-                condition = Expr::InfixApp {
-                    op: "&&".to_string(),
-                    lhs: Box::new(condition),
-                    rhs: Box::new(next),
-                };
+                quals.push(self.parse_guard_qualifier()?);
+            }
+            if quals.iter().any(|q| !matches!(q, GuardQual::Bool(_))) {
+                any_binding = true;
             }
             self.expect(sep)?;
             let body = self.parse_stmt_expr()?;
-            guards.push(Guard { condition, body });
+            raws.push(RawGuard { quals, body });
             let before = self.checkpoint();
             self.skip_newlines_and_indent();
             if self.at(&Token::Pipe) && self.current_indent <= min_indent {
@@ -1622,46 +1681,55 @@ impl Parser {
                 break;
             }
         }
-        Ok(guards)
+        if any_binding {
+            return Ok(GuardChain::Raw(raws));
+        }
+        // The all-boolean chain folds its qualifiers to short-circuit `&&`
+        // (the same order and laziness as sequential qualifier checking) —
+        // the exact form every downstream stage always consumed.
+        let guards = raws.into_iter().map(|r| {
+            let mut it = r.quals.into_iter();
+            let Some(GuardQual::Bool(mut condition)) = it.next() else {
+                unreachable!("non-boolean qualifier in a plain guard chain")
+            };
+            for q in it {
+                let GuardQual::Bool(next) = q else {
+                    unreachable!("non-boolean qualifier in a plain guard chain")
+                };
+                condition = Expr::InfixApp {
+                    op: "&&".to_string(),
+                    lhs: Box::new(condition),
+                    rhs: Box::new(next),
+                };
+            }
+            Guard { condition, body: r.body }
+        }).collect();
+        Ok(GuardChain::Plain(guards))
     }
 
-    /// One guard qualifier: a boolean expression. The two BINDING qualifier
-    /// forms of Haskell 2010 §3.13 — pattern guards (`Just v <- m`) and
-    /// `let` qualifiers — introduce names whose scope is the rest of the
-    /// guard and its body, which the Guard AST (one Bool condition) cannot
-    /// carry; they are rejected with a rewrite hint instead of the bare
-    /// "Expected '='" they used to die with.
-    fn parse_guard_qualifier(&mut self) -> PResult<Expr> {
-        let loc = self.peek_loc().clone();
+    /// One guard qualifier of Haskell 2010 §3.13: a `let` binding group, a
+    /// pattern guard `pat <- expr` (tried first, backtracking to an
+    /// expression exactly like a list-comprehension generator), or a
+    /// boolean expression.
+    fn parse_guard_qualifier(&mut self) -> PResult<GuardQual> {
         if self.at(&Token::Let) {
-            let mut diag = Diagnostic::parse_at(
-                "'let' qualifiers in guards are not supported",
-                Span::new(loc.line, loc.col),
-            );
-            diag.notes.push(
-                "a 'let' inside a guard (Haskell 2010 §3.13) binds names for the \
-                 rest of the guard and its body; bind the name in a 'where' \
-                 clause or a 'let … in …' around the right-hand side instead"
-                    .to_string(),
-            );
-            return Err(Box::new(diag));
+            self.advance();
+            let binds = self.parse_let_binds()?;
+            return Ok(GuardQual::Let(binds));
         }
-        let expr = self.parse_expr()?;
-        if self.at(&Token::Bind) {
-            let mut diag = Diagnostic::parse_at(
-                "pattern guards ('pat <- expr' inside a guard) are not supported",
-                Span::new(loc.line, loc.col),
-            );
-            diag.notes.push(
-                "a pattern guard (Haskell 2010 §3.13) matches a pattern against an \
-                 expression and falls through to the next guard when it fails; \
-                 rewrite with a 'case' expression in the right-hand side, or a \
-                 'Maybe'-returning helper checked with a boolean guard"
-                    .to_string(),
-            );
-            return Err(Box::new(diag));
+        let save = self.checkpoint();
+        if self.is_pattern_start() {
+            if let Ok(pat) = self.parse_pattern()
+                && self.at(&Token::Bind)
+            {
+                self.advance();
+                let expr = self.parse_expr()?;
+                return Ok(GuardQual::Pat(pat, expr));
+            }
+            // Not a pattern guard — backtrack and parse as a boolean.
+            self.rewind(save);
         }
-        Ok(expr)
+        Ok(GuardQual::Bool(self.parse_expr()?))
     }
 
     /// The head of one binding-group entry: `name [patterns]`. Shared by
@@ -1866,17 +1934,26 @@ impl Parser {
             self.skip_newlines_and_indent();
             if self.at(&Token::Pipe) {
                 // Guarded where binding: parse the shared chain, then
-                // desugar to an if/else spine (a where binding is one
-                // equation — no next-clause fall-through to preserve).
-                let guards = self.parse_guard_chain(&Token::Eq, 0)?;
-                let body = guards.into_iter().rev().fold(
-                    Expr::App(Box::new(Expr::Var("error".into())), Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec())))),
-                    |else_branch, g| Expr::If {
-                        cond: Box::new(g.condition),
-                        then_branch: Box::new(g.body),
-                        else_branch: Box::new(else_branch),
-                    },
+                // desugar it in place (a where binding is one equation —
+                // no next-clause fall-through to preserve). A plain chain
+                // keeps its historical if/else spine; a chain with binding
+                // qualifiers (§3.13) takes the pattern-guard lowering with
+                // the same error fall-through.
+                let fallback = Expr::App(
+                    Box::new(Expr::Var("error".into())),
+                    Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec()))),
                 );
+                let body = match self.parse_guard_chain(&Token::Eq, 0)? {
+                    GuardChain::Plain(guards) => guards.into_iter().rev().fold(
+                        fallback,
+                        |else_branch, g| Expr::If {
+                            cond: Box::new(g.condition),
+                            then_branch: Box::new(g.body),
+                            else_branch: Box::new(else_branch),
+                        },
+                    ),
+                    GuardChain::Raw(raws) => self.guard_chain_expr(raws, fallback),
+                };
                 binds.push(LocalDef { name, patterns, body, sig: None });
             } else {
                 self.expect(&Token::Eq)?;
@@ -3619,6 +3696,9 @@ impl Parser {
 
         // Layout-based syntax
         let mut branches = Vec::new();
+        // (branch index, raw chain) for alternatives whose guards use
+        // binding qualifiers — lowered after the loop.
+        let mut raw_branches: Vec<(usize, Vec<RawGuard>)> = Vec::new();
         let saved_block = self.block_indent;
         let case_indent = self.open_item_block();
 
@@ -3649,12 +3729,24 @@ impl Parser {
 
             if self.at(&Token::Pipe) {
                 // Guards on case branch
-                let guards = self.parse_guard_chain(&Token::Arrow, case_indent)?;
-                branches.push(CaseBranch {
-                    pattern,
-                    guards,
-                    body: None,
-                });
+                match self.parse_guard_chain(&Token::Arrow, case_indent)? {
+                    GuardChain::Plain(guards) => branches.push(CaseBranch {
+                        pattern,
+                        guards,
+                        body: None,
+                    }),
+                    GuardChain::Raw(raws) => {
+                        // A binding-qualifier chain (§3.13); remembered per
+                        // branch and lowered below, once the alternatives
+                        // it can fall through to are parsed.
+                        raw_branches.push((branches.len(), raws));
+                        branches.push(CaseBranch {
+                            pattern,
+                            guards: vec![],
+                            body: None,
+                        });
+                    }
+                }
             } else {
                 self.expect(&Token::Arrow)?;
                 let body = self.parse_stmt_expr()?;
@@ -3667,6 +3759,7 @@ impl Parser {
         }
         self.block_indent = saved_block;
 
+        let branches = self.desugar_pattern_guard_branches(branches, raw_branches);
         Ok(Expr::Case {
             scrutinee: Box::new(scrutinee),
             branches,
@@ -3863,6 +3956,232 @@ impl Parser {
             };
         }
         Expr::Lambda { params, body: Box::new(body) }
+    }
+
+    // --- Pattern-guard desugaring (Haskell 2010 §3.13) -------------------
+    //
+    // A guard chain with BINDING qualifiers (`pat <- expr`, `let`) lowers
+    // to the plain expression language right here in the parser: qualifiers
+    // become nested `case`/`if`/`let` forms, and every "this guard failed"
+    // edge jumps to a lazily `let`-bound JOIN POINT holding the rest of the
+    // alternatives — evaluated at most once, on demand, so nothing is
+    // duplicated and nothing is computed twice (the scrutinee of a pattern
+    // guard in particular). Function clause groups need the whole group
+    // (§3.13 falls through to the NEXT CLAUSE), so their lowering runs at
+    // end of parse over the merged clause list: the clauses from the first
+    // raw chain on merge into one clause over fresh parameters whose body
+    // re-matches each original clause's patterns with the same join-point
+    // fall-through. Downstream stages never see any of this — an all-boolean
+    // chain still folds to `&&` conditions, and no Clause leaves the parser
+    // with `raw_guards` set.
+
+    fn pg_fresh_name(&mut self, kind: &str) -> String {
+        self.pg_fresh += 1;
+        format!("__pg{}_{}", kind, self.pg_fresh)
+    }
+
+    /// A pattern the lowering needs no fall-through branch for: it can only
+    /// fail by diverging (forcing bottom), never by mismatch.
+    fn pg_irrefutable(p: &Pattern) -> bool {
+        match p {
+            Pattern::Var(_) | Pattern::Wildcard => true,
+            Pattern::Paren(inner) | Pattern::As(_, inner) => Self::pg_irrefutable(inner),
+            Pattern::Tuple(ps) => ps.iter().all(Self::pg_irrefutable),
+            Pattern::Constructor { .. } | Pattern::LitPat(_) => false,
+        }
+    }
+
+    fn pg_error(msg: &str) -> Expr {
+        Expr::App(
+            Box::new(Expr::Var("error".into())),
+            Box::new(Expr::Lit(Literal::Str(msg.as_bytes().to_vec()))),
+        )
+    }
+
+    /// Bind `fail` as a join point unless it is already a variable; returns
+    /// the binding to wrap around the user of the join (via `pg_wrap_join`)
+    /// and the expression each failure edge references.
+    fn pg_join(&mut self, fail: Expr) -> (Option<LocalDef>, Expr) {
+        if matches!(fail, Expr::Var(_)) {
+            return (None, fail);
+        }
+        let name = self.pg_fresh_name("j");
+        (
+            Some(LocalDef { name: name.clone(), patterns: vec![], body: fail, sig: None }),
+            Expr::Var(name),
+        )
+    }
+
+    fn pg_wrap_join(bind: Option<LocalDef>, body: Expr) -> Expr {
+        match bind {
+            None => body,
+            Some(ld) => Expr::Let { binds: vec![ld], body: Box::new(body) },
+        }
+    }
+
+    /// Lower a raw guard chain: guards try in order, a failing qualifier
+    /// falls to the next guard, and past the last guard to `fallthrough`.
+    fn guard_chain_expr(&mut self, raws: Vec<RawGuard>, fallthrough: Expr) -> Expr {
+        let mut acc = fallthrough;
+        for raw in raws.into_iter().rev() {
+            let (bind, fail) = self.pg_join(acc);
+            let mut inner = raw.body;
+            for q in raw.quals.into_iter().rev() {
+                inner = match q {
+                    GuardQual::Bool(c) => Expr::If {
+                        cond: Box::new(c),
+                        then_branch: Box::new(inner),
+                        else_branch: Box::new(fail.clone()),
+                    },
+                    GuardQual::Pat(p, e) => {
+                        let irref = Self::pg_irrefutable(&p);
+                        let mut brs = vec![CaseBranch { pattern: p, guards: vec![], body: Some(inner) }];
+                        if !irref {
+                            brs.push(CaseBranch {
+                                pattern: Pattern::Wildcard,
+                                guards: vec![],
+                                body: Some(fail.clone()),
+                            });
+                        }
+                        Expr::Case { scrutinee: Box::new(e), branches: brs }
+                    }
+                    GuardQual::Let(binds) => Expr::Let { binds, body: Box::new(inner) },
+                };
+            }
+            acc = Self::pg_wrap_join(bind, inner);
+        }
+        acc
+    }
+
+    /// Fold an all-boolean guard list over a fall-through expression — the
+    /// if/else spine the merged-clause lowering gives a PLAIN chain caught
+    /// between pattern-guard clauses.
+    fn pg_plain_guards(guards: Vec<Guard>, fail: &Expr) -> Expr {
+        guards.into_iter().rev().fold(fail.clone(), |els, g| Expr::If {
+            cond: Box::new(g.condition),
+            then_branch: Box::new(g.body),
+            else_branch: Box::new(els),
+        })
+    }
+
+    /// Re-match `pat` against the already-bound variable `param` around
+    /// `inner`: a wildcard vanishes, a variable becomes a lazy alias, and
+    /// anything else a `case` whose fall-through (for a refutable pattern)
+    /// is `fail`.
+    fn pg_match_var(param: &str, pat: Pattern, inner: Expr, fail: &Expr) -> Expr {
+        match pat {
+            Pattern::Wildcard => inner,
+            Pattern::Var(x) => Expr::Let {
+                binds: vec![LocalDef { name: x, patterns: vec![], body: Expr::Var(param.to_string()), sig: None }],
+                body: Box::new(inner),
+            },
+            p => {
+                let irref = Self::pg_irrefutable(&p);
+                let mut brs = vec![CaseBranch { pattern: p, guards: vec![], body: Some(inner) }];
+                if !irref {
+                    brs.push(CaseBranch {
+                        pattern: Pattern::Wildcard,
+                        guards: vec![],
+                        body: Some(fail.clone()),
+                    });
+                }
+                Expr::Case { scrutinee: Box::new(Expr::Var(param.to_string())), branches: brs }
+            }
+        }
+    }
+
+    /// End-of-parse lowering for a function clause group in which some
+    /// clause carries a raw (binding-qualifier) guard chain. The clauses
+    /// from the first such chain on collapse into one clause over fresh
+    /// parameters; earlier clauses keep the ordinary multi-clause path.
+    fn desugar_pattern_guard_clauses(&mut self, name: &str, clauses: &mut Vec<Clause>) -> PResult<()> {
+        let Some(k) = clauses.iter().position(|c| c.raw_guards.is_some()) else {
+            return Ok(());
+        };
+        let arity = clauses[k].patterns.len();
+        for c in &clauses[k..] {
+            if c.patterns.len() != arity {
+                return Err(Box::new(Diagnostic::parse_at(
+                    format!(
+                        "the equations of '{}' from its first pattern guard on must all \
+                         have the same number of patterns",
+                        name
+                    ),
+                    c.span,
+                )));
+            }
+        }
+        let span = clauses[k].span;
+        let params: Vec<String> = (0..arity).map(|_| self.pg_fresh_name("a")).collect();
+        let tail = clauses.split_off(k);
+        let mut acc = Self::pg_error(&format!("Non-exhaustive patterns in {}", name));
+        for c in tail.into_iter().rev() {
+            let (bind, fail) = self.pg_join(acc);
+            let mut inner = if let Some(raws) = c.raw_guards {
+                self.guard_chain_expr(raws, fail.clone())
+            } else if !c.guards.is_empty() {
+                Self::pg_plain_guards(c.guards, &fail)
+            } else {
+                c.body.expect("clause with neither guards nor body")
+            };
+            if !c.where_binds.is_empty() {
+                inner = Expr::Let { binds: c.where_binds, body: Box::new(inner) };
+            }
+            let pats: Vec<(String, Pattern)> =
+                params.iter().cloned().zip(c.patterns).collect();
+            for (param, pat) in pats.into_iter().rev() {
+                inner = Self::pg_match_var(&param, pat, inner, &fail);
+            }
+            acc = Self::pg_wrap_join(bind, inner);
+        }
+        clauses.push(Clause {
+            patterns: params.into_iter().map(Pattern::Var).collect(),
+            guards: vec![],
+            body: Some(acc),
+            where_binds: vec![],
+            span,
+            raw_guards: None,
+        });
+        Ok(())
+    }
+
+    /// The case-expression twin of `desugar_pattern_guard_clauses`: from
+    /// the first alternative with a raw chain on, alternatives collapse
+    /// into one final catch-all branch that binds the scrutinee value and
+    /// re-matches each original alternative with join-point fall-through.
+    fn desugar_pattern_guard_branches(
+        &mut self,
+        mut branches: Vec<CaseBranch>,
+        raws: Vec<(usize, Vec<RawGuard>)>,
+    ) -> Vec<CaseBranch> {
+        if raws.is_empty() {
+            return branches;
+        }
+        let k = raws[0].0;
+        let mut raw_map: std::collections::HashMap<usize, Vec<RawGuard>> =
+            raws.into_iter().collect();
+        let tail = branches.split_off(k);
+        let scrut = self.pg_fresh_name("s");
+        // The same message codegen's own fall-off statement raises.
+        let mut acc = Self::pg_error("Non-exhaustive patterns");
+        for (i, b) in tail.into_iter().enumerate().rev() {
+            let (bind, fail) = self.pg_join(acc);
+            let inner = if let Some(rg) = raw_map.remove(&(k + i)) {
+                self.guard_chain_expr(rg, fail.clone())
+            } else if !b.guards.is_empty() {
+                Self::pg_plain_guards(b.guards, &fail)
+            } else {
+                b.body.expect("case branch with neither guards nor body")
+            };
+            let inner = Self::pg_match_var(&scrut, b.pattern, inner, &fail);
+            acc = Self::pg_wrap_join(bind, inner);
+        }
+        branches.push(CaseBranch {
+            pattern: Pattern::Var(scrut),
+            guards: vec![],
+            body: Some(acc),
+        });
+        branches
     }
 
     /// A constructor atom: record construction `Con { f = v, ... }`

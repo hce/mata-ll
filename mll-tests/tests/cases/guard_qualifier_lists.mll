@@ -2,8 +2,9 @@
 -- succeeds when every qualifier holds, checked left to right (desugared
 -- to short-circuit &&, which has the same order and laziness).
 -- Regression: a comma in a guard died with a bare "Expected '='".
--- The binding qualifier forms (pattern guards, let) get explanatory
--- rejections, pinned in compile_errors.rs.
+-- The binding qualifier forms (pattern guards, let) are implemented too,
+-- pinned by pattern_guards.mll; this case pins that an ALL-BOOLEAN chain
+-- still folds to && (the historical, optimizer-friendly form).
 
 classify :: Int -> Int -> String
 classify x y

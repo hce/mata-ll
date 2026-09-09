@@ -163,12 +163,41 @@ pub struct Clause {
     pub body: Option<Expr>,
     pub where_binds: Vec<LocalDef>,
     pub span: Span,
+    /// A guard chain that uses BINDING qualifiers (Haskell 2010 §3.13
+    /// pattern guards / `let` qualifiers), held raw between parsing this
+    /// clause and the parser's own whole-group desugar (fall-through needs
+    /// the following clauses, which are not parsed yet when the clause is
+    /// built). `parse` lowers every one to plain cases/lets before it
+    /// returns — no clause LEAVES the parser with this set, so every later
+    /// stage may (and does) ignore it. An all-boolean chain never lands
+    /// here; it folds to `guards` exactly as before.
+    pub raw_guards: Option<Vec<RawGuard>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Guard {
     pub condition: Expr,
     pub body: Expr,
+}
+
+/// One `| q1, q2, … = body` guard as parsed, qualifiers unfolded — only
+/// used when a chain contains a binding qualifier (see `Clause::raw_guards`).
+#[derive(Debug, Clone)]
+pub struct RawGuard {
+    pub quals: Vec<GuardQual>,
+    pub body: Expr,
+}
+
+/// One guard qualifier of Haskell 2010 §3.13 — the same triple the
+/// list-comprehension qualifiers form. `Bool` tests, `Pat` matches a
+/// pattern against an expression (binding its variables for the rest of
+/// the guard and its body) and falls through when the match fails, `Let`
+/// binds names for the rest of the guard and its body.
+#[derive(Debug, Clone)]
+pub enum GuardQual {
+    Bool(Expr),
+    Pat(Pattern, Expr),
+    Let(Vec<LocalDef>),
 }
 
 #[derive(Debug, Clone)]

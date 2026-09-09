@@ -950,6 +950,9 @@ impl Rename<'_> {
             body: c.body.as_ref().map(|b| self.expr(b, &bound)),
             where_binds: c.where_binds.iter().map(|ld| self.localdef(ld, &bound)).collect(),
             span: c.span,
+            // The parser lowers every raw (binding-qualifier) guard chain
+            // before returning; nothing reaches module resolution with one.
+            raw_guards: { debug_assert!(c.raw_guards.is_none(), "raw guards survived parsing"); None },
         }
     }
 
@@ -1148,6 +1151,7 @@ fn rewrite_uses_clause(c: Clause, aliases: &HashSet<String>) -> Clause {
         where_binds: c.where_binds.into_iter()
             .map(|ld| rewrite_uses_localdef(ld, aliases)).collect(),
         span: c.span,
+        raw_guards: { debug_assert!(c.raw_guards.is_none(), "raw guards survived parsing"); None },
     }
 }
 

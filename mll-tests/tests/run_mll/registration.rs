@@ -555,6 +555,9 @@ mll_test!(negative_zero_keys, "negative_zero_keys.mll");
 // An FFI-leaked integer-subtype Number and its float spelling are one
 // structural map key (not GHC-twinnable: the subtype is Lua's).
 mll_test!(int_subtype_keys, "int_subtype_keys.mll");
+// Haskell 2010 §3.13 pattern guards and let qualifiers (join-point
+// lowering in the parser; clause/case/where/instance positions).
+mll_test!(pattern_guards, "pattern_guards.mll");
 mll_test!(dead_var_specialization, "dead_var_specialization.mll");
 mll_test!(foldl_lazy_accumulator, "foldl_lazy_accumulator.mll");
 // Record construction against the constructor's own fields (multi-

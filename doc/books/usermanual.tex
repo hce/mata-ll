@@ -474,6 +474,22 @@ classify n
     | otherwise = "negative"
 \end{lstlisting}
 
+A guard is a comma-separated list of \emph{qualifiers} (Haskell 2010
+\S3.13), checked left to right: boolean tests, \emph{pattern guards}
+(\texttt{pat <- expr}, which matches the pattern against the expression,
+binds its variables for the rest of the guard and the body, and falls
+through to the next guard --- or the next equation --- when the match
+fails), and \texttt{let} bindings scoped the same way. All three work in
+function clauses, case alternatives, and \texttt{where} bindings.
+
+\begin{lstlisting}
+price :: M.Map String Int -> String -> String
+price m k
+    | Just v <- M.lookup k m, v > 100 = "expensive " <> k
+    | Just v <- M.lookup k m, let s = show v = k <> ": " <> s
+    | otherwise = "not stocked"
+\end{lstlisting}
+
 \subsection{Where Clauses}
 
 \begin{lstlisting}

@@ -52,9 +52,13 @@ miscompile). Regression probes: `tests/cases/program_corpus_regressions.mll`.
       is a one-line change in `resolve_concrete_method`; the question is
       whether the `<>`-for-strings / `++`-for-lists teaching split is worth
       the parity gap. Not changed here — the user's call.
-- [ ] Pattern guards (`| Just v <- m`) and `let` qualifiers in guards stay
-      unsupported (parser rejects with a rewrite hint); the corpus avoids
-      them. Real programs use pattern guards often; worth a decision.
+- [x] Pattern guards (`| Just v <- m`) and `let` qualifiers in guards —
+      IMPLEMENTED 2026-09-09 (Haskell 2010 §3.13): the parser lowers a
+      binding-qualifier chain to lazily let-bound join points (nothing
+      evaluated twice, clause fall-through preserved by merging the
+      clauses from the first pattern-guard clause on); all-boolean chains
+      still fold to `&&` and nothing downstream changed. Case
+      pattern_guards.mll (GHC-goldened, byte-identical).
 
 ## Fresh-eyes review 2026-09-03 — open queue
 

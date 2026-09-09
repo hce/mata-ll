@@ -35,6 +35,21 @@ API of the `mllc` library crate.)
   => a -> b`, GHC's `fromInteger . toInteger`, over `Int`/`Integer`/
   `Number` sources and targets. Case `from_integral.mll` (GHC-goldened).
 
+- **Pattern guards and `let` qualifiers in guards** (Haskell 2010 §3.13).
+  A guard is now a full qualifier list: boolean tests, pattern guards
+  (`| Just v <- M.lookup k m, v > 100 = …` — binding `v` for the rest of
+  the guard and the body, falling through to the next guard or the next
+  equation on mismatch) and `let` bindings, in function clauses, case
+  alternatives, `where` bindings, and instance/class-default methods.
+  Both forms used to be parse errors with rewrite hints. The parser
+  lowers a binding-qualifier chain to lazily `let`-bound join points —
+  nothing is evaluated twice (a pattern guard's scrutinee in particular),
+  untaken alternatives are never evaluated, and clause fall-through is
+  preserved by merging the equations from the first pattern-guard clause
+  on into one join-point spine. All-boolean chains still fold to `&&`
+  exactly as before, and nothing downstream of the parser changed. Case
+  `pattern_guards.mll` (GHC-goldened, byte-identical).
+
 - **`floor`, `ceiling`, `truncate`, `round`** in the Prelude, with GHC's
   names and semantics — `truncate` toward zero, `round` half to even —
   typed `Number -> Int` (the RealFrac generalization stays deferred with

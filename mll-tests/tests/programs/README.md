@@ -47,11 +47,12 @@ What a program here may use (the rules the twin generation implies; see
   `Int` is reached by annotation (and a `Data.Map` key must be one);
   `Number` is `Double`;
 * no `Char`-based Prelude functions (`words`, `lines`, `unwords`), no
-  `fromIntegral` (use `fromInteger . toInteger`), no `Floating`/`RealFrac`
-  classes beyond `sqrt`;
-* no pattern guards or `let` qualifiers in guards (the parser rejects them
-  with a rewrite hint), and no `<>` at list types (`++` there; `<>` is for
-  `String` and user Semigroups — see the TODO entry on that decision).
+  `Floating`/`RealFrac` classes beyond `sqrt` and the `Number -> Int`
+  rounding functions.
+
+(Historical constraints, since lifted: `fromIntegral`, pattern guards and
+`let` qualifiers in guards, and `<>` at list types are all supported now —
+new programs may use them.)
 
 ## Adding a program
 
