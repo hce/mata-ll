@@ -547,6 +547,8 @@ mll_test!(thunklift_settled_captures, "thunklift_settled_captures.mll");
 mll_test!(either_monad, "either_monad.mll");
 // fromIntegral over every Int/Integer/Number source/target pair.
 mll_test!(from_integral, "from_integral.mll");
+// floor/ceiling/truncate/round (round half to even, as GHC).
+mll_test!(rounding, "rounding.mll");
 mll_test!(dead_var_specialization, "dead_var_specialization.mll");
 mll_test!(foldl_lazy_accumulator, "foldl_lazy_accumulator.mll");
 // Record construction against the constructor's own fields (multi-

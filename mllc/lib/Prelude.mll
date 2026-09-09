@@ -240,6 +240,31 @@ odd n = n `rem` 2 /= 0
 fromIntegral :: (Integral a, Num b) => a -> b
 fromIntegral n = fromInteger (toInteger n)
 
+-- Rounding, with GHC's names and semantics but the result type fixed at
+-- Int (the RealFrac generalization is deferred with the rest of the
+-- numeric tower's upper rungs — see CAVEATS). `floor` is the same
+-- primitive LMath declares (an identical FFI re-declaration is not an
+-- import collision); LMath's Lua-named `ceil` stays as well.
+floor :: Number -> LuaPure "math.floor" Int
+ceiling :: Number -> LuaPure "math.ceil" Int
+
+-- Toward zero, as GHC.
+truncate :: Number -> Int
+truncate x = if x >= 0.0 then floor x else ceiling x
+
+-- Round half to even, as GHC: a tie (fractional part exactly 0.5) goes
+-- to the even neighbour. The fractional part is exact — `fromIntegral n`
+-- reconstructs the double `floor` consumed, and for |x| >= 2^52 (where
+-- doubles are already integral) it is exactly x, so f is 0 and x rounds
+-- to itself.
+round :: Number -> Int
+round x =
+    let n = floor x
+        f = x - fromIntegral n
+    in if f < 0.5 then n
+       else if f > 0.5 then n + 1
+       else if even n then n else n + 1
+
 -- Largest / smallest element. Both error on an empty structure.
 maximum :: (Ord a, Foldable t) => t a -> a
 maximum t = case foldr (\x xs -> x : xs) [] t of

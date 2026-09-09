@@ -35,6 +35,14 @@ API of the `mllc` library crate.)
   => a -> b`, GHC's `fromInteger . toInteger`, over `Int`/`Integer`/
   `Number` sources and targets. Case `from_integral.mll` (GHC-goldened).
 
+- **`floor`, `ceiling`, `truncate`, `round`** in the Prelude, with GHC's
+  names and semantics — `truncate` toward zero, `round` half to even —
+  typed `Number -> Int` (the RealFrac generalization stays deferred with
+  the tower's upper rungs; see CAVEATS). `LMath.floor`/`LMath.ceil` are
+  unchanged, and `floor` is the same primitive in both, so `import LMath`
+  programs keep compiling. Case `rounding.mll` (GHC-goldened; ties,
+  negatives, and integral doubles past 2^52).
+
 - **`<>` concatenates lists** (GHC parity). `[a]` is a `Semigroup` with
   `(<>) = (++)`, so `xs <> ys` now compiles and concatenates at concrete
   list types, matching GHC. It previously errored with a note directing

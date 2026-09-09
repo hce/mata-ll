@@ -132,10 +132,11 @@ HASKDIFF.md, "Integers").
 
 The higher rungs of the numeric tower are not yet typeclasses. `pi`, `exp`,
 `log`, `sqrt`, `sin`, `cos`, … exist as `Number`-typed functions (in `LMath`;
-`sqrt` also in the Prelude), and rounding is `LMath.floor` / `LMath.ceil`
-(`Number -> Int`). GHC's `round`, `truncate` and `ceiling` are not provided
-(`truncate` is `LMath.floor` on a non-negative value; `round` — half to even
-in GHC — has no shim yet). So you can compute with these at `Number`, but
+`sqrt` also in the Prelude). Rounding is in the Prelude with GHC's names and
+semantics — `floor`, `ceiling`, `truncate` (toward zero) and `round` (half
+to even) — but typed `Number -> Int` rather than GHC's `(RealFrac a,
+Integral b) => a -> b` (`LMath.floor`/`LMath.ceil` remain, and `floor` is
+the same primitive in both). So you can compute with these at `Number`, but
 you cannot yet write code generic over `Floating a`/`RealFrac a`, nor give
 those classes a user instance. Generalising them is deferred.
 

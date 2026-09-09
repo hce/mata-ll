@@ -374,6 +374,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_thunklift_settled_captures, "cases", "thunklift_settled_captures.mll"),
         (ghc_oracle_either_monad, "cases", "either_monad.mll"),
         (ghc_oracle_from_integral, "cases", "from_integral.mll"),
+        (ghc_oracle_rounding, "cases", "rounding.mll"),
         (ghc_oracle_dead_var_specialization, "cases", "dead_var_specialization.mll"),
         (ghc_oracle_foldl_lazy_accumulator, "cases", "foldl_lazy_accumulator.mll"),
         (ghc_oracle_nan_map_keys, "cases", "nan_map_keys.mll"),

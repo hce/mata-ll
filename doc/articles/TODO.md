@@ -481,8 +481,11 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       rounding paragraph states what exists (LMath.floor/ceil; no
       round/truncate/ceiling — parity gap, see below); CAVEATS where-helper
       paragraph corrected; COMPILER.md count; DIVERGENCES.md scope note.
-      Still to add: `round` (half-to-even), `truncate`, `ceiling` as Prelude
-      functions on Number (would need LMath.floor/ceil reconciled first).
+      ~~Still to add: `round` (half-to-even), `truncate`, `ceiling` as Prelude
+      functions on Number (would need LMath.floor/ceil reconciled first)~~ —
+      ADDED 2026-09-09 with `floor` (all `Number -> Int`; Prelude `floor` is
+      LMath's primitive, so the shapes agree and `import LMath` still
+      compiles; case rounding.mll).
 - [ ] (details of the original drift list) SPEC.md ~210-218 and HASKDIFF.md
       526-529: existential `show` promised (B2). ioloop.rs:301 hm-persistence comment (B1). HASKDIFF
       44-57 thunk-depth thresholds (B6). HASKDIFF 484 + Prelude.mll:150
