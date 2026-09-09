@@ -151,6 +151,23 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`-0.0` and an FFI-leaked integer-subtype `Number` split structural map
+  keys.** The structural-key encoder spelled `-0.0` as `"n-0"` next to
+  `0.0`'s `"n0"`, and Lua's integer subtype `2` (from `tonumber`, the math
+  library, or any FFI result) as `"i2"` next to the float `2.0`'s `"n2"` —
+  two map entries for values `==` says (and GHC treats as) one key, with
+  lookups landing on either. The encoder now encodes by numeric value: an
+  integral float encodes as the equal integer, and `-0.0` as `0` (on
+  LuaJIT's single number type, `-0.0` normalizes by hand). The scalar
+  store always agreed via Lua's own key normalization. Cases
+  `negative_zero_keys.mll` (GHC-goldened; scalar + tuple/list/Maybe keys,
+  both insertion orders, `Data.Map` and `Data.Set`) and
+  `int_subtype_keys.mll` (self-asserting; the subtype is Lua-only). One
+  measured residual is pinned as the first entry in DIVERGENCES.md: a
+  scalar key whose last write was `-0.0` *shows* as `0.0` (GHC keeps the
+  written spelling); size/lookup/member/delete and all structural shapes
+  match GHC.
+
 - **Layout continuation lines the parser refused.** A data declaration
   whose `=` and `|` start on the following lines (`data T\n    = A\n
   | B`), and a case alternative whose guard chain starts on the line

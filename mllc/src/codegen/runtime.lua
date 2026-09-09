@@ -1979,7 +1979,19 @@ local function __mll_key_scalar(x)
     -- top): the key lands and nothing ever matches it. "u" is no other
     -- encoding's prefix (s/b/i/n/N/J/[/( are taken).
     if x ~= x then __mll_hm_nan_seq = __mll_hm_nan_seq + 1; return "u" .. __mll_hm_nan_seq end
-    if math.type ~= nil and math.type(x) == "integer" then return "i" .. x end
+    -- The encoding is by numeric VALUE, as `==` (and GHC) equate keys: an
+    -- integral float encodes as the equal integer when one exists, so the
+    -- integer-subtype 2 and a leaked 2.0 — and -0.0 and 0.0 — are ONE key
+    -- (the scalar store gets this for free from Lua's own key
+    -- normalization; this encoder used to split them).
+    if math.type ~= nil then
+        if math.type(x) == "integer" then return "i" .. x end
+        local i = math.tointeger(x)
+        if i ~= nil then return "i" .. i end
+        return "n" .. string.format("%.17g", x)
+    end
+    -- One float type (LuaJIT): only -0.0 needs the value rule by hand.
+    if x == 0 then return "n0" end
     return "n" .. string.format("%.17g", x)
 end
 local function __mll_key_list(enc, l) l = __force(l); local parts = {} local cur = l while cur ~= nil do parts[#parts+1] = enc(__force(cur[1])) cur = __mll_tail(cur) end return "[" .. table.concat(parts, ",") .. "]" end

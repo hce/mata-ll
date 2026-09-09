@@ -549,6 +549,12 @@ mll_test!(either_monad, "either_monad.mll");
 mll_test!(from_integral, "from_integral.mll");
 // floor/ceiling/truncate/round (round half to even, as GHC).
 mll_test!(rounding, "rounding.mll");
+// -0.0 and 0.0 are one map key, scalar and structural (value-based
+// structural key encoding).
+mll_test!(negative_zero_keys, "negative_zero_keys.mll");
+// An FFI-leaked integer-subtype Number and its float spelling are one
+// structural map key (not GHC-twinnable: the subtype is Lua's).
+mll_test!(int_subtype_keys, "int_subtype_keys.mll");
 mll_test!(dead_var_specialization, "dead_var_specialization.mll");
 mll_test!(foldl_lazy_accumulator, "foldl_lazy_accumulator.mll");
 // Record construction against the constructor's own fields (multi-

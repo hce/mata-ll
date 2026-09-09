@@ -51,6 +51,7 @@ excluded_reason() {
     case "$1" in
         # -- FFI / Lua-runtime surfaces: not expressible under GHC ------------
         cases/any_type)                  echo "builtin Any (Lua dynamic value carrier)";;
+        cases/int_subtype_keys)          echo "ffi_tonumber_float integer-subtype leak (Lua-only number subtype)";;
         cases/any_ffi_marshal)           echo "LuaPure FFI declarations marshalling the builtin Any";;
         cases/bytestring)                echo "ByteString builtins (Lua byte strings)";;
         cases/bytestring_fold_nil_result) echo "ByteString builtins (Lua byte strings)";;

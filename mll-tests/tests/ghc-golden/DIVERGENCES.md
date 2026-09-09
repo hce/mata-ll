@@ -21,12 +21,26 @@ file only records the measured facts.
 
 ## Pinned runtime divergences
 
-(Scope: "none" is measured over the goldened corpus — every case in
+(Scope: measured over the goldened corpus — every case in
 `tests/cases` and `tests/ghc` that is not listed in EXCLUDED.tsv. The
 excluded areas — FFI surfaces, HashMap builtins, Lua-specific modules —
 are checked by self-asserting cases, not by a GHC twin.)
 
-None. The nineteen divergences this file used to carry (four pinned
+* **`negative_zero_keys` (one line): a scalar `Data.Map` key written as
+  `-0.0` shows as `0.0`.** GHC's `insert` stores the new key's spelling,
+  so a map whose LAST write at zero used `-0.0` prints the key as `-0.0`
+  (`M.toList (M.fromList [(0.0,"a"),(-0.0,"b")])` is `[(-0.0,"b")]`).
+  mata-ll's scalar store indexes the Lua table with the key value itself
+  and Lua normalizes `-0.0` to `0`, so the spelling is lost and the key
+  prints as `0.0`. Size, lookup, member, delete and every structural-key
+  shape agree with GHC (a structural entry stores the written key, so
+  `M.toList` shows `-0.0` there exactly as GHC does — see the case).
+  Preserving the scalar spelling would mean threading a per-version
+  "sign of the zero key" through the persistent store's diff chain and
+  every write/enumerate fast path for one pathological double; recorded
+  here instead.
+
+Nothing else diverges. The nineteen divergences this file used to carry (four pinned
 runtime ones and fifteen assertion-level ones) all reduced to three `show`
 behaviors — unquoted `String` show, `", "` list/tuple separators, and
 `%.14g` fractional formatting — and were resolved by converging `show` on

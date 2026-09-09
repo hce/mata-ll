@@ -51,6 +51,7 @@ cases/hashmap_versions	HashMap builtins (Lua tables)
 cases/hm_lookup_case_fused	HashMap builtins (Lua tables)
 cases/import_dual_forms	qualified import: twin module resolution gap (Q77 seam)
 cases/import_merge	qualified import: twin module resolution gap (Q77 seam)
+cases/int_subtype_keys	ffi_tonumber_float integer-subtype leak (Lua-only number subtype)
 cases/integer_json	Generics substrate + JSON FFI library
 cases/json_codec	JSON FFI library
 cases/lbit_64bit_boundary	LBit (Lua bit-op semantics, deliberately not Data.Bits)
