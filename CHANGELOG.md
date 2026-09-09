@@ -254,6 +254,14 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **The type-erased container-show shims are deleted.** `show_List_`,
+  `show_Maybe` and their `showsPrec` twins (each a bare `return show(x)`)
+  are gone from the runtime and the known-name seeds: since constrained
+  existentials compose a real Show dictionary, no well-typed program
+  reached them. The verifier keeps the names on its deny-list, so a
+  compiler regression that resolved to one again would fail loudly at
+  compile time instead of calling nil at run time.
+
 - **One table per mirrored family inside the compiler.** The ST array
   and IORef intrinsics are one table (`intrinsics.rs`: source name,
   action-closure name, fused name, strictness mask) read by demand

@@ -11,8 +11,9 @@
 //!
 //! This pass makes that failure loud: it walks the final TIR and reports any
 //! call to a *type-erased* show — the bare class method `show` or one of the
-//! generic runtime wrappers `show_Maybe`/`show_List_` (which are defined as
-//! `\x -> show x`) — applied at a *concrete structured* type. At a concrete
+//! former generic runtime wrappers `show_Maybe`/`show_List_` (once defined as
+//! `\x -> show x`, now deleted from the runtime; the names remain flagged) —
+//! applied at a *concrete structured* type. At a concrete
 //! type, monomorphization should have resolved to a *specialized* show (a
 //! `__mll_show_list`/`__mll_show_maybe` thread, or a per-type derived
 //! `show_Tree_…`); reaching a type-erased one instead is a compiler bug, so the
@@ -32,9 +33,12 @@ use std::collections::HashSet;
 use crate::tir::*;
 use crate::types::Ty;
 
-/// The type-erased show functions: the bare class method and the two generic
-/// runtime wrappers that delegate to it. A concrete structured call must
-/// never resolve to one of these. Equality has NO entry here: at TIR level
+/// The type-erased show functions: the bare class method and the generic
+/// wrapper names that used to delegate to it (`show_Maybe`/`show_List_` and
+/// their showsPrec twins are deleted from the runtime — nothing mints them —
+/// but the names stay on this deny-list so a resurrected resolution fails
+/// loudly here at compile time, not as a nil call at run time). A concrete
+/// structured call must never resolve to one of these. Equality has NO entry here: at TIR level
 /// the Eq method only ever appears as the `==`/`/=` operator (`InfixApp`
 /// applied, `OpFunc` first-class) — both have their own checks in `walk` —
 /// while a bare `eq` Var is an ordinary binder (`nubBy eq xs` in the

@@ -1410,8 +1410,10 @@ local function show_Int(x) return __mll_show_integer(__force(x)) end
 local function show_Number(x) return __mll_show_double(__force(x)) end
 local function show_String(x) return __mll_show_string(__force(x)) end
 local function show_Bool(x) return show(x) end
-local function show_List_(x) return show(x) end
-local function show_Maybe(x) return show(x) end
+-- (The type-erased container-show shims show_List_/show_Maybe and their
+-- showsPrec twins are GONE: dictionary-form container show composes a
+-- real dictionary — mono's structural_show_dict — so no well-typed
+-- program reached them, and verify.rs still rejects any call that would.)
 -- Unit's runtime rep is nil (same as Nothing/[]), so the type-erased generic
 -- `show` cannot render it; the Show () instance dispatches here type-directedly.
 local function show_Unit(x) return "()" end
@@ -1422,8 +1424,6 @@ local function showsPrec_Int(d, x, s) d = __force(d); x = __force(x); s = __forc
 local function showsPrec_Number(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_Number(x), s) end
 local function showsPrec_String(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_String(x), s) end
 local function showsPrec_Bool(d, x, s) d = __force(d); x = __force(x); s = __force(s); return __mll_shows_prec(d, show_Bool(x), s) end
-local function showsPrec_List_(d, x, s) return __mll_shows_prec(d, show(x), s) end
-local function showsPrec_Maybe(d, x, s) return __mll_shows_prec(d, show(x), s) end
 local function showsPrec_Unit(d, x, s) d = __force(d); return "()" .. __force(s) end
 local function eq_Int(a, b) a = __force(a); b = __force(b); return a == b end
 local function eq_Number(a, b) a = __force(a); b = __force(b); return a == b end

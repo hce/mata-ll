@@ -462,12 +462,12 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
       bombs runtime bodies and is pass-independent; the emission-time
       rewrites (fusion inlining, exact-first-force) precede every pass and
       are held to their claims by the WHNF refutation build.
-- [ ] The type-erased container-show shims `show_List_`/`show_Maybe`
-      (runtime.lua, demand rows, SHOW_HELPERS, concrete_vars seeds) are no
-      longer reachable from a well-typed program (dictionary-form container
-      show composes a real dictionary since B2); their strictness-probe rows
-      were dropped. Delete the shims and their table entries once B17 (the
-      one remaining erased-element path) is closed.
+- [x] The type-erased container-show shims `show_List_`/`show_Maybe` —
+      DELETED 2026-09-09 (with their showsPrec twins) from runtime.lua and
+      the RUNTIME_VALUE_SEEDS list, now that B17 (the last erased-element
+      path) is closed. verify.rs keeps the names on its deny-list so a
+      resurrected resolution fails loudly at compile time; demand's
+      comments updated.
 - [x] mll-tests/lua-compat.sh prefers `target/release/mll`; it now refuses
       a binary older than any file under `mllc/src`, `mllc/lib` or
       `mll/src` (`MLL_ALLOW_STALE=1` overrides) — DONE 2026-09-08.

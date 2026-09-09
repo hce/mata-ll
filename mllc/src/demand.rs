@@ -157,10 +157,10 @@ pub const RUNTIME_PRELUDE_STRICTNESS: &[(&str, &[bool])] = &[
     ("show_String", &[true]),
     ("show_Bool", &[true]),
     // (`show_List_`/`show_Maybe`, the type-erased container-show shims,
-    // carry no row: no well-typed program reaches them since the
-    // dictionary-form container show composes a real dictionary — see
-    // mono's structural_show_dict. Left without a row they are weighed
-    // lazily, which is always sound.)
+    // are DELETED from the runtime: no well-typed program reached them
+    // since the dictionary-form container show composes a real dictionary
+    // — see mono's structural_show_dict — and verify.rs rejects any call
+    // that would resurrect them.)
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),
     // showsPrec shims: each forces the precedence, the value and the tail
@@ -280,10 +280,10 @@ pub const ENTRY_FORCED: &[(&str, &[bool])] = &[
     ("show_String", &[true]),
     ("show_Bool", &[true]),
     // (`show_List_`/`show_Maybe`, the type-erased container-show shims,
-    // carry no row: no well-typed program reaches them since the
-    // dictionary-form container show composes a real dictionary — see
-    // mono's structural_show_dict. Left without a row they are weighed
-    // lazily, which is always sound.)
+    // are DELETED from the runtime: no well-typed program reached them
+    // since the dictionary-form container show composes a real dictionary
+    // — see mono's structural_show_dict — and verify.rs rejects any call
+    // that would resurrect them.)
     ("show_ByteString", &[true]),
     ("show_HashMap", &[true]),
     ("show_Integer", &[true]),
