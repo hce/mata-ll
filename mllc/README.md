@@ -20,27 +20,27 @@ crate (which provides the `mll` command).
 
 ## Changelog
 
-Latest release — 0.1.7:
+Latest release — 0.1.8:
 
-- Correctness: a deep review round — four fresh-eyes passes, ~200 fixes.
-  Highlights: multi-clause functions returning functions no longer drop
-  arguments (eta padding is consumed, local functions are padded); the
-  dictionary-passing fallback's wrong-code and wrong-rejection paths are
-  closed; a tail call from one IO function to another runs in constant
-  stack; action-typed value bindings re-perform instead of memoizing.
-- Diagnostics: a warnings channel (a literal match without a catch-all
-  warns with a witness), Maranget-matrix exhaustiveness with real
-  witnesses in the error, import cycles reported as the actual chain.
-- Syntax: as-patterns, the remaining `newtype` forms, hex/octal/binary
-  literals and numeric underscores, first-class `($)` and `(.)`,
-  multi-line import lists, infix definitions in class/instance bodies.
-- Generics: `as` renames are reflected through the derived metadata
-  (`selName`/`conName`), so a `deriving (Generic)` type can rename fields
-  for user-written generic codecs.
-- REPL: IO actions execute, embedded Lua 5.4 matches the runner.
-- Prelude parity: `sortBy` is stable, `foldl'` is strict in its
-  accumulator, `max`/`min` are `Ord` methods, `head`/`tail` carry GHC's
-  messages.
+- Haskell parity: pattern guards and `let` qualifiers in guards (Haskell
+  2010 §3.13); type signatures on `where`/`let`/do-`let` bindings;
+  `fromIntegral` and `floor`/`ceiling`/`truncate`/`round` (half to
+  even); `Monad (Either e)`; GHC's mutual defaults for user
+  Functor/Applicative/Monad and Eq/Show instances; `<>` concatenates
+  lists; `Data.IORef`.
+- Performance: eleven optimization rounds against a speed-of-light
+  benchmark suite — persistent diff+reroot HashMaps, list-pipeline
+  fusion into single twin-shape loops, Knuth-D Integer division,
+  closure-free thunks, site-forced calling conventions; several
+  workloads now run within ~1x of hand-written Lua under LuaJIT.
+- Correctness: a differential program corpus — 25 whole programs run
+  under real GHC and byte-compared on three Lua interpreters — plus
+  review rounds closed miscompiles in newtype constructors,
+  dead-type-variable specialization, NaN and `-0.0` map keys,
+  mid-enumeration HashMap reroots, and lazy Prelude folds.
+- Structure: hand-mirrored compiler tables reduced to one source each,
+  the optimizer's strictness claims refuted after every pass, and the
+  LuaJIT canary's bimodality fixed (ST reads settle their slot inline).
 
 See [CHANGELOG.md](https://github.com/hce/mata-ll/blob/main/CHANGELOG.md) for the
 full history.

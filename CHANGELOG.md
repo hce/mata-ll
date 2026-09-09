@@ -29,6 +29,8 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+## [0.1.8] - 2026-09-09
+
 ### Added
 
 - **`fromIntegral`** (GHC parity): `fromIntegral :: (Integral a, Num b)
