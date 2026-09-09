@@ -121,7 +121,8 @@ included. An integer literal larger than `maxBound :: Int` is an ordinary
 base-2^24 limbs, exact on both Lua 5.3+ (native i64) and LuaJIT (doubles),
 with no boxing observable in the language. `Int` (and `Number`) arithmetic
 at a concrete type inlines to bare Lua operators. `fromInteger :: Integer
--> a` and `toInteger :: Integral a => a -> Integer` both exist, as in GHC.
+-> a`, `toInteger :: Integral a => a -> Integer` and `fromIntegral ::
+(Integral a, Num b) => a -> b` all exist, as in GHC.
 
 `Number` maps to Lua's float type (double-precision IEEE 754).
 

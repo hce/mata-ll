@@ -122,9 +122,11 @@ value in a Lua-hosted language whose fractional type is already a double. For
 the same reason the `Real` class carries no `toRational` method; it exists only
 as the `(Num a, Ord a) =>` superclass marker that `Integral` sits above.
 `Integral`'s `toInteger` and `Num`'s `fromInteger` are both present with
-their GHC signatures: `Integer` is a real arbitrary-precision type — the
-default for unannotated integer literals — and `Int`↔`Integer`
-conversions go through exactly this pair (see HASKDIFF.md, "Integers").
+their GHC signatures, and so is `fromIntegral :: (Integral a, Num b) => a
+-> b` (GHC's `fromInteger . toInteger`): `Integer` is a real
+arbitrary-precision type — the default for unannotated integer literals —
+and `Int`↔`Integer` conversions go through exactly this pair (see
+HASKDIFF.md, "Integers").
 
 ## `Floating` and `RealFrac` are functions, not classes
 

@@ -31,6 +31,10 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **`fromIntegral`** (GHC parity): `fromIntegral :: (Integral a, Num b)
+  => a -> b`, GHC's `fromInteger . toInteger`, over `Int`/`Integer`/
+  `Number` sources and targets. Case `from_integral.mll` (GHC-goldened).
+
 - **`<>` concatenates lists** (GHC parity). `[a]` is a `Semigroup` with
   `(<>) = (++)`, so `xs <> ys` now compiles and concatenates at concrete
   list types, matching GHC. It previously errored with a note directing

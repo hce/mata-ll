@@ -545,6 +545,8 @@ mll_test!(thunklift_settled_captures, "thunklift_settled_captures.mll");
 // GHC's `Monad (Either e)`: do-notation, Left short-circuit, mapM/
 // traverse/sequence/forM and Control.Monad combinators over Either.
 mll_test!(either_monad, "either_monad.mll");
+// fromIntegral over every Int/Integer/Number source/target pair.
+mll_test!(from_integral, "from_integral.mll");
 mll_test!(dead_var_specialization, "dead_var_specialization.mll");
 mll_test!(foldl_lazy_accumulator, "foldl_lazy_accumulator.mll");
 // Record construction against the constructor's own fields (multi-

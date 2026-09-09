@@ -234,6 +234,12 @@ even n = n `rem` 2 == 0
 odd :: Integral a => a -> Bool
 odd n = n `rem` 2 /= 0
 
+-- General Integral-to-Num conversion, GHC's definition verbatim: lift to
+-- Integer, lower with the target's fromInteger (so Integer -> Int wraps,
+-- like GHC on a 64-bit machine).
+fromIntegral :: (Integral a, Num b) => a -> b
+fromIntegral n = fromInteger (toInteger n)
+
 -- Largest / smallest element. Both error on an empty structure.
 maximum :: (Ord a, Foldable t) => t a -> a
 maximum t = case foldr (\x xs -> x : xs) [] t of

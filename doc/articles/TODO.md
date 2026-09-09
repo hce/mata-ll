@@ -40,7 +40,8 @@ Foldable/Monad-generic calls; `subtract` missing; a newtype-erased nested
 lambda flattened past its type's arity (State monad crash, the one
 miscompile). Regression probes: `tests/cases/program_corpus_regressions.mll`.
 
-- [ ] **Decision: `<>` at list types.** `mono.rs` refuses to dispatch
+- [x] **Decision: `<>` at list types — RESOLVED for parity (af71f9c):
+      `<>` concatenates lists.** `mono.rs` refuses to dispatch
       `Semigroup`'s `<>` at a concrete list type ("lists are concatenated
       with ++"), a deliberate divergence recorded in HASKDIFF. The corpus
       hit it through a GHC-idiomatic shape: `instance Semigroup e =>
@@ -399,27 +400,21 @@ generated Lua. Ranked: miscompiles, then crashes, then rejections/diagnostics.
   * C1, C3, C7, C8, C9 REFUTED. C8's `fold_num_num "^"` powf arm was
     dead code (`^` needs an Integral exponent, which no Number literal
     is) and is deleted.
-  * Noted on the way: `fromIntegral` is missing from the Prelude.
+  * Noted on the way: ~~`fromIntegral` is missing from the Prelude~~ —
+    ADDED 2026-09-09 (`fromInteger . toInteger`, case from_integral.mll).
 
-- [ ] C1 `-`, `*`, `negate`, `fromInteger` at builtin types past SPEC_LIMIT
-      (same root as B4). C2 erased runtime `foldl`/`foldr` strictness vs
-      compiled Foldable instances in dict-passing contexts (bottom element,
-      >16 types). C3 types.rs:1563 `Forall` unify arm strips the quantifier
-      and binds the bound variable like a flexible one (data field of type
-      `forall a. a -> a` unified at two monotypes in one clause). ~~C4 NaN as
-      a HashMap key → Lua "table index is NaN"~~ (fixed 2026-09-07). C5 mono.rs Var-arm
-      "lexically-smallest specialization" fallback inside a live generic
-      copy. ~~C6 `compute_body_subst` name-keyed fallback when a where-helper
-      signature reuses the outer `a`~~ (local signatures fixed 2026-09-07;
-      fallback suspicion refuted — fresh names carry ids). C7 codegen/module.rs `concrete_vars`
-      name seeds (e.g. `eq_Ordering`) vs runtime.lua drift — add a test
-      that every seed is defined in the runtime text. C8 fold.rs
-      `fold_num_num "^"` powf arm looks dead. C9 `__mll_hm_reroot`
-      materialisation path with two enumerated roots in one family (after
-      B1). ~~C10 `Either e` has no Monad instance (`>>=` on `Either String`
-      → "No instance")~~ — FIXED 2026-09-07: builtin `Monad Either`
-      instance (empty context, like its Functor/Applicative) over Prelude
-      `bind_Either`/`then_Either`; case either_monad.mll (GHC-goldened).
+- [x] C1-C10 ALL RESOLVED (see the verdicts bullet above): ~~C1~~ ~~C3~~
+      ~~C7~~ ~~C8~~ ~~C9~~ refuted 2026-09-06 (C7's seed-vs-runtime test
+      exists now anyway: `mirrored_runtime_names_are_bound_by_the_prelude`;
+      C8's dead powf arm deleted); ~~C2~~ ~~C5~~ fixed d12e2f0; ~~C4 NaN as
+      a HashMap key → Lua "table index is NaN"~~ fixed 8cdb5d9; ~~C6
+      `compute_body_subst` name-keyed fallback when a where-helper
+      signature reuses the outer `a`~~ local signatures fixed d51f3bf,
+      fallback suspicion refuted (fresh names carry ids); ~~C10 `Either e`
+      has no Monad instance~~ FIXED 2026-09-07 f866938: builtin `Monad
+      Either` instance (empty context, like its Functor/Applicative) over
+      Prelude `bind_Either`/`then_Either`; case either_monad.mll
+      (GHC-goldened).
 
 ### Weak seams (structural remedies, beyond the items above)
 
