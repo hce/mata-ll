@@ -1340,11 +1340,26 @@ Two caveats on the forms above:
 
 A module-header export list — `module M (foo, Bar(..)) where` —
 controls which of the module's names *other .mll modules* may import:
-names the list omits are private to the module. That is all it does.
-In particular it does not export anything to plain Lua — the module's
+names the list omits are private to the module. The list may carry
+`module X` re-export entries (Haskell 2010 §5.2): `module M` naming
+the module itself exports every own declaration (the self-export
+idiom), and `module X` naming an import passes X's names on to M's
+importers (the umbrella idiom), including through chains and through
+a qualified alias imported unqualified as well. A list also GATES
+what it does not mention: names from M's own imports reach M's
+importers only via a `module X` entry or by being named individually
+(a module without a list passes all of its imports through). The gate
+is per-import: importing the origin module directly elsewhere still
+makes its names visible. Import lists are checked against the list:
+`import M (f)` when M's export list does not offer `f` is a compile
+error, and `import M hiding (f)` warns, exactly as under GHC
+(constructors, record fields, and class methods always count as
+offered — they travel with their type or class). Imports of a module
+without an export list are unchecked. That is all an export list does. In
+particular it does not export anything to plain Lua — the module's
 Lua return table is populated exclusively by `export` declarations
-(see "Export" below). re-exports are supported but the scope is
-limited to within .mll. No exports to plain Lua are allowed that way.
+(see "Export" below). Re-export scope is limited to within .mll; no
+exports to plain Lua are possible that way.
 
 Consequently, compiling a module that has neither a `main` nor any
 `export` declaration (a header export list does not count) produces a

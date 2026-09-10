@@ -48,6 +48,12 @@ pub struct ModuleLoader {
     /// shadowed by a data constructor). Drained by the compile pipeline
     /// into `CompileResult.warnings`.
     warnings: Vec<crate::types::Diagnostic>,
+    /// Per resolved module: the origin keys its header export list passes
+    /// on wholesale via `module X` entries (Haskell 2010 §5.2). An entry
+    /// covers every origin arriving through the matching import edge, so
+    /// an importer's visibility gate (`transitive_gate`) can consult it by
+    /// origin key. Absent or empty = no `module X` entries.
+    reexport_origins: HashMap<String, HashSet<String>>,
 }
 
 impl ModuleLoader {
@@ -73,6 +79,7 @@ impl ModuleLoader {
             prelude_fixities,
             warnings: Vec::new(),
             module_sources: HashMap::new(),
+            reexport_origins: HashMap::new(),
         }
     }
 
@@ -339,6 +346,64 @@ impl ModuleLoader {
             edges.push(Edge { key: key.clone(), unqual, aliases, decls, spans });
         }
 
+        // `module X` export entries (Haskell 2010 §5.2). X naming the
+        // module itself exports every own declaration (recognized in
+        // private_names_of); X naming an import re-exports every origin
+        // arriving through that edge. The origin-key set is recorded for
+        // this module's importers, whose visibility gate consults it.
+        if let Some(ex) = &module.exports {
+            let mut origins: HashSet<String> = HashSet::new();
+            for x in &ex.reexports {
+                if x == own_key || module.name.as_deref() == Some(x.as_str()) {
+                    continue;
+                }
+                let matching: Vec<&Edge> = edges.iter()
+                    .filter(|e| e.key == *x || e.aliases.iter().any(|a| a == x))
+                    .collect();
+                if matching.is_empty() {
+                    return Err(format!(
+                        "the export list re-exports 'module {x}', but this \
+                         module neither is nor imports '{x}'\n\
+                         A 'module X' export entry passes an imported \
+                         module's names on to this module's importers \
+                         (Haskell 2010 section 5.2), so it needs a matching \
+                         'import {x}' (or a qualified import aliased as \
+                         '{x}') in this module."));
+                }
+                let mut any_unqual = false;
+                for e in &matching {
+                    // A qualified-only import leaves nothing in scope
+                    // unqualified, and H2010 defines `module X` as the
+                    // entities in scope BOTH unqualified and as X.e — so
+                    // such an entry exports nothing (GHC warns likewise).
+                    if e.unqual.is_empty() { continue; }
+                    any_unqual = true;
+                    for (okey, _) in &e.spans {
+                        origins.insert(okey.clone());
+                    }
+                }
+                if !any_unqual {
+                    self.warnings.push(crate::types::Diagnostic {
+                        kind: crate::types::DiagnosticKind::Other(format!(
+                            "export entry 'module {x}' exports nothing: \
+                             '{x}' is only imported qualified")),
+                        context: None,
+                        span: None,
+                        file: None,
+                        notes: vec![
+                            "a 'module X' export entry covers the entities \
+                             in scope both unqualified and as X.e (Haskell \
+                             2010 section 5.2); a qualified-only import \
+                             puts nothing in scope unqualified. Add an \
+                             unqualified 'import' of the module to \
+                             re-export it.".to_string()],
+                        baseline: false, excerpt: None,
+                    });
+                }
+            }
+            self.reexport_origins.insert(own_key.to_string(), origins);
+        }
+
         // Phase 2: decide, per origin module and declaration, whether the
         // declaration is VISIBLE UNQUALIFIED here. A visible declaration
         // keeps its bare name; one that is not (selection-hidden, private
@@ -353,7 +418,10 @@ impl ModuleLoader {
         // Explicit hiding on a direct import wins over transitive
         // visibility through another import; an explicit request (`import
         // M (a)`) wins over transitive hiding; a module's own export list
-        // wins over both. A declaration with an `export` signature keeps
+        // wins over both. A request for a name a LIST-CARRYING child does
+        // not export is rejected outright (the surface check below), so
+        // the request-wins rule only ever resurrects names a list-less
+        // child offers. A declaration with an `export` signature keeps
         // its bare name regardless — the Lua host's contract names it.
         let mut hidden_names: HashSet<String> = module.hidden.clone();
         // Names explicitly requested by a Specific import (see above).
@@ -368,12 +436,103 @@ impl ModuleLoader {
         for edge in &edges {
             // Names the directly imported module defines but does not
             // export (genuinely private). Only the module's OWN
-            // declarations count: names merged in transitively are not
-            // "private to" it because its export list omits them.
+            // declarations count here; what its export list says about
+            // names merged in transitively is per-edge, not absolute, and
+            // is applied through `transitive_gate` below.
             for name in self.private_names_of(&edge.key) {
                 private.insert((edge.key.clone(), name.clone()));
                 private_bases.insert(name.clone());
                 hidden_names.insert(name);
+            }
+            // The child's export list, when it has one, also gates its
+            // TRANSITIVE names (H2010 §5.2): an origin passes through only
+            // re-exported wholesale (`module X`) or entity by entity. A
+            // gated-off name is hidden through this edge exactly like a
+            // `hiding` clause — a direct import of the origin elsewhere
+            // still makes it visible.
+            let gate = self.transitive_gate(&edge.key);
+            let gated = |okey: &str, base: &str| -> bool {
+                okey != edge.key
+                    && gate.as_ref().is_some_and(|(names, origins)|
+                        !origins.contains(okey) && !names.contains(base))
+            };
+            // An import (or hiding) list may only name entities the child
+            // actually exports (Haskell 2010 §5.3.1; GHC: "Module 'A' does
+            // not export 'f'"). Without this check a Specific request
+            // force-visibled the name right past the child's export list
+            // (the request-wins rule below has no privacy exception for
+            // TRANSITIVE names). Only a list-carrying child is checked: a
+            // list-less module offers its whole import closure, mata-ll's
+            // long-standing behavior. Constructors, record fields and
+            // class methods are global names that travel with their type
+            // or class, so they always count as offered — visibility
+            // never gates them individually.
+            if let Some((ex_names, ex_origins)) = &gate {
+                let child_private: HashSet<String> =
+                    self.private_names_of(&edge.key).into_iter().collect();
+                let mut surface: HashSet<String> = ex_names.clone();
+                for (okey, slice) in runs(&edge.spans, &edge.decls) {
+                    let pass = okey == edge.key || ex_origins.contains(okey);
+                    for d in slice {
+                        if let Some(n) = decl_name(d) {
+                            let base = base_of(okey, &n);
+                            if matches!(d, Decl::ExportSig { .. })
+                                || (pass
+                                    && !(okey == edge.key
+                                        && child_private.contains(base)))
+                            {
+                                surface.insert(base.to_string());
+                            }
+                        }
+                        surface.extend(decl_constructors(d));
+                        surface.extend(con_record_fields(d));
+                        if let Decl::ClassDecl { methods, .. } = d {
+                            surface.extend(methods.iter().map(|m| m.name.clone()));
+                        }
+                    }
+                }
+                for form in &edge.unqual {
+                    let (items, hiding) = match form {
+                        ImportItems::Specific(items) => (items, false),
+                        ImportItems::Hiding(items) => (items, true),
+                        _ => continue,
+                    };
+                    for n in item_names(items) {
+                        if surface.contains(&n) { continue; }
+                        let key = &edge.key;
+                        if hiding {
+                            // Hiding what isn't offered is harmless;
+                            // GHC accepts it too (a -Wdodgy-imports
+                            // warning, not an error).
+                            self.warnings.push(crate::types::Diagnostic {
+                                kind: crate::types::DiagnosticKind::Other(
+                                    format!("module '{key}' does not \
+                                             export '{n}'")),
+                                context: None,
+                                span: None,
+                                file: None,
+                                notes: vec![format!(
+                                    "the 'hiding' list of 'import {key}' \
+                                     names '{n}', which '{key}''s export \
+                                     list does not offer — there is \
+                                     nothing to hide. Remove it from the \
+                                     list (GHC warns likewise, under \
+                                     -Wdodgy-imports).")],
+                                baseline: false, excerpt: None,
+                            });
+                            continue;
+                        }
+                        return Err(format!(
+                            "module '{key}' does not export '{n}'\n\
+                             An import list can only request names the \
+                             imported module's export list offers: its \
+                             listed entities plus everything its \
+                             'module X' re-export entries pass on. Add \
+                             '{n}' to '{key}''s export list, or import \
+                             '{n}' from its defining module directly \
+                             (GHC rejects this import the same way)."));
+                    }
+                }
             }
             for form in &edge.unqual {
                 if let ImportItems::Specific(items) = form {
@@ -388,7 +547,7 @@ impl ModuleLoader {
                         // always did; only value uses are enforced).
                         if !edge.unqual.is_empty()
                             && let Some(n) = decl_name(d)
-                            && hidden_by_forms(&edge.unqual, &n)
+                            && (hidden_by_forms(&edge.unqual, &n) || gated(okey, &n))
                         {
                             hidden_names.insert(n);
                         }
@@ -403,7 +562,7 @@ impl ModuleLoader {
                     if base != n || edge.unqual.is_empty() {
                         continue;
                     }
-                    if hidden_by_forms(&edge.unqual, base) {
+                    if hidden_by_forms(&edge.unqual, base) || gated(okey, base) {
                         if okey == edge.key {
                             direct_hidden.insert((okey.to_string(), base.to_string()));
                         }
@@ -438,6 +597,12 @@ impl ModuleLoader {
         // the same name by another edge or origin must not reject them.
         let mut bare_seen: HashSet<String> = HashSet::new();
         for edge in &edges {
+            let gate = self.transitive_gate(&edge.key);
+            let gated = |okey: &str, base: &str| -> bool {
+                okey != edge.key
+                    && gate.as_ref().is_some_and(|(names, origins)|
+                        !origins.contains(okey) && !names.contains(base))
+            };
             let mut vals: HashMap<String, String> = HashMap::new();
             let mut tys: HashMap<String, String> = HashMap::new();
             for (okey, slice) in runs(&edge.spans, &edge.decls) {
@@ -488,9 +653,12 @@ impl ModuleLoader {
                         }
                         if let Some((n, is_ty)) = renamable(d) {
                             let base = base_of(okey, n).to_string();
-                            // A name the module keeps private is not
-                            // reachable through an alias either.
-                            if private.contains(&(okey.to_string(), base.clone())) {
+                            // A name the module keeps private, or gates off
+                            // through its export list, is not reachable
+                            // through an alias either.
+                            if private.contains(&(okey.to_string(), base.clone()))
+                                || gated(okey, &base)
+                            {
                                 continue;
                             }
                             let map = if is_ty { &mut entry.tys } else { &mut entry.vals };
@@ -604,7 +772,7 @@ impl ModuleLoader {
         // recognize these declarations when they also arrive via a sibling.
         out_spans.push((own_key.to_string(), own_decls.len()));
         imported_decls.extend(own_decls);
-        Ok(Module { decls: imported_decls, exports: None, hidden: hidden_names, origin_spans: out_spans })
+        Ok(Module { decls: imported_decls, name: module.name.clone(), exports: None, hidden: hidden_names, origin_spans: out_spans })
     }
 
     /// The names a loaded module defines itself but leaves out of its
@@ -613,11 +781,35 @@ impl ModuleLoader {
     fn private_names_of(&self, key: &str) -> Vec<String> {
         let Some(m) = self.loaded.get(key) else { return Vec::new() };
         let Some(exports) = &m.exports else { return Vec::new() };
+        // The self re-export (`module M (module M, ...) where`) exports
+        // every own declaration: nothing is private.
+        if exports.reexports.iter()
+            .any(|x| x == key || m.name.as_deref() == Some(x.as_str()))
+        {
+            return Vec::new();
+        }
         m.decls.iter()
             .filter(|d| !matches!(d, Decl::Import { .. }))
             .filter_map(decl_name)
-            .filter(|n| !exports.contains(n))
+            .filter(|n| !exports.names.contains(n))
             .collect()
+    }
+
+    /// The visibility gate a directly imported module's header export list
+    /// puts on its TRANSITIVE names (Haskell 2010 §5.2): `Some((names,
+    /// origins))` when module `key` carries an export list — a transitive
+    /// origin's name passes through only when the origin is re-exported
+    /// wholesale (`module X` entries, resolved to origin keys in
+    /// `reexport_origins`) or the entity is named individually. `None` =
+    /// no export list, no gate: every import leaks through, mata-ll's
+    /// long-standing behavior for list-less modules. The module's OWN
+    /// declarations are governed by `private_names_of`, not this.
+    fn transitive_gate(&self, key: &str) -> Option<(HashSet<String>, HashSet<String>)> {
+        let m = self.loaded.get(key)?;
+        let ex = m.exports.as_ref()?;
+        let names: HashSet<String> = ex.names.iter().cloned().collect();
+        let origins = self.reexport_origins.get(key).cloned().unwrap_or_default();
+        Some((names, origins))
     }
 
     /// Flag unqualified imports that redefine an existing name *with an
@@ -655,6 +847,21 @@ impl ModuleLoader {
             // Skip if the module didn't resolve (e.g. an import cycle).
             let Some(resolved) = self.resolved.get(&key) else { continue };
             let private: HashSet<String> = self.private_names_of(&key).into_iter().collect();
+            // Transitive names the module's export list gates off (see
+            // transitive_gate): not visible here, so not collision-checked.
+            let mut gated_off: HashSet<String> = HashSet::new();
+            if let Some((names, origins)) = self.transitive_gate(&key) {
+                for (okey, slice) in runs(&resolved.origin_spans, &resolved.decls) {
+                    if okey == key || origins.contains(okey) { continue; }
+                    for d in slice {
+                        if let Some(n) = decl_name(d)
+                            && !names.contains(&n)
+                        {
+                            gated_off.insert(n);
+                        }
+                    }
+                }
+            }
             let exported: HashSet<String> = resolved.decls.iter()
                 .filter_map(|d| match d {
                     Decl::ExportSig { name, .. } => Some(name.clone()),
@@ -663,7 +870,9 @@ impl ModuleLoader {
                 .collect();
             let visible = |name: &String| -> bool {
                 exported.contains(name)
-                    || (!private.contains(name) && !hidden_by_forms(std::slice::from_ref(items), name))
+                    || (!private.contains(name)
+                        && !gated_off.contains(name)
+                        && !hidden_by_forms(std::slice::from_ref(items), name))
             };
 
             let shapes = signature_shapes(&resolved.decls);

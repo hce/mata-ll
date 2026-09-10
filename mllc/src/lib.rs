@@ -339,6 +339,7 @@ fn compile_impl(
         decls: prelude_decls.into_iter()
             .chain(module.decls)
             .collect(),
+        name: None,
         exports: None,
         hidden,
         origin_spans: Vec::new(),
@@ -554,7 +555,7 @@ fn compile_impl(
     // were never recorded (see Checker::push_warning_span).
     warnings.append(&mut checker.warnings);
     if !mono_module.has_main && mono_module.exports.is_empty() {
-        warnings.push(no_host_surface_warning(header_exports.as_deref()));
+        warnings.push(no_host_surface_warning(header_exports.as_ref()));
     }
 
     // Test-build stamp refutation (see verify::check_stamps): a violation is
@@ -597,7 +598,7 @@ fn compile_impl(
 /// export list (`module M (foo) where`), the notes additionally explain that
 /// the list governs .mll import visibility only — the GHC habit it mimics
 /// does not carry over to exporting for the Lua host.
-fn no_host_surface_warning(header_exports: Option<&[String]>) -> types::Diagnostic {
+fn no_host_surface_warning(header_exports: Option<&ast::ModuleExports>) -> types::Diagnostic {
     let mut d = types::Diagnostic::new(types::DiagnosticKind::Other(
         "this module defines no `main` and no `export`, so the compiled Lua file \
          contains no runnable or callable code"
@@ -611,15 +612,18 @@ fn no_host_surface_warning(header_exports: Option<&[String]>) -> types::Diagnost
     // A value-level (lowercase) name from the header list makes the guidance
     // concrete; type/constructor entries (`Bar(..)`) are import-visibility
     // items with no value to export, so they can't serve as the example.
-    let example = header_exports.and_then(|names| {
-        names.iter().find(|n| n.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_'))
+    let example = header_exports.and_then(|ex| {
+        ex.names.iter().find(|n| n.chars().next().is_some_and(|c| c.is_ascii_lowercase() || c == '_'))
     });
-    if let Some(exports) = header_exports {
+    if let Some(ex) = header_exports {
+        let entries: Vec<String> = ex.names.iter().cloned()
+            .chain(ex.reexports.iter().map(|m| format!("module {m}")))
+            .collect();
         d.notes.push(format!(
             "the export list in the `module … ({}) where` header only controls which \
              names other mata-ll modules may import — unlike in GHC, it does not export \
              anything to the Lua host.",
-            exports.join(", "),
+            entries.join(", "),
         ));
     }
     if let Some(name) = example {

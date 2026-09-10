@@ -2316,6 +2316,25 @@ impl Checker {
         None
     }
 
+    /// The spelling of a JSON-module combinator in this program's flat
+    /// namespace: bare when the root scope sees it bare, else the
+    /// canonical `JSON.<name>` module resolution renamed it to. The
+    /// renamed case arises when the type's DEFINING module imports JSON
+    /// but an export-list gate along the import chain keeps the
+    /// combinators out of the root's bare scope — the derived codec
+    /// belongs to the defining module, so it may reference them
+    /// regardless of what the root can name.
+    pub(super) fn json_fn(&self, name: &str) -> String {
+        if self.env.lookup(name).is_some() {
+            return name.to_string();
+        }
+        let qualified = format!("JSON.{name}");
+        if self.env.lookup(&qualified).is_some() {
+            return qualified;
+        }
+        name.to_string()
+    }
+
     pub(super) fn jx_var(name: &str, ty: Ty) -> TExpr {
         TExpr::new(TExprKind::Var(name.to_string()), ty)
     }
@@ -2427,7 +2446,7 @@ impl Checker {
     /// lived as a 55-line pair differing only in the direction's words.
     fn json_field_codec(&self, dir: JsonDir, field_ty: &Ty) -> Result<TExpr, (String, String)> {
         let codec_ty = dir.codec_ty(field_ty);
-        let comb = |name: &str, ty: Ty| Self::jx_var(&format!("{}{}", dir.prefix(), name), ty);
+        let comb = |name: &str, ty: Ty| Self::jx_var(&self.json_fn(&format!("{}{}", dir.prefix(), name)), ty);
         match field_ty {
             Ty::Con(n) if n == "Int" => Ok(comb("Int", codec_ty)),
             Ty::Con(n) if n == "Integer" => Ok(comb("Integer", codec_ty)),
@@ -2521,7 +2540,7 @@ impl Checker {
                 let dec = self.fromjson_field_decoder(inner)
                     .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
                 Self::jx_call(
-                    "jOptFieldWith",
+                    &self.json_fn("jOptFieldWith"),
                     vec![dec, Self::jx_str(key), Self::jx_var("_j", json.clone())],
                     Self::estr_ty(fty),
                 )
@@ -2529,7 +2548,7 @@ impl Checker {
                 let dec = self.fromjson_field_decoder(fty)
                     .map_err(|e| Self::fromjson_field_err(err_what(), e))?;
                 Self::jx_call(
-                    "jFieldWith",
+                    &self.json_fn("jFieldWith"),
                     vec![dec, Self::jx_str(key), Self::jx_var("_j", json.clone())],
                     Self::estr_ty(fty),
                 )
@@ -2560,7 +2579,7 @@ impl Checker {
             let dec = self.fromjson_field_decoder(fty).map_err(|e| Self::fromjson_field_err(
                 format!("argument {} of constructor '{}' cannot be decoded", i + 1, con_name), e))?;
             let step = Self::jx_call(
-                "jArgWith",
+                &self.json_fn("jArgWith"),
                 vec![
                     dec,
                     Self::jx_str(json_name),
@@ -2593,7 +2612,7 @@ impl Checker {
             _ if field_tys.is_empty() => Ok(Self::jx_ok_con(self.resolve_con_name(&con.name), &[], result_ty, estr)),
             _ => {
                 let contents = Self::jx_call(
-                    "jField",
+                    &self.json_fn("jField"),
                     vec![Self::jx_str("contents"), Self::jx_var("_j", json.clone())],
                     Self::estr_ty(&json),
                 );
@@ -2607,14 +2626,14 @@ impl Checker {
                     let arr_ty = Ty::list(json.clone());
                     let elems: Vec<TExpr> = (0..field_tys.len()).map(|i| {
                         Self::jx_call(
-                            "jNth",
+                            &self.json_fn("jNth"),
                             vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
                             json.clone(),
                         )
                     }).collect();
                     let chain = self.fromjson_positional_chain(&con.name, con.effective_tag(), field_tys, elems, estr, result_ty)?;
                     let arrn = Self::jx_call(
-                        "jExpectArrN",
+                        &self.json_fn("jExpectArrN"),
                         vec![
                             Self::jx_str(con.effective_tag()),
                             Self::jx_int(field_tys.len() as i64),
@@ -2731,7 +2750,11 @@ impl Checker {
         let class = dir.class();
         // The class and every combinator the generated codec calls live in
         // the JSON library module; without the import nothing can resolve.
-        if !self.classes.contains_key(class) || self.env.lookup(dir.scope_probe()).is_none() {
+        // The probe goes through json_fn: the combinators may be in scope
+        // bare, or only under their canonical `JSON.<name>` spelling (the
+        // defining module imports JSON behind an export-list gate).
+        let probe = self.json_fn(dir.scope_probe());
+        if !self.classes.contains_key(class) || self.env.lookup(&probe).is_none() {
             self.reject_derive(class, type_name,
                 &format!("the {} class and its {} combinators are not in scope", class, dir.noun()),
                 &format!("the {} class and the codec combinators the derived {} calls ({}) live in the JSON library module; add `import JSON` at the top of this file.",
@@ -2840,7 +2863,7 @@ impl Checker {
 
             // Bare-string form: only a nullary constructor may be a bare string.
             let mut str_chain = Self::jx_call(
-                "jBadTag",
+                &self.json_fn("jBadTag"),
                 vec![Self::jx_str(&expected), Self::jx_var("_s", str_ty.clone())],
                 estr.clone(),
             );
@@ -2851,7 +2874,7 @@ impl Checker {
                     // "name"` rename when present, the source name otherwise).
                     Self::jx_ok_con(self.resolve_con_name(&con.name), &[], &result_ty, &estr)
                 } else {
-                    Self::jx_call("jTagNeedsObject", vec![Self::jx_str(con.effective_tag())], estr.clone())
+                    Self::jx_call(&self.json_fn("jTagNeedsObject"), vec![Self::jx_str(con.effective_tag())], estr.clone())
                 };
                 str_chain = TExpr::new(TExprKind::If {
                     cond: Box::new(TExpr::new(TExprKind::InfixApp {
@@ -2866,7 +2889,7 @@ impl Checker {
 
             // Tagged-object form: dispatch on the decoded "tag" field.
             let mut tag_chain = Self::jx_call(
-                "jBadTag",
+                &self.json_fn("jBadTag"),
                 vec![Self::jx_str(&expected), Self::jx_var("_tag", str_ty.clone())],
                 estr.clone(),
             );
@@ -2883,9 +2906,9 @@ impl Checker {
             }
             let obj_body = Self::jx_bind_either(
                 Self::jx_call(
-                    "jFieldWith",
+                    &self.json_fn("jFieldWith"),
                     vec![
-                        Self::jx_var("fromJSONString", Ty::arrow(json.clone(), Self::estr_ty(&str_ty))),
+                        Self::jx_var(&self.json_fn("fromJSONString"), Ty::arrow(json.clone(), Self::estr_ty(&str_ty))),
                         Self::jx_str("tag"),
                         Self::jx_var("_j", json.clone()),
                     ],
@@ -2917,7 +2940,7 @@ impl Checker {
                         pattern: TPattern::Wildcard,
                         guards: vec![],
                         body: Some(Self::jx_call(
-                            "jExpectTagged",
+                            &self.json_fn("jExpectTagged"),
                             vec![Self::jx_var("_j", json.clone())],
                             estr.clone(),
                         )),
@@ -2943,7 +2966,7 @@ impl Checker {
                     let arr_ty = Ty::list(json.clone());
                     let elems: Vec<TExpr> = (0..ftys.len()).map(|i| {
                         Self::jx_call(
-                            "jNth",
+                            &self.json_fn("jNth"),
                             vec![Self::jx_int(i as i64), Self::jx_var("_xs", arr_ty.clone())],
                             json.clone(),
                         )
@@ -2951,7 +2974,7 @@ impl Checker {
                     self.fromjson_positional_chain(&con.name, &con.name, ftys, elems, &estr, &result_ty)
                         .map(|chain| {
                             let arrn = Self::jx_call(
-                                "jExpectArrN",
+                                &self.json_fn("jExpectArrN"),
                                 vec![
                                     Self::jx_str(&con.name),
                                     Self::jx_int(ftys.len() as i64),
@@ -2974,7 +2997,7 @@ impl Checker {
 
         // Tag every failure with the type being decoded.
         let body = Self::jx_call(
-            "jContext",
+            &self.json_fn("jContext"),
             vec![Self::jx_str(type_name), body_inner],
             estr.clone(),
         );
@@ -2987,7 +3010,7 @@ impl Checker {
         let field_fn = format!("fromJSONField_{}", type_name);
         let dec_ty = Ty::arrow(json.clone(), estr.clone());
         let field_body = Self::jx_call(
-            "jFieldWith",
+            &self.json_fn("jFieldWith"),
             vec![
                 Self::jx_var(&mangled, dec_ty),
                 Self::jx_var("_k", str_ty.clone()),

@@ -333,21 +333,28 @@ impl Parser {
         self.skip_indent();
 
         // Parse optional `module Name (exports) where` header
-        let mut module_exports: Option<Vec<String>> = None;
+        let mut module_name: Option<String> = None;
+        let mut module_exports: Option<ModuleExports> = None;
         if self.at(&Token::KwModule) {
             self.advance();
-            // Skip module name (may be dotted: Data.List)
-            while matches!(self.peek(), Token::UpperIdent(_) | Token::Ident(_)) {
+            // Module name (may be dotted: Data.List)
+            let mut name_parts: Vec<String> = Vec::new();
+            while let Token::UpperIdent(part) | Token::Ident(part) = self.peek().clone() {
+                name_parts.push(part);
                 self.advance();
                 if self.at(&Token::Operator(".".to_string())) {
                     self.advance();
                 }
+            }
+            if !name_parts.is_empty() {
+                module_name = Some(name_parts.join("."));
             }
             // Parse optional export list
             self.skip_newlines_and_indent();
             if self.at(&Token::LeftParen) {
                 self.advance();
                 let mut exports = Vec::new();
+                let mut reexports = Vec::new();
                 loop {
                     self.skip_newlines_and_indent();
                     if self.at(&Token::RightParen) { break; }
@@ -357,6 +364,21 @@ impl Parser {
                             exports.push(n); self.advance();
                             // Skip optional (..) for Type(..)
                             self.skip_export_subspec();
+                        }
+                        // Module re-export: `module X` (Haskell 2010 §5.2),
+                        // X possibly dotted. Which names that passes on is
+                        // decided during import resolution, where the
+                        // matching import edge is known.
+                        Token::KwModule => {
+                            self.advance();
+                            let mut parts = vec![self.expect_upper_ident()
+                                .map_err(|d| vec![*d])?];
+                            while self.at(&Token::Operator(".".to_string())) {
+                                self.advance();
+                                parts.push(self.expect_upper_ident()
+                                    .map_err(|d| vec![*d])?);
+                            }
+                            reexports.push(parts.join("."));
                         }
                         Token::Operator(op) => { exports.push(op); self.advance(); }
                         // Parenthesized operator export, GHC style:
@@ -374,19 +396,14 @@ impl Parser {
                             self.skip_export_subspec();
                         }
                         other => {
-                            let mut diag = self.err_here(format!(
+                            let diag = self.err_here(format!(
                                 "This export-list entry is not understood \
                                  (found {}). An entry names a value, a \
-                                 type (optionally with '(..)'), or an \
-                                 operator in parentheses.",
+                                 type (optionally with '(..)'), an \
+                                 operator in parentheses, or a module \
+                                 re-export ('module M').",
                                 other
                             ));
-                            diag.notes.push(
-                                "module re-exports ('module M') are not \
-                                 supported yet; export the module's names \
-                                 individually"
-                                    .to_string(),
-                            );
                             return Err(vec![*diag]);
                         }
                     }
@@ -395,7 +412,7 @@ impl Parser {
                 }
                 self.skip_newlines_and_indent();
                 if self.at(&Token::RightParen) { self.advance(); }
-                module_exports = Some(exports);
+                module_exports = Some(ModuleExports { names: exports, reexports });
             }
             if self.at(&Token::Where) {
                 self.advance();
@@ -467,7 +484,7 @@ impl Parser {
             }
         }
 
-        Ok(Module { decls: merged, exports: module_exports, hidden: std::collections::HashSet::new(), origin_spans: Vec::new() })
+        Ok(Module { decls: merged, name: module_name, exports: module_exports, hidden: std::collections::HashSet::new(), origin_spans: Vec::new() })
     }
 
     /// True when `tok` can begin a top-level declaration — the resync points

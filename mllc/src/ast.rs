@@ -17,12 +17,28 @@ impl std::fmt::Display for Span {
     }
 }
 
+/// A module-header export list (`module M (f, T(..), module X) where`).
+#[derive(Debug, Clone)]
+pub struct ModuleExports {
+    /// Named entities: values, types (with or without `(..)`), operators.
+    pub names: Vec<String>,
+    /// `module X` re-export entries, as dotted module names (Haskell 2010
+    /// §5.2). `module M` naming the module itself exports every own
+    /// declaration; naming an import passes that module's names on to
+    /// this module's importers.
+    pub reexports: Vec<String>,
+}
+
 /// An mll module corresponds to a single .mll file.
 #[derive(Debug, Clone)]
 pub struct Module {
     pub decls: Vec<Decl>,
+    /// The header's module name (`module Data.Tree where` -> "Data.Tree").
+    /// None for a file without a module header. Consulted to recognize the
+    /// self re-export (`module M (module M, ...) where`).
+    pub name: Option<String>,
     /// Module export list. None = export everything, Some = only these names.
-    pub exports: Option<Vec<String>>,
+    pub exports: Option<ModuleExports>,
     /// Names imported but hidden (from modules with export lists).
     /// The typechecker rejects direct references to these.
     pub hidden: std::collections::HashSet<String>,

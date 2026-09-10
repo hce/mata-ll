@@ -3778,15 +3778,157 @@ fn class_context_malformed_parens_is_diagnosed() {
     ]);
 }
 
-/// An export-list entry the grammar does not know (here a `module M`
-/// re-export) is rejected with an explanation, not silently dropped from
-/// the export list.
+/// A `module X` export entry must name the module itself or one of its
+/// imports (Haskell 2010 §5.2); anything else is rejected with an
+/// explanation, not silently dropped from the export list.
+#[test]
+fn reexport_of_unimported_module_is_diagnosed() {
+    expect_compile_error("module Main (module Data, main) where\n\nmain :: IO ()\nmain = putStrLn \"x\"\n", &[], &[
+        "re-exports 'module Data'",
+        "neither is nor imports",
+    ]);
+}
+
+/// An export-list entry the grammar does not know is still rejected with
+/// an explanation, not silently dropped from the export list.
 #[test]
 fn export_list_unknown_entry_is_diagnosed() {
-    expect_compile_error("module Main (module Data, main) where\n\nmain :: IO ()\nmain = putStrLn \"x\"\n", &[], &[
+    expect_compile_error("module Main (1, main) where\n\nmain :: IO ()\nmain = putStrLn \"x\"\n", &[], &[
         "export-list entry is not understood",
-        "module re-exports",
     ]);
+}
+
+/// An export list without a `module X` entry gates that import's names
+/// off from importers (H2010 §5.2): ReexGate imports ReexInner but only
+/// exports its own gateFn, so innerFn does not pass through.
+#[test]
+fn export_list_gates_transitive_names() {
+    let source = r#"
+import ReexGate
+
+main :: IO ()
+main = putStrLn (show (innerFn 5))
+"#;
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &["not exported"]);
+}
+
+/// The gate is per-edge, like a `hiding` clause: a direct import of the
+/// gated-off module makes the name visible again.
+#[test]
+fn gated_name_rescued_by_direct_import() {
+    let source = r#"
+import ReexGate
+import ReexInner
+
+main :: IO ()
+main = putStrLn (show (innerFn 5 + gateFn 5))
+"#;
+    compile(source, Path::new("tests/cases"), &[])
+        .expect("a direct import makes the gated-off name visible");
+}
+
+/// A chained re-export passes on only what each hop exports: ReexOuter
+/// re-exports ReexUmbrella wholesale, but outerPrivate is private to the
+/// umbrella's own export list and must not resurface two hops up.
+#[test]
+fn chained_reexport_keeps_private_hidden() {
+    let source = r#"
+import ReexOuter
+
+main :: IO ()
+main = putStrLn (show (outerPrivate 5))
+"#;
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &["outerPrivate"]);
+}
+
+/// An import list may only request names the module exports (H2010
+/// §5.3.1): asking a list-carrying module for a transitive name its
+/// export list gates off is rejected at the import, not force-visibled
+/// past the gate (GHC: "Module 'A' does not export 'f'").
+#[test]
+fn import_list_of_gated_name_is_diagnosed() {
+    let source = r#"
+import ReexGate (innerFn)
+
+main :: IO ()
+main = putStrLn (show (innerFn 5))
+"#;
+    expect_compile_error_in(source, Path::new("tests/cases"), &[],
+        &["'ReexGate' does not export 'innerFn'"]);
+}
+
+/// The same rule for a name the module defines but keeps private.
+#[test]
+fn import_list_of_private_name_is_diagnosed() {
+    let source = r#"
+import ReexUmbrella (outerPrivate)
+
+main :: IO ()
+main = putStrLn (show (outerPrivate 5))
+"#;
+    expect_compile_error_in(source, Path::new("tests/cases"), &[],
+        &["'ReexUmbrella' does not export 'outerPrivate'"]);
+}
+
+/// Hiding a name the module does not export is meaningless but
+/// harmless: a warning, exactly GHC's -Wdodgy-imports behavior
+/// (verified against runghc — hiding compiles where an import-list
+/// request errors).
+#[test]
+fn hiding_of_unexported_name_warns() {
+    let source = r#"
+import ReexGate hiding (innerFn)
+
+main :: IO ()
+main = putStrLn (show (gateFn 5))
+"#;
+    let result = compile(source, Path::new("tests/cases"), &[])
+        .expect("hiding an unexported name compiles, as under GHC");
+    assert!(
+        result.warnings.iter().any(|w| {
+            let s = w.to_string();
+            s.contains("'ReexGate' does not export 'innerFn'")
+        }),
+        "expected the dodgy-hiding warning, got: {:?}",
+        result.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>()
+    );
+}
+
+/// The surface the check accepts: listed own names, names passed on by
+/// `module X` re-exports, and constructors (global — they travel with
+/// their type). All three import and compile.
+#[test]
+fn import_list_of_exported_surface_compiles() {
+    let source = r#"
+import ReexUmbrella (outerFn, innerFn, MkInnerT)
+
+main :: IO ()
+main = do
+    putStrLn (show (outerFn (innerFn 5)))
+    putStrLn (show (MkInnerT 1))
+"#;
+    compile(source, Path::new("tests/cases"), &[])
+        .expect("listed, re-exported and constructor names are all importable");
+}
+
+/// `module X` covering only a qualified import exports nothing (H2010
+/// §5.2 requires the entities in scope unqualified too); the compiler
+/// says so in a warning rather than silently exporting nothing.
+#[test]
+fn reexport_of_qualified_only_import_warns() {
+    let source = r#"
+import ReexQual
+
+main :: IO ()
+main = putStrLn (show (qualFn 5))
+"#;
+    let result = compile(source, Path::new("tests/cases"), &[])
+        .expect("the qualified-only re-export compiles; the entry just exports nothing");
+    assert!(
+        result.warnings.iter().any(|w| w.to_string().contains("exports nothing")),
+        "expected the 'exports nothing' warning, got: {:?}",
+        result.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>()
+    );
 }
 
 /// A pattern parameter on a local (let/do-let) function binding is

@@ -247,6 +247,10 @@ mll_test!(bytestring, "bytestring.mll");
 mll_test!(operator_fixity, "operator_fixity.mll");
 mll_test!(fixity_import, "fixity_import.mll");
 mll_test!(export_module, "export_module.mll");
+mll_test!(gated_json_derive, "gated_json_derive.mll");
+mll_test!(module_reexport, "module_reexport.mll");
+mll_test!(module_reexport_chain, "module_reexport_chain.mll");
+mll_test!(module_reexport_alias, "module_reexport_alias.mll");
 mll_test!(import_hiding, "import_hiding.mll");
 mll_test!(record_update, "record_update.mll");
 mll_test!(record_update_lazy, "record_update_lazy.mll");
@@ -821,6 +825,14 @@ fn mll_case_registry_is_complete() {
         "DupConEast.mll",
         "DupConWest.mll",
         "DualForms.mll",
+        "ReexInner.mll",
+        "ReexJson.mll",
+        "ReexUmbrella.mll",
+        "ReexGate.mll",
+        "ReexSelf.mll",
+        "ReexOuter.mll",
+        "ReexAlias.mll",
+        "ReexQual.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")

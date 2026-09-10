@@ -838,10 +838,32 @@ module Geometry (area, Shape(..)) where
 
 The list controls \emph{import visibility within mata-ll}: other
 \texttt{.mll} modules can import only the listed names; everything
-else is private to the module.  Unlike in GHC, the list does
-\emph{not} export anything to the Lua host --- the compiled module's
-\texttt{return} table is populated exclusively by \texttt{export}
-declarations (see \emph{Exporting to Lua}).  A module with neither a
+else is private to the module.  The list may also carry
+Haskell-style \emph{module re-exports}:
+
+\begin{lstlisting}
+module Api (module Core, connect) where
+
+import Core
+\end{lstlisting}
+
+\texttt{module Core} passes everything imported from \texttt{Core} on
+to \texttt{Api}'s importers (the umbrella idiom), and \texttt{module M}
+naming the module itself exports every own declaration (the
+\texttt{module M (module M, ...)} self-export idiom).  An export list
+also \emph{gates} what it does not mention: names from the module's own
+imports reach its importers only through a \texttt{module X} entry or
+by being listed individually.  A module \emph{without} an export list
+passes all of its imports through unchanged.  Import lists are held to
+the export list, as under GHC: \texttt{import M (f)} when
+\texttt{M}'s list does not offer \texttt{f} is a compile error, and
+\texttt{import M hiding (f)} warns (GHC's
+\texttt{-Wdodgy-imports}).  Constructors, record fields and class
+methods always count as offered --- they travel with their type or
+class.  Unlike in GHC, the list
+does \emph{not} export anything to the Lua host --- the compiled
+module's \texttt{return} table is populated exclusively by
+\texttt{export} declarations (see \emph{Exporting to Lua}).  A module with neither a
 \texttt{main} nor any \texttt{export} compiles, standalone, to a Lua
 file with no runnable or callable code (dead-code elimination keeps
 only what \texttt{main} or an \texttt{export} can reach); the

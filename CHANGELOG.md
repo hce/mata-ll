@@ -29,6 +29,47 @@ API of the `mllc` library crate.)
 
 ## [Unreleased]
 
+### Added
+
+- **Module re-exports** (Haskell 2010 §5.2). An export list may carry
+  `module X` entries: `module M (module M, …)` exports every own
+  declaration (the self re-export idiom), and `module M (module X, f)`
+  with `import X` passes X's names on to M's importers (the umbrella
+  idiom), through chains and through a qualified alias (`import X` +
+  `import qualified X as Q` + `module Q`). Re-exporting a module that is
+  neither the module itself nor an import is a compile error; a `module
+  Q` entry covering only a qualified import exports nothing, per the
+  standard's in-scope-unqualified requirement, and warns. Cases
+  `module_reexport{,_chain,_alias}.mll`.
+
+### Changed
+
+- **An export list now gates transitive names** (Haskell 2010 §5.2,
+  breaking). When a module carries a header export list, names from ITS
+  imports no longer leak through to its importers unless the list passes
+  them on — via a `module X` re-export or by naming the entity. The gate
+  is per-import-edge, like a `hiding` clause: importing the origin
+  module directly still makes the name visible. Modules WITHOUT an
+  export list are unchanged (their imports still pass through). Code
+  that relied on the leak imports the origin module explicitly — which
+  is the same fix GHC would demand. Derived JSON codecs are unaffected:
+  a gated module's `deriving (ToJSON, FromJSON)` resolves the JSON
+  combinators in the defining module's scope (by canonical name), not
+  the root's, so the root does not need `import JSON`. Case
+  `gated_json_derive.mll`.
+- **Import lists are checked against the export list** (breaking).
+  `import A (f)` when A carries an export list that does not offer `f`
+  is now a compile error — "module 'A' does not export 'f'" — exactly
+  GHC's behavior (verified against runghc 9.14.1); previously the
+  explicit request made the name visible past A's export list. The
+  offered surface is A's listed entities, everything its `module X`
+  re-exports pass on, plus constructors, record fields, and class
+  methods (global names that travel with their type or class). Hiding
+  an unoffered name (`import A hiding (f)`) warns instead of erroring,
+  matching GHC's `-Wdodgy-imports`. Imports of modules without an
+  export list are unchecked, as before. Modules without a list are
+  unchanged.
+
 ## [0.1.8] - 2026-09-09
 
 ### Added

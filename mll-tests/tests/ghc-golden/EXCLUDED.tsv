@@ -13,6 +13,14 @@ cases/MergeNames	helper module (twinned for import, no main)
 cases/OpQualDefs	helper module (twinned for import, no main)
 cases/OpsExports	helper module (twinned for import, no main)
 cases/QualShapes	helper module for qualified twins (Q77 seam)
+cases/ReexAlias	helper module (twinned for import, no main)
+cases/ReexGate	helper module (twinned for import, no main)
+cases/ReexInner	helper module (twinned for import, no main)
+cases/ReexJson	helper module (twinned for import, no main)
+cases/ReexOuter	helper module (twinned for import, no main)
+cases/ReexQual	helper module (twinned for import, no main)
+cases/ReexSelf	helper module (twinned for import, no main)
+cases/ReexUmbrella	helper module (twinned for import, no main)
 cases/alias_ctor_collision	alias/constructor collision: documented deviation + Q77 seam
 cases/any_ffi_marshal	LuaPure FFI declarations marshalling the builtin Any
 cases/any_type	builtin Any (Lua dynamic value carrier)
@@ -37,6 +45,7 @@ cases/ffi_maybe_args	FFI declarations
 cases/ffi_multi_return	LuaPure FFI declarations (math.modf multi-return)
 cases/ffi_strictness	FFI declarations
 cases/gadt_syntax_generic_json	Generics substrate + JSON FFI library
+cases/gated_json_derive	JSON FFI library
 cases/generic_as_rename	Generics substrate + JSON FFI library (`as` renames under Generic)
 cases/generic_json	Generics substrate + JSON FFI library
 cases/generic_json_decode	Generics substrate + JSON FFI library
