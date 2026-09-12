@@ -419,7 +419,7 @@ fn compile_impl(
     };
 
     let early: Vec<types::Diagnostic> = redefined.iter()
-        .filter(|r| r.load_bearing || r.duplicate)
+        .filter(|r| r.load_bearing || r.duplicate || r.record_field_of.is_some())
         .map(|r| redefinition_diagnostic(r, options.source_name.as_deref()))
         .collect();
     if !early.is_empty() {
@@ -657,6 +657,14 @@ struct BaselineRedefinition {
     /// the same type shape (or no signature): a duplicate of the same
     /// function at the same type rather than an overload at a different one.
     duplicate: bool,
+    /// The user's "definition" is a record field of this data type: a field
+    /// defines a module-level accessor of its own name, so it collides like
+    /// a top-level function does — but the checker registers accessors in
+    /// its data-type pass, BEFORE the Prelude's signatures, so without this
+    /// rejection the Prelude name silently won and the program failed later
+    /// with a unification error at the field's use site (found when the
+    /// Prelude gained `until` and a case with a field of that name broke).
+    record_field_of: Option<String>,
 }
 
 /// Scan the user's own top-level declarations for value names the baseline
@@ -709,7 +717,7 @@ fn collect_baseline_redefinitions(
         }
     }
 
-    order.into_iter()
+    let mut out: Vec<BaselineRedefinition> = order.into_iter()
         .filter(|name| prelude_named.contains(*name) || checker.is_builtin(name))
         .map(|name| BaselineRedefinition {
             name: name.to_string(),
@@ -723,8 +731,44 @@ fn collect_baseline_redefinitions(
                     (None, _) => true,
                     (Some(_), None) => false,
                 },
+            record_field_of: None,
         })
-        .collect()
+        .collect();
+
+    // Record fields: each named field is a module-level accessor function of
+    // that name (the record-form newtype selector too). Reported once per
+    // field name, in source order, after the value definitions.
+    let mut field_seen: HashSet<&str> = HashSet::new();
+    for d in own_decls {
+        let (ty_name, fields): (&str, Vec<&str>) = match d {
+            ast::Decl::DataDef { name, constructors, .. } => (
+                name,
+                constructors.iter()
+                    .flat_map(|c| match &c.fields {
+                        ast::ConstructorFields::Named(fs) => fs.iter().map(|f| f.name.as_str()).collect(),
+                        ast::ConstructorFields::Positional(_) => Vec::new(),
+                    })
+                    .collect(),
+            ),
+            ast::Decl::NewtypeDef { name, field: Some(f), .. } => (name, vec![f.as_str()]),
+            _ => continue,
+        };
+        for f in fields {
+            if (prelude_named.contains(f) || checker.is_builtin(f))
+                && !seen.contains(f)
+                && field_seen.insert(f)
+            {
+                out.push(BaselineRedefinition {
+                    name: f.to_string(),
+                    span: None,
+                    load_bearing: prelude_used.contains(f),
+                    duplicate: false,
+                    record_field_of: Some(ty_name.to_string()),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// The "ignored pragma" warning for one `{-# … #-}` the lexer consumed
@@ -806,6 +850,19 @@ fn redefinition_diagnostic(
     )));
     d.span = r.span;
     d.file = source_name.map(str::to_string);
+    if let Some(ty) = &r.record_field_of {
+        d.context = Some(format!("data {}", ty));
+        d.notes.push(format!(
+            "a record field defines a module-level accessor function of the same \
+             name, so the field '{}' of '{}' is a definition of '{}'. mata-ll \
+             includes the Prelude implicitly and compiles it with your program in \
+             one global namespace, so its names are always in scope and the \
+             accessor does not shadow the Prelude's '{}' as it would in GHC — \
+             rename the field.",
+            r.name, ty, r.name, r.name
+        ));
+        return d;
+    }
     d.notes.push(
         "mata-ll includes the Prelude implicitly and compiles it with your program \
          in one global namespace, so its names (error, map, head, …) are always in \

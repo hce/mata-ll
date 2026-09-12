@@ -78,7 +78,6 @@ cases/lib_regex	Regex FFI (Lua patterns)
 cases/linear_affine_basic	GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar
 cases/linear_mult_poly	GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar
 cases/lua_iterator_method	LuaIterator FFI
-cases/lua_keywords	record fields named after Lua keywords collide with Prelude.until under GHC
 cases/luacatch	LuaCatch FFI
 cases/luadict	LuaDict FFI
 cases/newtypes	'newtype Age = Int' implicit-constructor sugar is not Haskell

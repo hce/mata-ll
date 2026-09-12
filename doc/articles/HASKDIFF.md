@@ -502,19 +502,30 @@ under `-Wmissing-methods`) and loops at the first use.
 
 ## The Prelude is a curated subset
 
-The auto-imported `Prelude` is a small, hand-maintained subset
-(`lib/Prelude.mll` plus a few compiler builtins), not the full GHC `Prelude`.
-The list functions it provides without any import are:
+The auto-imported `Prelude` is a hand-maintained subset
+(`lib/Prelude.mll` plus a few compiler builtins), not the full GHC `Prelude`,
+but it now carries every GHC Prelude function mata-ll can express, at GHC's
+definitions. The list functions it provides without any import are:
 
-    map  filter  foldl  foldr  length  reverse  head  tail  elem
-    take  drop  takeWhile  dropWhile  zipWith  concatMap
-    null  last  init  concat  span  zip  unzip  replicate  iterate
-    and  or  any  all  sum  product  subtract
+    map  filter  foldl  foldr  foldr1  foldl1  length  reverse  head  tail
+    elem  notElem  take  drop  splitAt  takeWhile  dropWhile  span  break
+    zip  zip3  zipWith  zipWith3  unzip  unzip3  concat  concatMap
+    null  last  init  replicate  iterate  scanl  scanl1  scanr  scanr1
+    and  or  any  all  sum  product  lookup
+
+together with `either`, `maybe`, `curry`, `uncurry`, `asTypeOf`, `until`,
+`subtract`, `gcd`, `lcm`, `($!)`, `(=<<)`, `(<$)`, `sequence_` and the
+monadic/Foldable family (`mapM`, `mapM_`, `sequence`, `when`, …). What is
+absent is absent for a reason recorded elsewhere in this document: the
+`Char`-based functions (`words`, `lines`, `unwords`, `unlines` — no `Char`),
+`realToFrac`/`(^^)`/`toRational` (no `Rational`), the `IOError` family
+(string-based errors), and lazy I/O (`interact`, `getContents`,
+`readFile`).
 
 `Data.List` (explicit `import Data.List`) adds the less common helpers and
 re-exports the Prelude ones, so existing imports keep working:
 
-    append  break'  find  unfoldr  scanl  scanr  intersperse  intercalate
+    append  break'  find  unfoldr  intersperse  intercalate
     partition  nubBy  groupBy  sortBy  foldl'
 
 Other bundled modules, also explicitly imported: `Data.Map`, `Data.Maybe`,

@@ -609,5 +609,138 @@ snd (_, y) = y
 elem :: (Eq a, Foldable t) => a -> t a -> Bool
 elem a t = foldr (\x rest -> if a == x then True else rest) False t
 
+
+-- Complement of `elem`, Foldable-generic like it.
+notElem :: (Eq a, Foldable t) => a -> t a -> Bool
+notElem a t = not (elem a t)
+
+-- ---------------------------------------------------------------------------
+-- The rest of GHC's Prelude that is expressible here, with GHC's definitions.
+-- The PSE dogfood (2026-09-12) wrote `either`/`maybe` and found them absent;
+-- the program corpus had been dodging the gap with local `either'` copies.
+-- ---------------------------------------------------------------------------
+
+-- Case analysis for Either and Maybe.
+either :: (a -> c) -> (b -> c) -> Either a b -> c
+either f _ (Left x) = f x
+either _ g (Right y) = g y
+
+maybe :: b -> (a -> b) -> Maybe a -> b
+maybe def _ Nothing = def
+maybe _ f (Just x) = f x
+
+-- Tuple/function shape conversions.
+curry :: ((a, b) -> c) -> a -> b -> c
+curry f x y = f (x, y)
+
+uncurry :: (a -> b -> c) -> (a, b) -> c
+uncurry f p = f (fst p) (snd p)
+
+-- `asTypeOf` is `const` with a signature that unifies its arguments' types.
+asTypeOf :: a -> a -> a
+asTypeOf x _ = x
+
+-- Iterate f until the predicate holds, starting with x itself.
+until :: (a -> Bool) -> (a -> a) -> a -> a
+until p f x = if p x then x else until p f (f x)
+
+-- Strict application: the argument is forced before the call.
+infixr 0 $!
+($!) :: (a -> b) -> a -> b
+f $! x = x `seq` f x
+
+-- Bind with the arguments flipped.
+infixr 1 =<<
+(=<<) :: Monad m => (a -> m b) -> m a -> m b
+f =<< m = m >>= f
+
+-- Replace every element of a Functor with one value (GHC's `<$`, a Functor
+-- method there; a plain function over fmap here, like `<$>` in spirit).
+infixl 4 <$
+(<$) :: Functor f => a -> f b -> f a
+x <$ m = fmap (const x) m
+
+-- Evaluate each action, discarding the results (Foldable-generic like mapM_).
+sequence_ :: (Foldable t, Monad m) => t (m a) -> m ()
+sequence_ t = foldr (\x k -> x >> k) (pure ()) t
+
+-- Greatest common divisor and least common multiple over any Integral,
+-- GHC's definitions: `gcd` is never negative, `gcd 0 0` is 0, and `lcm`
+-- of anything with 0 is 0.
+gcd :: Integral a => a -> a -> a
+gcd x y = go (abs x) (abs y)
+  where
+    go a 0 = a
+    go a b = go b (a `rem` b)
+
+lcm :: Integral a => a -> a -> a
+lcm _ 0 = 0
+lcm 0 _ = 0
+lcm x y = abs ((x `quot` gcd x y) * y)
+
+-- Prefix/suffix split at an index (`splitAt n xs == (take n xs, drop n xs)`).
+splitAt :: Int -> [a] -> ([a], [a])
+splitAt n xs = (take n xs, drop n xs)
+
+-- Longest prefix NOT satisfying p, paired with the remainder (the dual of span).
+break :: (a -> Bool) -> [a] -> ([a], [a])
+break p xs = span (\x -> not (p x)) xs
+
+-- Running folds. `scanl` and `scanr` keep the seed as the first/last
+-- element; the `1` variants start from the list's own first/last element
+-- and are empty on an empty list.
+scanl :: (b -> a -> b) -> b -> [a] -> [b]
+scanl _ acc [] = [acc]
+scanl f acc (x:xs) = acc : scanl f (f acc x) xs
+
+scanl1 :: (a -> a -> a) -> [a] -> [a]
+scanl1 _ [] = []
+scanl1 f (x:xs) = scanl f x xs
+
+-- (Written with a case rather than `head rest` so `head` stays a name no
+-- Prelude code depends on: a user program may redefine it at a narrower
+-- type, and a load-bearing `head` would turn that into a rejection.)
+scanr :: (a -> b -> b) -> b -> [a] -> [b]
+scanr _ acc [] = [acc]
+scanr f acc (x:xs) = case scanr f acc xs of
+    rest@(r : _) -> f x r : rest
+    [] -> []
+
+scanr1 :: (a -> a -> a) -> [a] -> [a]
+scanr1 _ [] = []
+scanr1 _ [x] = [x]
+scanr1 f (x:xs) = case scanr1 f xs of
+    rest@(r : _) -> f x r : rest
+    [] -> []
+
+-- Folds without a seed: the structure must be non-empty. Foldable-generic
+-- through the same list view `maximum`/`minimum` use.
+foldr1 :: Foldable t => (a -> a -> a) -> t a -> a
+foldr1 f t = case foldr (\x xs -> x : xs) [] t of
+    [] -> error "Prelude.foldr1: empty list"
+    xs -> go xs
+  where
+    go [x] = x
+    go (x : xs) = f x (go xs)
+
+foldl1 :: Foldable t => (a -> a -> a) -> t a -> a
+foldl1 f t = case foldr (\x xs -> x : xs) [] t of
+    [] -> error "Prelude.foldl1: empty list"
+    (x : xs) -> foldl f x xs
+
+-- Three-way zips, stopping at the shortest list.
+zip3 :: [a] -> [b] -> [c] -> [(a, b, c)]
+zip3 (x : xs) (y : ys) (z : zs) = (x, y, z) : zip3 xs ys zs
+zip3 _ _ _ = []
+
+zipWith3 :: (a -> b -> c -> d) -> [a] -> [b] -> [c] -> [d]
+zipWith3 f (x : xs) (y : ys) (z : zs) = f x y z : zipWith3 f xs ys zs
+zipWith3 _ _ _ _ = []
+
+unzip3 :: [(a, b, c)] -> ([a], [b], [c])
+unzip3 [] = ([], [], [])
+unzip3 ((a, b, c) : rest) = case unzip3 rest of
+    (as, bs, cs) -> (a : as, b : bs, c : cs)
+
 -- head, tail, map, filter, take, drop, zipWith are implemented in the
 -- Lua runtime to support lazy cons cells (infinite lists).

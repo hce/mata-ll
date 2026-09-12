@@ -71,14 +71,7 @@ unfoldr f b = case f b of
     Nothing -> []
     Just (a, b2) -> a : unfoldr f b2
 
-scanl :: (b -> a -> b) -> b -> [a] -> [b]
-scanl _ acc [] = [acc]
-scanl f acc (x:xs) = acc : scanl f (f acc x) xs
-
-scanr :: (a -> b -> b) -> b -> [a] -> [b]
-scanr _ acc [] = [acc]
-scanr f acc (x:xs) = let rest = scanr f acc xs
-                     in f x (head rest) : rest
+-- scanl/scanr live in the Prelude (as in GHC) and are re-exported above.
 
 find :: (a -> Bool) -> [a] -> Maybe a
 find _ [] = Nothing

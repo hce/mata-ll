@@ -15,11 +15,13 @@ compute x = local + goto
     local = x * 2
     goto  = let function = x + 1 in function
 
--- Keyword names as record fields.
-data Cfg = Cfg { until :: Int, while :: Int, function :: Int }
+-- Keyword names as record fields. (`until` is a Prelude function since the
+-- GHC-parity additions of 2026-09-12, so it cannot be a field name — a field
+-- defines a module-level accessor — and `nil` stands in for it here.)
+data Cfg = Cfg { nil :: Int, while :: Int, function :: Int }
 
 grab :: Cfg -> Int
-grab c = until c + while c + function c
+grab c = nil c + while c + function c
 
 main :: IO ()
 main = do

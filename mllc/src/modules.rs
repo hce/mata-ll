@@ -667,6 +667,37 @@ impl ModuleLoader {
                     }
                 }
             }
+            // Names the child's export list offers that no declaration in
+            // its region provides are Prelude (or builtin) names it
+            // re-exports — Data.Maybe's `maybe`, Data.List's `map`/`span`,
+            // Control.Monad's `sequence_`. They live in the flat namespace
+            // under their bare name, so `A.name` resolves to that, exactly
+            // as GHC resolves `M.maybe` through `import qualified
+            // Data.Maybe as M` to Prelude's. Until 2026-09-12 the alias
+            // table knew only declaration-provided names: `L.span` never
+            // resolved, and `M.maybe` went unbound the moment `maybe`
+            // moved from Data.Maybe into the Prelude.
+            if !edge.aliases.is_empty()
+                && let Some(ex) = self.loaded.get(&edge.key).and_then(|m| m.exports.as_ref())
+            {
+                for alias in &edge.aliases {
+                    let entry = alias_table.entry(alias.clone()).or_default();
+                    for n in &ex.names {
+                        if entry.vals.contains_key(n)
+                            || entry.tys.contains_key(n)
+                            || entry.cons.contains_key(n)
+                        {
+                            continue;
+                        }
+                        if n.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
+                            entry.tys.entry(n.clone()).or_insert_with(|| n.clone());
+                            entry.cons.entry(n.clone()).or_insert_with(|| n.clone());
+                        } else {
+                            entry.vals.entry(n.clone()).or_insert_with(|| n.clone());
+                        }
+                    }
+                }
+            }
         }
         // An explicit import of a name overrides transitive selection-hiding,
         // but never a module's own export-list privacy; and a name that

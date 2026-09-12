@@ -84,6 +84,8 @@ mll_test!(luacatch, "luacatch.mll");
 mll_test!(lua_iterator_method, "lua_iterator_method.mll");
 mll_test!(tuple_ctor, "tuple_ctor.mll");
 mll_test!(lua_keywords, "lua_keywords.mll");
+mll_test!(prelude_ghc_extras, "prelude_ghc_extras.mll");
+mll_test!(qualified_prelude_reexports, "qualified_prelude_reexports.mll");
 mll_test!(mapm, "mapm.mll");
 mll_test!(mapm_underscore, "mapm_underscore.mll");
 mll_test!(mapm_return_position, "mapm_return_position.mll");

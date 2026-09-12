@@ -31,6 +31,38 @@ API of the `mllc` library crate.)
 
 ### Added
 
+- **The rest of GHC's Prelude that mata-ll can express**, with GHC's
+  definitions: `either`, `maybe`, `curry`, `uncurry`, `asTypeOf`, `until`,
+  `($!)`, `(=<<)`, `(<$)`, `sequence_`, `gcd`, `lcm`, `splitAt`, `break`,
+  `scanl`, `scanl1`, `scanr`, `scanr1`, `foldr1`, `foldl1`, `zip3`,
+  `zipWith3`, `unzip3`, `notElem`. `maybe` (Data.Maybe), `scanl`/`scanr`
+  (Data.List) and `sequence_` (Control.Monad) moved into the Prelude and
+  stay re-exported from their old modules. Found by the PSE dogfood round:
+  a program written in ordinary Haskell reached for `either` and `maybe`
+  and the program corpus had been dodging the gap with local copies.
+  (GHC-goldened case `prelude_ghc_extras`.)
+
+### Fixed
+
+- **Alias-qualified references to Prelude names a library module
+  re-exports resolve** (`import qualified Data.List as L` → `L.span`,
+  `L.map`; `import qualified Data.Maybe as M` → `M.maybe`;
+  `import qualified Control.Monad as C` → `C.sequence_`), as under GHC.
+  The alias table knew only the names a module's own declarations provide,
+  so an export-list entry naming a Prelude function was reachable bare but
+  not through the alias: `L.span` never resolved, and `M.maybe` went
+  unbound the moment `maybe` moved into the Prelude. Case
+  `qualified_prelude_reexports` (GHC-goldened).
+- **A record field named after a Prelude function or builtin is rejected
+  up front** with the same "already provided by the Prelude and cannot be
+  redefined" report top-level definitions get, naming the field and its
+  type. The checker registers field accessors before the Prelude's
+  signatures, so the Prelude name silently won and the program failed at
+  the field's use site with a unification error that blamed nothing the
+  user wrote (`data R = R { either :: Int }`; `either (R 1)` → "Cannot
+  unify 'a -> b' with 'R'"). Case `lua_keywords` (whose `until` field the
+  new Prelude `until` broke) now uses `nil` and is GHC-goldened.
+
 - **Module re-exports** (Haskell 2010 §5.2). An export list may carry
   `module X` entries: `module M (module M, …)` exports every own
   declaration (the self re-export idiom), and `module M (module X, f)`

@@ -3591,6 +3591,38 @@ fn prelude_builtin_redefinition_reports_user_site_not_prelude() {
 }
 
 #[test]
+fn prelude_name_as_record_field_rejected_up_front() {
+    // A record field defines a module-level accessor of its own name. The
+    // checker registers accessors in its data-type pass, before the Prelude's
+    // signatures, so a field named after a Prelude function used to lose
+    // silently: `either (R 1 2)` then failed with "Cannot unify 'a -> b'
+    // with 'R'" at the use site, blaming nothing the user could see. It must
+    // be the same clear redefinition report, naming the field's type.
+    let e = expect_compile_error(
+        "data R = R { either :: Int, other :: Int }\n\nmain :: IO ()\nmain = print (either (R 1 2))\n",
+        &[],
+        &[
+            "'either' is already provided by the Prelude and cannot be redefined",
+            "the field 'either' of 'R'",
+            "rename the field",
+        ],
+    );
+    assert!(!e.contains("Cannot unify"), "use-site cascade leaked through, got: {e}");
+    // A builtin (no Prelude source definition) is caught the same way, and
+    // so is the record-form newtype selector.
+    expect_compile_error(
+        "data R = R { head :: Int }\n\nmain :: IO ()\nmain = print (head (R 1))\n",
+        &[],
+        &["'head' is already provided by the Prelude and cannot be redefined", "the field 'head' of 'R'"],
+    );
+    expect_compile_error(
+        "newtype W = W { maybe :: Int }\n\nmain :: IO ()\nmain = print (maybe (W 1))\n",
+        &[],
+        &["'maybe' is already provided by the Prelude and cannot be redefined", "the field 'maybe' of 'W'"],
+    );
+}
+
+#[test]
 fn prelude_load_bearing_name_redefinition_rejected() {
     // `map` is a builtin the Prelude uses internally (ap_List). Redefining it
     // used to compile silently and corrupt `<*>` on lists.

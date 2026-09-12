@@ -119,7 +119,6 @@ excluded_reason() {
         cases/newtypes)                  echo "'newtype Age = Int' implicit-constructor sugar is not Haskell";;
         cases/superclass)                echo "redefines the Eq/Ord classes (mata-ll builtin shadowing)";;
         cases/constructor_shadowing)     echo "redefines Just/Nothing constructors (Prelude shadowing)";;
-        cases/lua_keywords)              echo "record fields named after Lua keywords collide with Prelude.until under GHC";;
 
         # -- helper modules, not runnable cases -------------------------------
         cases/DiamondLeaf)               echo "helper module (twinned for import, no main)";;

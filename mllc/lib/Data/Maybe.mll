@@ -3,9 +3,7 @@ module Data.Maybe
     , listToMaybe, maybeToList, catMaybes, mapMaybe
     ) where
 
-maybe :: b -> (a -> b) -> Maybe a -> b
-maybe def _ Nothing = def
-maybe _ f (Just x) = f x
+-- `maybe` lives in the Prelude (as in GHC) and is re-exported above.
 
 isJust :: Maybe a -> Bool
 isJust (Just _) = True

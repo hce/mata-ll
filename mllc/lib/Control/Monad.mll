@@ -4,7 +4,7 @@ module Control.Monad
     , sequence, sequence_
     ) where
 
--- mapM, mapM_, sequence, when are already in Prelude, re-exported here
+-- mapM, mapM_, sequence, sequence_, when are already in Prelude, re-exported here
 
 -- forM_ = flip mapM_: result-discarding traversal with args swapped, so the
 -- action can be written as a trailing lambda block.
@@ -35,5 +35,4 @@ void action = action >> pure ()
 join :: Monad m => m (m a) -> m a
 join x = x >>= \inner -> inner
 
-sequence_ :: (Foldable t, Monad m) => t (m a) -> m ()
-sequence_ t = foldr (\x k -> x >> k) (pure ()) t
+-- sequence_ lives in the Prelude (as in GHC) and is re-exported above.
