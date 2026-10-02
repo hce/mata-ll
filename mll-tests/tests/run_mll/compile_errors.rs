@@ -4812,6 +4812,82 @@ fn explicit_prelude_import_scopes_the_prelude() {
          main :: IO ()\nmain = assert (reverse [1, 2, 3] == [1, 2, 3]) \"the program's own reverse\"\n");
 }
 
+/// `import Prelude hiding (…)` takes a name out of what the MODULE may
+/// write; it says nothing about what the compiler's desugarings refer to.
+/// A written `concatMap` is out of scope and reported; the comprehension,
+/// the range and the partial pattern in the same module are references
+/// the compiler wrote, and keep meaning the Prelude's functions.
+#[test]
+fn hiding_a_prelude_name_hides_it_from_the_module_not_from_desugaring() {
+    let source = "import Prelude hiding (concatMap, enumFromTo, error)\n\n\
+                  main :: IO ()\nmain = do\n    \
+                  print [x | Just x <- map Just [1 .. 3 :: Int]]\n    \
+                  print (concatMap (\\x -> [x]) [1, 2 :: Int])\n";
+    let msg = expect_compile_error(source, &[], &[
+        "'concatMap' is not in scope",
+        "at 6:",
+        "note:",
+        "'import Prelude'",
+    ]);
+    assert_eq!(msg.matches("is not in scope").count(), 1,
+        "only the written reference is out of scope: {msg}");
+    assert!(!msg.contains("at 5:"), "the comprehension line is not an error: {msg}");
+    let ok = "import Prelude hiding (concatMap, enumFromTo, error)\n\n\
+              main :: IO ()\nmain = do\n    \
+              assert ([x | Just x <- map Just [1 .. 3 :: Int]] == [1, 2, 3]) \"desugared names\"\n";
+    let lua = compile(ok, Path::new("."), &[])
+        .unwrap_or_else(|e| panic!("the desugarings alone should compile:\n{e}"))
+        .lua_code;
+    mlua::Lua::new().load(&lua).set_name("hidden_desugar_names").exec()
+        .unwrap_or_else(|e| panic!("the desugarings alone should run:\n{e}"));
+}
+
+/// `[A ..]` desugars to an application of `enumFrom` to the constructor
+/// `A`. That application is not the qualified name `A.enumFrom`, even
+/// when `A` is an import alias: the head is the compiler's reference, not
+/// a field or function name the module wrote after an alias.
+#[test]
+fn range_over_an_import_alias_is_not_a_qualified_name() {
+    let source = "import qualified Data.Map as M\n\n\
+                  main :: IO ()\nmain = print (take 2 [M ..])\n";
+    let msg = expect_compile_error(source, &[Path::new("../lib")], &[
+        "Unknown constructor: M",
+    ]);
+    assert!(!msg.contains("enumFrom"), "no qualified name was formed: {msg}");
+}
+
+/// The spellings import resolution gives a local binder named like a
+/// desugaring's Prelude function (`__local_error`), and the parameters of
+/// a tuple-constructor section (`__tcon0`), are compiler-made names; like
+/// every `__` name they cannot be written in source, so no program can
+/// collide with them.
+#[test]
+fn respelled_binder_names_are_not_source_names() {
+    for name in ["__local_error", "__local_concatMap", "__tcon0"] {
+        let source = format!(
+            "f :: Int -> Int\nf {name} = {name} + 1\n\nmain :: IO ()\nmain = print (f 1)\n");
+        expect_compile_error(&source, &[], &[
+            "reserved for compiler-generated names",
+            &format!("'{name}'"),
+        ]);
+    }
+}
+
+/// A diagnostic names a local binder as its author wrote it, also when
+/// import resolution gave the binder another spelling to keep it apart
+/// from the Prelude function a desugaring refers to.
+#[test]
+fn diagnostics_show_a_respelled_binder_as_written() {
+    let source = "f :: Int -> Int\nf n = error + 1\n  where\n    error = \"x\" + n\n\n\
+                  g :: Int %1 -> Int\ng error = 1\n\n\
+                  main :: IO ()\nmain = print (f 1 + g 2)\n";
+    let msg = expect_compile_error(source, &[], &[
+        "in the where-binding 'error' (definition of 'f')",
+        "'error' must be consumed exactly once",
+    ]);
+    assert!(!msg.contains("__local"), "the resolver's spelling must not show: {msg}");
+}
+
 /// The compiled program returns one table to the Lua host, keyed by the
 /// names the `export` declarations carry in their own modules — also for
 /// an export of an imported module, and for one that shares its name with

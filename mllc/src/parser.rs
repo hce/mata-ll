@@ -2070,7 +2070,7 @@ impl Parser {
                     unreachable!("non-boolean qualifier in a plain guard chain")
                 };
                 condition = Expr::InfixApp {
-                    op: "&&".to_string(),
+                    op: WiredIn::And.reference(),
                     lhs: Box::new(condition),
                     rhs: Box::new(next),
                 };
@@ -2317,7 +2317,7 @@ impl Parser {
                 // qualifiers (§3.13) takes the pattern-guard lowering with
                 // the same error fall-through.
                 let fallback = Expr::App(
-                    Box::new(Expr::Var("error".into())),
+                    Box::new(WiredIn::Error.var()),
                     Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec()))),
                 );
                 let body = match self.parse_guard_chain(&Token::Eq, 0)? {
@@ -3178,7 +3178,7 @@ impl Parser {
                     Pattern::Var(name) => {
                         Expr::App(
                             Box::new(Expr::App(
-                                Box::new(Expr::Var("concatMap".to_string())),
+                                Box::new(WiredIn::ConcatMap.var()),
                                 Box::new(Expr::Lambda {
                                     params: vec![name.clone()],
                                     body: Box::new(rest),
@@ -3208,7 +3208,7 @@ impl Parser {
                         };
                         Expr::App(
                             Box::new(Expr::App(
-                                Box::new(Expr::Var("concatMap".to_string())),
+                                Box::new(WiredIn::ConcatMap.var()),
                                 Box::new(Expr::Lambda {
                                     params: vec![var_name],
                                     body: Box::new(case_expr),
@@ -3458,12 +3458,14 @@ impl Parser {
         // function (matching how binary functions are passed to `zipWith`,
         // `foldr`, etc.), while partial application (e.g. `(,) x`) is
         // handled by the ordinary call-site eta-wrap. Type: `a -> b -> (a, b)`.
+        // The parameters are compiler-made names like every other binder a
+        // desugaring introduces, so they live in the reserved `__` namespace.
         if self.at(&Token::Comma) {
             let mut commas = 0;
             while self.at(&Token::Comma) { self.advance(); commas += 1; }
             self.expect(&Token::RightParen)?;
             let params: Vec<String> =
-                (0..commas + 1).map(|i| format!("_tup{}", i)).collect();
+                (0..commas + 1).map(|i| format!("__tcon{}", i)).collect();
             let elems: Vec<Expr> =
                 params.iter().map(|p| Expr::Var(p.clone())).collect();
             return Ok(Expr::Lambda { params, body: Box::new(Expr::Tuple(elems)) });
@@ -3679,7 +3681,7 @@ impl Parser {
                 // [x..] → enumFrom x
                 self.advance();
                 return Ok(Expr::App(
-                    Box::new(Expr::Var("enumFrom".to_string())),
+                    Box::new(WiredIn::EnumFrom.var()),
                     Box::new(first),
                 ));
             }
@@ -3689,7 +3691,7 @@ impl Parser {
             self.expect(&Token::RightBracket)?;
             return Ok(Expr::App(
                 Box::new(Expr::App(
-                    Box::new(Expr::Var("enumFromTo".to_string())),
+                    Box::new(WiredIn::EnumFromTo.var()),
                     Box::new(first),
                 )),
                 Box::new(end),
@@ -3711,7 +3713,7 @@ impl Parser {
                     self.advance();
                     return Ok(Expr::App(
                         Box::new(Expr::App(
-                            Box::new(Expr::Var("enumFromThen".to_string())),
+                            Box::new(WiredIn::EnumFromThen.var()),
                             Box::new(items.pop().unwrap()),
                         )),
                         Box::new(second),
@@ -3724,7 +3726,7 @@ impl Parser {
                 return Ok(Expr::App(
                     Box::new(Expr::App(
                         Box::new(Expr::App(
-                            Box::new(Expr::Var("enumFromThenTo".to_string())),
+                            Box::new(WiredIn::EnumFromThenTo.var()),
                             Box::new(items.pop().unwrap()),
                         )),
                         Box::new(second),
@@ -4048,7 +4050,7 @@ impl Parser {
                         pattern: Pattern::Wildcard,
                         guards: vec![],
                         body: Some(Expr::App(
-                            Box::new(Expr::Var("error".into())),
+                            Box::new(WiredIn::Error.var()),
                             Box::new(Expr::Lit(Literal::Str(fallback_msg.as_bytes().to_vec()))),
                         )),
                     },
@@ -4093,7 +4095,7 @@ impl Parser {
 
     fn pg_error(msg: &str) -> Expr {
         Expr::App(
-            Box::new(Expr::Var("error".into())),
+            Box::new(WiredIn::Error.var()),
             Box::new(Expr::Lit(Literal::Str(msg.as_bytes().to_vec()))),
         )
     }

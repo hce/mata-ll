@@ -19,7 +19,7 @@ Everything is orchestrated by `mllc/src/lib.rs:compile`. The stages, in order:
 |---|-------|-------------|----------------|
 | 1 | Lex | `lexer::lex` | source text → `Vec<Token>` |
 | 2 | Parse | `parser::parse` | tokens → `ast::Module` (infix expressions still flat: `Expr::OpChain`, `Expr::Section`, `Type::OpChain`) |
-| 3 | Resolve imports | `modules::ModuleLoader::resolve_imports` | module → module (imported decls merged, every reference bound to a canonical name, operator chains grouped; see §9) |
+| 3 | Resolve imports | `modules::ModuleLoader::resolve_imports` | module → module (imported decls merged, every reference bound to a canonical name — the program's in its module's scope, the compiler's own to their Prelude entities —, operator chains grouped; see §9) |
 | 4 | Prepend prelude | `parse_prelude` + merge in `compile` | → single `ast::Module` |
 | 5 | Desugar do-notation | `desugar::desugar_module` | AST → AST |
 | 6 | Type check | `typechecker::Checker::check_module_with_local_start` | AST → **TIR** (`tir::TModule`) |
@@ -323,9 +323,33 @@ apart is done entirely in `modules.rs`, before the merge
   `Rename` over them with empty tables. After stage 3 no chain node
   exists (the checker's arms for them are `unreachable!`).
 - **What is not scoped.** Constructors, record fields, classes and class
-  methods are global names and are not renamed. The parser's own desugarings
-  (`concatMap`, `enumFromTo`, `error`) are plain references and resolve like
-  written ones.
+  methods are global names and are not renamed.
+- **References the compiler writes (`ast::WiredIn`).** A desugaring is
+  spelled with Prelude functions: a list comprehension with `concatMap`, a
+  range with an `enumFrom…` method, a partial match with `error`, a guard
+  comma with `&&`, a `do` block with `>>=`. Such a reference is not one the
+  program wrote, and nothing the program declares may change what it means.
+  `WiredIn` lists these entities, and two rules in `Rename` keep them apart
+  from the program's names. (1) Everything the parser builds refers to them
+  by a reserved spelling (`WiredIn::reference`, `<wired-in concatMap>`: no
+  source name can look like that); `Rename::v` binds it to the entity's
+  canonical name — the bare Prelude name — without looking at the module's
+  scope, so the module's own or imported `concatMap`, and an
+  `import Prelude hiding (concatMap)`, do not matter. (2) The type checker
+  and everything after it tell a local variable from a top-level name by
+  spelling, and a local wins; so `Rename::local` gives every local binder
+  that is spelled like a wired-in entity a reserved spelling of its own
+  (`__local_error`), at the binding site and at every use. After stage 3
+  the bare name of a wired-in entity is never a local variable, which is
+  also what lets a later stage write the name directly: `desugar.rs`
+  (stage 5) writes `>>=` and `error` that way. `Resolution::display_names`
+  maps the binder spellings back, so diagnostics show `error`. A new
+  desugaring that needs another Prelude function adds a `WiredIn` variant;
+  a plain `Expr::Var("name")` in a desugaring would be an ordinary
+  reference again, bound in the user's scope. The fresh BINDERS desugaring
+  introduces (`__lamN`, `__tup_N`, `__wtup_N`, `__compN`, `__sec`, `__pgK_N`,
+  `__tconN`) are a separate matter: they live in the `__` namespace, which
+  the lexer refuses in source.
 - **Canonical names downstream.** The checker refers to the bundled library
   by canonical name where it has built-in knowledge of it
   (`Checker::json_fn`, `Checker::library_type`: `JSON.jField`,

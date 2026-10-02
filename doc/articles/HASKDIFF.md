@@ -268,6 +268,15 @@ it is used — all as in GHC. The differences:
   Prelude function) cannot be written under a local binding of the same
   name: `f maybe = M.maybe …` is rejected; rename the local.
 
+What syntax stands for is not subject to any of this, as in GHC: a list
+comprehension, a range (`[a .. b]`), a comma between guard conditions,
+the failure of a partial pattern and the sequencing of a `do` block mean
+the Prelude's `concatMap`, `enumFromTo` (and its three siblings), `&&`,
+`error` and `>>=`, whatever the module defines, imports, hides
+(`import Prelude hiding (concatMap)`) or binds locally under those
+names. A parameter may be called `error` or `concatMap`. (In the emitted
+Lua such a local is spelled `__local_error`.)
+
 ## Fixity belongs to the operator, as in GHC; where it can be declared is narrower
 
 An operator occurrence groups by the fixity of what it denotes in the

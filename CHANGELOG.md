@@ -128,6 +128,39 @@ API of the `mllc` library crate.)
   next to the Prelude's declarations for the rest; they are all
   declared in the Prelude source now, and the GHC-goldened case
   `fixity_table` pins precedence and associativity of every one of them.
+- **What syntax stands for means the Prelude's functions, whatever the
+  module defines** (silent miscompile). A list comprehension is
+  desugared to `concatMap`, a range to an `enumFrom…` method, a partial
+  pattern or a guard chain without a final alternative to `error`, a
+  comma between guard conditions to `&&` — and those were ordinary
+  references, bound like the ones the program writes. A module with a
+  `concatMap` of its own ran its comprehensions through it
+  (`[x * 10 | x <- [1, 2, 3]]` gave `[30,20,10]` next to a `concatMap`
+  that reverses; GHC `[10,20,30]`), as did a module that imports one;
+  an own `error`, `enumFromTo` or `(&&)` took over partial matches,
+  ranges and guard commas the same way; and a parameter, `let`, `where`
+  or pattern variable of such a name captured them too
+  (`f error m = (\(Just x) -> error x) m` and
+  `g concatMap xs = [concatMap x | x <- xs]` were type errors, a
+  refutable `do` bind under a parameter `error` likewise). A reference
+  the compiler writes is now marked as the compiler's, and module
+  resolution binds it to the Prelude's entity without a scope lookup. A
+  local binder spelled like one of these functions gets a reserved
+  spelling in the compiled program (`__local_error`), because the later
+  stages tell a local from a top-level name by spelling; that also
+  covers the `>>=` and `error` that `do` desugaring writes after
+  resolution. Diagnostics show the binder as written.
+  `import Prelude hiding (concatMap)` hides the name from the module's
+  own code and from nothing else; the exemption that kept six such names
+  visible to written references is gone. `[M ..]` with an import alias
+  `M` is no longer read as the qualified name `M.enumFrom`. Emitted Lua
+  is unchanged for every program without such a binder, with one
+  exception: the parameters of a tuple-constructor section `(,)` are
+  spelled `__tcon0`, `__tcon1`, … (they were `_tup0`, …, the one
+  compiler-made binder a program could write). GHC-goldened cases
+  `desugar_own_definitions`, `desugar_local_binders`,
+  `desugar_imported_names`, `desugar_module_own_names`,
+  `desugar_qualified_prelude`.
 - **`import Prelude` forms scope the Prelude instead of loading it a
   second time.** `import Prelude hiding (lookup)`, `import Prelude
   (print, (+))` and `import qualified Prelude as P` declare which Prelude

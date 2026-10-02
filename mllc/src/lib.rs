@@ -1010,3 +1010,38 @@ mod section_offset_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod wired_in_tests {
+    use super::*;
+
+    /// Import resolution binds a compiler-written reference to the bare
+    /// name of its entity and relies on that name being the Prelude's:
+    /// the entry module's own declaration of a Prelude name gets a
+    /// qualified canonical name (`modules::ModuleLoader::canon_val`), and
+    /// that only happens for names the Prelude scope holds. So every
+    /// wired-in entity must be a Prelude value, and neither of its
+    /// reserved spellings may be something the lexer hands out as a name.
+    #[test]
+    fn every_wired_in_entity_is_a_prelude_value_with_reserved_spellings() {
+        let prelude_decls = parse_prelude().expect("the Prelude parses");
+        let checker = typechecker::Checker::new();
+        let scope = prelude_scope(&prelude_decls, std::collections::HashMap::new(), &checker);
+        for w in ast::WiredIn::ALL {
+            assert!(scope.values.contains(w.name()),
+                "the Prelude provides no '{}'", w.name());
+            assert_eq!(ast::WiredIn::named(w.name()), Some(w));
+            let reference = w.reference();
+            assert_eq!(ast::WiredIn::of_reference(&reference), Some(w));
+            assert_eq!(ast::WiredIn::of_reference(w.name()), None,
+                "a written '{}' is an ordinary reference", w.name());
+            for spelling in [reference, w.local_binder()] {
+                let as_one_name = lexer::lex(&spelling).ok().is_some_and(|tokens| {
+                    tokens.iter().any(|t| matches!(&t.token,
+                        lexer::Token::Ident(n) | lexer::Token::Operator(n) if *n == spelling))
+                });
+                assert!(!as_one_name, "'{spelling}' can be written in source");
+            }
+        }
+    }
+}

@@ -878,6 +878,12 @@ two modules may each have a \texttt{helper} function or a
   \texttt{import Prelude (\ldots)} and
   \texttt{import qualified Prelude as P} restrict or alias the
   implicit Prelude import, as in Haskell.
+\item What syntax stands for is fixed, as in Haskell: a list
+  comprehension, a range, a comma between guard conditions, a failed
+  pattern match and a \texttt{do} block use the Prelude's
+  \texttt{concatMap}, \texttt{enumFromTo} (and its siblings),
+  \texttt{\&\&}, \texttt{error} and \texttt{>>=}, whatever the module
+  defines, imports, hides or binds locally under those names.
 \item Data constructors, record fields, classes and class methods are
   \emph{program-wide} names: import lists do not hide them, and two
   modules cannot declare the same one.

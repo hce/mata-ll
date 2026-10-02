@@ -1000,3 +1000,56 @@ fn head_tail_empty_list_carry_ghc_message() {
     lua.load(&lua_code).set_name("head_lazy_elems").exec()
         .expect("head [1, undefined] must not force the second element");
 }
+
+// The fall-through of a partial match, of a guard chain without a final
+// alternative and of a refutable do-bind is the Prelude's `error`, also
+// where a parameter or a where binding is itself named `error`: the
+// failure raises the fall-through's message. (The local `error` used to
+// capture the reference — a type error for these shapes, and a call of
+// the local value where the types happened to fit.)
+#[test]
+fn partial_match_under_a_binder_named_error_raises_the_prelude_error() {
+    let source = r#"
+unwrap :: Int -> Maybe Int -> Int
+unwrap error m = (\(Just x) -> x + error) m
+
+pick :: Int -> Int -> Int
+pick error n = go n
+  where
+    go i
+        | i > error = i
+
+bound :: Int -> IO Int
+bound error = do
+    Just x <- pure (if error > 0 then Nothing else Just error)
+    pure x
+
+limit :: Int
+limit
+    | error > 100 = 1
+  where
+    error = 2
+
+message :: Either String a -> String
+message r = case r of
+    Left msg -> msg
+    Right _ -> "no failure"
+
+main :: IO ()
+main = do
+    a <- try (print (unwrap 1 Nothing))
+    assert (message a == "non-exhaustive lambda pattern") "a pattern lambda"
+    b <- try (print (pick 5 1))
+    assert (message b == "non-exhaustive guards") "a where guard chain"
+    c <- try (bound 1)
+    assert (message c == "Pattern match failure in do expression at 13:5") "a refutable bind"
+    d <- try (print limit)
+    assert (message d == "Non-exhaustive guards in 'limit'") "a guarded value"
+"#;
+    let lua_code = compile(source, Path::new("."), &[])
+        .expect("binders named error next to partial matches should compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    lua.load(&lua_code).set_name("partial_match_under_error_binder").exec()
+        .expect("each failure should raise the Prelude's error with the fall-through's message");
+}

@@ -4,6 +4,13 @@
 //! do { e; rest }          =>  e >>= \_ -> do { rest }
 //! do { let x = e; rest }  =>  let x = e in do { rest }
 //! do { e }                =>  e
+//!
+//! This pass runs AFTER import resolution, on the merged program, so the
+//! `>>=` and `error` it writes are canonical names (`ast::WiredIn::name`),
+//! not references resolution still has to bind. They mean the Prelude's
+//! entities wherever the block stands: a module's own top-level `>>=` or
+//! `error` has another canonical name, and resolution left no local
+//! binder under either spelling (see `ast::WiredIn`).
 
 use crate::ast::*;
 
@@ -161,7 +168,7 @@ fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
     };
 
     let bind = |lhs: Expr, param: String, body: Expr| Expr::InfixApp {
-        op: ">>=".to_string(),
+        op: WiredIn::Bind.name().to_string(),
         lhs: Box::new(lhs),
         rhs: Box::new(Expr::Lambda { params: vec![param], body: Box::new(body) }),
     };
@@ -200,7 +207,7 @@ fn desugar_do(stmts: Vec<DoStmt>) -> Expr {
                         pattern: Pattern::Wildcard,
                         guards: vec![],
                         body: Some(Expr::App(
-                            Box::new(Expr::Var("error".into())),
+                            Box::new(Expr::Var(WiredIn::Error.name().into())),
                             Box::new(Expr::Lit(Literal::Str(
                                 format!(
                                     "Pattern match failure in do expression at {}:{}",

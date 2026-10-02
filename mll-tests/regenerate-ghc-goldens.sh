@@ -173,6 +173,7 @@ excluded_reason() {
         cases/ScopeCfgB)                 echo "helper module (twinned for import, no main)";;
         cases/ScopeStack)                echo "helper module (twinned for import, no main)";;
         cases/ScopeHostLib)              echo "helper module using the 'export' keyword (Lua module export)";;
+        cases/DesugarOwn)                echo "helper module (twinned for import, no main)";;
         cases/FixityInner)               echo "helper module (twinned for import, no main)";;
         cases/FixityOuter)               echo "helper module (twinned for import, no main)";;
         cases/FixityPrivate)             echo "helper module (twinned for import, no main)";;
@@ -294,7 +295,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps; do
+for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack DesugarOwn FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

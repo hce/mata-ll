@@ -1170,7 +1170,13 @@ guards, and pattern-matching generators:
     pairs = [(x, y) | x <- [1..3], y <- [1..3], x /= y]
     oks   = [v | Ok v <- results]
 
-Comprehensions desugar to `concatMap` and `filter`.
+A generator desugars to the Prelude's `concatMap` and a guard to an
+`if` — always the Prelude's `concatMap`, also in a module that defines
+or imports a `concatMap` of its own, hides the Prelude's, or has a local
+variable of that name. The same holds for the other names syntax stands
+for: the `enumFrom…` methods of a range, the `&&` of a comma between
+guard conditions, the `error` of a failed pattern match, the `>>=` of a
+`do` block.
 
 # Literals
 

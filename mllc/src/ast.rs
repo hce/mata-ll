@@ -84,6 +84,115 @@ impl ScopeError {
     }
 }
 
+/// A Prelude entity the compiler refers to on its own account: the names
+/// its desugarings are written with. A list comprehension becomes a
+/// `concatMap` chain, an arithmetic sequence a call of an `enumFrom…`
+/// method, a failed match a call of `error`, a comma in a guard `&&`, a
+/// `do` block a `>>=` chain. Such a reference is not one the program
+/// wrote, so nothing the program declares may change what it denotes —
+/// not a top-level definition, not an import, not an `import Prelude
+/// hiding (…)`, not a local binder of the same spelling (in GHC the
+/// desugarer refers to these entities directly, past every scope).
+///
+/// Two rules, both enforced by import resolution (`modules::Rename`), keep
+/// that true in a pipeline that otherwise resolves names by spelling:
+///
+///   * BEFORE resolution a compiler-written reference carries the reserved
+///     spelling `reference()`, which no source name can have. Resolution
+///     binds it to the Prelude entity's canonical name — its bare name —
+///     without consulting the module's scope.
+///   * Resolution gives every LOCAL binder spelled like one of these
+///     entities the reserved spelling `local_binder()`, with all its uses.
+///     After resolution the bare name of a wired-in entity is therefore
+///     never a local variable, and a stage that runs later (`desugar.rs`,
+///     the type checker, code generation) may write `name()` directly.
+///
+/// This enum is the list: a desugaring that needs a further Prelude
+/// entity adds a variant here and gets both rules with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WiredIn {
+    /// A list-comprehension generator.
+    ConcatMap,
+    /// `[a ..]`
+    EnumFrom,
+    /// `[a, b ..]`
+    EnumFromThen,
+    /// `[a .. z]`
+    EnumFromTo,
+    /// `[a, b .. z]`
+    EnumFromThenTo,
+    /// The fall-through of a partial match or guard chain.
+    Error,
+    /// The comma between boolean guard qualifiers.
+    And,
+    /// The statement sequencing of a `do` block.
+    Bind,
+}
+
+/// What a `WiredIn::reference` spelling starts with. `<` and the space
+/// are in no source name.
+const WIRED_IN_REFERENCE_PREFIX: &str = "<wired-in ";
+
+/// What a `WiredIn::local_binder` spelling starts with. The lexer refuses
+/// every source identifier that begins with `__`.
+const WIRED_IN_LOCAL_PREFIX: &str = "__local_";
+
+impl WiredIn {
+    pub const ALL: [WiredIn; 8] = [
+        WiredIn::ConcatMap,
+        WiredIn::EnumFrom,
+        WiredIn::EnumFromThen,
+        WiredIn::EnumFromTo,
+        WiredIn::EnumFromThenTo,
+        WiredIn::Error,
+        WiredIn::And,
+        WiredIn::Bind,
+    ];
+
+    /// The entity's canonical name: the name the Prelude declares it under.
+    pub const fn name(self) -> &'static str {
+        match self {
+            WiredIn::ConcatMap => "concatMap",
+            WiredIn::EnumFrom => "enumFrom",
+            WiredIn::EnumFromThen => "enumFromThen",
+            WiredIn::EnumFromTo => "enumFromTo",
+            WiredIn::EnumFromThenTo => "enumFromThenTo",
+            WiredIn::Error => "error",
+            WiredIn::And => "&&",
+            WiredIn::Bind => ">>=",
+        }
+    }
+
+    /// The entity a source spelling coincides with, if any.
+    pub fn named(name: &str) -> Option<WiredIn> {
+        WiredIn::ALL.into_iter().find(|w| w.name() == name)
+    }
+
+    /// The spelling of a compiler-written reference in a module that
+    /// import resolution has not rewritten yet (everything the parser
+    /// builds).
+    pub fn reference(self) -> String {
+        format!("{WIRED_IN_REFERENCE_PREFIX}{}>", self.name())
+    }
+
+    /// `reference()` as a variable expression.
+    pub fn var(self) -> Expr {
+        Expr::Var(self.reference())
+    }
+
+    /// The entity a `reference()` spelling stands for.
+    pub fn of_reference(spelling: &str) -> Option<WiredIn> {
+        let name = spelling.strip_prefix(WIRED_IN_REFERENCE_PREFIX)?.strip_suffix('>')?;
+        WiredIn::named(name)
+    }
+
+    /// The spelling import resolution gives a local binder the source
+    /// names like this entity.
+    pub fn local_binder(self) -> String {
+        format!("{WIRED_IN_LOCAL_PREFIX}{}", self.name())
+    }
+}
+
 /// An mll module corresponds to a single .mll file.
 #[derive(Debug, Clone)]
 pub struct Module {

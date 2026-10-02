@@ -234,6 +234,11 @@ impl ModuleLoader {
         for (placeholder, err) in &self.scope_errors {
             display_names.insert(placeholder.clone(), err.written().to_string());
         }
+        // A local binder that was respelled to stay clear of a wired-in
+        // entity (`Rename::local`) is shown as its author wrote it.
+        for w in WiredIn::ALL {
+            display_names.insert(w.local_binder(), w.name().to_string());
+        }
         resolved.resolution = Resolution {
             scope_errors: std::mem::take(&mut self.scope_errors),
             source_names: self.source_names.clone(),
@@ -363,6 +368,13 @@ impl ModuleLoader {
     ///
     /// Record fields, class methods, classes and constructors are not part
     /// of this model: they remain global names, as before.
+    ///
+    /// A reference the COMPILER wrote — the `concatMap` of a list
+    /// comprehension, the `error` of a partial match — is not looked up
+    /// in the module's scope at all: it denotes a fixed Prelude entity,
+    /// whatever the module declares, imports, hides or binds locally
+    /// (`ast::WiredIn`; `Rename::v` and `Rename::local` are the two places
+    /// that make it so).
     fn resolve_module(&mut self, module: &Module, own_key: &str) -> Result<Resolved, ResolveError> {
         let is_root = own_key == ROOT_KEY;
 
@@ -787,7 +799,7 @@ impl ModuleLoader {
                 } else if region_globals.contains(n) {
                     None
                 } else if self.prelude.values.contains(n) {
-                    if prelude_visible(n) || DESUGARED_TO.contains(&n) {
+                    if prelude_visible(n) {
                         None
                     } else {
                         Some(placeholders.make(prelude_hidden(n)))
@@ -1174,14 +1186,6 @@ const ROOT_KEY: &str = "//root";
 /// their bare names.
 const PRELUDE_KEY: &str = "Prelude";
 
-/// The Prelude functions the parser spells its desugarings with — a list
-/// comprehension, an arithmetic sequence, a failed pattern match are plain
-/// references to these by the time resolution sees the module. Such a
-/// reference is not one the module wrote, so an explicit `import Prelude`
-/// form cannot take these names out of scope.
-const DESUGARED_TO: &[&str] =
-    &["concatMap", "enumFrom", "enumFromTo", "enumFromThen", "enumFromThenTo", "error"];
-
 /// What the implicit Prelude contributes to every module's scope, as far
 /// as name resolution is concerned. Built by the compile pipeline from the
 /// Prelude source and the type checker's builtin environment.
@@ -1556,6 +1560,13 @@ fn hidden_by_forms(forms: &[ImportItems], n: &str) -> bool {
 /// the entity it denotes, or a placeholder when it denotes none (see
 /// `Placeholders`). Constructors, classes, instances and class methods are
 /// global names and are never touched.
+///
+/// The rewrite is also where the compiler's own references are kept apart
+/// from the program's names (`ast::WiredIn`): a reference a desugaring
+/// wrote is bound to its Prelude entity without a scope lookup (`v`), and
+/// a local binder spelled like such an entity is respelled, with its
+/// uses, so that the entity's bare canonical name never names a local
+/// variable in the rewritten module (`local`).
 struct Rename<'a> {
     vals: &'a HashMap<String, String>,
     tys: &'a HashMap<String, String>,
@@ -1577,8 +1588,17 @@ struct Rename<'a> {
 
 impl Rename<'_> {
     fn v(&self, name: &str, bound: &HashSet<String>) -> String {
+        // A reference the compiler wrote. It denotes its Prelude entity
+        // by definition: neither the binders in scope nor the module's
+        // tables (an own or imported declaration of the same spelling, an
+        // `import Prelude` form that leaves the name out) are consulted.
+        // The entity's canonical name is its bare name, and `local` keeps
+        // every local binder off that spelling.
+        if let Some(wired) = WiredIn::of_reference(name) {
+            return wired.name().to_string();
+        }
         if bound.contains(name) {
-            return name.to_string();
+            return Self::local(name);
         }
         let qualified = self.is_alias_qualified(name);
         match self.vals.get(name) {
@@ -1586,8 +1606,10 @@ impl Rename<'_> {
             // Prelude function or a global record field / class method
             // reached through an alias) under a local binder of that very
             // name: written out bare, the reference would be captured by
-            // the binder and silently mean the local.
-            Some(target) if qualified && bound.contains(target) => {
+            // the binder and silently mean the local. (Not so for a
+            // wired-in name: the binder has been respelled.)
+            Some(target) if qualified && bound.contains(target)
+                && WiredIn::named(target).is_none() => {
                 self.placeholders.make(ScopeError::Explained {
                     name: name.to_string(),
                     message: format!(
@@ -1604,6 +1626,22 @@ impl Rename<'_> {
             // written it could coincide with the canonical name of some
             // module `A`'s private declaration; it is unbound.
             None if qualified => self.placeholders.make(ScopeError::Unbound(name.to_string())),
+            None => name.to_string(),
+        }
+    }
+
+    /// The spelling of the local binder the source calls `name`, at its
+    /// binding site and at every use. A binder that shares its spelling
+    /// with a wired-in entity gets a reserved one instead: after
+    /// resolution the entity's bare canonical name must mean the entity
+    /// everywhere — in the references `v` has just bound, and in the ones
+    /// later stages write (`desugar.rs`: `>>=`, `error`) — and downstream
+    /// a local variable shadows a top-level name of the same spelling.
+    /// The respelling is a function of the name alone, so two binders of
+    /// one name shadow each other exactly as written.
+    fn local(name: &str) -> String {
+        match WiredIn::named(name) {
+            Some(wired) => wired.local_binder(),
             None => name.to_string(),
         }
     }
@@ -1643,9 +1681,6 @@ impl Rename<'_> {
     }
 
     fn pattern(&self, p: &Pattern) -> Pattern {
-        if self.cons.is_empty() {
-            return p.clone();
-        }
         match p {
             Pattern::Constructor { name, args } => Pattern::Constructor {
                 name: self.c(name),
@@ -1653,8 +1688,9 @@ impl Rename<'_> {
             },
             Pattern::Paren(inner) => Pattern::Paren(Box::new(self.pattern(inner))),
             Pattern::Tuple(elems) => Pattern::Tuple(elems.iter().map(|e| self.pattern(e)).collect()),
-            Pattern::As(n, inner) => Pattern::As(n.clone(), Box::new(self.pattern(inner))),
-            Pattern::Var(_) | Pattern::Wildcard | Pattern::LitPat(_) => p.clone(),
+            Pattern::As(n, inner) => Pattern::As(Self::local(n), Box::new(self.pattern(inner))),
+            Pattern::Var(n) => Pattern::Var(Self::local(n)),
+            Pattern::Wildcard | Pattern::LitPat(_) => p.clone(),
         }
     }
 
@@ -1781,7 +1817,7 @@ impl Rename<'_> {
         let mut bound = outer.clone();
         for p in &ld.patterns { collect_pattern_vars(p, &mut bound); }
         LocalDef {
-            name: ld.name.clone(),
+            name: Self::local(&ld.name),
             patterns: ld.patterns.iter().map(|p| self.pattern(p)).collect(),
             body: self.expr(&ld.body, &bound),
             // A local signature names types exactly as a top-level one does
@@ -1828,7 +1864,10 @@ impl Rename<'_> {
             Expr::Lambda { params, body } => {
                 let mut b = bound.clone();
                 for p in params { b.insert(p.clone()); }
-                Expr::Lambda { params: params.clone(), body: Box::new(self.expr(body, &b)) }
+                Expr::Lambda {
+                    params: params.iter().map(|p| Self::local(p)).collect(),
+                    body: Box::new(self.expr(body, &b)),
+                }
             }
             Expr::Case { scrutinee, branches } => Expr::Case {
                 scrutinee: Box::new(self.expr(scrutinee, bound)),
@@ -1950,7 +1989,7 @@ impl Rename<'_> {
             DoStmt::Bind { name, expr } => {
                 let e = self.expr(expr, bound);
                 bound.insert(name.clone());
-                DoStmt::Bind { name: name.clone(), expr: e }
+                DoStmt::Bind { name: Self::local(name), expr: e }
             }
             DoStmt::Expr(e) => DoStmt::Expr(self.expr(e, bound)),
             DoStmt::DoLet { binds } => {
@@ -2093,8 +2132,11 @@ fn rewrite_uses_expr(e: Expr, aliases: &HashSet<String>) -> Expr {
     // Recurse first (post-order), then collapse the field-access shape.
     let e = e.map_subexprs(&mut |c| rewrite_uses_expr(c, aliases));
     // `App(Var field, Con alias)` with a known alias is a qualified reference.
+    // (A compiler-written head — the `enumFrom` of `[A ..]` — is no field
+    // name the module wrote, so it never forms one.)
     if let Expr::App(f, x) = &e
         && let Expr::Var(field) = f.as_ref()
+        && WiredIn::of_reference(field).is_none()
         && let Expr::Con(name) = x.as_ref()
         && aliases.contains(name)
     {

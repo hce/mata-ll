@@ -293,6 +293,16 @@ mll_lib_test!(scope_local_names, "scope_local_names.mll");
 mll_test!(scope_same_type_name_imports, "scope_same_type_name_imports.mll");
 mll_test!(scope_own_type_names, "scope_own_type_names.mll");
 mll_lib_test!(scope_list_next_to_alias, "scope_list_next_to_alias.mll");
+// A name the compiler's own desugaring wrote (the `concatMap` of a list
+// comprehension, the `enumFrom…` of a range, the `error` of a partial
+// match, the `&&` of a guard comma, the `>>=` of a `do` block) means the
+// Prelude's entity, whatever the module defines, imports, hides or binds
+// locally under that spelling.
+mll_test!(desugar_own_definitions, "desugar_own_definitions.mll");
+mll_lib_test!(desugar_local_binders, "desugar_local_binders.mll");
+mll_test!(desugar_imported_names, "desugar_imported_names.mll");
+mll_test!(desugar_module_own_names, "desugar_module_own_names.mll");
+mll_test!(desugar_qualified_prelude, "desugar_qualified_prelude.mll");
 // A fixity belongs to the operator entity that declares it: an occurrence
 // groups by the fixity of what it denotes in its own scope — a local
 // binder, the module's own operator, an imported one, the Prelude's —
@@ -874,6 +884,7 @@ fn mll_case_registry_is_complete() {
         "ScopeCfgB.mll",
         "ScopeStack.mll",
         "ScopeHostLib.mll",
+        "DesugarOwn.mll",
         "FixityInner.mll",
         "FixityOuter.mll",
         "FixityPrivate.mll",
