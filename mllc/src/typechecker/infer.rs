@@ -2327,6 +2327,7 @@ impl Checker {
                     kind => Ok((TExpr::new(kind, ty.clone()), ty, subst)),
                 }
             }
+            Expr::OpChain(_) | Expr::Section { .. } => unreachable!("{}", crate::fixity::UNGROUPED),
             Expr::Negate(inner) => {
                 let (te, ty, s) = self.infer_expr(inner, env)?;
                 // Unary minus is GHC's `negate`, a Num method: `-x` at a

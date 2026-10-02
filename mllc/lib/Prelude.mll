@@ -313,6 +313,7 @@ foldMap f t = foldr (\x acc -> mappend (f x) acc) mempty t
 -- synthesizes each method's class constraint from these declarations (like
 -- any user class), which is what makes an undetermined `mempty` an ambiguity
 -- error at compile time. `mappend` is the named form of `(<>)`; both concat.
+infixr 6 <>
 class Semigroup a where
     (<>) :: a -> a -> a
 
@@ -548,8 +549,6 @@ read_String s = s
 ffi_tonumber :: String -> LuaPure "tonumber" Int
 ffi_tonumber_float :: String -> LuaPure "tonumber" Number
 
-infixl 4 <$>
-infixl 4 <*>
 infixr 8 ^
 
 -- Exponentiation by squaring: `x ^ n` = x multiplied by itself n times, using
@@ -565,12 +564,20 @@ powAcc b k acc =
     if k == 0 then acc
     else powAcc (b * b) (k `div` 2) (if k `mod` 2 == 1 then acc * b else acc)
 
--- Fixities of the named (backtick) operators, matching the GHC Prelude.
--- div, mod, and seq are compiler builtins; their fixities live here so they
--- reach every module like the rest of the Prelude interface.
-infixl 7 `div`, `mod`, `quot`, `rem`
-infix  4 `elem`
-infixr 0 `seq`
+-- Fixities of the operators the compiler provides and of the named
+-- (backtick) operators, matching the GHC Prelude. The symbolic operators
+-- defined in this file declare theirs next to their definitions.
+infixr 9 .
+infixl 9 !!
+infixl 7 *, /, `div`, `mod`, `quot`, `rem`
+infixl 6 +, -
+infixr 5 :, ++
+infix  4 ==, /=, <, <=, >=, >, `elem`, `notElem`
+infixl 4 <$>, <*>
+infixr 3 &&
+infixr 2 ||
+infixl 1 >>, >>=
+infixr 0 $, `seq`
 
 -- Monadic combinators
 -- Result-discarding traversal (works in any monad).

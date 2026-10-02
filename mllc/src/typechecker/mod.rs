@@ -1034,6 +1034,7 @@ impl Checker {
             // LuaIOCatch "name" (Either String T)  reduces to  IO (Either String T)
             Type::LuaIOCatch { result, .. } => Ty::io(self.ast_type_to_ty(result)),
             Type::Promoted(name) => Ty::Promoted(name.clone()),
+            Type::OpChain { .. } => unreachable!("{}", crate::fixity::UNGROUPED),
         }
     }
 
@@ -1196,6 +1197,7 @@ impl Checker {
                 }
             }
             Type::Con(_) | Type::Unit | Type::Promoted(_) => ty.clone(),
+            Type::OpChain { .. } => unreachable!("{}", crate::fixity::UNGROUPED),
             Type::App(f, a) => Type::App(
                 Box::new(self.substitute_type(f, bindings)),
                 Box::new(self.substitute_type(a, bindings)),
@@ -3390,6 +3392,7 @@ fn ast_type_size_up_to(ty: &Type, cap: u32) -> u32 {
                 for e in elems { go(e, cap, acc); if *acc >= cap { break; } }
             }
             Type::Con(_) | Type::Var(_) | Type::Unit | Type::Promoted(_) => {}
+            Type::OpChain { .. } => unreachable!("{}", crate::fixity::UNGROUPED),
         }
     }
     let mut acc = 0;

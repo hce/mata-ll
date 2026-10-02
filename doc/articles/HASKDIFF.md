@@ -268,6 +268,29 @@ it is used — all as in GHC. The differences:
   Prelude function) cannot be written under a local binding of the same
   name: `f maybe = M.maybe …` is rejected; rename the local.
 
+## Fixity belongs to the operator, as in GHC; where it can be declared is narrower
+
+An operator occurrence groups by the fixity of what it denotes in the
+module that wrote it: a local binder used in backticks is `infixl 9`,
+a module's own operator has its own declaration (or `infixl 9`), an
+imported operator has the fixity its defining module declared, and an
+operator another module keeps private, or that an import leaves out,
+has no influence on an operator of the same spelling. A fixity
+declaration for an operator the module does not define is rejected.
+All of this is GHC's behaviour. What differs is where a declaration
+may stand and what can carry one:
+
+- A fixity declaration is a top-level declaration. One for a class
+  method goes next to the class, not inside its body; `let` and `where`
+  groups take no fixity declarations (and cannot define symbolic
+  operators), so a locally bound operator is always `infixl 9`.
+- Class methods and record fields are program-wide names (see above),
+  so a method operator's fixity reaches every module that uses the
+  method, whatever its import list says.
+- A chain of infix type operators is grouped without the conflict
+  check value operators get: an `infix` type operator nests rightward
+  where GHC rejects the chain.
+
 ## HashMap, Data.Map, and Data.Set
 
 `HashMap k v` is the primitive, backed by Lua tables — and since the
@@ -442,7 +465,8 @@ in the program's own module.
 
 Infix type operators whose names begin with `:` are supported, both in
 declarations (`data (:+:) a b = L1 a | R1 b`) and in use (`f :+: g`, or
-the prefix `(:+:) f g`), grouping by their declared fixity. This exists chiefly for the generic
+the prefix `(:+:) f g`), grouping by the fixity declared for the type the operator names in the
+using module's scope (as for value operators). This exists chiefly for the generic
 representation combinators (`:+:`, `:*:`). Non-`:` type operators (a
 `TypeOperators`-style `data a + b`) are not supported.
 

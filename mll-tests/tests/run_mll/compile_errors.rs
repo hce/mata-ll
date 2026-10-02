@@ -5292,6 +5292,185 @@ fn imported_infix_non_associative_impl() {
     expect_compile_error_in(src, Path::new("tests/cases"), &[], &["non-associative", "'~=~'"]);
 }
 
+// --- Fixity belongs to the operator entity ----------------------------------
+// The accept side is the fixity_* corpus cases (GHC-goldened): an occurrence
+// groups by the fixity of the entity it denotes in its own scope. These pin
+// the rejections that follow from the same rule.
+
+/// A fixity declaration attaches to an operator its own module declares.
+/// One for a name the module does not define — an undefined name, a Prelude
+/// operator, an imported operator — has nothing to attach to (GHC: "The
+/// fixity signature for ... lacks an accompanying binding").
+#[test]
+fn fixity_declaration_needs_a_definition_in_its_module() {
+    with_compiler_stack(fixity_declaration_needs_a_definition_impl)
+}
+
+fn fixity_declaration_needs_a_definition_impl() {
+    let e = expect_compile_error("infixr 5 <+>\n\nmain :: IO ()\nmain = print (1 + 2)\n", &[], &[
+        "The fixity declaration for '<+>' has no accompanying definition",
+        "this module does not define '<+>'",
+        "at 1:10",
+        "note: a fixity declaration sets the precedence of an operator its own module defines",
+        "GHC rejects this declaration the same way",
+    ]);
+    assert!(e.starts_with("Parse error:"), "reported as a syntax error of the module, got: {e}");
+
+    // The Prelude's operators keep the Prelude's fixity.
+    expect_compile_error("infixr 6 +\n\nmain :: IO ()\nmain = print (1 + 2)\n", &[], &[
+        "The fixity declaration for '+' has no accompanying definition",
+    ]);
+
+    // A backtick operator, and every operator of a comma list on its own.
+    let e = expect_compile_error("infixl 6 `plus`, <+>\n\nmain :: IO ()\nmain = print (1 + 2)\n", &[], &[
+        "The fixity declaration for `plus` has no accompanying definition",
+        "The fixity declaration for '<+>' has no accompanying definition",
+    ]);
+    assert!(e.contains("at 1:11") && e.contains("at 1:18"), "each at its own operator, got: {e}");
+
+    // An imported operator keeps the fixity of its defining module.
+    expect_compile_error_in(
+        "import FixityOps\n\ninfixl 1 -.\n\nmain :: IO ()\nmain = print (10 -. 3 -. 2)\n",
+        Path::new("tests/cases"), &[], &[
+            "The fixity declaration for '-.' has no accompanying definition",
+            "at 3:10",
+        ]);
+
+    // In an imported module the error names the module.
+    expect_compile_error(
+        "import FixityOrphan\n\nmain :: IO ()\nmain = print two\n",
+        &[Path::new("tests/broken-helpers")], &[
+            "in module 'FixityOrphan'",
+            "The fixity declaration for '<+>' has no accompanying definition",
+        ]);
+
+    // With the definition, in either order, the declaration is accepted: for
+    // a function, a class method and a type operator.
+    for src in [
+        "infixr 5 <+>\n(<+>) :: Int -> Int -> Int\na <+> b = a - b\nmain :: IO ()\nmain = print (10 <+> 3 <+> 2)\n",
+        "plus :: Int -> Int -> Int\nplus a b = a + b\ninfixl 6 `plus`\nmain :: IO ()\nmain = print (1 `plus` 2)\n",
+        "infixr 5 <+>\nclass Mix a where\n    (<+>) :: a -> a -> a\ninstance Mix Int where\n    a <+> b = a - b\nmain :: IO ()\nmain = print ((10 :: Int) <+> 3 <+> 2)\n",
+        "infixr 5 :+:\ndata (:+:) a b = L a | R b\nf :: Int :+: Bool :+: Int -> Int\nf (L n) = n\nf (R _) = 0\nmain :: IO ()\nmain = print (f (L 1))\n",
+    ] {
+        assert!(compile(src, Path::new("."), &[]).is_ok(), "should compile:\n{src}");
+    }
+}
+
+/// An operator that denotes nothing in scope has no fixity: its chain is
+/// not grouped under some same-spelled operator's declaration, and the
+/// error is the scope error (GHC reports the ambiguity, or the name not
+/// being in scope, likewise). The two imports here would make the chain a
+/// non-associativity error under one fixity and a legal chain under the
+/// other.
+#[test]
+fn operator_without_an_entity_in_scope_is_a_scope_error_not_a_grouping() {
+    with_compiler_stack(operator_without_an_entity_impl)
+}
+
+fn operator_without_an_entity_impl() {
+    let libs = &[Path::new("tests/broken-helpers")];
+    for body in ["print (1 <+> 2 <+> 3)", "print (map (<+> 1 <+> 2) [3])", "print (map (1 <+> 2 <+>) [3])"] {
+        let src = format!("import FixityAmbLeft\nimport FixityAmbRight\n\nmain :: IO ()\nmain = {body}\n");
+        let e = expect_compile_error(&src, libs, &[
+            "Ambiguous occurrence '<+>'",
+            "the '<+>' of module 'FixityAmbLeft'",
+            "the '<+>' of module 'FixityAmbRight'",
+        ]);
+        assert!(!e.contains("non-associative") && !e.contains("section"),
+            "no fixity may be picked for an ambiguous operator, got: {e}");
+    }
+
+    // Keeping one of the two out leaves one entity, and its fixity.
+    let one = "import FixityAmbLeft hiding ((<+>))\nimport FixityAmbRight\n\nmain :: IO ()\nmain = print (1 <+> 2 <+> 3)\n";
+    assert!(compile(one, Path::new("."), libs).is_ok(), "one '<+>' in scope groups by its declaration");
+    let other = "import FixityAmbLeft\nimport FixityAmbRight hiding ((<+>))\n\nmain :: IO ()\nmain = print (1 <+> 2 <+> 3)\n";
+    expect_compile_error(other, libs, &["Cannot chain '<+>'", "non-associative (infix 4)"]);
+
+    // An operator the import list leaves out: not in scope, whatever fixity
+    // its module declares for it.
+    let hidden = "import FixityListed (listedTotal)\n\nmain :: IO ()\nmain = print (listedTotal <+> 2 <+> 3)\n";
+    let e = expect_compile_error_in(hidden, Path::new("tests/cases"), &[], &[
+        "'<+>' is not exported by its module",
+    ]);
+    assert!(!e.contains("Cannot"), "got: {e}");
+}
+
+/// A chain an imported module's own fixities define no grouping for is a
+/// syntax error of that module, reported under its name.
+#[test]
+fn ungroupable_chain_in_an_imported_module_names_that_module() {
+    let src = "import FixityBadChain\n\nmain :: IO ()\nmain = print chained\n";
+    expect_compile_error(src, &[Path::new("tests/broken-helpers")], &[
+        "in module 'FixityBadChain'",
+        "Cannot chain '<+>': it is non-associative (infix 4)",
+        "at 8:19",
+    ]);
+}
+
+/// A local binder used in backticks is infixl 9 whatever the module
+/// declares for a top-level function of the same name, so the section
+/// rule sees an infixl 9 operand under an infixl 9 operator (GHC rejects
+/// this section the same way; with the top-level `infixr 5` in force it
+/// would be legal). The accepted shapes are in fixity_local_binders.mll.
+#[test]
+fn local_binder_in_backticks_does_not_take_a_top_level_fixity() {
+    with_compiler_stack(local_binder_fixity_impl)
+}
+
+fn local_binder_fixity_impl() {
+    let decls = "infixr 5 `minus`\nminus :: Int -> Int -> Int\nminus a b = a - b\n\n";
+    let local = format!("{decls}f :: (Int -> Int -> Int) -> Int\nf minus = (`minus` 3 `minus` 2) 10\n\nmain :: IO ()\nmain = print (f (-))\n");
+    expect_compile_error(&local, &[], &[
+        "The operand of a right section must bind tighter than the section operator",
+        "`minus` (infixl 9)",
+    ]);
+    let top = format!("{decls}main :: IO ()\nmain = print ((`minus` 3 `minus` 2) 10)\n");
+    assert!(compile(&top, Path::new("."), &[]).is_ok(), "the top-level function is infixr 5");
+}
+
+/// The Prelude's precedence-4 operators are non-associative (`infix 4`),
+/// each of them: none chains with itself. (Their precedence is pinned by
+/// the fixity_table GHC-golden case.)
+#[test]
+fn prelude_infix_4_operators_do_not_chain() {
+    with_compiler_stack(prelude_infix_4_impl)
+}
+
+fn prelude_infix_4_impl() {
+    for (op, shown) in [
+        ("==", "'=='"), ("/=", "'/='"), ("<", "'<'"), ("<=", "'<='"), (">", "'>'"), (">=", "'>='"),
+        ("`elem`", "`elem`"), ("`notElem`", "`notElem`"),
+    ] {
+        let src = format!("main :: IO ()\nmain = print (1 {op} 2 {op} 3)\n");
+        let e = expect_compile_error(&src, &[], &["non-associative (infix 4)"]);
+        assert!(e.contains(&format!("Cannot chain {shown}")), "{op}: got: {e}");
+    }
+}
+
+/// A right-nested chain past the depth limit is reported by the grouping
+/// step with the parser's own diagnostic: the chain is read flat, so its
+/// nesting only exists once it is grouped.
+#[test]
+fn right_nested_chain_past_limit_yields_clean_depth_error() {
+    let n = mllc::MAX_NESTING_DEPTH + 1000;
+    let source = format!(
+        "xs :: [Int]\nxs = {}[]\nmain :: IO ()\nmain = print (length xs)\n",
+        "1 : ".repeat(n)
+    );
+    match compile(&source, Path::new("."), &[]) {
+        Err(e) => {
+            let msg = format!("{}", e);
+            assert!(
+                msg.contains("expression nested too deeply")
+                    && msg.contains(&format!("limit {}", mllc::MAX_NESTING_DEPTH)),
+                "expected the clean depth diagnostic, got: {}",
+                msg
+            );
+        }
+        Ok(_) => panic!("a right-nested chain past the limit must be rejected"),
+    }
+}
+
 #[test]
 fn type_errors_are_explained_not_cryptic() {
     // Passing a String to a list-typed function: internal unification vars

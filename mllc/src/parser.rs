@@ -47,17 +47,6 @@ impl GuardChain {
     }
 }
 
-/// The infix operator whose right-hand side is currently being parsed.
-/// Carried into the recursive infix parse so a same-precedence neighbor can
-/// be checked against it: Haskell only defines a grouping for such a pair
-/// when both are infixl (groups left) or both infixr (groups right) —
-/// anything else is ambiguous and rejected (the GHC precedence-parsing rule).
-struct ParentOp {
-    op: String,
-    prec: u8,
-    assoc: Assoc,
-}
-
 /// What a module's source declares a top-level name as: the kind of one
 /// entry of the parser's declaration table (`Parser::declared`). The table
 /// exists to enforce that one module's source declares each name at most
@@ -153,8 +142,6 @@ struct Parser {
     /// is exactly the Haskell rule: deeper than the block = continuation,
     /// at the block column = a new item.
     block_indent: usize,
-    /// User-defined operator fixity: op -> (assoc, precedence)
-    fixities: HashMap<String, (Assoc, u8)>,
     /// Current recursion depth of the nesting productions (expressions,
     /// types, patterns). Bounded by `crate::MAX_NESTING_DEPTH` via
     /// `enter_nested`, so absurdly nested input yields a clean diagnostic
@@ -206,7 +193,6 @@ impl Parser {
             current_indent: 0,
             expr_min_indent: 0,
             block_indent: 0,
-            fixities: HashMap::new(),
             depth: 0,
             pg_fresh: 0,
             pattern_binders: Vec::new(),
@@ -447,19 +433,7 @@ impl Parser {
     /// through `guarded`, which pairs the check with the exit decrement.
     fn enter_nested(&mut self, what: &str) -> PResult<()> {
         if self.depth >= crate::MAX_NESTING_DEPTH {
-            let mut diag = self.err_here(format!(
-                "{} nested too deeply (limit {})",
-                what,
-                crate::MAX_NESTING_DEPTH
-            ));
-            diag.notes.push(
-                "the compiler reads nested syntax with bounded recursion so it \
-                 can report this error instead of crashing on pathological \
-                 input; restructure the code to nest less, e.g. by splitting \
-                 it into smaller definitions"
-                    .to_string(),
-            );
-            return Err(diag);
+            return Err(nesting_error(what, self.span_of(self.pos)));
         }
         self.depth += 1;
         Ok(())
@@ -1814,83 +1788,11 @@ impl Parser {
         )))
     }
 
-    /// Look up an operator's fixity: a declared fixity (this module's or an
-    /// imported one's, both seeded into `self.fixities`) overrides the
-    /// builtin defaults.
-    fn operator_fixity(&self, op: &str) -> (Assoc, u8) {
-        if let Some(&(assoc, prec)) = self.fixities.get(op) {
-            (assoc, prec)
-        } else {
-            default_operator_fixity(op)
-        }
-    }
-
-    /// The error for two same-precedence operators whose fixities do not
-    /// allow an unparenthesized chain (the Haskell precedence-parsing rule):
-    /// either one of them is non-associative, or one is infixl and the other
-    /// infixr. In both cases the grammar defines no grouping, so the
-    /// expression is ambiguous and must be parenthesized. Reported at the
-    /// second operator, which the parser is currently looking at.
-    fn fixity_conflict_err(
-        &self,
-        parent: &ParentOp,
-        op2: &str,
-        assoc2: Assoc,
-        prec: u8,
-    ) -> Box<Diagnostic> {
-        let d1 = op_display(&parent.op);
-        let d2 = op_display(op2);
-        let e1 = op_in_expr(&parent.op);
-        let e2 = op_in_expr(op2);
-        let msg = if parent.assoc == Assoc::None && assoc2 == Assoc::None {
-            if parent.op == op2 {
-                format!(
-                    "Cannot chain {d1}: it is non-associative (infix {prec}), \
-                     so 'a {e1} b {e1} c' has no defined grouping"
-                )
-            } else {
-                format!(
-                    "Cannot mix {d1} and {d2} in one chain: both are \
-                     non-associative (infix {prec}), so 'a {e1} b {e2} c' \
-                     has no defined grouping"
-                )
-            }
-        } else if parent.assoc == Assoc::None || assoc2 == Assoc::None {
-            let na = if parent.assoc == Assoc::None { &parent.op } else { op2 };
-            format!(
-                "Cannot mix {d1} and {d2} in one chain: {} is non-associative \
-                 (infix {prec}), so it cannot chain with another \
-                 precedence-{prec} operator",
-                op_display(na)
-            )
-        } else {
-            format!(
-                "Cannot mix {d1} ({} {prec}) and {d2} ({} {prec}) in one \
-                 chain: they bind at the same precedence but group in \
-                 opposite directions, so 'a {e1} b {e2} c' has no defined \
-                 grouping",
-                assoc_keyword(parent.assoc),
-                assoc_keyword(assoc2)
-            )
-        };
-        let loc = self.peek_loc();
-        let mut diag = Diagnostic::parse_at(msg, Span::new(loc.line, loc.col));
-        diag.notes.push(format!(
-            "parenthesize one side: '(a {e1} b) {e2} c' or 'a {e1} (b {e2} c)'"
-        ));
-        if is_comparison_op(&parent.op) && is_comparison_op(op2) {
-            diag.notes.push(format!(
-                "to compare three values, chain with '&&': 'a {e1} b && b {e2} c'"
-            ));
-        }
-        Box::new(diag)
-    }
-
     /// Parse a fixity declaration: `infixl 6 +`, `infixr 5 :`,
-    /// `infix 4 \`elem\``, or a comma list (`infixl 7 *, /`).
-    /// The operators were already seeded into `self.fixities` by the
-    /// pre-parse scan (fixity is scope-wide, not textually ordered), so this
-    /// only records the declarations.
+    /// `infix 4 \`elem\``, or a comma list (`infixl 7 *, /`) — one
+    /// `Decl::FixityDecl` per operator. A declaration governs the whole
+    /// module, uses above it included; module resolution attaches it to
+    /// the operator this module declares under that name.
     fn parse_fixity_decl(&mut self) -> PResult<Vec<Decl>> {
         let assoc = match self.peek() {
             Token::Infixl => { self.advance(); Assoc::Left }
@@ -1927,8 +1829,7 @@ impl Parser {
                 _ => return Err(self.err_here("Expected operator after fixity precedence".to_string())),
             };
             self.declare(&op, DeclaredAs::Fixity, op_tok);
-            self.fixities.insert(op.clone(), (assoc, prec));
-            decls.push(Decl::FixityDecl { assoc, prec, op });
+            decls.push(Decl::FixityDecl { assoc, prec, op, span: self.span_of(op_tok) });
             if self.at(&Token::Comma) {
                 self.advance();
             } else {
@@ -2508,7 +2409,7 @@ impl Parser {
     }
 
     fn parse_type_arrow_inner(&mut self) -> PResult<Type> {
-        let lhs = self.parse_type_op(0)?;
+        let lhs = self.parse_type_op()?;
         self.skip_newlines_and_indent();
         // A multiplicity annotation before the arrow: `a %1 -> b` (the
         // argument is consumed exactly once) or the explicit unrestricted
@@ -2590,36 +2491,33 @@ impl Parser {
     /// begin with `:` are type operators — a type-level operator is a type
     /// CONSTRUCTOR, exactly as `:`-leading value operators are data
     /// constructors — which keeps `%` (multiplicity), `.` (forall / qualifier)
-    /// and `..` out. Fixity comes from the same table value operators use, so a
-    /// module's `infixr 6 :*:` / `infixr 5 :+:` group `a :+: b :*: c` as `a :+:
-    /// (b :*: c)`. `F a :+: G b` desugars to `(:+:) (F a) (G b)`.
+    /// and `..` out. The chain is returned flat (`Type::OpChain`): its
+    /// grouping depends on the fixity of the TYPE each operator names in the
+    /// module's scope (a module's `infixr 6 :*:` / `infixr 5 :+:` group
+    /// `a :+: b :*: c` as `a :+: (b :*: c)`), which module resolution
+    /// supplies.
     fn is_type_operator(op: &str) -> bool {
         op.starts_with(':') && op.len() > 1
     }
 
-    fn parse_type_op(&mut self, min_prec: u8) -> PResult<Type> {
-        let mut lhs = self.parse_type_app()?;
+    fn parse_type_op(&mut self) -> PResult<Type> {
+        let first = self.parse_type_app()?;
+        let mut rest: Vec<(ChainOp, Type)> = Vec::new();
         loop {
             let op = match self.peek() {
                 Token::Operator(o) if Self::is_type_operator(o) => o.clone(),
                 _ => break,
             };
-            let (assoc, prec) = self.operator_fixity(&op);
-            if prec < min_prec {
-                break;
-            }
+            let span = self.span_of(self.pos);
             self.advance();
             self.skip_newlines_and_indent();
-            // Left-assoc consumes only tighter operators on its right (prec+1);
-            // right-assoc re-enters at its own precedence so it nests rightward.
-            let next_min = if assoc == Assoc::Left { prec + 1 } else { prec };
-            let rhs = self.parse_type_op(next_min)?;
-            lhs = Type::App(
-                Box::new(Type::App(Box::new(Type::Con(op)), Box::new(lhs))),
-                Box::new(rhs),
-            );
+            let operand = self.parse_type_app()?;
+            rest.push((ChainOp { name: op, span }, operand));
         }
-        Ok(lhs)
+        if rest.is_empty() {
+            return Ok(first);
+        }
+        Ok(Type::OpChain { first: Box::new(first), rest })
     }
 
     fn parse_type_app(&mut self) -> PResult<Type> {
@@ -2923,7 +2821,7 @@ impl Parser {
         self.skip_newlines_and_indent();
         let saved_expr_min_indent = self.expr_min_indent;
         self.expr_min_indent = self.current_indent;
-        let expr = self.parse_expr_infix(0, None)?;
+        let expr = self.parse_infix_chain()?;
         self.expr_min_indent = saved_expr_min_indent;
 
         // Type ascription: expr :: Type
@@ -2936,64 +2834,22 @@ impl Parser {
         Ok(expr)
     }
 
-    // Depth-guard wrapper: the grammar rule itself is in `parse_expr_infix_inner`.
-    fn parse_expr_infix(&mut self, min_prec: u8, parent: Option<&ParentOp>) -> PResult<Expr> {
-        self.guarded("expression", |p| p.parse_expr_infix_inner(min_prec, parent))
+    /// Parse an infix expression — `[-] e (op [-] e)*`, each `e` an
+    /// application — WITHOUT grouping it: the result is the flat
+    /// `Expr::OpChain` (or the lone operand when there is no operator and
+    /// no prefix minus). How the chain nests depends on the fixity of the
+    /// entity each operator denotes, which only module resolution knows
+    /// (see `fixity`). Depth-guarded like every nesting production.
+    fn parse_infix_chain(&mut self) -> PResult<Expr> {
+        self.guarded("expression", Self::parse_infix_chain_inner)
     }
 
-    fn parse_expr_infix_inner(&mut self, min_prec: u8, parent: Option<&ParentOp>) -> PResult<Expr> {
-        // `parent` reaches the prefix parser so prefix minus can be rejected
-        // in the right operand of a precedence >= 6 operator (GHC's rule).
-        let lhs = self.parse_expr_prefix(parent)?;
-        self.continue_infix(lhs, min_prec, parent)
-    }
-
-    /// Decide what to do with the operator the parser is looking at, given
-    /// the operator whose right-hand side is being parsed (`parent`) and the
-    /// Pratt minimum binding power. `Ok(true)` = this call consumes it,
-    /// `Ok(false)` = it belongs to an enclosing call, `Err` = the two
-    /// operators share a precedence but define no grouping (Gap: the GHC
-    /// precedence-parsing rule).
-    fn infix_should_consume(
-        &self,
-        parent: Option<&ParentOp>,
-        min_prec: u8,
-        op: &str,
-        assoc: Assoc,
-        prec: u8,
-    ) -> PResult<bool> {
-        if let Some(par) = parent
-            && par.prec == prec
-        {
-            // Same precedence directly under `parent`: Haskell defines a
-            // grouping only for infixl/infixl (the enclosing loop takes it)
-            // and infixr/infixr (this call takes it, nesting rightward).
-            return match (par.assoc, assoc) {
-                (Assoc::Left, Assoc::Left) => Ok(false),
-                (Assoc::Right, Assoc::Right) => Ok(true),
-                _ => Err(self.fixity_conflict_err(par, op, assoc, prec)),
-            };
-        }
-        let (lp, _) = assoc_prec_to_binding(assoc, prec);
-        Ok(lp >= min_prec)
-    }
-
-    /// Continue infix-operator parsing from an already-parsed left operand.
-    /// Splitting this out of `parse_expr_infix` lets callers that have already
-    /// parsed an application (e.g. the parenthesised-expression path, which
-    /// parses one to test for a left section) resume without re-parsing it —
-    /// the parenthesised body would otherwise be parsed twice at every nesting
-    /// level, giving O(2^n) parse time on deeply nested parentheses.
-    fn continue_infix(&mut self, mut lhs: Expr, min_prec: u8, parent: Option<&ParentOp>) -> PResult<Expr> {
-        // A bare Negate here is a prefix-minus expression fresh from
-        // `parse_negation` (a parenthesized one arrives wrapped in Paren).
-        // As Haskell's `lexp6` it may only continue with operators of
-        // precedence < 6 or LEFT-associative precedence-6 ones
-        // (`-a + b` groups `(negate a) + b`); a precedence-6 operator with
-        // any other associativity has no defined grouping against it —
-        // GHC rejects `-a <> b`. Cleared after the first consumed operator:
-        // the negation is nested inside an InfixApp from then on.
-        let mut lhs_is_negation = matches!(lhs, Expr::Negate(_));
+    /// The grammar rule of `parse_infix_chain`, without the depth guard:
+    /// the parenthesised-expression path enters here directly, under the
+    /// guard of the atom that contains it.
+    fn parse_infix_chain_inner(&mut self) -> PResult<Expr> {
+        let first = self.parse_chain_operand()?;
+        let mut rest: Vec<(ChainOp, ChainOperand)> = Vec::new();
         loop {
             // Try to consume indentation for continuation lines
             // Only if the next real token after indent is an operator and
@@ -3026,40 +2882,26 @@ impl Parser {
                 Token::Operator(ref op) if op == ".." => {
                     break; // '..' is range syntax, not an infix operator
                 }
-                Token::Operator(ref op) => {
+                Token::Operator(op) => {
                     // An operator directly followed by ')' is a left-section
                     // tail (`(a * b +)`): it belongs to the enclosing
-                    // parenthesised-expression path, which builds the section
-                    // and checks its operand against the section-operand
-                    // precedence rule. Never consume it as an infix operator —
-                    // there is no expression after it to parse.
+                    // parenthesised-expression path, which builds the
+                    // section. Never take it as an infix operator — there
+                    // is no expression after it to parse.
                     if self.pos + 1 < self.tokens.len()
                         && self.tokens[self.pos + 1].token == Token::RightParen
                     {
                         break;
                     }
-                    let (assoc, prec) = self.operator_fixity(op);
-                    if lhs_is_negation && prec >= 6 && !(prec == 6 && assoc == Assoc::Left) {
-                        return Err(self.prefix_minus_lhs_err(op, assoc, prec));
-                    }
-                    if !self.infix_should_consume(parent, min_prec, op, assoc, prec)? {
-                        break;
-                    }
-                    let op = op.clone();
+                    let span = self.span_of(self.pos);
                     self.advance();
                     self.skip_newlines_and_indent();
-                    let (_, rp) = assoc_prec_to_binding(assoc, prec);
-                    let this = ParentOp { op: op.clone(), prec, assoc };
-                    let rhs = self.parse_expr_infix(rp, Some(&this))?;
-                    lhs = Expr::InfixApp {
-                        op,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    };
-                    lhs_is_negation = false;
+                    let operand = self.parse_chain_operand()?;
+                    rest.push((ChainOp { name: op, span }, operand));
                 }
                 Token::Backtick => {
                     let save = self.checkpoint();
+                    let span = self.span_of(self.pos);
                     self.advance();
                     let func = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
@@ -3070,87 +2912,54 @@ impl Parser {
                         self.rewind(save);
                         break;
                     }
-                    let (assoc, prec) = self.operator_fixity(&func);
-                    if lhs_is_negation && prec >= 6 && !(prec == 6 && assoc == Assoc::Left) {
-                        return Err(self.prefix_minus_lhs_err(&func, assoc, prec));
-                    }
-                    if !self.infix_should_consume(parent, min_prec, &func, assoc, prec)? {
-                        // The operator belongs to an enclosing call — rewind
-                        // past the backticks so it can consume them itself.
-                        self.rewind(save);
-                        break;
-                    }
                     self.skip_newlines_and_indent();
-                    let (_, rp) = assoc_prec_to_binding(assoc, prec);
-                    let this = ParentOp { op: func.clone(), prec, assoc };
-                    let rhs = self.parse_expr_infix(rp, Some(&this))?;
-                    lhs = Expr::InfixApp {
-                        op: func,
-                        lhs: Box::new(lhs),
-                        rhs: Box::new(rhs),
-                    };
-                    lhs_is_negation = false;
+                    let operand = self.parse_chain_operand()?;
+                    rest.push((ChainOp { name: func, span }, operand));
                 }
                 _ => break,
             }
         }
 
-        Ok(lhs)
+        if rest.is_empty() && first.neg.is_none() {
+            return Ok(first.expr);
+        }
+        Ok(Expr::OpChain(Box::new(OpChain { first, rest })))
     }
 
-    fn parse_expr_prefix(&mut self, parent: Option<&ParentOp>) -> PResult<Expr> {
-        // Prefix minus (negation). Haskell gives it the fixity of binary
-        // subtraction — infixl 6 — with two consequences the grammar
-        // (`lexp6 -> - exp7`) enforces and GHC implements exactly:
-        //   * it cannot be the right operand of any operator at precedence 6
-        //     or higher (`a + -b`, `a - -b`, `a * -b` are parse errors —
-        //     the expression has no defined grouping without parentheses);
-        //   * its operand is everything binding TIGHTER than 6, so
-        //     `-a * b` is `negate (a * b)`, while `-a + b` is
-        //     `negate a + b` (the `+` stops the operand).
-        if let Token::Operator(ref op) = self.peek().clone()
-            && op == "-" {
-                if let Some(par) = parent
-                    && par.prec >= 6
-                {
-                    return Err(self.prefix_minus_rhs_err(par));
-                }
-                return self.parse_negation();
+    /// One operand of an infix chain: an application, optionally under a
+    /// prefix minus. Whether the minus is legal where it stands, and how
+    /// much of the chain it negates, is decided with the grouping
+    /// (`fixity::group`): both depend on the neighbouring operators'
+    /// fixities.
+    fn parse_chain_operand(&mut self) -> PResult<ChainOperand> {
+        let neg = match self.peek() {
+            Token::Operator(op) if op == "-" => {
+                let span = self.span_of(self.pos);
+                self.advance(); // consume '-'
+                Some(span)
             }
-        self.parse_expr_app()
+            _ => None,
+        };
+        let expr = self.parse_expr_app()?;
+        Ok(ChainOperand { neg, expr })
     }
 
-    /// Parse `- <operand>` where `-` has already been checked to be legal
-    /// here. The operand is Haskell's `exp7`: an application followed by any
-    /// operators of precedence 7 and higher (`NEGATION_OPERAND_MIN_PREC`),
-    /// so `- a * b` reads the whole `a * b` and `- a + b` stops at `a`.
-    fn parse_negation(&mut self) -> PResult<Expr> {
-        self.advance(); // consume '-'
-        let operand = self.parse_expr_app()?;
-        let operand = self.continue_infix(operand, NEGATION_OPERAND_MIN_PREC, None)?;
-        Ok(Expr::Negate(Box::new(operand)))
-    }
-
-    /// The error for prefix minus in the right operand of a precedence >= 6
-    /// operator, matching GHC's rejection (GHC: "cannot mix ... and prefix
-    /// minus in the same infix expression").
     /// The operand of a right section, parsed at the `infixexp` level.
     /// Haskell 2010 puts `::` one grammar level HIGHER (exp → infixexp
     /// [:: type]), so a section operand can never carry an ascription —
-    /// GHC parse-errors on `(+ 1 :: Int)` — and this parser now agrees,
-    /// with the reason spelled out. (`parse_expr` would have consumed the
-    /// `::`, which is exactly how the form was accepted before.) Left
-    /// sections cannot reach the shape: their operand parse stops in
-    /// front of `::`, so the section test never sees a trailing operator.
-    /// `op_shown` is the operator as the user wrote it (backticks
-    /// included), for the error's concrete rewrite hint.
+    /// GHC parse-errors on `(+ 1 :: Int)` — and this parser agrees, with
+    /// the reason spelled out. (`parse_expr` would have consumed the
+    /// `::`.) Left sections cannot reach the shape: their operand parse
+    /// stops in front of `::`, so the section test never sees a trailing
+    /// operator. `op_shown` is the operator as the user wrote it
+    /// (backticks included), for the error's concrete rewrite hint.
     fn parse_right_section_operand(&mut self, op_shown: &str) -> PResult<Expr> {
         // Mirrors `parse_expr` (leading layout skip, `expr_min_indent`)
         // minus its ascription tail.
         self.skip_newlines_and_indent();
         let saved_expr_min_indent = self.expr_min_indent;
         self.expr_min_indent = self.current_indent;
-        let expr = self.parse_expr_infix(0, None)?;
+        let expr = self.parse_infix_chain()?;
         self.expr_min_indent = saved_expr_min_indent;
         if self.at(&Token::DblColon) {
             let loc = self.peek_loc();
@@ -3171,152 +2980,6 @@ impl Parser {
         Ok(expr)
     }
 
-    fn prefix_minus_rhs_err(&self, parent: &ParentOp) -> Box<Diagnostic> {
-        let d = op_display(&parent.op);
-        let e = op_in_expr(&parent.op);
-        let msg = format!(
-            "Prefix minus cannot be the right operand of {d} ({} {}): \
-             prefix minus binds like binary '-' (precedence 6), so \
-             'a {e} -b' has no defined grouping",
-            assoc_keyword(parent.assoc),
-            parent.prec
-        );
-        let loc = self.peek_loc();
-        let mut diag = Diagnostic::parse_at(msg, Span::new(loc.line, loc.col));
-        diag.notes.push(format!("parenthesize the negation: 'a {e} (-b)'"));
-        Box::new(diag)
-    }
-
-    /// The error for an operator that can neither take a prefix-minus
-    /// expression as its LEFT operand nor be part of its operand: a
-    /// precedence-6 operator that is not left-associative (`-a <> b`), or —
-    /// defensively — anything tighter that escaped the operand parse.
-    fn prefix_minus_lhs_err(&self, op: &str, assoc: Assoc, prec: u8) -> Box<Diagnostic> {
-        let d = op_display(op);
-        let e = op_in_expr(op);
-        let msg = format!(
-            "Cannot mix prefix minus and {d} ({} {prec}): prefix minus \
-             binds like binary '-' (infixl 6), so '-a {e} b' has no \
-             defined grouping",
-            assoc_keyword(assoc)
-        );
-        let loc = self.peek_loc();
-        let mut diag = Diagnostic::parse_at(msg, Span::new(loc.line, loc.col));
-        diag.notes.push(format!(
-            "parenthesize one side: '(-a) {e} b' or '-(a {e} b)'"
-        ));
-        Box::new(diag)
-    }
-
-    /// Enforce the section-operand precedence rule (Haskell 2010 §3.5, the
-    /// check GHC runs on every section): a section operand that is itself an
-    /// infix expression must bind tighter than the section operator, because
-    /// a section may only mean what its expansion means — `(== a || b)`
-    /// would have to be `\x -> x == (a || b)`, but `x == a || b` groups as
-    /// `(x == a) || b`, so the section is rejected rather than silently
-    /// regrouped. One same-precedence shape is well-defined and stays legal:
-    /// a chain that groups in the section's own direction — an infixl
-    /// operand in a left section (`(a + b +)` is `\x -> (a + b) + x`) and an
-    /// infixr operand in a right section (`(++ a ++ b)` is
-    /// `\x -> x ++ (a ++ b)`). Prefix minus counts as an infixl 6 operand,
-    /// exactly as in GHC. `direction` is `Assoc::Left` for a left section
-    /// `(e op)` and `Assoc::Right` for a right section `(op e)`; `span` is
-    /// the section operator's position.
-    fn check_section_operand(
-        &self,
-        op: &str,
-        op_assoc: Assoc,
-        op_prec: u8,
-        direction: Assoc,
-        operand: &Expr,
-        span: Span,
-    ) -> PResult<()> {
-        let (arg_assoc, arg_prec, negation, top_op) = match operand {
-            Expr::InfixApp { op: top, .. } => {
-                let (a, p) = self.operator_fixity(top);
-                (a, p, false, top.clone())
-            }
-            Expr::Negate(_) => (Assoc::Left, 6, true, "-".to_string()),
-            _ => return Ok(()),
-        };
-        if op_prec < arg_prec || (op_prec == arg_prec && direction == arg_assoc) {
-            return Ok(());
-        }
-
-        // Build the schematic pieces of the message from the operators as
-        // written: the operand shape, the section as the user wrote it, the
-        // expansion it would have to mean, and how the unparenthesized
-        // expansion groups (if it groups at all).
-        let d = op_display(op);
-        let e = op_in_expr(op);
-        let kw = assoc_keyword(op_assoc);
-        let side = if direction == Assoc::Left { "left" } else { "right" };
-        let rel = if arg_prec < op_prec { "looser than" } else { "at the same precedence as" };
-        let top_desc = if negation {
-            "prefix minus (which binds like binary '-', infixl 6)".to_string()
-        } else {
-            format!(
-                "{} ({} {arg_prec})",
-                op_display(&top_op),
-                assoc_keyword(arg_assoc)
-            )
-        };
-        let operand_src = if negation {
-            "-a".to_string()
-        } else {
-            format!("a {} b", op_in_expr(&top_op))
-        };
-        let (section_src, expansion, bare) = match direction {
-            Assoc::Left => (
-                format!("({operand_src} {e})"),
-                format!("\\x -> ({operand_src}) {e} x"),
-                format!("{operand_src} {e} x"),
-            ),
-            _ => (
-                format!("({e} {operand_src})"),
-                format!("\\x -> x {e} ({operand_src})"),
-                format!("x {e} {operand_src}"),
-            ),
-        };
-        // The unparenthesized expansion groups with the section operator
-        // applied first when the operand's operator binds looser; at equal
-        // precedence it only groups when both operators chain in the same
-        // (other) direction. A rejected negation operand binds looser than
-        // the section operator, and negation of the rest is the grouping.
-        let regrouped = if negation {
-            match direction {
-                Assoc::Left => Some(format!("-(a {e} x)")),
-                _ => None,
-            }
-        } else {
-            let e2 = op_in_expr(&top_op);
-            let groups = arg_prec < op_prec
-                || (arg_assoc == op_assoc && arg_assoc != Assoc::None);
-            groups.then(|| match direction {
-                Assoc::Left => format!("a {e2} (b {e} x)"),
-                _ => format!("(x {e} a) {e2} b"),
-            })
-        };
-        let grouping = match regrouped {
-            Some(g) => format!("'{bare}' groups as '{g}'"),
-            None => format!("'{bare}' has no defined grouping"),
-        };
-        let msg = format!(
-            "The operand of a {side} section must bind tighter than the \
-             section operator, but {top_desc} binds {rel} {d} \
-             ({kw} {op_prec}): '{section_src}' cannot mean '{expansion}', \
-             because {grouping}"
-        );
-        let mut diag = Diagnostic::parse_at(msg, span);
-        let fix = match direction {
-            Assoc::Left => format!("(({operand_src}) {e})"),
-            _ => format!("({e} ({operand_src}))"),
-        };
-        diag.notes.push(format!(
-            "parenthesize the operand to get that meaning: '{fix}'"
-        ));
-        Err(Box::new(diag))
-    }
 
     fn parse_expr_app(&mut self) -> PResult<Expr> {
         let mut func = self.parse_expr_atom_dotted()?;
@@ -3845,30 +3508,16 @@ impl Parser {
                     self.advance();
                     return Ok(Expr::OpFunc(op));
                 }
-                // (op expr) — right section: \x -> x op expr.
-                // Prefix minus in the operand follows the infix
-                // rule: legal only under a precedence < 6 operator
-                // (GHC rejects `(* -2)` like `a * -2`).
-                let (assoc, prec) = self.operator_fixity(&op);
-                if prec >= 6
-                    && let Token::Operator(m) = self.peek()
-                    && m == "-"
-                {
-                    let par = ParentOp { op: op.clone(), prec, assoc };
-                    return Err(self.prefix_minus_rhs_err(&par));
-                }
+                // (op expr) — right section: \x -> x op expr. The
+                // operand is checked against the operator's fixity, and
+                // the section rewritten to that lambda, when the chain
+                // is grouped (`Expr::Section`).
                 let rhs = self.parse_right_section_operand(&op)?;
-                self.check_section_operand(
-                    &op, assoc, prec, Assoc::Right, &rhs, op_span,
-                )?;
                 self.expect(&Token::RightParen)?;
-                return Ok(Expr::Lambda {
-                    params: vec!["__sec".into()],
-                    body: Box::new(Expr::InfixApp {
-                        op,
-                        lhs: Box::new(Expr::Var("__sec".into())),
-                        rhs: Box::new(rhs),
-                    }),
+                return Ok(Expr::Section {
+                    op: ChainOp { name: op, span: op_span },
+                    side: SectionSide::Right,
+                    operand: Box::new(rhs),
                 });
             }
         }
@@ -3887,28 +3536,12 @@ impl Parser {
                 self.advance();
                 return Ok(Expr::OpFunc(name));
             }
-            // Prefix minus in the operand follows the infix rule
-            // (see the symbolic right-section arm above).
-            let (assoc, prec) = self.operator_fixity(&name);
-            if prec >= 6
-                && let Token::Operator(m) = self.peek()
-                && m == "-"
-            {
-                let par = ParentOp { op: name.clone(), prec, assoc };
-                return Err(self.prefix_minus_rhs_err(&par));
-            }
             let rhs = self.parse_right_section_operand(&format!("`{}`", name))?;
-            self.check_section_operand(
-                &name, assoc, prec, Assoc::Right, &rhs, op_span,
-            )?;
             self.expect(&Token::RightParen)?;
-            return Ok(Expr::Lambda {
-                params: vec!["__sec".into()],
-                body: Box::new(Expr::InfixApp {
-                    op: name,
-                    lhs: Box::new(Expr::Var("__sec".into())),
-                    rhs: Box::new(rhs),
-                }),
+            return Ok(Expr::Section {
+                op: ChainOp { name, span: op_span },
+                side: SectionSide::Right,
+                operand: Box::new(rhs),
             });
         }
 
@@ -3918,59 +3551,43 @@ impl Parser {
             return Ok(Expr::Lit(Literal::Unit));
         }
 
-        // Parse the parenthesised body ONCE. To test for a left section
-        // `(expr op)` we need the application-level parse; if it turns
-        // out not to be a section we *continue* infix parsing from that
-        // same parse rather than backtracking and re-parsing. Parsing
-        // twice (the old behaviour) made nested parens cost O(2^n).
+        // Parse the parenthesised body ONCE: the infix chain stops in
+        // front of an operator directly followed by ')', so a
+        // left-section tail — with a simple operand (`(a +)`) or a full
+        // infix one (`(a * b +)`) — is still unconsumed afterwards, and
+        // nothing is parsed twice (re-parsing the body to test for a
+        // section made nested parens cost O(2^n)).
         //
         // Set up exactly as `parse_expr` does (leading layout skip and
-        // `expr_min_indent = current_indent`) so the resulting AST — and
-        // thus the emitted code — is identical to the previous
-        // parse-then-reparse path. `expr_min_indent` is restored before
-        // handling `::` ascription and the tuple/paren tail, mirroring
-        // `parse_expr`.
+        // `expr_min_indent = current_indent`). `expr_min_indent` is
+        // restored before handling `::` ascription and the tuple/paren
+        // tail, mirroring `parse_expr`. A leading '-' is prefix minus
+        // here (`(-a + b)` fell through from the operator-section check
+        // above).
         self.skip_newlines_and_indent();
         let saved_expr_min_indent = self.expr_min_indent;
         self.expr_min_indent = self.current_indent;
-        // Prefix (not just application) level: a leading '-' is
-        // negation here (`(-a + b)` fell through from the
-        // operator-section check above).
-        let lhs = self.parse_expr_prefix(None)?;
+        let mut expr = self.parse_infix_chain_inner()?;
 
-        // Finish the infix expression from the parse we already have
-        // (no re-parse). `continue_infix` stops in front of an
-        // operator directly followed by ')', so a left-section tail
-        // — with a simple operand (`(a +)`) or a full infix one
-        // (`(a * b +)`) — is still unconsumed here.
-        let mut expr = self.continue_infix(lhs, 0, None)?;
-
-        // (expr op) — left section: \x -> expr op x. The operand
-        // must satisfy the section-operand precedence rule
-        // (`check_section_operand`): `(a * b +)` is legal,
-        // `(a + b *)` is not.
+        // (expr op) — left section: \x -> expr op x. The operand must
+        // satisfy the section-operand precedence rule — `(a * b +)` is
+        // legal, `(a + b *)` is not — which is checked when the chain is
+        // grouped (`Expr::Section`).
         if let Token::Operator(op) = self.peek().clone() {
             let after_op = self.pos + 1;
             if after_op < self.tokens.len()
                 && self.tokens[after_op].token == Token::RightParen {
-                    let (op_assoc, op_prec) = self.operator_fixity(&op);
                     let op_span = {
                         let l = self.peek_loc();
                         Span::new(l.line, l.col)
                     };
-                    self.check_section_operand(
-                        &op, op_assoc, op_prec, Assoc::Left, &expr, op_span,
-                    )?;
                     self.advance(); // consume operator
                     self.advance(); // consume )
                     self.expr_min_indent = saved_expr_min_indent;
-                    return Ok(Expr::Lambda {
-                        params: vec!["__sec".into()],
-                        body: Box::new(Expr::InfixApp {
-                            op,
-                            lhs: Box::new(expr),
-                            rhs: Box::new(Expr::Var("__sec".into())),
-                        }),
+                    return Ok(Expr::Section {
+                        op: ChainOp { name: op, span: op_span },
+                        side: SectionSide::Left,
+                        operand: Box::new(expr),
                     });
                 }
         }
@@ -3991,19 +3608,12 @@ impl Parser {
                         self.advance(); // consume first backtick
                         let name = self.expect_ident()?;
                         self.advance(); // consume second backtick
-                        let (op_assoc, op_prec) = self.operator_fixity(&name);
-                        self.check_section_operand(
-                            &name, op_assoc, op_prec, Assoc::Left, &expr, op_span,
-                        )?;
                         self.advance(); // consume )
                         self.expr_min_indent = saved_expr_min_indent;
-                        return Ok(Expr::Lambda {
-                            params: vec!["__sec".into()],
-                            body: Box::new(Expr::InfixApp {
-                                op: name,
-                                lhs: Box::new(expr),
-                                rhs: Box::new(Expr::Var("__sec".into())),
-                            }),
+                        return Ok(Expr::Section {
+                            op: ChainOp { name, span: op_span },
+                            side: SectionSide::Left,
+                            operand: Box::new(expr),
                         });
                     }
         }
@@ -4013,7 +3623,7 @@ impl Parser {
         self.expr_min_indent = saved_expr_min_indent;
         // Inside explicit ( ) newlines are insignificant: `::`, a tuple
         // comma, or the closing `)` may sit on a continuation line.
-        // continue_infix stops at the newline, so skip it before each
+        // The infix chain stops at the newline, so skip it before each
         // of those decisions.
         self.skip_newlines_and_indent();
         if self.at(&Token::DblColon) {
@@ -5045,84 +4655,21 @@ impl Parser {
     }
 }
 
-/// Minimum Pratt binding power for the operand of prefix minus: Haskell's
-/// `lexp6 -> - exp7` takes everything binding tighter than precedence 6, so
-/// the operand continues through operators with precedence >= 7 (left
-/// binding power >= 7*2) and stops at precedence 6 and below.
-const NEGATION_OPERAND_MIN_PREC: u8 = 14;
-
-/// Convert a Haskell fixity (Assoc, precedence 0-9) to Pratt binding powers
-/// (left, right): precedence doubled, with the associativity deciding which
-/// side binds one tighter.
-fn assoc_prec_to_binding(assoc: Assoc, prec: u8) -> (u8, u8) {
-    let base = prec * 2;
-    match assoc {
-        Assoc::Left => (base, base + 1),
-        Assoc::Right => (base + 1, base),
-        // Non-associative: same binding powers as Left. The grouping never
-        // materializes — `continue_infix` rejects a same-precedence neighbor
-        // of a non-associative operator before it could chain.
-        Assoc::None => (base, base + 1),
-    }
-}
-
-/// Builtin operator fixities, matching the Haskell report and the GHC
-/// Prelude. An operator with no `infixl`/`infixr`/`infix` declaration and no
-/// entry here defaults to `infixl 9`, exactly as in Haskell.
-fn default_operator_fixity(op: &str) -> (Assoc, u8) {
-    match op {
-        ">>=" | ">>" => (Assoc::Left, 1),
-        "$" => (Assoc::Right, 0),
-        "||" => (Assoc::Right, 2),
-        "&&" => (Assoc::Right, 3),
-        "==" | "/=" | "<" | ">" | "<=" | ">=" => (Assoc::None, 4),
-        ":" => (Assoc::Right, 5),
-        "++" => (Assoc::Right, 5),
-        "<>" => (Assoc::Right, 6),
-        "+" | "-" => (Assoc::Left, 6),
-        "*" | "/" => (Assoc::Left, 7),
-        // GHC Prelude: infixl 7 `div`, `mod`, `quot`, `rem`. Declared in
-        // Prelude.mll too; listed here so the grouping survives even where
-        // the Prelude fixity scan is not in effect. Without this they fell
-        // to the infixl 9 default and `4 * 5 \`rem\` 3` regrouped silently
-        // (8 instead of GHC's 2).
-        "div" | "mod" | "quot" | "rem" => (Assoc::Left, 7),
-        "^" => (Assoc::Right, 8),
-        "." => (Assoc::Right, 9),
-        "!!" => (Assoc::Left, 9),
-        _ => (Assoc::Left, 9), // Haskell's default for undeclared operators
-    }
-}
-
-/// How an operator is written in prose: symbolic operators quoted, function
-/// names in backticks (`div`), matching how they appear at the use site.
-fn op_display(op: &str) -> String {
-    if op.starts_with(|c: char| c.is_alphabetic() || c == '_') {
-        format!("`{}`", op)
-    } else {
-        format!("'{}'", op)
-    }
-}
-
-/// How an operator is written inside an example expression.
-fn op_in_expr(op: &str) -> String {
-    if op.starts_with(|c: char| c.is_alphabetic() || c == '_') {
-        format!("`{}`", op)
-    } else {
-        op.to_string()
-    }
-}
-
-fn assoc_keyword(assoc: Assoc) -> &'static str {
-    match assoc {
-        Assoc::Left => "infixl",
-        Assoc::Right => "infixr",
-        Assoc::None => "infix",
-    }
-}
-
-fn is_comparison_op(op: &str) -> bool {
-    matches!(op, "==" | "/=" | "<" | "<=" | ">" | ">=")
+/// The diagnostic for input nested past `crate::MAX_NESTING_DEPTH`. `what`
+/// names the construct ("expression", "type", "pattern").
+pub(crate) fn nesting_error(what: &str, span: Span) -> Box<Diagnostic> {
+    let mut diag = Box::new(Diagnostic::parse_at(
+        format!("{} nested too deeply (limit {})", what, crate::MAX_NESTING_DEPTH),
+        span,
+    ));
+    diag.notes.push(
+        "the compiler reads nested syntax with bounded recursion so it \
+         can report this error instead of crashing on pathological \
+         input; restructure the code to nest less, e.g. by splitting \
+         it into smaller definitions"
+            .to_string(),
+    );
+    diag
 }
 
 
@@ -5280,131 +4827,18 @@ fn validate_ffi_callee(s: &str) -> Result<(), String> {
     }
 }
 
-/// Scan a token stream for fixity declarations without parsing. A Haskell
-/// fixity declaration governs the whole scope it appears in — including uses
-/// earlier in the file — so the parser seeds its fixity table from this scan
-/// before parsing any expression, instead of discovering declarations in
-/// textual order. Mirrors the `parse_fixity_decl` grammar exactly
-/// (`infixl`/`infixr`/`infix`, precedence 0-9, comma-separated operators,
-/// backtick-quoted or bare function names).
-pub fn scan_fixities(tokens: &[Located]) -> Vec<(String, Assoc, u8)> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
-        let assoc = match tokens[i].token {
-            Token::Infixl => Assoc::Left,
-            Token::Infixr => Assoc::Right,
-            Token::Infix => Assoc::None,
-            _ => {
-                i += 1;
-                continue;
-            }
-        };
-        i += 1;
-        let prec = match tokens.get(i).map(|t| &t.token) {
-            Some(Token::IntLit(n)) if (0..=9).contains(n) => {
-                i += 1;
-                *n as u8
-            }
-            _ => continue, // malformed — parse_fixity_decl reports it
-        };
-        loop {
-            match tokens.get(i).map(|t| &t.token) {
-                Some(Token::Operator(s)) => {
-                    out.push((s.clone(), assoc, prec));
-                    i += 1;
-                }
-                Some(Token::Ident(s)) => {
-                    out.push((s.clone(), assoc, prec));
-                    i += 1;
-                }
-                Some(Token::Backtick) => {
-                    if let (Some(Token::Ident(s)), Some(Token::Backtick)) = (
-                        tokens.get(i + 1).map(|t| &t.token),
-                        tokens.get(i + 2).map(|t| &t.token),
-                    ) {
-                        out.push((s.clone(), assoc, prec));
-                        i += 3;
-                    } else {
-                        break;
-                    }
-                }
-                _ => break,
-            }
-            if matches!(tokens.get(i).map(|t| &t.token), Some(Token::Comma)) {
-                i += 1;
-            } else {
-                break;
-            }
-        }
-    }
-    out
-}
-
-/// Scan a token stream for the module paths it imports, without parsing.
-/// Multi-module compilation needs the import list before the module can be
-/// parsed: an imported operator's fixity (Haskell carries fixity with the
-/// export) changes how this module's expressions group.
-pub fn scan_imports(tokens: &[Located]) -> Vec<Vec<String>> {
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < tokens.len() {
-        if !matches!(tokens[i].token, Token::Import) {
-            i += 1;
-            continue;
-        }
-        i += 1;
-        if matches!(tokens.get(i).map(|t| &t.token), Some(Token::Qualified)) {
-            i += 1;
-        }
-        let mut path = Vec::new();
-        while let Some(Token::UpperIdent(s)) = tokens.get(i).map(|t| &t.token) {
-            path.push(s.clone());
-            match tokens.get(i + 1).map(|t| &t.token) {
-                Some(Token::Operator(dot)) if dot == "." => i += 2,
-                _ => {
-                    i += 1;
-                    break;
-                }
-            }
-        }
-        if !path.is_empty() {
-            out.push(path);
-        }
-    }
-    out
-}
-
 /// Parse a token stream into a module. On failure, returns every syntax
 /// error found (the parser recovers at declaration boundaries), in source
 /// order; the list is never empty.
+///
+/// Infix expressions and infix types are returned as flat chains
+/// (`Expr::OpChain`, `Expr::Section`, `Type::OpChain`): an operator's
+/// fixity belongs to the entity it denotes, which only module resolution
+/// knows, so the chains are grouped there (see `fixity`).
 ///
 /// Takes the tokens by value: every caller owns its freshly lexed vector
 /// and is done with it here, so the parser holds it directly instead of
 /// deep-cloning the whole stream per module.
 pub fn parse(tokens: Vec<Located>) -> Result<Module, Vec<Diagnostic>> {
-    parse_with_fixities(tokens, &HashMap::new())
-}
-
-/// Parse with operator fixities from other modules already in force.
-/// Haskell fixity travels with the operator: `import M` brings M's
-/// `infixr 3 <+>` into this module's expression grammar, so multi-module
-/// compilation seeds each module's parser with its imports' fixities (plus
-/// the implicit Prelude's). The module's own declarations, scanned up front,
-/// take precedence over imported ones.
-pub fn parse_with_fixities(
-    tokens: Vec<Located>,
-    imported: &HashMap<String, (Assoc, u8)>,
-) -> Result<Module, Vec<Diagnostic>> {
-    // Scan the module's own fixity declarations before the vector moves
-    // into the parser.
-    let own_fixities = scan_fixities(&tokens);
-    let mut parser = Parser::new(tokens);
-    for (op, &(assoc, prec)) in imported {
-        parser.fixities.insert(op.clone(), (assoc, prec));
-    }
-    for (op, assoc, prec) in own_fixities {
-        parser.fixities.insert(op, (assoc, prec));
-    }
-    parser.parse_module()
+    Parser::new(tokens).parse_module()
 }

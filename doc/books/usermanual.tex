@@ -436,22 +436,28 @@ halve  = (`div` 2)
 
 \subsubsection{Operator Precedence}
 
-Declare fixity with \texttt{infixl}, \texttt{infixr}, or \texttt{infix}
-(levels 0--9):
+Declare the fixity of an operator you define with \texttt{infixl},
+\texttt{infixr}, or \texttt{infix} (levels 0--9):
 
 \begin{lstlisting}
-infixl 6 +
-infixl 6 -
-infixl 7 *
-infixr 5 :
-infixr 0 $
-infix  4 ==
+infixr 5 +++
+(+++) :: [a] -> [a] -> [a]
+xs +++ ys = xs ++ ys
+
+infixl 6 `plus`
+plus :: Int -> Int -> Int
+plus a b = a + b
 \end{lstlisting}
 
-Standard Haskell fixities are the defaults; an undeclared operator is
-\texttt{infixl 9}. A fixity declaration governs the whole module, including
-uses above it, and travels with an import: an operator imported from another
-module keeps the fixity its defining module declared, as in GHC.
+The Prelude's operators have the standard Haskell fixities; an operator
+without a declaration is \texttt{infixl 9}. A fixity declaration governs
+the whole module, including uses above it, and belongs to the operator it
+declares, as in GHC: the declaration must stand in the module that defines
+the operator, an imported operator keeps the fixity its defining module
+declared, and an operator of another module that is not in scope (private,
+hidden, or imported only \texttt{qualified}) has no influence on an
+operator of the same spelling. A local name used in backticks is
+\texttt{infixl 9}.
 
 Operators declared \texttt{infix} are non-associative, so \texttt{a == b == c}
 is a parse error --- parenthesize one side, or chain comparisons with

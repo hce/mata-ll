@@ -191,11 +191,14 @@ pub enum Decl {
         params: Vec<String>,
         ty: Type,
     },
-    /// Fixity declaration: `infixl 6 +` or `infixr 5 :`
+    /// Fixity declaration: `infixl 6 +` or `infixr 5 :`, one node per
+    /// operator of a comma list. `span` is the operator's position in the
+    /// declaration.
     FixityDecl {
         assoc: Assoc,
         prec: u8,
         op: String,
+        span: Span,
     },
 }
 
@@ -359,6 +362,41 @@ impl Pattern {
     }
 }
 
+/// An operator occurrence in an infix chain or a section: the name as
+/// written (a symbolic operator, or the function name of a backtick
+/// operator) and where it stands.
+#[derive(Debug, Clone)]
+pub struct ChainOp {
+    pub name: String,
+    pub span: Span,
+}
+
+/// One operand of an infix chain: an application-level expression,
+/// optionally under a prefix minus (`neg` is the position of the `-`).
+#[derive(Debug, Clone)]
+pub struct ChainOperand {
+    pub neg: Option<Span>,
+    pub expr: Expr,
+}
+
+/// The body of `Expr::OpChain`: `[-] e (op [-] e)*` in source order. A
+/// chain has at least one operator or a prefix minus; a lone operand is
+/// never wrapped.
+#[derive(Debug, Clone)]
+pub struct OpChain {
+    pub first: ChainOperand,
+    pub rest: Vec<(ChainOp, ChainOperand)>,
+}
+
+/// Which side of a section's operator the written operand stands on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SectionSide {
+    /// `(e op)`: the operand is the operator's left argument.
+    Left,
+    /// `(op e)`: the operand is the operator's right argument.
+    Right,
+}
+
 /// Expressions.
 #[derive(Debug, Clone)]
 pub enum Expr {
@@ -383,6 +421,25 @@ pub enum Expr {
     },
     /// Prefix negation: `-x`
     Negate(Box<Expr>),
+    /// An infix expression as the source wrote it: operands and operators
+    /// in order, NOT yet grouped. The parser cannot group it — how
+    /// `a + b * c` nests depends on the fixity of the entities `+` and `*`
+    /// denote, and a name is bound to its entity only by module resolution
+    /// (a local binder, the module's own operator, an imported one and the
+    /// Prelude's can share a spelling). Resolution groups every chain into
+    /// `InfixApp` / `Negate` nodes (`fixity::group`, driven by
+    /// `modules::Rename`); no chain reaches the type checker.
+    OpChain(Box<OpChain>),
+    /// An operator section as written: `(op e)` or `(e op)`, the operand
+    /// still ungrouped. Resolution checks the operand against the section
+    /// operator's fixity and rewrites the section to the lambda it stands
+    /// for (`\x -> x op e` / `\x -> e op x`); like `OpChain`, it never
+    /// reaches the type checker.
+    Section {
+        op: ChainOp,
+        side: SectionSide,
+        operand: Box<Expr>,
+    },
     /// If-then-else
     If {
         cond: Box<Expr>,
@@ -472,6 +529,18 @@ impl Expr {
                 rhs: Box::new(f(*rhs)),
             },
             Expr::Negate(x) => Expr::Negate(Box::new(f(*x))),
+            Expr::OpChain(chain) => {
+                let OpChain { first, rest } = *chain;
+                let mut operand = |o: ChainOperand| ChainOperand { neg: o.neg, expr: f(o.expr) };
+                let first = operand(first);
+                let rest = rest.into_iter().map(|(op, o)| (op, operand(o))).collect();
+                Expr::OpChain(Box::new(OpChain { first, rest }))
+            }
+            Expr::Section { op, side, operand } => Expr::Section {
+                op,
+                side,
+                operand: Box::new(f(*operand)),
+            },
             Expr::If { cond, then_branch, else_branch } => Expr::If {
                 cond: Box::new(f(*cond)),
                 then_branch: Box::new(f(*then_branch)),
@@ -536,6 +605,11 @@ impl Expr {
             Expr::Lambda { body, .. } => f(body),
             Expr::InfixApp { lhs, rhs, .. } => { f(lhs); f(rhs); }
             Expr::Negate(x) => f(x),
+            Expr::OpChain(chain) => {
+                f(&chain.first.expr);
+                for (_, o) in &chain.rest { f(&o.expr); }
+            }
+            Expr::Section { operand, .. } => f(operand),
             Expr::If { cond, then_branch, else_branch } => {
                 f(cond);
                 f(then_branch);
@@ -697,6 +771,15 @@ pub enum Type {
     },
     /// Promoted data constructor (DataKinds): `'Empty`, `'NonEmpty`
     Promoted(String),
+    /// An infix type as the source wrote it (`f :+: g :*: h`): operands and
+    /// type operators in order, not yet grouped. Like `Expr::OpChain`, it
+    /// is grouped by module resolution, which knows the type each operator
+    /// names in the module's scope (`fixity::group_types`); no chain reaches
+    /// the type checker.
+    OpChain {
+        first: Box<Type>,
+        rest: Vec<(ChainOp, Type)>,
+    },
 }
 
 /// A type family equation: `Element [a] = a`

@@ -36,6 +36,7 @@ pub mod dce;
 pub mod demand;
 pub mod desugar;
 pub mod embed;
+pub mod fixity;
 pub mod fold;
 pub mod intrinsics;
 pub mod lexer;
@@ -201,11 +202,13 @@ impl std::fmt::Display for CompileError {
     }
 }
 
-/// Parse and return the prelude declarations.
+/// Parse and return the prelude declarations, their infix expressions
+/// grouped under the Prelude's own fixities (the Prelude is not a module
+/// import resolution rewrites; see `modules::group_baseline`).
 fn parse_prelude() -> Result<Vec<ast::Decl>, CompileError> {
     let tokens = lexer::lex(stdlib::PRELUDE).map_err(|d| CompileError::Lex(*d))?;
     let module = parser::parse(tokens).map_err(CompileError::Parse)?;
-    Ok(module.decls)
+    modules::group_baseline(&module.decls).map_err(CompileError::Parse)
 }
 
 /// What the implicit Prelude provides to every module's scope: the names
@@ -327,17 +330,14 @@ fn compile_impl(
     let (tokens, pragmas) =
         lexer::lex_with_pragmas(source).map_err(|d| CompileError::Lex(*d))?;
 
-    // The module loader is created before parsing: fixity travels with an
-    // import in Haskell, so the root module's expressions must be parsed
-    // under the fixities its imports (and the implicit Prelude) declare.
+    // Parse. Infix expressions come back as flat chains; import resolution
+    // groups them, once each operator is bound to the entity it denotes.
+    let parsed = parser::parse(tokens).map_err(CompileError::Parse)?;
+
     let mut loader = modules::ModuleLoader::new(source_dir);
     for path in lib_paths {
         loader.add_search_path(path.to_path_buf());
     }
-    let fixities = loader.fixities_for(&tokens);
-
-    // Parse
-    let parsed = parser::parse_with_fixities(tokens, &fixities).map_err(CompileError::Parse)?;
 
     // Parse the prelude up-front: its signature shapes are the baseline against
     // which unqualified imports are checked for incompatible-type collisions.
@@ -355,7 +355,10 @@ fn compile_impl(
     // Prelude scope.
     let mut checker = typechecker::Checker::new();
     loader.set_prelude(prelude_scope(&prelude_decls, prelude_shapes, &checker));
-    let module = loader.resolve_imports(&parsed).map_err(CompileError::Import)?;
+    let module = loader.resolve_imports(&parsed).map_err(|e| match e {
+        modules::ResolveError::Import(message) => CompileError::Import(message),
+        modules::ResolveError::Syntax(diags) => CompileError::Parse(diags),
+    })?;
     // Non-fatal resolution diagnostics (an import alias shadowed by a data
     // constructor) — carried into CompileResult.warnings below.
     let import_warnings = loader.take_warnings();

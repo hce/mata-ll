@@ -95,6 +95,39 @@ API of the `mllc` library crate.)
   `scope_same_type_name_imports`, `scope_own_type_names` (GHC-goldened).
   Constructors, record fields, classes and class methods are still
   program-wide names.
+- **An operator groups by the fixity of what it denotes, not of its
+  spelling** (silent miscompiles). Fixity declarations were collected
+  from the tokens of every module an import chain reaches and applied to
+  the operator's spelling, before any name was resolved. A module's own
+  `|>` therefore grouped under the `infixl 1 |>` of a module two imports
+  away that does not even export it (`1 + 2 |> (* 10)` gave `30`, GHC
+  `21`); an operator private to an imported module, left out by an
+  import list or `hiding`, or reachable only through a `qualified`
+  import, lent its fixity to the importer's own operator of that
+  spelling (`10 <+> 3 <+> 2` gave `9`, GHC `5`); and a local binder used
+  in backticks took the fixity of a top-level or Prelude function of the
+  same name (``f minus = 10 `minus` 3 `minus` 2`` under a top-level
+  ``infixr 5 `minus` ``). A fixity now belongs to the declaration: the
+  parser reads an infix expression as a flat chain, and module
+  resolution groups it once every operator in it is bound to the entity
+  it denotes in that module's scope — a local binder (`infixl 9`), the
+  module's own operator (its own declaration, or `infixl 9` without
+  one), an imported one (the fixity its defining module declared,
+  through re-exports too), or the Prelude's. The same holds for type
+  operators and for the operand rule of sections. An operator two
+  imports both provide is the "Ambiguous occurrence" error, with no
+  grouping picked first. Emitted Lua is unchanged for every program
+  whose operators were already grouped as GHC groups them.
+  GHC-goldened cases `fixity_own_operator`, `fixity_not_imported`,
+  `fixity_qualified_only`, `fixity_local_binders`, `fixity_class_method`,
+  `fixity_reexport`, `fixity_prelude_spelling`, `fixity_type_operators`.
+- **`notElem` is `infix 4`**, as in GHC. It had no fixity declaration, so
+  ``3 `notElem` [1, 2] ++ [3]`` grouped as ``(3 `notElem` [1, 2]) ++ [3]``
+  and was a type error. The fixities of the operators the compiler
+  provides (`+`, `==`, `:`, `$`, `>>=`, …) were a table in the parser
+  next to the Prelude's declarations for the rest; they are all
+  declared in the Prelude source now, and the GHC-goldened case
+  `fixity_table` pins precedence and associativity of every one of them.
 - **`import Prelude` forms scope the Prelude instead of loading it a
   second time.** `import Prelude hiding (lookup)`, `import Prelude
   (print, (+))` and `import qualified Prelude as P` declare which Prelude
@@ -182,6 +215,30 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **A fixity declaration for an operator its module does not define is
+  rejected** (breaking for programs that wrote one), as in GHC ("The
+  fixity signature … lacks an accompanying binding"). `infixl 6 +` in a
+  user module, a declaration for an imported operator, or one for a
+  name defined nowhere used to be accepted and applied to the spelling;
+  under the rule above it has no operator to attach to. An operator
+  keeps the fixity its defining module gave it in every module that
+  uses it; to migrate, delete the declaration (or move it next to the
+  operator's definition).
+- **A module's own operator spelled like a Prelude operator no longer
+  inherits the Prelude's fixity** (breaking for programs that relied on
+  it; GHC's rule). A module that defines its own `+`, `<>`-like or
+  `elem`-like function (with `import Prelude hiding`, or under the
+  shadowing rules) and uses it infix gets that operator's own
+  declaration, and `infixl 9` without one, where the spelling used to
+  supply `infixl 6` and so on: `a + b * c` over such a `+` now groups as
+  `(a + b) * c`. To migrate, declare the fixity next to the definition
+  (`infixl 6 +`).
+- **Errors in the grouping of an infix expression are reported after
+  the module's imports are resolved**, since the grouping needs them.
+  The messages and positions are the same, except that a chain error
+  at a backtick operator now points at the operator's opening backtick
+  rather than at the token after it; a program with both a syntax error
+  and a grouping error reports the syntax error first.
 - **Name clashes between imports are reported where the name is used,
   not at the import** (the per-module scopes above; GHC's rule). Two
   unqualified imports that both provide a name no longer make the

@@ -1497,28 +1497,44 @@ Types: Maybe (Just, Nothing), Either (Left, Right), IO, Ordering,
 
 # Operator fixity declarations
 
-User-defined fixity is supported:
+A module declares the fixity of the operators it defines:
 
-    infixl 6 +
-    infixr 5 :
-    infix 4 ==
-    infixl 7 `div`, `mod`
+    infixr 5 +++
+    infixl 6 <+>, <->
+    infix 4 `near`
+    infixl 7 `scaledBy`
 
 Precedence levels 0-9, with left, right, or no associativity; an
 operator list may be comma-separated, and named (backtick) operators
-may be declared with or without backticks. Haskell defaults are used
-for standard operators when no declaration is given; an undeclared
-operator is `infixl 9`.
+may be declared with or without backticks. An operator without a
+declaration is `infixl 9`.
 
-Fixity follows Haskell scoping rules:
+A fixity belongs to the operator that is declared, not to its
+spelling:
 
 - A declaration governs the whole module, including uses that precede
-  it textually.
-- Fixity travels with an import: `import M` brings M's fixity
-  declarations (and, transitively, those of M's imports) into the
-  importing module, as in GHC. The implicit Prelude contributes its
-  own (`infixl 4 <$>, <*>`, `infixl 7 div, mod`, `infix 4 elem`,
-  `infixr 0 seq`).
+  it textually. It must name an operator the same module defines — a
+  function, a class method, a record field or a type operator;
+  a declaration for an imported or Prelude operator, or for a name
+  defined nowhere, is rejected, as in GHC.
+- Every occurrence groups by the fixity of what it denotes in the
+  module that wrote it. An imported operator has the fixity its
+  defining module declared, however it was imported (through an import
+  list, a `module X` re-export or an umbrella module). An operator an
+  import does not make visible — private to its module, left out by an
+  import list or `hiding`, or imported only `qualified` — contributes
+  nothing, so a module's own operator of the same spelling has its own
+  declaration or `infixl 9`. A local binder used in backticks (a
+  parameter, a `let`/`where` binding, a pattern variable) is
+  `infixl 9`, whatever a top-level function of the same name declares.
+- The Prelude declares the standard fixities: `infixr 9 .`,
+  `infixl 9 !!`, `infixr 8 ^`, `infixl 7 *, /, div, mod, quot, rem`,
+  `infixl 6 +, -`, `infixr 6 <>`, `infixr 5 :, ++`,
+  `infix 4 ==, /=, <, <=, >=, >, elem, notElem`, `infixl 4 <$>, <$, <*>`,
+  `infixr 3 &&`, `infixr 2 ||`, `infixl 1 >>, >>=`, `infixr 1 =<<`,
+  `infixr 0 $, $!, seq` — GHC's table for these names.
+- An operator that two imports both provide has no fixity to group by;
+  its use is the "Ambiguous occurrence" error.
 
 A chain of same-precedence operators is rejected — as in GHC — when
 any operator in it is non-associative (`infix`), or when the operators
@@ -1963,9 +1979,11 @@ build a thunk chain, exactly as in Haskell.
         ↓
     Lexer — tokenize with layout-sensitive indentation tracking
         ↓
-    Parser — parse to AST (including fixity declarations)
+    Parser — parse to AST (infix expressions as flat operator chains)
         ↓
-    Import resolution — merge imported .mll modules and the prelude
+    Import resolution — merge imported .mll modules and the prelude;
+        bind every name to its declaration and group the operator
+        chains by the fixities of the operators they resolve to
         ↓
     Desugar — do-notation to >>= chains
         ↓

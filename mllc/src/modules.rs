@@ -17,8 +17,10 @@ use std::path::{Path, PathBuf};
 use std::fs;
 
 use crate::ast::*;
+use crate::fixity::{self, Fixities};
 use crate::lexer;
 use crate::parser;
+use crate::types::Diagnostic;
 
 /// Module loader
 pub struct ModuleLoader {
@@ -35,15 +37,12 @@ pub struct ModuleLoader {
     /// to an empty module — which surfaced as a far-away "Unbound
     /// variable" with nothing pointing at the cycle (F13).
     in_progress_stack: Vec<String>,
-    /// Fixities a module carries to its importers (its own declarations plus
-    /// those of its imports, transitively: fixity is keyed by the operator's
-    /// spelling and travels along every import edge).
-    fixity_cache: HashMap<String, HashMap<String, (Assoc, u8)>>,
-    /// Modules whose fixities are currently being computed (cycle detection).
-    fixities_in_progress: HashSet<String>,
-    /// The Prelude's fixity declarations, in force in every module (the
-    /// implicit `import Prelude`).
-    prelude_fixities: HashMap<String, (Assoc, u8)>,
+    /// The fixity of every operator entity resolved so far, by canonical
+    /// name: the Prelude's to begin with, then each module's own
+    /// declarations as the module is resolved (`resolve_module`, phase 2).
+    /// A module is resolved after its imports, so when its infix chains
+    /// are grouped the table holds every entity its scope can name.
+    fixities: Fixities,
     /// Each loaded module's display name and source text, by module key —
     /// retained for diagnostics: file attribution (`Diagnostic::file`) and
     /// the excerpt enrichment pass in lib.rs, which needs the text a span's
@@ -85,25 +84,13 @@ pub struct ModuleLoader {
 
 impl ModuleLoader {
     pub fn new(source_dir: &Path) -> Self {
-        // The embedded Prelude always lexes — it is compiled into the crate
-        // and parsed on every compilation.
-        let prelude_fixities = lexer::lex(crate::stdlib::PRELUDE)
-            .map(|tokens| {
-                parser::scan_fixities(&tokens)
-                    .into_iter()
-                    .map(|(op, assoc, prec)| (op, (assoc, prec)))
-                    .collect()
-            })
-            .unwrap_or_default();
         ModuleLoader {
             search_paths: vec![source_dir.to_path_buf()],
             loaded: HashMap::new(),
             resolved: HashMap::new(),
             in_progress: HashSet::new(),
             in_progress_stack: Vec::new(),
-            fixity_cache: HashMap::new(),
-            fixities_in_progress: HashSet::new(),
-            prelude_fixities,
+            fixities: fixity::prelude().clone(),
             warnings: Vec::new(),
             module_sources: HashMap::new(),
             prelude: PreludeScope::default(),
@@ -214,82 +201,13 @@ impl ModuleLoader {
         for p in &pragmas {
             self.warnings.push(crate::pragma_warning(p, Some(display_name.as_str())));
         }
-        // Fixity is part of a module's interface: this module's operators
-        // must group under the fixities its imports (and the implicit
-        // Prelude) declare, so those are collected before parsing.
-        let fixities = self.fixities_for(&tokens);
         // An imported module's syntax errors surface through the import-error
         // channel, prefixed with the module that failed to parse.
-        let module = parser::parse_with_fixities(tokens, &fixities).map_err(|diags| {
-            let msgs: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
-            format!("in module '{}': {}", key, msgs.join("\n"))
-        })?;
+        let module = parser::parse(tokens)
+            .map_err(|diags| syntax_errors_in_module(&key, &diags))?;
 
         self.loaded.insert(key.clone(), module);
         Ok(self.loaded.get(&key).unwrap())
-    }
-
-    /// The fixities in force for a module with the given token stream: the
-    /// implicit Prelude's, plus everything its imports carry (transitively).
-    /// The module's own declarations are layered on top by the parser itself.
-    /// An import that cannot be loaded is skipped here — `resolve_imports`
-    /// reports it through the normal import-error channel.
-    pub fn fixities_for(&mut self, tokens: &[lexer::Located]) -> HashMap<String, (Assoc, u8)> {
-        let mut fixities = self.prelude_fixities.clone();
-        for path in parser::scan_imports(tokens) {
-            // `import Prelude ...` names the implicit Prelude, whose
-            // fixities are in force already; it is never loaded as a module.
-            if path.len() == 1 && path[0] == PRELUDE_KEY {
-                continue;
-            }
-            if let Ok(imported) = self.imported_fixities(&path) {
-                fixities.extend(imported);
-            }
-        }
-        fixities
-    }
-
-    /// The fixities a module exports to an importer: its own declarations
-    /// plus its imports' (transitively), own winning on a clash. On an
-    /// import cycle the cycled-on module contributes nothing, matching how
-    /// `resolve_imports` breaks cycles.
-    fn imported_fixities(&mut self, module_path: &[String]) -> Result<HashMap<String, (Assoc, u8)>, String> {
-        let key = module_path.join(".");
-        if let Some(cached) = self.fixity_cache.get(&key) {
-            return Ok(cached.clone());
-        }
-        if self.fixities_in_progress.contains(&key) {
-            return Ok(HashMap::new());
-        }
-        self.fixities_in_progress.insert(key.clone());
-        let result: Result<HashMap<String, (Assoc, u8)>, String> = (|| {
-            self.load_module(module_path)?;
-            let module = self.loaded.get(&key).unwrap();
-            let mut fixities = HashMap::new();
-            let mut own = Vec::new();
-            let mut imports = Vec::new();
-            for decl in &module.decls {
-                match decl {
-                    Decl::FixityDecl { assoc, prec, op } => {
-                        own.push((op.clone(), (*assoc, *prec)));
-                    }
-                    Decl::Import { module_path, .. } => imports.push(module_path.clone()),
-                    _ => {}
-                }
-            }
-            for import in imports {
-                if import.len() == 1 && import[0] == PRELUDE_KEY {
-                    continue;
-                }
-                fixities.extend(self.imported_fixities(&import)?);
-            }
-            fixities.extend(own);
-            Ok(fixities)
-        })();
-        self.fixities_in_progress.remove(&key);
-        let fixities = result?;
-        self.fixity_cache.insert(key, fixities.clone());
-        Ok(fixities)
     }
 
     /// Resolve the entry module: every import (transitively) is resolved
@@ -297,7 +215,7 @@ impl ModuleLoader {
     /// reference is bound in the scope of the module that wrote it (see
     /// `resolve_module` for the model). The returned module carries the
     /// program's `Resolution` for the type checker.
-    pub fn resolve_imports(&mut self, module: &Module) -> Result<Module, String> {
+    pub fn resolve_imports(&mut self, module: &Module) -> Result<Module, ResolveError> {
         self.begin_program(module);
         let mut resolved = self.resolve_module(module, ROOT_KEY)?.module;
         self.check_host_exports(&resolved)?;
@@ -445,7 +363,7 @@ impl ModuleLoader {
     ///
     /// Record fields, class methods, classes and constructors are not part
     /// of this model: they remain global names, as before.
-    fn resolve_module(&mut self, module: &Module, own_key: &str) -> Result<Resolved, String> {
+    fn resolve_module(&mut self, module: &Module, own_key: &str) -> Result<Resolved, ResolveError> {
         let is_root = own_key == ROOT_KEY;
 
         // Import declarations grouped per module, in first-appearance order.
@@ -500,12 +418,18 @@ impl ModuleLoader {
                      each other (GHC rejects import cycles for the same \
                      structural reason). Break the cycle by moving the shared \
                      definitions into a module both can import.",
-                    chain.join(" -> ")));
+                    chain.join(" -> ")).into());
             } else {
                 self.in_progress.insert(key.clone());
                 self.in_progress_stack.push(key.clone());
                 let imported = self.load_module(module_path)?.clone();
-                let r = self.resolve_module(&imported, key);
+                // An imported module's ungroupable infix chains are syntax
+                // errors of that module, reported like its parse errors.
+                let r = self.resolve_module(&imported, key).map_err(|e| match e {
+                    ResolveError::Syntax(diags) =>
+                        ResolveError::Import(syntax_errors_in_module(key, &diags)),
+                    other => other,
+                });
                 self.in_progress.remove(key);
                 self.in_progress_stack.pop();
                 let r = r?;
@@ -570,7 +494,7 @@ impl ModuleLoader {
                          module's names on to this module's importers \
                          (Haskell 2010 section 5.2), so it needs a matching \
                          'import {x}' (or a qualified import aliased as \
-                         '{x}') in this module."));
+                         '{x}') in this module.").into());
                 }
                 let mut any_unqual = false;
                 for i in matching {
@@ -643,6 +567,39 @@ impl ModuleLoader {
         for d in &module.decls {
             if let Decl::TypeSig { name, ty } | Decl::ExportSig { name, ty } = d {
                 self.shapes.entry(own_vals[name].clone()).or_insert_with(|| type_shape(ty));
+            }
+        }
+        // A fixity declaration belongs to the operator THIS module declares
+        // under that name, and is recorded under that entity's canonical
+        // name — never under the spelling: another module's operator of
+        // the same spelling, a local binder, or the Prelude's are different
+        // entities with fixities of their own. A class method or record
+        // field is a global name, which is its canonical name; where the
+        // Prelude provides that name too, a bare reference denotes the
+        // Prelude's, so the Prelude's entry stays — no module can change
+        // how the Prelude's own code, or another module's, groups. A
+        // declaration for a name the module does not declare has no entity
+        // to attach to and is rejected, as in GHC.
+        let mut syntax_errors: Vec<Diagnostic> = Vec::new();
+        for d in &module.decls {
+            let Decl::FixityDecl { assoc, prec, op, span } = d else { continue };
+            let fix = (*assoc, *prec);
+            let mut attached = false;
+            if let Some(canon) = own_vals.get(op) {
+                self.fixities.vals.insert(canon.clone(), fix);
+                attached = true;
+            } else if own_globals.contains(op) {
+                if !self.prelude.values.contains(op) {
+                    self.fixities.vals.insert(op.clone(), fix);
+                }
+                attached = true;
+            }
+            if let Some(canon) = own_tys.get(op) {
+                self.fixities.tys.insert(canon.clone(), fix);
+                attached = true;
+            }
+            if !attached {
+                syntax_errors.push(fixity_without_definition(op, *span));
             }
         }
 
@@ -731,7 +688,7 @@ impl ModuleLoader {
                              'module X' re-export entries pass on. Add \
                              '{n}' to '{key}''s export list, or import \
                              '{n}' from its defining module directly \
-                             (GHC rejects this import the same way)."));
+                             (GHC rejects this import the same way).").into());
                     }
                 }
             }
@@ -794,7 +751,7 @@ impl ModuleLoader {
         }
         if let Some((via, names)) = collisions.into_iter().next() {
             let importer = (!is_root).then(|| self.module_label(own_key));
-            return Err(collision_error(&edges[via].key, &names, importer.as_deref()));
+            return Err(collision_error(&edges[via].key, &names, importer.as_deref()).into());
         }
 
         // Phase 5: the bare-name tables the rewrite of this module's own
@@ -1009,9 +966,11 @@ impl ModuleLoader {
         // Phase 7: rewrite this module's own declarations to canonical
         // spelling, binding every reference in the scope built above.
         let alias_names: HashSet<String> = alias_table.keys().cloned().collect();
+        let chain_errors = std::cell::RefCell::new(Vec::new());
         let rename = Rename {
             vals: &vals, tys: &tys, cons: &cons,
             aliases: &alias_names, placeholders: &placeholders,
+            fixities: &self.fixities, errors: &chain_errors,
         };
         let mut own_decls: Vec<Decl> = Vec::new();
         for decl in &module.decls {
@@ -1024,6 +983,11 @@ impl ModuleLoader {
                 rewrite_qualified_uses_decl(decl.clone(), &qualified_aliases)
             };
             own_decls.push(rename.decl(&d));
+        }
+        syntax_errors.extend(chain_errors.into_inner());
+        if !syntax_errors.is_empty() {
+            syntax_errors.sort_by_key(|d| d.span.map(|s| (s.line, s.col)));
+            return Err(ResolveError::Syntax(syntax_errors));
         }
 
         // Phase 8: what this module offers its importers. Without an
@@ -1298,6 +1262,74 @@ impl Placeholders {
     fn into_made(self) -> Vec<(String, ScopeError)> {
         self.made.into_inner()
     }
+
+    /// Is `spelling` a placeholder (of any module)?
+    fn is_placeholder(spelling: &str) -> bool {
+        spelling.starts_with("<scope error ")
+    }
+}
+
+/// Why resolution failed: an import error (a message), or syntax errors in
+/// the entry module that only resolution can see — an infix chain its
+/// operators' fixities define no grouping for, a fixity declaration
+/// without a definition. (The same errors in an IMPORTED module are
+/// reported as an import error naming the module.)
+#[derive(Debug)]
+pub enum ResolveError {
+    Import(String),
+    Syntax(Vec<Diagnostic>),
+}
+
+impl From<String> for ResolveError {
+    fn from(message: String) -> Self {
+        ResolveError::Import(message)
+    }
+}
+
+/// The import error for syntax errors in imported module `key`.
+fn syntax_errors_in_module(key: &str, diags: &[Diagnostic]) -> String {
+    let msgs: Vec<String> = diags.iter().map(|d| d.to_string()).collect();
+    format!("in module '{}': {}", key, msgs.join("\n"))
+}
+
+/// A fixity declaration for a name its module does not declare.
+fn fixity_without_definition(op: &str, span: Span) -> Diagnostic {
+    let shown = fixity::op_display(op);
+    let mut diag = Diagnostic::parse_at(
+        format!(
+            "The fixity declaration for {shown} has no accompanying definition: \
+             this module does not define {shown}"),
+        span,
+    );
+    diag.notes.push(format!(
+        "a fixity declaration sets the precedence of an operator its own module \
+         defines. An operator defined elsewhere — imported, or the Prelude's — \
+         keeps the fixity its defining module gave it, in every module that uses \
+         it. Remove the declaration, or define {shown} in this module (GHC rejects \
+         this declaration the same way)."));
+    diag
+}
+
+/// Group the infix chains of declarations written in the BASELINE scope:
+/// the Prelude source, and the method bodies the type checker registers
+/// for its builtin classes. Every name there is its own canonical name, so
+/// what such declarations need of resolution is `Rename` with empty
+/// tables — the grouping of their chains under the Prelude's fixities,
+/// local binders shadowing as in every module.
+pub fn group_baseline(decls: &[Decl]) -> Result<Vec<Decl>, Vec<Diagnostic>> {
+    let (vals, tys, cons) = (HashMap::new(), HashMap::new(), HashMap::new());
+    let aliases = HashSet::new();
+    let placeholders = Placeholders::new(0);
+    let errors = std::cell::RefCell::new(Vec::new());
+    let rename = Rename {
+        vals: &vals, tys: &tys, cons: &cons,
+        aliases: &aliases, placeholders: &placeholders,
+        fixities: fixity::prelude(), errors: &errors,
+    };
+    let grouped: Vec<Decl> = decls.iter().map(|d| rename.decl(d)).collect();
+    debug_assert!(placeholders.into_made().is_empty(), "baseline names are all in scope");
+    let errors = errors.into_inner();
+    if errors.is_empty() { Ok(grouped) } else { Err(errors) }
 }
 
 /// Does `module` see the Prelude's `name` unqualified? Without an explicit
@@ -1532,6 +1564,15 @@ struct Rename<'a> {
     /// The module's import aliases: what makes `A.name` a qualified name.
     aliases: &'a HashSet<String>,
     placeholders: &'a Placeholders,
+    /// The fixity of every operator entity this module's scope can name,
+    /// by canonical name. An infix chain is grouped HERE, where each of
+    /// its operators has just been bound to its entity, so the fixity that
+    /// governs an occurrence is by construction the fixity of what the
+    /// occurrence denotes: infixl 9 for a local binder, whatever the
+    /// module scope holds under the same spelling.
+    fixities: &'a Fixities,
+    /// The errors of chains the fixities define no grouping for.
+    errors: &'a std::cell::RefCell<Vec<Diagnostic>>,
 }
 
 impl Rename<'_> {
@@ -1773,6 +1814,10 @@ impl Rename<'_> {
                 lhs: Box::new(self.expr(lhs, bound)),
                 rhs: Box::new(self.expr(rhs, bound)),
             },
+            // Infix chains and sections are grouped here, under the
+            // fixities of the entities their operators denote.
+            Expr::OpChain(chain) => self.chain(chain, bound).0,
+            Expr::Section { op, side, operand } => self.section(op, *side, operand, bound),
             // Ascriptions carry a type; the generic descent visits only
             // expressions, and type names need renaming too.
             Expr::Ascription(x, t) =>
@@ -1818,6 +1863,88 @@ impl Rename<'_> {
         }
     }
 
+    /// Bind an operator occurrence to its entity and that entity's fixity.
+    /// A local binder has no fixity declaration (infixl 9). `Err` carries
+    /// the placeholder of an operator that denotes nothing in scope.
+    fn operator(&self, op: &ChainOp, bound: &HashSet<String>) -> Result<fixity::Op, String> {
+        let name = self.v(&op.name, bound);
+        if Placeholders::is_placeholder(&name) {
+            return Err(name);
+        }
+        let (assoc, prec) = if bound.contains(&op.name) {
+            fixity::DEFAULT_FIXITY
+        } else {
+            self.fixities.vals.get(&name).copied().unwrap_or(fixity::DEFAULT_FIXITY)
+        };
+        Ok(fixity::Op { written: op.name.clone(), name, span: op.span, assoc, prec })
+    }
+
+    /// Group an infix chain. Returns the grouped expression and what
+    /// stands at its root (for a section's operand check).
+    ///
+    /// A chain with an operator that denotes nothing in scope (hidden,
+    /// ambiguous) has no fixity to group by: it is replaced by that
+    /// operator's placeholder reference, so the type checker reports the
+    /// scope error and no grouping is ever picked for it.
+    fn chain(&self, chain: &OpChain, bound: &HashSet<String>) -> (Expr, Option<fixity::Top>) {
+        let mut ops = Vec::with_capacity(chain.rest.len());
+        for (op, _) in &chain.rest {
+            match self.operator(op, bound) {
+                Ok(op) => ops.push(op),
+                Err(placeholder) => return (Expr::Var(placeholder), None),
+            }
+        }
+        let operand = |o: &ChainOperand| (o.neg, self.expr(&o.expr, bound));
+        let first = operand(&chain.first);
+        let rest = ops.into_iter()
+            .zip(chain.rest.iter().map(|(_, o)| operand(o)))
+            .collect();
+        match fixity::group(first, rest) {
+            Ok((e, top)) => (e, Some(top)),
+            Err(diag) => (self.chain_error(*diag), None),
+        }
+    }
+
+    /// Check a section's operand against the section operator's fixity and
+    /// rewrite the section to the lambda it stands for.
+    fn section(&self, op: &ChainOp, side: SectionSide, operand: &Expr, bound: &HashSet<String>) -> Expr {
+        let op = match self.operator(op, bound) {
+            Ok(op) => op,
+            Err(placeholder) => return Expr::Var(placeholder),
+        };
+        let (operand, top) = match operand {
+            Expr::OpChain(chain) => {
+                if side == SectionSide::Right
+                    && let Err(diag) = fixity::check_right_section_minus(&op, chain.first.neg)
+                {
+                    return self.chain_error(*diag);
+                }
+                self.chain(chain, bound)
+            }
+            other => (self.expr(other, bound), None),
+        };
+        if let Err(diag) = fixity::check_section_operand(&op, side, top.as_ref()) {
+            return self.chain_error(*diag);
+        }
+        let x = Box::new(Expr::Var("__sec".into()));
+        let operand = Box::new(operand);
+        let (lhs, rhs) = match side {
+            SectionSide::Left => (operand, x),
+            SectionSide::Right => (x, operand),
+        };
+        Expr::Lambda {
+            params: vec!["__sec".into()],
+            body: Box::new(Expr::InfixApp { op: op.name, lhs, rhs }),
+        }
+    }
+
+    /// Record a chain's error. The expression returned in the chain's
+    /// place is never compiled: resolution fails once the module is done.
+    fn chain_error(&self, diag: Diagnostic) -> Expr {
+        self.errors.borrow_mut().push(diag);
+        Expr::Lit(Literal::Unit)
+    }
+
     fn dostmt(&self, s: &DoStmt, bound: &mut HashSet<String>) -> DoStmt {
         match s {
             DoStmt::Bind { name, expr } => {
@@ -1847,6 +1974,24 @@ impl Rename<'_> {
                 Type::Con(self.t(n))
             }
             Type::Var(_) | Type::Unit | Type::Promoted(_) => t.clone(),
+            // An infix type is grouped under the fixities of the types its
+            // operators name in this module's scope. An operator that names
+            // no type in scope leaves nothing to group by: the chain becomes
+            // that operator's placeholder, which the type checker reports.
+            Type::OpChain { first, rest } => {
+                let mut ops = Vec::with_capacity(rest.len());
+                for (op, operand) in rest {
+                    let name = self.t(&op.name);
+                    if Placeholders::is_placeholder(&name) {
+                        return Type::Con(name);
+                    }
+                    let (assoc, prec) = self.fixities.tys.get(&name).copied()
+                        .unwrap_or(fixity::DEFAULT_FIXITY);
+                    let op = fixity::Op { written: op.name.clone(), name, span: op.span, assoc, prec };
+                    ops.push((op, self.ty(operand)));
+                }
+                fixity::group_types(self.ty(first), ops)
+            }
             Type::App(a, b) => Type::App(Box::new(self.ty(a)), Box::new(self.ty(b))),
             Type::Arrow(a, b, m) => Type::Arrow(Box::new(self.ty(a)), Box::new(self.ty(b)), m.clone()),
             Type::List(x) => Type::List(Box::new(self.ty(x))),
@@ -1985,6 +2130,16 @@ fn type_shape(ty: &Type) -> String {
         Type::Tuple(xs) => format!("({})", xs.iter().map(type_shape).collect::<Vec<_>>().join(",")),
         Type::Constrained { ty, .. } => type_shape(ty),
         Type::Promoted(n) => format!("'{}", n),
+        // Shapes are taken of signatures as written, before their infix
+        // types are grouped; the written order is fingerprint enough (no
+        // Prelude signature has a type operator to compare with).
+        Type::OpChain { first, rest } => {
+            let mut out = format!("<{}", type_shape(first));
+            for (op, operand) in rest {
+                out.push_str(&format!(" {} {}", op.name, type_shape(operand)));
+            }
+            out + ">"
+        }
     }
 }
 
@@ -2062,6 +2217,9 @@ fn refs_in_expr(e: &Expr, out: &mut HashSet<String>) {
         // An infix use `a >>= b` is a reference to the operator itself, on
         // top of whatever its operands reference.
         Expr::InfixApp { op, .. } => { out.insert(op.clone()); }
+        // The same references before their chain is grouped.
+        Expr::OpChain(chain) => out.extend(chain.rest.iter().map(|(op, _)| op.name.clone())),
+        Expr::Section { op, .. } => { out.insert(op.name.clone()); }
         _ => {}
     }
     e.for_each_subexpr(&mut |c| refs_in_expr(c, out));

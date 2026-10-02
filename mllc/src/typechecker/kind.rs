@@ -211,6 +211,7 @@ pub(super) fn show_ast_type(ty: &Type) -> String {
         ),
         Type::Constrained { ty, .. } => show_ast_type(ty),
         Type::Promoted(name) => format!("'{}", name),
+        Type::OpChain { .. } => unreachable!("{}", crate::fixity::UNGROUPED),
         Type::LuaPure { lua_name, result } => format!("LuaPure \"{}\" {}", lua_name, atom(result)),
         Type::LuaIO { lua_name, result } => format!("LuaIO \"{}\" {}", lua_name, atom(result)),
         Type::LuaIterator { lua_name, result } => format!("LuaIterator \"{}\" {}", lua_name, atom(result)),
@@ -376,6 +377,7 @@ impl Checker {
                 }
                 self.infer_type_kind(ty, kctx, ctx)
             }
+            Type::OpChain { .. } => unreachable!("{}", crate::fixity::UNGROUPED),
             Type::Promoted(name) => {
                 let key = format!("'{}", name);
                 if let Some(kind) = self.kinds.get(&key).cloned() {

@@ -18,8 +18,8 @@ Everything is orchestrated by `mllc/src/lib.rs:compile`. The stages, in order:
 | # | Stage | Entry point | Input → Output |
 |---|-------|-------------|----------------|
 | 1 | Lex | `lexer::lex` | source text → `Vec<Token>` |
-| 2 | Parse | `parser::parse` | tokens → `ast::Module` |
-| 3 | Resolve imports | `modules::ModuleLoader::resolve_imports` | module → module (imported decls merged, every reference bound to a canonical name; see §9) |
+| 2 | Parse | `parser::parse` | tokens → `ast::Module` (infix expressions still flat: `Expr::OpChain`, `Expr::Section`, `Type::OpChain`) |
+| 3 | Resolve imports | `modules::ModuleLoader::resolve_imports` | module → module (imported decls merged, every reference bound to a canonical name, operator chains grouped; see §9) |
 | 4 | Prepend prelude | `parse_prelude` + merge in `compile` | → single `ast::Module` |
 | 5 | Desugar do-notation | `desugar::desugar_module` | AST → AST |
 | 6 | Type check | `typechecker::Checker::check_module_with_local_start` | AST → **TIR** (`tir::TModule`) |
@@ -296,6 +296,32 @@ apart is done entirely in `modules.rs`, before the merge
   placeholder, where the statement's location is known. Because a module's
   rewritten region depends on nothing an importer does, it is merged verbatim
   into every importer, once per origin (`origin_spans`).
+- **Fixity is a property of an entity, and chains are grouped here.**
+  The parser does not know how `a + b * c` nests: that depends on which
+  declarations `+` and `*` denote, and a local binder, the module's own
+  operator, an imported one and the Prelude's can share a spelling. So
+  `parser.rs` returns every infix expression as a flat chain
+  (`Expr::OpChain`: operands, operators and prefix minuses in source
+  order; `Expr::Section`; `Type::OpChain` for `:`-operators in types).
+  `ModuleLoader::fixities` maps canonical names to fixities: seeded with
+  the Prelude's declarations (`fixity::prelude`, read from the Prelude
+  source — there is no operator table in Rust), then extended by each
+  module's own `infix…` declarations under the canonical names of the
+  operators that module declares (`resolve_module`, phase 2; a
+  declaration with no such operator is an error). `Rename` groups a
+  chain at the moment it binds the chain's operators (`Rename::operator`
+  → `fixity::group`): the fixity looked up is that of the canonical
+  name just produced, `infixl 9` for a name in the local binder set, and
+  a chain with an operator bound to a scope-error placeholder is replaced
+  by that placeholder, so no grouping is chosen for a name that denotes
+  nothing. `fixity.rs` holds the grouping itself (Haskell 2010 §10.6,
+  including prefix minus and the section-operand rule) and its
+  diagnostics; they surface as `CompileError::Parse` for the entry
+  module and as an import error naming the module otherwise. The Prelude
+  source and the checker's builtin default-method snippets are not
+  modules `resolve_module` sees; `modules::group_baseline` runs the same
+  `Rename` over them with empty tables. After stage 3 no chain node
+  exists (the checker's arms for them are `unreachable!`).
 - **What is not scoped.** Constructors, record fields, classes and class
   methods are global names and are not renamed. The parser's own desugarings
   (`concatMap`, `enumFromTo`, `error`) are plain references and resolve like

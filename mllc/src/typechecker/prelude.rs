@@ -94,8 +94,11 @@ impl Checker {
             .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not lex: {e:?}\n{source}"));
         let module = crate::parser::parse(tokens)
             .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not parse: {e:?}\n{source}"));
-        let clauses = module
-            .decls
+        // The snippet is written in the Prelude's scope: its infix
+        // expressions group under the Prelude's fixities.
+        let decls = crate::modules::group_baseline(&module.decls)
+            .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not group: {e:?}\n{source}"));
+        let clauses = decls
             .into_iter()
             .find_map(|d| match d {
                 Decl::FunDef { name, clauses } if name == method => Some(clauses),

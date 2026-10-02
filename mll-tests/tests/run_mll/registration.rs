@@ -293,6 +293,19 @@ mll_lib_test!(scope_local_names, "scope_local_names.mll");
 mll_test!(scope_same_type_name_imports, "scope_same_type_name_imports.mll");
 mll_test!(scope_own_type_names, "scope_own_type_names.mll");
 mll_lib_test!(scope_list_next_to_alias, "scope_list_next_to_alias.mll");
+// A fixity belongs to the operator entity that declares it: an occurrence
+// groups by the fixity of what it denotes in its own scope — a local
+// binder, the module's own operator, an imported one, the Prelude's —
+// whatever other entities of the program share the spelling.
+mll_test!(fixity_own_operator, "fixity_own_operator.mll");
+mll_test!(fixity_not_imported, "fixity_not_imported.mll");
+mll_test!(fixity_qualified_only, "fixity_qualified_only.mll");
+mll_test!(fixity_local_binders, "fixity_local_binders.mll");
+mll_test!(fixity_class_method, "fixity_class_method.mll");
+mll_test!(fixity_reexport, "fixity_reexport.mll");
+mll_test!(fixity_prelude_spelling, "fixity_prelude_spelling.mll");
+mll_test!(fixity_type_operators, "fixity_type_operators.mll");
+mll_test!(fixity_table, "fixity_table.mll");
 mll_test!(negative_pattern_parens, "negative_pattern_parens.mll");
 mll_test!(dash_run_operators, "dash_run_operators.mll");
 mll_test!(underscore_names_no_capture, "underscore_names_no_capture.mll");
@@ -861,6 +874,17 @@ fn mll_case_registry_is_complete() {
         "ScopeCfgB.mll",
         "ScopeStack.mll",
         "ScopeHostLib.mll",
+        "FixityInner.mll",
+        "FixityOuter.mll",
+        "FixityPrivate.mll",
+        "FixityListed.mll",
+        "FixityHidden.mll",
+        "FixityQual.mll",
+        "FixityClass.mll",
+        "FixityUmbrella.mll",
+        "FixityByName.mll",
+        "FixityPow.mll",
+        "FixityTypeOps.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")
