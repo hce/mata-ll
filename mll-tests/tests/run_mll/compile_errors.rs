@@ -2543,6 +2543,148 @@ fn duplicate_type_signature_is_rejected() {
     expect_compile_error(source, &[], &["Duplicate type signatures for '+++': at 1:2 and again at 3:2"]);
 }
 
+// An `export f :: T` declaration IS the type signature of `f`, so any other
+// signature-bearing declaration of the name next to it — a plain signature,
+// an FFI import, an `intrinsic`, a second `export` — declares the signature
+// twice, in either order and whether or not the types agree. Each pair used
+// to compile with the later line silently winning: the definition was
+// checked at one type while the export wrapper marshalled by the other.
+#[test]
+fn export_next_to_plain_signature_is_a_duplicate_signature() {
+    let tail = "\nmain :: IO ()\nmain = pure ()\n";
+    let export_note = "note: in mata-ll 'export f :: T' already is the type signature of 'f'";
+
+    // Plain signature first, the export at another type.
+    let source = format!("f :: Int -> Int\nexport f :: Int -> String\nf n = show n\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'f': a type signature at 1:1 and an export declaration at 2:8",
+        export_note,
+        "whether or not the two types agree",
+        "remove the other signature and keep the export declaration",
+    ]);
+    // The export first.
+    let source = format!("export f :: Int -> String\nf :: Int -> Int\nf n = n + 1\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'f': an export declaration at 1:8 and a type signature at 2:1",
+        export_note,
+    ]);
+    // Agreeing types are a duplicate all the same, in both orders, and with
+    // the definition between the two lines.
+    let source = format!("f :: Int -> Int\nexport f :: Int -> Int\nf n = n + 1\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'f': a type signature at 1:1 and an export declaration at 2:8",
+        export_note,
+    ]);
+    let source = format!("export f :: Int -> Int\nf :: Int -> Int\nf n = n + 1\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'f': an export declaration at 1:8 and a type signature at 2:1",
+        export_note,
+    ]);
+    let source = format!("f :: Int -> Int\nf n = n + 1\n\nexport f :: Int -> Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'f': a type signature at 1:1 and an export declaration at 4:8",
+        export_note,
+    ]);
+}
+
+#[test]
+fn export_declared_twice_is_a_duplicate_signature() {
+    let tail = "\nmain :: IO ()\nmain = pure ()\n";
+    let note = "note: an 'export' declaration is the type signature of 'f', and a name has one type signature";
+    let source = format!("export f :: Int -> Int\nexport f :: Int -> Int\nf n = n + 1\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'f': an export declaration at 1:8 and again at 2:8",
+        note,
+    ]);
+    let source = format!("export f :: Int -> Int\nf n = n + 1\n\nexport f :: Int -> String\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'f': an export declaration at 1:8 and again at 4:8",
+        note,
+    ]);
+}
+
+// The other signature-bearing forms obey the same one-signature rule: an FFI
+// import (a signature whose result names the Lua callee) and an `intrinsic`
+// signature clash with an `export` of the name, with a plain signature and
+// with each other.
+#[test]
+fn export_next_to_ffi_import_or_intrinsic_is_a_duplicate_signature() {
+    let tail = "\nmain :: IO ()\nmain = pure ()\n";
+
+    let source = format!("absI :: Int -> LuaPure \"math.abs\" Int\nexport absI :: Int -> Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'absI': a type signature at 1:1 and an export declaration at 2:8",
+        "note: in mata-ll 'export absI :: T' already is the type signature of 'absI'",
+    ]);
+    let source = format!("export absI :: Int -> Int\nabsI :: Int -> LuaPure \"math.abs\" Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'absI': an export declaration at 1:8 and a type signature at 2:1",
+        "note: in mata-ll 'export absI :: T' already is the type signature of 'absI'",
+    ]);
+    let source = format!("export now :: LuaIO \"os.time\" Int\nnow :: LuaIO \"os.clock\" Number\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'now': an export declaration at 1:8 and a type signature at 2:1",
+    ]);
+    let source = format!("nowC :: LuaIOCatch \"os.time\" (Either String Int)\nexport nowC :: IO (Either String Int)\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'nowC': a type signature at 1:1 and an export declaration at 2:8",
+    ]);
+    let source = format!("parse :: String -> LuaCatch \"tonumber\" (Either String Int)\nexport parse :: String -> Either String Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'parse': a type signature at 1:1 and an export declaration at 2:8",
+    ]);
+    let source = format!("export parse :: String -> Either String Int\nparse :: String -> LuaCatch \"tonumber\" (Either String Int)\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'parse': an export declaration at 1:8 and a type signature at 2:1",
+    ]);
+
+    let source = format!("intrinsic foo :: Int -> Int\nexport foo :: Int -> Int\nfoo n = n\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'foo': a type signature at 1:11 and an export declaration at 2:8",
+        "note: in mata-ll 'export foo :: T' already is the type signature of 'foo'",
+    ]);
+    let source = format!("export foo :: Int -> Int\nintrinsic foo :: Int -> Int\nfoo n = n\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'foo': an export declaration at 1:8 and a type signature at 2:11",
+    ]);
+
+    // Without an export in the pair the plain duplicate-signature report
+    // stands, whichever two forms meet.
+    let plain_note = "note: a name has one type signature; remove one of the two.";
+    let source = format!("absI :: Int -> LuaPure \"math.abs\" Int\nabsI :: Int -> Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'absI': at 1:1 and again at 2:1", plain_note,
+    ]);
+    let source = format!("absI :: Int -> Int\nabsI :: Int -> LuaPure \"math.abs\" Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'absI': at 1:1 and again at 2:1", plain_note,
+    ]);
+    let source = format!("absI :: Int -> LuaPure \"math.abs\" Int\nabsI :: Int -> LuaPure \"math.floor\" Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'absI': at 1:1 and again at 2:1", plain_note,
+    ]);
+    let source = format!("now :: LuaIO \"os.time\" Int\nnow :: LuaTry \"os.time\" (Either String Int)\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'now': at 1:1 and again at 2:1", plain_note,
+    ]);
+    let source = format!("intrinsic foo :: Int -> Int\nfoo :: Int -> Int\nfoo n = n\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'foo': at 1:11 and again at 2:1", plain_note,
+    ]);
+    let source = format!("foo :: Int -> Int\nintrinsic foo :: Int -> Int\nfoo n = n\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'foo': at 1:1 and again at 2:11", plain_note,
+    ]);
+    let source = format!("intrinsic foo :: Int -> Int\nintrinsic foo :: Int -> Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'foo': at 1:11 and again at 2:11", plain_note,
+    ]);
+    let source = format!("intrinsic foo :: Int -> LuaPure \"math.abs\" Int\nfoo :: Int -> LuaPure \"math.abs\" Int\n{tail}");
+    expect_compile_error(&source, &[], &[
+        "Duplicate type signatures for 'foo': at 1:11 and again at 2:1", plain_note,
+    ]);
+}
+
 // Functions, class methods and record fields share the value namespace: a
 // method and a field ARE top-level functions of their name. Each of these
 // compiled, with one declaration silently shadowing the other.
@@ -6004,11 +6146,9 @@ gg :: Show a => Int -> a -> String
 gg 0 x = show x
 gg n x = gg (n - 1) [x]
 
-pick :: Show a => Bool -> (Int -> a -> String) -> Int -> a -> String
+export pick :: Show a => Bool -> (Int -> a -> String) -> Int -> a -> String
 pick True h = h
 pick False _ = gg
-
-export pick :: Show a => Bool -> (Int -> a -> String) -> Int -> a -> String
 
 main :: IO ()
 main = putStrLn (pick True gg 0 (3 :: Int))

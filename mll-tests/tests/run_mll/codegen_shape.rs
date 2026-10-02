@@ -593,7 +593,7 @@ fn compiled_module_carries_mllc_provenance() {
 
     // An exporting module surfaces the stamps as module properties, so a Lua
     // host can read them from the required table.
-    let module = "export answer :: Int\nanswer :: Int\nanswer = 42\n";
+    let module = "export answer :: Int\nanswer = 42\n";
     let lua = compile(module, Path::new("tests/cases"), &[])
         .expect("compile should succeed")
         .lua_code;
@@ -932,7 +932,7 @@ fn modules_with_a_host_surface_do_not_warn() {
     assert!(result.warnings.is_empty(), "program with main must not warn");
 
     // `export`-keyword module root.
-    let module = "export answer :: Int\nanswer :: Int\nanswer = 42\n";
+    let module = "export answer :: Int\nanswer = 42\n";
     let result = compile(module, Path::new("tests/cases"), &[])
         .expect("compile should succeed");
     assert!(result.warnings.is_empty(), "exporting module must not warn");

@@ -1703,6 +1703,17 @@ Definitions are exported to plain Lua via the `export` keyword:
     export fibonacci :: Int -> [Int]
     fibonacci = flip take fib
 
+The `export` declaration is the type signature of the name it exports:
+`fibonacci` above has no separate `fibonacci :: Int -> [Int]` line, and
+writing one is a compile error ("Duplicate type signatures"), in either
+order and whether or not the two types agree. Two `export`
+declarations for one name are the same error. The rule is uniform over
+every declaration that carries a signature — a plain signature, an FFI
+import (`f :: A -> LuaPure "g" B`), an `intrinsic` signature and an
+`export`: a module writes one of them per name. (Haskell's `foreign
+export` works the other way round: it accompanies the name's own
+signature.)
+
 Exports appear in the module's return table. An export may be a
 function, an IO/LuaIO action, or a plain value: a function export
 becomes a wrapper callable from Lua, an action export becomes a

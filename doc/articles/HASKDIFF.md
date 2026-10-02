@@ -170,6 +170,17 @@ type signatures on every top-level definition:
     -- mata-ll: the line below does not compile without the signature above
     double x = x * 2
 
+An `export` declaration is that signature for the name it exports to
+Lua:
+
+    export double :: Int -> Int
+    double x = x * 2
+
+Haskell's `foreign export` accompanies the name's own signature;
+mata-ll's `export` replaces it. A plain `double :: Int -> Int` next to
+the `export` line is a compile error ("Duplicate type signatures"),
+even when both state the same type.
+
 ## The monomorphism restriction also covers let-bound functions
 
 GHC's monomorphism restriction exempts bindings with argument patterns:

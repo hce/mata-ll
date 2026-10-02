@@ -76,9 +76,14 @@ enum DeclaredAs {
     Synonym,
     Family,
     Class,
-    /// A type signature: `f :: T` or `intrinsic f :: T`. An `export f :: T`
-    /// line is not entered (see `parse_export_decl`).
+    /// A type signature: `f :: T` (an FFI import is one, its result type
+    /// names the Lua callee) or `intrinsic f :: T`.
     Signature,
+    /// An `export f :: T` declaration. It IS the type signature of `f`
+    /// (`parse_export_decl` emits the `TypeSig`), so it occupies the
+    /// signature namespace like the plain form: a name takes one
+    /// signature-bearing declaration.
+    ExportSignature,
     /// A fixity declaration's entry for one operator.
     Fixity,
 }
@@ -104,7 +109,7 @@ impl DeclaredAs {
             | DeclaredAs::Synonym
             | DeclaredAs::Family
             | DeclaredAs::Class => DeclSpace::Type,
-            DeclaredAs::Signature => DeclSpace::Signature,
+            DeclaredAs::Signature | DeclaredAs::ExportSignature => DeclSpace::Signature,
             DeclaredAs::Fixity => DeclSpace::Fixity,
         }
     }
@@ -121,6 +126,7 @@ impl DeclaredAs {
             DeclaredAs::Family => "a type family".to_string(),
             DeclaredAs::Class => "a class".to_string(),
             DeclaredAs::Signature => "a type signature".to_string(),
+            DeclaredAs::ExportSignature => "an export declaration".to_string(),
             DeclaredAs::Fixity => "a fixity declaration".to_string(),
         }
     }
@@ -292,7 +298,9 @@ impl Parser {
     /// module's source a name is declared once per namespace (GHC:
     /// "Multiple declarations", "Duplicate type signatures", "Multiple
     /// fixity declarations"). Returns one diagnostic per redeclaration, at
-    /// the later declaration, naming the first.
+    /// the later declaration, naming the first. The signature namespace
+    /// holds every signature-bearing declaration — plain, `intrinsic` and
+    /// `export` — so any two of them for one name are a duplicate.
     ///
     /// Three clashes are deliberately left to the typechecker, which
     /// already rejects them when it registers the declarations and has to
@@ -330,7 +338,28 @@ impl Parser {
             } else {
                 format!("{} at {} and {}", prev.kind.describe(), prev.span, d.kind.describe())
             };
+            let exported = |k: &DeclaredAs| *k == DeclaredAs::ExportSignature;
             let (msg, note) = match d.kind.space() {
+                DeclSpace::Signature if exported(&prev.kind) && exported(&d.kind) => (
+                    format!("Duplicate type signatures for '{}': {}", d.name, pair),
+                    format!(
+                        "an 'export' declaration is the type signature of '{}', and a \
+                         name has one type signature; remove one of the two.",
+                        d.name,
+                    ),
+                ),
+                DeclSpace::Signature if exported(&prev.kind) || exported(&d.kind) => (
+                    format!("Duplicate type signatures for '{}': {}", d.name, pair),
+                    format!(
+                        "in mata-ll 'export {} :: T' already is the type signature of \
+                         '{}': it gives the name its type and, in addition, puts it in \
+                         the module's Lua return table. A name has one type signature, \
+                         whether or not the two types agree; remove the other signature \
+                         and keep the export declaration. (Haskell's 'foreign export' \
+                         is the opposite: it accompanies the name's own signature.)",
+                        d.name, d.name,
+                    ),
+                ),
                 DeclSpace::Signature => (
                     format!("Duplicate type signatures for '{}': at {} and again", d.name, prev.span),
                     "a name has one type signature; remove one of the two.".to_string(),
@@ -1674,14 +1703,20 @@ impl Parser {
 
     fn parse_export_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::Export)?;
+        let name_tok = self.pos;
         let name = self.expect_ident()?;
         self.expect(&Token::DblColon)?;
         let ty = self.parse_type()?;
-        // ExportSig also serves as a TypeSig so the function gets type-checked.
-        // It is not entered in the declaration table as a signature: a
-        // program may write `f :: T` next to `export f :: T` (the shape of
-        // a Haskell `foreign export`, which accompanies the signature), and
-        // that pair stays accepted.
+        // The export declaration is the name's type signature: besides the
+        // ExportSig it yields the TypeSig the typechecker checks the
+        // definition against. It therefore enters the declaration table's
+        // signature namespace, where a second signature-bearing
+        // declaration of the name (plain, `intrinsic` or another `export`)
+        // is a duplicate. The typechecker keeps one signature per name
+        // (`collect_signatures`), so an unreported pair would check the
+        // definition against whichever line came last while the export
+        // wrapper marshals by the export's own type.
+        self.declare(&name, DeclaredAs::ExportSignature, name_tok);
         Ok(vec![
             Decl::ExportSig { name: name.clone(), ty: ty.clone() },
             Decl::TypeSig { name, ty },

@@ -1446,6 +1446,17 @@ export fibonacci :: Int -> [Int]
 fibonacci = flip take fib
 \end{lstlisting}
 
+The \texttt{export} declaration is the type signature of the name it
+exports: \texttt{fibonacci} has no separate
+\texttt{fibonacci :: Int -> [Int]} line.  Writing one next to the
+\texttt{export} is rejected (``Duplicate type signatures''), in either
+order and even when both lines state the same type, and so are two
+\texttt{export} declarations for one name.  A name takes exactly one
+declaration that carries a signature --- a plain signature, an FFI
+import, an \texttt{intrinsic} signature or an \texttt{export}.
+(Haskell's \texttt{foreign export} is the other way round: it
+accompanies the name's own signature.)
+
 From Lua:
 \begin{lstlisting}[language={}]
 local mll = require("fib")

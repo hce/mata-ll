@@ -750,6 +750,39 @@ main = pure ()
     assert!(!result, "isEven 7 == False");
 }
 
+// An `export` declaration is the name's type signature (a plain signature
+// beside it is a duplicate-signature error), so on its own it must do both
+// jobs: the definition is checked at the export's type, other definitions
+// of the module use the name at that type, and the name is in the module's
+// return table.
+#[test]
+fn ffi_export_declaration_alone_is_the_signature() {
+    let source = r#"
+export label :: Int -> String
+label n = "n=" <> show n
+
+export answer :: Int
+answer = 42
+
+export labelled :: String
+labelled = label answer <> "!"
+
+main :: IO ()
+main = pure ()
+"#;
+    let (_lua, module) = compile_ffi_module(source);
+
+    let label: mlua::Function = module.get("label").unwrap();
+    let result: String = label.call(7).unwrap();
+    assert_eq!(result, "n=7", "label 7");
+
+    let answer: i64 = module.get("answer").unwrap();
+    assert_eq!(answer, 42, "answer is a value export");
+
+    let labelled: String = module.get("labelled").unwrap();
+    assert_eq!(labelled, "n=42!", "exports are ordinary names inside the module");
+}
+
 #[test]
 fn ffi_export_string_functions() {
     let source = r#"

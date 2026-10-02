@@ -52,7 +52,11 @@ Two ordering facts that are easy to get wrong and matter:
   two logs while it reads one file: the declaration table
   (`Parser::declared`, checked once by `check_declarations` at the end of
   `parse_module`: one declaration per name and namespace, and equations of
-  a function grouped only when adjacent — `push_decl`), and the pattern
+  a function grouped only when adjacent — `push_decl`; the signature
+  namespace holds plain, `intrinsic` and `export` signatures alike,
+  because `export f :: T` is parsed into an `ExportSig` plus the
+  `TypeSig` the typechecker reads, of which it keeps one per name), and
+  the pattern
   binder log (`Parser::pattern_binders`, checked by `check_linear` at
   every construct that binds a list of patterns: each variable once). The
   typechecker's own duplicate checks (constructors, a field in two types,

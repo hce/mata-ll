@@ -147,6 +147,20 @@ API of the `mllc` library crate.)
   module, a second definition of a name is this error (`/drop` and
   `/clear` remove earlier declarations). Cases `declaration_boundaries`
   and `private_helper_names` (GHC-goldened).
+- **A type signature next to an `export` declaration of the same name
+  is a duplicate-signature error** (breaking for programs that wrote
+  both). `export f :: T` is the type signature of `f`, but the
+  declared-twice check above did not count it as one, so `f :: Int ->
+  Int` next to `export f :: Int -> String` compiled and the later of the
+  two lines silently won: the definition was checked at one type while
+  the Lua wrapper marshalled by the export's. The pair is now rejected
+  in either order and also when the two types agree, with both
+  locations named and a note that the export declaration already is the
+  signature; so are two `export` declarations for one name, and an
+  `export` next to an FFI import or an `intrinsic` signature of the
+  name. One declaration carries a name's signature: plain, FFI import,
+  `intrinsic` or `export`. To migrate, delete the plain signature and
+  keep the `export` line.
 - **Non-linear patterns are rejected**, as in GHC ("Conflicting
   definitions for 'x'"), with both occurrences located. A variable bound
   twice by the patterns of one function equation, lambda, case
