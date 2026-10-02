@@ -568,6 +568,7 @@ impl Monomorphizer {
             instance_fns,
             has_main: module.has_main,
             exports: module.exports,
+            source_names: module.source_names,
             record_accessors: module.record_accessors,
             newtypes: module.newtypes,
             newtype_types: module.newtype_types,
@@ -1266,7 +1267,7 @@ impl Monomorphizer {
             span: self.cur_span,
             file: None,
             notes: hint.map(str::to_string).into_iter().collect(),
-            baseline: false, excerpt: None,
+            baseline: false, excerpt: None, names: None,
         });
     }
 
@@ -3175,7 +3176,7 @@ impl Monomorphizer {
                  dictionaries at runtime; in mata-ll, annotate the use so \
                  its type is concrete.".to_string(),
             ],
-            baseline: false, excerpt: None,
+            baseline: false, excerpt: None, names: None,
         };
         // Deferred to reachability (see `deferred_errors`): the enclosing
         // function is usually a generic original that dies once every real
@@ -3459,7 +3460,7 @@ impl Monomorphizer {
                                  '{}', and emitting the bare method name would crash \
                                  at runtime",
                                 method_name, concrete_ty)],
-                            baseline: false, excerpt: None,
+                            baseline: false, excerpt: None, names: None,
                         });
                     }
                     method_name.clone()

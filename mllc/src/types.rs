@@ -1617,15 +1617,123 @@ pub struct Diagnostic {
     /// the `at …` line. `None` (no span, unknown file, or a span past the
     /// text) renders nothing, keeping the historical output.
     pub excerpt: Option<String>,
+    /// How to spell the program's canonical declaration names in this
+    /// diagnostic (see `DisplayNames`). Attached by lib.rs next to the
+    /// excerpt; construction sites leave it `None`, which renders every
+    /// name as it stands.
+    pub names: Option<DisplayNames>,
+}
+
+/// Canonical declaration name -> the spelling a diagnostic shows for it.
+/// Import resolution names every declaration of an imported module
+/// `Module.name` (see modules.rs), and the checker's messages are built
+/// from those names; a message must show the name as its author wrote it
+/// (`insert`, not `Data.Map.insert`). Rendering looks every name-shaped
+/// token of the message, context and notes up in this table.
+#[derive(Clone)]
+pub struct DisplayNames(std::sync::Arc<HashMap<String, String>>);
+
+impl DisplayNames {
+    pub fn new(names: HashMap<String, String>) -> Self {
+        DisplayNames(std::sync::Arc::new(names))
+    }
+}
+
+/// The table is program-wide and attached to every diagnostic; a `{:?}` of
+/// a diagnostic (a failed `expect` on a compile result) names its size
+/// instead of dumping it once per error.
+impl fmt::Debug for DisplayNames {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "DisplayNames({} names)", self.0.len())
+    }
+}
+
+/// Rewrite the canonical names in `text` to their display spelling. A
+/// candidate token is a maximal run of identifier characters and dots,
+/// extended over a trailing operator when the run ends in a dot (the
+/// canonical name of an operator: `Vec.<+>`); a sentence-final dot is not
+/// part of a name, so a miss retries without trailing dots. An instance
+/// method's name carries its type after an underscore (`area_Shapes.Sq`);
+/// that tail is respelled too. Tokens absent from the table (file names,
+/// prose) are copied through unchanged. Import resolution's placeholders (`<scope
+/// error N>`, see `ast::Resolution`) are bracketed, not word-shaped, and
+/// are matched as a whole.
+pub(crate) fn spell_names(text: &str, names: &HashMap<String, String>) -> String {
+    let is_word = |c: char| c.is_alphanumeric() || c == '_' || c == '\'' || c == '.';
+    let is_sym = |c: char| "!#$%&*+/<=>?@\\^|-~:.".contains(c);
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '<'
+            && let Some(len) = chars[i..].iter().position(|&c| c == '>')
+            && let Some(shown) = names.get(&chars[i..=i + len].iter().collect::<String>())
+        {
+            out.push_str(shown);
+            i += len + 1;
+            continue;
+        }
+        if !is_word(chars[i]) || chars[i] == '.' || chars[i] == '\'' {
+            out.push(chars[i]);
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < chars.len() && is_word(chars[j]) {
+            j += 1;
+        }
+        let mut k = j;
+        if chars[j - 1] == '.' {
+            while k < chars.len() && is_sym(chars[k]) {
+                k += 1;
+            }
+        }
+        let mut end = k;
+        let mut hit = None;
+        loop {
+            let token: String = chars[i..end].iter().collect();
+            if let Some(shown) = names.get(&token) {
+                hit = Some((i, shown.clone()));
+                break;
+            }
+            // An instance method is named `method_Type` (`area_Shapes.Sq`):
+            // the canonical name is what follows one of the underscores.
+            let tail = (i..end).filter(|&u| chars[u] == '_').find_map(|u| {
+                let rest: String = chars[u + 1..end].iter().collect();
+                names.get(&rest).map(|shown| (u + 1, shown.clone()))
+            });
+            if tail.is_some() {
+                hit = tail;
+                break;
+            }
+            if end > i + 1 && (chars[end - 1] == '.' || chars[end - 1] == '\'') {
+                end -= 1;
+            } else {
+                break;
+            }
+        }
+        match hit {
+            Some((from, shown)) => {
+                out.extend(&chars[i..from]);
+                out.push_str(&shown);
+                i = end;
+            }
+            None => {
+                out.extend(&chars[i..j]);
+                i = j;
+            }
+        }
+    }
+    out
 }
 
 impl Diagnostic {
     pub fn new(kind: DiagnosticKind) -> Self {
-        Diagnostic { kind, context: None, span: None, file: None, notes: Vec::new(), baseline: false, excerpt: None }
+        Diagnostic { kind, context: None, span: None, file: None, notes: Vec::new(), baseline: false, excerpt: None, names: None }
     }
 
     pub fn in_context(kind: DiagnosticKind, ctx: impl Into<String>) -> Self {
-        Diagnostic { kind, context: Some(ctx.into()), span: None, file: None, notes: Vec::new(), baseline: false, excerpt: None }
+        Diagnostic { kind, context: Some(ctx.into()), span: None, file: None, notes: Vec::new(), baseline: false, excerpt: None, names: None }
     }
 
     /// A parse error at a known source location. Rendered inline as
@@ -1639,6 +1747,7 @@ impl Diagnostic {
             notes: Vec::new(),
             baseline: false,
             excerpt: None,
+            names: None,
         }
     }
 
@@ -1733,6 +1842,11 @@ pub enum DiagnosticKind {
     /// present) appended inline as ` at line:col` — the parser's historical
     /// format, unlike type errors which put the location on its own line.
     Parse(String),
+    /// A reference that denotes no declaration in its module's scope, as
+    /// import resolution diagnosed it (`ast::ScopeError::Explained`): the
+    /// message and its notes are in the user's own spelling and are
+    /// rendered verbatim.
+    Scope { message: String, notes: Vec<String> },
     Other(String),
 }
 
@@ -1905,8 +2019,13 @@ impl Diagnostic {
     }
 }
 
-impl fmt::Display for Diagnostic {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl Diagnostic {
+    /// Render the message of `self.kind` into `f`. Returns `true` when the
+    /// rendering is already COMPLETE (a parse error, which carries its
+    /// location and notes inline); `false` when the location, excerpt and
+    /// notes still follow.
+    fn write_message(&self, f: &mut String) -> Result<bool, fmt::Error> {
+        use fmt::Write;
         match &self.kind {
             DiagnosticKind::Mismatch(a, b) => {
                 let s = pretty_var_subst(&[a, b]);
@@ -2034,9 +2153,46 @@ impl fmt::Display for Diagnostic {
                 for note in &self.notes {
                     write!(f, "\n  note: {}", note)?;
                 }
-                return Ok(());
+                return Ok(true);
             }
+            DiagnosticKind::Scope { message, .. } => write!(f, "{}", message)?,
             DiagnosticKind::Other(msg) => write!(f, "{}", msg)?,
+        }
+        Ok(false)
+    }
+
+    /// `text` with the program's canonical names in their display spelling
+    /// (see `DisplayNames`).
+    fn spell(&self, text: &str) -> String {
+        match &self.names {
+            Some(names) => spell_names(text, &names.0),
+            None => text.to_string(),
+        }
+    }
+
+    /// True for the kinds whose message quotes a name the USER wrote that
+    /// resolved to nothing. Such a message is rendered verbatim: `A.helper`
+    /// reported unbound must not be respelled just because some module `A`
+    /// has a private `helper` of its own.
+    fn quotes_unresolved_name(&self) -> bool {
+        matches!(self.kind,
+            DiagnosticKind::Scope { .. }
+            | DiagnosticKind::UnboundVariable(_)
+            | DiagnosticKind::UnboundConstructor(_)
+            | DiagnosticKind::UnknownType(_))
+    }
+}
+
+impl fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut message = String::new();
+        if self.write_message(&mut message)? {
+            return f.write_str(&message);
+        }
+        if self.quotes_unresolved_name() {
+            f.write_str(&message)?;
+        } else {
+            f.write_str(&self.spell(&message))?;
         }
         // `at [file:]line:col` — the file prefix appears only when known.
         let loc = |span: &crate::ast::Span| match &self.file {
@@ -2044,6 +2200,7 @@ impl fmt::Display for Diagnostic {
             None => format!("{}:{}", span.line, span.col),
         };
         if let Some(ctx) = &self.context {
+            let ctx = self.spell(ctx);
             if let Some(span) = &self.span {
                 write!(f, "\n  at {}, in {}", loc(span), ctx)?;
             } else {
@@ -2073,10 +2230,47 @@ impl fmt::Display for Diagnostic {
         if let Some(note) = self.kind_note() {
             write!(f, "\n  note: {}", note)?;
         }
+        if let DiagnosticKind::Scope { notes, .. } = &self.kind {
+            for note in notes {
+                write!(f, "\n  note: {}", note)?;
+            }
+        }
         for note in &self.notes {
-            write!(f, "\n  note: {}", note)?;
+            write!(f, "\n  note: {}", self.spell(note))?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod spell_names_tests {
+    use super::*;
+
+    fn names(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    /// Canonical names are respelled as whole tokens only: inside quotes,
+    /// before sentence punctuation, with an operator base — and never as a
+    /// fragment of a longer name, a file name or a mangled name.
+    #[test]
+    fn canonical_names_are_respelled_as_whole_tokens() {
+        let table = names(&[
+            ("A.helper", "helper"),
+            ("Data.Map.insert", "insert"),
+            ("Vec.<+>", "<+>"),
+            ("Main.head", "head"),
+            ("<scope error 3>", "Config"),
+        ]);
+        let spell = |text: &str| spell_names(text, &table);
+        assert_eq!(spell("in definition of 'A.helper'"), "in definition of 'helper'");
+        assert_eq!(spell("uses Data.Map.insert."), "uses insert.");
+        assert_eq!(spell("operator 'Vec.<+>' here"), "operator '<+>' here");
+        assert_eq!(spell("Cannot unify 'Int' with '<scope error 3>'"), "Cannot unify 'Int' with 'Config'");
+        assert_eq!(spell("at A.mll:4:3, in 'Main.head'"), "at A.mll:4:3, in 'head'");
+        assert_eq!(spell("'XA.helper' and 'A.helperx'"), "'XA.helper' and 'A.helperx'");
+        assert_eq!(spell("in definition of 'show_A.helper'"), "in definition of 'show_helper'");
+        assert_eq!(spell("a < b and c > d"), "a < b and c > d");
     }
 }
 

@@ -44,6 +44,64 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A bare name means what the module that wrote it has in scope** (five
+  silent miscompiles). Imports were merged into one namespace keyed by
+  bare names, so one name could stand for the declarations of several
+  modules, and which one a reference reached was decided by merge order
+  instead of by the referring module's imports:
+  - Two modules defining one name at one type collapsed into the later
+    definition, for the whole program. A root `step` replaced the `step`
+    a transitively imported module uses internally (`100` where GHC
+    prints `3`); with `import A` and `import B` both defining `helper`,
+    A's functions called B's; an imported module's own `takeWhile` became
+    the one the Prelude's `span` runs on; `import Data.List` swapped the
+    `sortBy` underneath the Prelude's `sort`.
+  - `import A (f)` next to `import B hiding (f)` called B's `f`. At
+    different types the same clash was a type error located inside the
+    imported file (`import Stack (Stack, empty, push, size)` next to
+    `import qualified Data.Map as M`).
+  - `Q.helper` under `import qualified A as Q` named the `helper` of a
+    module A imports, not A's own.
+  - An alias reached the private names of an unrelated module that
+    happens to be NAMED like the alias, and of two modules imported under
+    one alias that both define a name, `X.name` meant the first import's.
+
+  Every module now has its own scope: its own declarations, then what
+  its imports make visible, then the Prelude. Each imported module's
+  declarations get a canonical name of their own, and each module's
+  references are bound once, in that module's scope, whatever the rest
+  of the program defines. Two modules may define the same function at
+  the same or at different types; a reference to a name two imports both
+  provide is an "Ambiguous occurrence" error where it is used, as in
+  GHC; `Alias.name` names exactly what the modules under that alias
+  export. The Prelude's own code always means the Prelude's definitions.
+  GHC-goldened cases `scope_root_shadows_import`,
+  `scope_same_name_imports`, `scope_import_lists{,_swapped}`,
+  `scope_alias_surface`, `scope_prelude_names`,
+  `scope_list_next_to_alias`.
+- **A local name spelled like a name an import list leaves out is
+  accepted.** `area size keys = size * keys` and `let values = …` next to
+  `import Data.Map (Map)` were rejected with "'size' is not exported by
+  its module", as were a module's own record fields and class methods of
+  such a name: the hidden-name test ran on every variable before its
+  binder was looked up. A local binder, and a module's own declaration,
+  now come first. Case `scope_local_names` (GHC-goldened).
+- **Two modules may declare a type of one name**, and a program may
+  declare a type named like a Prelude type. Two imported modules each
+  with a `data Config` were "Multiple declarations of type 'Config'"
+  even when the root named neither; a root `data Ordering = Small | Big`
+  replaced the Prelude's type inside the Prelude, so `compare 1 2`
+  printed `Small`. Type names are scoped per module like values. Cases
+  `scope_same_type_name_imports`, `scope_own_type_names` (GHC-goldened).
+  Constructors, record fields, classes and class methods are still
+  program-wide names.
+- **`import Prelude` forms scope the Prelude instead of loading it a
+  second time.** `import Prelude hiding (lookup)`, `import Prelude
+  (print, (+))` and `import qualified Prelude as P` declare which Prelude
+  names the module sees (Haskell 2010 §5.6.1); a hidden name is out of
+  scope, and the module may define it itself — at any type, including a
+  name the Prelude's own functions use. The qualified and list forms
+  used to fail with a cascade of duplicate-declaration errors.
 - **Alias-qualified references to Prelude names a library module
   re-exports resolve** (`import qualified Data.List as L` → `L.span`,
   `L.map`; `import qualified Data.Maybe as M` → `M.maybe`;
@@ -109,6 +167,56 @@ API of the `mllc` library crate.)
   `module_reexport{,_chain,_alias}.mll`.
 
 ### Changed
+
+- **Name clashes between imports are reported where the name is used,
+  not at the import** (the per-module scopes above; GHC's rule). Two
+  unqualified imports that both provide a name no longer make the
+  program fail with "importing 'B' unqualified conflicts with …": the
+  program compiles until the name is written bare, and that use is the
+  "Ambiguous occurrence" error. A module's own definition wins over an
+  imported one of the same name without a `hiding` clause (GHC calls the
+  use ambiguous). One import-time check remains, for every module of the
+  program: an unqualified import that provides a Prelude name at a
+  DIFFERENT type is still rejected, with the qualified import spelled
+  out (`import Data.Map` unqualified); at the same type the import's
+  definition shadows the Prelude's in the importing module only.
+- **A module sees only what it declares or imports** (breaking for
+  programs that relied on the leak). With one namespace for the whole
+  program, a module could use a function of a module it never imported —
+  as long as some other module of the program imported it — or a
+  function of the entry module. That reference is now "Unbound variable"
+  in the file that wrote it, as in GHC; add the missing import.
+- **Redefining a Prelude name at another type always compiles.** The
+  entry module's definition has its own canonical name, so it cannot
+  disturb the Prelude: `replicate :: Int -> String -> String` used to be
+  rejected because the Prelude's own `replicate` body no longer
+  type-checked against it. Still rejected in the entry module, unless
+  the name is hidden with `import Prelude hiding (…)`: a name the
+  Prelude's own functions use, a definition at the Prelude's own type,
+  and a record field named like a Prelude function.
+- **`Alias.name` names exactly what the aliased module exports.** A
+  declaration of a module the aliased module imports but does not pass
+  on is not reachable through the alias, and a qualified name written
+  with a module's full name instead of the declared alias
+  (`Data.Map.Map` under `import qualified Data.Map as M`) no longer
+  resolves by coincidence. A qualified reference that resolves to a
+  Prelude function, a record field or a class method cannot be written
+  under a local binding of that same plain name (`f maybe = M.maybe …`);
+  that used to be captured by the local silently and is now an error
+  naming the deviation.
+- **`export` names the Lua host's key, not the internal name.** An
+  exported declaration follows import lists, `hiding` and export lists
+  like any other; the key in the returned table is the name the
+  declaration has in its own module. Two modules exporting one name is
+  a compile error (one silently replaced the other).
+- **Diagnostics.** A hidden name's error carries a note saying whether
+  the import list leaves it out or the imported module keeps it back. A
+  type is shown module-qualified (`A.Config`) only when another type of
+  the program shares its name. An unqualified import that conflicts with
+  the Prelude inside an imported module names that module and its file.
+- **Emitted Lua**: byte-identical for a program without imports. In a
+  program with imports the numbering of the function slots may differ
+  (FFI declarations are emitted in the order of their canonical names).
 
 - **An export list now gates transitive names** (Haskell 2010 §5.2,
   breaking). When a module carries a header export list, names from ITS

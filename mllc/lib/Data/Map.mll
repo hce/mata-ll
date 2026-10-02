@@ -16,12 +16,12 @@ module Data.Map
 -- unqualified alongside:
 --     import Data.Map (Map)
 --     import qualified Data.Map as M
--- Several names here (map, filter, null, lookup) deliberately shadow the
--- Prelude; because mata-ll flattens all imports into one namespace, a
--- plain `import Data.Map` would collide with the Prelude versions. An
--- import list or an alias keeps both usable: only the names an import
--- makes visible enter the flat namespace, the rest stay reachable
--- through the alias.
+-- Several names here (map, filter, null, lookup) deliberately share a
+-- name with the Prelude at another type; a plain `import Data.Map` would
+-- make every bare use of them ambiguous and is rejected. An import list
+-- or an alias keeps both usable: only the names an import makes visible
+-- enter the importing module's scope, the rest stay reachable through
+-- the alias.
 --
 -- Keys must be primitive (String or a numeric type): the backing Lua
 -- table hashes compound keys by identity, and the ordering operations

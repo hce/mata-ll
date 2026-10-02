@@ -203,11 +203,59 @@ One module may be imported through several forms at once, as in GHC:
 `import Data.Map (Map)` next to `import qualified Data.Map as M`, or two
 aliases of one module. All forms name the same declarations — the type
 is one type, instances are declared once — and only the names a form
-makes visible unqualified enter the flat namespace; the rest are
-reachable through an alias (`M.filter`) while a bare `filter` keeps its
-Prelude meaning. Qualified constructors (`M.Just`, `M.Rect 1 2`, in
+makes visible unqualified enter the importing module's scope; the rest
+are reachable through an alias (`M.filter`) while a bare `filter` keeps
+its Prelude meaning. Qualified constructors (`M.Just`, `M.Rect 1 2`, in
 expressions and patterns), class methods and record fields resolve
-through an alias too.
+through an alias too. An alias names what the modules imported under it
+export, as in GHC; a plain `import A` does not put `A.f` in scope
+(Haskell 2010 does), and a qualified name must be written with the
+declared alias.
+
+`import Prelude hiding (lookup)`, `import Prelude (print, (+))` and
+`import qualified Prelude as P` work as in Haskell 2010 §5.6.1: they
+say which Prelude names the module sees. Data constructors, classes and
+class methods cannot be hidden (see the next section).
+
+## Every module has its own scope; four rules differ from GHC
+
+A bare name means what the module that wrote it has in scope: the
+module's own declaration, else what its imports make visible, else the
+Prelude's. Two modules may define functions or types of the same name
+(at the same or at different types) without affecting each other, the
+Prelude's own code always uses the Prelude's definitions, and a name
+that two imports both provide is an "Ambiguous occurrence" error where
+it is used — all as in GHC. The differences:
+
+- **A module's own definition wins without `hiding`.** A top-level
+  definition named like an imported or a Prelude function is what the
+  module's own references mean. GHC accepts the definition and reports
+  each bare use as ambiguous until the other one is hidden. The entry
+  module keeps two rejections: a definition of a name the Prelude's own
+  functions use (`map`, `error`, …) and a definition at exactly the
+  Prelude's type are errors unless the module says
+  `import Prelude hiding (name)` — with that line the program is plain
+  Haskell and compiles.
+- **An import shadows the Prelude only at the same type.** An
+  unqualified import that provides a Prelude name at the same type
+  shape (a library's own `sortBy`, an FFI re-declaration of `sqrt`)
+  silently wins in the importing module. At a different type the import
+  itself is rejected with the qualified form spelled out — `import
+  Data.Map` unqualified, whose `null` and `lookup` are not the
+  Prelude's. GHC accepts both imports and reports the use.
+- **A module without an export list passes its imports on.** Its
+  importers see the names it imports as well as its own. GHC exports
+  the own declarations only. When such a passed-on name is one side of
+  an ambiguity the error says so; an export list stops it.
+- **Constructors, record fields, classes and class methods are
+  program-wide names.** They are not scoped per module, an import list
+  does not hide them, and two modules cannot both declare a constructor
+  `Node`, a field `name` or a class `Pretty`, even privately. A
+  constructor declared in the entry module may shadow an imported one;
+  a record field named like a Prelude function is rejected.
+  A qualified reference that resolves to such a plain name (or to a
+  Prelude function) cannot be written under a local binding of the same
+  name: `f maybe = M.maybe …` is rejected; rename the local.
 
 ## HashMap, Data.Map, and Data.Set
 
@@ -472,8 +520,8 @@ type-checks and stays sound. Differences from GHC:
 it — and, structurally, the compiler-owned containers: `Ord [a]`
 (lexicographic), `Ord (a, b, …)` (element-wise), and `Ord (Maybe a)`
 (`Nothing < Just _`), exactly GHC's derived orderings. `sort` and
-`sortBy` (stable mergesort, GHC's `Data.List` behavior) live in the flat
-Prelude namespace like the other list functions.
+`sortBy` (stable mergesort, GHC's `Data.List` behavior) live in the
+Prelude like the other list functions.
 
 ## Show and Eq carry GHC's methods and defaults; `showList` is absent
 
@@ -579,9 +627,8 @@ generic over them, as in GHC. The differences:
   ambiguous form.
 - **`foldl'` stays list-only** (in `Data.List`/`Data.Foldable`).
 - **`toList` is only in `Data.Foldable`**, matching GHC's Prelude
-  (which does not export it either) — and keeping the name free for
-  programs that define their own `toList`, since a mata-ll program
-  cannot shadow Prelude names.
+  (which does not export it either), so a program's own `toList` meets
+  no Prelude name.
 - **`mempty`/`mappend` (Monoid) have `String` and `[a]` instances.**
   `mappend` works on lists, but the `(<>)` operator on lists remains
   an error directing you to `(++)` (see Strings above). The

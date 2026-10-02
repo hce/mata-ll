@@ -19,7 +19,7 @@ Everything is orchestrated by `mllc/src/lib.rs:compile`. The stages, in order:
 |---|-------|-------------|----------------|
 | 1 | Lex | `lexer::lex` | source text → `Vec<Token>` |
 | 2 | Parse | `parser::parse` | tokens → `ast::Module` |
-| 3 | Resolve imports | `modules::ModuleLoader::resolve_imports` | module → module (with imported decls merged) |
+| 3 | Resolve imports | `modules::ModuleLoader::resolve_imports` | module → module (imported decls merged, every reference bound to a canonical name; see §9) |
 | 4 | Prepend prelude | `parse_prelude` + merge in `compile` | → single `ast::Module` |
 | 5 | Desugar do-notation | `desugar::desugar_module` | AST → AST |
 | 6 | Type check | `typechecker::Checker::check_module_with_local_start` | AST → **TIR** (`tir::TModule`) |
@@ -44,9 +44,11 @@ Two ordering facts that are easy to get wrong and matter:
 
 - **"Declared twice" is decided in the parser, per source file.** Stages 3
   and 4 merge the Prelude, every import and the user's file into ONE
-  declaration list, in which a second declaration of a name may
-  legitimately come from another module — so nothing after the parser can
-  tell a duplicate from a cross-module name. `parser.rs` therefore keeps
+  declaration list. Stage 3 gives each imported module's values and types
+  canonical names of their own, but constructors, record fields, classes
+  and class methods stay program-wide, so after the parser a second
+  declaration of such a name cannot be told from a cross-module one.
+  `parser.rs` therefore keeps
   two logs while it reads one file: the declaration table
   (`Parser::declared`, checked once by `check_declarations` at the end of
   `parse_module`: one declaration per name and namespace, and equations of
@@ -257,6 +259,53 @@ Each `.mll` file is a module. `import Data.Tree` → `Data/Tree.mll`, searched i
 the source dir + configured lib paths. Imported modules are parsed and their
 declarations merged into the current module before type checking, so the whole
 program is checked together (see the prelude/`local_start` note in §1).
+
+The type checker and everything after it work on that ONE flat declaration
+list and resolve names by plain string lookup. What keeps two modules' `helper`
+apart is done entirely in `modules.rs`, before the merge
+(`ModuleLoader::resolve_module`, one call per module, cached):
+
+- **Entities and canonical names.** Every top-level value and type declaration
+  is an entity with one canonical name, fixed by its defining module alone
+  (`canon_val` / `canon_ty`): `Module.name` for an imported module — a
+  spelling no source identifier can have — and the bare name for the entry
+  module and the Prelude. An entry-module declaration whose bare name is
+  already taken program-wide (a Prelude name, or an imported module's record
+  field or class method) is `Main.name` instead; `main` is always bare. A
+  program without imports therefore has exactly the names it is written with.
+- **Scopes.** A module's scope maps the bare names it may write to entities:
+  its own declarations; then what each unqualified import edge makes visible
+  (the imported module's export *surface*, filtered by the edge's import list
+  or `hiding`); then the Prelude (`PreludeScope`: the Prelude source plus the
+  checker's builtin environment, narrowed by explicit `import Prelude` forms).
+  Own wins over imported, imported over Prelude; two different imported
+  entities under one name are ambiguous. An alias has a table of its own: the
+  surfaces of the modules imported under it.
+- **Binding happens once, in the resolver.** `Rename` rewrites the module's
+  own declarations: declared names become canonical, and every reference not
+  shadowed by a local binder is replaced by the canonical name of the entity
+  the scope gives it. A reference that denotes nothing in scope (hidden,
+  ambiguous, an alias that does not offer the name, the entry module's name
+  seen from an imported module) is replaced by a placeholder spelling
+  (`<scope error N>`), and `ast::Resolution::scope_errors` maps the
+  placeholder to the error; the type checker reports it when it meets the
+  placeholder, where the statement's location is known. Because a module's
+  rewritten region depends on nothing an importer does, it is merged verbatim
+  into every importer, once per origin (`origin_spans`).
+- **What is not scoped.** Constructors, record fields, classes and class
+  methods are global names and are not renamed. The parser's own desugarings
+  (`concatMap`, `enumFromTo`, `error`) are plain references and resolve like
+  written ones.
+- **Canonical names downstream.** The checker refers to the bundled library
+  by canonical name where it has built-in knowledge of it
+  (`Checker::json_fn`, `Checker::library_type`: `JSON.jField`,
+  `Data.Generics.K1`). Diagnostics are rendered through
+  `types::DisplayNames`, which spells canonical names the way their module
+  wrote them (`Resolution::display_names`). The Lua host key of an `export`
+  and runtime-visible type names (`datatypeName`, JSON error contexts) use
+  the source spelling (`Resolution::source_names`, `TModule::export_keys`).
+  Emitted Lua refers to functions by slot, so canonical names do not appear
+  in it.
 
 ---
 

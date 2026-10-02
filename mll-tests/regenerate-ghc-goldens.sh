@@ -163,6 +163,16 @@ excluded_reason() {
         cases/ReexAlias)                 echo "helper module (twinned for import, no main)";;
         cases/ReexQual)                  echo "helper module (twinned for import, no main)";;
         cases/PrivateHelperLib)          echo "helper module (twinned for import, no main)";;
+        cases/ScopeInner)                echo "helper module (twinned for import, no main)";;
+        cases/ScopeLeak)                 echo "helper module (twinned for import, no main)";;
+        cases/ScopeMid)                  echo "helper module (twinned for import, no main)";;
+        cases/ScopeLeft)                 echo "helper module (twinned for import, no main)";;
+        cases/ScopeRight)                echo "helper module (twinned for import, no main)";;
+        cases/ScopeTake)                 echo "helper module (twinned for import, no main)";;
+        cases/ScopeCfgA)                 echo "helper module (twinned for import, no main)";;
+        cases/ScopeCfgB)                 echo "helper module (twinned for import, no main)";;
+        cases/ScopeStack)                echo "helper module (twinned for import, no main)";;
+        cases/ScopeHostLib)              echo "helper module using the 'export' keyword (Lua module export)";;
 
         *) : ;;
     esac
@@ -239,28 +249,41 @@ inject_default() {
 # `module Main where` header; helper-module files (those with their own
 # `module X (...) where` line) keep it, and the shim imports are inserted
 # directly after it.
+#
+# A source's own `import Prelude hiding (...)` is folded into the twin's
+# header import: GHC takes the UNION of what several imports of one module
+# make visible, so left next to the header's `import Prelude hiding (...)`
+# it would hide nothing.
 make_twin() { # $1 = source .mll, $2 = output .hs
-    if grep -q '^module ' "$1"; then
+    twin_hiding=$hiding
+    twin_src=$1
+    own_hidden=$(sed -n 's/^import Prelude hiding *(\(.*\)) *$/\1/p' "$1" | head -1)
+    if [ -n "$own_hidden" ]; then
+        twin_hiding="${hiding%)}, $own_hidden)"
+        twin_src=$gen/.twin-source
+        grep -v '^import Prelude hiding' "$1" > "$twin_src"
+    fi
+    if grep -q '^module ' "$twin_src"; then
         {
             printf '%s\n' "$pragmas"
-            awk -v hiding="$hiding" -v qualprelude="$qualprelude" '
+            awk -v hiding="$twin_hiding" -v qualprelude="$qualprelude" '
                 { print }
                 /^module .* where *$/ && !done {
                     print hiding; print qualprelude; print "import MllShim"; done = 1
                 }
-            ' "$1" | rewrite_body | inject_default
+            ' "$twin_src" | rewrite_body | inject_default
         } > "$2"
     else
         {
             printf '%s\nmodule Main where\n%s\n%s\nimport MllShim\n' \
-                "$pragmas" "$hiding" "$qualprelude"
-            rewrite_body < "$1"
+                "$pragmas" "$twin_hiding" "$qualprelude"
+            rewrite_body < "$twin_src"
         } | inject_default > "$2"
     fi
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib; do
+for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

@@ -297,7 +297,7 @@ impl CodeGen {
         // function_stmts does — after the rewrite it is a plain value clause
         // (never an action type: desugar_guarded_value excludes them).
         let desugared;
-        let func = match Self::desugar_guarded_value(func) {
+        let func = match Self::desugar_guarded_value(func, &func.name) {
             Some(f) => { desugared = f; &desugared }
             None => func,
         };
@@ -335,8 +335,10 @@ impl CodeGen {
     /// sites then read the slot bare and did arithmetic on a function
     /// value. Action types (IO/LuaIO/Forall) are excluded: their slots
     /// legitimately hold nullary action functions and the function arm
-    /// emits their guard chains correctly.
-    fn desugar_guarded_value(func: &TFunction) -> Option<TFunction> {
+    /// emits their guard chains correctly. `shown` is the binding's name
+    /// for the runtime error message (its source name, not its canonical
+    /// one).
+    fn desugar_guarded_value(func: &TFunction, shown: &str) -> Option<TFunction> {
         let [clause] = func.clauses.as_slice() else { return None };
         if clause.guards.is_empty()
             || !clause.patterns.is_empty()
@@ -350,7 +352,7 @@ impl CodeGen {
                 Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                 Box::new(TExpr::new(
                     TExprKind::Lit(TLiteral::Str(
-                        format!("Non-exhaustive guards in '{}'", func.name).into_bytes(),
+                        format!("Non-exhaustive guards in '{}'", shown).into_bytes(),
                     )),
                     Ty::Con("String".into()),
                 )),
@@ -377,7 +379,8 @@ impl CodeGen {
         // Guarded value bindings become guard-chain CAFs first — see
         // `desugar_guarded_value` (and its mirror rule in `slot_always_whnf`).
         let desugared;
-        let func = match Self::desugar_guarded_value(func) {
+        let shown = self.source_names.get(&func.name).unwrap_or(&func.name);
+        let func = match Self::desugar_guarded_value(func, shown) {
             Some(f) => { desugared = f; &desugared }
             None => func,
         };

@@ -118,8 +118,9 @@
 //!     exactly once and cannot capture, duplicate or drop it. `&&`/`||`
 //!     are the exception on the right: the right operand is skipped when
 //!     the left already decides the result, so a linear variable there is
-//!     rejected (skippable path). (The Prelude cannot be redefined — the
-//!     typechecker rejects that separately — so the set is stable.)
+//!     rejected (skippable path). (A module's own operator of such a
+//!     spelling has a canonical name of its own after import resolution,
+//!     so these bare names always are the Prelude's.)
 //!
 //! SCALARS AND UNIT. A *derived* binder of builtin scalar type — Int,
 //! Number, Bool, String — gets NO exemption: it is tracked exactly-once
@@ -332,8 +333,9 @@ fn scale_usage(u: Usage, factor: Factor, cause: &Option<String>) -> Usage {
 /// operands in a closure, and `$` is an ordinary unrestricted function.
 /// `&&`/`||` are handled separately: they consume the LEFT operand exactly
 /// once but may skip the right one, which exactly-once cannot allow for a
-/// tracked variable.) The Prelude cannot be redefined (the typechecker
-/// rejects interference with it), so matching by name is reliable.
+/// tracked variable.) Import resolution gives a module's own operator of
+/// such a spelling a canonical name of its own, so the bare names always
+/// are the Prelude's and matching by name is reliable.
 /// `!!` cannot be here: indexing DROPS every element but the selected
 /// one, and under exactly-once dropping the rest of a `%1` list is a
 /// leak — it now charges ω through its ordinary type, which rejects a

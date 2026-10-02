@@ -244,6 +244,7 @@ mod tests {
             instance_fns: vec![],
             has_main: false,
             exports: vec![],
+            source_names: std::collections::HashMap::new(),
             record_accessors: vec![],
             newtypes: vec![],
             newtype_types: vec![],

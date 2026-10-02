@@ -276,8 +276,8 @@ minimum t = case foldr (\x xs -> x : xs) [] t of
     []     -> error "minimum: empty structure"
     (x:xs) -> foldl' (\m y -> if y < m then y else m) x xs
 
--- Stable sort (GHC's Data.List.sort/sortBy; mata-ll's flat namespace puts
--- them in the Prelude like the other list functions). Bottom-up mergesort:
+-- Stable sort (GHC's Data.List.sort/sortBy; mata-ll puts them in the
+-- Prelude like the other list functions). Bottom-up mergesort:
 -- singleton runs merged pairwise until one remains. `mergeTwo` takes the
 -- LEFT element unless the right is STRICTLY smaller, which is what makes
 -- the sort stable, exactly as GHC's.

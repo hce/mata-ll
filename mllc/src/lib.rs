@@ -17,9 +17,9 @@
 //!    spine (an 8-line example) exceeds a default 2 MB thread.
 //!
 //! 2. **Compilation is whole-program.** One root module per `compile`
-//!    call: its imports are resolved from the search path and merged into
-//!    a single flat namespace (unqualified name clashes are compile
-//!    errors; qualified imports are the fix), then the whole program is
+//!    call: its imports are resolved from the search path, every module's
+//!    references are bound in that module's own scope, and the modules
+//!    are merged into one declaration list; then the whole program is
 //!    typechecked, monomorphized and emitted as ONE self-contained Lua
 //!    file — runtime included, no external requires. There is no separate
 //!    compilation and no linking: a library module compiled alone
@@ -208,6 +208,59 @@ fn parse_prelude() -> Result<Vec<ast::Decl>, CompileError> {
     Ok(module.decls)
 }
 
+/// What the implicit Prelude provides to every module's scope: the names
+/// its source declares plus the builtin environment of a fresh `checker`.
+/// Import resolution needs the scope by name — to keep an own declaration
+/// of the entry module apart from a Prelude name it shares, to decide what
+/// an explicit `import Prelude` form leaves visible, and to check
+/// unqualified imports against `shapes`.
+fn prelude_scope(
+    prelude_decls: &[ast::Decl],
+    shapes: std::collections::HashMap<String, String>,
+    checker: &typechecker::Checker,
+) -> modules::PreludeScope {
+    let (values, types, constructors) = checker.builtin_names();
+    let mut scope = modules::PreludeScope {
+        values: values.into_iter().collect(),
+        types: types.into_iter().collect(),
+        constructors: constructors.into_iter().collect(),
+        shapes,
+    };
+    for d in prelude_decls {
+        match d {
+            ast::Decl::FunDef { name, .. }
+            | ast::Decl::TypeSig { name, .. }
+            | ast::Decl::ExportSig { name, .. } => {
+                scope.values.insert(name.clone());
+            }
+            ast::Decl::DataDef { name, constructors, .. } => {
+                scope.types.insert(name.clone());
+                for c in constructors {
+                    scope.constructors.insert(c.name.clone());
+                    if let ast::ConstructorFields::Named(fields) = &c.fields {
+                        scope.values.extend(fields.iter().map(|f| f.name.clone()));
+                    }
+                }
+            }
+            ast::Decl::NewtypeDef { name, con_name, field, .. } => {
+                scope.types.insert(name.clone());
+                scope.constructors.extend(con_name.iter().cloned());
+                scope.values.extend(field.iter().cloned());
+            }
+            ast::Decl::TypeAlias { name, .. } | ast::Decl::TypeFamily { name, .. } => {
+                scope.types.insert(name.clone());
+            }
+            ast::Decl::ClassDecl { methods, .. } => {
+                scope.values.extend(methods.iter().map(|m| m.name.clone()));
+            }
+            ast::Decl::InstanceDecl { .. }
+            | ast::Decl::Import { .. }
+            | ast::Decl::FixityDecl { .. } => {}
+        }
+    }
+    scope
+}
+
 /// Compile mll source code to Lua with default options.
 ///
 /// `source`: the .mll source code
@@ -296,14 +349,19 @@ fn compile_impl(
     for m in typechecker::builtin_method_names() {
         prelude_shapes.entry(m).or_insert_with(|| "<builtin class method>".to_string());
     }
+    // The checker is created here, ahead of type checking, because its
+    // fresh builtin environment is half of what the Prelude provides — and
+    // import resolution binds every module's references against the whole
+    // Prelude scope.
+    let mut checker = typechecker::Checker::new();
+    loader.set_prelude(prelude_scope(&prelude_decls, prelude_shapes, &checker));
     let module = loader.resolve_imports(&parsed).map_err(CompileError::Import)?;
     // Non-fatal resolution diagnostics (an import alias shadowed by a data
     // constructor) — carried into CompileResult.warnings below.
     let import_warnings = loader.take_warnings();
-    // Reject unqualified imports that would clash in the flattened namespace,
-    // with a clear message, rather than letting the clash surface downstream.
-    loader.check_import_collisions(&parsed, &prelude_shapes)
-        .map_err(CompileError::Import)?;
+    // How diagnostics spell the canonical names resolution gave the
+    // imported modules' declarations (see types::DisplayNames).
+    let display_names = types::DisplayNames::new(module.resolution.display_names.clone());
 
     // The module-header export list (`module M (foo, Bar(..)) where`), kept
     // from the parsed source before the merge below discards it. It controls
@@ -320,17 +378,6 @@ fn compile_impl(
     let own_count = parsed.decls.iter()
         .filter(|d| !matches!(d, ast::Decl::Import { .. }))
         .count();
-    // Names selection-hidden by an import (`import M (a)` leaves M's other
-    // names out of scope) are reported as "not exported" when used bare —
-    // unless the Prelude defines the same name, which is then simply what
-    // the bare name means (`import Data.Map (Map)` and a bare `filter`).
-    // The hidden declaration itself was renamed out of the way by module
-    // resolution, so nothing shadows the Prelude's.
-    let prelude_names = modules::declared_names(&prelude_decls);
-    let hidden: std::collections::HashSet<String> = module.hidden.iter()
-        .filter(|n| !prelude_names.contains(*n))
-        .cloned()
-        .collect();
     let prelude_count = prelude_decls.len();
     // Captured before the Prelude merge below discards it: provenance of the
     // resolved decl list, for per-declaration file attribution (`decl_files`).
@@ -341,7 +388,7 @@ fn compile_impl(
             .collect(),
         name: None,
         exports: None,
-        hidden,
+        resolution: module.resolution,
         origin_spans: Vec::new(),
     };
     let local_start = module.decls.len() - own_count;
@@ -379,42 +426,51 @@ fn compile_impl(
     // Desugar do-notation to >>= chains
     desugar::desugar_module(&mut module);
 
-    let mut checker = typechecker::Checker::new();
     checker.set_decl_files(decl_files);
 
     // The user's own top-level value definitions that reuse a name the
     // baseline already provides (a Prelude definition or a compiler builtin).
-    // mata-ll compiles the Prelude and the program into one flat namespace, so
-    // such a redefinition does not shadow the Prelude name (as it would in
-    // GHC) — it collides with it. Two collision classes are rejected up front,
-    // before the Prelude is ever type-checked against the user's signature:
+    // Import resolution gives such a definition its own canonical name, so
+    // it never replaces the Prelude's: the user's references mean the
+    // user's definition, the Prelude's own code keeps meaning the Prelude's
+    // (benign shadowing: `head` at a narrower type, a monomorphic
+    // `replicate` for FFI export). GHC would call a bare use of such a name
+    // ambiguous unless the module hides the Prelude's; mata-ll lets the
+    // user's definition win, except in two cases, where the entry module
+    // must say so with an explicit `hiding`:
     //
     //   1. the Prelude's own implementation uses the name (`error`, `show`,
-    //      `foldl`, …): the redefinition replaces the name out from under the
-    //      Prelude's code, which then either fails to type-check — a cascade
-    //      of errors at Prelude source lines the user never wrote — or
-    //      silently compiles against the user's replacement;
+    //      `foldl`, …);
     //   2. the name has a Prelude source definition and the user's definition
-    //      has the same type shape (or no signature): a duplicate definition
-    //      of the same function at the same type, which downstream passes
-    //      cannot disambiguate.
+    //      has the same type shape (or no signature): a duplicate of the same
+    //      function at the same type.
     //
-    // Anything else is left alone: redefining an unreferenced builtin (`head`)
-    // or a Prelude function at a genuinely different type (a monomorphic
-    // `replicate` for FFI export) works today with GHC-like user-wins
-    // semantics and stays supported. If such a redefinition nevertheless
-    // breaks the Prelude's own type-checking, the safety net below converts
-    // the Prelude-internal errors into the same clear message.
-    let redefined = collect_baseline_redefinitions(
+    // A name the module explicitly keeps out of its Prelude import
+    // (`import Prelude hiding (lookup)`) is no redefinition at all — that
+    // program is plain Haskell — and is not rejected. A record field named
+    // like a Prelude function is rejected whatever the module hides: a
+    // field's accessor is a program-wide name and cannot be given a
+    // canonical name of its own.
+    let own_decls: Vec<ast::Decl> = parsed.decls.iter()
+        .filter(|d| !matches!(d, ast::Decl::Import { .. }))
+        .cloned()
+        .collect();
+    let redefined: Vec<BaselineRedefinition> = collect_baseline_redefinitions(
         &module.decls[..prelude_count],
-        &module.decls[local_start..],
+        &own_decls,
         &checker,
-    );
+    )
+        .into_iter()
+        .filter(|r| r.record_field_of.is_some() || modules::prelude_name_visible(&parsed, &r.name))
+        .collect();
     // Every CompileError::Type below goes out through this: source-line
     // excerpts attached centrally (see attach_excerpts), never at the
     // construction sites.
     let enrich = |mut diags: Vec<types::Diagnostic>, loader: &modules::ModuleLoader| {
         attach_excerpts(&mut diags, source, options.source_name.as_deref(), loader);
+        for d in &mut diags {
+            d.names = Some(display_names.clone());
+        }
         diags
     };
 
@@ -553,6 +609,9 @@ fn compile_impl(
     // Typechecker warnings (e.g. literal patterns without a catch-all) —
     // recorded during the successful check above; Prelude-internal ones
     // were never recorded (see Checker::push_warning_span).
+    for w in &mut checker.warnings {
+        w.names = Some(display_names.clone());
+    }
     warnings.append(&mut checker.warnings);
     if !mono_module.has_main && mono_module.exports.is_empty() {
         warnings.push(no_host_surface_warning(header_exports.as_ref()));
@@ -651,7 +710,8 @@ struct BaselineRedefinition {
     /// (`None` for a signature with no accompanying definition).
     span: Option<ast::Span>,
     /// The Prelude's own implementation references this name from another
-    /// definition, so redefining it changes the Prelude out from under itself.
+    /// definition. The entry module may give such a name a meaning of its
+    /// own only with an explicit `import Prelude hiding`.
     load_bearing: bool,
     /// The name has a Prelude source definition and the user's definition has
     /// the same type shape (or no signature): a duplicate of the same
@@ -853,33 +913,33 @@ fn redefinition_diagnostic(
     if let Some(ty) = &r.record_field_of {
         d.context = Some(format!("data {}", ty));
         d.notes.push(format!(
-            "a record field defines a module-level accessor function of the same \
-             name, so the field '{}' of '{}' is a definition of '{}'. mata-ll \
-             includes the Prelude implicitly and compiles it with your program in \
-             one global namespace, so its names are always in scope and the \
-             accessor does not shadow the Prelude's '{}' as it would in GHC — \
+            "a record field defines an accessor function of the same name, so the \
+             field '{}' of '{}' is a definition of '{}'. Accessors are program-wide \
+             names in mata-ll — unlike a top-level function, a field cannot be kept \
+             to its own module — so this one would take the place of the Prelude's \
+             '{}' everywhere, where GHC would scope it to this module — \
              rename the field.",
             r.name, ty, r.name, r.name
         ));
         return d;
     }
-    d.notes.push(
-        "mata-ll includes the Prelude implicitly and compiles it with your program \
-         in one global namespace, so its names (error, map, head, …) are always in \
-         scope and a top-level definition does not shadow them as it would in GHC — \
-         rename your function."
-            .to_string(),
-    );
+    d.notes.push(format!(
+        "the Prelude's names (error, map, head, …) are in scope in every module. GHC \
+         accepts such a definition but reports each bare use of the name as \
+         ambiguous unless the module hides the Prelude's — rename your function, or \
+         hide the Prelude's with 'import Prelude hiding ({})'.",
+        r.name
+    ));
     if r.load_bearing {
         d.notes.push(format!(
-            "the Prelude's own functions use '{}', so redefining it would break \
-             Prelude code your program did not write.",
+            "the Prelude's own functions use '{}'; mata-ll does not let a definition \
+             take over such a name without the explicit 'hiding'.",
             r.name
         ));
     } else if r.duplicate {
         d.notes.push(format!(
-            "your definition has the same type as the Prelude's '{}', making it a \
-             duplicate definition of the same function rather than a distinct one.",
+            "your definition has the same type as the Prelude's '{}', so nothing but \
+             an explicit 'hiding' tells a reader which of the two a use means.",
             r.name
         ));
     }

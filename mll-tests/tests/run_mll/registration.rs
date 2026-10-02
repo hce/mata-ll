@@ -280,6 +280,19 @@ mll_test!(guard_qualifier_lists, "guard_qualifier_lists.mll");
 mll_test!(where_tuple_binding, "where_tuple_binding.mll");
 mll_test!(declaration_boundaries, "declaration_boundaries.mll");
 mll_test!(private_helper_names, "private_helper_names.mll");
+// One module per scope: a bare name means what the module that wrote it
+// has in scope — its own declaration, else an import's, else the
+// Prelude's — whatever other modules of the program call their own.
+mll_test!(scope_root_shadows_import, "scope_root_shadows_import.mll");
+mll_test!(scope_same_name_imports, "scope_same_name_imports.mll");
+mll_test!(scope_import_lists, "scope_import_lists.mll");
+mll_test!(scope_import_lists_swapped, "scope_import_lists_swapped.mll");
+mll_test!(scope_alias_surface, "scope_alias_surface.mll");
+mll_test!(scope_prelude_names, "scope_prelude_names.mll");
+mll_lib_test!(scope_local_names, "scope_local_names.mll");
+mll_test!(scope_same_type_name_imports, "scope_same_type_name_imports.mll");
+mll_test!(scope_own_type_names, "scope_own_type_names.mll");
+mll_lib_test!(scope_list_next_to_alias, "scope_list_next_to_alias.mll");
 mll_test!(negative_pattern_parens, "negative_pattern_parens.mll");
 mll_test!(dash_run_operators, "dash_run_operators.mll");
 mll_test!(underscore_names_no_capture, "underscore_names_no_capture.mll");
@@ -838,6 +851,16 @@ fn mll_case_registry_is_complete() {
         "ReexAlias.mll",
         "ReexQual.mll",
         "PrivateHelperLib.mll",
+        "ScopeInner.mll",
+        "ScopeLeak.mll",
+        "ScopeMid.mll",
+        "ScopeLeft.mll",
+        "ScopeRight.mll",
+        "ScopeTake.mll",
+        "ScopeCfgA.mll",
+        "ScopeCfgB.mll",
+        "ScopeStack.mll",
+        "ScopeHostLib.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")

@@ -364,6 +364,9 @@ struct CodeGen {
     /// `local __SOURCE_CODE = …` binding (see embed.rs), and the module's
     /// return table must export it — even when there are no other exports.
     embed_var_export: bool,
+    /// The module's `TModule::source_names`: canonical name -> the name a
+    /// declaration has in its own source, for names shown at runtime.
+    source_names: std::collections::HashMap<String, String>,
     /// TEST-ONLY WHNF claim refutation (`compile_with_whnf_refutation` in
     /// lib.rs): when set, every emission that ACTS on a `*_is_whnf` /
     /// `pure_value_bare_is_safe` claim — skipping a `__force`, reading a
@@ -430,6 +433,7 @@ impl CodeGen {
             local_fn_arity: std::collections::HashMap::new(),
             direct_perform_conflicts: std::collections::HashSet::new(),
             embed_var_export: false,
+            source_names: std::collections::HashMap::new(),
             whnf_assert: false,
             big_lits: std::rc::Rc::new(std::cell::RefCell::new(BigLitPool::default())),
         }
@@ -684,6 +688,7 @@ pub(crate) fn generate(
     );
     let mut cg = CodeGen::new();
     cg.embed_var_export = matches!(embed_source, Some((EmbedMode::Var, _)));
+    cg.source_names = module.source_names.clone();
     cg.whnf_assert = whnf_assert;
     cg.demand_info = crate::demand::analyze(module);
     // Build the program body first (as one Lua statement list, then printed)

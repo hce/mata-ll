@@ -2116,10 +2116,6 @@ impl Checker {
                 r
             }
             Expr::Var(name) => {
-                if self.enforce_hidden && self.hidden_names.contains(name) {
-                    return Err(DiagnosticKind::Other(
-                        format!("'{}' is not exported by its module", name)));
-                }
                 if let Some(scheme) = env.lookup(name) {
                     let scheme = scheme.clone();
                     let (ty, inst_map) = self.instantiate_with_map(&scheme);
@@ -2132,6 +2128,10 @@ impl Checker {
                     Err(DiagnosticKind::Other(format!(
                         "Field '{}' of constructor '{}' has an existential type, so it has no selector function: the field's type was erased when the value was packed, and a selector would carry it out of the pattern match that is the only place it may be used. Pattern-match the constructor positionally instead ('case v of {} x -> …')",
                         name, con, con)))
+                } else if let Some(kind) = self.scope_error(name) {
+                    // A reference import resolution found no declaration
+                    // for in its module's scope (hidden, ambiguous, …).
+                    Err(kind)
                 } else {
                     Err(DiagnosticKind::UnboundVariable(name.clone()))
                 }
@@ -2533,13 +2533,6 @@ impl Checker {
                 Ok((TExpr::new(TExprKind::Paren(Box::new(te)), ty.clone()), ty, s))
             }
             Expr::OpFunc(op) => {
-                // A hidden operator (`import M hiding ((&))`) is reported
-                // as hidden, like a hidden Var, before the lookup — its
-                // declaration was renamed out of scope, so it is unbound.
-                if self.enforce_hidden && self.hidden_names.contains(op) {
-                    return Err(DiagnosticKind::Other(
-                        format!("'{}' is not exported by its module", op)));
-                }
                 if let Some(scheme) = env.lookup(op) {
                     let scheme = scheme.clone();
                     // A first-class operator section is a USE of the operator
@@ -2550,6 +2543,9 @@ impl Checker {
                     let (ty, inst_map) = self.instantiate_with_map(&scheme);
                     self.emit_use_constraints(op, &inst_map);
                     Ok((TExpr::new(TExprKind::OpFunc(op.clone()), ty.clone()), ty, Subst::empty()))
+                } else if let Some(kind) = self.scope_error(op) {
+                    // A hidden or ambiguous operator, like a Var.
+                    Err(kind)
                 } else {
                     Err(DiagnosticKind::UnboundVariable(format!("({})", op)))
                 }

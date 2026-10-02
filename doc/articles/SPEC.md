@@ -1338,18 +1338,33 @@ default library directory.
 
 Two caveats on the forms above:
 
-- **Qualified imports cover functions, not constructors.** After
-  `import qualified Data.Tree as T`, a qualified *function* use like
-  `T.depth` resolves, but a qualified *constructor* use like `T.Leaf`
-  does not — constructors are not namespaced and must be written
-  unqualified (`Leaf`), and they remain visible even under a qualified
-  import.
+- **Constructors are not scoped by imports.** After
+  `import qualified Data.Tree as T`, a function is reachable only as
+  `T.depth`; a constructor may be written qualified (`T.Leaf`, in
+  expressions and patterns) but also stays visible unqualified (`Leaf`),
+  because constructor names are program-wide.
 - **The `(..)` constructor-list on an import is currently
   decorative.** `import Data.Tree (depth, Tree(..))` and
   `import Data.Tree (depth)` behave identically: the selective list
   restricts which *functions* are brought into scope, but a type's
   constructors are always exposed regardless of whether `Tree(..)` is
   written. `hiding (...)` is enforced for functions.
+
+Every module has its own scope. A bare name refers to the module's own
+top-level declaration of that name if it has one, else to the one
+declaration its unqualified imports make visible under that name, else
+to the Prelude's. Other modules of the program do not matter: two
+modules may each define a `helper` or a `Config`, and each one's
+references mean its own. A bare name that two different imports provide
+is an "Ambiguous occurrence" error where it is used (keep one out with
+an import list or `hiding`, or import one module qualified); an
+unqualified import that provides a Prelude name at a different type is
+rejected at the import. `M.name` names what the modules imported as `M`
+export. `import Prelude hiding (…)`, `import Prelude (…)` and
+`import qualified Prelude as P` restrict or alias the implicit Prelude
+import. Data constructors, record fields, classes and class methods are
+outside this rule: they are program-wide names (see HASKDIFF.md, "Every
+module has its own scope").
 
 A module-header export list — `module M (foo, Bar(..)) where` —
 controls which of the module's names *other .mll modules* may import:
@@ -1701,6 +1716,13 @@ top-level `(A -> LuaIO s R)` argument — is rejected at compile time
 (see "Boundaries between standard Lua and MATA-LL" for the full
 contract).
 
+The `export` declarations of imported modules appear in the same
+return table as the entry module's. The key is the name the
+declaration has in its own module, so no name may be exported by two
+modules of one program (a compile error). Inside the program an
+exported declaration is an ordinary one: import lists, `hiding` and
+export lists apply to it as to any other name.
+
 # STArray (mutable arrays)
 
 `STArray s` is an intrinsic mutable integer array scoped to `ST s`.
@@ -1800,11 +1822,14 @@ are imported explicitly:
     import Data.Traversable -- traverse, sequenceA, etc. (re-exports)
     import Control.Monad -- mapM, forM, sequence, etc.
 
-Several of these deliberately reuse Prelude names (`Data.Map`'s
-`map`/`filter`/`lookup`/`null`, `Data.List`'s `find`). Because
-mata-ll merges every import into one namespace, such modules must be
-imported `qualified` (e.g. `import qualified Data.Map as M`) to avoid
-clashing with the Prelude or with each other.
+Several of these deliberately reuse Prelude names at another type
+(`Data.Map`'s `map`/`filter`/`lookup`/`null`). An unqualified import of
+such a module is rejected — every bare use of those names would be
+ambiguous — so import it `qualified` (`import qualified Data.Map as M`),
+optionally next to an import list for the names wanted bare
+(`import Data.Map (Map)`). Two library modules that share a name
+(`Data.List`'s and `Regex`'s `find`) may both be imported unqualified;
+only a bare use of the shared name is an error.
 
 # Evaluation strategy
 

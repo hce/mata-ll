@@ -3,10 +3,16 @@
 //! Each .mll file is a module. Module names map to file paths:
 //!   import Data.Tree  =>  Data/Tree.mll
 //!
-//! When compiling a module, imported .mll files are parsed, type-checked,
-//! and their declarations are merged into the current module's environment.
+//! The compiler works on ONE flat declaration list per program. Import
+//! resolution builds it: every imported module's declarations are merged
+//! in front of the entry module's, each origin once, and — before that —
+//! every module's own source is rewritten so that each reference is spelled
+//! as the canonical name of the one declaration it denotes in THAT
+//! module's scope (see `ModuleLoader::resolve_module` for the model). The
+//! flat list can therefore hold two modules' `helper` side by side: they
+//! are `A.helper` and `B.helper`, and no reference is ambiguous.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::fs;
 
@@ -20,8 +26,8 @@ pub struct ModuleLoader {
     search_paths: Vec<PathBuf>,
     /// Already loaded (parsed) modules (key -> AST)
     loaded: HashMap<String, Module>,
-    /// Already resolved modules (key -> fully resolved module)
-    resolved: HashMap<String, Module>,
+    /// Already resolved modules (key -> canonical region and surface)
+    resolved: HashMap<String, Resolved>,
     /// Modules currently being resolved (cycle detection)
     in_progress: HashSet<String>,
     /// The same modules in RESOLUTION ORDER, so a detected cycle can be
@@ -30,8 +36,8 @@ pub struct ModuleLoader {
     /// variable" with nothing pointing at the cycle (F13).
     in_progress_stack: Vec<String>,
     /// Fixities a module carries to its importers (its own declarations plus
-    /// those of its imports, transitively — mata-ll merges every import into
-    /// one namespace, and fixity travels with the operator).
+    /// those of its imports, transitively: fixity is keyed by the operator's
+    /// spelling and travels along every import edge).
     fixity_cache: HashMap<String, HashMap<String, (Assoc, u8)>>,
     /// Modules whose fixities are currently being computed (cycle detection).
     fixities_in_progress: HashSet<String>,
@@ -48,12 +54,33 @@ pub struct ModuleLoader {
     /// shadowed by a data constructor). Drained by the compile pipeline
     /// into `CompileResult.warnings`.
     warnings: Vec<crate::types::Diagnostic>,
-    /// Per resolved module: the origin keys its header export list passes
-    /// on wholesale via `module X` entries (Haskell 2010 §5.2). An entry
-    /// covers every origin arriving through the matching import edge, so
-    /// an importer's visibility gate (`transitive_gate`) can consult it by
-    /// origin key. Absent or empty = no `module X` entries.
-    reexport_origins: HashMap<String, HashSet<String>>,
+    /// What the implicit Prelude provides (see `PreludeScope`); set by the
+    /// compile pipeline before resolution.
+    prelude: PreludeScope,
+    /// Record-field and class-method names of every module in the import
+    /// closure: global names, which the entry module's own declarations
+    /// must not share a spelling with (see `canon_val`).
+    program_globals: HashSet<String>,
+    /// The module name the entry module's clashing declarations are
+    /// qualified with (see `begin_program`).
+    root_prefix: String,
+    /// The entry module's value / type declarations that keep their bare
+    /// names. A bare name in the flat list that an IMPORTED module does not
+    /// have in scope must not resolve to one of these.
+    root_vals: HashSet<String>,
+    root_tys: HashSet<String>,
+    /// Program-wide by-products of resolution, handed to the type checker
+    /// with the resolved entry module (see `ast::Resolution`).
+    scope_errors: HashMap<String, ScopeError>,
+    source_names: HashMap<String, String>,
+    /// Signature shape of every signed value, by canonical name (for the
+    /// import-against-Prelude check).
+    shapes: HashMap<String, String>,
+    /// Canonical names that are types, and how many type declarations in
+    /// the program share each source spelling (for diagnostics' display
+    /// names).
+    canon_types: HashSet<String>,
+    type_spellings: HashMap<String, usize>,
 }
 
 impl ModuleLoader {
@@ -79,8 +106,24 @@ impl ModuleLoader {
             prelude_fixities,
             warnings: Vec::new(),
             module_sources: HashMap::new(),
-            reexport_origins: HashMap::new(),
+            prelude: PreludeScope::default(),
+            program_globals: HashSet::new(),
+            root_prefix: String::new(),
+            root_vals: HashSet::new(),
+            root_tys: HashSet::new(),
+            scope_errors: HashMap::new(),
+            source_names: HashMap::new(),
+            shapes: HashMap::new(),
+            canon_types: HashSet::new(),
+            type_spellings: HashMap::new(),
         }
+    }
+
+    /// Declare what the implicit Prelude provides. Must be called before
+    /// `resolve_imports`: scopes, canonical names and the import check all
+    /// depend on it.
+    pub fn set_prelude(&mut self, prelude: PreludeScope) {
+        self.prelude = prelude;
     }
 
     /// The display name and source text of loaded module `key`, when it was
@@ -194,6 +237,11 @@ impl ModuleLoader {
     pub fn fixities_for(&mut self, tokens: &[lexer::Located]) -> HashMap<String, (Assoc, u8)> {
         let mut fixities = self.prelude_fixities.clone();
         for path in parser::scan_imports(tokens) {
+            // `import Prelude ...` names the implicit Prelude, whose
+            // fixities are in force already; it is never loaded as a module.
+            if path.len() == 1 && path[0] == PRELUDE_KEY {
+                continue;
+            }
             if let Ok(imported) = self.imported_fixities(&path) {
                 fixities.extend(imported);
             }
@@ -230,6 +278,9 @@ impl ModuleLoader {
                 }
             }
             for import in imports {
+                if import.len() == 1 && import[0] == PRELUDE_KEY {
+                    continue;
+                }
                 fixities.extend(self.imported_fixities(&import)?);
             }
             fixities.extend(own);
@@ -241,28 +292,180 @@ impl ModuleLoader {
         Ok(fixities)
     }
 
-    /// Process all imports in a module, returning merged declarations.
-    /// The imported declarations are prepended to the module's own declarations.
+    /// Resolve the entry module: every import (transitively) is resolved
+    /// and merged in front of the module's own declarations, and every
+    /// reference is bound in the scope of the module that wrote it (see
+    /// `resolve_module` for the model). The returned module carries the
+    /// program's `Resolution` for the type checker.
     pub fn resolve_imports(&mut self, module: &Module) -> Result<Module, String> {
-        // "//root" is not a legal module name, so the entry module's own
-        // span can never collide with an imported module's key.
-        self.resolve_imports_keyed(module, "//root")
+        self.begin_program(module);
+        let mut resolved = self.resolve_module(module, ROOT_KEY)?.module;
+        self.check_host_exports(&resolved)?;
+        let mut display_names = HashMap::new();
+        for (canon, base) in &self.source_names {
+            // A type whose source spelling another type shares keeps its
+            // module-qualified form: `A.Config` against `B.Config` (or
+            // against the Prelude's) must stay distinguishable.
+            let shared = self.canon_types.contains(canon)
+                && self.type_spellings.get(base).copied().unwrap_or(0)
+                    + usize::from(self.prelude.types.contains(base)) > 1;
+            if !shared {
+                display_names.insert(canon.clone(), base.clone());
+            }
+        }
+        for (placeholder, err) in &self.scope_errors {
+            display_names.insert(placeholder.clone(), err.written().to_string());
+        }
+        resolved.resolution = Resolution {
+            scope_errors: std::mem::take(&mut self.scope_errors),
+            source_names: self.source_names.clone(),
+            display_names,
+        };
+        Ok(resolved)
     }
 
-    fn resolve_imports_keyed(&mut self, module: &Module, own_key: &str) -> Result<Module, String> {
+    /// Program-wide facts the per-module resolution needs before it starts:
+    /// the globally visible record-field and class-method names of every
+    /// imported module, the prefix the entry module's clashing names are
+    /// qualified with, and which of the entry module's names keep their
+    /// bare spelling. The whole import closure is loaded (parsed) here;
+    /// a module that fails to load is skipped and reported by resolution.
+    fn begin_program(&mut self, root: &Module) {
+        let mut pending: Vec<Vec<String>> = import_paths_of(root);
+        let mut seen: HashSet<String> = HashSet::new();
+        while let Some(path) = pending.pop() {
+            let key = path.join(".");
+            if key == PRELUDE_KEY || !seen.insert(key) {
+                continue;
+            }
+            if let Ok(m) = self.load_module(&path) {
+                pending.extend(import_paths_of(m));
+            }
+        }
+        self.program_globals.clear();
+        for key in &seen {
+            if let Some(m) = self.loaded.get(key) {
+                for d in &m.decls {
+                    self.program_globals.extend(global_value_names(d));
+                }
+            }
+        }
+        // GHC's name for the entry module. A module of that name in the
+        // import closure would share the prefix, so step past it.
+        let mut prefix = "Main".to_string();
+        let mut n = 1;
+        while self.loaded.contains_key(&prefix) {
+            prefix = format!("Main{n}");
+            n += 1;
+        }
+        self.root_prefix = prefix;
+        self.root_vals.clear();
+        self.root_tys.clear();
+        for d in &root.decls {
+            match renamable(d) {
+                Some((name, false)) if self.canon_val(ROOT_KEY, name) == name => {
+                    self.root_vals.insert(name.to_string());
+                }
+                Some((name, true)) if self.canon_ty(ROOT_KEY, name) == name => {
+                    self.root_tys.insert(name.to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The canonical name of value `name` declared by module `key`.
+    ///
+    /// An imported module's declaration is ALWAYS `Module.name`: a spelling
+    /// no source identifier can have, so it cannot collide with the
+    /// Prelude, the entry module, another import, or a local binder. The
+    /// entry module's declarations keep their bare names — a program
+    /// without imports compiles to the same Lua names as ever — except
+    /// where the bare name is already taken program-wide: by the Prelude
+    /// (source definition or builtin), or by a record field or class
+    /// method of an imported module (those are global names). `main` is
+    /// the entry point and always bare.
+    fn canon_val(&self, key: &str, name: &str) -> String {
+        if key != ROOT_KEY {
+            return format!("{key}.{name}");
+        }
+        if name != "main"
+            && (self.prelude.values.contains(name) || self.program_globals.contains(name))
+        {
+            format!("{}.{name}", self.root_prefix)
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// The canonical name of type `name` declared by module `key` (see
+    /// `canon_val`; the only bare type names taken program-wide are the
+    /// Prelude's).
+    fn canon_ty(&self, key: &str, name: &str) -> String {
+        if key != ROOT_KEY {
+            return format!("{key}.{name}");
+        }
+        if self.prelude.types.contains(name) {
+            format!("{}.{name}", self.root_prefix)
+        } else {
+            name.to_string()
+        }
+    }
+
+    /// Resolve one module: its imports (recursively, through the cache),
+    /// then its own declarations.
+    ///
+    /// THE MODEL. Every top-level value and type declaration is an ENTITY
+    /// with one canonical name fixed by its defining module alone
+    /// (`canon_val` / `canon_ty`), whoever imports it and however. A
+    /// module's SCOPE maps the bare names it may write to entities:
+    ///
+    ///   1. its own declarations;
+    ///   2. what its unqualified imports make visible — each import edge
+    ///      contributes the imported module's export SURFACE, filtered by
+    ///      the edge's import list / `hiding` clause;
+    ///   3. the implicit Prelude (or what explicit `import Prelude` forms
+    ///      leave of it).
+    ///
+    /// An own declaration wins over an imported one, and an imported one
+    /// over the Prelude's. Two DIFFERENT imported entities under one bare
+    /// name are ambiguous, reported where the name is used (as in GHC) —
+    /// never at the import, and never by picking one. `Alias.name`
+    /// resolves in the alias's own table: the surfaces of the modules
+    /// imported under that alias, nothing else.
+    ///
+    /// References are bound HERE, once, while the module's own source is
+    /// rewritten to canonical spelling (`Rename`): a local binder shadows
+    /// the module scope, a reference found in scope becomes its entity's
+    /// canonical name, and a reference that denotes nothing in scope
+    /// becomes a placeholder the type checker reports (`ScopeError`).
+    /// Nothing an importer does can change what this module's references
+    /// mean, so the resolved region is cached and merged verbatim — once
+    /// per origin — into every importer.
+    ///
+    /// Record fields, class methods, classes and constructors are not part
+    /// of this model: they remain global names, as before.
+    fn resolve_module(&mut self, module: &Module, own_key: &str) -> Result<Resolved, String> {
+        let is_root = own_key == ROOT_KEY;
+
         // Import declarations grouped per module, in first-appearance order.
         // GHC MERGES repeated imports — each one contributes visibility
         // (`import M (a)` + `import M (b)` makes both visible; qualified
         // and unqualified forms of one module coexist; two aliases both
-        // work). The old `seen_imports` short-circuit dropped every import
-        // after a module's first, so the second list's names stayed hidden
-        // and a second alias was never introduced.
+        // work). `import Prelude ...` loads nothing: the Prelude is always
+        // part of the program, and such an import only declares which of
+        // its names this module sees (`prelude_forms`).
         let mut import_order: Vec<String> = Vec::new();
         let mut import_paths: HashMap<String, Vec<String>> = HashMap::new();
         let mut import_forms: HashMap<String, Vec<ImportItems>> = HashMap::new();
+        let mut prelude_forms: Vec<ImportItems> = Vec::new();
         for decl in &module.decls {
             if let Decl::Import { module_path, items } = decl {
                 let key = module_path.join(".");
+                if key == PRELUDE_KEY {
+                    prelude_forms.push(items.clone());
+                    continue;
+                }
                 if !import_paths.contains_key(&key) {
                     import_order.push(key.clone());
                     import_paths.insert(key.clone(), module_path.clone());
@@ -271,17 +474,14 @@ impl ModuleLoader {
             }
         }
 
-        // Phase 1: resolve every imported module (recursively, through the
-        // cache) and capture its REGION — the declaration list with the
-        // origin runs that partition it — before any naming decision is
-        // made. Decisions are per origin module and must see every edge
-        // (a module can arrive directly, through several forms, and
-        // transitively through other imports, all in one importer).
+        // Phase 1: resolve every imported module and capture its REGION —
+        // the canonical declaration list with the origin runs that
+        // partition it — and its export surface.
         let mut edges: Vec<Edge> = Vec::new();
         for key in &import_order {
             let module_path = &import_paths[key];
-            let resolved = if self.resolved.contains_key(key) {
-                self.resolved.get(key).unwrap().clone()
+            let resolved = if let Some(r) = self.resolved.get(key) {
+                r.clone()
             } else if self.in_progress.contains(key) {
                 // Import cycle: report the actual chain. The old behavior —
                 // an empty placeholder module — compiled on and surfaced
@@ -294,17 +494,18 @@ impl ModuleLoader {
                 chain.push(key);
                 return Err(format!(
                     "module imports form a cycle: {}\n\
-                     mata-ll resolves an import by copying the imported module's \
-                     declarations into the importer, which has no meaning when the \
-                     modules import each other (GHC rejects import cycles for the \
-                     same structural reason). Break the cycle by moving the shared \
+                     mata-ll compiles a program as one unit in which every \
+                     module's declarations come after those of the modules it \
+                     imports, which has no meaning when the modules import \
+                     each other (GHC rejects import cycles for the same \
+                     structural reason). Break the cycle by moving the shared \
                      definitions into a module both can import.",
                     chain.join(" -> ")));
             } else {
                 self.in_progress.insert(key.clone());
                 self.in_progress_stack.push(key.clone());
                 let imported = self.load_module(module_path)?.clone();
-                let r = self.resolve_imports_keyed(&imported, key);
+                let r = self.resolve_module(&imported, key);
                 self.in_progress.remove(key);
                 self.in_progress_stack.pop();
                 let r = r?;
@@ -313,16 +514,11 @@ impl ModuleLoader {
             };
 
             // Include ALL non-import declarations for compilation
-            // (exported functions may depend on internal helpers). The
-            // resolved module is ours (one clone out of the cache above);
-            // its declarations move into the edge.
-            let child_spans = resolved.origin_spans;
-            let decls: Vec<Decl> = resolved.decls.into_iter()
+            // (exported functions may depend on internal helpers).
+            let child_spans = resolved.module.origin_spans;
+            let decls: Vec<Decl> = resolved.module.decls.into_iter()
                 .filter(|d| !matches!(d, Decl::Import { .. }))
                 .collect();
-            // The child's provenance spans, when they cover its
-            // declaration list exactly (a resolved module always does; a
-            // raw one — no spans — counts as one span of its own).
             let spans: Vec<(String, usize)> =
                 if child_spans.iter().map(|(_, n)| n).sum::<usize>() == decls.len()
                     && !child_spans.is_empty()
@@ -343,22 +539,28 @@ impl ModuleLoader {
                     other => unqual.push(other.clone()),
                 }
             }
-            edges.push(Edge { key: key.clone(), unqual, aliases, decls, spans });
+            let listed = self.loaded.get(key).is_some_and(|m| m.exports.is_some());
+            edges.push(Edge {
+                key: key.clone(), unqual, aliases, decls, spans,
+                surface: resolved.surface, listed,
+            });
         }
 
         // `module X` export entries (Haskell 2010 §5.2). X naming the
-        // module itself exports every own declaration (recognized in
-        // private_names_of); X naming an import re-exports every origin
-        // arriving through that edge. The origin-key set is recorded for
-        // this module's importers, whose visibility gate consults it.
+        // module itself exports every own declaration; X naming an import
+        // (by module name or alias) re-exports what that import edge makes
+        // visible here.
+        let mut reexported_edges: Vec<usize> = Vec::new();
+        let mut self_export = false;
         if let Some(ex) = &module.exports {
-            let mut origins: HashSet<String> = HashSet::new();
             for x in &ex.reexports {
                 if x == own_key || module.name.as_deref() == Some(x.as_str()) {
+                    self_export = true;
                     continue;
                 }
-                let matching: Vec<&Edge> = edges.iter()
-                    .filter(|e| e.key == *x || e.aliases.iter().any(|a| a == x))
+                let matching: Vec<usize> = edges.iter().enumerate()
+                    .filter(|(_, e)| e.key == *x || e.aliases.iter().any(|a| a == x))
+                    .map(|(i, _)| i)
                     .collect();
                 if matching.is_empty() {
                     return Err(format!(
@@ -371,15 +573,15 @@ impl ModuleLoader {
                          '{x}') in this module."));
                 }
                 let mut any_unqual = false;
-                for e in &matching {
+                for i in matching {
                     // A qualified-only import leaves nothing in scope
                     // unqualified, and H2010 defines `module X` as the
                     // entities in scope BOTH unqualified and as X.e — so
                     // such an entry exports nothing (GHC warns likewise).
-                    if e.unqual.is_empty() { continue; }
+                    if edges[i].unqual.is_empty() { continue; }
                     any_unqual = true;
-                    for (okey, _) in &e.spans {
-                        origins.insert(okey.clone());
+                    if !reexported_edges.contains(&i) {
+                        reexported_edges.push(i);
                     }
                 }
                 if !any_unqual {
@@ -397,109 +599,108 @@ impl ModuleLoader {
                              puts nothing in scope unqualified. Add an \
                              unqualified 'import' of the module to \
                              re-export it.".to_string()],
-                        baseline: false, excerpt: None,
+                        baseline: false, excerpt: None, names: None,
                     });
                 }
             }
-            self.reexport_origins.insert(own_key.to_string(), origins);
         }
 
-        // Phase 2: decide, per origin module and declaration, whether the
-        // declaration is VISIBLE UNQUALIFIED here. A visible declaration
-        // keeps its bare name; one that is not (selection-hidden, private
-        // to its module's export list, or reachable only through an alias)
-        // is renamed to `Origin.name` — a canonical, importer-independent
-        // spelling that cannot collide with the Prelude, this module, or
-        // another import in the flattened namespace, and that every alias
-        // of the module resolves to. There is exactly ONE copy of every
-        // origin's declarations whatever the import forms: the former
-        // per-alias copies duplicated constructors and instances (B7).
-        //
-        // Explicit hiding on a direct import wins over transitive
-        // visibility through another import; an explicit request (`import
-        // M (a)`) wins over transitive hiding; a module's own export list
-        // wins over both. A request for a name a LIST-CARRYING child does
-        // not export is rejected outright (the surface check below), so
-        // the request-wins rule only ever resurrects names a list-less
-        // child offers. A declaration with an `export` signature keeps
-        // its bare name regardless — the Lua host's contract names it.
-        let mut hidden_names: HashSet<String> = module.hidden.clone();
-        // Names explicitly requested by a Specific import (see above).
-        let mut visible_names: HashSet<String> = HashSet::new();
-        // (origin, name) pairs, by the rule that decides them.
-        let mut private: HashSet<(String, String)> = HashSet::new();
-        let mut private_bases: HashSet<String> = HashSet::new();
-        let mut direct_hidden: HashSet<(String, String)> = HashSet::new();
-        let mut bare_votes: HashSet<(String, String)> = HashSet::new();
-        let mut exported: HashSet<(String, String)> = HashSet::new();
-
-        for edge in &edges {
-            // Names the directly imported module defines but does not
-            // export (genuinely private). Only the module's OWN
-            // declarations count here; what its export list says about
-            // names merged in transitively is per-edge, not absolute, and
-            // is applied through `transitive_gate` below.
-            for name in self.private_names_of(&edge.key) {
-                private.insert((edge.key.clone(), name.clone()));
-                private_bases.insert(name.clone());
-                hidden_names.insert(name);
+        // Phase 2: this module's own entities. Record fields and class
+        // methods are global names; they are in scope here under their
+        // bare spelling and win over anything imported, like every own
+        // declaration.
+        let mut own_vals: HashMap<String, String> = HashMap::new();
+        let mut own_tys: HashMap<String, String> = HashMap::new();
+        let mut own_globals: HashSet<String> = HashSet::new();
+        let mut own_classes: HashSet<String> = HashSet::new();
+        for d in &module.decls {
+            match renamable(d) {
+                Some((n, false)) => {
+                    if !own_vals.contains_key(n) {
+                        own_vals.insert(n.to_string(), self.canon_val(own_key, n));
+                    }
+                }
+                Some((n, true)) => {
+                    if !own_tys.contains_key(n) {
+                        let canon = self.canon_ty(own_key, n);
+                        *self.type_spellings.entry(n.to_string()).or_insert(0) += 1;
+                        self.canon_types.insert(canon.clone());
+                        own_tys.insert(n.to_string(), canon);
+                    }
+                }
+                None => {}
             }
-            // The child's export list, when it has one, also gates its
-            // TRANSITIVE names (H2010 §5.2): an origin passes through only
-            // re-exported wholesale (`module X`) or entity by entity. A
-            // gated-off name is hidden through this edge exactly like a
-            // `hiding` clause — a direct import of the origin elsewhere
-            // still makes it visible.
-            let gate = self.transitive_gate(&edge.key);
-            let gated = |okey: &str, base: &str| -> bool {
-                okey != edge.key
-                    && gate.as_ref().is_some_and(|(names, origins)|
-                        !origins.contains(okey) && !names.contains(base))
-            };
+            own_globals.extend(global_value_names(d));
+            if let Decl::ClassDecl { name, .. } = d {
+                own_classes.insert(name.clone());
+            }
+        }
+        for (n, canon) in own_vals.iter().chain(own_tys.iter()) {
+            if canon != n {
+                self.source_names.insert(canon.clone(), n.clone());
+            }
+        }
+        for d in &module.decls {
+            if let Decl::TypeSig { name, ty } | Decl::ExportSig { name, ty } = d {
+                self.shapes.entry(own_vals[name].clone()).or_insert_with(|| type_shape(ty));
+            }
+        }
+
+        // Phase 3: the import scope. Each unqualified edge contributes the
+        // child's surface, minus what the edge's forms leave out. A name
+        // this module hides on a DIRECT import of its defining module does
+        // not come back through another import that merely passes it on.
+        // Everything an edge could have named but does not make visible
+        // is remembered as `hidden`, for the diagnostic on a bare use.
+        let direct_hidden = |origin: &str, n: &str| -> bool {
+            edges.iter().any(|d| d.key == origin
+                && !d.unqual.is_empty()
+                && hidden_by_forms(&d.unqual, n))
+        };
+        let visible_through = |e: &Edge, origin: &str, n: &str| -> bool {
+            !e.unqual.is_empty() && !hidden_by_forms(&e.unqual, n) && !direct_hidden(origin, n)
+        };
+        let mut imp_vals: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+        let mut imp_tys: BTreeMap<String, Vec<Candidate>> = BTreeMap::new();
+        // name -> the module whose import form leaves it out (None: the
+        // imported module itself keeps it back).
+        let mut hidden: HashMap<String, Option<String>> = HashMap::new();
+        let mut region_globals: HashSet<String> = HashSet::new();
+        for (via, e) in edges.iter().enumerate() {
+            for d in &e.decls {
+                region_globals.extend(global_value_names(d));
+            }
+            for n in &e.surface.withheld {
+                hidden.entry(n.clone()).or_insert(None);
+            }
             // An import (or hiding) list may only name entities the child
             // actually exports (Haskell 2010 §5.3.1; GHC: "Module 'A' does
-            // not export 'f'"). Without this check a Specific request
-            // force-visibled the name right past the child's export list
-            // (the request-wins rule below has no privacy exception for
-            // TRANSITIVE names). Only a list-carrying child is checked: a
+            // not export 'f'"). Only a list-carrying child is checked: a
             // list-less module offers its whole import closure, mata-ll's
             // long-standing behavior. Constructors, record fields and
             // class methods are global names that travel with their type
-            // or class, so they always count as offered — visibility
-            // never gates them individually.
-            if let Some((ex_names, ex_origins)) = &gate {
-                let child_private: HashSet<String> =
-                    self.private_names_of(&edge.key).into_iter().collect();
-                let mut surface: HashSet<String> = ex_names.clone();
-                for (okey, slice) in runs(&edge.spans, &edge.decls) {
-                    let pass = okey == edge.key || ex_origins.contains(okey);
-                    for d in slice {
-                        if let Some(n) = decl_name(d) {
-                            let base = base_of(okey, &n);
-                            if matches!(d, Decl::ExportSig { .. })
-                                || (pass
-                                    && !(okey == edge.key
-                                        && child_private.contains(base)))
-                            {
-                                surface.insert(base.to_string());
-                            }
-                        }
-                        surface.extend(decl_constructors(d));
-                        surface.extend(con_record_fields(d));
-                        if let Decl::ClassDecl { methods, .. } = d {
-                            surface.extend(methods.iter().map(|m| m.name.clone()));
-                        }
-                    }
+            // or class, so they always count as offered.
+            if e.listed {
+                let mut offered: HashSet<String> = e.surface.vals.keys()
+                    .chain(e.surface.tys.keys())
+                    .chain(e.surface.classes.iter())
+                    .cloned()
+                    .collect();
+                for d in &e.decls {
+                    offered.extend(decl_constructors(d));
+                    offered.extend(global_value_names(d));
                 }
-                for form in &edge.unqual {
+                for form in &e.unqual {
                     let (items, hiding) = match form {
                         ImportItems::Specific(items) => (items, false),
                         ImportItems::Hiding(items) => (items, true),
                         _ => continue,
                     };
-                    for n in item_names(items) {
-                        if surface.contains(&n) { continue; }
-                        let key = &edge.key;
+                    let mut names: Vec<String> = item_names(items).into_iter().collect();
+                    names.sort();
+                    for n in names {
+                        if offered.contains(&n) { continue; }
+                        let key = &e.key;
                         if hiding {
                             // Hiding what isn't offered is harmless;
                             // GHC accepts it too (a -Wdodgy-imports
@@ -518,7 +719,7 @@ impl ModuleLoader {
                                      nothing to hide. Remove it from the \
                                      list (GHC warns likewise, under \
                                      -Wdodgy-imports).")],
-                                baseline: false, excerpt: None,
+                                baseline: false, excerpt: None, names: None,
                             });
                             continue;
                         }
@@ -534,180 +735,204 @@ impl ModuleLoader {
                     }
                 }
             }
-            for form in &edge.unqual {
-                if let ImportItems::Specific(items) = form {
-                    visible_names.extend(item_names(items));
-                }
+            if e.unqual.is_empty() {
+                continue;
             }
-            for (okey, slice) in runs(&edge.spans, &edge.decls) {
-                for d in slice {
-                    let Some((n, _)) = renamable(d) else {
-                        // Class and instance names: global, never renamed;
-                        // the hidden bookkeeping still records them (as it
-                        // always did; only value uses are enforced).
-                        if !edge.unqual.is_empty()
-                            && let Some(n) = decl_name(d)
-                            && (hidden_by_forms(&edge.unqual, &n) || gated(okey, &n))
-                        {
-                            hidden_names.insert(n);
-                        }
-                        continue;
-                    };
-                    let base = base_of(okey, n);
-                    if matches!(d, Decl::ExportSig { .. }) {
-                        exported.insert((okey.to_string(), base.to_string()));
-                    }
-                    // Prefixed by the child already: not visible through
-                    // this edge, whatever its forms say.
-                    if base != n || edge.unqual.is_empty() {
-                        continue;
-                    }
-                    if hidden_by_forms(&edge.unqual, base) || gated(okey, base) {
-                        if okey == edge.key {
-                            direct_hidden.insert((okey.to_string(), base.to_string()));
-                        }
-                        hidden_names.insert(base.to_string());
-                    } else {
-                        bare_votes.insert((okey.to_string(), base.to_string()));
-                    }
-                }
-            }
-        }
-        let is_bare = |okey: &str, base: &str| -> bool {
-            let k = (okey.to_string(), base.to_string());
-            if exported.contains(&k) { return true; }
-            if private.contains(&k) { return false; }
-            if visible_names.contains(base) { return true; }
-            if direct_hidden.contains(&k) { return false; }
-            bare_votes.contains(&k)
-        };
-
-        // Phase 3: merge. Each edge's region is renamed from the child's
-        // spelling to this level's canonical one (both directions — the
-        // child may have hidden what we see, or see what we hide), then
-        // its runs go in once: a diamond's shared module arrives through
-        // every path and must contribute its declarations once.
-        let mut imported_decls: Vec<Decl> = Vec::new();
-        let mut out_spans: Vec<(String, usize)> = Vec::new();
-        let mut merged_origins: HashSet<String> = HashSet::new();
-        // alias -> (value name -> canonical, type name -> canonical)
-        let mut alias_table: HashMap<String, AliasNames> = HashMap::new();
-        // Bare canonical names decided by visibility (not by an export
-        // signature): these are in scope, so a hidden entry recorded for
-        // the same name by another edge or origin must not reject them.
-        let mut bare_seen: HashSet<String> = HashSet::new();
-        for edge in &edges {
-            let gate = self.transitive_gate(&edge.key);
-            let gated = |okey: &str, base: &str| -> bool {
-                okey != edge.key
-                    && gate.as_ref().is_some_and(|(names, origins)|
-                        !origins.contains(okey) && !names.contains(base))
-            };
-            let mut vals: HashMap<String, String> = HashMap::new();
-            let mut tys: HashMap<String, String> = HashMap::new();
-            for (okey, slice) in runs(&edge.spans, &edge.decls) {
-                for d in slice {
-                    let Some((n, is_ty)) = renamable(d) else { continue };
-                    let base = base_of(okey, n);
-                    let bare = is_bare(okey, base);
-                    if bare && !exported.contains(&(okey.to_string(), base.to_string())) {
-                        bare_seen.insert(base.to_string());
-                    }
-                    let canon = if bare { base.to_string() } else { format!("{okey}.{base}") };
-                    if canon != n {
-                        let map = if is_ty { &mut tys } else { &mut vals };
-                        map.insert(n.to_string(), canon);
-                    }
-                }
-            }
-            let renamed: Vec<Decl> = if vals.is_empty() && tys.is_empty() {
-                edge.decls.clone()
-            } else {
-                let no_cons = HashMap::new();
-                let rn = Rename { vals: &vals, tys: &tys, cons: &no_cons };
-                edge.decls.iter().map(|d| rn.decl(d)).collect()
-            };
-            for (okey, slice) in runs(&edge.spans, &renamed) {
-                if merged_origins.insert(okey.to_string()) {
-                    imported_decls.extend(slice.iter().cloned());
-                    out_spans.push((okey.to_string(), slice.len()));
-                }
-                for alias in &edge.aliases {
-                    let entry = alias_table.entry(alias.clone()).or_default();
-                    for d in slice {
-                        match d {
-                            // Class methods and record fields are global
-                            // names; `A.method` / `A.field` name them.
-                            Decl::ClassDecl { methods, .. } => {
-                                for m in methods {
-                                    entry.vals.entry(m.name.clone()).or_insert_with(|| m.name.clone());
-                                }
-                            }
-                            _ => {}
-                        }
-                        for f in con_record_fields(d) {
-                            entry.vals.entry(f.clone()).or_insert(f);
-                        }
-                        for c in decl_constructors(d) {
-                            entry.cons.entry(c.clone()).or_insert(c);
-                        }
-                        if let Some((n, is_ty)) = renamable(d) {
-                            let base = base_of(okey, n).to_string();
-                            // A name the module keeps private, or gates off
-                            // through its export list, is not reachable
-                            // through an alias either.
-                            if private.contains(&(okey.to_string(), base.clone()))
-                                || gated(okey, &base)
-                            {
-                                continue;
-                            }
-                            let map = if is_ty { &mut entry.tys } else { &mut entry.vals };
-                            map.entry(base).or_insert_with(|| n.to_string());
-                        }
-                    }
-                }
-            }
-            // Names the child's export list offers that no declaration in
-            // its region provides are Prelude (or builtin) names it
-            // re-exports — Data.Maybe's `maybe`, Data.List's `map`/`span`,
-            // Control.Monad's `sequence_`. They live in the flat namespace
-            // under their bare name, so `A.name` resolves to that, exactly
-            // as GHC resolves `M.maybe` through `import qualified
-            // Data.Maybe as M` to Prelude's. Until 2026-09-12 the alias
-            // table knew only declaration-provided names: `L.span` never
-            // resolved, and `M.maybe` went unbound the moment `maybe`
-            // moved from Data.Maybe into the Prelude.
-            if !edge.aliases.is_empty()
-                && let Some(ex) = self.loaded.get(&edge.key).and_then(|m| m.exports.as_ref())
-            {
-                for alias in &edge.aliases {
-                    let entry = alias_table.entry(alias.clone()).or_default();
-                    for n in &ex.names {
-                        if entry.vals.contains_key(n)
-                            || entry.tys.contains_key(n)
-                            || entry.cons.contains_key(n)
-                        {
+            for (names, out) in [(&e.surface.vals, &mut imp_vals), (&e.surface.tys, &mut imp_tys)] {
+                for (n, ents) in names {
+                    for ent in ents {
+                        if !visible_through(e, &ent.origin, n) {
+                            hidden.entry(n.clone()).or_insert_with(|| Some(e.key.clone()));
                             continue;
                         }
-                        if n.chars().next().is_some_and(|c| c.is_ascii_uppercase()) {
-                            entry.tys.entry(n.clone()).or_insert_with(|| n.clone());
-                            entry.cons.entry(n.clone()).or_insert_with(|| n.clone());
-                        } else {
-                            entry.vals.entry(n.clone()).or_insert_with(|| n.clone());
+                        let cands = out.entry(n.clone()).or_default();
+                        if !cands.iter().any(|c| c.entity.canon == ent.canon) {
+                            cands.push(Candidate { entity: ent.clone(), via });
                         }
                     }
                 }
             }
         }
-        // An explicit import of a name overrides transitive selection-hiding,
-        // but never a module's own export-list privacy; and a name that
-        // resolves to a visible declaration is not hidden.
-        for v in &visible_names {
-            if !private_bases.contains(v) {
-                hidden_names.remove(v);
+
+        // Phase 4: the Prelude's share of the scope. Without an explicit
+        // `import Prelude` every Prelude name is visible; with one (or
+        // several), exactly what the unqualified forms admit — none, when
+        // the Prelude is only imported qualified (Haskell 2010 §5.6.1).
+        let prelude_restricted = !prelude_forms.is_empty();
+        let prelude_unqual: Vec<ImportItems> = prelude_forms.iter()
+            .filter(|f| !matches!(f, ImportItems::Qualified(_)))
+            .cloned()
+            .collect();
+        let prelude_visible = |n: &str| -> bool {
+            !prelude_restricted
+                || (!prelude_unqual.is_empty() && !hidden_by_forms(&prelude_unqual, n))
+        };
+
+        // An unqualified import that brings in a name the Prelude also
+        // provides, AT A DIFFERENT TYPE, is rejected here with the fix
+        // spelled out: every bare use of the name would otherwise mean the
+        // import's declaration, which is rarely what the importer intends
+        // (`import Data.Map` and then `null xs` on a list). GHC reports the
+        // same clash as an ambiguity where the name is used. At the SAME
+        // type shape the import's declaration is taken as this module's
+        // replacement for the Prelude's (an FFI re-declaration like
+        // `sqrt`, a library's own copy of a Prelude function) and simply
+        // shadows it in this module.
+        let mut collisions: BTreeMap<usize, Vec<String>> = BTreeMap::new();
+        for (n, cands) in &imp_vals {
+            if own_vals.contains_key(n) || own_globals.contains(n) || !prelude_visible(n) {
+                continue;
+            }
+            let Some(prelude_shape) = self.prelude.shapes.get(n) else { continue };
+            for c in cands {
+                if c.entity.origin != PRELUDE_KEY
+                    && self.shapes.get(&c.entity.canon).is_some_and(|s| s != prelude_shape)
+                {
+                    collisions.entry(c.via).or_default().push(n.clone());
+                }
             }
         }
-        hidden_names.retain(|n| !bare_seen.contains(n));
+        if let Some((via, names)) = collisions.into_iter().next() {
+            let importer = (!is_root).then(|| self.module_label(own_key));
+            return Err(collision_error(&edges[via].key, &names, importer.as_deref()));
+        }
+
+        // Phase 5: the bare-name tables the rewrite of this module's own
+        // source consults — bare name -> the spelling to put in its place.
+        // A name absent from a table is left as written: it is a local
+        // binder's business, a Prelude or global name, or unknown (which
+        // the type checker reports).
+        let placeholders = Placeholders::new(self.scope_errors.len());
+        let mut vals: HashMap<String, String> = HashMap::new();
+        let mut tys: HashMap<String, String> = HashMap::new();
+        let mut cons: HashMap<String, String> = HashMap::new();
+        {
+            let mut names: BTreeSet<&str> = BTreeSet::new();
+            names.extend(own_vals.keys().map(String::as_str));
+            names.extend(imp_vals.keys().map(String::as_str));
+            names.extend(hidden.keys().map(String::as_str).filter(|n| !is_type_spelling(n)));
+            if prelude_restricted {
+                names.extend(self.prelude.values.iter().map(String::as_str));
+            }
+            if !is_root {
+                names.extend(self.root_vals.iter().map(String::as_str));
+            }
+            for n in names {
+                let target = if let Some(canon) = own_vals.get(n) {
+                    Some(canon.clone())
+                } else if own_globals.contains(n) {
+                    None
+                } else if let Some(cands) = imp_vals.get(n) {
+                    Some(match cands.as_slice() {
+                        [one] => one.entity.canon.clone(),
+                        many => placeholders.make(ambiguous_occurrence(n, many, &edges)),
+                    })
+                } else if region_globals.contains(n) {
+                    None
+                } else if self.prelude.values.contains(n) {
+                    if prelude_visible(n) || DESUGARED_TO.contains(&n) {
+                        None
+                    } else {
+                        Some(placeholders.make(prelude_hidden(n)))
+                    }
+                } else if let Some(by) = hidden.get(n) {
+                    Some(placeholders.make(not_exported(n, by.as_deref())))
+                } else if !is_root && self.root_vals.contains(n) {
+                    // The entry module's declaration of this name is not
+                    // in scope in a module it imports.
+                    Some(placeholders.make(ScopeError::Unbound(n.to_string())))
+                } else {
+                    None
+                };
+                if let Some(t) = target
+                    && t != n
+                {
+                    vals.insert(n.to_string(), t);
+                }
+            }
+        }
+        {
+            let mut names: BTreeSet<&str> = BTreeSet::new();
+            names.extend(own_tys.keys().map(String::as_str));
+            names.extend(imp_tys.keys().map(String::as_str));
+            names.extend(hidden.keys().map(String::as_str).filter(|n| is_type_spelling(n)));
+            if prelude_restricted {
+                names.extend(self.prelude.types.iter().map(String::as_str));
+            }
+            if !is_root {
+                names.extend(self.root_tys.iter().map(String::as_str));
+            }
+            for n in names {
+                let target = if let Some(canon) = own_tys.get(n) {
+                    Some(canon.clone())
+                } else if let Some(cands) = imp_tys.get(n) {
+                    Some(match cands.as_slice() {
+                        [one] => one.entity.canon.clone(),
+                        many => placeholders.make(ambiguous_occurrence(n, many, &edges)),
+                    })
+                } else if self.prelude.types.contains(n) {
+                    if prelude_visible(n) {
+                        None
+                    } else {
+                        Some(placeholders.make(ScopeError::UnknownType(n.to_string())))
+                    }
+                } else if let Some(by) = hidden.get(n) {
+                    Some(placeholders.make(not_exported(n, by.as_deref())))
+                } else if !is_root && self.root_tys.contains(n) {
+                    Some(placeholders.make(ScopeError::UnknownType(n.to_string())))
+                } else {
+                    None
+                };
+                if let Some(t) = target
+                    && t != n
+                {
+                    tys.insert(n.to_string(), t);
+                }
+            }
+        }
+
+        // Phase 6: the alias tables. `A.name` names what the modules
+        // imported as `A` EXPORT — their surfaces — and nothing else: not
+        // their private names, and not a declaration of some other module
+        // that happens to share the spelling. Two modules under one alias
+        // offering different entities for one name make `A.name`
+        // ambiguous, reported where it is used. Constructors, record
+        // fields and class methods are global names; `A.C` / `A.field`
+        // name them for every declaration in the module's region.
+        let mut alias_table: BTreeMap<String, AliasNames> = BTreeMap::new();
+        for e in &edges {
+            for alias in &e.aliases {
+                let entry = alias_table.entry(alias.clone()).or_default();
+                for (names, out) in [(&e.surface.vals, &mut entry.vals), (&e.surface.tys, &mut entry.tys)] {
+                    for (n, ents) in names {
+                        let slot = out.entry(n.clone()).or_default();
+                        for ent in ents {
+                            if !slot.iter().any(|x| x.canon == ent.canon) {
+                                slot.push(ent.clone());
+                            }
+                        }
+                    }
+                }
+                for d in &e.decls {
+                    entry.globals.extend(global_value_names(d));
+                    entry.cons.extend(decl_constructors(d));
+                }
+            }
+        }
+        for form in &prelude_forms {
+            if let ImportItems::Qualified(alias) = form {
+                let entry = alias_table.entry(alias.clone()).or_default();
+                for (names, out) in [(&self.prelude.values, &mut entry.vals), (&self.prelude.types, &mut entry.tys)] {
+                    for n in names {
+                        let slot = out.entry(n.clone()).or_default();
+                        if !slot.iter().any(|x| x.canon == *n) {
+                            slot.push(Entity { canon: n.clone(), origin: PRELUDE_KEY.to_string() });
+                        }
+                    }
+                }
+                entry.cons.extend(self.prelude.constructors.iter().cloned());
+            }
+        }
 
         // A constructor use `f M` and a qualified reference `M.f` parse to
         // the SAME shape — `App(Var "f", Con "M")` (field access desugars
@@ -721,15 +946,8 @@ impl ModuleLoader {
         // from GHC, whose module aliases live in a separate namespace — so
         // warn, pointing at the rename that restores them.
         let ctor_names: HashSet<String> = module.decls.iter()
-            .chain(imported_decls.iter())
-            .flat_map(|d| -> Vec<String> {
-                match d {
-                    Decl::DataDef { constructors, .. } =>
-                        constructors.iter().map(|c| c.name.clone()).collect(),
-                    Decl::NewtypeDef { con_name: Some(c), .. } => vec![c.clone()],
-                    _ => Vec::new(),
-                }
-            })
+            .chain(edges.iter().flat_map(|e| e.decls.iter()))
+            .flat_map(decl_constructors)
             .collect();
         let qualified_aliases: HashSet<String> = alias_table.keys()
             .filter(|a| {
@@ -750,7 +968,7 @@ impl ModuleLoader {
                              aliases in a separate namespace and allows both; \
                              rename the alias (e.g. 'as {a}M') to use \
                              qualified references.")],
-                        baseline: false, excerpt: None,
+                        baseline: false, excerpt: None, names: None,
                     });
                 }
                 keep
@@ -758,28 +976,43 @@ impl ModuleLoader {
             .cloned()
             .collect();
         // Use sites in this module: `A.f` (collapsed from the field-access
-        // shape), `A.T` and `A.C` resolve through the alias table to the one
-        // canonical declaration. A qualified TYPE or CONSTRUCTOR is
-        // unambiguous, so it resolves through every alias, including one a
-        // constructor shadows at the value level. An unknown `A.f` stays as written
-        // and is reported as unbound.
-        let mut own_vals: HashMap<String, String> = HashMap::new();
-        let mut own_tys: HashMap<String, String> = HashMap::new();
-        let mut own_cons: HashMap<String, String> = HashMap::new();
+        // shape), `A.T` and `A.C` resolve through the alias table. A
+        // qualified TYPE or CONSTRUCTOR is unambiguous, so it resolves
+        // through every alias, including one a constructor shadows at the
+        // value level. A qualified name the table does not hold is given
+        // no entry here; the rewrite reports it as unbound (`Rename::v`,
+        // `Rename::t`) rather than leave a spelling that could coincide
+        // with some module's canonical name.
         for (alias, names) in &alias_table {
-            for (base, canon) in &names.tys {
-                own_tys.insert(format!("{alias}.{base}"), canon.clone());
+            for (n, ents) in &names.tys {
+                tys.insert(format!("{alias}.{n}"), match ents.as_slice() {
+                    [one] => one.canon.clone(),
+                    many => placeholders.make(ambiguous_alias(alias, n, many)),
+                });
             }
-            for (base, canon) in &names.cons {
-                own_cons.insert(format!("{alias}.{base}"), canon.clone());
+            for c in &names.cons {
+                cons.insert(format!("{alias}.{c}"), c.clone());
             }
             if qualified_aliases.contains(alias) {
-                for (base, canon) in &names.vals {
-                    own_vals.insert(format!("{alias}.{base}"), canon.clone());
+                for g in &names.globals {
+                    vals.insert(format!("{alias}.{g}"), g.clone());
+                }
+                for (n, ents) in &names.vals {
+                    vals.insert(format!("{alias}.{n}"), match ents.as_slice() {
+                        [one] => one.canon.clone(),
+                        many => placeholders.make(ambiguous_alias(alias, n, many)),
+                    });
                 }
             }
         }
-        let own_rename = Rename { vals: &own_vals, tys: &own_tys, cons: &own_cons };
+
+        // Phase 7: rewrite this module's own declarations to canonical
+        // spelling, binding every reference in the scope built above.
+        let alias_names: HashSet<String> = alias_table.keys().cloned().collect();
+        let rename = Rename {
+            vals: &vals, tys: &tys, cons: &cons,
+            aliases: &alias_names, placeholders: &placeholders,
+        };
         let mut own_decls: Vec<Decl> = Vec::new();
         for decl in &module.decls {
             if matches!(decl, Decl::Import { .. }) {
@@ -790,140 +1023,177 @@ impl ModuleLoader {
             } else {
                 rewrite_qualified_uses_decl(decl.clone(), &qualified_aliases)
             };
-            let d = if own_vals.is_empty() && own_tys.is_empty() && own_cons.is_empty() {
-                d
-            } else {
-                own_rename.decl(&d)
-            };
-            own_decls.push(d);
+            own_decls.push(rename.decl(&d));
         }
 
-        // Merge: imported first, then own. The own span is keyed by this
-        // module's import key so a PARENT merging this resolved module can
-        // recognize these declarations when they also arrive via a sibling.
-        out_spans.push((own_key.to_string(), own_decls.len()));
-        imported_decls.extend(own_decls);
-        Ok(Module { decls: imported_decls, name: module.name.clone(), exports: None, hidden: hidden_names, origin_spans: out_spans })
-    }
-
-    /// The names a loaded module defines itself but leaves out of its
-    /// header export list (`module M (a, b) where`): private to it. Empty
-    /// without an export list, or for a module that is not loaded.
-    fn private_names_of(&self, key: &str) -> Vec<String> {
-        let Some(m) = self.loaded.get(key) else { return Vec::new() };
-        let Some(exports) = &m.exports else { return Vec::new() };
-        // The self re-export (`module M (module M, ...) where`) exports
-        // every own declaration: nothing is private.
-        if exports.reexports.iter()
-            .any(|x| x == key || m.name.as_deref() == Some(x.as_str()))
-        {
-            return Vec::new();
-        }
-        m.decls.iter()
-            .filter(|d| !matches!(d, Decl::Import { .. }))
-            .filter_map(decl_name)
-            .filter(|n| !exports.names.contains(n))
-            .collect()
-    }
-
-    /// The visibility gate a directly imported module's header export list
-    /// puts on its TRANSITIVE names (Haskell 2010 §5.2): `Some((names,
-    /// origins))` when module `key` carries an export list — a transitive
-    /// origin's name passes through only when the origin is re-exported
-    /// wholesale (`module X` entries, resolved to origin keys in
-    /// `reexport_origins`) or the entity is named individually. `None` =
-    /// no export list, no gate: every import leaks through, mata-ll's
-    /// long-standing behavior for list-less modules. The module's OWN
-    /// declarations are governed by `private_names_of`, not this.
-    fn transitive_gate(&self, key: &str) -> Option<(HashSet<String>, HashSet<String>)> {
-        let m = self.loaded.get(key)?;
-        let ex = m.exports.as_ref()?;
-        let names: HashSet<String> = ex.names.iter().cloned().collect();
-        let origins = self.reexport_origins.get(key).cloned().unwrap_or_default();
-        Some((names, origins))
-    }
-
-    /// Flag unqualified imports that redefine an existing name *with an
-    /// incompatible type* (against the Prelude, this file, or an earlier
-    /// import). Because mata-ll flattens every import into one namespace, such a
-    /// clash otherwise surfaces later as a baffling unification error deep inside
-    /// the imported module. A matching type shape (an FFI re-declaration like
-    /// `sqrt`, or the same definition re-exported through a diamond import) is
-    /// harmless and not flagged. Only the names the import form makes VISIBLE
-    /// take part: a name the form hides, or that the module keeps private, is
-    /// renamed out of the way by `resolve_imports` (an `export`ed name keeps
-    /// its bare name and is checked). Call after `resolve_imports`, which
-    /// populates the resolved-module cache this reads. `reserved` maps
-    /// globally-provided names (the Prelude's) to their type shapes.
-    pub fn check_import_collisions(
-        &self,
-        module: &Module,
-        reserved: &HashMap<String, String>,
-    ) -> Result<(), String> {
-        // name -> (source label, type shape)
-        let mut claimed: HashMap<String, (String, String)> = reserved.iter()
-            .map(|(n, shape)| (n.clone(), ("the Prelude".to_string(), shape.clone())))
-            .collect();
-        for (name, shape) in signature_shapes(&module.decls) {
-            claimed.entry(name).or_insert(("this file".to_string(), shape));
-        }
-
-        for d in &module.decls {
-            let Decl::Import { module_path, items } = d else { continue };
-            // Qualified imports are renamed to `Module.name` and can't collide.
-            if matches!(items, ImportItems::Qualified(_)) {
-                continue;
+        // Phase 8: what this module offers its importers. Without an
+        // export list: every own declaration plus everything its
+        // unqualified imports make visible here (mata-ll's long-standing
+        // pass-through; GHC exports the own declarations only). With one:
+        // the listed own declarations (all of them under the self
+        // re-export), each listed name that resolves to an import or to
+        // the Prelude, and what the `module X` entries' import edges make
+        // visible. Everything else the module declares or sees is
+        // `withheld`: a bare use in an importer is told it is not
+        // exported, instead of plain "unbound".
+        let own_entity = |canon: &String| vec![Entity {
+            canon: canon.clone(), origin: own_key.to_string(),
+        }];
+        let entities = |cands: &Vec<Candidate>| -> Vec<Entity> {
+            cands.iter().map(|c| c.entity.clone()).collect()
+        };
+        let mut surface = Surface::default();
+        match &module.exports {
+            None => {
+                for (n, canon) in &own_vals {
+                    surface.vals.insert(n.clone(), own_entity(canon));
+                }
+                for (n, canon) in &own_tys {
+                    surface.tys.insert(n.clone(), own_entity(canon));
+                }
+                for (n, cands) in &imp_vals {
+                    if !own_globals.contains(n) {
+                        surface.vals.entry(n.clone()).or_insert_with(|| entities(cands));
+                    }
+                }
+                for (n, cands) in &imp_tys {
+                    surface.tys.entry(n.clone()).or_insert_with(|| entities(cands));
+                }
+                surface.classes.extend(own_classes.iter().cloned());
+                for e in edges.iter().filter(|e| !e.unqual.is_empty()) {
+                    surface.classes.extend(e.surface.classes.iter().cloned());
+                }
             }
-            let key = module_path.join(".");
-            // Skip if the module didn't resolve (e.g. an import cycle).
-            let Some(resolved) = self.resolved.get(&key) else { continue };
-            let private: HashSet<String> = self.private_names_of(&key).into_iter().collect();
-            // Transitive names the module's export list gates off (see
-            // transitive_gate): not visible here, so not collision-checked.
-            let mut gated_off: HashSet<String> = HashSet::new();
-            if let Some((names, origins)) = self.transitive_gate(&key) {
-                for (okey, slice) in runs(&resolved.origin_spans, &resolved.decls) {
-                    if okey == key || origins.contains(okey) { continue; }
-                    for d in slice {
-                        if let Some(n) = decl_name(d)
-                            && !names.contains(&n)
-                        {
-                            gated_off.insert(n);
+            Some(ex) => {
+                let listed: HashSet<&str> = ex.names.iter().map(String::as_str).collect();
+                for (n, canon) in &own_vals {
+                    if self_export || listed.contains(n.as_str()) {
+                        surface.vals.insert(n.clone(), own_entity(canon));
+                    }
+                }
+                for (n, canon) in &own_tys {
+                    if self_export || listed.contains(n.as_str()) {
+                        surface.tys.insert(n.clone(), own_entity(canon));
+                    }
+                }
+                for c in &own_classes {
+                    if self_export || listed.contains(c.as_str()) {
+                        surface.classes.insert(c.clone());
+                    }
+                }
+                let prelude_entity = |n: &String| vec![Entity {
+                    canon: n.clone(), origin: PRELUDE_KEY.to_string(),
+                }];
+                for n in &ex.names {
+                    if own_vals.contains_key(n) || own_tys.contains_key(n)
+                        || own_globals.contains(n) || own_classes.contains(n)
+                    {
+                        continue;
+                    }
+                    if let Some(cands) = imp_vals.get(n) {
+                        surface.vals.insert(n.clone(), entities(cands));
+                    } else if let Some(cands) = imp_tys.get(n) {
+                        surface.tys.insert(n.clone(), entities(cands));
+                    } else if self.prelude.values.contains(n) && !region_globals.contains(n) {
+                        surface.vals.insert(n.clone(), prelude_entity(n));
+                    } else if self.prelude.types.contains(n) {
+                        surface.tys.insert(n.clone(), prelude_entity(n));
+                    }
+                    if edges.iter().any(|e| e.surface.classes.contains(n)) {
+                        surface.classes.insert(n.clone());
+                    }
+                }
+                for &i in &reexported_edges {
+                    let e = &edges[i];
+                    for (names, out) in [(&e.surface.vals, &mut surface.vals), (&e.surface.tys, &mut surface.tys)] {
+                        for (n, ents) in names {
+                            for ent in ents {
+                                if !visible_through(e, &ent.origin, n) {
+                                    continue;
+                                }
+                                let slot = out.entry(n.clone()).or_default();
+                                if !slot.iter().any(|x| x.canon == ent.canon) {
+                                    slot.push(ent.clone());
+                                }
+                            }
                         }
+                    }
+                    surface.classes.extend(e.surface.classes.iter().cloned());
+                }
+                for n in own_vals.keys().chain(imp_vals.keys()) {
+                    if !surface.vals.contains_key(n) {
+                        surface.withheld.insert(n.clone());
+                    }
+                }
+                for n in own_tys.keys().chain(imp_tys.keys()) {
+                    if !surface.tys.contains_key(n) {
+                        surface.withheld.insert(n.clone());
                     }
                 }
             }
-            let exported: HashSet<String> = resolved.decls.iter()
-                .filter_map(|d| match d {
-                    Decl::ExportSig { name, .. } => Some(name.clone()),
-                    _ => None,
-                })
-                .collect();
-            let visible = |name: &String| -> bool {
-                exported.contains(name)
-                    || (!private.contains(name)
-                        && !gated_off.contains(name)
-                        && !hidden_by_forms(std::slice::from_ref(items), name))
-            };
+        }
 
-            let shapes = signature_shapes(&resolved.decls);
-            let mut collisions: Vec<(String, String)> = Vec::new();
-            for (name, shape) in &shapes {
-                if visible(name)
-                    && let Some((src, claimed_shape)) = claimed.get(name)
-                    && claimed_shape != shape
-                {
-                    collisions.push((name.clone(), src.clone()));
+        // Merge: imported regions first — each origin ONCE, however many
+        // edges carry it (a diamond's shared module arrives through every
+        // path) — then own. Every region is already canonical, so nothing
+        // is renamed here. The own span is keyed by this module's import
+        // key so a PARENT merging this resolved module can recognize these
+        // declarations when they also arrive via a sibling.
+        let mut decls: Vec<Decl> = Vec::new();
+        let mut out_spans: Vec<(String, usize)> = Vec::new();
+        let mut merged_origins: HashSet<String> = HashSet::new();
+        for e in &edges {
+            for (okey, slice) in runs(&e.spans, &e.decls) {
+                if merged_origins.insert(okey.to_string()) {
+                    decls.extend(slice.iter().cloned());
+                    out_spans.push((okey.to_string(), slice.len()));
                 }
             }
-            if !collisions.is_empty() {
-                collisions.sort();
-                return Err(collision_error(&key, &collisions));
-            }
-            // Later imports compare against this one too.
-            for (name, shape) in shapes {
-                if visible(&name) {
-                    claimed.entry(name).or_insert((key.clone(), shape));
+        }
+        out_spans.push((own_key.to_string(), own_decls.len()));
+        decls.extend(own_decls);
+        self.scope_errors.extend(placeholders.into_made());
+        Ok(Resolved {
+            module: Module {
+                decls,
+                name: module.name.clone(),
+                exports: None,
+                resolution: Resolution::default(),
+                origin_spans: out_spans,
+            },
+            surface,
+        })
+    }
+
+    /// How a diagnostic names module `key`: its file where it has one.
+    fn module_label(&self, key: &str) -> String {
+        match self.module_sources.get(key) {
+            Some((display, _)) => format!("'{key}' ({display})"),
+            None => format!("'{key}'"),
+        }
+    }
+
+    /// The compiled program returns ONE table to the Lua host, keyed by
+    /// the names its `export` declarations carry in their own modules. Two
+    /// modules exporting one name would overwrite each other's entry.
+    fn check_host_exports(&self, program: &Module) -> Result<(), String> {
+        let mut seen: HashMap<String, String> = HashMap::new();
+        for (okey, slice) in runs(&program.origin_spans, &program.decls) {
+            for d in slice {
+                let Decl::ExportSig { name, .. } = d else { continue };
+                let host = self.source_names.get(name).unwrap_or(name).clone();
+                let here = if okey == ROOT_KEY { "this file".to_string() } else { format!("module '{okey}'") };
+                if let Some(prev) = seen.get(&host) {
+                    if *prev != here {
+                        return Err(format!(
+                            "'{host}' is exported to the Lua host by both {prev} and {here}\n\
+                             The compiled program returns one table with one entry \
+                             per exported name, so two 'export {host}' declarations \
+                             cannot both be honoured. Rename one of them, or drop \
+                             one of the 'export' declarations."));
+                    }
+                } else {
+                    seen.insert(host, here);
                 }
             }
         }
@@ -931,26 +1201,257 @@ impl ModuleLoader {
     }
 }
 
+/// The module key the entry module is resolved under. Not a legal module
+/// name, so it cannot collide with an imported module's key.
+const ROOT_KEY: &str = "//root";
+
+/// Origin key of everything the implicit Prelude provides (its source
+/// declarations and the compiler's builtins). Their canonical names are
+/// their bare names.
+const PRELUDE_KEY: &str = "Prelude";
+
+/// The Prelude functions the parser spells its desugarings with — a list
+/// comprehension, an arithmetic sequence, a failed pattern match are plain
+/// references to these by the time resolution sees the module. Such a
+/// reference is not one the module wrote, so an explicit `import Prelude`
+/// form cannot take these names out of scope.
+const DESUGARED_TO: &[&str] =
+    &["concatMap", "enumFrom", "enumFromTo", "enumFromThen", "enumFromThenTo", "error"];
+
+/// What the implicit Prelude contributes to every module's scope, as far
+/// as name resolution is concerned. Built by the compile pipeline from the
+/// Prelude source and the type checker's builtin environment.
+#[derive(Default, Clone)]
+pub struct PreludeScope {
+    /// Every value name: source definitions, builtins, class methods.
+    pub values: HashSet<String>,
+    /// Every type name: source declarations and builtin types.
+    pub types: HashSet<String>,
+    /// Every data constructor.
+    pub constructors: HashSet<String>,
+    /// Type shape of each signed value (see `signature_shapes`), the
+    /// baseline unqualified imports are checked against.
+    pub shapes: HashMap<String, String>,
+}
+
+/// One top-level value or type declaration, by its canonical name and the
+/// module that declares it.
+#[derive(Clone, Debug)]
+struct Entity {
+    canon: String,
+    origin: String,
+}
+
+/// What a module offers its importers, keyed by the bare name the
+/// importer writes. A name normally maps to one entity; it maps to several
+/// when the module passes on a name that is ambiguous in its own scope.
+#[derive(Clone, Default)]
+struct Surface {
+    vals: BTreeMap<String, Vec<Entity>>,
+    tys: BTreeMap<String, Vec<Entity>>,
+    /// Class names offered (classes are global; this only feeds the
+    /// import-list check).
+    classes: BTreeSet<String>,
+    /// Names the module declares or sees but keeps back (private to its
+    /// export list, or not passed on by it).
+    withheld: BTreeSet<String>,
+}
+
+/// A resolved module as the cache holds it: its region in canonical
+/// spelling, and its surface.
+#[derive(Clone)]
+struct Resolved {
+    module: Module,
+    surface: Surface,
+}
+
+/// An entity visible in the importing module's bare scope, with the import
+/// edge (index into the module's edges) that made it visible.
+struct Candidate {
+    entity: Entity,
+    via: usize,
+}
+
+/// The placeholder spellings minted while one module is rewritten, each
+/// with the error its use reports. A placeholder contains characters no
+/// source name can (`<`, a space), so no binder and no declaration can
+/// share its spelling.
+struct Placeholders {
+    base: usize,
+    made: std::cell::RefCell<Vec<(String, ScopeError)>>,
+}
+
+impl Placeholders {
+    /// `base`: how many placeholders the program holds already, so the
+    /// numbering stays unique across modules.
+    fn new(base: usize) -> Self {
+        Placeholders { base, made: std::cell::RefCell::new(Vec::new()) }
+    }
+
+    fn make(&self, err: ScopeError) -> String {
+        let mut made = self.made.borrow_mut();
+        let spelling = format!("<scope error {}>", self.base + made.len());
+        made.push((spelling.clone(), err));
+        spelling
+    }
+
+    fn into_made(self) -> Vec<(String, ScopeError)> {
+        self.made.into_inner()
+    }
+}
+
+/// Does `module` see the Prelude's `name` unqualified? Without an explicit
+/// `import Prelude` every Prelude name is visible; with one or several,
+/// exactly what the unqualified forms admit (Haskell 2010 §5.6.1).
+pub fn prelude_name_visible(module: &Module, name: &str) -> bool {
+    let forms: Vec<&ImportItems> = module.decls.iter()
+        .filter_map(|d| match d {
+            Decl::Import { module_path, items }
+                if module_path.len() == 1 && module_path[0] == PRELUDE_KEY => Some(items),
+            _ => None,
+        })
+        .collect();
+    if forms.is_empty() {
+        return true;
+    }
+    let unqual: Vec<ImportItems> = forms.into_iter()
+        .filter(|f| !matches!(f, ImportItems::Qualified(_)))
+        .cloned()
+        .collect();
+    !unqual.is_empty() && !hidden_by_forms(&unqual, name)
+}
+
+/// Is `name` spelled like a type (capitalized, or a `:`-operator) rather
+/// than like a value? The two namespaces never share a spelling.
+fn is_type_spelling(name: &str) -> bool {
+    name.chars().next().is_some_and(|c| c.is_uppercase() || c == ':')
+}
+
+/// The import paths a parsed module names.
+fn import_paths_of(module: &Module) -> Vec<Vec<String>> {
+    module.decls.iter()
+        .filter_map(|d| match d {
+            Decl::Import { module_path, .. } => Some(module_path.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The value-level names a declaration puts in the GLOBAL namespace:
+/// record fields (their accessor functions) and class methods.
+fn global_value_names(decl: &Decl) -> Vec<String> {
+    let mut out = con_record_fields(decl);
+    if let Decl::ClassDecl { methods, .. } = decl {
+        out.extend(methods.iter().map(|m| m.name.clone()));
+    }
+    out
+}
+
+fn module_phrase(origin: &str) -> String {
+    if origin == PRELUDE_KEY { "the Prelude".to_string() } else { format!("module '{origin}'") }
+}
+
+/// Two or more different imported entities share the bare name `n`.
+fn ambiguous_occurrence(n: &str, cands: &[Candidate], edges: &[Edge]) -> ScopeError {
+    let who: Vec<String> = cands.iter()
+        .map(|c| format!("the '{n}' of {}", module_phrase(&c.entity.origin)))
+        .collect();
+    let mut notes = vec![format!(
+        "more than one import brings a '{n}' into scope here, so a bare '{n}' has \
+         no single meaning (GHC reports the same ambiguity). Keep one of them out \
+         with an import list or 'hiding ({n})', or import one of the modules \
+         'qualified' and write its '{n}' with the alias.")];
+    for c in cands {
+        let e = &edges[c.via];
+        if c.entity.origin != e.key && c.entity.origin != PRELUDE_KEY && !e.listed {
+            notes.push(format!(
+                "the '{n}' of module '{}' arrives through 'import {}': a module \
+                 without an export list passes the names it imports on to its \
+                 importers. GHC exports only the module's own declarations in that \
+                 case; an export list on '{}' stops the pass-through.",
+                c.entity.origin, e.key, e.key));
+        }
+    }
+    ScopeError::Explained {
+        name: n.to_string(),
+        message: format!("Ambiguous occurrence '{n}': it could refer to {}", who.join(" or to ")),
+        notes,
+    }
+}
+
+/// Two modules imported under one alias offer different entities named `n`.
+fn ambiguous_alias(alias: &str, n: &str, ents: &[Entity]) -> ScopeError {
+    let who: Vec<String> = ents.iter()
+        .map(|e| format!("the '{n}' of {}", module_phrase(&e.origin)))
+        .collect();
+    ScopeError::Explained {
+        name: format!("{alias}.{n}"),
+        message: format!(
+            "Ambiguous occurrence '{alias}.{n}': it could refer to {}", who.join(" or to ")),
+        notes: vec![format!(
+            "several modules are imported under the alias '{alias}', and more than \
+             one of them offers a '{n}' (GHC reports the same ambiguity). Give one \
+             of the imports its own alias.")],
+    }
+}
+
+/// A bare use of a name an import could have provided but does not.
+/// `by`: the module whose import form leaves the name out, when it is the
+/// IMPORT that does; `None` when the imported module itself keeps it back.
+fn not_exported(n: &str, by: Option<&str>) -> ScopeError {
+    let note = match by {
+        Some(module) => format!(
+            "module '{module}' offers '{n}', but the import of '{module}' in this \
+             module leaves it out (it is absent from the import list, or named in \
+             'hiding'). Add it to the import, or use a qualified import."),
+        None => format!(
+            "an imported module defines or imports '{n}' but its export list does \
+             not pass it on, so it is private to that module."),
+    };
+    ScopeError::Explained {
+        name: n.to_string(),
+        message: format!("'{n}' is not exported by its module"),
+        notes: vec![note],
+    }
+}
+
+/// A bare use of a Prelude name this module's `import Prelude` excludes.
+fn prelude_hidden(n: &str) -> ScopeError {
+    ScopeError::Explained {
+        name: n.to_string(),
+        message: format!("'{n}' is not in scope"),
+        notes: vec![format!(
+            "the Prelude provides '{n}', but this module's explicit 'import Prelude' \
+             leaves it out (it is named in 'hiding', absent from the import list, \
+             or the Prelude is only imported qualified).")],
+    }
+}
+
 /// One import edge of the module being resolved: the imported module, the
-/// forms it is imported through, and its resolved region — the child's
+/// forms it is imported through, its resolved region — the child's
 /// declarations (its own and its imports') with the origin runs that
-/// partition them, in the CHILD's spelling.
+/// partition them, in canonical spelling — and the surface it offers.
 struct Edge {
     key: String,
     unqual: Vec<ImportItems>,
     aliases: Vec<String>,
     decls: Vec<Decl>,
     spans: Vec<(String, usize)>,
+    surface: Surface,
+    /// The imported module carries a header export list.
+    listed: bool,
 }
 
-/// What an alias names: the base name of every declaration in its module's
-/// region, by namespace, mapped to that declaration's canonical name here.
+/// What an alias names: the surfaces of the modules imported under it, by
+/// namespace, plus the global names declared anywhere in their regions.
 #[derive(Default)]
 struct AliasNames {
-    vals: HashMap<String, String>,
-    tys: HashMap<String, String>,
+    vals: BTreeMap<String, Vec<Entity>>,
+    tys: BTreeMap<String, Vec<Entity>>,
+    /// Record fields and class methods: `A.field` names `field`.
+    globals: BTreeSet<String>,
     /// Constructors are global names: `A.C` names `C`.
-    cons: HashMap<String, String>,
+    cons: BTreeSet<String>,
 }
 
 /// The origin runs of a region: `(origin key, declarations)` slices.
@@ -965,10 +1466,11 @@ fn runs<'a>(spans: &'a [(String, usize)], decls: &'a [Decl]) -> Vec<(&'a str, &'
     out
 }
 
-/// The declarations a naming decision applies to: value bindings (function,
-/// signature, export signature — `false`) and type-level names (data,
-/// newtype, alias, family — `true`). Constructors, classes, instances and
-/// class methods are global names and never renamed.
+/// The declarations that are ENTITIES of the resolution model (see
+/// `resolve_module`): value bindings (function, signature, export
+/// signature — `false`) and type-level names (data, newtype, alias, family
+/// — `true`). Constructors, classes, instances and class methods are
+/// global names and never renamed.
 fn renamable(decl: &Decl) -> Option<(&str, bool)> {
     match decl {
         Decl::FunDef { name, .. } | Decl::TypeSig { name, .. } | Decl::ExportSig { name, .. } =>
@@ -977,15 +1479,6 @@ fn renamable(decl: &Decl) -> Option<(&str, bool)> {
         | Decl::TypeAlias { name, .. } | Decl::TypeFamily { name, .. } => Some((name, true)),
         _ => None,
     }
-}
-
-/// The bare name of a declaration of origin `okey`, whether the level that
-/// spelled it saw it bare or had renamed it to `okey.name`.
-fn base_of<'n>(okey: &str, name: &'n str) -> &'n str {
-    name.strip_prefix(okey)
-        .and_then(|rest| rest.strip_prefix('.'))
-        .filter(|rest| !rest.is_empty())
-        .unwrap_or(name)
 }
 
 /// Record field names declared by a data or newtype declaration.
@@ -1022,30 +1515,64 @@ fn hidden_by_forms(forms: &[ImportItems], n: &str) -> bool {
     })
 }
 
-/// Renames declarations and the references to them by two name maps (values
-/// and types), scope-aware: a reference is rewritten only when it names a
-/// module-level binding, never a local that shadows it. Used to move a
-/// region between one level's spelling and another's (`filter` <->
-/// `Data.Map.filter`) and to resolve an importer's qualified uses (`M.filter`
-/// -> the canonical name). Constructors, classes, instances and class
-/// methods are global names and are never touched.
+/// Rewrites one module's own declarations from source spelling to
+/// canonical spelling: declared names become their canonical names, and
+/// every reference is bound in the module's scope — scope-aware, so a
+/// reference is rewritten only when it names a module-level binding, never
+/// a local that shadows it. The maps hold, per bare (or alias-qualified)
+/// source name, the spelling to put in its place: the canonical name of
+/// the entity it denotes, or a placeholder when it denotes none (see
+/// `Placeholders`). Constructors, classes, instances and class methods are
+/// global names and are never touched.
 struct Rename<'a> {
     vals: &'a HashMap<String, String>,
     tys: &'a HashMap<String, String>,
-    /// Qualified constructor spellings (`A.C`) to the global constructor;
-    /// empty for a region rename.
+    /// Qualified constructor spellings (`A.C`) to the global constructor.
     cons: &'a HashMap<String, String>,
+    /// The module's import aliases: what makes `A.name` a qualified name.
+    aliases: &'a HashSet<String>,
+    placeholders: &'a Placeholders,
 }
 
 impl Rename<'_> {
     fn v(&self, name: &str, bound: &HashSet<String>) -> String {
-        if !bound.contains(name)
-            && let Some(c) = self.vals.get(name)
-        {
-            c.clone()
-        } else {
-            name.to_string()
+        if bound.contains(name) {
+            return name.to_string();
         }
+        let qualified = self.is_alias_qualified(name);
+        match self.vals.get(name) {
+            // A qualified reference that resolves to a bare name (a
+            // Prelude function or a global record field / class method
+            // reached through an alias) under a local binder of that very
+            // name: written out bare, the reference would be captured by
+            // the binder and silently mean the local.
+            Some(target) if qualified && bound.contains(target) => {
+                self.placeholders.make(ScopeError::Explained {
+                    name: name.to_string(),
+                    message: format!(
+                        "'{name}' cannot be used here: the local binding '{target}' \
+                         shadows the name it refers to"),
+                    notes: vec![format!(
+                        "mata-ll resolves '{name}' to the plain name '{target}', which \
+                         the enclosing local binding of the same name would capture. \
+                         GHC accepts this; rename the local binding.")],
+                })
+            }
+            Some(target) => target.clone(),
+            // `A.name` where the alias `A` offers no `name`. Left as
+            // written it could coincide with the canonical name of some
+            // module `A`'s private declaration; it is unbound.
+            None if qualified => self.placeholders.make(ScopeError::Unbound(name.to_string())),
+            None => name.to_string(),
+        }
+    }
+
+    /// Is `name` an alias-qualified value spelling (`A.f`, as collapsed by
+    /// `rewrite_qualified_uses_decl`)? An alias is a single identifier, so
+    /// the first dot ends it.
+    fn is_alias_qualified(&self, name: &str) -> bool {
+        name.split_once('.')
+            .is_some_and(|(head, rest)| !rest.is_empty() && self.aliases.contains(head))
     }
 
     /// A declared value name: never shadowed.
@@ -1054,7 +1581,20 @@ impl Rename<'_> {
     }
 
     fn t(&self, name: &str) -> String {
-        self.tys.get(name).cloned().unwrap_or_else(|| name.to_string())
+        if let Some(target) = self.tys.get(name) {
+            return target.clone();
+        }
+        // A module-qualified type name (`M.Map`: the parser spells it as
+        // one dotted name) the scope does not hold. Left as written it
+        // could coincide with a canonical type name; it is unknown. A
+        // type-level string literal (`"math.sqrt"`) is not a name.
+        let qualified = name.split_once('.').is_some_and(|(head, rest)| {
+            !rest.is_empty() && head.chars().next().is_some_and(|c| c.is_ascii_uppercase())
+        });
+        if qualified {
+            return self.placeholders.make(ScopeError::UnknownType(name.to_string()));
+        }
+        name.to_string()
     }
 
     fn c(&self, name: &str) -> String {
@@ -1418,11 +1958,12 @@ fn rewrite_uses_expr(e: Expr, aliases: &HashSet<String>) -> Expr {
     e
 }
 
-/// A structural fingerprint of a type, with variable names erased. Two
-/// signatures with the same shape are compatible enough to coexist as one
-/// merged definition; differing shapes are the real, breaking clash (e.g.
-/// `[a] -> Bool` vs `HashMap k v -> Bool` for two `null`s). FFI re-declarations
-/// (`sqrt`) and re-exports (diamond imports) share a shape, so they don't flag.
+/// A structural fingerprint of a type as written, with variable names
+/// erased. An unqualified import may shadow a Prelude name whose signature
+/// has the same shape (an FFI re-declaration like `sqrt`, a library's own
+/// copy of a Prelude function); a differing shape is the breaking clash
+/// (`[a] -> Bool` vs `HashMap k v -> Bool` for two `null`s) the import
+/// check rejects.
 fn type_shape(ty: &Type) -> String {
     match ty {
         Type::Con(n) => n.clone(),
@@ -1465,10 +2006,8 @@ pub fn signature_shapes(decls: &[Decl]) -> HashMap<String, String> {
 /// reference to `>>=`.
 ///
 /// Used on the Prelude's own declarations to compute which names its
-/// implementation depends on. A user program redefining such a name would
-/// have the Prelude type-checked — and its generated code resolved — against
-/// the user's replacement, breaking code the user never wrote, so those
-/// redefinitions are rejected up front (see `lib.rs`).
+/// implementation depends on: the entry module may redefine such a name
+/// only when it hides the Prelude's explicitly (see `lib.rs`).
 ///
 /// Where/let-bound locals that happen to share a referenced name are not
 /// tracked as shadowing here; that only over-approximates the reference set,
@@ -1528,42 +2067,25 @@ fn refs_in_expr(e: &Expr, out: &mut HashSet<String>) {
     e.for_each_subexpr(&mut |c| refs_in_expr(c, out));
 }
 
-fn collision_error(module: &str, collisions: &[(String, String)]) -> String {
+/// The import-time rejection of an unqualified import whose names clash
+/// with the Prelude's at a different type (see `resolve_module`, phase 4).
+/// `importer`: the importing module, when it is not the entry module.
+fn collision_error(module: &str, names: &[String], importer: Option<&str>) -> String {
     let alias = module.rsplit('.').next().unwrap_or(module);
-    let listed: Vec<String> = collisions.iter()
-        .map(|(name, src)| format!("'{}' (already defined by {})", name, src))
+    let listed: Vec<String> = names.iter()
+        .map(|name| format!("'{}' (already defined by the Prelude)", name))
         .collect();
+    let whence = importer.map(|m| format!("in module {m}: ")).unwrap_or_default();
     format!(
-        "importing '{module}' unqualified conflicts with {}.\n\
-         mata-ll merges every import into a single namespace, so these names would clash \
-         with the existing definitions. Import '{module}' qualified instead:\n\
+        "{whence}importing '{module}' unqualified conflicts with {}.\n\
+         The import would give these names a second meaning at a different type, so \
+         every bare use would be ambiguous (GHC reports that at the use; mata-ll \
+         rejects the import). Import '{module}' qualified instead:\n\
          \n    import qualified {module} as {alias}\n\n\
          then refer to its members as `{alias}.name` (e.g. `{alias}.{}`).",
         listed.join(", "),
-        collisions.first().map(|(n, _)| n.as_str()).unwrap_or("name"),
+        names.first().map(String::as_str).unwrap_or("name"),
     )
-}
-
-fn decl_name(decl: &Decl) -> Option<String> {
-    match decl {
-        Decl::TypeSig { name, .. } => Some(name.clone()),
-        Decl::FunDef { name, .. } => Some(name.clone()),
-        Decl::DataDef { name, .. } => Some(name.clone()),
-        Decl::NewtypeDef { name, .. } => Some(name.clone()),
-        Decl::ClassDecl { name, .. } => Some(name.clone()),
-        Decl::InstanceDecl { class_name, .. } => Some(class_name.clone()),
-        Decl::ExportSig { name, .. } => Some(name.clone()),
-        Decl::TypeFamily { name, .. } => Some(name.clone()),
-        Decl::Import { .. } => None,
-        Decl::FixityDecl { .. } => None,
-        Decl::TypeAlias { name, .. } => Some(name.clone()),
-    }
-}
-
-/// Every name a group of declarations declares (values, types, classes),
-/// as `decl_name` sees them.
-pub fn declared_names(decls: &[Decl]) -> HashSet<String> {
-    decls.iter().filter_map(decl_name).collect()
 }
 
 /// Constructor names declared by a data or newtype declaration.

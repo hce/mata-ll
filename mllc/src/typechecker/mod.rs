@@ -597,11 +597,13 @@ pub struct Checker {
     /// before pass 2 registers the classes). Instance heads are checked
     /// against this.
     class_kinds: HashMap<String, Kind>,
-    /// Names hidden by module export control (imported but not exported).
-    /// Only enforced when `enforce_hidden` is true (local code, not imported code).
-    hidden_names: HashSet<String>,
-    enforce_hidden: bool,
-    /// Index where local declarations start (for hidden name enforcement)
+    /// What import resolution diagnosed and renamed (see
+    /// `ast::Resolution`): the placeholder spellings of references that
+    /// denote nothing in their module's scope, each reported where it is
+    /// used, and the source spelling of every canonically renamed
+    /// declaration.
+    resolution: Resolution,
+    /// Index where local declarations start
     local_decl_start: usize,
     /// Number of leading declarations that belong to the implicit Prelude
     /// (indices `0..prelude_decl_count` of the merged module; imports follow,
@@ -761,8 +763,7 @@ impl Checker {
             kinds: HashMap::new(),
             promotable_kinds: HashSet::from(["Bool".to_string()]),
             class_kinds: HashMap::new(),
-            hidden_names: HashSet::new(),
-            enforce_hidden: false,
+            resolution: Resolution::default(),
             local_decl_start: 0,
             prelude_decl_count: 0,
             checking_prelude: false,
@@ -1434,7 +1435,7 @@ impl Checker {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
         let file = self.cur_file.clone();
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file, notes, baseline, excerpt: None });
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: None, file, notes, baseline, excerpt: None, names: None });
     }
 
     /// `push_error_ctx` plus one explanatory `note:` line, carried as a
@@ -1453,7 +1454,7 @@ impl Checker {
         let baseline = self.checking_prelude;
         let notes = self.existential_provenance_notes(&kind);
         let file = self.cur_file.clone();
-        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file, notes, baseline, excerpt: None });
+        self.errors.push(Diagnostic { kind, context: Some(ctx), span: Some(span), file, notes, baseline, excerpt: None, names: None });
     }
 
     /// Record a WARNING (see the `warnings` field). Skipped entirely inside
@@ -1473,7 +1474,7 @@ impl Checker {
         let file = self.cur_file.clone();
         self.warnings.push(Diagnostic {
             kind, context: Some(ctx), span, file, notes,
-            baseline: false, excerpt: None,
+            baseline: false, excerpt: None, names: None,
         });
     }
 
@@ -1718,6 +1719,10 @@ impl Checker {
         if self.type_name_defined(name) {
             return;
         }
+        if let Some(kind) = self.scope_error(name) {
+            self.push_error_ctx(kind, ctx.to_string());
+            return;
+        }
         if self.classes.contains_key(name) {
             self.push_error_ctx(
                 DiagnosticKind::Other(format!(
@@ -1743,7 +1748,7 @@ impl Checker {
                 notes: vec![format!(
                     "GHC (with DataKinds) accepts the un-ticked pun when the name is unambiguous; mata-ll always requires the tick."
                 )],
-                baseline, excerpt: None,
+                baseline, excerpt: None, names: None,
             });
         } else {
             self.push_error_ctx(DiagnosticKind::UnknownType(name.to_string()), ctx.to_string());
@@ -1795,20 +1800,20 @@ impl Checker {
     /// the key to register it under, or `None` (with a diagnostic pushed) when
     /// the name genuinely duplicates an existing same-scope constructor.
     ///
-    /// Policy, mirroring GHC's scoping as closely as the flattened-namespace
-    /// architecture allows:
+    /// Constructor names are program-wide: import resolution gives values
+    /// and types a canonical name per module, but not constructors (their
+    /// names are visible at runtime — `show`, JSON tags). Policy, mirroring
+    /// GHC's scoping as closely as that allows:
     /// - two constructors of the same name in the same scope: error (GHC:
     ///   "Multiple declarations of ...") — except that a *non-local*
     ///   re-registration of the identical constructor (same type, same
-    ///   position) is benign and accepted: a diamond import merges the same
-    ///   module's declarations twice;
+    ///   position) is benign and accepted;
     /// - a local constructor whose name a builtin/Prelude/import already uses:
     ///   the local one shadows it (GHC: a local definition shadows an
     ///   implicitly imported name) — it gets a mangled key, and
     ///   `resolve_con_name` routes local references to it;
     /// - two non-local constructors (an import against the Prelude or another
-    ///   import): error, consistent with the loud import-collision policy for
-    ///   functions in `check_import_collisions`.
+    ///   import): error — there is no scope to tell them apart by.
     ///
     /// Silently keeping both under one name is never an option: the
     /// typechecker's map is last-writer-wins but codegen's tag table scans
@@ -1827,7 +1832,7 @@ impl Checker {
                 "GHC rejects this too (\"Multiple declarations\"): all constructors declared in one module share a single namespace, so a use of the name would be ambiguous. Rename one of the constructors.".to_string()
             } else {
                 format!(
-                    "mata-ll merges the Prelude and every import into a single namespace, so two imported types cannot both declare a constructor named '{}'. (A constructor declared in your own file may shadow an imported one — this error is only for two imported/Prelude declarations.) Rename the constructor in one of the imported modules.",
+                    "data constructor names are program-wide in mata-ll (unlike functions and types, which each module keeps to itself), so two imported types cannot both declare a constructor named '{}'; GHC accepts that. (A constructor declared in your own file may shadow an imported one — this error is only for two imported/Prelude declarations.) Rename the constructor in one of the imported modules.",
                     con_name,
                 )
             };
@@ -2147,10 +2152,12 @@ impl Checker {
                                     field.name, other_ty,
                                 )),
                                 format!("data {}", name),
-                                "a record field defines a module-level accessor \
-                                 function of the same name, so two types cannot \
-                                 share a field name; rename one field (GHC \
-                                 rejects this as 'Multiple declarations')",
+                                "a record field defines an accessor function of \
+                                 the same name, and accessors are program-wide \
+                                 names in mata-ll, so two types cannot share a \
+                                 field name; rename one field (GHC rejects this \
+                                 as 'Multiple declarations' when both types are \
+                                 in one module, and accepts it across modules)",
                             );
                             continue;
                         }
@@ -2320,8 +2327,9 @@ impl Checker {
         let inner_ty = self.ast_type_to_ty(inner);
 
         // Register the constructor: Con :: InnerType -> Name.
-        // It shares the flat namespace with data constructors, so it goes
-        // through the same duplicate/shadowing claim.
+        // It shares the program-wide constructor namespace with data
+        // constructors, so it goes through the same duplicate/shadowing
+        // claim.
         let Some(con_key) = self.claim_constructor_name(&con_name, name, 1, 1) else { return };
         // The resolved shape, keyed by type name: the TModule newtype list
         // (codegen's transparency test is by CONSTRUCTOR key), the selector
@@ -2382,6 +2390,27 @@ impl Checker {
         }
     }
 
+    /// The error to report for `name` when it is one of import
+    /// resolution's placeholders for a reference that denotes nothing in
+    /// its module's scope (see `ast::Resolution::scope_errors`).
+    pub(super) fn scope_error(&self, name: &str) -> Option<DiagnosticKind> {
+        Some(match self.resolution.scope_errors.get(name)? {
+            ScopeError::Unbound(n) => DiagnosticKind::UnboundVariable(n.clone()),
+            ScopeError::UnknownType(n) => DiagnosticKind::UnknownType(n.clone()),
+            ScopeError::Explained { message, notes, .. } => DiagnosticKind::Scope {
+                message: message.clone(),
+                notes: notes.clone(),
+            },
+        })
+    }
+
+    /// The name `canonical` has in its own module's source (see
+    /// `ast::Resolution::source_names`): what a Lua host, a runtime string
+    /// or a reader of the program knows the declaration as.
+    pub(super) fn source_name<'a>(&'a self, canonical: &'a str) -> &'a str {
+        self.resolution.source_names.get(canonical).map(String::as_str).unwrap_or(canonical)
+    }
+
     // --- Module checking (produces TIR) ---
 
     /// True when `name` is bound in the initial global environment — a
@@ -2390,6 +2419,25 @@ impl Checker {
     /// checker, before `check_module` has inserted source-level bindings.
     pub fn is_builtin(&self, name: &str) -> bool {
         self.env.lookup(name).is_some()
+    }
+
+    /// Every name the builtin environment provides, as `(values, types,
+    /// constructors)` — the compiler-defined part of the implicit Prelude's
+    /// scope (import resolution needs the whole Prelude scope by name).
+    /// Only meaningful on a fresh checker, like `is_builtin`.
+    pub fn builtin_names(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
+        let constructors: Vec<String> = self.constructors.keys().cloned().collect();
+        let values: Vec<String> = self.env.iter()
+            .map(|(name, _)| name.clone())
+            .filter(|name| !self.constructors.contains_key(name))
+            .collect();
+        let types: Vec<String> = self.kinds.keys()
+            .chain(self.type_aliases.keys())
+            .chain(self.type_families.keys())
+            .filter(|name| !name.starts_with('\''))
+            .cloned()
+            .collect();
+        (values, types, constructors)
     }
 
     /// Declare how many leading declarations of the module about to be checked
@@ -2426,15 +2474,7 @@ impl Checker {
     /// needs from the passes before it and what it provides to the ones
     /// after. Do not reorder the calls without re-reading those contracts.
     pub fn check_module(&mut self, module: &Module) -> TModule {
-        // Register hidden names from import export control. A builtin of
-        // the same name is what the bare name means (lib.rs drops the
-        // Prelude.mll-defined ones the same way): the hidden declaration
-        // was renamed out of the way by module resolution.
-        let hidden: Vec<String> = module.hidden.iter()
-            .filter(|n| !self.is_builtin(n))
-            .cloned()
-            .collect();
-        self.hidden_names.extend(hidden);
+        self.resolution = module.resolution.clone();
 
         self.preregister_families_and_aliases(module);
         self.scan_promotable_kinds(module);
@@ -2480,7 +2520,6 @@ impl Checker {
         let mut data_defs = Vec::new();
         let mut functions = Vec::new();
         self.generate_ffi_functions(&sigs, &ffi_info, &defined_fns, &mut functions);
-        self.unhide_local_redefinitions(module);
         self.reject_bodyless_signatures(&sigs, &ffi_info, &defined_fns);
 
         let (has_main, exports, constrained_exports) =
@@ -2505,7 +2544,9 @@ impl Checker {
         let mut newtype_types: Vec<String> = self.newtype_types.iter().cloned().collect();
         newtype_types.sort();
 
-        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, record_accessors, newtypes, newtype_types, passes_run: vec![] }
+        let source_names = self.resolution.source_names.clone();
+
+        TModule { data_defs, dropped_data_defs: vec![], functions, instance_fns, has_main, exports, source_names, record_accessors, newtypes, newtype_types, passes_run: vec![] }
     }
 
     /// Register type families and aliases and lower the families to `Ty`
@@ -2570,10 +2611,10 @@ impl Checker {
         // one instance slot — a match covering the first `data T`'s
         // constructors was reported non-exhaustive, demanding the SECOND
         // declaration's (F12; GHC rejects with "Multiple declarations").
-        // Prelude declarations are exempt — a user declaration shadows a
-        // Prelude type deliberately, mirroring the constructor-shadowing
-        // rule; everything merged from imports and the module itself is
-        // one namespace, exactly as for values.
+        // Import resolution gives every module's types their own canonical
+        // names (and the entry module's a name of its own where it would
+        // meet a Prelude type's), so only two declarations of ONE module
+        // can meet here. The Prelude's own declarations are not checked.
         {
             let mut seen: HashMap<String, &'static str> = HashMap::new();
             for (i, decl) in module.decls.iter().enumerate() {
@@ -2593,11 +2634,10 @@ impl Checker {
                         format!("declaration of '{}'", name),
                         format!(
                             "'{}' is declared here as a {} and earlier as a {}. \
-                             mata-ll merges every module into one namespace, so two \
-                             type declarations under one name would silently share \
-                             one constructor universe and one instance slot — a \
-                             match over either type would demand the other's \
-                             constructors. Rename one of them.",
+                             Two type declarations under one name in one module \
+                             would silently share one constructor universe and \
+                             one instance slot — a match over either type would \
+                             demand the other's constructors. Rename one of them.",
                             name, what, prev),
                     );
                 }
@@ -3097,28 +3137,6 @@ impl Checker {
         }
     }
 
-    /// Local declarations that redefine a hidden name should shadow it:
-    /// drop such names from `hidden_names` before hidden-name enforcement
-    /// runs in pass 6.
-    fn unhide_local_redefinitions(&mut self, module: &Module) {
-        if !self.hidden_names.is_empty() && self.local_decl_start > 0 {
-            for decl in module.decls.iter().skip(self.local_decl_start) {
-                match decl {
-                    Decl::TypeSig { name, .. } | Decl::FunDef { name, .. } => {
-                        self.hidden_names.remove(name);
-                    }
-                    Decl::DataDef { name, constructors, .. } => {
-                        self.hidden_names.remove(name);
-                        for con in constructors {
-                            self.hidden_names.remove(&con.name);
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-
     /// Reject type signatures that have no accompanying definition and are
     /// not FFI bindings. Without this, `foo :: Int` with no body silently
     /// compiles to a nil value that errors only when forced at runtime — a
@@ -3161,10 +3179,6 @@ impl Checker {
         let mut exports = Vec::new();
         let mut constrained_exports: Vec<String> = Vec::new();
         for (decl_idx, decl) in module.decls.iter().enumerate() {
-            // Enable hidden name enforcement only for local (user) declarations
-            self.enforce_hidden = !self.hidden_names.is_empty()
-                && self.local_decl_start > 0
-                && decl_idx >= self.local_decl_start;
             // Constructor references in local bodies resolve to local
             // (possibly shadowing) constructors; non-local bodies keep seeing
             // the constructors of their own scope.

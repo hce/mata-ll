@@ -29,6 +29,61 @@ pub struct ModuleExports {
     pub reexports: Vec<String>,
 }
 
+/// The by-products of import resolution (modules.rs). After resolution
+/// every reference in the declaration list is spelled as the CANONICAL
+/// name of the one declaration it denotes in the scope of the module that
+/// wrote it, so the type checker can keep working over one flat list.
+#[derive(Debug, Clone, Default)]
+pub struct Resolution {
+    /// References that denote NO declaration in their module's scope (a
+    /// name an import list leaves out, a name two imports both provide, a
+    /// qualified name its alias does not offer). Each was rewritten to a
+    /// placeholder spelling no source name can have — so it can neither
+    /// be captured by a local binder nor fall through to another module's
+    /// declaration of the same spelling — and this table maps the
+    /// placeholder to the error the type checker reports where the
+    /// reference is used (that is where the statement's location is
+    /// known).
+    pub scope_errors: std::collections::HashMap<String, ScopeError>,
+    /// Canonical name -> the name as its module declares it, for every
+    /// declaration whose canonical name differs from its source spelling
+    /// (`Data.Map.insert` -> `insert`). Diagnostics, Lua export keys and
+    /// runtime-visible type names use the source spelling.
+    pub source_names: std::collections::HashMap<String, String>,
+    /// Canonical name -> the spelling diagnostics show: the source
+    /// spelling, except for a type whose source spelling another type in
+    /// the program shares (two modules' `Config`), which keeps its
+    /// module-qualified form so a message can tell the two apart. Every
+    /// `scope_errors` placeholder is in here too, mapped to the name the
+    /// user wrote: a placeholder type name is reported once and then
+    /// flows on into follow-up messages like any unknown type.
+    pub display_names: std::collections::HashMap<String, String>,
+}
+
+/// Why a reference denotes nothing in its module's scope.
+#[derive(Debug, Clone)]
+pub enum ScopeError {
+    /// No declaration of this name is in scope. Reported exactly like a
+    /// name the program does not define at all.
+    Unbound(String),
+    /// A type name with no declaration in scope.
+    UnknownType(String),
+    /// Anything that needs its own explanation: `message`, then `notes`
+    /// rendered as `note:` lines. `name` is the reference as written.
+    Explained { name: String, message: String, notes: Vec<String> },
+}
+
+impl ScopeError {
+    /// The reference as the user wrote it.
+    pub fn written(&self) -> &str {
+        match self {
+            ScopeError::Unbound(name)
+            | ScopeError::UnknownType(name)
+            | ScopeError::Explained { name, .. } => name,
+        }
+    }
+}
+
 /// An mll module corresponds to a single .mll file.
 #[derive(Debug, Clone)]
 pub struct Module {
@@ -39,9 +94,10 @@ pub struct Module {
     pub name: Option<String>,
     /// Module export list. None = export everything, Some = only these names.
     pub exports: Option<ModuleExports>,
-    /// Names imported but hidden (from modules with export lists).
-    /// The typechecker rejects direct references to these.
-    pub hidden: std::collections::HashSet<String>,
+    /// What import resolution leaves for the type checker besides the
+    /// declarations themselves (see `Resolution`). Empty on a freshly
+    /// parsed module.
+    pub resolution: Resolution,
     /// Provenance of `decls` after import resolution: ordered
     /// (module_key, decl_count) spans covering the whole list, one span
     /// per source module. resolve_imports uses them to merge each

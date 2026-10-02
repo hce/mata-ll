@@ -500,7 +500,7 @@ fn single_specific_import_still_hides_unrequested_names() {
     );
 }
 
-// A name an import list leaves out is renamed out of the flat namespace
+// A name an import list leaves out is not in the importing module's scope
 // (so it cannot clash with the Prelude or another import), yet a bare use
 // must still be diagnosed as the hidden name it is — not as an unbound
 // variable — and the alias form of the same module must reach it.
@@ -3248,9 +3248,9 @@ fn duplicate_imported_constructor_rejected() {
     // of claim_constructor_name, previously untested. A LOCAL declaration
     // may shadow an imported constructor (GHC scoping, see
     // shadowed_prelude_constructor_stays_shadowed), but two imports have no
-    // shadowing order: the merged flat namespace would silently hand the
-    // name to one of them, so it is a hard error, consistent with the
-    // import-collision policy for functions. (The same-module arm is
+    // shadowing order: constructor names are program-wide (unlike functions
+    // and types, which are scoped per module), so the name would silently
+    // go to one of them — a hard error instead. (The same-module arm is
     // duplicate_local_constructor_rejected; this file once carried a
     // tolerant duplicate_constructor_rejected written to pass whether or
     // not the compiler rejected — a test that cannot fail pins nothing.)
@@ -4154,18 +4154,26 @@ fn prelude_foldable_generic_allows_monomorphic_redefinition() {
 }
 
 #[test]
-fn prelude_redefinition_breaking_prelude_body_reports_user_not_prelude() {
+fn prelude_redefinition_at_another_type_leaves_the_prelude_alone() {
     // `replicate` is neither used by other Prelude code nor duplicated at the
-    // same type here, so it passes the up-front checks — but the Prelude's own
-    // `replicate` body cannot type-check against this signature (its cons
-    // result is not a String). The safety net must convert the resulting
-    // Prelude-internal error (formerly "Cannot unify '[String]' with 'String'
-    // at 96:11") into the same clear redefinition report.
-    let e = expect_compile_error("replicate :: Int -> String -> String\nreplicate n s = s\n\nmain :: IO ()\nmain = putStrLn (replicate 3 \"x\")\n", &[], &[
-        "'replicate' is already provided by the Prelude and cannot be redefined",
-    ]);
-    assert!(!e.contains("Cannot unify"), "Prelude-internal error leaked, got: {e}");
-    assert!(!e.contains("96:"), "points at a Prelude source line, got: {e}");
+    // same type here, so it is the permitted user-wins redefinition. Until
+    // the Prelude and the program stopped sharing one namespace this very
+    // program was REJECTED: the user's signature replaced the Prelude's, the
+    // Prelude's own `replicate` body no longer type-checked against it
+    // (formerly "Cannot unify '[String]' with 'String' at 96:11"), and a
+    // safety net turned that into "cannot be redefined". The user's
+    // definition has its own canonical name now, so the Prelude's body is
+    // checked against the Prelude's signature and the user's references
+    // mean the user's definition (GHC, with the Prelude's hidden: the same).
+    let source = "replicate :: Int -> String -> String\nreplicate n s = s\n\n\
+                  main :: IO ()\nmain = do\n    \
+                  assert (replicate 3 \"x\" == \"x\") \"the program's own replicate\"\n    \
+                  assert (concat (map (\\n -> [n, n]) [1, 2]) == [1, 1, 2, 2]) \"the Prelude is intact\"\n";
+    let lua = compile(source, Path::new("."), &[])
+        .expect("a Prelude name redefined at another type compiles")
+        .lua_code;
+    mlua::Lua::new().load(&lua).set_name("user_wins_replicate").exec()
+        .expect("the program's own replicate runs");
 }
 
 #[test]
@@ -4435,6 +4443,265 @@ main = putStrLn (show (qualFn 5))
         "expected the 'exports nothing' warning, got: {:?}",
         result.warnings.iter().map(|w| w.to_string()).collect::<Vec<_>>()
     );
+}
+
+// --- One scope per module -------------------------------------------------
+//
+// Import resolution binds every reference in the scope of the module that
+// wrote it. The accept side is the scope_* corpus cases (GHC-goldened);
+// these pin what a scope does NOT contain, and how that is reported.
+
+/// Two imports that both bring in a `helper` are fine until the name is
+/// USED bare (GHC: "Ambiguous occurrence"); the use is the error, at the
+/// use, in the user's file — never an arbitrary pick, and never an error
+/// inside one of the imported files.
+#[test]
+fn bare_name_from_two_imports_is_ambiguous_on_use() {
+    let unused = "import ScopeLeft\nimport ScopeRight\n\nmain :: IO ()\nmain = print (leftF 1)\n";
+    compile(unused, Path::new("tests/cases"), &[])
+        .expect("two imports sharing a name compile while the name is unused");
+    let used = "import ScopeLeft\nimport ScopeRight\n\nmain :: IO ()\nmain = print (helper 5)\n";
+    let msg = expect_compile_error_in(used, Path::new("tests/cases"), &[], &[
+        "Ambiguous occurrence 'helper'",
+        "the 'helper' of module 'ScopeLeft'",
+        "the 'helper' of module 'ScopeRight'",
+        "at 5:",
+        "note:",
+        "GHC reports the same ambiguity",
+    ]);
+    assert!(!msg.contains("ScopeLeft.mll") && !msg.contains("ScopeRight.mll"),
+        "the error belongs to the using file, got: {msg}");
+    assert!(!msg.contains("ScopeLeft.helper") && !msg.contains("ScopeRight.helper"),
+        "canonical names must not surface, got: {msg}");
+}
+
+/// A module without an export list passes its imports' names on (mata-ll's
+/// documented deviation). When such a passed-on name is one side of an
+/// ambiguity, the report says so: under GHC that side would not be in
+/// scope at all.
+#[test]
+fn ambiguity_through_a_list_less_module_names_the_pass_through() {
+    let source = "import ScopeLeak\nimport ScopeLeft\n\nmain :: IO ()\nmain = print (helper 5)\n";
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
+        "Ambiguous occurrence 'helper'",
+        "the 'helper' of module 'ScopeInner'",
+        "the 'helper' of module 'ScopeLeft'",
+        "arrives through 'import ScopeLeak'",
+        "GHC exports only the module's own declarations",
+    ]);
+}
+
+/// The same rule for type names: two imported types of one name are
+/// ambiguous where the name is written, not at the imports.
+#[test]
+fn type_name_from_two_imports_is_ambiguous_on_use() {
+    let source = "import ScopeCfgA\nimport ScopeCfgB\n\nsize :: Config -> Int\nsize _ = 1\n\n\
+                  main :: IO ()\nmain = print (size defaultA)\n";
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
+        "Ambiguous occurrence 'Config'",
+        "the 'Config' of module 'ScopeCfgA'",
+        "the 'Config' of module 'ScopeCfgB'",
+        "in the type signature for 'size'",
+    ]);
+}
+
+/// `Alias.name` names what the modules imported under the alias EXPORT.
+/// It does not reach a declaration of some other module that merely
+/// shares the spelling (here the alias `ScopeMid` is given to ScopeLeft,
+/// while module ScopeMid itself has a `viaInner` the import list leaves
+/// out), nor a name the aliased module imports but does not export.
+#[test]
+fn alias_reaches_only_what_its_modules_export() {
+    let source = "import ScopeMid (helper)\nimport qualified ScopeLeft as ScopeMid\n\n\
+                  main :: IO ()\nmain = print (helper 1, ScopeMid.viaInner 1)\n";
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
+        "Unbound variable: ScopeMid.viaInner",
+    ]);
+    let source = "import qualified ScopeMid as Q\n\nmain :: IO ()\nmain = print (Q.other 1)\n";
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
+        "Unbound variable: Q.other",
+    ]);
+    let ok = "import ScopeMid (helper)\nimport qualified ScopeLeft as ScopeMid\n\n\
+              main :: IO ()\nmain = print (helper 1, ScopeMid.leftF 1)\n";
+    compile(ok, Path::new("tests/cases"), &[])
+        .expect("the alias names the module it was given to");
+}
+
+/// Two modules under one alias (valid, pinned by import_merge-style
+/// cases): a name only one of them offers resolves, a name both offer is
+/// ambiguous where it is used (GHC likewise) instead of meaning the first
+/// import's.
+#[test]
+fn alias_shared_by_two_modules_reports_a_clash_on_use() {
+    let ok = "import qualified ScopeLeft as X\nimport qualified ScopeRight as X\n\n\
+              main :: IO ()\nmain = print (X.leftF 1, X.rightG 1)\n";
+    compile(ok, Path::new("tests/cases"), &[])
+        .expect("names only one of the aliased modules offers resolve");
+    let clash = "import qualified ScopeLeft as X\nimport qualified ScopeRight as X\n\n\
+                 main :: IO ()\nmain = print (X.helper 1)\n";
+    expect_compile_error_in(clash, Path::new("tests/cases"), &[], &[
+        "Ambiguous occurrence 'X.helper'",
+        "the 'helper' of module 'ScopeLeft'",
+        "the 'helper' of module 'ScopeRight'",
+        "imported under the alias 'X'",
+    ]);
+}
+
+/// The entry module's declarations are not in scope in the modules it
+/// imports: a bare name an imported module leaves undefined is unbound
+/// there even when the entry module defines it. Reported in the imported
+/// file, under the name as written.
+#[test]
+fn imported_module_does_not_see_the_entry_modules_names() {
+    let source = "import ScopeNeedsRoot\n\nrootOnly :: Int -> Int\nrootOnly x = x + 1\n\n\
+                  main :: IO ()\nmain = print (viaRoot 1)\n";
+    let msg = expect_compile_error(source, &[Path::new("tests/broken-helpers")], &[
+        "Unbound variable: rootOnly",
+        "ScopeNeedsRoot.mll:4:",
+        "in definition of 'viaRoot'",
+    ]);
+    assert!(!msg.contains("ScopeNeedsRoot.viaRoot"),
+        "canonical names must not surface, got: {msg}");
+}
+
+/// Nor does a module see what only ANOTHER module of the program imports:
+/// a function of a library the entry module imports is unbound in an
+/// imported module that does not import the library itself (it used to
+/// resolve, the whole program being one namespace; GHC rejects it).
+#[test]
+fn module_does_not_see_what_only_its_importer_imports() {
+    let source = "import LString\nimport ScopeNeedsImport\n\n\
+                  main :: IO ()\nmain = print (doubled \"abc\", strLen \"abc\")\n";
+    expect_compile_error(source, &[Path::new("tests/broken-helpers"), Path::new("../lib")], &[
+        "Unbound variable: strLen",
+        "ScopeNeedsImport.mll:4:",
+        "in definition of 'doubled'",
+    ]);
+}
+
+/// A diagnostic inside an imported module names its declarations as their
+/// author wrote them, not by the canonical `Module.name` the compiler
+/// keeps them under.
+#[test]
+fn diagnostics_in_imported_modules_use_source_names() {
+    let source = "import qualified ScopeBadBody as B\n\nmain :: IO ()\nmain = print (B.norm (B.Pt 1 2))\n";
+    let msg = expect_compile_error(source, &[Path::new("tests/broken-helpers")], &[
+        "Cannot unify 'Pt' with 'Int'",
+        "ScopeBadBody.mll:6:",
+        "in definition of 'norm'",
+    ]);
+    assert!(!msg.contains("ScopeBadBody.norm") && !msg.contains("ScopeBadBody.Pt"),
+        "canonical names must not surface, got: {msg}");
+}
+
+/// The import-against-Prelude check runs for every module, and names the
+/// importing module when that is not the entry module.
+#[test]
+fn conflicting_unqualified_import_in_an_imported_module_names_that_module() {
+    let source = "import ScopeBadImport\n\nmain :: IO ()\nmain = print (keep 1)\n";
+    expect_compile_error(source, &[Path::new("tests/broken-helpers"), Path::new("../lib")], &[
+        "in module 'ScopeBadImport'",
+        "importing 'Data.Map' unqualified conflicts with",
+        "'null' (already defined by the Prelude)",
+        "import qualified Data.Map as Map",
+    ]);
+}
+
+/// A qualified reference to a Prelude function (or to a global record
+/// field or class method) resolves to that plain name. Under a local
+/// binder of the same name, writing the plain name out would hand the
+/// reference to the binder; that is rejected, with the deviation named,
+/// instead of silently meaning the local.
+#[test]
+fn qualified_reference_under_a_same_named_local_is_rejected() {
+    let source = "import qualified Data.Maybe as M\n\nf :: Int -> Int\n\
+                  f maybe = M.maybe 0 (\\x -> x) (Just maybe)\n\n\
+                  main :: IO ()\nmain = print (f 3)\n";
+    expect_compile_error(source, &[Path::new("../lib")], &[
+        "'M.maybe' cannot be used here",
+        "the local binding 'maybe' shadows the name it refers to",
+        "note:",
+        "GHC accepts this",
+    ]);
+    let ok = "import qualified Data.Maybe as M\n\nf :: Int -> Int\n\
+              f n = M.maybe 0 (\\x -> x) (Just n)\n\n\
+              main :: IO ()\nmain = print (f 3)\n";
+    compile(ok, Path::new("."), &[Path::new("../lib")])
+        .expect("the same reference with no shadowing local compiles");
+}
+
+/// `import Prelude ...` declares which Prelude names the module sees; it
+/// loads nothing. A name the forms leave out is out of scope, and one the
+/// module then defines itself is no redefinition — even a name the
+/// Prelude's own functions use, or one defined at the Prelude's type,
+/// which the entry module may not redefine otherwise.
+#[test]
+fn explicit_prelude_import_scopes_the_prelude() {
+    expect_compile_error(
+        "import Prelude hiding (head)\n\nmain :: IO ()\nmain = print (head [1, 2, 3])\n",
+        &[],
+        &["'head' is not in scope", "note:", "'import Prelude'"],
+    );
+    expect_compile_error(
+        "import qualified Prelude as P\n\nmain :: P.IO ()\nmain = print 1\n",
+        &[],
+        &["'print' is not in scope"],
+    );
+    let run = |name: &str, source: &str| {
+        let lua = compile(source, Path::new("."), &[])
+            .unwrap_or_else(|e| panic!("{name} should compile:\n{e}"))
+            .lua_code;
+        mlua::Lua::new().load(&lua).set_name(name).exec()
+            .unwrap_or_else(|e| panic!("{name} should run:\n{e}"));
+    };
+    run("prelude_qualified",
+        "import qualified Prelude as P\n\nmain :: P.IO ()\n\
+         main = P.assert (P.not (P.null [1, 2, 3])) \"the Prelude through its alias\"\n");
+    run("prelude_list",
+        "import Prelude (IO, assert, (+), (==))\n\nmain :: IO ()\n\
+         main = assert (1 + 2 == 3) \"the listed Prelude names\"\n");
+    run("prelude_hidden_used_by_prelude",
+        "import Prelude hiding (map)\n\nmap :: Int -> Int\nmap x = x + 1\n\n\
+         main :: IO ()\nmain = do\n    \
+         assert (map 1 == 2) \"the program's own map\"\n    \
+         assert (([\\x -> x * 2] <*> [1, 2]) == [2, 4]) \"the Prelude's <*> keeps the Prelude's map\"\n");
+    run("prelude_hidden_same_type",
+        "import Prelude hiding (reverse)\n\nreverse :: [a] -> [a]\nreverse xs = xs\n\n\
+         main :: IO ()\nmain = assert (reverse [1, 2, 3] == [1, 2, 3]) \"the program's own reverse\"\n");
+}
+
+/// The compiled program returns one table to the Lua host, keyed by the
+/// names the `export` declarations carry in their own modules — also for
+/// an export of an imported module, and for one that shares its name with
+/// a Prelude function. Two modules exporting one name is an error: there
+/// is one entry per name.
+#[test]
+fn exports_keep_their_declared_names_and_must_be_unique() {
+    let source = "import ScopeHostLib\n\n\
+                  export replicate :: Int -> Int -> [Int]\n\
+                  replicate 0 _ = []\nreplicate n x = x : replicate (n - 1) x\n\n\
+                  export total :: [Int] -> Int\ntotal xs = twice (sum xs)\n";
+    let lua_code = compile(source, Path::new("tests/cases"), &[])
+        .expect("exports across modules compile")
+        .lua_code;
+    let lua = mlua::Lua::new();
+    let module: mlua::Table = lua.load(&lua_code).set_name("scope_exports").eval()
+        .expect("the module returns its export table");
+    let call = |name: &str| -> mlua::Function {
+        module.get(name).unwrap_or_else(|e| panic!("export '{name}' missing: {e}"))
+    };
+    assert_eq!(call("twice").call::<i64>(21).unwrap(), 42, "an imported module's export");
+    assert_eq!(call("scaled").call::<i64>(5).unwrap(), 15,
+        "the imported module's own replicate behind its export");
+    assert_eq!(call("replicate").call::<Vec<i64>>((2, 7)).unwrap(), vec![7, 7],
+        "the entry module's export named like a Prelude function");
+    assert_eq!(call("total").call::<i64>(vec![1, 2, 3]).unwrap(), 12);
+
+    let clash = "import ScopeHostLib\n\nexport twice :: Int -> Int\ntwice x = x * 3\n";
+    expect_compile_error_in(clash, Path::new("tests/cases"), &[], &[
+        "'twice' is exported to the Lua host by both module 'ScopeHostLib' and this file",
+        "one entry per exported name",
+    ]);
 }
 
 /// A pattern parameter on a local (let/do-let) function binding is

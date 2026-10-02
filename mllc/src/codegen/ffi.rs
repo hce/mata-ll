@@ -374,12 +374,19 @@ impl CodeGen {
     /// (nil) one — is reported with the declared type and its position (`w`).
     /// Bare scalar FFI *results* deliberately get no such check (see
     /// `ffi_decode_desc_inner`): they would wrap every hot scalar FFI call.
+    /// `ty` as an FFI decode error names it at runtime: with every type
+    /// under the name its own module declares it by, not the canonical
+    /// one import resolution gave it.
+    fn shown_ty(&self, ty: &Ty) -> String {
+        crate::types::spell_names(&ty.to_string(), &self.source_names)
+    }
+
     pub(super) fn ffi_child_desc(&self, ty: &Ty, stack: &mut Vec<String>, w: &str) -> (String, bool) {
         if let Some((d, converts)) = self.ffi_decode_desc_inner(ty, stack, Some(w)) {
             (d, converts)
         } else if let Some(lt) = Self::scalar_lua_type(ty) {
             (
-                format!("{{k=\"chk\",t={:?},lt=\"{}\",w={:?}}}", ty.to_string(), lt, w),
+                format!("{{k=\"chk\",t={:?},lt=\"{}\",w={:?}}}", self.shown_ty(ty), lt, w),
                 false,
             )
         } else {
@@ -410,7 +417,7 @@ impl CodeGen {
             // (1-based, possibly empty) which must become a cons list. An empty
             // array MUST decode to the empty list (nil), never a bogus element.
             FfiShape::List(inner) => {
-                let t = ty.to_string();
+                let t = self.shown_ty(ty);
                 let (e, _) = self.ffi_child_desc(
                     &inner,
                     stack,
@@ -423,7 +430,7 @@ impl CodeGen {
             // only need scalar checks the descriptor is validation-only
             // (rb=false) and the host array passes through unchanged.
             FfiShape::Tuple(elems) => {
-                let t = ty.to_string();
+                let t = self.shown_ty(ty);
                 let mut converts = false;
                 let mut any = false;
                 let mut es = Vec::new();
@@ -457,7 +464,7 @@ impl CodeGen {
             // wrapping happens; `e` decodes/checks the payload (false =
             // pass the payload through).
             FfiShape::Maybe(payload) => {
-                let t = ty.to_string();
+                let t = self.shown_ty(ty);
                 let (e, _) = self.ffi_child_desc(
                     &payload,
                     stack,
@@ -473,7 +480,7 @@ impl CodeGen {
                 if stack.iter().any(|s| s == &name) {
                     return None;
                 }
-                let t = ty.to_string();
+                let t = self.shown_ty(ty);
                 stack.push(name.clone());
                 let mut converts = false;
                 let mut any = false;
@@ -482,7 +489,11 @@ impl CodeGen {
                     let (d, c) = self.ffi_child_desc(
                         fty,
                         stack,
-                        &format!("field '{}' of record {}", fname, name),
+                        &format!(
+                            "field '{}' of record {}",
+                            fname,
+                            self.source_names.get(&name).unwrap_or(&name),
+                        ),
                     );
                     converts |= c;
                     any |= d != "false";
@@ -509,7 +520,7 @@ impl CodeGen {
             // against the declared key type (catching a host array where
             // a String-keyed map was declared) and decodes each value.
             FfiShape::HashMap { key, value } => {
-                let t = ty.to_string();
+                let t = self.shown_ty(ty);
                 let kt = con_name(&key).unwrap_or("");
                 let (v, _) = self.ffi_child_desc(
                     &value,
@@ -529,7 +540,7 @@ impl CodeGen {
             // scalar nor nil (a table/function/userdata) fails at runtime,
             // localized by `w`, since `Any` models only scalar Lua values.
             FfiShape::Any => {
-                let t = ty.to_string();
+                let t = self.shown_ty(ty);
                 Some((format!("{{k=\"any\",t={:?}{}}}", t, wlua), true))
             }
             // Scalars, opaque type variables, functions, IO, etc.: the raw

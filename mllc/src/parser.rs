@@ -734,7 +734,7 @@ impl Parser {
             }
         }
 
-        Ok(Module { decls: merged, name: module_name, exports: module_exports, hidden: std::collections::HashSet::new(), origin_spans: Vec::new() })
+        Ok(Module { decls: merged, name: module_name, exports: module_exports, resolution: Resolution::default(), origin_spans: Vec::new() })
     }
 
     /// Append one parsed declaration (which began at token `started_at`)

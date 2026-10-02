@@ -1021,7 +1021,7 @@ impl Checker {
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
-                            format!("toEnum: index out of range for {}", type_name).into_bytes()
+                            format!("toEnum: index out of range for {}", self.source_name(type_name)).into_bytes()
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
@@ -1061,7 +1061,7 @@ impl Checker {
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
-                            format!("succ: already at maxBound for {}", type_name).into_bytes()
+                            format!("succ: already at maxBound for {}", self.source_name(type_name)).into_bytes()
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
@@ -1101,7 +1101,7 @@ impl Checker {
                     TExprKind::App(
                         Box::new(TExpr::new(TExprKind::Var("error".into()), Ty::Unit)),
                         Box::new(TExpr::new(TExprKind::Lit(TLiteral::Str(
-                            format!("pred: already at minBound for {}", type_name).into_bytes()
+                            format!("pred: already at minBound for {}", self.source_name(type_name)).into_bytes()
                         )), Ty::Con("String".into()))),
                     ),
                     result_type.clone(),
@@ -2036,13 +2036,17 @@ impl Checker {
         let (_, result_type) = Self::data_result_type(type_name, type_vars);
 
         // Rep type builders.
-        let k1_t = |t: Ty| Ty::app(Ty::Con("K1".into()), t);
-        let sum_t = |a: Ty, b: Ty| Ty::app(Ty::app(Ty::Con(":+:".into()), a), b);
-        let prod_t = |a: Ty, b: Ty| Ty::app(Ty::app(Ty::Con(":*:".into()), a), b);
-        let d1_t = |d: Ty, f: Ty| Ty::app(Ty::app(Ty::Con("D1".into()), d), f);
-        let c1_t = |c: Ty, f: Ty| Ty::app(Ty::app(Ty::Con("C1".into()), c), f);
-        let s1_t = |s: Ty, f: Ty| Ty::app(Ty::app(Ty::Con("S1".into()), s), f);
-        let u1_t = Ty::Con("U1".into());
+        let rep_con = |name: &str| Ty::Con(self.library_type("Data.Generics", name));
+        let (k1, sum, prod) = (rep_con("K1"), rep_con(":+:"), rep_con(":*:"));
+        let (d1, c1, s1) = (rep_con("D1"), rep_con("C1"), rep_con("S1"));
+        let k1_t = |t: Ty| Ty::app(k1.clone(), t);
+        let sum_t = |a: Ty, b: Ty| Ty::app(Ty::app(sum.clone(), a), b);
+        let prod_t = |a: Ty, b: Ty| Ty::app(Ty::app(prod.clone(), a), b);
+        let d1_t = |d: Ty, f: Ty| Ty::app(Ty::app(d1.clone(), d), f);
+        let c1_t = |c: Ty, f: Ty| Ty::app(Ty::app(c1.clone(), c), f);
+        let s1_t = |s: Ty, f: Ty| Ty::app(Ty::app(s1.clone(), s), f);
+        let u1_t = rep_con("U1");
+        let rep_family = self.library_type("Data.Generics", "Rep");
 
         // Value/pattern helpers.
         let con_e = |name: &str, ty: Ty| TExpr::new(TExprKind::Con(name.into()), ty);
@@ -2056,7 +2060,9 @@ impl Checker {
         self.register_meta_type(&d_marker);
         let dt_fn = format!("__meta_datatypeName_{}", type_name);
         let dc_fn = format!("__meta_datatypeConCount_{}", type_name);
-        out_fns.push(self.meta_string_fn(&dt_fn, type_name));
+        // The name the program sees at runtime is the type's own, not
+        // the canonical (module-qualified) one import resolution gave it.
+        out_fns.push(self.meta_string_fn(&dt_fn, self.source_name(type_name)));
         out_fns.push(self.meta_int_fn(&dc_fn, constructors.len() as i64));
         self.register_instance(InstanceInfo {
             class_name: "Datatype".to_string(),
@@ -2144,7 +2150,7 @@ impl Checker {
         let rep_type = d1_t(Ty::Con(d_marker.clone()), sum_ty.clone());
 
         // Extend the `Rep` family with `Rep <result_type> = rep_type`.
-        self.ty_families.add_equation("Rep", vec![result_type.clone()], rep_type.clone());
+        self.ty_families.add_equation(&rep_family, vec![result_type.clone()], rep_type.clone());
 
         // Build `from` and `to` clauses per constructor.
         let mut from_clauses: Vec<TClause> = Vec::new();
@@ -2301,7 +2307,18 @@ impl Checker {
 
     // --- FromJSON deriving ---
 
-    pub(super) fn json_ty() -> Ty { Ty::Con("Json".into()) }
+    /// The name of type `name` of the bundled library module `module`, a
+    /// type the compiler itself refers to (the derived JSON codecs and
+    /// Generic representations are written in terms of the library's
+    /// declarations). Import resolution names an imported module's
+    /// declarations `Module.name`; the bare name is the type when the
+    /// program compiled IS that module (or declares the type itself).
+    pub(super) fn library_type(&self, module: &str, name: &str) -> String {
+        let canonical = format!("{module}.{name}");
+        if self.type_name_defined(&canonical) { canonical } else { name.to_string() }
+    }
+
+    pub(super) fn json_ty(&self) -> Ty { Ty::Con(self.library_type("JSON", "Json")) }
 
     /// `Either String t`
     pub(super) fn estr_ty(t: &Ty) -> Ty {
@@ -2316,23 +2333,14 @@ impl Checker {
         None
     }
 
-    /// The spelling of a JSON-module combinator in this program's flat
-    /// namespace: bare when the root scope sees it bare, else the
-    /// canonical `JSON.<name>` module resolution renamed it to. The
-    /// renamed case arises when the type's DEFINING module imports JSON
-    /// but an export-list gate along the import chain keeps the
-    /// combinators out of the root's bare scope — the derived codec
-    /// belongs to the defining module, so it may reference them
-    /// regardless of what the root can name.
+    /// The name of a JSON-module combinator the derived codecs call: the
+    /// canonical `JSON.<name>` import resolution gives the library's
+    /// declarations — whatever the deriving module itself can name, the
+    /// derived codec refers to the library's own — or the bare name when
+    /// the program compiled is the JSON module itself.
     pub(super) fn json_fn(&self, name: &str) -> String {
-        if self.env.lookup(name).is_some() {
-            return name.to_string();
-        }
-        let qualified = format!("JSON.{name}");
-        if self.env.lookup(&qualified).is_some() {
-            return qualified;
-        }
-        name.to_string()
+        let canonical = format!("JSON.{name}");
+        if self.env.lookup(&canonical).is_some() { canonical } else { name.to_string() }
     }
 
     pub(super) fn jx_var(name: &str, ty: Ty) -> TExpr {
@@ -2445,7 +2453,8 @@ impl Checker {
     /// (reason, note) for the rejection message. The two directions once
     /// lived as a 55-line pair differing only in the direction's words.
     fn json_field_codec(&self, dir: JsonDir, field_ty: &Ty) -> Result<TExpr, (String, String)> {
-        let codec_ty = dir.codec_ty(field_ty);
+        let json = self.json_ty();
+        let codec_ty = dir.codec_ty(&json, field_ty);
         let comb = |name: &str, ty: Ty| Self::jx_var(&self.json_fn(&format!("{}{}", dir.prefix(), name)), ty);
         match field_ty {
             Ty::Con(n) if n == "Int" => Ok(comb("Int", codec_ty)),
@@ -2453,7 +2462,7 @@ impl Checker {
             Ty::Con(n) if n == "Number" => Ok(comb("Number", codec_ty)),
             Ty::Con(n) if n == "String" => Ok(comb("String", codec_ty)),
             Ty::Con(n) if n == "Bool" => Ok(comb("Bool", codec_ty)),
-            Ty::Con(n) if n == "Json" => Ok(comb("Value", codec_ty)),
+            Ty::Con(n) if Ty::Con(n.clone()) == json => Ok(comb("Value", codec_ty)),
             Ty::List(elem) => {
                 let inner = self.json_field_codec(dir, elem)?;
                 let list_fn_ty = Ty::arrow(inner.ty.clone(), codec_ty.clone());
@@ -2523,7 +2532,7 @@ impl Checker {
         estr: &Ty,
         result_ty: &Ty,
     ) -> Result<TExpr, (String, String)> {
-        let json = Self::json_ty();
+        let json = self.json_ty();
         // The constructed value uses the registered key (a shadowing local
         // constructor is mangled); every *string* below keeps the source name.
         let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
@@ -2604,7 +2613,7 @@ impl Checker {
         estr: &Ty,
         result_ty: &Ty,
     ) -> Result<TExpr, (String, String)> {
-        let json = Self::json_ty();
+        let json = self.json_ty();
         match &con.fields {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
                 self.fromjson_named_body(&con.name, fields, field_tys, estr, result_ty)
@@ -2750,9 +2759,9 @@ impl Checker {
         let class = dir.class();
         // The class and every combinator the generated codec calls live in
         // the JSON library module; without the import nothing can resolve.
-        // The probe goes through json_fn: the combinators may be in scope
-        // bare, or only under their canonical `JSON.<name>` spelling (the
-        // defining module imports JSON behind an export-list gate).
+        // The probe goes through json_fn: the combinators exist under their
+        // canonical `JSON.<name>` whenever some module of the program
+        // imports JSON (bare when the program IS the JSON module).
         let probe = self.json_fn(dir.scope_probe());
         if !self.classes.contains_key(class) || self.env.lookup(&probe).is_none() {
             self.reject_derive(class, type_name,
@@ -2830,7 +2839,7 @@ impl Checker {
 
         let result_ty = Ty::Con(type_name.to_string());
         let estr = Self::estr_ty(&result_ty);
-        let json = Self::json_ty();
+        let json = self.json_ty();
         let str_ty = Ty::Con("String".into());
         let bool_ty = Ty::Con("Bool".into());
         let mangled = format!("fromJSON_{}", type_name);
@@ -2998,7 +3007,7 @@ impl Checker {
         // Tag every failure with the type being decoded.
         let body = Self::jx_call(
             &self.json_fn("jContext"),
-            vec![Self::jx_str(type_name), body_inner],
+            vec![Self::jx_str(self.source_name(type_name)), body_inner],
             estr.clone(),
         );
 
@@ -3035,7 +3044,7 @@ impl Checker {
             ty: Ty::arrow(json.clone(), estr.clone()),
             clauses: vec![TClause {
                 span: None,
-                patterns: vec![TPattern::Var("_j".into(), Self::json_ty())],
+                patterns: vec![TPattern::Var("_j".into(), self.json_ty())],
                 guards: vec![],
                 body: Some(body),
                 where_binds: vec![],
@@ -3052,7 +3061,7 @@ impl Checker {
                 span: None,
                 patterns: vec![
                     TPattern::Var("_k".into(), Ty::Con("String".into())),
-                    TPattern::Var("_j".into(), Self::json_ty()),
+                    TPattern::Var("_j".into(), self.json_ty()),
                 ],
                 guards: vec![],
                 body: Some(field_body),
@@ -3068,8 +3077,8 @@ impl Checker {
     // --- ToJSON deriving ---
 
     /// `("key", val)` — one pair of a JSON object, of type `(String, Json)`.
-    pub(super) fn jx_pair(key: &str, val: TExpr) -> TExpr {
-        let ty = Ty::Tuple(vec![Ty::Con("String".into()), Self::json_ty()]);
+    pub(super) fn jx_pair(&self, key: &str, val: TExpr) -> TExpr {
+        let ty = Ty::Tuple(vec![Ty::Con("String".into()), self.json_ty()]);
         TExpr::new(TExprKind::Tuple(vec![Self::jx_str(key), val]), ty)
     }
 
@@ -3088,31 +3097,31 @@ impl Checker {
     }
 
     /// `JObj [pair0, pair1, …]`
-    pub(super) fn jx_obj(pairs: Vec<TExpr>) -> TExpr {
-        let pair_ty = Ty::Tuple(vec![Ty::Con("String".into()), Self::json_ty()]);
+    pub(super) fn jx_obj(&self, pairs: Vec<TExpr>) -> TExpr {
+        let pair_ty = Ty::Tuple(vec![Ty::Con("String".into()), self.json_ty()]);
         let list = Self::jx_list(pairs, pair_ty);
-        let con_ty = Ty::arrow(list.ty.clone(), Self::json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JObj".into()), con_ty), list, Self::json_ty())
+        let con_ty = Ty::arrow(list.ty.clone(), self.json_ty());
+        Self::jx_app(TExpr::new(TExprKind::Con("JObj".into()), con_ty), list, self.json_ty())
     }
 
     /// `JStr "s"`
-    pub(super) fn jx_jstr(s: &str) -> TExpr {
-        let con_ty = Ty::arrow(Ty::Con("String".into()), Self::json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JStr".into()), con_ty), Self::jx_str(s), Self::json_ty())
+    pub(super) fn jx_jstr(&self, s: &str) -> TExpr {
+        let con_ty = Ty::arrow(Ty::Con("String".into()), self.json_ty());
+        Self::jx_app(TExpr::new(TExprKind::Con("JStr".into()), con_ty), Self::jx_str(s), self.json_ty())
     }
 
     /// `JArr [e0, e1, …]`
-    pub(super) fn jx_jarr(elems: Vec<TExpr>) -> TExpr {
-        let list = Self::jx_list(elems, Self::json_ty());
-        let con_ty = Ty::arrow(list.ty.clone(), Self::json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JArr".into()), con_ty), list, Self::json_ty())
+    pub(super) fn jx_jarr(&self, elems: Vec<TExpr>) -> TExpr {
+        let list = Self::jx_list(elems, self.json_ty());
+        let con_ty = Ty::arrow(list.ty.clone(), self.json_ty());
+        Self::jx_app(TExpr::new(TExprKind::Con("JArr".into()), con_ty), list, self.json_ty())
     }
 
     /// Encode constructor argument #i: the resolved encoder applied to the
     /// pattern variable `_x{i}` the clause binds it to.
     pub(super) fn tojson_arg(&self, i: usize, fty: &Ty) -> Result<TExpr, (String, String)> {
         let enc = self.tojson_field_encoder(fty)?;
-        Ok(Self::jx_app(enc, Self::jx_var(&format!("_x{}", i), fty.clone()), Self::json_ty()))
+        Ok(Self::jx_app(enc, Self::jx_var(&format!("_x{}", i), fty.clone()), self.json_ty()))
     }
 
     /// The `("key", encoded value)` pairs of a record constructor, keyed by
@@ -3131,7 +3140,7 @@ impl Checker {
         for (i, field) in fields.iter().enumerate() {
             let val = self.tojson_arg(i, &field_tys[i]).map_err(|e| Self::fromjson_field_err(
                 format!("field '{}' of constructor '{}' cannot be encoded", field.name, con_name), e))?;
-            pairs.push(Self::jx_pair(field.effective_key(), val));
+            pairs.push(self.jx_pair(field.effective_key(), val));
         }
         Ok(pairs)
     }
@@ -3158,11 +3167,11 @@ impl Checker {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
                 let mut pairs = self.tojson_named_pairs(&con.name, fields, field_tys)?;
                 if tagged {
-                    pairs.insert(0, Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())));
+                    pairs.insert(0, self.jx_pair("tag", self.jx_jstr(con.effective_tag())));
                 }
-                Ok(Self::jx_obj(pairs))
+                Ok(self.jx_obj(pairs))
             }
-            _ if field_tys.is_empty() => Ok(Self::jx_jstr(con.effective_tag())),
+            _ if field_tys.is_empty() => Ok(self.jx_jstr(con.effective_tag())),
             _ => {
                 let args: Vec<TExpr> = field_tys.iter().enumerate().map(|(i, fty)| {
                     self.tojson_arg(i, fty).map_err(|e| Self::fromjson_field_err(
@@ -3171,12 +3180,12 @@ impl Checker {
                 let contents = if field_tys.len() == 1 {
                     args.into_iter().next().unwrap()
                 } else {
-                    Self::jx_jarr(args)
+                    self.jx_jarr(args)
                 };
                 if tagged {
-                    Ok(Self::jx_obj(vec![
-                        Self::jx_pair("tag", Self::jx_jstr(con.effective_tag())),
-                        Self::jx_pair("contents", contents),
+                    Ok(self.jx_obj(vec![
+                        self.jx_pair("tag", self.jx_jstr(con.effective_tag())),
+                        self.jx_pair("contents", contents),
                     ]))
                 } else {
                     Ok(contents)
@@ -3224,7 +3233,7 @@ impl Checker {
         };
 
         let result_ty = Ty::Con(type_name.to_string());
-        let json = Self::json_ty();
+        let json = self.json_ty();
         let mangled = format!("toJSON_{}", type_name);
 
         // One clause per constructor; report every unsupported field before
@@ -3293,10 +3302,10 @@ impl JsonDir {
         match self { JsonDir::Decode => "fromJSON", JsonDir::Encode => "toJSON" }
     }
     /// A decoder maps `Json -> Either String t`; an encoder `t -> Json`.
-    fn codec_ty(self, field_ty: &Ty) -> Ty {
+    fn codec_ty(self, json: &Ty, field_ty: &Ty) -> Ty {
         match self {
-            JsonDir::Decode => Ty::arrow(Checker::json_ty(), Checker::estr_ty(field_ty)),
-            JsonDir::Encode => Ty::arrow(field_ty.clone(), Checker::json_ty()),
+            JsonDir::Decode => Ty::arrow(json.clone(), Checker::estr_ty(field_ty)),
+            JsonDir::Encode => Ty::arrow(field_ty.clone(), json.clone()),
         }
     }
     /// A library name whose presence shows the JSON module is imported.

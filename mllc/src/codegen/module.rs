@@ -559,6 +559,9 @@ impl CodeGen {
             }
             for name in &module.exports {
                 let sname = sanitize_name(name);
+                // The key the Lua host knows the export by: the name the
+                // declaration has in its own module, not its canonical one.
+                let host = module.source_names.get(name).unwrap_or(name);
                 // Extract argument and result types from the function type
                 let (arg_tys, res_ty) = if let Some(ty) = export_types.get(name) {
                     let mut args = Vec::new();
@@ -627,7 +630,7 @@ impl CodeGen {
                         }
                     }
                     entries.push((
-                        sanitize_name(name),
+                        sanitize_name(host),
                         Expr::call(
                             Expr::paren(Expr::Func(vec![], FuncBody::Block(Block(body)))),
                             vec![],
@@ -681,7 +684,7 @@ impl CodeGen {
                             .unwrap_or_else(|| "false".into());
                         let root = format!(
                             "in the result of a callback passed to the exported function '{}'",
-                            name
+                            host
                         );
                         body.push(Stmt::Raw(format!(
                             "if type({arg}) == \"function\" then {arg} = __mll_wrap_callback_in({arg}, {}, {{{}}}, {}, {:?}) end",
@@ -691,7 +694,7 @@ impl CodeGen {
                     {
                         let root = format!(
                             "in argument {} of the exported function '{}'",
-                            i + 1, name
+                            i + 1, host
                         );
                         body.push(Stmt::Assign(
                             arg.clone(),
@@ -772,7 +775,7 @@ impl CodeGen {
                     }
                 }
                 entries.push((
-                    sanitize_name(name),
+                    sanitize_name(host),
                     Expr::Func(wrapper_params, FuncBody::Block(Block(body))),
                 ));
             }

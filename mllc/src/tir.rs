@@ -23,6 +23,12 @@ pub struct TModule {
     pub has_main: bool,
     /// Functions exported to Lua
     pub exports: Vec<String>,
+    /// Canonical name -> the name its module declares it under, for every
+    /// declaration import resolution renamed (see
+    /// `ast::Resolution::source_names`). What the program shows at runtime
+    /// is the declared name: an export's key in the Lua return table, a
+    /// function named in a runtime error message.
+    pub source_names: std::collections::HashMap<String, String>,
     /// Record field accessors: (field_name, lua_index)
     pub record_accessors: Vec<(String, usize)>,
     /// Newtype CONSTRUCTOR names (zero-cost wrappers: a saturated
