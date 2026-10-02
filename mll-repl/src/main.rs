@@ -398,6 +398,25 @@ mod repl_action_tests {
         assert_eq!(st.decls.len(), 1, "expression did not accumulate");
     }
 
+    /// The accumulated declarations form one module, so a second
+    /// definition of a name is a compile error there ("Multiple
+    /// declarations") and is not accumulated — directly after the first
+    /// (two argument-less bindings) or with another declaration between.
+    #[test]
+    fn redefinition_is_rejected_and_not_accumulated() {
+        let mut st = ReplState::new(vec![]);
+        assert!(st.eval("x :: Int\nx = 1"));
+        assert!(st.eval("x = 2"));
+        assert_eq!(st.decls.len(), 1, "an adjacent redefinition is not persisted");
+        assert!(st.eval("y :: Int\ny = 5"));
+        assert!(st.eval("x = 3"));
+        assert_eq!(st.decls.len(), 2, "a separated redefinition is not persisted");
+        let err = compile_on_compiler_stack(&st.source_for("x = 3", Interp::Decl), &[])
+            .err()
+            .expect("the redefinition does not compile");
+        assert!(format!("{err}").contains("Multiple declarations of 'x'"), "{err}");
+    }
+
     #[test]
     fn run_wrapper_shape() {
         let src = build_source_run(&["x :: Int".into()], "putStrLn \"hi\"");

@@ -990,6 +990,19 @@ alternatives, and lambda arguments are fully supported.
 Non-exhaustive function definitions and case expressions are rejected
 at compile time (the type checker performs exhaustiveness checking).
 
+Patterns are linear, as in Haskell: the patterns bound together by one
+construct — the parameters of one function equation or lambda, or the
+pattern of a case alternative, a `<-` statement, a generator, a pattern
+guard or a pattern binding — name each variable at most once. `same x x
+= True` is a compile error ("Conflicting definitions for 'x'"), not an
+equality test; write `same x y | x == y = True`.
+
+The equations of one function follow each other directly. Another
+declaration between them, the function's own type signature included,
+ends the function, and a later equation for the same name is then a
+second definition — a compile error ("Multiple declarations"), like
+every other name a module declares twice in one namespace.
+
 NOTE: The following distinction for assignments is aspirational and
 not yet implemented. We want to distinguish between "single-case
 assignments" such as a let or <- assignment inside a do block. Here,

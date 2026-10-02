@@ -2155,6 +2155,37 @@ impl Checker {
                             continue;
                         }
                     let field_ty = self.ast_type_to_ty(&field.ty);
+                    // A field shared by several constructors of this type
+                    // is ONE selector, registered once under the field's
+                    // name — so every constructor must give it the same
+                    // type (Haskell 2010 §4.2.1). Registration is
+                    // last-writer-wins: without this check the selector
+                    // took the LAST constructor's type and read the other
+                    // constructors' values at that type.
+                    let earlier = constructors[..i].iter().find_map(|c| match &c.fields {
+                        ConstructorFields::Named(fs) => fs.iter()
+                            .find(|f| f.name == field.name)
+                            .map(|f| (c.name.clone(), f.ty.clone())),
+                        ConstructorFields::Positional(_) => None,
+                    });
+                    if let Some((earlier_con, earlier_ast)) = earlier {
+                        let earlier_ty = self.ast_type_to_ty(&earlier_ast);
+                        if earlier_ty != field_ty {
+                            self.push_error_ctx_note(
+                                DiagnosticKind::Other(format!(
+                                    "Constructors '{}' and '{}' give different types for \
+                                     field '{}': '{}' and '{}'",
+                                    earlier_con, con.name, field.name, earlier_ty, field_ty,
+                                )),
+                                format!("data {}", name),
+                                "a field shared by several constructors of one type is a \
+                                 single selector function, so it has one type in all of \
+                                 them; give the field the same type in both constructors, \
+                                 or rename one of the two fields",
+                            );
+                            continue;
+                        }
+                    }
                     // A field whose type mentions an existential variable
                     // gets NO selector: `getIt :: Foo -> a` would hand the
                     // hidden type to any caller, outside any match scope —

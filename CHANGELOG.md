@@ -62,6 +62,40 @@ API of the `mllc` library crate.)
   user wrote (`data R = R { either :: Int }`; `either (R 1)` → "Cannot
   unify 'a -> b' with 'R'"). Case `lua_keywords` (whose `until` field the
   new Prelude `until` broke) now uses `nil` and is GHC-goldened.
+- **A name declared twice in one module is rejected** (breaking for
+  programs that relied on it), as in GHC ("Multiple declarations",
+  "Duplicate type signatures", "Conflicting definitions"), with both
+  locations named. Until now the later declaration silently replaced
+  the earlier one. The dangerous form was a function whose equations are
+  separated by another declaration — or by its own type signature —
+  where the first group of equations was dropped without a word
+  (`f 0 = 100`, then `g`, then `f n = n`: `f 0` was `0`). Equations now
+  group as in Haskell 2010 §4.4.3.1: they follow each other
+  directly and the first takes arguments, so `k = 1` followed by
+  `k = 2` is two definitions as well (the pair used to merge into one
+  function that crashed when called). The same rule covers the equations
+  of a method inside a class or instance body. Also rejected, each
+  previously accepted: two type signatures for one name; a function
+  named like a record field or a class method of the same module; a
+  class declaring one method twice; two classes, a class and a type, or
+  a type family and any other type under one name; two fixity
+  declarations for one operator; a field named twice in one constructor;
+  and a field that two constructors of one type declare at different
+  types (the selector took the last constructor's type and failed at
+  runtime on the others). The check runs per source file, so a
+  duplicate inside an imported module is reported for that module, and
+  a module still may define a private helper under a name another
+  module also uses. In the REPL, whose inputs accumulate into one
+  module, a second definition of a name is this error (`/drop` and
+  `/clear` remove earlier declarations). Cases `declaration_boundaries`
+  and `private_helper_names` (GHC-goldened).
+- **Non-linear patterns are rejected**, as in GHC ("Conflicting
+  definitions for 'x'"), with both occurrences located. A variable bound
+  twice by the patterns of one function equation, lambda, case
+  alternative, `<-` statement, list-comprehension generator, pattern
+  guard or pattern binding used to compile, the later occurrence
+  winning: `same x x = True` answered `same 1 2` with `True`, and
+  `case (1, 2) of (a, a) -> a` gave `2`.
 
 - **Module re-exports** (Haskell 2010 §5.2). An export list may carry
   `module X` entries: `module M (module M, …)` exports every own

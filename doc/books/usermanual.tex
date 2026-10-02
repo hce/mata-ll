@@ -156,6 +156,12 @@ REPL commands: \texttt{/clear}, \texttt{/decls}, \texttt{/lua EXPR},
 \texttt{/source}, \texttt{/drop}, \texttt{/help}, \texttt{/quit}.
 Multi-line input: end a line with \texttt{\textbackslash}.
 
+The declarations you enter accumulate into one module, so a name is
+defined once: entering a second definition of \texttt{x} is the
+``Multiple declarations'' error a source file would get.
+\texttt{/drop} removes the most recent declaration and
+\texttt{/clear} all of them.
+
 %======================================================================
 \section{Basic Syntax}
 
@@ -531,6 +537,14 @@ head (x:_) = x
 fst :: (a, b) -> a
 fst (a, _) = a
 \end{lstlisting}
+
+As in Haskell, the equations of one function stand together: any other
+declaration between them, the function's own type signature included,
+ends the function, and a later equation for the same name is rejected
+as a second definition (``Multiple declarations'').  A pattern names
+each variable once: \texttt{same x x = True} is rejected
+(``Conflicting definitions''), it does not compare its arguments ---
+write \texttt{same x y | x == y = True}.
 
 \subsection{Case Expressions}
 

@@ -278,6 +278,8 @@ mll_test!(newtype_nextline_brace, "newtype_nextline_brace.mll");
 mll_test!(block_comment_layout, "block_comment_layout.mll");
 mll_test!(guard_qualifier_lists, "guard_qualifier_lists.mll");
 mll_test!(where_tuple_binding, "where_tuple_binding.mll");
+mll_test!(declaration_boundaries, "declaration_boundaries.mll");
+mll_test!(private_helper_names, "private_helper_names.mll");
 mll_test!(negative_pattern_parens, "negative_pattern_parens.mll");
 mll_test!(dash_run_operators, "dash_run_operators.mll");
 mll_test!(underscore_names_no_capture, "underscore_names_no_capture.mll");
@@ -835,6 +837,7 @@ fn mll_case_registry_is_complete() {
         "ReexOuter.mll",
         "ReexAlias.mll",
         "ReexQual.mll",
+        "PrivateHelperLib.mll",
     ];
 
     let source = std::fs::read_to_string("tests/run_mll/registration.rs")

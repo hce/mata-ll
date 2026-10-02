@@ -42,6 +42,21 @@ Two ordering facts that are easy to get wrong and matter:
   which `fold.rs` pattern-matches as `App(App(Var(name), lhs), rhs)` and
   reduces. Folding earlier would miss most opportunities.
 
+- **"Declared twice" is decided in the parser, per source file.** Stages 3
+  and 4 merge the Prelude, every import and the user's file into ONE
+  declaration list, in which a second declaration of a name may
+  legitimately come from another module — so nothing after the parser can
+  tell a duplicate from a cross-module name. `parser.rs` therefore keeps
+  two logs while it reads one file: the declaration table
+  (`Parser::declared`, checked once by `check_declarations` at the end of
+  `parse_module`: one declaration per name and namespace, and equations of
+  a function grouped only when adjacent — `push_decl`), and the pattern
+  binder log (`Parser::pattern_binders`, checked by `check_linear` at
+  every construct that binds a list of patterns: each variable once). The
+  typechecker's own duplicate checks (constructors, a field in two types,
+  a method in two classes, data/newtype/synonym names) work on the merged
+  list and stay responsible for those clashes.
+
 ### The prelude / `local_start` trick
 
 The prelude (`lib/Prelude.mll`, embedded via `include_str!`) is parsed and

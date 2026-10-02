@@ -244,6 +244,8 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_block_comment_layout, "cases", "block_comment_layout.mll"),
         (ghc_oracle_guard_qualifier_lists, "cases", "guard_qualifier_lists.mll"),
         (ghc_oracle_where_tuple_binding, "cases", "where_tuple_binding.mll"),
+        (ghc_oracle_declaration_boundaries, "cases", "declaration_boundaries.mll"),
+        (ghc_oracle_private_helper_names, "cases", "private_helper_names.mll"),
         (ghc_oracle_negative_pattern_parens, "cases", "negative_pattern_parens.mll"),
         (ghc_oracle_dash_run_operators, "cases", "dash_run_operators.mll"),
         (ghc_oracle_underscore_names_no_capture, "cases", "underscore_names_no_capture.mll"),

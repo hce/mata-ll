@@ -58,6 +58,82 @@ struct ParentOp {
     assoc: Assoc,
 }
 
+/// What a module's source declares a top-level name as: the kind of one
+/// entry of the parser's declaration table (`Parser::declared`). The table
+/// exists to enforce that one module's source declares each name at most
+/// once per namespace (`check_declarations`).
+#[derive(Clone, PartialEq, Eq)]
+enum DeclaredAs {
+    /// A function or value binding — one contiguous group of equations.
+    Binding,
+    /// A method of the named class (its signature line in the class body).
+    Method(String),
+    /// A record field of the named data type or newtype: the field's
+    /// selector is a top-level function of that name.
+    Field(String),
+    Data,
+    Newtype,
+    Synonym,
+    Family,
+    Class,
+    /// A type signature: `f :: T` or `intrinsic f :: T`. An `export f :: T`
+    /// line is not entered (see `parse_export_decl`).
+    Signature,
+    /// A fixity declaration's entry for one operator.
+    Fixity,
+}
+
+/// The namespaces of the declaration table. A name may be declared once in
+/// each: `data Foo` and a function `foo`, or a signature and its binding,
+/// do not clash; types and classes share one namespace, as do functions,
+/// class methods and record fields.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum DeclSpace {
+    Value,
+    Type,
+    Signature,
+    Fixity,
+}
+
+impl DeclaredAs {
+    fn space(&self) -> DeclSpace {
+        match self {
+            DeclaredAs::Binding | DeclaredAs::Method(_) | DeclaredAs::Field(_) => DeclSpace::Value,
+            DeclaredAs::Data
+            | DeclaredAs::Newtype
+            | DeclaredAs::Synonym
+            | DeclaredAs::Family
+            | DeclaredAs::Class => DeclSpace::Type,
+            DeclaredAs::Signature => DeclSpace::Signature,
+            DeclaredAs::Fixity => DeclSpace::Fixity,
+        }
+    }
+
+    /// The declaration in prose, for the middle of a message.
+    fn describe(&self) -> String {
+        match self {
+            DeclaredAs::Binding => "a top-level definition".to_string(),
+            DeclaredAs::Method(class) => format!("a method of class '{}'", class),
+            DeclaredAs::Field(ty) => format!("a record field of '{}'", ty),
+            DeclaredAs::Data => "a data type".to_string(),
+            DeclaredAs::Newtype => "a newtype".to_string(),
+            DeclaredAs::Synonym => "a type synonym".to_string(),
+            DeclaredAs::Family => "a type family".to_string(),
+            DeclaredAs::Class => "a class".to_string(),
+            DeclaredAs::Signature => "a type signature".to_string(),
+            DeclaredAs::Fixity => "a fixity declaration".to_string(),
+        }
+    }
+}
+
+/// One entry of the declaration table: a name, what the source declares it
+/// as, and where (the declaring token).
+struct Declared {
+    name: String,
+    kind: DeclaredAs,
+    span: Span,
+}
+
 struct Parser {
     tokens: Vec<Located>,
     pos: usize,
@@ -82,6 +158,26 @@ struct Parser {
     /// points and parameters). One counter for the whole parse keeps every
     /// synthesized name unique across nested desugars.
     pg_fresh: usize,
+    /// Token indices of the pattern variables read so far in the current
+    /// top-level declaration, in source order — the raw material of the
+    /// linearity check (`check_linear`). Every pattern variable is recorded
+    /// where it is parsed (`bind_pattern_var`), `rewind` drops the entries
+    /// of an abandoned speculative parse, and each construct that binds a
+    /// list of patterns at once checks and removes its own entries once it
+    /// has committed to them. So the log never holds a token twice, and it
+    /// is the only stage that still knows the binder list AS WRITTEN: the
+    /// parser's own desugars (pattern lambdas, tuple bindings, pattern
+    /// guards, comprehensions) spread one list over several AST nodes.
+    pattern_binders: Vec<usize>,
+    /// The declaration table: every top-level name this module's source
+    /// declares, in source order. Filled as the declarations are parsed
+    /// (`declare`), checked once at the end of the module
+    /// (`check_declarations`). It covers one source file — the
+    /// only place where "declared twice in one module" is decidable, since
+    /// import resolution later merges every module into one declaration
+    /// list in which a second declaration may legitimately come from
+    /// another module.
+    declared: Vec<Declared>,
 }
 
 /// A parser position to rewind to when a speculative parse fails. Captures
@@ -107,6 +203,8 @@ impl Parser {
             fixities: HashMap::new(),
             depth: 0,
             pg_fresh: 0,
+            pattern_binders: Vec::new(),
+            declared: Vec::new(),
         }
     }
 
@@ -122,6 +220,159 @@ impl Parser {
     fn rewind(&mut self, cp: Checkpoint) {
         self.pos = cp.pos;
         self.current_indent = cp.current_indent;
+        // Pattern variables read past the checkpoint belong to the parse
+        // being abandoned; the tokens will be read again, possibly as a
+        // pattern, and must not be logged twice.
+        while self.pattern_binders.last().is_some_and(|&tok| tok >= cp.pos) {
+            self.pattern_binders.pop();
+        }
+    }
+
+    /// The source position of the token at index `tok`.
+    fn span_of(&self, tok: usize) -> Span {
+        let loc = &self.tokens[tok];
+        Span::new(loc.line, loc.col)
+    }
+
+    /// Record the identifier token at index `tok` as a pattern variable.
+    /// Called wherever a pattern variable is born: the variable and
+    /// as-pattern arms of `parse_pattern_atom_inner`, and the infix
+    /// definition forms, whose left operand is read as a plain identifier
+    /// before the operator shows it to be a pattern.
+    fn bind_pattern_var(&mut self, tok: usize) {
+        debug_assert!(self.pattern_binders.last().is_none_or(|&last| last < tok));
+        self.pattern_binders.push(tok);
+    }
+
+    /// THE linearity check (Haskell 2010 §3.17.1: a pattern, and the set of
+    /// patterns bound together, names each variable at most once). `from`
+    /// is the index of the first token of a binder list the caller has just
+    /// finished and committed to — the parameters of one function equation
+    /// or lambda, or the single pattern of a case alternative, a `<-`
+    /// statement, generator or guard, or a pattern binding. Its variables
+    /// are taken out of the log and must be pairwise distinct. `context`
+    /// names the construct for the message.
+    fn check_linear(&mut self, from: usize, context: &str) -> PResult<()> {
+        let start = self.pattern_binders.partition_point(|&tok| tok < from);
+        let list = self.pattern_binders.split_off(start);
+        for (i, &tok) in list.iter().enumerate() {
+            let Token::Ident(name) = &self.tokens[tok].token else { continue };
+            let first = list[..i].iter().copied().find(|&earlier| {
+                matches!(&self.tokens[earlier].token, Token::Ident(n) if n == name)
+            });
+            if let Some(first) = first {
+                let mut diag = Diagnostic::parse_at(
+                    format!(
+                        "Conflicting definitions for '{}' in {}: bound at {} and again",
+                        name, context, self.span_of(first),
+                    ),
+                    self.span_of(tok),
+                );
+                diag.notes.push(format!(
+                    "the patterns bound together name each variable once: a repeated \
+                     name does not compare the two positions, so there is no single \
+                     value '{}' could stand for. Bind them under two names and \
+                     compare those (a guard '| a == b').",
+                    name,
+                ));
+                return Err(Box::new(diag));
+            }
+        }
+        Ok(())
+    }
+
+    /// Enter the name spelled by the token at index `tok` into the
+    /// declaration table.
+    fn declare(&mut self, name: &str, kind: DeclaredAs, tok: usize) {
+        let span = self.span_of(tok);
+        self.declared.push(Declared { name: name.to_string(), kind, span });
+    }
+
+    /// The single-declaration rule over the declaration table: within one
+    /// module's source a name is declared once per namespace (GHC:
+    /// "Multiple declarations", "Duplicate type signatures", "Multiple
+    /// fixity declarations"). Returns one diagnostic per redeclaration, at
+    /// the later declaration, naming the first.
+    ///
+    /// Three clashes are deliberately left to the typechecker, which
+    /// already rejects them when it registers the declarations and has to
+    /// keep doing so for the merged program (a second declaration can come
+    /// from an import, which this table never sees): a record field
+    /// declared by two types, a method declared by two classes, and two
+    /// data/newtype/synonym declarations of one name. Reporting them here
+    /// too would only give one defect two diagnostics.
+    fn check_declarations(&self) -> Vec<Diagnostic> {
+        let mut first: HashMap<(DeclSpace, &str), &Declared> = HashMap::new();
+        let mut errors = Vec::new();
+        for d in &self.declared {
+            let prev = match first.entry((d.kind.space(), d.name.as_str())) {
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(d);
+                    continue;
+                }
+                std::collections::hash_map::Entry::Occupied(slot) => *slot.get(),
+            };
+            let plain_type = |k: &DeclaredAs| {
+                matches!(k, DeclaredAs::Data | DeclaredAs::Newtype | DeclaredAs::Synonym)
+            };
+            match (&prev.kind, &d.kind) {
+                // Within ONE type, a field shared by several constructors
+                // is a single declaration (Haskell 2010 §4.2.1); across two
+                // types the clash is the typechecker's (see above), like
+                // the two arms below.
+                (DeclaredAs::Field(_), DeclaredAs::Field(_)) => continue,
+                (DeclaredAs::Method(a), DeclaredAs::Method(b)) if a != b => continue,
+                (a, b) if plain_type(a) && plain_type(b) => continue,
+                _ => {}
+            }
+            let pair = if prev.kind == d.kind {
+                format!("{} at {} and again", prev.kind.describe(), prev.span)
+            } else {
+                format!("{} at {} and {}", prev.kind.describe(), prev.span, d.kind.describe())
+            };
+            let (msg, note) = match d.kind.space() {
+                DeclSpace::Signature => (
+                    format!("Duplicate type signatures for '{}': at {} and again", d.name, prev.span),
+                    "a name has one type signature; remove one of the two.".to_string(),
+                ),
+                DeclSpace::Fixity => (
+                    format!("Multiple fixity declarations for '{}': at {} and again", d.name, prev.span),
+                    "an operator has one precedence and associativity for the whole \
+                     module, so it takes one fixity declaration; remove one of the two."
+                        .to_string(),
+                ),
+                DeclSpace::Type => (
+                    format!("Multiple declarations of '{}': {}", d.name, pair),
+                    "types, type families and classes share one namespace, so a module \
+                     declares each such name once; rename one of the two."
+                        .to_string(),
+                ),
+                DeclSpace::Value if prev.kind == DeclaredAs::Binding && d.kind == DeclaredAs::Binding => (
+                    format!("Multiple declarations of '{}': {}", d.name, pair),
+                    format!(
+                        "a module defines each name once. Equations form ONE function \
+                         only when they follow each other directly and the first takes \
+                         arguments; anything between them — another declaration, or \
+                         the type signature of '{}' itself — ends the function, and the \
+                         next equation starts a second definition. Write the equations \
+                         of '{}' together, or rename one definition.",
+                        d.name, d.name,
+                    ),
+                ),
+                DeclSpace::Value => (
+                    format!("Multiple declarations of '{}': {}", d.name, pair),
+                    "functions, class methods and record fields share one namespace: \
+                     a class method and a record field are top-level functions of \
+                     their name, so a module declares each such name once; rename \
+                     one of the two."
+                        .to_string(),
+                ),
+            };
+            let mut diag = Diagnostic::parse_at(msg, d.span);
+            diag.notes.push(note);
+            errors.push(diag);
+        }
+        errors
     }
 
     fn peek(&self) -> &Token {
@@ -324,10 +575,12 @@ impl Parser {
 
     /// Parse a whole module: the optional `module … where` header, then
     /// top-level declarations at column 0 (import decls, signatures, bindings,
-    /// data/newtype/class/instance/type-family/fixity decls). Consecutive
-    /// same-named clauses are merged into one FunDef; a declaration that fails to parse
-    /// is recorded and parsing resumes at the next column-0 declaration, so
-    /// every declaration's error is reported at once.
+    /// data/newtype/class/instance/type-family/fixity decls). Adjacent
+    /// equations of one function are merged into one FunDef (`push_decl`);
+    /// a declaration that fails to parse is recorded and parsing resumes at
+    /// the next column-0 declaration, so every declaration's error is
+    /// reported at once. A source free of syntax errors is then checked for
+    /// names it declares twice (`check_declarations`).
     fn parse_module(&mut self) -> Result<Module, Vec<Diagnostic>> {
         let mut decls = Vec::new();
         self.skip_indent();
@@ -427,8 +680,13 @@ impl Parser {
         let mut errors: Vec<Diagnostic> = Vec::new();
         while !self.at_eof() {
             let started_at = self.pos;
+            self.pattern_binders.clear();
             match self.parse_decl() {
-                Ok(decl) => decls.extend(decl),
+                Ok(parsed) => {
+                    for decl in parsed {
+                        self.push_decl(&mut decls, decl, started_at);
+                    }
+                }
                 Err(e) => {
                     errors.push(*e);
                     self.recover_to_next_decl(started_at);
@@ -439,22 +697,14 @@ impl Parser {
         if !errors.is_empty() {
             return Err(errors);
         }
-
-        // Merge consecutive FunDef declarations with the same name (moving
-        // the clauses, not cloning them).
-        let mut merged: Vec<Decl> = Vec::new();
-        for decl in decls {
-            match decl {
-                Decl::FunDef { name, clauses }
-                    if matches!(merged.last(), Some(Decl::FunDef { name: prev, .. }) if *prev == name) =>
-                {
-                    if let Some(Decl::FunDef { clauses: prev_clauses, .. }) = merged.last_mut() {
-                        prev_clauses.extend(clauses);
-                    }
-                }
-                other => merged.push(other),
-            }
+        // With the whole source read, every name it declares is in the
+        // table: reject the ones declared twice before any later stage
+        // can let the last declaration silently replace the first.
+        let redeclared = self.check_declarations();
+        if !redeclared.is_empty() {
+            return Err(redeclared);
         }
+        let mut merged = decls;
 
         // Lower pattern-guard chains now that every clause group is
         // complete (§3.13 fall-through needs the following clauses) —
@@ -485,6 +735,32 @@ impl Parser {
         }
 
         Ok(Module { decls: merged, name: module_name, exports: module_exports, hidden: std::collections::HashSet::new(), origin_spans: Vec::new() })
+    }
+
+    /// Append one parsed declaration (which began at token `started_at`)
+    /// to the module's list. A function equation either CONTINUES the
+    /// function the previous declaration was defining or starts a new
+    /// binding — the Haskell 2010 §4.4.3.1 rule, as GHC implements it: the
+    /// equations of one function are adjacent, and only a first equation
+    /// that takes arguments opens a group (`k = 1` is complete on its
+    /// own). A new binding enters the declaration table, so an equation
+    /// separated from its function by any other declaration — the
+    /// function's own type signature included — is found there as a second
+    /// definition of the name instead of silently replacing the first.
+    fn push_decl(&mut self, decls: &mut Vec<Decl>, decl: Decl, started_at: usize) {
+        if let Decl::FunDef { name, clauses } = decl {
+            if let Some(Decl::FunDef { name: prev, clauses: prev_clauses }) = decls.last_mut()
+                && *prev == name
+                && prev_clauses.first().is_some_and(|c| !c.patterns.is_empty())
+            {
+                prev_clauses.extend(clauses);
+            } else {
+                self.declare(&name, DeclaredAs::Binding, started_at);
+                decls.push(Decl::FunDef { name, clauses });
+            }
+        } else {
+            decls.push(decl);
+        }
     }
 
     /// True when `tok` can begin a top-level declaration — the resync points
@@ -546,7 +822,9 @@ impl Parser {
         // declared in prefix parenthesised form — `data (:+:) a b = …` — just
         // like an operator value binding (`(<>) a b = …`). Both spellings then
         // take the same type-variable list.
+        let name_tok = self.pos;
         let name = self.parse_type_con_name()?;
+        self.declare(&name, DeclaredAs::Data, name_tok);
 
         let mut type_vars = Vec::new();
         while let Token::Ident(v) = self.peek() {
@@ -603,12 +881,12 @@ impl Parser {
         self.expect(&Token::Eq)?;
 
         let mut constructors = Vec::new();
-        constructors.push(self.parse_constructor()?);
+        constructors.push(self.parse_constructor(&name)?);
         loop {
             self.skip_newlines_and_indent();
             if !self.at(&Token::Pipe) { break; }
             self.advance();
-            constructors.push(self.parse_constructor()?);
+            constructors.push(self.parse_constructor(&name)?);
         }
 
         let deriving = self.parse_deriving()?;
@@ -640,7 +918,8 @@ impl Parser {
         }
     }
 
-    fn parse_constructor(&mut self) -> PResult<Constructor> {
+    /// One constructor of the data type `type_name` (the `=`/`|` form).
+    fn parse_constructor(&mut self, type_name: &str) -> PResult<Constructor> {
         // Check for existential quantification: `forall a b. [Constraint =>] ConName fields`
         let mut existential_vars = Vec::new();
         let mut existential_constraints = Vec::new();
@@ -673,13 +952,38 @@ impl Parser {
         self.skip_newlines_and_indent();
         if self.at(&Token::LeftBrace) {
             self.advance();
-            let mut fields = Vec::new();
+            let mut fields: Vec<crate::ast::RecordField> = Vec::new();
+            // The name token of each field, parallel to `fields`.
+            let mut field_toks: Vec<usize> = Vec::new();
             loop {
                 self.skip_newlines_and_indent();
                 if self.at(&Token::RightBrace) {
                     break;
                 }
+                let field_tok = self.pos;
                 let field_name = self.expect_ident()?;
+                // One constructor names each of its fields once: a second
+                // `x ::` would be a second component under the same label,
+                // which no selector, record pattern or update could tell
+                // from the first.
+                if let Some(i) = fields.iter().position(|f| f.name == field_name) {
+                    let mut diag = Diagnostic::parse_at(
+                        format!(
+                            "Duplicate field name '{}' in the record declaration of '{}': \
+                             at {} and again",
+                            field_name, name, self.span_of(field_toks[i]),
+                        ),
+                        self.span_of(field_tok),
+                    );
+                    diag.notes.push(
+                        "a field name labels one component of a constructor; rename \
+                         one of the two fields."
+                            .to_string(),
+                    );
+                    return Err(Box::new(diag));
+                }
+                field_toks.push(field_tok);
+                self.declare(&field_name, DeclaredAs::Field(type_name.to_string()), field_tok);
                 // Optional external-key rename: `fieldName as "key" :: T`.
                 // One shared name for every external boundary (LuaDict table
                 // key, JSON object key). 'as' is not a reserved word — check
@@ -808,7 +1112,9 @@ impl Parser {
 
     fn parse_newtype_decl(&mut self) -> PResult<Decl> {
         self.expect(&Token::Newtype)?;
+        let name_tok = self.pos;
         let name = self.expect_upper_ident()?;
+        self.declare(&name, DeclaredAs::Newtype, name_tok);
 
         let mut type_vars = Vec::new();
         while let Token::Ident(v) = self.peek() {
@@ -857,7 +1163,9 @@ impl Parser {
                 // Record form: exactly one selector (a newtype has exactly
                 // one field).
                 self.advance();
+                let sel_tok = self.pos;
                 let sel = self.expect_ident()?;
+                self.declare(&sel, DeclaredAs::Field(name.clone()), sel_tok);
                 self.expect(&Token::DblColon)?;
                 inner = self.parse_type()?;
                 if self.at(&Token::Comma) {
@@ -1045,8 +1353,13 @@ impl Parser {
     /// operator is the method actually being defined. Mirrors
     /// parse_value_decl's top-level infix branch; class and instance
     /// bodies used to lack it, so the spelling the top level accepts died
-    /// there with "Expected '='".
-    fn parse_infix_method_clause(&mut self, left: Pattern) -> PResult<(String, Clause)> {
+    /// there with "Expected '='". `binders_from` is the token the left
+    /// operand began at — the start of the equation's binder list.
+    fn parse_infix_method_clause(
+        &mut self,
+        left: Pattern,
+        binders_from: usize,
+    ) -> PResult<(String, Clause)> {
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
         let saved_block = self.block_indent;
@@ -1065,7 +1378,7 @@ impl Parser {
             _ => unreachable!("caller checked for Operator/Backtick"),
         };
         let right = self.parse_pattern_atom()?;
-        let clause = self.finish_clause(vec![left, right], span, saved_block)?;
+        let clause = self.finish_clause(&op, vec![left, right], span, saved_block, binders_from)?;
         Ok((op, clause))
     }
 
@@ -1149,7 +1462,9 @@ impl Parser {
             }
         }
 
+        let class_tok = self.pos;
         let class_name = self.expect_upper_ident()?;
+        self.declare(&class_name, DeclaredAs::Class, class_tok);
         let type_var = self.expect_ident()?;
         let where_line = self.peek_loc().line;
         self.expect(&Token::Where)?;
@@ -1159,6 +1474,12 @@ impl Parser {
             return Ok(vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }]);
         };
 
+        // The head token of each method's first default equation, and the
+        // method whose default equations the previous member line belonged
+        // to (None after a signature line): the default equations of one
+        // method group like a top-level function's (`push_decl`).
+        let mut default_toks: HashMap<String, usize> = HashMap::new();
+        let mut open_default: Option<String> = None;
         loop {
             self.skip_newlines_and_indent();
             if self.at_eof() || self.current_indent < method_indent {
@@ -1167,6 +1488,7 @@ impl Parser {
 
             // Parse method name: a `name :: type` signature line or a
             // default method clause. Could be an operator like (+) :: ...
+            let head_tok = self.pos;
             let Some(head) = self.parse_method_name("class method")? else { break };
 
             // A `::` after a plain name makes it a type signature; an
@@ -1177,34 +1499,53 @@ impl Parser {
             // `parse_clause` picks up right after the already-consumed name,
             // exactly like a top-level function clause.
             let (name, clause) = match head {
-                MethodHead::Infix(left) => self.parse_infix_method_clause(left)?,
+                MethodHead::Infix(left) => self.parse_infix_method_clause(left, head_tok)?,
                 MethodHead::Name(name) => {
                     if self.at(&Token::DblColon) {
                         self.advance();
                         let ty = self.parse_type()?;
+                        self.declare(&name, DeclaredAs::Method(class_name.clone()), head_tok);
                         methods.push(ClassMethod { name, ty, default_clauses: None });
+                        open_default = None;
                         continue;
                     }
                     if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                        self.parse_infix_method_clause(Pattern::Var(name))?
+                        self.bind_pattern_var(head_tok);
+                        self.parse_infix_method_clause(Pattern::Var(name), head_tok)?
                     } else {
-                        (name.clone(), self.parse_clause()?)
+                        (name.clone(), self.parse_clause(&name)?)
                     }
                 }
             };
 
             // Attach to the matching method signature
-            if let Some(m) = methods.iter_mut().find(|m| m.name == name) {
-                match &mut m.default_clauses {
-                    Some(clauses) => clauses.push(clause),
-                    None => m.default_clauses = Some(vec![clause]),
-                }
-            } else {
+            let Some(m) = methods.iter_mut().find(|m| m.name == name) else {
                 return Err(Box::new(Diagnostic::parse_at(format!(
                     "Default implementation for '{}' has no preceding type signature in class '{}'",
                     name, class_name
                 ), clause.span)));
+            };
+            match &mut m.default_clauses {
+                Some(clauses)
+                    if open_default.as_deref() == Some(name.as_str())
+                        && clauses.first().is_some_and(|c| !c.patterns.is_empty()) =>
+                {
+                    clauses.push(clause)
+                }
+                Some(_) => {
+                    return Err(self.conflicting_method_err(
+                        &name,
+                        default_toks[&name],
+                        head_tok,
+                        &format!("class '{}'", class_name),
+                    ));
+                }
+                None => {
+                    m.default_clauses = Some(vec![clause]);
+                    default_toks.insert(name.clone(), head_tok);
+                }
             }
+            open_default = Some(name);
         }
 
         Ok(vec![Decl::ClassDecl { name: class_name, type_var, superclasses, methods }])
@@ -1246,12 +1587,16 @@ impl Parser {
             return Ok(vec![Decl::InstanceDecl { class_name, target_type, context, methods }]);
         };
 
+        // The head token of each method's first equation, parallel to
+        // `methods`.
+        let mut method_toks: Vec<usize> = Vec::new();
         loop {
             self.skip_newlines_and_indent();
             if self.at_eof() || self.current_indent < method_indent {
                 break;
             }
 
+            let head_tok = self.pos;
             let Some(head) = self.parse_method_name("instance method")? else { break };
 
             // Collect all clauses for this method. An operator (or
@@ -1259,25 +1604,72 @@ impl Parser {
             // (`x <> y = …` — the identifier was the left operand); a
             // parenthesised pattern head is always that form.
             let (name, clause) = match head {
-                MethodHead::Infix(left) => self.parse_infix_method_clause(left)?,
+                MethodHead::Infix(left) => self.parse_infix_method_clause(left, head_tok)?,
                 MethodHead::Name(name) => {
                     if matches!(self.peek(), Token::Operator(_) | Token::Backtick) {
-                        self.parse_infix_method_clause(Pattern::Var(name))?
+                        self.bind_pattern_var(head_tok);
+                        self.parse_infix_method_clause(Pattern::Var(name), head_tok)?
                     } else {
-                        (name, self.parse_clause()?)
+                        let clause = self.parse_clause(&name)?;
+                        (name, clause)
                     }
                 }
             };
 
-            // Check if there's an existing method we should add a clause to
-            if let Some(existing) = methods.iter_mut().find(|m: &&mut InstanceMethod| m.name == name) {
-                existing.clauses.push(clause);
-            } else {
-                methods.push(InstanceMethod { name, clauses: vec![clause] });
+            // The equations of one method group like a top-level
+            // function's (`push_decl`): an equation continues the method
+            // the previous line was defining, or starts a method — which
+            // must then be one this body has not defined yet.
+            match methods.last_mut() {
+                Some(InstanceMethod { name: last, clauses })
+                    if *last == name && clauses.first().is_some_and(|c| !c.patterns.is_empty()) =>
+                {
+                    clauses.push(clause)
+                }
+                _ => {
+                    if let Some(i) = methods.iter().position(|m| m.name == name) {
+                        return Err(self.conflicting_method_err(
+                            &name,
+                            method_toks[i],
+                            head_tok,
+                            &format!("this instance of '{}'", class_name),
+                        ));
+                    }
+                    methods.push(InstanceMethod { name, clauses: vec![clause] });
+                    method_toks.push(head_tok);
+                }
             }
         }
 
         Ok(vec![Decl::InstanceDecl { class_name, target_type, context, methods }])
+    }
+
+    /// The error for a method that one class or instance body (`body`
+    /// names it) defines by two separate groups of equations (GHC:
+    /// "Conflicting definitions"). `first_tok` and `again_tok` are the head
+    /// tokens of the two groups.
+    fn conflicting_method_err(
+        &self,
+        name: &str,
+        first_tok: usize,
+        again_tok: usize,
+        body: &str,
+    ) -> Box<Diagnostic> {
+        let mut diag = Diagnostic::parse_at(
+            format!(
+                "Conflicting definitions for '{}' in {}: defined at {} and again",
+                name, body, self.span_of(first_tok),
+            ),
+            self.span_of(again_tok),
+        );
+        diag.notes.push(format!(
+            "a method is defined once per class or instance body. Equations form \
+             ONE definition only when they follow each other directly and the \
+             first takes arguments; a later equation for '{}' starts a second \
+             definition. Write the equations of '{}' together.",
+            name, name,
+        ));
+        Box::new(diag)
     }
 
     fn parse_export_decl(&mut self) -> PResult<Vec<Decl>> {
@@ -1285,7 +1677,11 @@ impl Parser {
         let name = self.expect_ident()?;
         self.expect(&Token::DblColon)?;
         let ty = self.parse_type()?;
-        // ExportSig also serves as a TypeSig so the function gets type-checked
+        // ExportSig also serves as a TypeSig so the function gets type-checked.
+        // It is not entered in the declaration table as a signature: a
+        // program may write `f :: T` next to `export f :: T` (the shape of
+        // a Haskell `foreign export`, which accompanies the signature), and
+        // that pair stays accepted.
         Ok(vec![
             Decl::ExportSig { name: name.clone(), ty: ty.clone() },
             Decl::TypeSig { name, ty },
@@ -1300,7 +1696,9 @@ impl Parser {
 
         // Plain type alias: `type Name a b = ...`
         if !self.at(&Token::Family) {
+            let name_tok = self.pos;
             let name = self.expect_upper_ident()?;
+            self.declare(&name, DeclaredAs::Synonym, name_tok);
             let mut params = Vec::new();
             while matches!(self.peek(), Token::Ident(_)) {
                 if let Token::Ident(p) = self.peek().clone() {
@@ -1314,7 +1712,9 @@ impl Parser {
         }
 
         self.expect(&Token::Family)?;
+        let name_tok = self.pos;
         let name = self.expect_upper_ident()?;
+        self.declare(&name, DeclaredAs::Family, name_tok);
 
         // Capture the header parameter names: their count fixes the family's
         // arity (and thus kind) even when it declares no equations.
@@ -1364,9 +1764,11 @@ impl Parser {
         }
         // intrinsic name :: type => parse as type signature (implementation is compiler-provided)
         if let Token::Ident(_) = self.peek() {
+            let name_tok = self.pos;
             let name = self.expect_ident()?;
             self.expect(&Token::DblColon)?;
             let ty = self.parse_type()?;
+            self.declare(&name, DeclaredAs::Signature, name_tok);
             return Ok(vec![Decl::TypeSig { name, ty }]);
         }
         Err(self.err_here(format!(
@@ -1476,17 +1878,20 @@ impl Parser {
         };
         let mut decls = Vec::new();
         loop {
+            let mut op_tok = self.pos;
             let op = match self.peek().clone() {
                 Token::Operator(s) => { self.advance(); s }
                 Token::Ident(s) => { self.advance(); s } // backtick operator, bare
                 Token::Backtick => {
                     self.advance();
+                    op_tok = self.pos;
                     let s = self.expect_ident()?;
                     self.expect(&Token::Backtick)?;
                     s
                 }
                 _ => return Err(self.err_here("Expected operator after fixity precedence".to_string())),
             };
+            self.declare(&op, DeclaredAs::Fixity, op_tok);
             self.fixities.insert(op.clone(), (assoc, prec));
             decls.push(Decl::FixityDecl { assoc, prec, op });
             if self.at(&Token::Comma) {
@@ -1502,12 +1907,14 @@ impl Parser {
     fn parse_value_decl(&mut self) -> PResult<Vec<Decl>> {
         let loc = self.peek_loc();
         let (def_line, def_col) = (loc.line, loc.col);
+        let name_tok = self.pos;
         let name = self.expect_ident()?;
 
         // Type signature: `name :: type`
         if self.at(&Token::DblColon) {
             self.advance();
             let ty = self.parse_type()?;
+            self.declare(&name, DeclaredAs::Signature, name_tok);
             return Ok(vec![Decl::TypeSig { name, ty }]);
         }
 
@@ -1520,6 +1927,7 @@ impl Parser {
             let saved_block = self.block_indent;
             self.block_indent = self.current_indent;
 
+            self.bind_pattern_var(name_tok);
             let left = Pattern::Var(name);
             let op = match self.peek().clone() {
                 Token::Operator(op) => {
@@ -1535,7 +1943,7 @@ impl Parser {
                 _ => unreachable!(),
             };
             let right = self.parse_pattern_atom()?;
-            let clause = self.finish_clause(vec![left, right], span, saved_block)?;
+            let clause = self.finish_clause(&op, vec![left, right], span, saved_block, name_tok)?;
             return Ok(vec![Decl::FunDef {
                 name: op,
                 clauses: vec![clause],
@@ -1543,7 +1951,7 @@ impl Parser {
         }
 
         // Function definition: `name patterns = expr`
-        let clause = self.parse_clause()?;
+        let clause = self.parse_clause(&name)?;
 
         Ok(vec![Decl::FunDef {
             name,
@@ -1554,6 +1962,7 @@ impl Parser {
     /// Parse an operator definition like `(+) a b = ...`
     fn parse_operator_decl(&mut self) -> PResult<Vec<Decl>> {
         self.expect(&Token::LeftParen)?;
+        let op_tok = self.pos;
         let op = match self.peek().clone() {
             Token::Operator(op) => {
                 self.advance();
@@ -1569,17 +1978,21 @@ impl Parser {
         if self.at(&Token::DblColon) {
             self.advance();
             let ty = self.parse_type()?;
+            self.declare(&op, DeclaredAs::Signature, op_tok);
             return Ok(vec![Decl::TypeSig { name: op, ty }]);
         }
 
-        let clause = self.parse_clause()?;
+        let clause = self.parse_clause(&op)?;
         Ok(vec![Decl::FunDef {
             name: op,
             clauses: vec![clause],
         }])
     }
 
-    fn parse_clause(&mut self) -> PResult<Clause> {
+    /// One equation of `name`, from just after the name: its parameter
+    /// patterns, then `finish_clause`.
+    fn parse_clause(&mut self, name: &str) -> PResult<Clause> {
+        let binders_from = self.pos;
         let loc = self.peek_loc();
         let span = Span::new(loc.line, loc.col);
         // The clause's column is the layout block for its RHS: continuation
@@ -1611,19 +2024,26 @@ impl Parser {
             }
         }
 
-        self.finish_clause(patterns, span, saved_block)
+        self.finish_clause(name, patterns, span, saved_block, binders_from)
     }
 
     /// Parse the tail of a clause (guards or `= body`, then an optional `where`)
     /// given its already-parsed parameter patterns. `saved_block` is the
     /// caller's previous `block_indent`, restored before returning. Shared by
-    /// the prefix form (`f a b = ...`) and the infix form (`a `op` b = ...`).
+    /// the prefix form (`f a b = ...`) and the infix form (`a `op` b = ...`)
+    /// of top-level functions, class defaults and instance methods alike —
+    /// every equation with a clause passes through here, so this is where
+    /// its parameter list (which began at token `binders_from`) is checked
+    /// for a variable bound twice.
     fn finish_clause(
         &mut self,
+        name: &str,
         patterns: Vec<Pattern>,
         span: Span,
         saved_block: usize,
+        binders_from: usize,
     ) -> PResult<Clause> {
+        self.check_linear(binders_from, &format!("an equation for '{}'", name))?;
         // Guards
         self.skip_newlines_and_indent();
         let chain = self.parse_guard_chain(&Token::Eq, 0)?;
@@ -1739,6 +2159,7 @@ impl Parser {
             if let Ok(pat) = self.parse_pattern()
                 && self.at(&Token::Bind)
             {
+                self.check_linear(save.pos, "a pattern guard")?;
                 self.advance();
                 let expr = self.parse_expr()?;
                 return Ok(GuardQual::Pat(pat, expr));
@@ -1754,10 +2175,12 @@ impl Parser {
     /// caller has already established that an identifier starts the line).
     fn parse_binding_head(&mut self) -> PResult<(String, Vec<Pattern>)> {
         let name = self.expect_ident()?;
+        let binders_from = self.pos;
         let mut patterns = Vec::new();
         while self.is_pattern_start() {
             patterns.push(self.parse_pattern_atom()?);
         }
+        self.check_linear(binders_from, &format!("an equation for '{}'", name))?;
         Ok((name, patterns))
     }
 
@@ -1907,6 +2330,7 @@ impl Parser {
                 let save = self.checkpoint();
                 match self.parse_pattern_atom() {
                     Ok(pat @ Pattern::Tuple(_)) if self.at(&Token::Eq) => {
+                        self.check_linear(save.pos, "a pattern binding")?;
                         self.advance(); // consume '='
                         let rhs = self.parse_stmt_expr()?;
                         let fresh = format!("__wtup_{}", fresh_counter);
@@ -2940,8 +3364,10 @@ impl Parser {
             // and the match happens lazily on first demand (never
             // eagerly, the way wrapping the body in a case would).
             if matches!(self.peek(), Token::LeftParen) {
+                let binders_from = self.pos;
                 let pat = self.parse_pattern_atom()?;
                 if matches!(pat, Pattern::Tuple(_)) {
+                    self.check_linear(binders_from, "a pattern binding")?;
                     self.expect(&Token::Eq)?;
                     let rhs = self.parse_expr()?;
                     let fresh = format!("__tup_{}", fresh_counter);
@@ -3009,6 +3435,7 @@ impl Parser {
             if self.is_pattern_start() {
                 if let Ok(pat) = self.parse_pattern()
                     && self.at(&Token::Bind) {
+                        self.check_linear(save.pos, "a list-comprehension generator")?;
                         self.advance();
                         let expr = self.parse_expr()?;
                         quals.push(ListCompQual::Generator { pattern: pat, expr });
@@ -3698,7 +4125,7 @@ impl Parser {
             loop {
                 self.skip_newlines_and_indent();
                 if self.at(&Token::RightBrace) { break; }
-                let pattern = self.parse_pattern()?;
+                let pattern = self.parse_case_pattern()?;
                 self.expect(&Token::Arrow)?;
                 let body = self.parse_stmt_expr()?;
                 branches.push(CaseBranch { pattern, guards: vec![], body: Some(body) });
@@ -3729,7 +4156,7 @@ impl Parser {
                 self.rewind(save_pos);
                 break;
             }
-            let pattern = self.parse_pattern()?;
+            let pattern = self.parse_case_pattern()?;
 
             // A guard chain may begin on the line after the pattern
             // (`Just a\n    | a < 0 -> …`), indented past the
@@ -3783,6 +4210,14 @@ impl Parser {
         })
     }
 
+    /// The pattern of one case alternative — a binder list of its own.
+    fn parse_case_pattern(&mut self) -> PResult<Pattern> {
+        let binders_from = self.pos;
+        let pattern = self.parse_pattern()?;
+        self.check_linear(binders_from, "a case alternative")?;
+        Ok(pattern)
+    }
+
     /// A `do` block: layout-driven statement list with `let`, `pat <-`,
     /// `_ <-`, named binds and bare expressions. Consumes the `do`.
     fn parse_do_block(&mut self) -> PResult<Expr> {
@@ -3830,6 +4265,7 @@ impl Parser {
                 let save_pat = self.checkpoint();
                 if let Ok(pat) = self.parse_pattern()
                     && self.at(&Token::Bind) {
+                        self.check_linear(save_pat.pos, "a 'do' statement")?;
                         self.advance();
                         let expr = self.parse_stmt_expr()?;
                         match pat {
@@ -3910,6 +4346,7 @@ impl Parser {
     /// on an earlier parameter is reported before a later one is looked at.
     fn parse_lambda(&mut self) -> PResult<Expr> {
         self.advance();
+        let binders_from = self.pos;
         let mut pats = Vec::new();
         while matches!(
             self.peek(),
@@ -3928,6 +4365,7 @@ impl Parser {
         if pats.is_empty() {
             return Err(self.err_here("Expected lambda parameter".to_string()));
         }
+        self.check_linear(binders_from, "a lambda")?;
         self.expect(&Token::Arrow)?;
         let body = self.parse_expr()?;
         Ok(Self::lambda_from_patterns(pats, body, "non-exhaustive lambda pattern"))
@@ -4445,6 +4883,7 @@ impl Parser {
             }
         match self.peek().clone() {
             Token::Ident(name) => {
+                self.bind_pattern_var(self.pos);
                 self.advance();
                 if self.at(&Token::At) {
                     // As-pattern `xs@(x:_)` (Haskell 2010 §3.17: apat →

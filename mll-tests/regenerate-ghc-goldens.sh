@@ -162,6 +162,7 @@ excluded_reason() {
         cases/ReexOuter)                 echo "helper module (twinned for import, no main)";;
         cases/ReexAlias)                 echo "helper module (twinned for import, no main)";;
         cases/ReexQual)                  echo "helper module (twinned for import, no main)";;
+        cases/PrivateHelperLib)          echo "helper module (twinned for import, no main)";;
 
         *) : ;;
     esac
@@ -259,7 +260,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias; do
+for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

@@ -2400,29 +2400,503 @@ main = print noSuchThing
     expect_compile_error(source, &[], &["Unbound variable"]);
 }
 
+// One module's source declares each name once per namespace (GHC:
+// "Multiple declarations", "Duplicate type signatures"). The parser used to
+// merge only ADJACENT equations of one name and no later stage rejected a
+// second group, so the last definition silently replaced the first. The
+// rejection names both locations.
 #[test]
 fn duplicate_definition_rejected() {
-    // Two separate FunDef blocks for the same name with incompatible bodies.
-    // The compiler processes both; one will fail to unify against the single sig.
-    let source = r#"
+    // A second, separated definition of `f` with a repeated signature: both
+    // the signature and the definition are reported.
+    let source = r#"f :: Int -> Int
+f x = x + 1
+
+g :: Int
+g = f 1
+
 f :: Int -> Int
+f x = x * 100
+
+main :: IO ()
+main = print g
+"#;
+    expect_compile_error(source, &[], &[
+        "Duplicate type signatures for 'f': at 1:1 and again at 7:1",
+        "Multiple declarations of 'f': a top-level definition at 2:1 and again at 8:1",
+        "note:",
+    ]);
+
+    // Adjacent equations are ONE function, so a second equation of another
+    // type is a type error in that function's second clause (this test once
+    // also accepted a successful compile here as a "known gap").
+    let source = r#"f :: Int -> Int
 f x = x + 1
 f x = "hello"
 
 main :: IO ()
 main = print (f 1)
 "#;
-    match compile(source, Path::new("."), &[]) {
-        Err(e) => {
-            let msg = format!("{}", e);
-            assert!(
-                msg.contains("Cannot unify") || msg.contains("doesn't match") || msg.contains("Unbound"),
-                "Expected a type error for duplicate definition, got: {}", msg
-            );
-        }
-        // Known gap: compiler may accept this if it processes only the first body
-        Ok(_) => { /* known gap: duplicate function bodies not rejected */ }
-    }
+    expect_compile_error(source, &[], &["Cannot unify 'String' with 'Int'", "clause 2 of 'f'"]);
+}
+
+// Equations of one function are adjacent (Haskell 2010 §4.4.3.1): another
+// declaration between them — the function's own signature included — ends
+// the function, and the later equation is a second definition. The first
+// group used to be dropped: `f 0 = 100 … f n = n` answered `f 0` with 0.
+#[test]
+fn separated_equations_are_a_second_definition() {
+    let source = r#"f :: Int -> Int
+f 0 = 100
+
+g :: Int -> Int
+g x = x
+
+f n = n
+
+main :: IO ()
+main = print (f 0)
+"#;
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'f': a top-level definition at 2:1 and again at 7:1",
+        "note:",
+        "follow each other directly",
+    ]);
+
+    // The function's own signature between its equations separates them too.
+    let source = "f 0 = 100\nf :: Int -> Int\nf n = n\n\nmain :: IO ()\nmain = print (f 0)\n";
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'f': a top-level definition at 1:1 and again at 3:1",
+        "the type signature of 'f' itself",
+    ]);
+
+    // Operators, in prefix and infix spelling.
+    let source = r#"(+++) :: Int -> Int -> Int
+(+++) 0 b = 100
+
+g :: Int
+g = 1
+
+a +++ b = a + b
+
+main :: IO ()
+main = print (0 +++ 2)
+"#;
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of '+++': a top-level definition at 2:1 and again at 7:1",
+    ]);
+
+    // Control: the signature may follow the equations, directly or later.
+    let control = "f 0 = 100\nf n = n\n\ng :: Int\ng = 1\n\nf :: Int -> Int\n\nmain :: IO ()\nmain = print (f 0 + g)\n";
+    compile(control, Path::new("."), &[])
+        .expect("a signature after its function's equations must stay legal");
+}
+
+#[test]
+fn duplicate_top_level_value_is_rejected() {
+    let source = r#"k :: Int
+k = 1
+
+other :: Int
+other = 5
+
+k = 2
+
+main :: IO ()
+main = print k
+"#;
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'k': a top-level definition at 2:1 and again at 7:1",
+    ]);
+
+    // A binding without arguments is complete after one equation: a second
+    // one is a second definition even when it follows directly. (The two
+    // used to merge into one two-clause function that crashed at runtime.)
+    let source = "k :: Int\nk = 1\nk = 2\n\nmain :: IO ()\nmain = print k\n";
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'k': a top-level definition at 2:1 and again at 3:1",
+        "the first takes arguments",
+    ]);
+    let source = "k :: Int\nk | True = 1\nk | False = 2\n\nmain :: IO ()\nmain = print k\n";
+    expect_compile_error(source, &[], &["Multiple declarations of 'k'", "at 2:1 and again at 3:1"]);
+    let source = "f :: Int -> Int\nf = \\x -> x\nf x = 2\n\nmain :: IO ()\nmain = print (f 1)\n";
+    expect_compile_error(source, &[], &["Multiple declarations of 'f'", "at 2:1 and again at 3:1"]);
+
+    // Every redeclaration is reported, each against the first.
+    let source = "k :: Int\nk = 1\n\nj :: Int\nj = 0\n\nk = 2\n\ni :: Int\ni = 0\n\nk = 3\n\nmain :: IO ()\nmain = print k\n";
+    let msg = expect_compile_error(source, &[], &[
+        "a top-level definition at 2:1 and again at 7:1",
+        "a top-level definition at 2:1 and again at 12:1",
+    ]);
+    assert_eq!(msg.matches("Multiple declarations of 'k'").count(), 2, "got: {msg}");
+}
+
+#[test]
+fn duplicate_type_signature_is_rejected() {
+    let source = "f :: Int -> Int\nf :: Int -> Int\nf n = n\n\nmain :: IO ()\nmain = print (f 0)\n";
+    expect_compile_error(source, &[], &[
+        "Duplicate type signatures for 'f': at 1:1 and again at 2:1",
+        "note:",
+        "one type signature",
+    ]);
+    let source = "(+++) :: Int -> Int -> Int\n(+++) a b = a + b\n(+++) :: Int -> Int -> Int\n\nmain :: IO ()\nmain = print (1 +++ 2)\n";
+    expect_compile_error(source, &[], &["Duplicate type signatures for '+++': at 1:2 and again at 3:2"]);
+}
+
+// Functions, class methods and record fields share the value namespace: a
+// method and a field ARE top-level functions of their name. Each of these
+// compiled, with one declaration silently shadowing the other.
+#[test]
+fn value_clashing_with_field_or_method_is_rejected() {
+    let source = "data S = S { v :: Int } deriving (Show)\n\nv :: Int\nv = 3\n\nmain :: IO ()\nmain = print (S 1)\n";
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'v': a record field of 'S' at 1:14 and a top-level definition at 4:1",
+        "note:",
+        "share one namespace",
+    ]);
+    let source = "newtype Age = Age { unAge :: Int }\n\nunAge :: Int\nunAge = 3\n\nmain :: IO ()\nmain = print 1\n";
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'unAge': a record field of 'Age' at 1:21 and a top-level definition at 4:1",
+    ]);
+    let source = r#"class C a where
+    foo :: a -> Int
+
+instance C Int where
+    foo x = x
+
+foo :: Int -> Int
+foo x = 7
+
+main :: IO ()
+main = print (foo (1 :: Int))
+"#;
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'foo': a method of class 'C' at 2:5 and a top-level definition at 8:1",
+    ]);
+    let source = r#"data S = S { foo :: Int } deriving (Show)
+
+class C a where
+    foo :: a -> Int
+
+main :: IO ()
+main = print (S 1)
+"#;
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'foo': a record field of 'S' at 1:14 and a method of class 'C' at 4:5",
+    ]);
+    // One class declaring a method twice.
+    let source = r#"class C a where
+    foo :: a -> Int
+    foo :: a -> Int
+
+instance C Int where
+    foo x = x
+
+main :: IO ()
+main = print (foo (1 :: Int))
+"#;
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'foo': a method of class 'C' at 2:5 and again at 3:5",
+    ]);
+}
+
+// Types, type families and classes share the type namespace. Two classes,
+// a class and a data type, or a type family and anything else under one
+// name all compiled (data/newtype/synonym pairs were already rejected, see
+// duplicate_type_name_rejected).
+#[test]
+fn class_and_type_names_share_one_namespace() {
+    let source = "data C = MkC deriving (Show)\n\nclass C a where\n    foo :: a -> Int\n\nmain :: IO ()\nmain = print MkC\n";
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'C': a data type at 1:6 and a class at 3:7",
+        "note:",
+        "share one namespace",
+    ]);
+    let source = r#"class C a where
+    foo :: a -> Int
+
+class C a where
+    bar :: a -> Int
+
+instance C Int where
+    bar x = x
+
+main :: IO ()
+main = print (bar (1 :: Int))
+"#;
+    expect_compile_error(source, &[], &["Multiple declarations of 'C': a class at 1:7 and again at 4:7"]);
+    let source = "type family F a where\n    F Int = Bool\n\ndata F = MkF deriving (Show)\n\nmain :: IO ()\nmain = print MkF\n";
+    expect_compile_error(source, &[], &[
+        "Multiple declarations of 'F': a type family at 1:13 and a data type at 4:6",
+    ]);
+    let source = "type family F a where\n    F Int = Bool\n\ntype family F a where\n    F Bool = Int\n\nmain :: IO ()\nmain = print 1\n";
+    expect_compile_error(source, &[], &["Multiple declarations of 'F': a type family at 1:13 and again at 4:13"]);
+
+    // Control: a data CONSTRUCTOR lives in another namespace than a class.
+    let control = r#"data T = Foo deriving (Show)
+
+class Foo a where
+    foo :: a -> Int
+
+instance Foo Int where
+    foo x = x
+
+main :: IO ()
+main = do
+    print Foo
+    print (foo (3 :: Int))
+"#;
+    compile(control, Path::new("."), &[])
+        .expect("a constructor and a class may share a name");
+}
+
+#[test]
+fn duplicate_fixity_declaration_is_rejected() {
+    let source = "infixl 6 +++\ninfixr 5 +++\n\n(+++) :: Int -> Int -> Int\n(+++) a b = a + b\n\nmain :: IO ()\nmain = print (1 +++ 2)\n";
+    expect_compile_error(source, &[], &[
+        "Multiple fixity declarations for '+++': at 1:10 and again at 2:10",
+        "note:",
+    ]);
+    let source = "infixl 6 +++, +++\n\n(+++) :: Int -> Int -> Int\n(+++) a b = a + b\n\nmain :: IO ()\nmain = print (1 +++ 2)\n";
+    expect_compile_error(source, &[], &["Multiple fixity declarations for '+++': at 1:10 and again at 1:15"]);
+    let source = "infixl 6 `plus`\ninfixl 6 `plus`\n\nplus :: Int -> Int -> Int\nplus a b = a + b\n\nmain :: IO ()\nmain = print (1 `plus` 2)\n";
+    expect_compile_error(source, &[], &["Multiple fixity declarations for 'plus': at 1:11 and again at 2:11"]);
+}
+
+// Record fields: one constructor names each field once, and a field shared
+// by several constructors of one type is ONE selector, so it has one type.
+// The first compiled to a record with two components under one label; the
+// second took the last constructor's type for the selector and crashed (or
+// misread the value) at runtime on the other constructors.
+#[test]
+fn conflicting_record_fields_in_one_type_are_rejected() {
+    let source = "data P = P { x :: Int, x :: Int } deriving (Show)\n\nmain :: IO ()\nmain = print (P 1 2)\n";
+    expect_compile_error(source, &[], &[
+        "Duplicate field name 'x' in the record declaration of 'P': at 1:14 and again at 1:24",
+        "note:",
+    ]);
+    let source = "data S = A { v :: Int } | B { v :: String } deriving (Show)\n\nmain :: IO ()\nmain = print (v (A 1))\n";
+    expect_compile_error(source, &[], &[
+        "Constructors 'A' and 'B' give different types for field 'v': 'Int' and 'String'",
+        "data S",
+        "note:",
+        "single selector function",
+    ]);
+    let source = "data Bad a b = BL { item :: a } | BR { item :: b }\n\nmain :: IO ()\nmain = print 1\n";
+    expect_compile_error(source, &[], &[
+        "Constructors 'BL' and 'BR' give different types for field 'item': 'a' and 'b'",
+    ]);
+
+    // Controls: the shared field's type is compared as a TYPE (a synonym
+    // and its expansion agree), also at a type parameter.
+    let control = r#"type Name = String
+
+data P = L { nm :: Name } | R { nm :: String }
+
+data Q a b = QL { val :: a, tag :: Int } | QR { val :: a, other :: b }
+
+main :: IO ()
+main = do
+    putStrLn (nm (R "x"))
+    print (val (QL 1 2) + val (QR 3 True))
+"#;
+    compile(control, Path::new("."), &[])
+        .expect("a field shared at one type by two constructors must stay legal");
+}
+
+// The equations of one method are adjacent inside a class or instance body,
+// like a top-level function's (GHC: "Conflicting definitions").
+// Separated groups used to be merged into one definition as if adjacent.
+#[test]
+fn separated_method_equations_are_rejected() {
+    let source = r#"class C a where
+    foo :: a -> Int
+    bar :: a -> Int
+
+instance C Int where
+    foo 0 = 100
+    bar _ = 2
+    foo n = n
+
+main :: IO ()
+main = print (foo (0 :: Int))
+"#;
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'foo' in this instance of 'C': defined at 6:5 and again at 8:5",
+        "note:",
+        "Write the equations of 'foo' together",
+    ]);
+    // A method without arguments is complete after one equation.
+    let source = r#"class C a where
+    val :: a
+
+instance C Int where
+    val = 1
+    val = 2
+
+main :: IO ()
+main = print (val :: Int)
+"#;
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'val' in this instance of 'C': defined at 5:5 and again at 6:5",
+    ]);
+    // Default equations in a class body: separated by another default …
+    let source = r#"class C a where
+    foo :: a -> Int
+    bar :: a -> Int
+    foo _ = 100
+    bar _ = 2
+    foo _ = 5
+
+instance C Int where
+
+main :: IO ()
+main = print (foo (0 :: Int))
+"#;
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'foo' in class 'C': defined at 4:5 and again at 6:5",
+    ]);
+    // … and by a signature line.
+    let source = r#"class C a where
+    foo :: a -> Int
+    foo _ = 100
+    bar :: a -> Int
+    foo _ = 5
+
+instance C Int where
+    bar _ = 3
+
+main :: IO ()
+main = print (foo (0 :: Int))
+"#;
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'foo' in class 'C': defined at 3:5 and again at 5:5",
+    ]);
+}
+
+// A pattern, and the patterns bound together by one construct, name each
+// variable once (Haskell 2010 §3.17.1; GHC: "Conflicting definitions").
+// Every form below compiled, the later occurrence silently winning:
+// `same x x = True` answered `same 1 2` with True.
+#[test]
+fn non_linear_patterns_are_rejected() {
+    let reject = |source: &str, needle: &str| {
+        let msg = expect_compile_error(source, &[], &[needle, "note:", "name each variable once"]);
+        assert!(msg.starts_with("Parse error: Conflicting definitions for '"), "got: {msg}");
+    };
+    reject(
+        "same :: Int -> Int -> Bool\nsame x x = True\n\nmain :: IO ()\nmain = print (same 1 2)\n",
+        "Conflicting definitions for 'x' in an equation for 'same': bound at 2:6 and again at 2:8",
+    );
+    reject(
+        "main :: IO ()\nmain = print (case (1, 2) of\n    (a, a) -> a)\n",
+        "Conflicting definitions for 'a' in a case alternative: bound at 3:6 and again at 3:9",
+    );
+    reject(
+        "main :: IO ()\nmain = print (case (1, 2) of { (a, a) -> a })\n",
+        "Conflicting definitions for 'a' in a case alternative: bound at 2:33 and again at 2:36",
+    );
+    reject(
+        "main :: IO ()\nmain = print ((\\x x -> x) 1 2)\n",
+        "Conflicting definitions for 'x' in a lambda: bound at 2:17 and again at 2:19",
+    );
+    // Across two pattern parameters of one lambda, which desugar into
+    // separate `case` expressions.
+    reject(
+        "main :: IO ()\nmain = print ((\\(a, b) a -> a) (1, 2) 3)\n",
+        "Conflicting definitions for 'a' in a lambda: bound at 2:18 and again at 2:24",
+    );
+    reject(
+        "f :: Maybe Int -> Int\nf x@(Just x) = x\nf _ = 0\n\nmain :: IO ()\nmain = print (f (Just 1))\n",
+        "Conflicting definitions for 'x' in an equation for 'f': bound at 2:3 and again at 2:11",
+    );
+    reject(
+        "f :: [Int] -> Int\nf (x : x : _) = x\nf _ = 0\n\nmain :: IO ()\nmain = print (f [1, 2, 3])\n",
+        "Conflicting definitions for 'x' in an equation for 'f': bound at 2:4 and again at 2:8",
+    );
+    reject(
+        "f :: [Int] -> Int\nf [x, x] = x\nf _ = 0\n\nmain :: IO ()\nmain = print (f [1, 2])\n",
+        "Conflicting definitions for 'x' in an equation for 'f': bound at 2:4 and again at 2:7",
+    );
+    // An underscore-led name is an ordinary variable; only `_` repeats.
+    reject(
+        "g :: Int -> Int -> Int\ng _x _x = 2\n\nmain :: IO ()\nmain = print (g 1 2)\n",
+        "Conflicting definitions for '_x' in an equation for 'g': bound at 2:3 and again at 2:6",
+    );
+    reject(
+        "main :: IO ()\nmain = do\n    (a, a) <- pure (1, 2)\n    print a\n",
+        "Conflicting definitions for 'a' in a 'do' statement: bound at 3:6 and again at 3:9",
+    );
+    reject(
+        "main :: IO ()\nmain = do\n    let (a, a) = (1, 2)\n    print a\n",
+        "Conflicting definitions for 'a' in a pattern binding: bound at 3:10 and again at 3:13",
+    );
+    reject(
+        "main :: IO ()\nmain = print (let (a, a) = (1, 2) in a)\n",
+        "Conflicting definitions for 'a' in a pattern binding: bound at 2:20 and again at 2:23",
+    );
+    reject(
+        "g :: Int -> Int\ng n = a + n\n  where\n    (a, a) = (1, 2)\n\nmain :: IO ()\nmain = print (g 1)\n",
+        "Conflicting definitions for 'a' in a pattern binding: bound at 4:6 and again at 4:9",
+    );
+    reject(
+        "main :: IO ()\nmain = print [a | (a, a) <- [(1, 2), (3, 4)]]\n",
+        "Conflicting definitions for 'a' in a list-comprehension generator: bound at 2:20 and again at 2:23",
+    );
+    reject(
+        "main :: IO ()\nmain = print [a | x <- [1, 2], let (a, a) = (x, x)]\n",
+        "Conflicting definitions for 'a' in a pattern binding: bound at 2:37 and again at 2:40",
+    );
+    reject(
+        "main :: IO ()\nmain = do\n    let f x x = x\n    print (f 1 2)\n",
+        "Conflicting definitions for 'x' in an equation for 'f': bound at 3:11 and again at 3:13",
+    );
+    reject(
+        "g :: Int -> Int\ng n = h n 5\n  where\n    h x x = x\n\nmain :: IO ()\nmain = print (g 1)\n",
+        "Conflicting definitions for 'x' in an equation for 'h': bound at 4:7 and again at 4:9",
+    );
+    reject(
+        "f :: Int -> Int\nf n\n    | (a, a) <- (n, 2) = a\n    | otherwise = 0\n\nmain :: IO ()\nmain = print (f 1)\n",
+        "Conflicting definitions for 'a' in a pattern guard: bound at 3:8 and again at 3:11",
+    );
+    reject(
+        "f :: Int -> Int\nf n = case (n, n) of\n    (p, q) | (r, r) <- (p, q) -> r\n    _ -> 0\n\nmain :: IO ()\nmain = print (f 1)\n",
+        "Conflicting definitions for 'r' in a pattern guard: bound at 3:15 and again at 3:18",
+    );
+    // Infix definitions: the left operand is a pattern of the same list.
+    reject(
+        "(+++) :: Int -> Int -> Int\nx +++ x = x\n\nmain :: IO ()\nmain = print (1 +++ 2)\n",
+        "Conflicting definitions for 'x' in an equation for '+++': bound at 2:1 and again at 2:7",
+    );
+    reject(
+        "plus :: Int -> Int -> Int\nx `plus` x = x\n\nmain :: IO ()\nmain = print (1 `plus` 2)\n",
+        "Conflicting definitions for 'x' in an equation for 'plus': bound at 2:1 and again at 2:10",
+    );
+    // Class and instance bodies.
+    reject(
+        "class C a where\n    foo :: a -> a -> Int\n\ninstance C Int where\n    foo x x = x\n\nmain :: IO ()\nmain = print (foo (1 :: Int) 2)\n",
+        "Conflicting definitions for 'x' in an equation for 'foo': bound at 5:9 and again at 5:11",
+    );
+    reject(
+        "class C a where\n    foo :: a -> a -> Int\n    foo y y = 1\n\ninstance C Int where\n    foo x z = x\n\nmain :: IO ()\nmain = print (foo (1 :: Int) 2)\n",
+        "Conflicting definitions for 'y' in an equation for 'foo': bound at 3:9 and again at 3:11",
+    );
+    reject(
+        "newtype K = K Int\n\ninstance Semigroup K where\n    (K a) <> (K a) = K a\n\nmain :: IO ()\nmain = print 1\n",
+        "Conflicting definitions for 'a' in an equation for '<>': bound at 4:8 and again at 4:17",
+    );
+}
+
+// The single-declaration rule is checked per source file, so it reaches an
+// imported module's own duplicates (which used to compile, the later
+// equation replacing the earlier one) …
+#[test]
+fn duplicate_definition_in_imported_module_is_rejected() {
+    let source = "import SplitEquationsHelper\n\nmain :: IO ()\nmain = print (libFn 0)\n";
+    expect_compile_error(source, &[Path::new("tests/broken-helpers")], &[
+        "in module 'SplitEquationsHelper'",
+        "Multiple declarations of 'libFn': a top-level definition at 4:1 and again at 9:1",
+    ]);
 }
 
 #[test]
