@@ -1,0 +1,41 @@
+effect
+prefix-dollar right
+0
+10
+1
+dollar handler: too big 4
+7
+11
+20
+13
+["Right 1","Left x","Left too big 3","Right 20"]
+["Right 10","Right 20","Left too big 3"]
+[0,-5]
+Left too big 7
+Right 10
+safely: too big 3
+[10,-1]
+safely: too big 3
+[10,-1]
+(24,25)
+Left too big 10
+0
+Left too big 12
+10
+outer: re: too big 13
+14
+inner left: too big 15
+Right 10
+Left too big 18
+(19,10,0)
+Left too big 20
+["second","first"]
+1
+effects kept, then too big 21
+lazy right
+Left forced
+Left computed outside
+handler saw: computed inside
+Right 22
+2
+.

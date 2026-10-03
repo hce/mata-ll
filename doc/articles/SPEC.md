@@ -2065,6 +2065,22 @@ the result is `Right value`; if it raises a Lua error, the result is
 `catch` runs an IO action; if it raises, the handler function
 receives the error message and produces a recovery action.
 
+Both are ordinary functions over action values, as in GHC: every
+spelling behaves the same — prefix `try act`, `try $ act`, backtick
+``act `catch` h``, `catch act $ \m -> …`, sections, partial
+application (`catch act` applied to a handler later), composition
+(`try . f`), passed to `map`/`mapM`/`traverse`, stored in a data
+structure or bound by `let`, or wrapped by a user function. Their
+action argument is lazy: evaluating it to an action value happens
+inside the protected run, so `catch (error "x") h` and `try (if b then
+a else error "x")` are caught. An exception raised while the action
+value is computed *before* `try`/`catch` is entered (the program
+forced it first, e.g. ``act `seq` catch act h``) is not theirs to
+catch. The handler and its action run outside the protected region:
+an error it raises propagates (a handler can re-raise). The action's
+result is not forced, so a bottom it returns escapes (see CAVEATS.md
+"`try (pure e)` does not catch an error inside `e`").
+
     import LIO
 
     main :: IO ()

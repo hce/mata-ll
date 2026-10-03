@@ -2230,20 +2230,36 @@ local function __mll_pcall(desc, root, f, ...)
     if desc then res = __mll_ffi_decode(desc, res, root) end
     return {2, res}
 end
--- Exception handling: try wraps an IO action in pcall, returning Either String a
--- action is a closure (deferred by codegen) so errors happen inside pcall
+-- Exception handling: `try` and `catch` are ordinary first-class functions
+-- over ACTION VALUES. Their action argument arrives under the plain lazy
+-- argument convention, so it is anything an action-typed expression
+-- evaluates to: an action closure, a pure box, or a thunk that computes
+-- either. The returned action runs it through a runner INSIDE the pcall,
+-- so computing the action value (forcing that thunk) and performing it
+-- both happen under the handler, as GHC's catch# applies the action inside
+-- its frame: `catch (error "x") h` and `try (if b then a else ⊥)` are
+-- caught. Neither runner forces the action's result, so a ⊥ the action
+-- returns without forcing escapes the handler unraised, as in GHC. The
+-- handler is applied and its action run outside the pcall: an exception
+-- it raises propagates.
+--
+-- Box protocol (see the runners): try_ CONSUMES the action's result to
+-- wrap it in Right, so it runs the action with the consuming `__mll_run`.
+-- catch_'s result is its action's or its handler's result unchanged, so it
+-- runs both with the forwarding `__mll_run_tail` and returns what that
+-- yields — at most the one pending box, which the consumer of catch_'s own
+-- action strips, exactly as if the inner action had been run in its place.
 local function try_(action)
     return function()
-        local ok, result = pcall(action)
-        if ok then return {2, __mll_unbox(result)} else return {1, tostring(result)} end
+        local ok, result = pcall(__mll_run, action)
+        if ok then return {2, result} else return {1, tostring(result)} end
     end
 end
--- catch runs an IO action; on error, passes the message to a handler
 local function catch_(action, handler)
     return function()
-        local ok, result = pcall(action)
-        if ok then return __mll_unbox(result)
-        else return __mll_run(__force(__force(handler)(tostring(result)))) end
+        local ok, result = pcall(__mll_run_tail, action)
+        if ok then return result end
+        return __mll_run_tail(__force(handler)(tostring(result)))
     end
 end
 

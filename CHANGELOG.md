@@ -44,6 +44,32 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **`try` and `catch` are ordinary functions: every spelling catches**
+  (silent miscompile). Only the saturated prefix forms `try act` and
+  `catch act h` worked: `try $ act`, ``act `catch` h``, `catch act $ \m ->
+  …`, `mapM try acts`, `try . f`, a partial application, a section, or a
+  user wrapper (`orElse = catch`) handed the runtime a raw action value it
+  called as a Lua function (`Left "attempt to call a table value"`), and
+  the backtick form evaluated the action before `catch` was entered, so
+  the error escaped the handler; `catch (pure 1) $ \_ -> pure 3` gave 3.
+  The runtime's `try`/`catch` now take any action value and evaluate and
+  run it inside the protected call, as GHC's `catch#` does (`catch (error
+  "x") h` is caught); the handler runs outside it, and a bottom the action
+  returns unforced still escapes, as in GHC. The prefix special case in
+  the code generator is gone. The export wrapper runs an action-typed
+  export's result by its type with the same runner.
+  (GHC-goldened case `try_catch_first_class`; FFI case
+  `ffi_try_catch_values`.)
+- **An infix application of a function is that application** (silent
+  miscompile, crash). A backtick application ``a `f` b`` and a
+  user-defined operator `a <+> b` evaluated both operands before the call
+  and always passed exactly two arguments: ``1 `k` error "boom"`` raised
+  where `k` ignores its second argument, and a three-parameter function
+  in backticks, ``(n `add3` 2) 3``, crashed with a nil argument. Both
+  are now emitted as the application `f a b`, with the operands weighed
+  like any argument and the callee's arity honoured. The builtin lowerings
+  of `div`, `mod`, `quot`, `rem` and `seq` and the native Lua operators
+  are unchanged. (GHC-goldened case `infix_application`.)
 - **An IO action is a value: evaluating it never performs it, and every
   run performs it again** (silent miscompile). An application at IO type
   in a value position — a function argument, a constructor, record, list

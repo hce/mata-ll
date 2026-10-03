@@ -146,9 +146,6 @@ impl CodeGen {
                 if let Some(e) = self.try_opfunc_infix_app(expr, f, &args) {
                     return e;
                 }
-                if let Some(e) = self.try_exception_app(f, &args) {
-                    return e;
-                }
                 if let Some(e) = self.try_native_not_app(f, &args) {
                     return e;
                 }
@@ -165,40 +162,20 @@ impl CodeGen {
                 self.general_call_ast(expr, f, &args)
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                // A backtick operator is an ordinary identifier; a local
-                // binder shadowing it (a parameter named `div`, `seq`, …)
-                // makes this a CALL to that local value — the builtin
-                // lowerings below (native arithmetic, seq inline, __mll_*)
-                // must not fire. Rebuild the application spine and emit
-                // through the ordinary call path: every callee fast-path
-                // declines on shadowed names (is_local_shadowed), so the
-                // call gets the generic convention, arguments staying as
-                // lazy as any other unknown-callee call site.
+                // A backtick operator is an ordinary identifier, and
+                // `` a `f` b `` is the application `f a b`. Only the
+                // builtins with a dedicated infix lowering below (`div`,
+                // `mod`, `quot`, `rem`, `seq`) keep it, and only while no
+                // local binder shadows them (a parameter named `div`, `seq`,
+                // … makes this a CALL to that local value). Every other
+                // backtick — a module function, a Prelude or runtime
+                // function such as `catch`, a shadowed builtin — is emitted
+                // as the application (infix_application_ast).
                 if op.starts_with(|c: char| c.is_alphabetic() || c == '_')
-                    && self.is_local_shadowed(op)
+                    && (self.is_local_shadowed(op)
+                        || !matches!(op.as_str(), "div" | "mod" | "quot" | "rem" | "seq"))
                 {
-                    let fn_ty = crate::types::Ty::fun(
-                        &[lhs.ty.clone(), rhs.ty.clone()],
-                        expr.ty.clone(),
-                    );
-                    let partial_ty = crate::types::Ty::fun(
-                        std::slice::from_ref(&rhs.ty),
-                        expr.ty.clone(),
-                    );
-                    let call = TExpr::new(
-                        TExprKind::App(
-                            Box::new(TExpr::new(
-                                TExprKind::App(
-                                    Box::new(TExpr::new(TExprKind::Var(op.clone()), fn_ty)),
-                                    lhs.clone(),
-                                ),
-                                partial_ty,
-                            )),
-                            rhs.clone(),
-                        ),
-                        expr.ty.clone(),
-                    );
-                    return self.expr_ast(&call);
+                    return self.infix_application_ast(expr, op, lhs, rhs);
                 }
                 match op.as_str() {
                 "div" | "mod" | "quot" | "rem" => self.intdiv_infix_ast(op, lhs, rhs),
@@ -231,7 +208,7 @@ impl CodeGen {
                     Expr::Func(vec![], FuncBody::Block(b))
                 }
                 "." => self.compose_infix_ast(expr, lhs, rhs),
-                _ => self.operator_infix_ast(op, lhs, rhs),
+                _ => self.operator_infix_ast(expr, op, lhs, rhs),
             }
             }
             TExprKind::Negate(inner) => Expr::paren(Expr::neg(self.expr_ast(inner))),
@@ -1223,30 +1200,6 @@ impl CodeGen {
         Some(self.expr_ast(&node))
     }
 
-    /// The `try`/`catch` case of the App arm, split out only to keep
-    /// `expr_ast_inner` readable: wrap the IO action argument in a closure
-    /// so that errors are deferred into pcall rather than crashing eagerly.
-    fn try_exception_app(&mut self, f: &TExpr, args: &[&TExpr]) -> Option<Expr> {
-        if let TExprKind::Var(name) = &f.kind {
-            if self.is_local_shadowed(name) {
-                return None;
-            }
-            if name == "try" && args.len() == 1 {
-                let action = self.action_run_ast(args[0], false);
-                return Some(Expr::call_named("try_", vec![Expr::inline_fn0(action)]));
-            }
-            if name == "catch" && args.len() == 2 {
-                let action = self.action_run_ast(args[0], false);
-                let handler = self.expr_ast(args[1]);
-                return Some(Expr::call_named(
-                    "catch_",
-                    vec![Expr::inline_fn0(action), handler],
-                ));
-            }
-        }
-        None
-    }
-
     /// The primitive-operator case of the App arm, split out only to keep
     /// `expr_ast_inner` readable: typeclass methods on primitive types →
     /// inline as Lua operators (primitive_method_lua_op is also what
@@ -1873,8 +1826,9 @@ impl CodeGen {
 
     /// The operator-table dispatch of the InfixApp arm — every operator
     /// without a dedicated case — split out only to keep `expr_ast_inner`
-    /// readable.
-    fn operator_infix_ast(&mut self, op: &str, lhs: &TExpr, rhs: &TExpr) -> Expr {
+    /// readable: a Lua-native operator inline, any other operator as the
+    /// application of the operator function (infix_application_ast).
+    fn operator_infix_ast(&mut self, expr: &TExpr, op: &str, lhs: &TExpr, rhs: &TExpr) -> Expr {
         let lua_op = match op {
             "<>" => "..", "&&" => "and", "||" => "or", "/=" => "~=",
             // "div"/"mod" never reach here: handled by intdiv_infix_ast via
@@ -1898,31 +1852,40 @@ impl CodeGen {
             let r = self.forced_ast(rhs);
             Expr::paren(Expr::binop(lua_op, l, r))
         } else {
-            // User-defined or non-Lua operator: emit as function call. The
-            // scan registers this as a two-argument call site of the
-            // operator function, so its convention row applies: a
-            // SiteForced position must be delivered in WHNF (the eager
-            // expr_ast emission usually is, but the row's claim needs
-            // forced_ast's wrapper on the shapes it cannot prove).
-            let conv_row = self.callee_conv_row(op).cloned();
-            let site_forced = |r: &Option<Vec<super::analysis::ParamConv>>, i: usize| {
-                r.as_ref().is_some_and(|r| matches!(
-                    r.get(i), Some(super::analysis::ParamConv::SiteForced)))
-            };
-            let sop = sanitize_name(op);
-            let fref = self.lua_ref(&sop);
-            let l = if site_forced(&conv_row, 0) {
-                self.site_forced_arg_ast(lhs)
-            } else {
-                self.expr_ast(lhs)
-            };
-            let r = if site_forced(&conv_row, 1) {
-                self.site_forced_arg_ast(rhs)
-            } else {
-                self.expr_ast(rhs)
-            };
-            Expr::call_named(&fref, vec![l, r])
+            self.infix_application_ast(expr, op, lhs, rhs)
         }
+    }
+
+    /// An infix application of a function — a user-defined or Prelude
+    /// operator (`<+>`, `^`, `<$>`), or a backtick identifier — is the
+    /// application `op lhs rhs`, as in Haskell: rebuild the application
+    /// spine and emit it through the ordinary call path, so it gets exactly
+    /// what the prefix spelling gets: operands weighed lazily by the
+    /// callee's strictness and convention rows (`1 `k` error "boom"` does
+    /// not raise when k ignores its second argument, and `act `catch` h`
+    /// hands catch the unevaluated action), the callee's emitted arity
+    /// honoured (a three-parameter function in backticks is a partial
+    /// application), and every callee fast path. The call-site scan
+    /// registers the InfixApp as the same two-argument call of `op`, so
+    /// the always-cheap and site-forced judgments see the delivery made
+    /// here.
+    fn infix_application_ast(&mut self, expr: &TExpr, op: &str, lhs: &TExpr, rhs: &TExpr) -> Expr {
+        let fn_ty = crate::types::Ty::fun(&[lhs.ty.clone(), rhs.ty.clone()], expr.ty.clone());
+        let partial_ty = crate::types::Ty::fun(std::slice::from_ref(&rhs.ty), expr.ty.clone());
+        let call = TExpr::new(
+            TExprKind::App(
+                Box::new(TExpr::new(
+                    TExprKind::App(
+                        Box::new(TExpr::new(TExprKind::Var(op.to_string()), fn_ty)),
+                        Box::new(lhs.clone()),
+                    ),
+                    partial_ty,
+                )),
+                Box::new(rhs.clone()),
+            ),
+            expr.ty.clone(),
+        );
+        self.expr_ast(&call)
     }
 
     /// The first-class VALUE of a Lua-native binary operator (`(+)`, `(<)`,

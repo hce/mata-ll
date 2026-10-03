@@ -738,16 +738,22 @@ impl CodeGen {
                     vec!["__result".into()],
                     Some(Expr::call(Expr::force(Expr::name(fn_ref)), call_args)),
                 ));
-                // Run the result if it is an action, unwrapping a pure box the
-                // same way __mll_run does — a body ending in `pure e` hands back
-                // its result boxed (not forced), and the marshalling below must
-                // see the value, not the box.
-                body.push(Stmt::Raw(
-                    "if getmetatable(__result) == __mll_pure_mt then __result = __result[1]".into(),
-                ));
-                body.push(Stmt::Raw(
-                    "elseif type(__result) == \"function\" then __result = __mll_unbox(__result()) end".into(),
-                ));
+                // An action-typed export's call yields an ACTION VALUE — an
+                // action closure, a pure box, or a thunk computing either — so
+                // the wrapper performs it with the consuming runner, which
+                // dispatches over every one of those forms and strips the one
+                // pending box (a body ending in `pure e` hands back its result
+                // boxed, and the marshalling below must see the value). The
+                // type decides, not the value's Lua type: a pure result is
+                // never run. Without type information (the vararg fallback)
+                // the result is run as an action, as before: the runner calls a
+                // closure and passes any other value through.
+                if is_action || res_ty.is_none() {
+                    body.push(Stmt::Assign(
+                        "__result".into(),
+                        Expr::call_named("__mll_run", vec![Expr::name("__result")]),
+                    ));
+                }
                 // Type-directed result conversion (mata-ll→Lua): the same
                 // marshal descriptors an FFI argument of this type would get,
                 // so e.g. interior Nothings in a [Maybe a] keep their

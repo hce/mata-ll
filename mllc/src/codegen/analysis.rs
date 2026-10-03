@@ -315,13 +315,15 @@ impl CodeGen {
                 self.scan_call_sites(rhs, scan);
             }
             TExprKind::InfixApp { op, lhs, rhs } => {
-                // A user-defined operator IS a saturated two-argument call
-                // of the operator function (operator_infix_ast emits
-                // `op(lhs, rhs)`): register it like a spine call so the
-                // position data covers these sites too. Builtin operators
-                // never key the maps (they are not module functions), and a
-                // locally SHADOWED backtick operator re-enters expr_ast as
-                // an App spine of the local — the registration here then
+                // A user-defined operator IS a two-argument call of the
+                // operator function: the emission re-enters expr_ast with
+                // the App spine `op lhs rhs` (infix_application_ast), so it
+                // is delivered exactly as the prefix spelling is. Register
+                // it like a spine call so the position data covers these
+                // sites too.
+                // Builtin operators never key the maps (they are not module
+                // functions), and a locally SHADOWED backtick operator is an
+                // App spine of the local — the registration here then
                 // attributes marks to the module function that are not real
                 // deliveries to it, which can only add conservative bits.
                 if scan.ever_thunked.contains_key(op.as_str()) {

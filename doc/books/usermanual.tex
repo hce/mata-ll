@@ -772,6 +772,13 @@ safeRead path = catch (fileLines path)
                       (\err -> return [])
 \end{lstlisting}
 
+\texttt{try} and \texttt{catch} are ordinary functions, as in GHC: every
+spelling works the same --- \texttt{try \$ act}, \texttt{act \textasciigrave{}catch\textasciigrave{} h},
+partial application, \texttt{try . f}, \texttt{mapM try actions}. The action
+is evaluated and run inside the protected region; the handler runs outside
+it, so an error the handler raises propagates. A value the action returns
+is not forced: \texttt{try (pure (error "x"))} is a \texttt{Right}.
+
 %======================================================================
 \section{Evaluation Strategy}
 
