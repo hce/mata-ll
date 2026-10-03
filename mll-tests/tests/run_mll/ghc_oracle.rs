@@ -364,6 +364,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_ioloop_deep, "cases", "ioloop_deep.mll"),
         (ghc_oracle_ioloop_mixed, "cases", "ioloop_mixed.mll"),
         (ghc_oracle_ioloop_seq_parity, "cases", "ioloop_seq_parity.mll"),
+        (ghc_oracle_ioloop_rerun, "cases", "ioloop_rerun.mll"),
         (ghc_oracle_integral_semantics, "cases", "integral_semantics.mll"),
         (ghc_oracle_io_actions, "cases", "io_actions.mll"),
         (ghc_oracle_inline_compose_non_strict, "cases", "inline_compose_non_strict.mll"),

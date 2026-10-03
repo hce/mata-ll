@@ -105,6 +105,7 @@ mll_test!(ioloop_capture, "ioloop_capture.mll");
 mll_test!(ioloop_mixed, "ioloop_mixed.mll");
 mll_test!(ioloop_box, "ioloop_box.mll");
 mll_test!(ioloop_seq_parity, "ioloop_seq_parity.mll");
+mll_test!(ioloop_rerun, "ioloop_rerun.mll");
 mll_test!(performloop_deep, "performloop_deep.mll");
 mll_test!(performloop_dispatch, "performloop_dispatch.mll");
 mll_test!(performloop_pure_bottom, "performloop_pure_bottom.mll");

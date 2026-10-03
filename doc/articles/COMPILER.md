@@ -262,8 +262,13 @@ Responsibilities beyond the obvious translation:
   and Lua's tail calls on the hot path), and the action builder in the
   function's own slot, which every other use — a value-position call, a
   first-class reference, a partial application, a dictionary entry —
-  reaches and which returns the action closure. `main` is skipped when
-  the module is loaded via `require` (library use).
+  reaches and which returns the action closure. A self-recursive IO/ST
+  function with pattern dispatch becomes one action closure running a
+  `while true` loop (`ioloop.rs`); its loop state is locals of that
+  closure, initialised from the builder's arguments on every call, so each
+  run of the action — a second run, a retry after a raise, a run nested
+  inside its own — starts whole. `main` is skipped when the module is
+  loaded via `require` (library use).
 - **Names:** `names::sanitize_name` is the one mapping from mata-ll names
   to Lua names, and it is injective: a runtime entity has its fixed Lua
   name; an identifier keeps its spelling with `'` as `_prime`, moved by

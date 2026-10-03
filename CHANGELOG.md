@@ -44,6 +44,22 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A looping IO or ST action runs whole every time it is run** (silent
+  miscompile). A self-recursive IO/ST function with pattern dispatch
+  (`countdown 0 = …; countdown n = do { print n; countdown (n - 1) }`)
+  compiles to one action closure running a loop, and that loop kept its
+  state in the builder's parameters, shared by every run of the closure.
+  The first run left them at their final values, so a second run started
+  there: `twice (countdown 2)` printed `2 1 done done` instead of `2 1
+  done 2 1 done`, an ST loop run twice under `runST` filled its array
+  once, an action read back from an IORef, a list under `sequence_` or
+  `mapM_`, or a `let` binding ran its loop only the first time, a retry
+  after a raise mid-loop resumed at the failing step, and a run nested
+  inside the action's own run started from the outer run's position. The
+  loop state is now local to each run of the closure, initialised from
+  the arguments the action was built with. Measured cost: none on the
+  benchmark suite and the perf canary. (GHC-goldened case
+  `ioloop_rerun`.)
 - **`try` and `catch` are ordinary functions: every spelling catches**
   (silent miscompile). Only the saturated prefix forms `try act` and
   `catch act h` worked: `try $ act`, ``act `catch` h``, `catch act $ \m ->

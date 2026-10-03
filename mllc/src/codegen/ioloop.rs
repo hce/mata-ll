@@ -14,12 +14,13 @@
 //! ```text
 //! function(p1..pn)
 //!     local _lp = function()
+//!         local s1 = p1 … local sn = pn
 //!         while true do
-//!             local w1 = p1 … local wn = pn
+//!             local w1 = s1 … local wn = sn
 //!             <dispatch, renamed p→w, with each branch's action-closure
 //!              BODY spliced in place of `return <closure>`, and each tail
 //!              `return __mll_run_tail(self(e…))` replaced by
-//!              `p1, …, pn = e1', …, en'` + `goto continue`;
+//!              `s1, …, sn = e1', …, en'` + `goto continue`;
 //!              each `return <value>` branch becomes
 //!              `return __mll_run_tail(<value>')`>
 //!             ::continue::
@@ -112,13 +113,28 @@
 //!   [iteration N's effects][build of N+1: dispatch + bindings][closure
 //!   N+1's effects]; the loop runs [effects][update][dispatch + bindings]
 //!   [effects] — the same sequence.
+//! * RUN STATE LIVES IN THE RUN. `_lp` is the action VALUE the build
+//!   returns, and an action value may be run any number of times: twice by
+//!   a combinator (`a >> a`, `replicateM_`, `forever`), again by a retry
+//!   after it raised mid-loop, from an IORef, a list or a let binding, and
+//!   from inside its own run. Each run performs the whole action from the
+//!   build's arguments. So the loop's carried state is the locals `s1..sn`
+//!   of one CALL of `_lp`, initialised from the parameters at entry, and
+//!   the update assigns those; the parameters themselves are written only
+//!   by the skeleton, at build, before `_lp` can run. Two runs — sequential,
+//!   interleaved by a raise, or one nested inside the other — therefore
+//!   share no mutable variable: each has its own activation. (State kept
+//!   in the parameters — upvalues of `_lp`, shared by every run — would
+//!   make the action single-use: a second run would start from the first
+//!   run's final state.)
 //! * MIXED FUNCTIONS. Value branches reached on iterations ≥ 2 (a tail
 //!   forward to ANOTHER compiled function, a base case built by `pure`)
 //!   exit the loop by `return`; only self sites loop. Non-tail self uses
 //!   (`__mll_run(self(…))` binds, first-class references) call the
 //!   converted function, whose external contract — build-time dispatch,
-//!   then one action closure — is preserved, so every other caller is
-//!   correct by construction.
+//!   then an action closure that may be run any number of times (RUN
+//!   STATE above) — is preserved, so every other caller is correct by
+//!   construction.
 //! * DIVERGENCE OF SPLICED BODIES — a spliced body's statements sit where
 //!   `return <closure>` stood, which (for guarded matches) may be followed
 //!   by further clause tests and the non-exhaustive raise. A body that
@@ -342,9 +358,9 @@ fn to_skeleton(stmts: &mut [Stmt], lp: &str) {
 
 /// The loop-phase body: branch closures spliced (with their tail self sites
 /// rewritten), value branches run through the forwarding runner. Input
-/// statements are already renamed p→w; the update's lvalues are the real
-/// parameters, written here.
-fn to_loop(stmts: Vec<Stmt>, name: &SelfName, params: &[String]) -> Vec<Stmt> {
+/// statements are already renamed p→w; the update's lvalues are the run's
+/// state locals `state` (one per parameter, in order), written here.
+fn to_loop(stmts: Vec<Stmt>, name: &SelfName, state: &[String]) -> Vec<Stmt> {
     let mut out = Vec::with_capacity(stmts.len());
     for s in stmts {
         match s {
@@ -364,7 +380,7 @@ fn to_loop(stmts: Vec<Stmt>, name: &SelfName, params: &[String]) -> Vec<Stmt> {
                     // site is not in loop-body tail position in general, so
                     // the rewrite is always the goto shape (see the module
                     // comment).
-                    rewrite_run_tail_sites(&mut body, name, params);
+                    rewrite_run_tail_sites(&mut body, name, state);
                     out.extend(body);
                 } else {
                     out.push(Stmt::Return(Expr::call_named("__mll_run_tail", vec![e])));
@@ -372,14 +388,14 @@ fn to_loop(stmts: Vec<Stmt>, name: &SelfName, params: &[String]) -> Vec<Stmt> {
             }
             Stmt::If { cond, then_b, elseifs, else_b } => out.push(Stmt::If {
                 cond,
-                then_b: Block(to_loop(then_b.0, name, params)),
+                then_b: Block(to_loop(then_b.0, name, state)),
                 elseifs: elseifs
                     .into_iter()
-                    .map(|(c, b)| (c, Block(to_loop(b.0, name, params))))
+                    .map(|(c, b)| (c, Block(to_loop(b.0, name, state))))
                     .collect(),
-                else_b: else_b.map(|b| Block(to_loop(b.0, name, params))),
+                else_b: else_b.map(|b| Block(to_loop(b.0, name, state))),
             }),
-            Stmt::Do(b) => out.push(Stmt::Do(Block(to_loop(b.0, name, params)))),
+            Stmt::Do(b) => out.push(Stmt::Do(Block(to_loop(b.0, name, state)))),
             other => out.push(other),
         }
     }
@@ -430,6 +446,7 @@ fn convert(
     // against every identifier token of the rendered function.
     let used = tailloop::used_tokens(target, params, &body.0);
     let ws = tailloop::fresh_with_prefix(&used, "_w", params.len());
+    let ss = tailloop::fresh_with_prefix(&used, "_s", params.len());
     let lp = {
         let mut cand = String::from("_lp");
         while used.contains(&cand) {
@@ -444,17 +461,17 @@ fn convert(
         params.iter().cloned().zip(ws.iter().cloned()).collect();
     let mut loop_stmts = body.0.clone();
     rename_block(&mut loop_stmts, &map);
-    let loop_stmts = to_loop(loop_stmts, &self_name, params);
+    let loop_stmts = to_loop(loop_stmts, &self_name, &ss);
 
-    let inner = build_loop_scaffold(&ws, params, loop_stmts);
+    let lp_body = build_loop_scaffold(&ss, &ws, params, loop_stmts);
 
     // Locals budget, per scope: the outer body keeps its own locals plus
-    // `_lp`; the loop closure is its own scope holding the copies, the
-    // skeleton's locals and every spliced body's. (Same conservative 2×
-    // parameter allowance as tailloop: parameters occupy slots the
-    // statement-level count cannot see.)
+    // `_lp`; the loop closure is its own scope holding the run state, the
+    // copies, the skeleton's locals and every spliced body's. (Same
+    // conservative 2× parameter allowance as tailloop: parameters occupy
+    // slots the statement-level count cannot see.)
     if opt::count_locals(&body.0) + 1 > super::CodeGen::LOCAL_LIMIT
-        || opt::count_locals(&inner) + 2 * params.len() > super::CodeGen::LOCAL_LIMIT
+        || opt::count_locals(&lp_body) + 2 * params.len() > super::CodeGen::LOCAL_LIMIT
     {
         return None;
     }
@@ -465,10 +482,7 @@ fn convert(
     let mut out: Vec<Stmt> = Vec::with_capacity(skeleton.len() + 1);
     out.push(Stmt::Local(
         vec![lp.clone()],
-        Some(Expr::Func(
-            vec![],
-            FuncBody::Block(Block(vec![Stmt::WhileTrue(Block(inner))])),
-        )),
+        Some(Expr::Func(vec![], FuncBody::Block(Block(lp_body)))),
     ));
     out.extend(skeleton);
 
@@ -480,7 +494,7 @@ fn convert(
     debug_assert!(
         reverse_check(
             &target.header_text(params),
-            reverse(&out, &self_name, params, &ws, &lp),
+            reverse(&out, &self_name, params, &ss, &ws, &lp),
             &canonical_closure_returns(&body.0),
         ),
         "ioloop conversion is not reversible (see stderr)"
@@ -529,10 +543,12 @@ fn reverse(
     converted: &[Stmt],
     name: &SelfName,
     params: &[String],
+    ss: &[String],
     ws: &[String],
     lp: &str,
 ) -> Option<Vec<Stmt>> {
-    // Peel `local _lp = function() while true do … end end` + skeleton.
+    // Peel `local _lp = function() <state> while true do … end end` +
+    // skeleton.
     let (first, skeleton) = converted.split_first()?;
     let Stmt::Local(names, Some(Expr::Func(fparams, FuncBody::Block(Block(lbody))))) = first
     else {
@@ -541,12 +557,12 @@ fn reverse(
     if names != &vec![lp.to_string()] || !fparams.is_empty() {
         return None;
     }
-    let [Stmt::WhileTrue(Block(inner))] = lbody.as_slice() else { return None };
-    // Strip the per-iteration copies and the continue scaffolding.
-    let rest = peel_loop_scaffold(inner, ws, params)?;
+    // Strip the run state, the per-iteration copies and the continue
+    // scaffolding.
+    let rest = peel_loop_scaffold(lbody, ss, ws, params)?;
     let unmap: HashMap<String, String> =
         ws.iter().cloned().zip(params.iter().cloned()).collect();
-    lockstep(skeleton, rest, name, params, lp, &unmap)
+    lockstep(skeleton, rest, name, ss, lp, &unmap)
 }
 
 /// Walk skeleton and loop blocks in lockstep, reconstructing the original.
@@ -554,7 +570,7 @@ fn lockstep(
     skel: &[Stmt],
     lp_side: &[Stmt],
     name: &SelfName,
-    params: &[String],
+    state: &[String],
     lp: &str,
     unmap: &HashMap<String, String>,
 ) -> Option<Vec<Stmt>> {
@@ -570,7 +586,7 @@ fn lockstep(
                     return None;
                 }
                 let mut spliced: Vec<Stmt> = l.cloned().collect();
-                unrewrite_run_tail_sites(&mut spliced, name, params)?;
+                unrewrite_run_tail_sites(&mut spliced, name, state)?;
                 rename_block(&mut spliced, unmap);
                 out.push(Stmt::Return(Expr::Func(
                     vec![],
@@ -613,19 +629,19 @@ fn lockstep(
                 }
                 let else_rec = match (else_b, lo) {
                     (Some(b), Some(lb)) => {
-                        Some(Block(lockstep(&b.0, &lb.0, name, params, lp, unmap)?))
+                        Some(Block(lockstep(&b.0, &lb.0, name, state, lp, unmap)?))
                     }
                     (None, None) => None,
                     _ => return None,
                 };
                 out.push(Stmt::If {
                     cond: cond.clone(),
-                    then_b: Block(lockstep(&then_b.0, &lt.0, name, params, lp, unmap)?),
+                    then_b: Block(lockstep(&then_b.0, &lt.0, name, state, lp, unmap)?),
                     elseifs: elseifs
                         .iter()
                         .zip(le.iter())
                         .map(|((c, b), (_, lb))| {
-                            lockstep(&b.0, &lb.0, name, params, lp, unmap).map(|r| (c.clone(), Block(r)))
+                            lockstep(&b.0, &lb.0, name, state, lp, unmap).map(|r| (c.clone(), Block(r)))
                         })
                         .collect::<Option<Vec<_>>>()?,
                     else_b: else_rec,
@@ -633,7 +649,7 @@ fn lockstep(
             }
             Stmt::Do(b) => {
                 let Stmt::Do(lb) = l.next()? else { return None };
-                out.push(Stmt::Do(Block(lockstep(&b.0, &lb.0, name, params, lp, unmap)?)));
+                out.push(Stmt::Do(Block(lockstep(&b.0, &lb.0, name, state, lp, unmap)?)));
             }
             // Any other statement must be the skeleton statement, renamed.
             other => {
@@ -728,17 +744,17 @@ fn each_return(stmts: &[Stmt], f: &mut impl FnMut(&Expr)) {
 }
 
 /// Replace `return __mll_run_tail(self(e…))` sites in a spliced closure
-/// BODY with the simultaneous parameter update and the jump to the loop's
-/// continue label. Always the goto shape: a rewritten site is not in
+/// BODY with the simultaneous update of the run's state locals `state`
+/// (one per parameter, in order) and the jump to the loop's continue label. Always the goto shape: a rewritten site is not in
 /// loop-body tail position in general (see the module comment). The update
 /// is ONE multiple assignment in the call's argument order, over tailloop's
 /// simultaneity and evaluation-order arguments; with zero parameters there
 /// is no update, only the jump. Sites live only in the body's own tail
 /// positions (last statement, tail `if` arms, `do` blocks), so the walk
 /// descends only through the last statement.
-fn rewrite_run_tail_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[String]) {
+fn rewrite_run_tail_sites(stmts: &mut Vec<Stmt>, name: &SelfName, state: &[String]) {
     tailloop::for_each_tail_block_mut(stmts, &mut |b| {
-        if !matches!(b.last(), Some(Stmt::Return(e)) if run_tail_self_args(e, name, params).is_some()) {
+        if !matches!(b.last(), Some(Stmt::Return(e)) if run_tail_self_args(e, name, state).is_some()) {
             return;
         }
         let Some(Stmt::Return(Expr::Call(_, mut runner_args))) = b.pop() else {
@@ -747,15 +763,15 @@ fn rewrite_run_tail_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[Stri
         let Expr::Call(_, args) = runner_args.pop().expect("runner argument") else {
             unreachable!()
         };
-        if !params.is_empty() {
-            b.push(Stmt::MultiAssign(params.to_vec(), args));
+        if !state.is_empty() {
+            b.push(Stmt::MultiAssign(state.to_vec(), args));
         }
         b.push(Stmt::Goto("continue".into()));
     });
 }
 
 /// Mirror of `rewrite_run_tail_sites`, over the same positions: a
-/// block-final `[…, params = args, goto continue]` (or a bare
+/// block-final `[…, state = args, goto continue]` (or a bare
 /// `[…, goto continue]` for a zero-parameter function) becomes the original
 /// `return __mll_run_tail(self(args))` again. Returns `None` when the tree
 /// does not have the exact produced shape — the self-check then fails
@@ -763,7 +779,7 @@ fn rewrite_run_tail_sites(stmts: &mut Vec<Stmt>, name: &SelfName, params: &[Stri
 fn unrewrite_run_tail_sites(
     stmts: &mut Vec<Stmt>,
     name: &SelfName,
-    params: &[String],
+    state: &[String],
 ) -> Option<()> {
     let mut ok = true;
     tailloop::for_each_tail_block_mut(stmts, &mut |b| {
@@ -771,11 +787,11 @@ fn unrewrite_run_tail_sites(
             return;
         }
         b.pop();
-        let args = if params.is_empty() {
+        let args = if state.is_empty() {
             Vec::new()
         } else {
             match b.pop() {
-                Some(Stmt::MultiAssign(lhs, args)) if lhs == params => args,
+                Some(Stmt::MultiAssign(lhs, args)) if lhs == state => args,
                 _ => {
                     ok = false;
                     return;
@@ -788,11 +804,15 @@ fn unrewrite_run_tail_sites(
     ok.then_some(())
 }
 
-/// The loop-body scaffold: per-iteration parameter copies `local _wN = pN`
-/// (fresh locals every iteration, so surviving closures and thunks capture
-/// their own iteration's values — recursion's semantics; tailloop's module
-/// comment carries the full argument), then the transformed body, then the
-/// continue scaffolding. When the body can fall off its end, `do return
+/// The loop closure's body. First the run state `local _sN = pN`, one local
+/// per parameter, initialised from the parameters each time the closure is
+/// CALLED: the closure is the action value, and every run of it starts
+/// from the build's arguments (see RUN STATE in the module comment). Then
+/// the `while true` loop, whose body is: per-iteration copies `local _wN =
+/// _sN` (fresh locals every iteration, so surviving closures and thunks
+/// capture their own iteration's values — recursion's semantics;
+/// tailloop's module comment carries the full argument), then the
+/// transformed body, then the continue scaffolding. When the body can fall off its end, `do return
 /// end` sits before the label so falling off exits the loop exactly like
 /// the original's fall-off did (see CONTINUE MECHANISM in the module
 /// comment); the `::continue::` label sits in end-of-block position, the
@@ -801,34 +821,60 @@ fn unrewrite_run_tail_sites(
 /// tailloop's scaffold differs — its label is emitted only when the body
 /// can fall off (a diverging body's updates fall through to the loop end
 /// instead of jumping) — so it builds its own.
-fn build_loop_scaffold(ws: &[String], params: &[String], loop_stmts: Vec<Stmt>) -> Vec<Stmt> {
+fn build_loop_scaffold(
+    ss: &[String],
+    ws: &[String],
+    params: &[String],
+    loop_stmts: Vec<Stmt>,
+) -> Vec<Stmt> {
     let falls_off = !opt::stmts_diverge(&loop_stmts);
-    let mut inner: Vec<Stmt> = Vec::with_capacity(loop_stmts.len() + params.len() + 2);
-    for (w, p) in ws.iter().zip(params.iter()) {
-        inner.push(Stmt::Local(vec![w.clone()], Some(Expr::name(p.clone()))));
+    let mut inner: Vec<Stmt> = Vec::with_capacity(loop_stmts.len() + ws.len() + 2);
+    for (w, s) in ws.iter().zip(ss.iter()) {
+        inner.push(Stmt::Local(vec![w.clone()], Some(Expr::name(s.clone()))));
     }
     inner.extend(loop_stmts);
     if falls_off {
         inner.push(Stmt::Do(Block(vec![Stmt::ReturnNone])));
     }
     inner.push(Stmt::Label("continue".into()));
-    inner
+    let mut body: Vec<Stmt> = Vec::with_capacity(ss.len() + 1);
+    for (s, p) in ss.iter().zip(params.iter()) {
+        body.push(Stmt::Local(vec![s.clone()], Some(Expr::name(p.clone()))));
+    }
+    body.push(Stmt::WhileTrue(Block(inner)));
+    body
 }
 
 /// Exact inverse of `build_loop_scaffold`, for the reverse self-check:
-/// strip the per-iteration copies and the continue scaffolding, returning
-/// the transformed body. `None` when the tree does not have the exact
-/// produced shape — the self-check then fails loudly.
-fn peel_loop_scaffold<'a>(inner: &'a [Stmt], ws: &[String], params: &[String]) -> Option<&'a [Stmt]> {
-    let mut rest = inner;
-    for (w, p) in ws.iter().zip(params.iter()) {
-        let (c, r) = rest.split_first()?;
-        let Stmt::Local(ns, Some(Expr::Name(src))) = c else { return None };
-        if ns != &vec![w.clone()] || src != p {
-            return None;
+/// strip the run state, the loop, the per-iteration copies and the
+/// continue scaffolding, returning the transformed body. `None` when the
+/// tree does not have the exact produced shape — the self-check then fails
+/// loudly.
+fn peel_loop_scaffold<'a>(
+    lp_body: &'a [Stmt],
+    ss: &[String],
+    ws: &[String],
+    params: &[String],
+) -> Option<&'a [Stmt]> {
+    fn peel_copies<'a>(
+        mut rest: &'a [Stmt],
+        dsts: &[String],
+        srcs: &[String],
+    ) -> Option<&'a [Stmt]> {
+        for (d, s) in dsts.iter().zip(srcs.iter()) {
+            let (c, r) = rest.split_first()?;
+            let Stmt::Local(ns, Some(Expr::Name(src))) = c else { return None };
+            if ns != std::slice::from_ref(d) || src != s {
+                return None;
+            }
+            rest = r;
         }
-        rest = r;
+        Some(rest)
     }
+    let [Stmt::WhileTrue(Block(inner))] = peel_copies(lp_body, ss, params)? else {
+        return None;
+    };
+    let rest = peel_copies(inner, ws, ss)?;
     match rest {
         [r @ .., Stmt::Do(guard), Stmt::Label(l)] if l == "continue" => {
             let [Stmt::ReturnNone] = guard.0.as_slice() else { return None };
@@ -927,15 +973,19 @@ mod tests {
         // One loop closure, declared before the skeleton.
         assert!(out.contains("local _lp = function()"), "{out}");
         assert!(out.contains("while true do"), "{out}");
-        // The loop re-dispatches on the per-iteration copy.
-        assert!(out.contains("local _w0 = _arg0"), "{out}");
+        // The run state is a local of the loop closure, initialised from
+        // the parameter on every call; the loop re-dispatches on the
+        // per-iteration copy of it.
+        assert!(out.contains("local _lp = function()\n        local _s0 = _arg0\n        while true do\n            local _w0 = _s0"), "{out}");
         assert!(out.contains("_w0 = __force(_w0)"), "{out}");
         // Terminal branch spliced: the box-convention-bearing return is
         // verbatim inside the loop.
         assert!(out.contains("if _w0 == 0 then\n                return nil"), "{out}");
         // Effect statement kept; tail site became update + goto.
         assert!(out.contains("__mll_run_tail(__mll_fn[9](n))"), "{out}");
-        assert!(out.contains("_arg0 = n - 1"), "{out}");
+        // The update writes the run state, never the parameter.
+        assert!(out.contains("_s0 = n - 1"), "{out}");
+        assert!(!out.contains("_arg0 = n - 1"), "{out}");
         assert!(out.contains("goto continue"), "{out}");
         assert!(out.contains("::continue::"), "{out}");
         // The skeleton keeps the build-time force and returns _lp from both
@@ -1002,7 +1052,7 @@ mod tests {
         assert!(rewrote, "{out}");
         assert!(out.contains("return __mll_run_tail(__mll_fn[8](_w0))"), "{out}");
         // Self site rewritten, other site untouched.
-        assert!(out.contains("_arg0 = _w0"), "{out}");
+        assert!(out.contains("_s0 = _w0"), "{out}");
     }
 
     #[test]
@@ -1082,7 +1132,7 @@ mod tests {
         let (out, rewrote) = converted(stmts);
         assert!(rewrote, "{out}");
         assert!(out.contains("local x = __mll_run(__mll_fn[3](1))"), "{out}");
-        assert!(out.contains("_arg0 = x"), "{out}");
+        assert!(out.contains("_s0 = x"), "{out}");
     }
 
     #[test]
@@ -1169,7 +1219,7 @@ mod tests {
     fn per_iteration_capture_uses_fresh_locals() {
         // A thunk in the looping branch captures the intro local; the loop
         // must keep the capture on per-iteration locals (the copy and the
-        // re-derived intro), never on the mutated parameter.
+        // re-derived intro), never on the mutated run state.
         let (out, _) = converted(countdown());
         let loop_part =
             &out[out.find("while true do").unwrap()..out.find("::continue::").unwrap()];
