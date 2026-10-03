@@ -44,6 +44,47 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **No two names of a program share a Lua name, and no name of a
+  program is taken for one of the compiler's** (silent miscompiles,
+  load failures, one rejection). The mapping from mata-ll names to Lua
+  names was many-to-one, and the compiler minted its own definitions in
+  the program's namespace:
+  - Distinct local binders and constructors whose Lua spellings met
+    became one variable: `y'` and `y_prime` in one scope, `end` and
+    `end_`, a parameter `not_` next to the builtin `not` (whose Lua name
+    is `not_`), `error_` next to `error`, constructors `A'` and
+    `A_prime` (`print (A' 1)` printed `A_prime 1`).
+  - A user function or variable spelled like a generated instance
+    method, a structural instance, a specialization or a function of
+    the runtime library replaced it or was replaced by it:
+    `show_Color` defined next to a derived `Show Color` made `print Red`
+    use the user's function; a top-level `show_Int` was constant-folded
+    as the builtin; a parameter named `show_Int` captured `show` at
+    `Int` (one shape emitted Lua that does not load); `eq_LInt`,
+    `show_LInt`, `ord_compare__Shape`, `showsPrec_Shape` and a
+    specialization name such as `count_IntTLIntTInt` were taken over the
+    same way. Locals named like Lua globals the emitted code calls
+    (`select`, `type`, `pairs`, …) are kept off those names as well.
+  - Two operators whose spellings differ only in `-` and `.` (`<->`,
+    `<.>`) were rejected as colliding.
+
+  The Lua name of a name is now injective by construction: a prime is
+  `_prime` and a Lua reserved word, Lua global or runtime name gains
+  trailing underscores as before, but a name that already contains the
+  text `_prime` or would land on another name's spelling is escaped
+  whole (`y_prime` is `__usr_y__prime`), and every operator character
+  has its own word (`<->` is `_usr_lt__minus__gt_`). Generated
+  definitions are named with a separator no source name can contain,
+  and the names of the runtime library and of the builtin instances'
+  implementations are claimed: an entry-module declaration of such a
+  name gets a qualified internal name and a local binder a reserved
+  one, as for the wired-in names. Emitted Lua changes only for local
+  variables named like a Lua global (`next` is `next_`, `table` is
+  `table_`), like a runtime function, or with `_prime` in the name, and
+  for the dictionary field of the `-` method. GHC-goldened cases
+  `names_local_binders`, `names_constructors_fields`,
+  `names_generated`, `names_operators`, `names_modules`;
+  self-asserting cases `names_lua_globals`, `names_generic_metadata`.
 - **A bare name means what the module that wrote it has in scope** (five
   silent miscompiles). Imports were merged into one namespace keyed by
   bare names, so one name could stand for the declarations of several
@@ -248,6 +289,18 @@ API of the `mllc` library crate.)
 
 ### Changed
 
+- **A record field or a class method cannot be named like a function
+  of the runtime library** (breaking for programs that declared one;
+  GHC accepts them). Fields and class methods are program-wide names in
+  mata-ll, so a field `show_Int` became the accessor every `show` at
+  `Int` called (a run-time crash), and a class method `show_Int` was
+  taken for every use of the builtin `show` at `Int`. Such a field (any
+  runtime-library name: `show_Int`, `eq_Int`, `hashmap_insert`, …) or
+  class method (a builtin instance's implementation name) is now
+  rejected with the reason and a `note:`; a top-level function or a
+  local variable of the same name is accepted. This extends the
+  existing rule for fields named like Prelude functions. To migrate,
+  rename the field or method.
 - **A fixity declaration for an operator its module does not define is
   rejected** (breaking for programs that wrote one), as in GHC ("The
   fixity signature … lacks an accompanying binding"). `infixl 6 +` in a

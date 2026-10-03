@@ -11,8 +11,8 @@
 //!
 //! This pass makes that failure loud: it walks the final TIR and reports any
 //! call to a *type-erased* show — the bare class method `show` or one of the
-//! former generic runtime wrappers `show_Maybe`/`show_List_` (once defined as
-//! `\x -> show x`, now deleted from the runtime; the names remain flagged) —
+//! names the builtin list/Maybe instances are registered under
+//! (`show_Maybe`/`show_[]`: the runtime has no such functions) —
 //! applied at a *concrete structured* type. At a concrete
 //! type, monomorphization should have resolved to a *specialized* show (a
 //! `__mll_show_list`/`__mll_show_maybe` thread, or a per-type derived
@@ -33,20 +33,24 @@ use std::collections::HashSet;
 use crate::tir::*;
 use crate::types::Ty;
 
-/// The type-erased show functions: the bare class method and the generic
-/// wrapper names that used to delegate to it (`show_Maybe`/`show_List_` and
-/// their showsPrec twins are deleted from the runtime — nothing mints them —
-/// but the names stay on this deny-list so a resurrected resolution fails
-/// loudly here at compile time, not as a nil call at run time). A concrete
-/// structured call must never resolve to one of these. Equality has NO entry here: at TIR level
+/// The type-erased show functions: the bare class method and the names the
+/// builtin `Show [a]` / `Show (Maybe a)` instances are registered under
+/// (`show_[]`, `show_Maybe` and their showsPrec twins: the runtime has no
+/// such functions, monomorphization builds the instance per element type
+/// instead — the names stay on this deny-list so a resolution that falls
+/// back to one fails loudly here at compile time, not as a nil call at run
+/// time). A concrete structured call must never resolve to one of these.
+/// Every name here is a claimed spelling (`Checker::claimed_names`), so
+/// no function or variable of a program can be mistaken for one.
+/// Equality has NO entry here: at TIR level
 /// the Eq method only ever appears as the `==`/`/=` operator (`InfixApp`
 /// applied, `OpFunc` first-class) — both have their own checks in `walk` —
 /// while a bare `eq` Var is an ordinary binder (`nubBy eq xs` in the
 /// Prelude), which is exactly the false positive that fired the first time
 /// `"eq"` was added to this list.
 const TYPE_ERASED_METHODS: &[&str] = &[
-    "show", "show_Maybe", "show_List_",
-    "showsPrec", "showsPrec_Maybe", "showsPrec_List_",
+    "show", "show_Maybe", "show_[]",
+    "showsPrec", "showsPrec_Maybe", "showsPrec_[]",
 ];
 
 /// Check the module's invariants. Returns one message per violation; empty
@@ -290,7 +294,7 @@ mod tests {
     #[test]
     fn flags_type_erased_show_on_structured_concrete() {
         // bare `show` and the generic wrappers, at a concrete structured type
-        for name in ["show", "show_Maybe", "show_List_"] {
+        for name in ["show", "show_Maybe", "show_[]"] {
             let m = module_with(show_call(name, Ty::list(Ty::Con("Int".into()))));
             assert_eq!(check(&m).len(), 1, "{name} on [Int] should flag");
         }

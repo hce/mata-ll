@@ -22,6 +22,8 @@ cases/FixityQual	helper module (twinned for import, no main)
 cases/FixityTypeOps	helper module (twinned for import, no main)
 cases/FixityUmbrella	helper module (twinned for import, no main)
 cases/MergeNames	helper module (twinned for import, no main)
+cases/NamesA	helper module (twinned for import, no main)
+cases/NamesA_b	helper module (twinned for import, no main)
 cases/OpQualDefs	helper module (twinned for import, no main)
 cases/OpsExports	helper module (twinned for import, no main)
 cases/PrivateHelperLib	helper module (twinned for import, no main)
@@ -103,6 +105,8 @@ cases/linear_mult_poly	GHC's -XLinearTypes rejects unrestricted use of a %1-boun
 cases/lua_iterator_method	LuaIterator FFI
 cases/luacatch	LuaCatch FFI
 cases/luadict	LuaDict FFI
+cases/names_generic_metadata	mata-ll Generics substrate (Data.Generics is not GHC's)
+cases/names_lua_globals	imports LString (Lua string FFI)
 cases/newtypes	'newtype Age = Int' implicit-constructor sugar is not Haskell
 cases/poly_recursion_user_class	contains a LuaPure FFI declaration
 cases/pure_scalar_bare_escape	ByteString builtins (Lua byte strings)

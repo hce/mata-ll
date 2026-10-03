@@ -1652,9 +1652,11 @@ impl fmt::Debug for DisplayNames {
 /// candidate token is a maximal run of identifier characters and dots,
 /// extended over a trailing operator when the run ends in a dot (the
 /// canonical name of an operator: `Vec.<+>`); a sentence-final dot is not
-/// part of a name, so a miss retries without trailing dots. An instance
-/// method's name carries its type after an underscore (`area_Shapes.Sq`);
-/// that tail is respelled too. Tokens absent from the table (file names,
+/// part of a name, so a miss retries without trailing dots. A generated
+/// name (`ast::minted`: an instance method `area·Shapes.Sq`, a
+/// specialization) is two tokens around its separator, each respelled on
+/// its own, and the separator is shown as the underscore such names are
+/// displayed with (`area_Sq`). Tokens absent from the table (file names,
 /// prose) are copied through unchanged. Import resolution's placeholders (`<scope
 /// error N>`, see `ast::Resolution`) are bracketed, not word-shaped, and
 /// are matched as a whole.
@@ -1696,16 +1698,6 @@ pub(crate) fn spell_names(text: &str, names: &HashMap<String, String>) -> String
                 hit = Some((i, shown.clone()));
                 break;
             }
-            // An instance method is named `method_Type` (`area_Shapes.Sq`):
-            // the canonical name is what follows one of the underscores.
-            let tail = (i..end).filter(|&u| chars[u] == '_').find_map(|u| {
-                let rest: String = chars[u + 1..end].iter().collect();
-                names.get(&rest).map(|shown| (u + 1, shown.clone()))
-            });
-            if tail.is_some() {
-                hit = tail;
-                break;
-            }
             if end > i + 1 && (chars[end - 1] == '.' || chars[end - 1] == '\'') {
                 end -= 1;
             } else {
@@ -1724,7 +1716,7 @@ pub(crate) fn spell_names(text: &str, names: &HashMap<String, String>) -> String
             }
         }
     }
-    out
+    crate::ast::shown(&out).into_owned()
 }
 
 impl Diagnostic {
@@ -2166,7 +2158,7 @@ impl Diagnostic {
     fn spell(&self, text: &str) -> String {
         match &self.names {
             Some(names) => spell_names(text, &names.0),
-            None => text.to_string(),
+            None => crate::ast::shown(text).into_owned(),
         }
     }
 
@@ -2269,7 +2261,10 @@ mod spell_names_tests {
         assert_eq!(spell("Cannot unify 'Int' with '<scope error 3>'"), "Cannot unify 'Int' with 'Config'");
         assert_eq!(spell("at A.mll:4:3, in 'Main.head'"), "at A.mll:4:3, in 'head'");
         assert_eq!(spell("'XA.helper' and 'A.helperx'"), "'XA.helper' and 'A.helperx'");
-        assert_eq!(spell("in definition of 'show_A.helper'"), "in definition of 'show_helper'");
+        assert_eq!(
+            spell(&format!("in definition of '{}'", crate::ast::minted("show", "A.helper"))),
+            "in definition of 'show_helper'");
+        assert_eq!(spell("in definition of 'show_A.helper'"), "in definition of 'show_A.helper'");
         assert_eq!(spell("a < b and c > d"), "a < b and c > d");
     }
 }

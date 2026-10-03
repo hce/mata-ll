@@ -164,7 +164,8 @@ The primary mechanism for compiling polymorphism and typeclasses to plain Lua.
 
 Idea: walk the TIR, collect every **concrete** type instantiation of each
 polymorphic function actually used, and emit one specialized copy per unique
-instantiation with a **mangled name**, rewriting call sites to point at the
+instantiation with a **mangled name** (`count·IntTInt`: `ast::minted`, a
+spelling no source name has), rewriting call sites to point at the
 specialization. After this pass, typeclass methods are gone — they've become
 ordinary monomorphic functions (`eq_Integer`, …), which is exactly why
 constant folding (§7) can then recognize them.
@@ -255,6 +256,16 @@ Responsibilities beyond the obvious translation:
   (`":write"`) becomes `handle:write(...)`.
 - **IO:** `__mll_run` forces IO thunks in `>>=`; `main` is skipped when the
   module is loaded via `require` (library use).
+- **Names:** `names::sanitize_name` is the one mapping from mata-ll names
+  to Lua names, and it is injective: a runtime entity has its fixed Lua
+  name; an identifier keeps its spelling with `'` as `_prime`, moved by
+  trailing underscores off Lua's reserved words, the standard globals and
+  the runtime's names (`end` -> `end_`, `end_` -> `end__`); `_x` is
+  `_usr_x`; an operator is `_usr` plus one word per character; anything
+  else (a canonical `M.f`, a generated name, a name containing `_prime`)
+  is escaped whole under `__usr_`. Tables keyed by Lua name are therefore
+  keyed by the mata-ll name. `names::reserved_binder` checks the emitted
+  tree for a local declared under a reserved name (an internal error).
 
 ---
 
@@ -350,6 +361,25 @@ apart is done entirely in `modules.rs`, before the merge
   introduces (`__lamN`, `__tup_N`, `__wtup_N`, `__compN`, `__sec`, `__pgK_N`,
   `__tconN`) are a separate matter: they live in the `__` namespace, which
   the lexer refuses in source.
+- **Names the compiler owns (`PreludeScope::claimed`, `ast::minted`).**
+  Later stages also recognize the runtime library's functions (`map`,
+  `not`, `hashmap_insert`, `show_Int`) and the builtin instances'
+  implementations (`eq_Int`, `fmap_Maybe`) by spelling: instance
+  resolution writes `show_Int` in place of `show` at `Int`, and
+  `fold.rs`, `demand.rs` and the emitter key tables on these names.
+  `Checker::claimed_names` lists them, and resolution keeps every program
+  entity off them the way it keeps locals off wired-in names: an
+  entry-module declaration of such a name gets the qualified canonical
+  name (`Main.show_Int`, `canon_val`), a local binder the `__local_`
+  spelling. Record fields and class methods are not renamed (see above),
+  so `Checker::reject_claimed_globals` refuses a field of a claimed name
+  and a class method named like a builtin implementation. Everything the
+  compiler generates per program — instance methods (`show·Color`),
+  derived helpers, specializations and dictionary forms (`count·IntTInt`,
+  `show·Color·dictform` via `Monomorphizer::mangle_name`), Generic
+  metadata — is named with `ast::MINT` (`·`), a character the lexer
+  accepts in no identifier or operator, so no source name can equal one;
+  `ast::shown` prints it as `_` in messages.
 - **Canonical names downstream.** The checker refers to the bundled library
   by canonical name where it has built-in knowledge of it
   (`Checker::json_fn`, `Checker::library_type`: `JSON.jField`,

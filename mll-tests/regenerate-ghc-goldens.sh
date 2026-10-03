@@ -174,6 +174,10 @@ excluded_reason() {
         cases/ScopeStack)                echo "helper module (twinned for import, no main)";;
         cases/ScopeHostLib)              echo "helper module using the 'export' keyword (Lua module export)";;
         cases/DesugarOwn)                echo "helper module (twinned for import, no main)";;
+        cases/NamesA)                    echo "helper module (twinned for import, no main)";;
+        cases/NamesA_b)                  echo "helper module (twinned for import, no main)";;
+        cases/names_lua_globals)         echo "imports LString (Lua string FFI)";;
+        cases/names_generic_metadata)    echo "mata-ll Generics substrate (Data.Generics is not GHC's)";;
         cases/FixityInner)               echo "helper module (twinned for import, no main)";;
         cases/FixityOuter)               echo "helper module (twinned for import, no main)";;
         cases/FixityPrivate)             echo "helper module (twinned for import, no main)";;
@@ -295,7 +299,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack DesugarOwn FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps; do
+for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack DesugarOwn NamesA NamesA_b FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

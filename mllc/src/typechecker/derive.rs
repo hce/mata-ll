@@ -5,6 +5,16 @@
 
 use super::*;
 
+/// The name of a piece of generated `Generic` metadata — a marker type, a
+/// metadata function, a conversion — for the type (and constructor, and
+/// field) in `of`: the parts joined by the generated-name separator
+/// (`ast::MINT`), which no type or constructor name contains, so two
+/// different (type, constructor) pairs never run together into one name
+/// (`A_B`/`C` and `A`/`B_C`).
+fn meta_name(kind: &str, of: &[&str]) -> String {
+    of.iter().fold(kind.to_string(), |name, part| minted(&name, part))
+}
+
 impl Checker {
     // --- Deriving ---
 
@@ -235,7 +245,7 @@ impl Checker {
     ) -> Vec<TFunction> {
         let (_, result_type) = Self::data_result_type(type_name, type_vars);
 
-        let mangled = format!("show_{}", type_name);
+        let mangled = minted("show", type_name);
         let fn_ty = Ty::arrow(result_type.clone(), Ty::Con("String".into()));
 
         let mut clauses = Vec::new();
@@ -383,7 +393,7 @@ impl Checker {
         // argument types (mono specializes the instance method per use).
         let str_ty = Ty::Con("String".into());
         let int_ty = Ty::Con("Int".into());
-        let shows_prec_mangled = format!("showsPrec_{}", type_name);
+        let shows_prec_mangled = minted("showsPrec", type_name);
         let shows_prec_ty = Ty::fun(&[int_ty.clone(), result_type.clone(), str_ty.clone()], str_ty.clone());
         let app = |f: TExpr, a: TExpr, t: Ty| TExpr::new(TExprKind::App(Box::new(f), Box::new(a)), t);
         let shown = app(
@@ -461,7 +471,7 @@ impl Checker {
     ) -> Vec<TFunction> {
         let (_, result_type) = Self::data_result_type(type_name, type_vars);
 
-        let mangled = format!("eq_{}", type_name);
+        let mangled = minted("eq", type_name);
         let fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], Ty::Con("Bool".into()));
 
         let mut clauses = Vec::new();
@@ -552,7 +562,7 @@ impl Checker {
         // eq_T; at a parameterized type it is specialized per use like the
         // field comparisons above).
         let bool_ty = Ty::Con("Bool".into());
-        let ne_mangled = format!("ne_{}", type_name);
+        let ne_mangled = minted("ne", type_name);
         let ne_body = TExpr::new(
             TExprKind::App(
                 Box::new(TExpr::new(
@@ -637,7 +647,7 @@ impl Checker {
 
         let ordering_ty = Ty::Con("Ordering".into());
         let compare_fn_ty = Ty::fun(&[result_type.clone(), result_type.clone()], ordering_ty.clone());
-        let compare_name = format!("ord_compare__{}", type_name);
+        let compare_name = minted("ord_compare_", type_name);
 
         // compare: cross-constructor pairs order by declaration index
         // (earlier constructor < later); same-constructor pairs compare
@@ -764,7 +774,7 @@ impl Checker {
         });
 
         for (op, op_name) in &[("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")] {
-            let mangled = format!("ord_{}__{}", op_name, type_name);
+            let mangled = minted(&format!("ord_{}_", op_name), type_name);
 
             let clauses = if is_enum {
                 // Enum: fields can't exist, so the constructor index fully
@@ -877,7 +887,7 @@ impl Checker {
         // exactly on GT.
         let sel_ty = Ty::fun(&[result_type.clone(), result_type.clone()], result_type.clone());
         for (method, on_gt, otherwise) in &[("max", "_a", "_b"), ("min", "_b", "_a")] {
-            let mangled = format!("ord_{}__{}", method, type_name);
+            let mangled = minted(&format!("ord_{}_", method), type_name);
             let cmp_call = TExpr::new(
                 TExprKind::App(
                     Box::new(TExpr::new(
@@ -937,11 +947,11 @@ impl Checker {
         // Register the Ord instance
         let mut method_fns = HashMap::new();
         for (op, op_name) in &[("<", "lt"), (">", "gt"), ("<=", "le"), (">=", "ge")] {
-            method_fns.insert(op.to_string(), format!("ord_{}__{}", op_name, type_name));
+            method_fns.insert(op.to_string(), minted(&format!("ord_{}_", op_name), type_name));
         }
-        method_fns.insert("compare".to_string(), format!("ord_compare__{}", type_name));
-        method_fns.insert("max".to_string(), format!("ord_max__{}", type_name));
-        method_fns.insert("min".to_string(), format!("ord_min__{}", type_name));
+        method_fns.insert("compare".to_string(), minted("ord_compare_", type_name));
+        method_fns.insert("max".to_string(), minted("ord_max_", type_name));
+        method_fns.insert("min".to_string(), minted("ord_min_", type_name));
         self.register_instance(InstanceInfo {
             class_name: "Ord".to_string(),
             target_type: result_type,
@@ -978,7 +988,7 @@ impl Checker {
         let mut functions = Vec::new();
 
         // fromEnum_T :: T -> Int
-        let from_name = format!("fromEnum_{}", type_name);
+        let from_name = minted("fromEnum", type_name);
         {
             let clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
                 TClause {
@@ -1001,7 +1011,7 @@ impl Checker {
         }
 
         // toEnum_T :: Int -> T
-        let to_name = format!("toEnum_{}", type_name);
+        let to_name = minted("toEnum", type_name);
         {
             let mut clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
                 TClause {
@@ -1040,7 +1050,7 @@ impl Checker {
         }
 
         // succ_T :: T -> T  (toEnum (fromEnum x + 1))
-        let succ_name = format!("succ_{}", type_name);
+        let succ_name = minted("succ", type_name);
         {
             let mut clauses: Vec<TClause> = Vec::new();
             for i in 0..n.saturating_sub(1) {
@@ -1080,7 +1090,7 @@ impl Checker {
         }
 
         // pred_T :: T -> T
-        let pred_name = format!("pred_{}", type_name);
+        let pred_name = minted("pred", type_name);
         {
             let mut clauses: Vec<TClause> = Vec::new();
             for i in 1..n {
@@ -1124,7 +1134,7 @@ impl Checker {
 
         // enumFromTo_T :: T -> T -> [T]
         // Generate explicit clauses: for each constructor i, check if fromEnum a <= fromEnum b
-        let enum_from_to_name = format!("enumFromTo_{}", type_name);
+        let enum_from_to_name = minted("enumFromTo", type_name);
         {
             // enumFromTo a b = if fromEnum a > fromEnum b then []
             //                  else a : enumFromTo (succ a) b
@@ -1207,7 +1217,7 @@ impl Checker {
         }
 
         // enumFrom_T :: T -> [T]  =>  enumFromTo a (last constructor)
-        let enum_from_name = format!("enumFrom_{}", type_name);
+        let enum_from_name = minted("enumFrom", type_name);
         {
             let a_var = TExpr::new(TExprKind::Var("_a".into()), result_type.clone());
             let last_con = TExpr::new(
@@ -1276,7 +1286,7 @@ impl Checker {
 
         // enumStep_T :: Int -> Int -> Int -> [T]
         // enumStep i step limit — the index walk behind both stepped ranges.
-        let enum_step_name = format!("enumStep_{}", type_name);
+        let enum_step_name = minted("enumStep", type_name);
         {
             // if step >= 0 then (if i > limit then [] else toEnum i : go)
             //              else (if i < limit then [] else toEnum i : go)
@@ -1327,7 +1337,7 @@ impl Checker {
         // enumFromThen a b = enumStep (fromEnum a) (fromEnum b - fromEnum a) limit
         //   where limit = maxBound index when ascending, 0 when descending
         // (GHC picks the limit from the step direction the same way.)
-        let enum_from_then_name = format!("enumFromThen_{}", type_name);
+        let enum_from_then_name = minted("enumFromThen", type_name);
         {
             let limit = TExpr::new(TExprKind::If {
                 cond: Box::new(cmp(">=", from_enum("_b"), from_enum("_a"))),
@@ -1359,7 +1369,7 @@ impl Checker {
 
         // enumFromThenTo_T :: T -> T -> T -> [T]
         // enumFromThenTo a b c = enumStep (fromEnum a) (fromEnum b - fromEnum a) (fromEnum c)
-        let enum_from_then_to_name = format!("enumFromThenTo_{}", type_name);
+        let enum_from_then_to_name = minted("enumFromThenTo", type_name);
         {
             let body = apply(&enum_step_name, vec![
                 from_enum("_a"),
@@ -1422,8 +1432,8 @@ impl Checker {
             let con_key = self.resolve_con_name(&con.name).to_string();
             let result_type = Ty::Con(type_name.to_string());
             let mut functions = Vec::new();
-            for (method, mangled) in [("minBound", format!("minBound_{}", type_name)),
-                                      ("maxBound", format!("maxBound_{}", type_name))] {
+            for (method, mangled) in [("minBound", minted("minBound", type_name)),
+                                      ("maxBound", minted("maxBound", type_name))] {
                 // Con applied to one `minBound`/`maxBound` per field, each
                 // annotated at the field's type so monomorphization
                 // resolves the method there (and rejects a field type
@@ -1453,8 +1463,8 @@ impl Checker {
                 });
             }
             let mut method_fns = HashMap::new();
-            method_fns.insert("minBound".to_string(), format!("minBound_{}", type_name));
-            method_fns.insert("maxBound".to_string(), format!("maxBound_{}", type_name));
+            method_fns.insert("minBound".to_string(), minted("minBound", type_name));
+            method_fns.insert("maxBound".to_string(), minted("maxBound", type_name));
             self.register_instance(InstanceInfo {
                 class_name: "Bounded".to_string(),
                 target_type: Ty::Con(type_name.to_string()),
@@ -1479,7 +1489,7 @@ impl Checker {
         let mut functions = Vec::new();
 
         // minBound_T :: T
-        let min_name = format!("minBound_{}", type_name);
+        let min_name = minted("minBound", type_name);
         functions.push(TFunction {
             name: min_name.clone(),
             ty: result_type.clone(),
@@ -1497,7 +1507,7 @@ impl Checker {
         });
 
         // maxBound_T :: T
-        let max_name = format!("maxBound_{}", type_name);
+        let max_name = minted("maxBound", type_name);
         functions.push(TFunction {
             name: max_name.clone(),
             ty: result_type.clone(),
@@ -1820,7 +1830,7 @@ impl Checker {
         let f_ty = Ty::arrow(Ty::Var(a_tv.clone()), Ty::Var(b_tv.clone()));
         let fn_ty = Ty::fun(&[f_ty.clone(), input_type.clone()], output_type.clone());
 
-        let mangled = format!("fmap_{}", type_name);
+        let mangled = minted("fmap", type_name);
 
         let mut clauses = Vec::new();
         for con in constructors {
@@ -2056,10 +2066,10 @@ impl Checker {
         let mut out_fns: Vec<TFunction> = Vec::new();
 
         // Datatype metadata marker + instance (name + constructor count).
-        let d_marker = format!("__Meta_D_{}", type_name);
+        let d_marker = meta_name("__Meta_D", &[type_name]);
         self.register_meta_type(&d_marker);
-        let dt_fn = format!("__meta_datatypeName_{}", type_name);
-        let dc_fn = format!("__meta_datatypeConCount_{}", type_name);
+        let dt_fn = meta_name("__meta_datatypeName", &[type_name]);
+        let dc_fn = meta_name("__meta_datatypeConCount", &[type_name]);
         // The name the program sees at runtime is the type's own, not
         // the canonical (module-qualified) one import resolution gave it.
         out_fns.push(self.meta_string_fn(&dt_fn, self.source_name(type_name)));
@@ -2089,11 +2099,11 @@ impl Checker {
             };
 
             // Constructor metadata marker + instance (name, arity, record-ness).
-            let c_marker = format!("__Meta_C_{}_{}", type_name, con.name);
+            let c_marker = meta_name("__Meta_C", &[type_name, &con.name]);
             self.register_meta_type(&c_marker);
-            let cn_fn = format!("__meta_conName_{}_{}", type_name, con.name);
-            let ca_fn = format!("__meta_conArity_{}_{}", type_name, con.name);
-            let cr_fn = format!("__meta_conIsRecord_{}_{}", type_name, con.name);
+            let cn_fn = meta_name("__meta_conName", &[type_name, &con.name]);
+            let ca_fn = meta_name("__meta_conArity", &[type_name, &con.name]);
+            let cr_fn = meta_name("__meta_conIsRecord", &[type_name, &con.name]);
             let is_record = matches!(&con.fields, ConstructorFields::Named(fs) if !fs.is_empty());
             // Arity from the REGISTRY: the parser's field list is empty for
             // a GADT-syntax constructor (its signature lives in gadt_type),
@@ -2117,9 +2127,9 @@ impl Checker {
             let mut s_markers = Vec::new();
             let mut field_reps: Vec<Ty> = Vec::new();
             for (fi, fty) in field_tys.iter().enumerate() {
-                let s_marker = format!("__Meta_S_{}_{}_{}", type_name, con.name, fi);
+                let s_marker = meta_name("__Meta_S", &[type_name, &con.name, &fi.to_string()]);
                 self.register_meta_type(&s_marker);
-                let sn_fn = format!("__meta_selName_{}_{}_{}", type_name, con.name, fi);
+                let sn_fn = meta_name("__meta_selName", &[type_name, &con.name, &fi.to_string()]);
                 out_fns.push(self.meta_string_fn(&sn_fn, &field_names[fi]));
                 self.register_instance(InstanceInfo {
                     class_name: "Selector".to_string(),
@@ -2230,8 +2240,8 @@ impl Checker {
             });
         }
 
-        let from_fn = format!("__generic_from_{}", type_name);
-        let to_fn = format!("__generic_to_{}", type_name);
+        let from_fn = meta_name("__generic_from", &[type_name]);
+        let to_fn = meta_name("__generic_to", &[type_name]);
         out_fns.push(TFunction {
             name: from_fn.clone(),
             ty: Ty::arrow(result_type.clone(), rep_type.clone()),
@@ -2481,7 +2491,7 @@ impl Checker {
                 };
                 if derived_here
                     || self.instances.contains_key(&(dir.class().to_string(), InstHead::Con(n.clone()))) {
-                    Ok(Self::jx_var(&format!("{}_{}", dir.prefix(), n), codec_ty))
+                    Ok(Self::jx_var(&minted(dir.prefix(), n), codec_ty))
                 } else {
                     Err((
                         format!("the type '{}' has no {} instance", n, dir.class()),
@@ -2842,7 +2852,7 @@ impl Checker {
         let json = self.json_ty();
         let str_ty = Ty::Con("String".into());
         let bool_ty = Ty::Con("Bool".into());
-        let mangled = format!("fromJSON_{}", type_name);
+        let mangled = minted("fromJSON", type_name);
 
         let body_inner: TExpr = if tagged {
             // "'A', 'B' or 'C'" for the unknown-tag message — the effective
@@ -3016,7 +3026,7 @@ impl Checker {
         // source instances get, so the derive must provide it itself — the
         // generic decoder (genericFromJSON) reads every record field through
         // fromJSONField, including fields of natively-derived types.
-        let field_fn = format!("fromJSONField_{}", type_name);
+        let field_fn = minted("fromJSONField", type_name);
         let dec_ty = Ty::arrow(json.clone(), estr.clone());
         let field_body = Self::jx_call(
             &self.json_fn("jFieldWith"),
@@ -3234,7 +3244,7 @@ impl Checker {
 
         let result_ty = Ty::Con(type_name.to_string());
         let json = self.json_ty();
-        let mangled = format!("toJSON_{}", type_name);
+        let mangled = minted("toJSON", type_name);
 
         // One clause per constructor; report every unsupported field before
         // bailing out.

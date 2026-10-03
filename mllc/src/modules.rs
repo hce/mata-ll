@@ -234,10 +234,13 @@ impl ModuleLoader {
         for (placeholder, err) in &self.scope_errors {
             display_names.insert(placeholder.clone(), err.written().to_string());
         }
-        // A local binder that was respelled to stay clear of a wired-in
-        // entity (`Rename::local`) is shown as its author wrote it.
-        for w in WiredIn::ALL {
-            display_names.insert(w.local_binder(), w.name().to_string());
+        // A local binder that was respelled to stay clear of one of the
+        // compiler's entities (`Rename::local`) is shown as its author
+        // wrote it.
+        for name in WiredIn::ALL.iter().map(|w| w.name())
+            .chain(self.prelude.claimed.iter().map(|n| n.as_str()))
+        {
+            display_names.insert(crate::ast::local_binder(name), name.to_string());
         }
         resolved.resolution = Resolution {
             scope_errors: std::mem::take(&mut self.scope_errors),
@@ -305,7 +308,8 @@ impl ModuleLoader {
     /// entry module's declarations keep their bare names — a program
     /// without imports compiles to the same Lua names as ever — except
     /// where the bare name is already taken program-wide: by the Prelude
-    /// (source definition or builtin), or by a record field or class
+    /// (source definition or builtin), by the runtime library or a builtin
+    /// instance (`PreludeScope::claimed`), or by a record field or class
     /// method of an imported module (those are global names). `main` is
     /// the entry point and always bare.
     fn canon_val(&self, key: &str, name: &str) -> String {
@@ -313,7 +317,9 @@ impl ModuleLoader {
             return format!("{key}.{name}");
         }
         if name != "main"
-            && (self.prelude.values.contains(name) || self.program_globals.contains(name))
+            && (self.prelude.values.contains(name)
+                || self.prelude.claimed.contains(name)
+                || self.program_globals.contains(name))
         {
             format!("{}.{name}", self.root_prefix)
         } else {
@@ -983,6 +989,7 @@ impl ModuleLoader {
             vals: &vals, tys: &tys, cons: &cons,
             aliases: &alias_names, placeholders: &placeholders,
             fixities: &self.fixities, errors: &chain_errors,
+            claimed: &self.prelude.claimed,
         };
         let mut own_decls: Vec<Decl> = Vec::new();
         for decl in &module.decls {
@@ -1200,6 +1207,19 @@ pub struct PreludeScope {
     /// Type shape of each signed value (see `signature_shapes`), the
     /// baseline unqualified imports are checked against.
     pub shapes: HashMap<String, String>,
+    /// Spellings the compiler has claimed for entities of its own that are
+    /// not names of the Prelude's scope: the functions of the runtime
+    /// library and the implementations of the builtin instances
+    /// (`typechecker::Checker::claimed_names`: `show_Int`, `eq_Int`,
+    /// `fmap_Maybe`, …; the builtins that ARE in scope, `map` or `not`,
+    /// are in here too). The type checker and everything after it take a
+    /// name of such a spelling for the compiler's entity, so resolution
+    /// lets no program entity keep one: a top-level declaration of the
+    /// entry module gets its qualified canonical name (`canon_val`), a
+    /// local binder a reserved spelling (`Rename::local`). A program can
+    /// declare and bind these names as in GHC; it cannot be mistaken for
+    /// the runtime library by doing so.
+    pub claimed: HashSet<String>,
 }
 
 /// One top-level value or type declaration, by its canonical name and the
@@ -1319,8 +1339,12 @@ fn fixity_without_definition(op: &str, span: Span) -> Diagnostic {
 /// for its builtin classes. Every name there is its own canonical name, so
 /// what such declarations need of resolution is `Rename` with empty
 /// tables — the grouping of their chains under the Prelude's fixities,
-/// local binders shadowing as in every module.
-pub fn group_baseline(decls: &[Decl]) -> Result<Vec<Decl>, Vec<Diagnostic>> {
+/// local binders shadowing as in every module and kept off the `claimed`
+/// spellings as in every module.
+pub fn group_baseline(
+    decls: &[Decl],
+    claimed: &HashSet<String>,
+) -> Result<Vec<Decl>, Vec<Diagnostic>> {
     let (vals, tys, cons) = (HashMap::new(), HashMap::new(), HashMap::new());
     let aliases = HashSet::new();
     let placeholders = Placeholders::new(0);
@@ -1329,6 +1353,7 @@ pub fn group_baseline(decls: &[Decl]) -> Result<Vec<Decl>, Vec<Diagnostic>> {
         vals: &vals, tys: &tys, cons: &cons,
         aliases: &aliases, placeholders: &placeholders,
         fixities: fixity::prelude(), errors: &errors,
+        claimed,
     };
     let grouped: Vec<Decl> = decls.iter().map(|d| rename.decl(d)).collect();
     debug_assert!(placeholders.into_made().is_empty(), "baseline names are all in scope");
@@ -1584,6 +1609,8 @@ struct Rename<'a> {
     fixities: &'a Fixities,
     /// The errors of chains the fixities define no grouping for.
     errors: &'a std::cell::RefCell<Vec<Diagnostic>>,
+    /// The spellings no local binder keeps (`PreludeScope::claimed`).
+    claimed: &'a HashSet<String>,
 }
 
 impl Rename<'_> {
@@ -1598,7 +1625,7 @@ impl Rename<'_> {
             return wired.name().to_string();
         }
         if bound.contains(name) {
-            return Self::local(name);
+            return self.local(name);
         }
         let qualified = self.is_alias_qualified(name);
         match self.vals.get(name) {
@@ -1607,9 +1634,9 @@ impl Rename<'_> {
             // reached through an alias) under a local binder of that very
             // name: written out bare, the reference would be captured by
             // the binder and silently mean the local. (Not so for a
-            // wired-in name: the binder has been respelled.)
+            // name whose binder has been respelled.)
             Some(target) if qualified && bound.contains(target)
-                && WiredIn::named(target).is_none() => {
+                && self.local(target) == *target => {
                 self.placeholders.make(ScopeError::Explained {
                     name: name.to_string(),
                     message: format!(
@@ -1632,17 +1659,22 @@ impl Rename<'_> {
 
     /// The spelling of the local binder the source calls `name`, at its
     /// binding site and at every use. A binder that shares its spelling
-    /// with a wired-in entity gets a reserved one instead: after
-    /// resolution the entity's bare canonical name must mean the entity
-    /// everywhere — in the references `v` has just bound, and in the ones
-    /// later stages write (`desugar.rs`: `>>=`, `error`) — and downstream
-    /// a local variable shadows a top-level name of the same spelling.
+    /// with an entity of the compiler's — a wired-in Prelude entity, a
+    /// function of the runtime library, the implementation of a builtin
+    /// instance (`PreludeScope::claimed`) — gets a reserved one instead:
+    /// after resolution such a spelling must mean the compiler's entity
+    /// everywhere — in the references `v` has just bound, in the ones
+    /// later stages write (`desugar.rs`: `>>=`, `error`; instance
+    /// resolution: `show_Int`, `fmap_Maybe`) and in the Lua name code
+    /// generation gives it (`not_`, `__mll_bs[1]`) — and downstream a
+    /// local variable shadows a top-level name of the same spelling.
     /// The respelling is a function of the name alone, so two binders of
     /// one name shadow each other exactly as written.
-    fn local(name: &str) -> String {
-        match WiredIn::named(name) {
-            Some(wired) => wired.local_binder(),
-            None => name.to_string(),
+    fn local(&self, name: &str) -> String {
+        if WiredIn::named(name).is_some() || self.claimed.contains(name) {
+            crate::ast::local_binder(name)
+        } else {
+            name.to_string()
         }
     }
 
@@ -1688,8 +1720,8 @@ impl Rename<'_> {
             },
             Pattern::Paren(inner) => Pattern::Paren(Box::new(self.pattern(inner))),
             Pattern::Tuple(elems) => Pattern::Tuple(elems.iter().map(|e| self.pattern(e)).collect()),
-            Pattern::As(n, inner) => Pattern::As(Self::local(n), Box::new(self.pattern(inner))),
-            Pattern::Var(n) => Pattern::Var(Self::local(n)),
+            Pattern::As(n, inner) => Pattern::As(self.local(n), Box::new(self.pattern(inner))),
+            Pattern::Var(n) => Pattern::Var(self.local(n)),
             Pattern::Wildcard | Pattern::LitPat(_) => p.clone(),
         }
     }
@@ -1817,7 +1849,7 @@ impl Rename<'_> {
         let mut bound = outer.clone();
         for p in &ld.patterns { collect_pattern_vars(p, &mut bound); }
         LocalDef {
-            name: Self::local(&ld.name),
+            name: self.local(&ld.name),
             patterns: ld.patterns.iter().map(|p| self.pattern(p)).collect(),
             body: self.expr(&ld.body, &bound),
             // A local signature names types exactly as a top-level one does
@@ -1865,7 +1897,7 @@ impl Rename<'_> {
                 let mut b = bound.clone();
                 for p in params { b.insert(p.clone()); }
                 Expr::Lambda {
-                    params: params.iter().map(|p| Self::local(p)).collect(),
+                    params: params.iter().map(|p| self.local(p)).collect(),
                     body: Box::new(self.expr(body, &b)),
                 }
             }
@@ -1989,7 +2021,7 @@ impl Rename<'_> {
             DoStmt::Bind { name, expr } => {
                 let e = self.expr(expr, bound);
                 bound.insert(name.clone());
-                DoStmt::Bind { name: Self::local(name), expr: e }
+                DoStmt::Bind { name: self.local(name), expr: e }
             }
             DoStmt::Expr(e) => DoStmt::Expr(self.expr(e, bound)),
             DoStmt::DoLet { binds } => {

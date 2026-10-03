@@ -218,6 +218,15 @@ until :: Int -> Bool
 until n = n > 100
 \end{lstlisting}
 
+The same holds for names of Lua's standard globals (\texttt{select},
+\texttt{table}) and for names that look like the compiler's own
+(\texttt{show\_Int}, \texttt{show\_Color}): each is a name of its own,
+and two names never share one in the generated code (\texttt{y'} and
+\texttt{y\_prime} are two variables).  The exception: a record field or
+class method cannot be named like a function of MATA-LL's runtime library
+such as \texttt{show\_Int}, because fields and methods are program-wide
+names.
+
 %======================================================================
 \section{Types and Data}
 

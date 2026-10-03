@@ -303,6 +303,19 @@ mll_lib_test!(desugar_local_binders, "desugar_local_binders.mll");
 mll_test!(desugar_imported_names, "desugar_imported_names.mll");
 mll_test!(desugar_module_own_names, "desugar_module_own_names.mll");
 mll_test!(desugar_qualified_prelude, "desugar_qualified_prelude.mll");
+// No name of a program can be taken for one of the compiler's, and no two
+// names share a Lua name: local binders, constructors, fields, operators
+// and top-level functions spelled like Lua's reserved words and globals,
+// like the runtime library's functions, like generated instance methods,
+// structural instances, specializations and dictionary forms, and like
+// each other once primes, dots and operator characters are written out.
+mll_lib_test!(names_local_binders, "names_local_binders.mll");
+mll_test!(names_constructors_fields, "names_constructors_fields.mll");
+mll_test!(names_generated, "names_generated.mll");
+mll_test!(names_operators, "names_operators.mll");
+mll_test!(names_modules, "names_modules.mll");
+mll_lib_test!(names_lua_globals, "names_lua_globals.mll");
+mll_lib_test!(names_generic_metadata, "names_generic_metadata.mll");
 // A fixity belongs to the operator entity that declares it: an occurrence
 // groups by the fixity of what it denotes in its own scope — a local
 // binder, the module's own operator, an imported one, the Prelude's —
@@ -885,6 +898,8 @@ fn mll_case_registry_is_complete() {
         "ScopeStack.mll",
         "ScopeHostLib.mll",
         "DesugarOwn.mll",
+        "NamesA.mll",
+        "NamesA_b.mll",
         "FixityInner.mll",
         "FixityOuter.mll",
         "FixityPrivate.mll",

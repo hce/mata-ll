@@ -1,0 +1,13 @@
+(Red,False,True,LT)
+(Just (Circle 3),[Circle 1,Square 2],Tag#3)
+user show_Color True user show_Tag
+(0,103)
+(3,[3,4],True,True,True)
+user show_Int False False
+True user show_LInt
+thing [thingthing] user describe_Int
+(2,99,1)
+[[thingthing][thingthing]]12
+[[3]]==[[3]] [[3]]/=[[4]]
+(192,243)
+([False,True],192,6,4)

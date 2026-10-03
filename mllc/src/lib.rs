@@ -194,7 +194,7 @@ impl std::fmt::Display for CompileError {
             }
             CompileError::Internal(errors) => {
                 for e in errors {
-                    writeln!(f, "Internal compiler error: {}", e)?;
+                    writeln!(f, "Internal compiler error: {}", ast::shown(e))?;
                 }
                 Ok(())
             }
@@ -205,10 +205,12 @@ impl std::fmt::Display for CompileError {
 /// Parse and return the prelude declarations, their infix expressions
 /// grouped under the Prelude's own fixities (the Prelude is not a module
 /// import resolution rewrites; see `modules::group_baseline`).
-fn parse_prelude() -> Result<Vec<ast::Decl>, CompileError> {
+fn parse_prelude(
+    claimed: &std::collections::HashSet<String>,
+) -> Result<Vec<ast::Decl>, CompileError> {
     let tokens = lexer::lex(stdlib::PRELUDE).map_err(|d| CompileError::Lex(*d))?;
     let module = parser::parse(tokens).map_err(CompileError::Parse)?;
-    modules::group_baseline(&module.decls).map_err(CompileError::Parse)
+    modules::group_baseline(&module.decls, claimed).map_err(CompileError::Parse)
 }
 
 /// What the implicit Prelude provides to every module's scope: the names
@@ -228,6 +230,7 @@ fn prelude_scope(
         types: types.into_iter().collect(),
         constructors: constructors.into_iter().collect(),
         shapes,
+        claimed: checker.claimed_names().clone(),
     };
     for d in prelude_decls {
         match d {
@@ -339,9 +342,15 @@ fn compile_impl(
         loader.add_search_path(path.to_path_buf());
     }
 
+    // The checker is created here, ahead of type checking, because its
+    // fresh builtin environment is half of what the Prelude provides — and
+    // import resolution binds every module's references against the whole
+    // Prelude scope — and because it knows the spellings the compiler has
+    // claimed, which no binder of the Prelude source or of a module keeps.
+    let mut checker = typechecker::Checker::new();
     // Parse the prelude up-front: its signature shapes are the baseline against
     // which unqualified imports are checked for incompatible-type collisions.
-    let prelude_decls = parse_prelude()?;
+    let prelude_decls = parse_prelude(checker.claimed_names())?;
     let mut prelude_shapes = modules::signature_shapes(&prelude_decls);
     // The builtin classes' methods are Prelude names too (defined in Rust,
     // so absent from the source shapes); an import redefining one of them
@@ -349,11 +358,6 @@ fn compile_impl(
     for m in typechecker::builtin_method_names() {
         prelude_shapes.entry(m).or_insert_with(|| "<builtin class method>".to_string());
     }
-    // The checker is created here, ahead of type checking, because its
-    // fresh builtin environment is half of what the Prelude provides — and
-    // import resolution binds every module's references against the whole
-    // Prelude scope.
-    let mut checker = typechecker::Checker::new();
     loader.set_prelude(prelude_scope(&prelude_decls, prelude_shapes, &checker));
     let module = loader.resolve_imports(&parsed).map_err(|e| match e {
         modules::ResolveError::Import(message) => CompileError::Import(message),
@@ -1024,8 +1028,8 @@ mod wired_in_tests {
     /// reserved spellings may be something the lexer hands out as a name.
     #[test]
     fn every_wired_in_entity_is_a_prelude_value_with_reserved_spellings() {
-        let prelude_decls = parse_prelude().expect("the Prelude parses");
         let checker = typechecker::Checker::new();
+        let prelude_decls = parse_prelude(checker.claimed_names()).expect("the Prelude parses");
         let scope = prelude_scope(&prelude_decls, std::collections::HashMap::new(), &checker);
         for w in ast::WiredIn::ALL {
             assert!(scope.values.contains(w.name()),

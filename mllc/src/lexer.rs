@@ -795,6 +795,8 @@ fn is_line_comment_start(chars: &[char], pos: usize) -> bool {
     j >= chars.len() || !is_operator_char(chars[j])
 }
 
+/// ASCII only. Generated names rely on it: `ast::MINT` (`·`) must be a
+/// character no identifier and no operator can contain.
 fn is_operator_char(c: char) -> bool {
     matches!(c, '!' | '#' | '$' | '%' | '&' | '*' | '+' | '.' | '/' |
                 '<' | '=' | '>' | '?' | '@' | '^' | '|' | '-' | '~' | ':')

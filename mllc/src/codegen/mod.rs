@@ -85,6 +85,7 @@ mod thunks;
 mod util;
 
 pub(crate) use names::is_lua_keyword;
+pub(crate) use names::runtime_spellings;
 pub(crate) use names::infix_operand_strictness;
 
 /// Public for the strictness-contract check in mll-tests (G5): the harness
@@ -171,13 +172,10 @@ struct CodeGen {
     expr_depth: usize,
     /// Set once when the depth guard fires; surfaced by `generate`.
     depth_error: Option<String>,
-    /// A fn-table name collision detected while forward-declaring module
-    /// names (two distinct source names sanitizing to one Lua name — see
-    /// module_stmts); carried out of `generate` as a clean error.
-    name_collision_error: Option<String>,
     /// An emitter-agreement violation (a module-level prediction and the
     /// actual emission decision disagree — `slot_always_whnf`,
-    /// `direct_perform_fns`): earlier-emitted references already encoded
+    /// `direct_perform_fns` — or two definitions meeting in one slot of
+    /// the function table): earlier-emitted references already encoded
     /// the WRONG belief (a dropped force, a dropped runner), so the
     /// compile must fail — in RELEASE builds too, where these used to be
     /// debug_asserts that silently let the wrong code through (F11).
@@ -396,7 +394,6 @@ impl CodeGen {
             clause_eta_params: Vec::new(),
             expr_depth: 0,
             depth_error: None,
-            name_collision_error: None,
             internal_error: None,
             constructors: Vec::new(), newtypes: Vec::new(), newtype_types: Vec::new(),
             forward_declared: std::collections::HashSet::new(),
@@ -698,11 +695,15 @@ pub(crate) fn generate(
     if let Some(msg) = cg.depth_error {
         return Err(msg);
     }
-    if let Some(msg) = cg.name_collision_error {
-        return Err(msg);
-    }
     if let Some(msg) = cg.internal_error {
         return Err(msg);
+    }
+    if let Some(name) = names::reserved_binder(&stmts) {
+        return Err(format!(
+            "internal compiler error: the generated code declares a local variable \
+             '{name}', a name Lua or the runtime library owns; every reference to \
+             that name in the variable's scope would be captured"
+        ));
     }
     opt::run(&mut stmts, opt_disable);
     // Locate the entry-point marker AFTER the optimization passes: they may

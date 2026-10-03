@@ -275,29 +275,100 @@ fn ascription_variables_are_rigid() {
     .expect("an ascribed polymorphic value is instantiated afresh at its use");
 }
 
-// sanitize_name is not injective (`f'` -> f_prime): two distinct source
-// names that sanitize alike shared one fn-table slot, and the
-// last-emitted definition silently served both names (confirmed: both
-// calls returned the second function's result). Now a loud error names
-// both spellings. The control: a lone primed name still compiles.
+/// Two names that differ only where the Lua name of one spells a character
+/// out (`f'` and `f_prime`, `<.>` and `<->`) are two definitions, each
+/// with a Lua name of its own (their outputs are pinned against GHC by
+/// cases/names_*.mll).
 #[test]
-fn sanitize_name_collisions_are_rejected() {
+fn names_that_differ_only_in_an_escaped_character_are_accepted() {
     let source = "f' :: Int -> Int\n\
                   f' x = if x > 0 then f' (x - 1) else x + 1\n\n\
                   f_prime :: Int -> Int\n\
                   f_prime x = if x > 100 then x else f_prime (x + 7)\n\n\
+                  (<.>) :: Int -> Int -> Int\na <.> b = a * 10 + b\n\n\
+                  (<->) :: Int -> Int -> Int\na <-> b = a - b\n\n\
                   main :: IO ()\n\
-                  main = do\n    print (f' 5)\n    print (f_prime 5)\n";
+                  main = do\n    print (f' 5)\n    print (f_prime 5)\n    print (1 <.> 2, 1 <-> 2)\n";
+    compile(source, Path::new("."), &[])
+        .expect("names that differ in an escaped character are distinct definitions");
+}
+
+/// A record field is a program-wide accessor function that import
+/// resolution does not rename, so it cannot carry a name of the runtime
+/// library: the accessor would take the runtime function's slot (a field
+/// `show_Int`, and `print [1]` read the field). A top-level function and a
+/// local variable of the same name are accepted; they get names of their
+/// own.
+#[test]
+fn a_record_field_cannot_take_a_runtime_library_name() {
+    for (decl, name, ctx) in [
+        ("data R = R { show_Int :: Int }", "show_Int", "in data R"),
+        ("data R = R { ok :: Int, ord_lt__Int :: Int }", "ord_lt__Int", "in data R"),
+        ("newtype N = N { eq_Int :: Int }", "eq_Int", "in newtype N"),
+    ] {
+        let source = format!("{decl}\n\nmain :: IO ()\nmain = print (1 :: Int)\n");
+        expect_compile_error(&source, &[], &[
+            &format!("'{name}' cannot be declared as a record field: the name belongs to mata-ll's runtime library"),
+            ctx,
+            "note: the compiler refers to the functions of its runtime library",
+            "accessors are program-wide names in mata-ll",
+            "GHC accepts the record field as well",
+        ]);
+    }
+    let accepted = "show_Int :: Int -> String\nshow_Int _ = \"mine\"\n\n\
+                    f :: Int -> Int -> Int\nf eq_Int hmInsert = eq_Int + hmInsert\n\n\
+                    main :: IO ()\nmain = putStrLn (show_Int (f 1 2) <> show (3 :: Int))\n";
+    compile(accepted, Path::new("."), &[])
+        .expect("a function and a variable may carry a runtime library's name");
+}
+
+/// A class method spelled like the implementation of a builtin instance
+/// is refused: instance resolution writes that name wherever the builtin
+/// method is used at its type, and the monomorphizer would resolve it
+/// again as the new class's method.
+#[test]
+fn a_class_method_cannot_take_the_name_of_a_builtin_instance_implementation() {
+    let source = "class C a where\n    show_Int :: a -> Int\n\n\
+                  instance C Int where\n    show_Int x = x + 1\n\n\
+                  main :: IO ()\nmain = print [show_Int (3 :: Int)]\n";
     expect_compile_error(source, &[], &[
-        "Definitions 'f'' and 'f_prime' collide",
-        "both compile to the Lua name 'f_prime'",
-        "Rename one",
+        "'show_Int' cannot be declared as a class method: the name belongs to mata-ll's runtime library",
+        "in declaration of class 'C'",
+        "note: the compiler refers to the functions of its runtime library",
+        "those uses would be taken for uses of this method",
+        "GHC accepts the class method as well",
     ]);
-    let control = "f' :: Int -> Int\n\
-                   f' x = if x > 0 then f' (x - 1) else x + 1\n\n\
-                   main :: IO ()\n\
-                   main = print (f' 5)\n";
-    compile(control, Path::new("."), &[]).expect("a lone primed name must stay legal");
+}
+
+/// The name of a generated definition — an instance method, a
+/// specialization — contains a character the lexer accepts in no name, so
+/// no declaration or binder can be spelled like one.
+#[test]
+fn generated_names_are_not_source_names() {
+    let source = "f :: Int -> Int\nf show\u{b7}Int = 1\n\nmain :: IO ()\nmain = print (f 1)\n";
+    expect_compile_error(source, &[], &["Unexpected character '\u{b7}'"]);
+    let operator = "(<\u{b7}>) :: Int -> Int -> Int\na <\u{b7}> b = a + b\n\nmain :: IO ()\nmain = print (1 <\u{b7}> 2)\n";
+    expect_compile_error(operator, &[], &["Unexpected character '\u{b7}'"]);
+}
+
+/// Diagnostics show the names a program wrote: a generated instance
+/// method as `method_Type`, a variable or function the resolver respelled
+/// to keep it off a runtime library's name under its own name.
+#[test]
+fn diagnostics_show_generated_and_respelled_names_as_written() {
+    let source = "data Color = Red | Green\n\n\
+                  instance Show Color where\n    show c = 1 + \"a\"\n\n\
+                  g :: Int %1 -> Int\ng show_Int = 1\n\n\
+                  eq_Int :: Int -> String\neq_Int n = n + 1\n\n\
+                  main :: IO ()\nmain = print (g 2)\n";
+    let msg = expect_compile_error(source, &[], &[
+        "in definition of 'show_Color'",
+        "'show_Int' must be consumed exactly once",
+        "in definition of 'eq_Int'",
+    ]);
+    for internal in ["\u{b7}", "__local", "Main."] {
+        assert!(!msg.contains(internal), "an internal spelling ({internal}) shows: {msg}");
+    }
 }
 
 // The '__' identifier prefix is the compiler's fresh-name namespace

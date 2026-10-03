@@ -263,7 +263,11 @@ it is used — all as in GHC. The differences:
   does not hide them, and two modules cannot both declare a constructor
   `Node`, a field `name` or a class `Pretty`, even privately. A
   constructor declared in the entry module may shadow an imported one;
-  a record field named like a Prelude function is rejected.
+  a record field named like a Prelude function or like a function of
+  mata-ll's runtime library (`show_Int`, `eq_Int`, `hashmap_insert`, …)
+  is rejected, and so is a class method named like the implementation
+  of a builtin instance (`show_Int`). A top-level function or a local
+  variable may carry any of these names.
   A qualified reference that resolves to such a plain name (or to a
   Prelude function) cannot be written under a local binding of the same
   name: `f maybe = M.maybe …` is rejected; rename the local.
@@ -276,6 +280,15 @@ the Prelude's `concatMap`, `enumFromTo` (and its three siblings), `&&`,
 (`import Prelude hiding (concatMap)`) or binds locally under those
 names. A parameter may be called `error` or `concatMap`. (In the emitted
 Lua such a local is spelled `__local_error`.)
+
+Every other name is a name of its own as well, as in GHC: a function or
+variable spelled like a Lua reserved word or global (`end`, `select`),
+like a function of the runtime library (`show_Int`, `hashmap_insert`),
+or like a definition the compiler generates (`show_Color` next to a
+derived `Show Color`, a specialization's name) is the program's own and
+never replaces, or is replaced by, the compiler's; names that differ
+only in a prime and the text `_prime` (`y'`, `y_prime`), or operators
+that differ in any character (`<.>`, `<->`), stay apart.
 
 ## Fixity belongs to the operator, as in GHC; where it can be declared is narrower
 

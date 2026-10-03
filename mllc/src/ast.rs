@@ -133,9 +133,56 @@ pub enum WiredIn {
 /// are in no source name.
 const WIRED_IN_REFERENCE_PREFIX: &str = "<wired-in ";
 
-/// What a `WiredIn::local_binder` spelling starts with. The lexer refuses
-/// every source identifier that begins with `__`.
-const WIRED_IN_LOCAL_PREFIX: &str = "__local_";
+/// What a respelled local binder starts with (`local_binder`). The lexer
+/// refuses every source identifier that begins with `__`.
+const RESPELLED_LOCAL_PREFIX: &str = "__local_";
+
+/// The spelling import resolution gives a local binder the source calls
+/// `name`, when `name` is a spelling the compiler has claimed for an
+/// entity of its own: a wired-in Prelude entity (`WiredIn`), a function of
+/// the runtime library, or the implementation of a builtin instance. The
+/// type checker and everything after it resolve names by spelling, and a
+/// local wins over a top-level name; with the binder respelled, a claimed
+/// spelling denotes the compiler's entity in every scope.
+pub fn local_binder(name: &str) -> String {
+    format!("{RESPELLED_LOCAL_PREFIX}{name}")
+}
+
+/// The separator inside the name of a definition the compiler generates
+/// for one particular program: the method of an instance (`show·Color`),
+/// a specialization (`count·IntTInt`), a structural instance for a list,
+/// tuple or Maybe type (`eq·LInt`), a dictionary-passing form
+/// (`show·Color·dictform`). The lexer accepts the character in no
+/// identifier and no operator, and import resolution builds canonical
+/// names from source tokens and dots only, so a generated name is one no
+/// declaration, binder or reference of a program can be spelled as: the
+/// type checker's and the monomorphizer's name tables, which are keyed by
+/// spelling, cannot confuse the two. (The names of the runtime library —
+/// `show_Int`, `eq_Int`, … — are fixed spellings without the separator;
+/// import resolution keeps the program's own names off those, see
+/// `modules::PreludeScope::claimed`.)
+///
+/// A generated name never reaches the emitted Lua as an identifier
+/// (top-level definitions are `__mll_fn` slots); where one is shown to a
+/// person — a diagnostic's context, a runtime error message — it goes
+/// through `shown`, which writes the separator as the underscore these
+/// names have always been displayed with.
+pub const MINT: char = '\u{b7}';
+
+/// The generated name of `stem` at `of`: `minted("show", "Color")`.
+pub fn minted(stem: &str, of: &str) -> String {
+    format!("{stem}{MINT}{of}")
+}
+
+/// A name as a message shows it: a generated name with `_` for its
+/// separators, any other name unchanged.
+pub fn shown(name: &str) -> std::borrow::Cow<'_, str> {
+    if name.contains(MINT) {
+        std::borrow::Cow::Owned(name.replace(MINT, "_"))
+    } else {
+        std::borrow::Cow::Borrowed(name)
+    }
+}
 
 impl WiredIn {
     pub const ALL: [WiredIn; 8] = [
@@ -189,7 +236,7 @@ impl WiredIn {
     /// The spelling import resolution gives a local binder the source
     /// names like this entity.
     pub fn local_binder(self) -> String {
-        format!("{WIRED_IN_LOCAL_PREFIX}{}", self.name())
+        local_binder(self.name())
     }
 }
 

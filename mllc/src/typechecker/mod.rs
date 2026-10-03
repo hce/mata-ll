@@ -718,6 +718,18 @@ pub struct Checker {
     /// Registered instead of a selector so both uses get a real explanation
     /// rather than "unbound variable". Same restriction as GHC.
     existential_fields: HashMap<String, String>,
+    /// See `claimed_names`.
+    claimed: HashSet<String>,
+    /// The implementation name of every method of every builtin instance
+    /// (`eq_Int`, `fmap_Maybe`, `map` for the list Functor): the part of
+    /// `claimed` that instance resolution writes in place of a method.
+    builtin_impls: HashSet<String>,
+    /// The default method bodies of the builtin classes as registered
+    /// (class, method, source), until `install_builtin_defaults` parses
+    /// them: their binders are respelled like every program's
+    /// (`modules::group_baseline`), which needs `claimed`, and that is
+    /// complete only once every builtin instance is registered.
+    pub(super) pending_builtin_defaults: Vec<(String, String, String)>,
 }
 
 /// Suffix appended to a local constructor's key when it shadows a non-local
@@ -786,10 +798,36 @@ impl Checker {
             pattern_skolems: Vec::new(),
             existential_skolems: HashMap::new(),
             existential_fields: HashMap::new(),
+            claimed: HashSet::new(),
+            builtin_impls: HashSet::new(),
+            pending_builtin_defaults: Vec::new(),
         };
         checker.init_prelude();
+        checker.builtin_impls = checker.instances.values()
+            .flat_map(|inst| inst.method_fns.values().cloned())
+            .collect();
+        checker.claimed = crate::codegen::runtime_spellings()
+            .map(str::to_string)
+            .chain(checker.builtin_impls.iter().cloned())
+            .collect();
+        checker.install_builtin_defaults();
         checker.init_kinds();
         checker
+    }
+
+    /// The spellings the compiler has claimed for entities of its own, as
+    /// far as they are known before a program is read: the names of the
+    /// runtime library (`codegen::runtime_spellings`: `map`, `not`,
+    /// `hmInsert`, `show_Int`, …) and the implementation of every method
+    /// of every builtin instance (`eq_Int`, `fmap_Maybe`, `+`) — the names
+    /// instance resolution and monomorphization write into a function
+    /// body in place of a method. Later stages recognize these entities
+    /// by spelling, so import resolution lets no declaration and no
+    /// binder of a program keep one (`modules::PreludeScope::claimed`),
+    /// and `reject_claimed_globals` refuses the two kinds of declaration
+    /// it cannot rename. Only meaningful on a fresh checker.
+    pub fn claimed_names(&self) -> &HashSet<String> {
+        &self.claimed
     }
 
     fn fresh_var(&mut self, prefix: &str) -> Ty {
@@ -2489,6 +2527,7 @@ impl Checker {
         // Silent — ill-kinded declarations are reported by pass 2b.
         self.infer_declared_kinds(&module.decls);
 
+        self.reject_claimed_globals(module);
         self.register_type_declarations(module);
 
         // Pass 1b: infer the type-variable kind of every class the module
@@ -2601,6 +2640,91 @@ impl Checker {
                 }
             }
         }
+    }
+
+    /// The two kinds of declaration import resolution does not rename are
+    /// refused where they are spelled like one of the compiler's own
+    /// entities; every other declaration and every binder of a program is
+    /// moved off those spellings (`claimed_names`).
+    ///
+    ///   * A record field of a claimed spelling: its accessor is a
+    ///     program-wide function of that name and would take the slot of
+    ///     the runtime function (a field `show_Int`, and every `show` at
+    ///     Int reads the field).
+    ///   * A class method spelled like the implementation of a builtin
+    ///     instance: instance resolution writes that name wherever the
+    ///     builtin method is used at its type, and monomorphization would
+    ///     resolve it a second time, as the new class's method.
+    ///
+    /// The Prelude's own declarations are the entities themselves and are
+    /// not checked; a method a builtin class already has is left to
+    /// `register_class`, which reports the duplicate.
+    fn reject_claimed_globals(&mut self, module: &Module) {
+        for (decl_idx, decl) in module.decls.iter().enumerate() {
+            if decl_idx < self.prelude_decl_count {
+                continue;
+            }
+            self.set_decl_position(decl_idx);
+            let (ctx, field, names): (String, bool, Vec<&String>) = match decl {
+                Decl::DataDef { name, constructors, .. } => (
+                    format!("data {}", name),
+                    true,
+                    constructors.iter()
+                        .flat_map(|c| match &c.fields {
+                            ConstructorFields::Named(fs) => fs.iter().map(|f| &f.name).collect(),
+                            ConstructorFields::Positional(_) => Vec::new(),
+                        })
+                        .filter(|n| self.claimed.contains(*n))
+                        .collect(),
+                ),
+                Decl::NewtypeDef { name, field: Some(f), .. } => (
+                    format!("newtype {}", name),
+                    true,
+                    Some(f).into_iter().filter(|n| self.claimed.contains(*n)).collect(),
+                ),
+                Decl::ClassDecl { name, methods, .. } => (
+                    format!("declaration of class '{}'", name),
+                    false,
+                    methods.iter().map(|m| &m.name)
+                        .filter(|m| self.builtin_impls.contains(*m)
+                            && !self.classes.values()
+                                .any(|ci| ci.methods.iter().any(|(n, _)| n == *m)))
+                        .collect(),
+                ),
+                _ => continue,
+            };
+            let mut seen: HashSet<&String> = HashSet::new();
+            for n in names {
+                if !seen.insert(n) {
+                    continue;
+                }
+                let (what, why) = if field {
+                    ("record field",
+                     "a record field defines an accessor function of the same name, and \
+                      accessors are program-wide names in mata-ll, so this one would take \
+                      the runtime function's place")
+                } else {
+                    ("class method",
+                     "the compiler writes this name wherever the builtin method it \
+                      implements is used, and a class method is a program-wide name in \
+                      mata-ll, so those uses would be taken for uses of this method")
+                };
+                self.push_error_ctx_note(
+                    DiagnosticKind::Other(format!(
+                        "'{}' cannot be declared as a {}: the name belongs to mata-ll's \
+                         runtime library", n, what)),
+                    ctx.clone(),
+                    format!(
+                        "the compiler refers to the functions of its runtime library and \
+                         to the implementations of the builtin instances by fixed names, \
+                         and '{}' is one of them; {}. A top-level function or a local \
+                         variable can be called '{}'; GHC accepts the {} as well — \
+                         rename it.",
+                        n, why, n, what),
+                );
+            }
+        }
+        self.clear_decl_position();
     }
 
     /// Pass 1: register type aliases, data types, and newtypes.
@@ -2875,7 +2999,7 @@ impl Checker {
                     if deriving.iter().any(|c| c == "Functor") {
                         // derive_functor registers exactly this name.
                         self.functor_fmap_futures
-                            .insert(name.clone(), format!("fmap_{}", name));
+                            .insert(name.clone(), minted("fmap", name));
                     }
                 }
                 Decl::InstanceDecl { class_name, target_type, .. }
@@ -2898,7 +3022,7 @@ impl Checker {
                     // instance rather than guessing a name.
                     if let Type::Con(head) = target_type {
                         self.functor_fmap_futures
-                            .insert(head.clone(), format!("fmap_{}", head));
+                            .insert(head.clone(), minted("fmap", head));
                     }
                 }
                 _ => {}

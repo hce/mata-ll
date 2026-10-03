@@ -636,7 +636,7 @@ impl Checker {
             if provided.contains(method_name.as_str())
                 || class_info.default_methods.contains_key(method_name)
             {
-                method_fns.insert(method_name.clone(), format!("{}_{}", method_name, ty_str));
+                method_fns.insert(method_name.clone(), minted(method_name, &ty_str));
             }
         }
         let ctx = self.convert_instance_context(class_name, &target_ty, context, false);
@@ -874,8 +874,9 @@ impl Checker {
                 }
             };
 
-            // Generate mangled name: show_Int, show_Bool, etc.
-            let mangled_name = format!("{}_{}", method_def.name, ty_str);
+            // The method's function at this instance: `show·Color`
+            // (`ast::minted`: a spelling no source name has).
+            let mangled_name = minted(&method_def.name, &ty_str);
             instance_info.method_fns.insert(method_def.name.clone(), mangled_name.clone());
 
             // Type-check the instance method against the specialized type,
@@ -899,7 +900,7 @@ impl Checker {
                 let subst = Subst::singleton(tv, fresh_target_ty.clone());
                 let specialized_ty = method_ty.apply_subst(&subst);
 
-                let mangled_name = format!("{}_{}", method_name, ty_str);
+                let mangled_name = minted(method_name, &ty_str);
                 instance_info.method_fns.insert(method_name.clone(), mangled_name.clone());
 
                 // A default body is checked at this instance's type, so it

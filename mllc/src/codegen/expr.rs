@@ -22,7 +22,7 @@ use crate::types::Ty;
 use super::CodeGen;
 use super::function::{FnSpillScope, LocalVarsSnapshot, VarsSnapshot};
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
-use super::names::{is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
+use super::names::{dict_field_name, is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
 use super::strictness::{bare_var_alias, strict_binding_safe};
 
@@ -730,7 +730,7 @@ impl CodeGen {
                 Expr::Table(items)
             }
             TExprKind::DictAccess { dict_param, method_name } => {
-                Expr::name(format!("{}.{}", sanitize_name(dict_param), sanitize_name(method_name)))
+                Expr::name(format!("{}.{}", sanitize_name(dict_param), dict_field_name(method_name)))
             }
             TExprKind::DictMethod { dict, method_name } => {
                 // A method of a CONSTRUCTED dictionary (e.g. the `[a]`
@@ -738,7 +738,7 @@ impl CodeGen {
                 // because the dictionary may be a table literal, which Lua
                 // cannot index directly.
                 let d = self.expr_ast(dict);
-                Expr::index(Expr::paren(d), format!(".{}", sanitize_name(method_name)))
+                Expr::index(Expr::paren(d), format!(".{}", dict_field_name(method_name)))
             }
             TExprKind::DictCall { func_name, dict_args, value_args } => {
                 let sfn = sanitize_name(func_name);
@@ -1988,7 +1988,7 @@ impl CodeGen {
                             Expr::name(self.lua_ref(&sv))
                         }
                     };
-                    items.push(Item::KV(format!("{} = ", sanitize_name(m)), value));
+                    items.push(Item::KV(format!("{} = ", dict_field_name(m)), value));
                 }
                 Expr::TableSpaced(items)
             }
@@ -2020,14 +2020,14 @@ impl CodeGen {
                         dict_params.iter().map(|p| Expr::name(p.clone())).collect();
                     if *arity == 0 {
                         items.push(Item::KV(
-                            format!("{} = ", sanitize_name(m)),
+                            format!("{} = ", dict_field_name(m)),
                             Expr::call_named(&impl_ref, impl_args),
                         ));
                         continue;
                     }
                     impl_args.push(Expr::name("..."));
                     items.push(Item::KV(
-                        format!("{} = ", sanitize_name(m)),
+                        format!("{} = ", dict_field_name(m)),
                         Expr::Func(
                             vec!["...".into()],
                             FuncBody::Inline(vec![Stmt::Return(Expr::call_named(

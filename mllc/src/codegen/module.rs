@@ -94,14 +94,13 @@ pub(super) const RUNTIME_VALUE_SEEDS: &[&str] = &[
 
 /// Source names seeded as known top-level functions THROUGH
 /// `sanitize_name` (so has_unknown_call recognizes them): every runtime
-/// rename's source but `main` (names.rs RUNTIME_RENAMES), every ST array /
+/// rename's source (names.rs RUNTIME_RENAMES), every ST array /
 /// IORef intrinsic (crate::intrinsics), and the Prelude names that
 /// sanitize to themselves.
 pub(super) fn builtin_source_seeds() -> impl Iterator<Item = &'static str> {
     super::names::RUNTIME_RENAMES
         .iter()
         .map(|(source, _)| *source)
-        .filter(|s| *s != "main")
         .chain(crate::intrinsics::ST_INTRINSICS.iter().map(|i| i.source))
         .chain(["pure", "show", "undefined"].iter().copied())
 }
@@ -244,39 +243,36 @@ impl CodeGen {
         // methods, and user functions all get __mll_fn[N] slots.
         let mut all_fn_names: Vec<String> = Vec::new();
 
-        // sanitize_name is not injective (`f'` -> f_prime, `not` -> not_):
-        // two DISTINCT source names that sanitize alike would share one
-        // fn-table key — and hence one slot, with the last-emitted
-        // definition silently serving both names. Detect it here, where
-        // every slot-receiving name passes with its source spelling still
-        // in hand. Same-source duplicates stay allowed (the documented
-        // user-wins case for names merged along two import paths).
+        // One slot per name. `sanitize_name` is injective, so two entries
+        // of the slot table meet only when two definitions carry the same
+        // mata-ll name, and import resolution and the type checker give
+        // every constructor, accessor, function and generated definition
+        // a name of its own. A pair that still meets here would let the
+        // later definition silently serve both names; that is a compiler
+        // bug, reported as one instead of emitted.
         {
-            let mut by_sanitized: std::collections::HashMap<String, &str> =
+            let mut by_lua_name: std::collections::HashMap<String, &str> =
                 std::collections::HashMap::new();
             let sources = module
-                .functions
+                .data_defs
                 .iter()
-                .map(|f| f.name.as_str())
+                .flat_map(|d| d.constructors.iter().map(|c| c.name.as_str()))
+                .chain(module.functions.iter().map(|f| f.name.as_str()))
                 .chain(module.instance_fns.iter().map(|f| f.name.as_str()))
                 .chain(module.newtypes.iter().map(|n| n.as_str()))
                 .chain(module.record_accessors.iter().map(|(n, _)| n.as_str()));
             for src in sources {
                 let n = sanitize_name(src);
-                match by_sanitized.get(n.as_str()) {
-                    Some(prev) if *prev != src => {
-                        self.name_collision_error = Some(format!(
-                            "Definitions '{}' and '{}' collide: both compile to the \
-                             Lua name '{}' (mata-ll maps identifiers onto valid Lua \
-                             names — a prime becomes '_prime', a Lua keyword gains a \
-                             trailing '_'), so one definition would silently replace \
-                             the other. Rename one of them",
-                            prev, src, n,
-                        ));
-                    }
-                    _ => {
-                        by_sanitized.insert(n, src);
-                    }
+                if let Some(prev) = by_lua_name.insert(n, src)
+                    && prev != src
+                    && self.internal_error.is_none()
+                {
+                    self.internal_error = Some(format!(
+                        "internal compiler error: the definitions '{}' and '{}' were \
+                         given one Lua name; the name mapping must keep distinct \
+                         names apart",
+                        prev, src,
+                    ));
                 }
             }
         }
@@ -284,15 +280,17 @@ impl CodeGen {
         // Data constructors
         for def in &module.data_defs {
             for con in &def.constructors {
-                if !self.concrete_vars.contains(&con.name) {
-                    all_fn_names.push(con.name.clone());
+                let n = sanitize_name(&con.name);
+                if !self.concrete_vars.contains(&n) {
+                    all_fn_names.push(n);
                 }
             }
         }
         // Newtype constructors
         for name in &module.newtypes {
-            if !self.concrete_vars.contains(name) {
-                all_fn_names.push(name.clone());
+            let n = sanitize_name(name);
+            if !self.concrete_vars.contains(&n) {
+                all_fn_names.push(n);
             }
         }
         // Instance functions
@@ -442,7 +440,7 @@ impl CodeGen {
         // `N x` to WHNF demands `x`), and the call itself only runs when the
         // context demands the result.
         for name in &module.newtypes {
-            if let Some(&slot) = self.fn_table.get(name.as_str()) {
+            if let Some(&slot) = self.fn_table.get(&sanitize_name(name)) {
                 stmts.push(Stmt::Assign(
                     format!("__mll_fn[{}]", slot),
                     Expr::Func(
@@ -530,7 +528,7 @@ impl CodeGen {
             // a require modname and main was wrongly skipped.
             stmts.push(Stmt::Raw(ENTRY_POINT_COMMENT.into()));
             stmts.push(Stmt::Local(vec!["__mll_arg1".into()], Some(Expr::name("..."))));
-            let run_ref = self.lua_ref("__run");
+            let run_ref = self.lua_ref(&sanitize_name("main"));
             stmts.push(Stmt::Raw(format!(
                 "if __mll_arg1 == nil or (arg ~= nil and __mll_arg1 == arg[1]) then __mll_run({}()) end",
                 run_ref

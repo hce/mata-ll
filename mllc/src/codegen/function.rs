@@ -379,8 +379,9 @@ impl CodeGen {
         // Guarded value bindings become guard-chain CAFs first — see
         // `desugar_guarded_value` (and its mirror rule in `slot_always_whnf`).
         let desugared;
-        let shown = self.source_names.get(&func.name).unwrap_or(&func.name);
-        let func = match Self::desugar_guarded_value(func, shown) {
+        let shown = crate::ast::shown(self.source_names.get(&func.name).unwrap_or(&func.name))
+            .into_owned();
+        let func = match Self::desugar_guarded_value(func, &shown) {
             Some(f) => { desugared = f; &desugared }
             None => func,
         };

@@ -131,6 +131,33 @@ static CHUNK_INDEX: std::sync::LazyLock<ChunkIndex> = std::sync::LazyLock::new(|
     ChunkIndex { chunks, all_names, providers }
 });
 
+/// Does the prelude chunk bind `lua_name` at its top level? Read off the
+/// chunk index, so it is the same set of names the on-demand selection
+/// resolves body references against.
+pub(super) fn binds_name(lua_name: &str) -> bool {
+    CHUNK_INDEX.all_names.contains(lua_name)
+}
+
+/// Every name the prelude chunk binds at its top level.
+pub(super) fn bound_names() -> impl Iterator<Item = &'static str> {
+    CHUNK_INDEX.all_names.iter().copied()
+}
+
+/// The prelude's own spelling of `name` when the chunk binds it and the
+/// name starts with a letter — the runtime entities a mata-ll name can
+/// denote by its own spelling (`map`, `show`, `eq_Int`); the helpers under
+/// `__` are the emitter's.
+pub(super) fn plain_runtime_name(name: &str) -> Option<&'static str> {
+    name.starts_with(|c: char| c.is_ascii_alphabetic())
+        .then(|| CHUNK_INDEX.all_names.get(name).copied())
+        .flatten()
+}
+
+/// Every name `plain_runtime_name` answers for.
+pub(super) fn plain_runtime_names() -> impl Iterator<Item = &'static str> {
+    bound_names().filter(|n| n.starts_with(|c: char| c.is_ascii_alphabetic()))
+}
+
 /// Split the prelude into top-level definition chunks. A chunk starts at a
 /// column-0 `local function`, `local …`, or `IDENT = …` line and runs until the
 /// next such line; everything else (bodies, `end`, `if/else`, leading comments)

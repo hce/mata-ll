@@ -87,29 +87,42 @@ impl Checker {
     /// (`ClassInfo::default_methods`, consumed when an instance omits the
     /// method), so a user instance that leaves the method out gets GHC's
     /// default instead of a per-use "No instance" error. The snippet is
+    /// recorded here and parsed by `install_builtin_defaults`.
+    fn register_builtin_default(&mut self, class: &str, method: &str, source: &str) {
+        assert!(self.classes.contains_key(class), "builtin default for unregistered class {class}");
+        self.pending_builtin_defaults
+            .push((class.to_string(), method.to_string(), source.to_string()));
+    }
+
+    /// Parse the recorded default method bodies and attach them to their
+    /// classes. Runs once every builtin instance is registered: a snippet
+    /// is written in the Prelude's scope and resolved like the Prelude
+    /// source, with the claimed spellings known. A snippet is
     /// compiler-owned text: a parse failure is a compiler bug, reported as
     /// a panic with the source.
-    fn register_builtin_default(&mut self, class: &str, method: &str, source: &str) {
-        let tokens = crate::lexer::lex(source)
-            .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not lex: {e:?}\n{source}"));
-        let module = crate::parser::parse(tokens)
-            .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not parse: {e:?}\n{source}"));
-        // The snippet is written in the Prelude's scope: its infix
-        // expressions group under the Prelude's fixities.
-        let decls = crate::modules::group_baseline(&module.decls)
-            .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not group: {e:?}\n{source}"));
-        let clauses = decls
-            .into_iter()
-            .find_map(|d| match d {
-                Decl::FunDef { name, clauses } if name == method => Some(clauses),
-                _ => None,
-            })
-            .unwrap_or_else(|| panic!("builtin default for {class}.{method}: snippet defines no `{method}`"));
-        self.classes
-            .get_mut(class)
-            .unwrap_or_else(|| panic!("builtin default for unregistered class {class}"))
-            .default_methods
-            .insert(method.to_string(), clauses);
+    pub(super) fn install_builtin_defaults(&mut self) {
+        for (class, method, source) in std::mem::take(&mut self.pending_builtin_defaults) {
+            let tokens = crate::lexer::lex(&source)
+                .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not lex: {e:?}\n{source}"));
+            let module = crate::parser::parse(tokens)
+                .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not parse: {e:?}\n{source}"));
+            // The snippet is written in the Prelude's scope: its infix
+            // expressions group under the Prelude's fixities.
+            let decls = crate::modules::group_baseline(&module.decls, &self.claimed)
+                .unwrap_or_else(|e| panic!("builtin default for {class}.{method} does not group: {e:?}\n{source}"));
+            let clauses = decls
+                .into_iter()
+                .find_map(|d| match d {
+                    Decl::FunDef { name, clauses } if name == method => Some(clauses),
+                    _ => None,
+                })
+                .unwrap_or_else(|| panic!("builtin default for {class}.{method}: snippet defines no `{method}`"));
+            self.classes
+                .get_mut(&class)
+                .unwrap_or_else(|| panic!("builtin default for unregistered class {class}"))
+                .default_methods
+                .insert(method, clauses);
+        }
     }
 
     /// Register one builtin instance: `class` at `target`, each method mapped

@@ -1110,9 +1110,12 @@ impl Monomorphizer {
     /// `ty_to_suffix` encoding is kept, but uniqueness is guaranteed through
     /// `mangled_names`: when a DIFFERENT (base, type) pair already owns the
     /// candidate name, a deterministic "__2"/"__3"… disambiguator is appended
-    /// (generation order is deterministic, so so is the numbering).
+    /// (generation order is deterministic, so so is the numbering). That
+    /// table knows the names THIS pass handed out; what keeps a generated
+    /// name apart from every name of the program is its spelling
+    /// (`ast::minted`: `count·IntTInt`), which no source name has.
     fn mangle_name(&mut self, base: &str, ty: &Ty) -> String {
-        let stem = format!("{}_{}", base, self.ty_to_suffix(ty));
+        let stem = crate::ast::minted(base, &self.ty_to_suffix(ty));
         let mut candidate = stem.clone();
         let mut k = 1u32;
         loop {
@@ -1125,7 +1128,7 @@ impl Monomorphizer {
                 Some((b, t)) if b == base && t == ty => return candidate,
                 Some(_) => {
                     k += 1;
-                    candidate = format!("{}__{}", stem, k);
+                    candidate = crate::ast::minted(&format!("{}_", stem), &k.to_string());
                 }
             }
         }
@@ -3916,7 +3919,7 @@ impl Monomorphizer {
             if !self.poly_fns.contains_key(&base) {
                 return None;
             }
-            let dictform = format!("{}__dictform", base);
+            let dictform = crate::ast::minted(&format!("{}_", base), "dictform");
             // The method's VALUE arity decides the DictCtor field shape:
             // a closure over the context dictionaries for arity > 0, the
             // constructed VALUE for a nullary method (see SpecKind::DictCtor).
