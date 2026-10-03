@@ -453,16 +453,13 @@ impl CodeGen {
                     // when the group overflowed the local budget.
                     let lval = self.local_lvalue(&sname);
                     if Self::is_nullary_action_type(&bind.body.ty) {
-                        // First-class action binding — mirror bind_chain_block's
-                        // Let arm: a re-performable closure, never a memoizing
-                        // thunk (a thunked action performs once and caches its
-                        // result; GHC performs it at every use). Its result is
-                        // not this expression's result.
-                        let saved_rd = std::mem::replace(
-                            &mut self.cur_result_demand, crate::demand::Demand::Head);
-                        let action = self.action_run_ast(&bind.body, false);
-                        self.cur_result_demand = saved_rd;
-                        stmts.push(Stmt::Assign(lval, Expr::inline_fn0(action)));
+                        // First-class action binding: an action value, never
+                        // a memoizing thunk (a thunked action performs once
+                        // and caches its result; GHC performs it at every
+                        // use) — see action_binding_ast, shared with the
+                        // do-block and where emitters.
+                        let action = self.action_binding_ast(&bind.body, strict_binding_safe(binds, i));
+                        stmts.push(Stmt::Assign(lval, action));
                         self.concrete_vars.insert(sname);
                     } else if self.strict_binding_ok(bind, &demanded) && strict_binding_safe(binds, i) {
                         let rhs = self.expr_ast(&bind.body);
@@ -1469,15 +1466,7 @@ impl CodeGen {
         // at all). local_strict_params entries are themselves locals, so
         // they are consulted first, before the shadow test.
         let callee_strict = if let TExprKind::Var(name) = &f.kind {
-            self.local_strict_params.get(name)
-                .cloned()
-                .or_else(|| {
-                    if self.is_local_shadowed(name) {
-                        None
-                    } else {
-                        self.demand_info.strict_params.get(name).cloned()
-                    }
-                })
+            self.callee_strict_row(name).cloned()
         } else {
             None
         };
@@ -1730,8 +1719,7 @@ impl CodeGen {
                 }
             }
             matches!(&head.kind, TExprKind::Var(n)
-                if self.local_strict_params.get(n)
-                    .or_else(|| self.demand_info.strict_params.get(n))
+                if self.callee_strict_row(n)
                     .and_then(|v| v.get(applied).copied())
                     .unwrap_or(false))
         };
@@ -1781,18 +1769,16 @@ impl CodeGen {
             Expr::Func(vec![], FuncBody::Block(b))
         } else {
             // m >>= f (non-lambda RHS, e.g. `step 1 >>= print`):
-            // under the calling convention, applying an IO-typed
-            // function to its argument PERFORMS the action and
-            // returns the result carrying at most one pending
-            // pure box (see the __mll_run contract in the
-            // runtime). So the continuation's application must
-            // flow through the FORWARDING runner, which returns
-            // a plain result as-is, forwards a pure box, and
-            // calls a first-class action closure. Calling the
-            // application result unconditionally — the previous
-            // emission — crashed ("attempt to call a nil
-            // value") whenever `f x` returned a plain value,
-            // which is the normal case.
+            // applying a function value to its argument yields an
+            // action VALUE — an action closure, a pure box, or a
+            // bare value of an effect-free action (see the
+            // __mll_run contract in the runtime) — never a
+            // performed result. So the continuation's application
+            // must flow through the FORWARDING runner, which
+            // returns a plain value as-is, forwards a pure box,
+            // and calls an action closure; calling the
+            // application result unconditionally crashed ("attempt
+            // to call a nil value") on the bare-value shape.
             let f_e = if self.expr_yields_whnf(rhs) {
                 let c = self.callee_ast(rhs);
                 self.whnf_claim_checked(rhs, c)
@@ -1842,8 +1828,7 @@ impl CodeGen {
         // forces its function argument itself, so both are safe
         // to pass eagerly.
         let f_strict = matches!(&lhs.kind, TExprKind::Var(n)
-            if self.local_strict_params.get(n)
-                .or_else(|| self.demand_info.strict_params.get(n))
+            if self.callee_strict_row(n)
                 .and_then(|v| v.first().copied()).unwrap_or(false));
         let suspend = !f_strict && g_extras == 0 && adapter.is_none();
         let f_arity = self.known_callee_arity(lhs);
@@ -1966,6 +1951,33 @@ impl CodeGen {
     /// `JSON.gFields`; see `dict_field_name`).
     fn dict_field(&self, method: &str) -> String {
         dict_field_name(self.source_names.get(method).map_or(method, String::as_str))
+    }
+
+    /// The performing host call of a LuaTry import: the call under
+    /// `__mll_try`, which wraps the host's (value, error) convention in
+    /// Either. The SUCCESS payload crosses the FFI boundary like any other
+    /// result, so it carries the same type-directed decode descriptor (a
+    /// raw Lua array where [Int] was declared must become a cons list, not
+    /// be walked as a cons cell later). Evaluating it PERFORMS: value
+    /// position wraps it in the action closure, run position emits it
+    /// directly.
+    pub(super) fn ffi_try_call_ast(&mut self, host: &str, args: &[TExpr], ty: &Ty) -> Expr {
+        let desc = self.ffi_catch_decode_desc(ty);
+        let desc_str = desc.as_deref().unwrap_or("false").to_string();
+        let root = Self::ffi_root_name(host);
+        let call = if let Some(method) = host.strip_prefix(':') {
+            // Method call try: handle:method(args)
+            let recv = self.forced_prefix_ast(&args[0]);
+            let margs = self.ffi_args_ast(&args[1..]);
+            Expr::method(recv, method, margs)
+        } else {
+            // Global function try
+            Expr::call_named(host, self.ffi_args_ast(args))
+        };
+        Expr::call_named(
+            "__mll_try",
+            vec![Expr::raw(desc_str), Expr::raw(format!("{:?}", root)), call],
+        )
     }
 
     /// The SpecCall arms of the expression walk, split out only to keep
@@ -2397,31 +2409,11 @@ impl CodeGen {
                     Expr::call_named("__mll_iter", iter_args)
                 }
             }
-            SpecKind::Try(host) => {
-                // Try FFI: wrap the (val, err) convention in Either via
-                // __mll_try. The SUCCESS payload crosses the FFI boundary
-                // like any other result, so it carries the same
-                // type-directed decode descriptor (a raw Lua array where
-                // [Int] was declared must become a cons list, not be
-                // walked as a cons cell later).
-                let lua_func = host.as_str();
-                let desc = self.ffi_catch_decode_desc(&expr.ty);
-                let desc_str = desc.as_deref().unwrap_or("false").to_string();
-                let root = Self::ffi_root_name(lua_func);
-                let call = if let Some(method) = lua_func.strip_prefix(':') {
-                    // Method call try: handle:method(args)
-                    let recv = self.forced_prefix_ast(&args[0]);
-                    let margs = self.ffi_args_ast(&args[1..]);
-                    Expr::method(recv, method, margs)
-                } else {
-                    // Global function try
-                    Expr::call_named(lua_func, self.ffi_args_ast(args))
-                };
-                Expr::call_named(
-                    "__mll_try",
-                    vec![Expr::raw(desc_str), Expr::raw(format!("{:?}", root)), call],
-                )
-            }
+            // Try FFI: the host call under `__mll_try`. A LuaTry import is
+            // an IO action, so in value position it is the closure that
+            // makes the call when run (run position emits the call itself,
+            // see action_run_ast).
+            SpecKind::Try(host) => Expr::inline_fn0(self.ffi_try_call_ast(host, args, &expr.ty)),
             SpecKind::Pcall(host) => {
                 // LuaCatch: pure call under pcall, result Either String a.
                 let desc = self.ffi_catch_decode_desc(&expr.ty);
@@ -2435,11 +2427,12 @@ impl CodeGen {
                 Expr::inline_fn0(call)
             }
             SpecKind::Io(host) => {
-                // IO FFI: wrap in action thunk — only performed by >>= / >>
-                // Zero-arg IO (e.g., os.clock): emit raw call without closure wrapper,
-                // since the function definition already wraps in function()...end.
+                // IO FFI in value position: the action closure that makes
+                // the host call when run — whatever the argument count, so
+                // evaluating it never performs. Run position (the import
+                // wrapper's own body, a bind statement) emits the call
+                // itself (action_run_ast's HostCall arm).
                 let lua_func = host.as_str();
-                let needs_wrapper = !args.is_empty();
                 // Type-directed decode of the FFI result (see action_run_ast).
                 let decode = self.ffi_decode_desc(&expr.ty);
                 let call = if let Some(method) = lua_func.strip_prefix(':') {
@@ -2464,7 +2457,7 @@ impl CodeGen {
                     // return values cannot spread.
                     None => Expr::paren(call),
                 };
-                if needs_wrapper { Expr::inline_fn0(inner) } else { inner }
+                Expr::inline_fn0(inner)
             }
             SpecKind::IoTup { arity, host } => {
                 // IO FFI with multi-return: wrap in action thunk

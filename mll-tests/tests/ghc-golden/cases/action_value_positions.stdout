@@ -1,0 +1,86 @@
+-- arguments
+3
+3
+single 3
+single 3
+guarded 3
+guarded 3
+multi 3
+multi 3
+tagged 3
+tagged 3
+partial 3
+partial 3
+lambda 6
+lambda 6
+local 3
+local 3
+hello
+hello
+dollar 3
+dollar 3
+30
+30
+3
+4
+3
+4
+-- order
+4
+3
+multi 3
+single 3
+-- zero runs
+seq of an unrun action
+seq done
+case done
+picked
+-- repeats
+3
+3
+3
+single 3
+single 3
+-- structures
+3
+4
+3
+4
+single 3
+multi 3
+single 3
+multi 3
+4
+5
+4
+5
+3
+6
+3
+6
+3
+3
+single 3
+single 3
+5
+5
+multi 3
+multi 3
+4
+4
+-- bindings
+single 42
+single 42
+single 53
+single 53
+single 4
+single 4
+-- pure payloads and references
+3
+3
+single 7
+single 7
+[4,8,12]
+[22,32]
+-- ST
+(2,10)

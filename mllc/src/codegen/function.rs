@@ -269,23 +269,22 @@ impl CodeGen {
         pat_arity + count_arrows(&func.ty).saturating_sub(first.patterns.len())
     }
 
-    /// Is this binding emitted DIRECT-PERFORM — a Lua function whose body IS
-    /// the IO action, so calling it saturated performs and returns a result
-    /// in the runners' range (see the __mll_run contract in the runtime)?
-    /// `Some(n)` gives the saturating argument count. Two arms of
+    /// Is this binding emitted DIRECT-PERFORM — with a Lua function whose
+    /// body IS the IO action, so calling it saturated performs and returns
+    /// a result in the runners' range (see the __mll_run contract in the
+    /// runtime)? `Some(n)` gives the saturating argument count. Two arms of
     /// `function_stmts` emit that way, and this predicate mirrors their
-    /// branch structure exactly (function_stmts debug_asserts agreement at
-    /// each arm, so the two cannot drift):
+    /// branch structure exactly (function_stmts checks agreement at each
+    /// arm, so the two cannot drift):
     ///
     ///  * the nullary IO/LuaIO value arm (`main :: IO ()`, `loop :: IO a`):
     ///    one clause, no patterns, no guards, nothing to eta-expand — the
-    ///    `Ty::Forall` CAF wrapper that arm also emits is a deferred value,
-    ///    not a performing action, so it is excluded;
-    ///  * the single-clause, guard-free, all-simple-pattern function arm
-    ///    whose type returns an IO/LuaIO action, with nothing to eta-expand
-    ///    (an eta-expanded body applies a callee, it does not perform) and
-    ///    not an ST action (ST bodies are wrapped in a closure the runner
-    ///    calls).
+    ///    slot holds the action closure itself, which is the action VALUE
+    ///    the name denotes; the `Ty::Forall` CAF wrapper that arm also
+    ///    emits is a deferred value, not a performing action, so it is
+    ///    excluded;
+    ///  * the performer of a performer / action-builder pair
+    ///    (`splits_performer`) — the name's own slot holds the builder.
     ///
     /// Both decline dictionary-taking functions: their call spine carries
     /// dictionary arguments the saturation count cannot see. Multi-clause
@@ -316,12 +315,45 @@ impl CodeGen {
         if clause.patterns.is_empty() {
             return matches!(&func.ty, Ty::IO(_) | Ty::LuaIO(_, _)).then_some(0);
         }
-        let all_simple = clause
-            .patterns
-            .iter()
-            .all(|p| matches!(p, TPattern::Var(_, _) | TPattern::Wildcard));
-        (all_simple && !Self::returns_st(&func.ty) && Self::returns_action(&func.ty))
-            .then_some(clause.patterns.len())
+        Self::splits_performer(func).then_some(clause.patterns.len())
+    }
+
+    /// Is this function emitted as a PERFORMER / ACTION-BUILDER pair? The
+    /// single-clause, guard-free, all-simple-pattern arm of `function_stmts`
+    /// whose type returns an IO/LuaIO action (nothing to eta-expand, not an
+    /// ST action, and not the nullary value arm — at least one value or
+    /// dictionary parameter) flattens its body into statements that run
+    /// the action's effects when the Lua function is CALLED. That Lua
+    /// function is the performer; it lives in its own slot
+    /// (`performer_slots`) and is reached only by a saturated call in
+    /// action-run position (`perform_call_ast`). The function's own slot —
+    /// what its name denotes everywhere else: a call in value position, a
+    /// first-class reference, a partial application, a dictionary entry,
+    /// an export — holds the action builder, which returns a closure that
+    /// calls the performer when the action is run. So calling the function
+    /// value never performs, exactly as applying a Haskell function that
+    /// returns `IO a` only builds the action. Mirrors the arm's dispatch
+    /// (function_stmts records which arm it took and checks it against
+    /// this, the `slot_always_whnf` discipline).
+    pub(super) fn splits_performer(func: &TFunction) -> bool {
+        let desugared;
+        let func = match Self::desugar_guarded_value(func, &func.name) {
+            Some(f) => { desugared = f; &desugared }
+            None => func,
+        };
+        let [clause] = func.clauses.as_slice() else { return false };
+        if !clause.guards.is_empty() {
+            return false;
+        }
+        if count_arrows(&func.ty) > clause.patterns.len() {
+            return false;
+        }
+        if clause.patterns.is_empty() && func.dict_params.is_empty() {
+            return false;
+        }
+        Self::emission_all_simple(clause)
+            && !Self::returns_st(&func.ty)
+            && Self::returns_action(&func.ty)
     }
 
     /// A guarded VALUE binding — one clause, zero patterns, nothing to
@@ -584,6 +616,9 @@ impl CodeGen {
 
         if Self::emission_single_clause(func) {
             let clause = &clauses[0];
+            // Set by the action arm below: the body is a performer, and
+            // the function's own slot gets its action builder.
+            let mut split_performer = false;
             let dict_param_names: Vec<String> = func.dict_params.iter().map(|(_, p)| sanitize_name(p)).collect();
             let mut params: Vec<String> = (0..clause.patterns.len()).map(|i| format!("_arg{}", i)).collect();
             let eta_params: Vec<String> = (0..eta_count).map(|i| format!("_eta{}", i)).collect();
@@ -654,19 +689,24 @@ impl CodeGen {
                     body.push(Stmt::Return(Expr::Func(vec![], FuncBody::Block(chain))));
                 } else if Self::returns_action(&func.ty) {
                     // IO-returning function: flatten bind chains, performing
-                    // sub-actions directly. The function itself acts as the action
-                    // closure — callers use the action runners to invoke it.
-                    // Direct-perform: a saturated tail call to this function
-                    // (from its own body or any other) performs and forwards
-                    // its own runner-normalized result, so it may return
-                    // bare — Lua's tail-call form (see direct_perform_arity,
-                    // which predicted this arm's outcome for the module-level
-                    // map, and action_run_ast). Dict-taking functions are
-                    // declined: their call spine carries dictionary
-                    // arguments this saturation count cannot see.
+                    // sub-actions directly. This Lua function is the
+                    // PERFORMER — calling it runs the action — so it goes
+                    // to its own slot, and the function's slot gets the
+                    // action builder below (see splits_performer).
+                    // Direct-perform: a saturated tail call to the
+                    // performer (from its own body or any other) performs
+                    // and forwards its own runner-normalized result, so it
+                    // may return bare — Lua's tail-call form (see
+                    // direct_perform_arity, which predicted this arm's
+                    // outcome for the module-level map, and
+                    // action_run_ast). Dict-taking functions are declined:
+                    // their call spine carries dictionary arguments this
+                    // saturation count cannot see, so their callers always
+                    // go through the builder.
                     if func.dict_params.is_empty() {
                         emitted_direct_perform = Some(clause.patterns.len());
                     }
+                    split_performer = true;
                     body.extend(self.bind_chain_block(clause.plain_body(), true).0);
                 } else {
                     // Pure function: use the plain bind-chain builder for the
@@ -710,10 +750,14 @@ impl CodeGen {
                 body.extend(self.pattern_match_block(&params, clauses).0);
                 self.clause_eta_params.clear();
             }
-            let stmts = vec![
-                Stmt::Function { target, params: all_params, body: Block(body) },
-                Stmt::Raw(String::new()),
-            ];
+            let stmts = if split_performer {
+                self.performer_pair_stmts(func, target, all_params, Block(body))
+            } else {
+                vec![
+                    Stmt::Function { target, params: all_params, body: Block(body) },
+                    Stmt::Raw(String::new()),
+                ]
+            };
             scope.restore(self);
             self.concrete_vars.insert(lua_name);
             self.check_direct_perform_prediction(func, emitted_direct_perform);
@@ -827,6 +871,76 @@ impl CodeGen {
             eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
             arity,
         )
+    }
+
+    /// The two Lua functions of a performer / action-builder pair (see
+    /// `splits_performer`): the performer — `body`, which runs the action
+    /// when called — stored in the function's performer slot, and the
+    /// action builder stored under `target`, the function's own slot. The
+    /// builder takes the same parameters and returns a zero-argument
+    /// closure that calls the performer: applying the function builds the
+    /// action, running the action performs it, and every run performs
+    /// again. The arguments are captured as given — the call sites of a
+    /// builder pass every value argument lazily (`call_reaches_builder`),
+    /// so building the action forces nothing — and the builder discharges
+    /// the performer's site-forced positions itself, when the action runs:
+    /// the performer binds those bare (see `ParamConv::SiteForced`), and
+    /// the builder is a delivery like any other call site. The performer
+    /// slot was allocated by `module_stmts` from the same predicate; a
+    /// missing slot means the prediction and this emission disagree.
+    fn performer_pair_stmts(
+        &mut self,
+        func: &TFunction,
+        target: FnTarget,
+        params: Vec<String>,
+        body: Block,
+    ) -> Vec<Stmt> {
+        let Some(&slot) = self.performer_slots.get(&func.name) else {
+            if self.internal_error.is_none() {
+                self.internal_error = Some(format!(
+                    "internal: splits_performer out of sync with function_stmts \
+                     for '{}' (no performer slot was allocated); please report this",
+                    func.name
+                ));
+            }
+            return Vec::new();
+        };
+        let conv_row = self.param_conv.get(&func.name).cloned();
+        let n_dicts = func.dict_params.len();
+        let call_args: Vec<Expr> = params
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let site_forced = i >= n_dicts
+                    && conv_row.as_ref().is_some_and(|r| matches!(
+                        r.get(i - n_dicts), Some(super::analysis::ParamConv::SiteForced)));
+                if site_forced { Expr::force(Expr::name(p.clone())) } else { Expr::name(p.clone()) }
+            })
+            .collect();
+        let performer = Self::performer_ref_of_slot(slot);
+        let action = Expr::Func(
+            vec![],
+            FuncBody::Inline(vec![Stmt::Return(Expr::call(Expr::name(performer), call_args))]),
+        );
+        vec![
+            Stmt::Function {
+                target: FnTarget::Slot(u32::try_from(slot).expect("fn_table slot fits u32")),
+                params: params.clone(),
+                body,
+            },
+            Stmt::Raw(String::new()),
+            Stmt::Function {
+                target,
+                params,
+                body: Block(vec![Stmt::Return(action)]),
+            },
+            Stmt::Raw(String::new()),
+        ]
+    }
+
+    /// The Lua reference of a performer slot.
+    pub(super) fn performer_ref_of_slot(slot: usize) -> String {
+        format!("{}[{}]", super::lua::FN_TABLE, slot)
     }
 
     /// The direct-perform twin of the `slot_always_whnf` agreement check:
@@ -1051,13 +1165,14 @@ impl CodeGen {
         let saved_rd =
             std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
         let stmt = if Self::is_nullary_action_type(&bind.body.ty) {
-            // First-class action binding — mirror bind_chain_block's Let arm:
-            // emit a re-performable closure, never a memoizing thunk. A
-            // thunked `t = putStrLn "hi"` performs the effect on the first
-            // force and caches the unit result, so `t >> t` prints once;
-            // GHC performs the action at every use.
+            // First-class action binding — an action value, never a
+            // memoizing thunk (see action_binding_ast, shared with the
+            // do-block and let emitters). A thunked `t = putStrLn "hi"`
+            // performs the effect on the first force and caches the unit
+            // result, so `t >> t` prints once; GHC performs the action at
+            // every use.
             self.concrete_vars.insert(sname);
-            Stmt::Assign(lref, Expr::inline_fn0(self.action_run_ast(&bind.body, false)))
+            Stmt::Assign(lref, self.action_binding_ast(&bind.body, strict_binding_safe(binds, i)))
         } else if self.strict_binding_ok(bind, demanded) && strict_binding_safe(binds, i) {
             let rhs = self.expr_ast(&bind.body);
             self.concrete_vars.insert(sname);

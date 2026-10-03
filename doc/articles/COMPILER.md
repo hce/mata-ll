@@ -254,8 +254,16 @@ Responsibilities beyond the obvious translation:
   element type, using the `Ty` carried on each `TExpr`.
 - **FFI:** `LuaPure`/`LuaIO` bindings become direct Lua calls; method-call FFI
   (`":write"`) becomes `handle:write(...)`.
-- **IO:** `__mll_run` forces IO thunks in `>>=`; `main` is skipped when the
-  module is loaded via `require` (library use).
+- **IO:** an action-typed expression in a value position compiles to an
+  action value and performs nothing; a runner (`__mll_run`,
+  `__mll_run_tail`) performs it. A single-clause IO function is emitted as
+  two Lua functions: the performer, whose body runs the effects and which
+  only a saturated call in run position reaches (keeping the direct call
+  and Lua's tail calls on the hot path), and the action builder in the
+  function's own slot, which every other use — a value-position call, a
+  first-class reference, a partial application, a dictionary entry —
+  reaches and which returns the action closure. `main` is skipped when
+  the module is loaded via `require` (library use).
 - **Names:** `names::sanitize_name` is the one mapping from mata-ll names
   to Lua names, and it is injective: a runtime entity has its fixed Lua
   name; an identifier keeps its spelling with `'` as `_prime`, moved by

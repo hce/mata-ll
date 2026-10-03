@@ -142,8 +142,9 @@
 //!   __mll_run_tail(…)` forwards from `_lp` exactly like the original
 //!   forwarded through the runner chain.
 //!
-//! The other IO recursion shape — a single-clause function that PERFORMS at
-//! call time and recurses at the OUTER body's tail — is out of scope here:
+//! The other IO recursion shape — a single-clause function whose performer
+//! (function.rs, splits_performer) PERFORMS at call time and recurses at the
+//! OUTER body's tail — is out of scope here:
 //! its effects live in skeleton position, so the repeat-safe gate declines
 //! it. It needs no pass of its own: the emitter spells that saturated tail
 //! as a bare `return self(…)` (action.rs / direct_perform_fns), Lua's own

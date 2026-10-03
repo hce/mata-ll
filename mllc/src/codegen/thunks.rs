@@ -314,6 +314,8 @@ impl CodeGen {
     ///   - Lambda / OpFunc: emit Lua function literals.
     ///   - InfixApp: see infix_yields_whnf.
     ///   - App of a record accessor: emitted as `__force(container[i])`.
+    ///   - A saturated action-builder call: returns the action closure it
+    ///     allocates (`is_builder_call`).
     ///   - App of a resolved primitive eq/ord/concat method (2 args): inlined
     ///     as a native Lua operator over forced operands (see the expr_ast
     ///     App arm and primitive_method_lua_op).
@@ -332,6 +334,11 @@ impl CodeGen {
                     && self.record_accessors.contains_key(&sanitize_name(name)) {
                         return true;
                     }
+                // A saturated action-builder call returns the action
+                // closure it allocates (see is_builder_call).
+                if self.is_builder_call(expr) {
+                    return true;
+                }
                 let mut n_args = 0usize;
                 let mut f = expr;
                 while let TExprKind::App(inner_f, _) = &f.kind {
@@ -738,6 +745,15 @@ impl CodeGen {
         // nothing (a Con head has no strictness row either), so no let/where
         // binding is judged demanded by appearing under a constructor.
         if Self::is_saturated_con_app(stripped) {
+            return self.expr_ast(stripped);
+        }
+        // A saturated call of an action builder is the same kind of total
+        // construction: it allocates the action closure over lazily passed
+        // arguments and runs nothing (see is_builder_call), so it needs no
+        // thunk of its own. Sound for demand analysis: an action-typed
+        // application outside run position demands nothing (demand.rs's
+        // suspended rule).
+        if self.is_builder_call(stripped) {
             return self.expr_ast(stripped);
         }
         if matches!(&stripped.kind, TExprKind::Var(_) | TExprKind::Con(_)) {

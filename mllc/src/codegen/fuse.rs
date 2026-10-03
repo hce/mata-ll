@@ -275,17 +275,6 @@ impl CodeGen {
         self.spec_origins.get(name).map(String::as_str).unwrap_or(name)
     }
 
-    /// The demand row of the named function `n` visible here, if any.
-    fn name_strict_row(&self, n: &str) -> Option<&Vec<bool>> {
-        self.local_strict_params.get(n).or_else(|| {
-            if self.is_local_shadowed(n) {
-                None
-            } else {
-                self.demand_info.strict_params.get(n)
-            }
-        })
-    }
-
     /// Does evaluating `e` to WHNF force the variable `p` on every path?
     /// Conservative and syntactic: false when unsure. Used to judge a
     /// lambda's parameter strictness (sections desugar to lambdas).
@@ -325,7 +314,7 @@ impl CodeGen {
                     }
                     // A saturated call of a function with a demand row:
                     // its strict positions are forced.
-                    if let Some(row) = self.name_strict_row(n)
+                    if let Some(row) = self.callee_strict_row(n)
                         && row.len() == sp.len()
                     {
                         return sp
@@ -376,7 +365,7 @@ impl CodeGen {
         }
         let (h, sp) = spine(e);
         if let TExprKind::Var(n) = &h.kind
-            && let Some(row) = self.name_strict_row(n)
+            && let Some(row) = self.callee_strict_row(n)
             && row.len() == sp.len() + arity
         {
             return Some(row[sp.len()..].to_vec());

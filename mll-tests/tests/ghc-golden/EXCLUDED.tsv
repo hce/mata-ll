@@ -76,6 +76,7 @@ cases/exact_let_eager_hm	HashMap builtins (Lua tables)
 cases/exitvalue_prelude	ExitValue/exit (Lua process control)
 cases/export_module	'export' keyword (Lua module export)
 cases/ffi	FFI declarations
+cases/ffi_action_values	FFI declarations
 cases/ffi_constructed_values	FFI declarations
 cases/ffi_maybe_args	FFI declarations
 cases/ffi_multi_return	LuaPure FFI declarations (math.modf multi-return)

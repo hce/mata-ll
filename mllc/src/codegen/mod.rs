@@ -308,20 +308,29 @@ struct CodeGen {
     /// argument count — computed by `module_stmts` from
     /// `direct_perform_arity` BEFORE any function body is emitted, so a
     /// body may consult it for callees defined later in the file. A
-    /// direct-perform function is one whose emitted Lua function's body IS
-    /// the action (the single-clause simple-pattern IO arm and the nullary
-    /// IO-value arm of function_stmts): calling it performs and returns a
-    /// result in the runners' range, on which the forwarding runner is the
-    /// identity. So a tail terminal that is a saturated call to ANY name in
-    /// this map — the function itself or another one (mutual recursion) —
-    /// returns bare (`return callee(...)`, Lua's tail-call form) instead of
-    /// riding the forwarding runner's argument position; see action_run_ast
-    /// / direct_perform_callee_arity. Everything else keeps the runner:
-    /// multi-clause and ST emissions build actions their caller's runner
-    /// performs — a bare call there would return an unperformed value.
+    /// direct-perform function is one with a Lua function whose body IS
+    /// the action — the performer of the single-clause simple-pattern IO
+    /// arm (see splits_performer), or the nullary IO-value arm's own slot —
+    /// so calling it performs and returns a result in the runners' range,
+    /// on which the forwarding runner is the identity. A saturated call to
+    /// ANY name in this map in action-run position — the function itself
+    /// or another one (mutual recursion) — calls that Lua function
+    /// directly, and a forwarding one returns bare (`return performer(...)`,
+    /// Lua's tail-call form) instead of riding the forwarding runner's
+    /// argument position; see action_run_ast / direct_perform_callee.
+    /// Everything else keeps the runner: multi-clause and ST emissions and
+    /// action builders build actions their caller's runner performs.
     /// function_stmts debug_asserts its own emission decision against this
     /// map (the `slot_always_whnf` pattern), so the two cannot drift.
     direct_perform_fns: std::collections::HashMap<String, usize>,
+    /// Source name → the `__mll_fn` slot of its PERFORMER, for every
+    /// function emitted as a performer / action-builder pair
+    /// (`splits_performer`), allocated by `module_stmts` past the
+    /// name slots before any body is emitted. The name's own slot holds
+    /// the action builder; the performer is reached only by
+    /// `perform_call_ast`. Duplicate definitions of one name share the
+    /// slot, like they share the name's.
+    performer_slots: std::collections::HashMap<String, usize>,
     /// The module's compiled functions — source name → the number of VALUE
     /// parameters their emitted Lua function takes (`emitted_value_arity`),
     /// filled by `module_stmts` before any body is emitted so a call site may
@@ -424,6 +433,7 @@ impl CodeGen {
             local_inline_fns: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
             direct_perform_fns: std::collections::HashMap::new(),
+            performer_slots: std::collections::HashMap::new(),
             fixed_arity: std::collections::HashMap::new(),
             module_fn_names: std::collections::HashSet::new(),
             spec_origins: std::collections::HashMap::new(),

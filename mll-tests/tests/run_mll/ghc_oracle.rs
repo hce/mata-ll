@@ -217,6 +217,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_derive_ord, "cases", "derive_ord.mll"),
         (ghc_oracle_ord_max_min, "cases", "ord_max_min.mll"),
         (ghc_oracle_action_value_bindings, "cases", "action_value_bindings.mll"),
+        (ghc_oracle_action_value_positions, "cases", "action_value_positions.mll"),
         (ghc_oracle_quot_rem_fixity, "cases", "quot_rem_fixity.mll"),
         (ghc_oracle_dollar_stays_lazy, "cases", "dollar_stays_lazy.mll"),
         (ghc_oracle_guarded_clause_scope, "cases", "guarded_clause_scope.mll"),

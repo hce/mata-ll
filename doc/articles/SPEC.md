@@ -1868,6 +1868,15 @@ MATA-LL uses non-strict evaluation. Function arguments and let/where
 bindings are wrapped in memoizing thunks by default, and are forced
 only when their value is demanded.
 
+An expression of an action type (`IO a`, `LuaIO … a`, `ST s a`)
+evaluates to an action VALUE, as in GHC: evaluating it — passing it as
+an argument, storing it in a data structure or an `IORef`, returning it
+with `pure`, forcing it with `seq` — never performs it. The action is
+performed only where it is run (a do-block statement or `<-`, `>>`,
+`>>=`, `mapM_`, `when`, `runST`, `main`), every run performs it again,
+and its effects happen in the order of the runs. `twice a = a >> a`
+applied to `print n` prints twice.
+
 ## The eagerness contract
 
 The compiler may evaluate a delayed expression *eagerly* (in place, with

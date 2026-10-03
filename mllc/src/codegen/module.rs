@@ -317,7 +317,15 @@ impl CodeGen {
             }
         }
 
-        if !all_fn_names.is_empty() {
+        // Performer slots (see splits_performer), numbered past the name
+        // slots: one per name, shared by duplicate definitions.
+        let mut performer_names: Vec<String> = Vec::new();
+        for f in module.functions.iter().chain(module.instance_fns.iter()) {
+            if Self::splits_performer(f) && !performer_names.contains(&f.name) {
+                performer_names.push(f.name.clone());
+            }
+        }
+        if !all_fn_names.is_empty() || !performer_names.is_empty() {
             // A slot that will be assigned a THUNKED value binding must not
             // be seeded concrete: a reference emitted before the binding
             // (forward reference, or any earlier-emitted body) consults
@@ -343,6 +351,9 @@ impl CodeGen {
                     self.concrete_vars.insert(name.clone());
                 }
                 self.top_level_names.insert(name.clone());
+            }
+            for (i, name) in performer_names.into_iter().enumerate() {
+                self.performer_slots.insert(name, all_fn_names.len() + i + 1);
             }
         }
 

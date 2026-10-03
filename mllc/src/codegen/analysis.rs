@@ -200,11 +200,47 @@ impl CodeGen {
     /// computed for (a where-bound local function's row lives in
     /// local_strict_params; any other local binder shadowing the name makes
     /// the callee an unknown local value).
+    ///
+    /// A call that reaches an ACTION BUILDER (`call_reaches_builder`) gets
+    /// no row either: the row describes the performer, which this call
+    /// does not run — building the action forces none of its arguments.
     pub(super) fn callee_conv_row(&self, name: &str) -> Option<&Vec<ParamConv>> {
-        if self.local_strict_params.contains_key(name) || self.is_local_shadowed(name) {
+        if self.local_strict_params.contains_key(name)
+            || self.is_local_shadowed(name)
+            || self.performer_slots.contains_key(name)
+        {
             return None;
         }
         self.param_conv.get(name)
+    }
+
+    /// The demand row a call site naming `name` applies to its arguments:
+    /// a where-bound local function's scoped row first, then — unless a
+    /// local binder shadows the name (an unknown local value) — the
+    /// module-level row. None for a call that reaches an action builder
+    /// (`call_reaches_builder`): the row says what RUNNING the function
+    /// forces, and such a call only builds the action.
+    pub(super) fn callee_strict_row(&self, name: &str) -> Option<&Vec<bool>> {
+        if let Some(row) = self.local_strict_params.get(name) {
+            return Some(row);
+        }
+        if self.is_local_shadowed(name) || self.call_reaches_builder(name) {
+            return None;
+        }
+        self.demand_info.strict_params.get(name)
+    }
+
+    /// Does a call naming `name` here reach the ACTION BUILDER of a
+    /// performer / action-builder pair (`splits_performer`)? True for the
+    /// module-level function when no local binding shadows it. Such a call
+    /// builds an action value and runs nothing, so its arguments are all
+    /// passed lazily — the builder discharges the performer's conventions
+    /// when the action runs. Only `perform_call_ast` (a saturated call in
+    /// action-run position) reaches the performer itself.
+    pub(super) fn call_reaches_builder(&self, name: &str) -> bool {
+        !self.local_strict_params.contains_key(name)
+            && !self.is_local_shadowed(name)
+            && self.performer_slots.contains_key(name)
     }
 
     pub(super) fn scan_call_sites(&self, expr: &TExpr, scan: &mut CallScan) {

@@ -32,6 +32,7 @@ enum ActionShape<'a> {
     PlainValue,
     MaybeAction,
     HostCall { host: &'a String, args: &'a [TExpr] },
+    HostTry { host: &'a String, args: &'a [TExpr] },
     Fused { fused: &'static str, args: Vec<&'a TExpr> },
     Runner,
 }
@@ -88,6 +89,8 @@ impl CodeGen {
             ActionShape::Value => true,
             // A raw host value (plus decode), never a mata-ll thunk.
             ActionShape::HostCall { .. } => true,
+            // `__mll_try` builds its Either table.
+            ActionShape::HostTry { .. } => true,
             // Every fused intrinsic result is WHNF except the IORef read:
             // `__mll_st_read` forces the slot it returns, and the ST/IORef
             // writes/news return () or the cell itself — but an IORef slot
@@ -121,10 +124,11 @@ impl CodeGen {
     ///   * `MaybeAction`: an unresolved type that may be an action; the
     ///     expression through the runner;
     ///   * `HostCall`: an FFI SpecCall; the host call itself, decoded;
+    ///   * `HostTry`: a LuaTry SpecCall; the host call under `__mll_try`;
     ///   * `Fused`: a fully applied ST array / IORef intrinsic; the fused
     ///     direct call;
-    ///   * `Runner`: everything else — a direct-perform tail call or the
-    ///     runner over the expression.
+    ///   * `Runner`: everything else — a direct call of a direct-perform
+    ///     function's performer, or the runner over the expression.
     ///
     /// Grouping parens are transparent: `(readSTArray arr i)` is the read.
     fn action_shape(action: &TExpr) -> ActionShape<'_> {
@@ -147,6 +151,9 @@ impl CodeGen {
         }
         if let TExprKind::SpecCall { specialized: SpecKind::Io(host), args, .. } = &a.kind {
             return ActionShape::HostCall { host, args };
+        }
+        if let TExprKind::SpecCall { specialized: SpecKind::Try(host), args, .. } = &a.kind {
+            return ActionShape::HostTry { host, args };
         }
         if let Some((fused, args)) = Self::st_intrinsic_fused(a) {
             return ActionShape::Fused { fused, args };
@@ -320,6 +327,7 @@ impl CodeGen {
                     None => Expr::paren(call),
                 }
             }
+            ActionShape::HostTry { host, args } => self.ffi_try_call_ast(host, args, &expr.ty),
             // Fully-applied ST intrinsic in run-once position: emit the
             // effect directly, skipping the action-closure allocation and
             // the __mll_run dispatch. This path is only reached where an
@@ -350,42 +358,42 @@ impl CodeGen {
                 Expr::call_named(fused, cargs)
             }
             ActionShape::Runner => {
-                // Direct-perform tail: a saturated call to a module-level
-                // DIRECT-PERFORM function (its emitted body IS the action —
-                // see direct_perform_arity / direct_perform_fns) PERFORMS
-                // when called and returns a result in the runners' range,
-                // on which the forwarding runner is the identity. So in a
-                // forwarding position the call returns bare: `return
-                // callee(...)` is the exact syntactic form Lua's tail-call
-                // elimination reclaims the frame for, and it skips the
-                // runner re-application whose `__force` would evaluate a
-                // thunk `pure` payload GHC never forces on unwind. The
-                // callee may be the function being emitted (self-recursion)
-                // or ANY other direct-perform function (mutual recursion,
-                // `f` ↔ `g`): the invariant is the callee's, not the
-                // caller's — the callee's single pending consumer
-                // application simply becomes this function's (the
-                // one-root-application invariant; see the __mll_run contract
-                // comment in the runtime), and every forwarding position
-                // (a direct-perform body's terminal, a first-class action
-                // closure's terminal, a discarded effect statement) delivers
-                // its value to exactly one consumer application. Builders
-                // (multi-clause IO functions, the two-level shape; ST
-                // closures) are never in the map and keep their runner,
+                // A saturated call to a module-level DIRECT-PERFORM function
+                // (see direct_perform_arity / direct_perform_fns) runs its
+                // performer here: the call itself performs and returns a
+                // result in the runners' range, on which the forwarding
+                // runner is the identity. So in a forwarding position the
+                // call returns bare: `return performer(...)` is the exact
+                // syntactic form Lua's tail-call elimination reclaims the
+                // frame for, and it skips the runner re-application whose
+                // `__force` would evaluate a thunk `pure` payload GHC never
+                // forces on unwind. The callee may be the function being
+                // emitted (self-recursion) or ANY other direct-perform
+                // function (mutual recursion, `f` ↔ `g`): the invariant is
+                // the callee's, not the caller's — the callee's single
+                // pending consumer application simply becomes this
+                // function's (the one-root-application invariant; see the
+                // __mll_run contract comment in the runtime), and every
+                // forwarding position (a direct-perform body's terminal, a
+                // first-class action closure's terminal, a discarded effect
+                // statement) delivers its value to exactly one consumer
+                // application. A consuming position keeps the runner around
+                // the performing call (it strips the pending box).
+                // Builders (multi-clause IO functions, the two-level shape;
+                // ST closures) are never in the map and keep their runner,
                 // which performs the action closure they return.
-                if tail && let Some(arity) = self.direct_perform_callee_arity(expr) {
-                    let e = self.expr_ast(expr);
-                    if Self::call_head_is(&e, &self.direct_perform_callee_ref(expr)) {
-                        return e;
+                if let Some((name, args)) = self.direct_perform_callee(expr) {
+                    if args.is_empty() {
+                        // Arity 0: the name denotes the action closure
+                        // itself, spelled as a call in a forwarding position.
+                        let e = self.expr_ast(expr);
+                        if tail && matches!(&e, Expr::Name(n) if *n == self.lua_ref(&sanitize_name(name))) {
+                            return Expr::call(e, vec![]);
+                        }
+                        return Expr::call_named(runner, vec![e]);
                     }
-                    // Arity-0 callee: the emission is the bare function
-                    // reference — the call is spelled here.
-                    if arity == 0 && matches!(&e, Expr::Name(n) if *n == self.direct_perform_callee_ref(expr)) {
-                        return Expr::call(e, vec![]);
-                    }
-                    // Any other emitted shape (an inlined body, an adapter):
-                    // keep the runner — it handles every action form.
-                    return Expr::call_named(runner, vec![e]);
+                    let call = self.perform_call_ast(name, &args);
+                    return if tail { call } else { Expr::call_named(runner, vec![call]) };
                 }
                 // General IO/ST action: the runner handles both direct
                 // values and action closures (function or value).
@@ -395,65 +403,118 @@ impl CodeGen {
         }
     }
 
+    /// The saturated call to a performer in action-run position: the
+    /// arguments of `name`'s performer under the performer's own calling
+    /// convention — its demand row and convention row, exactly as a
+    /// general call site applies them, since this call RUNS the body those
+    /// rows describe — passed to the performer slot. Reached only through
+    /// `direct_perform_callee`, which checked that `name` is the un-shadowed
+    /// module-level function and the call is saturated. Every other call
+    /// of the function reaches its action builder (see splits_performer).
+    fn perform_call_ast(&mut self, name: &str, args: &[&TExpr]) -> Expr {
+        let slot = *self
+            .performer_slots
+            .get(name)
+            .expect("a direct-perform function with parameters has a performer slot");
+        let strict_row = self.demand_info.strict_params.get(name).cloned();
+        let conv_row = self.param_conv.get(name).cloned();
+        let mut cargs = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let site_forced = conv_row.as_ref().is_some_and(|r| matches!(
+                r.get(i), Some(super::analysis::ParamConv::SiteForced)));
+            let strict = strict_row.as_ref().is_some_and(|r| r.get(i).copied().unwrap_or(false));
+            cargs.push(if site_forced {
+                self.site_forced_arg_ast(a)
+            } else {
+                self.arg_ast(a, strict)
+            });
+        }
+        Expr::call(Expr::name(Self::performer_ref_of_slot(slot)), cargs)
+    }
+
     /// If `expr` is a SATURATED call to a module-level direct-perform
     /// function (`direct_perform_fns`, seeded by module_stmts before any
-    /// body is emitted), its arity: an application spine (grouping parens
-    /// transparent) whose head is a `Var` spelling an un-shadowed name in
-    /// the map, applied to exactly that entry's parameter count. Shadowing
-    /// check: a local binding of the same name is a first-class value whose
-    /// emission arm this claim knows nothing about — the test is the same
-    /// `local_vars` membership `lua_ref` resolves references by. Partial
-    /// applications (a closure value, not a perform), over-applications and
-    /// SpecCall spines (runtime/FFI protocols, never a compiled function)
-    /// report `None` and keep the runner.
-    fn direct_perform_callee_arity(&self, expr: &TExpr) -> Option<usize> {
-        let (name, nargs) = Self::var_call_spine(expr)?;
+    /// body is emitted), its name and arguments: an application spine
+    /// (grouping parens transparent, `f a $ b` read as `f a b`) whose head
+    /// is a `Var` spelling an un-shadowed name in the map, applied to
+    /// exactly that entry's parameter count. Shadowing check: a local
+    /// binding of the same name is a first-class value whose emission arm
+    /// this claim knows nothing about — the test is the same `local_vars`
+    /// membership `lua_ref` resolves references by. Partial applications
+    /// (a closure value, not a perform), over-applications and SpecCall
+    /// spines (runtime/FFI protocols, never a compiled function) report
+    /// `None` and keep the runner.
+    fn direct_perform_callee<'e>(&self, expr: &'e TExpr) -> Option<(&'e str, Vec<&'e TExpr>)> {
+        let (name, args) = self.call_spine(expr)?;
         let arity = *self.direct_perform_fns.get(name)?;
-        (nargs == arity && !self.local_vars.contains(&sanitize_name(name))).then_some(arity)
+        (args.len() == arity && !self.local_vars.contains(&sanitize_name(name)))
+            .then_some((name, args))
     }
 
-    /// The Lua reference a direct-perform callee is emitted as (its
-    /// `__mll_fn` slot or plain name — the same resolution `expr_ast` uses
-    /// for a concrete top-level function). Only meaningful after
-    /// `direct_perform_callee_arity` accepted `expr`.
-    fn direct_perform_callee_ref(&self, expr: &TExpr) -> String {
-        let (name, _) = Self::var_call_spine(expr).expect("accepted direct-perform spine");
-        self.lua_ref(&sanitize_name(name))
+    /// The value of a first-class action binding (`let`/`where`/do-`let`
+    /// with an action-typed RHS): an action value, never a memoizing thunk
+    /// of a performed result. A saturated action-builder call is its own
+    /// value — total and WHNF (`is_builder_call`) — and evaluating it once
+    /// shares its arguments across every run, as GHC's let does. Any other
+    /// RHS becomes a re-performable closure that runs the RHS on each run.
+    /// The binding is WHNF either way, so every emitter marks it concrete.
+    /// `eager_ok` is the group's `strict_binding_safe` verdict: building
+    /// the value now reads its arguments' variables now, which must not be
+    /// a sibling of a recursive group that is still unassigned (the
+    /// closure reads them only when run).
+    pub(super) fn action_binding_ast(&mut self, body: &TExpr, eager_ok: bool) -> Expr {
+        let saved_rd =
+            std::mem::replace(&mut self.cur_result_demand, crate::demand::Demand::Head);
+        let e = if eager_ok && self.is_builder_call(body) {
+            self.expr_ast(body)
+        } else {
+            Expr::inline_fn0(self.action_run_ast(body, false))
+        };
+        self.cur_result_demand = saved_rd;
+        e
     }
 
-    /// The head name and argument count of an application spine headed by
-    /// a `Var` (grouping parens transparent); `None` for any other head.
-    fn var_call_spine(expr: &TExpr) -> Option<(&str, usize)> {
-        let mut nargs = 0usize;
+    /// Is `expr` a saturated call that reaches an action builder
+    /// (`call_reaches_builder`)? Its value-position emission is the builder
+    /// call itself, which only allocates the action closure — its
+    /// arguments are passed lazily — so evaluating it is total and yields
+    /// WHNF. Inline candidates are excluded: their call site re-emits the
+    /// body instead of calling the builder.
+    pub(super) fn is_builder_call(&self, expr: &TExpr) -> bool {
+        if !Self::is_nullary_action_type(&expr.ty) {
+            return false;
+        }
+        let Some((name, args)) = self.call_spine(expr) else { return false };
+        self.call_reaches_builder(name)
+            && !self.inline_fns.contains_key(name)
+            && self.fixed_arity.get(name) == Some(&args.len())
+    }
+
+    /// The head name and arguments (in order) of an application spine
+    /// headed by a `Var`: grouping parens are transparent and `f $ x` is
+    /// the application `f x` (the Prelude `$`, not a local operator of
+    /// that name); `None` for any other head.
+    fn call_spine<'e>(&self, expr: &'e TExpr) -> Option<(&'e str, Vec<&'e TExpr>)> {
+        let mut rev: Vec<&TExpr> = Vec::new();
         let mut f = expr;
         loop {
             match &f.kind {
                 TExprKind::Paren(inner) => f = inner.as_ref(),
-                TExprKind::App(inner_f, _) => {
-                    nargs += 1;
+                TExprKind::App(inner_f, a) => {
+                    rev.push(a.as_ref());
                     f = inner_f.as_ref();
                 }
-                TExprKind::Var(n) => return Some((n, nargs)),
+                TExprKind::InfixApp { op, lhs, rhs } if op == "$" && !self.is_local_shadowed(op) => {
+                    rev.push(rhs.as_ref());
+                    f = lhs.as_ref();
+                }
+                TExprKind::Var(n) => {
+                    rev.reverse();
+                    return Some((n, rev));
+                }
                 _ => return None,
             }
         }
-    }
-
-    /// Whether the emitted expression is a call chain whose innermost callee
-    /// is exactly the name `head` — the shape `general_call_ast` produces
-    /// for a saturated call to a concrete top-level function
-    /// (`__mll_fn[k](a, b)`), as opposed to an inlined body (`Paren`), a
-    /// runtime-generic adapter, or a partial-application closure. The bare
-    /// tail is emitted only for this shape; the gate is on the EMITTED tree,
-    /// so no belief about which expr_ast arm fired is relied on.
-    fn call_head_is(e: &Expr, head: &str) -> bool {
-        let mut e = e;
-        let mut depth = 0usize;
-        while let Expr::Call(f, _) = e {
-            e = f.as_ref();
-            depth += 1;
-        }
-        depth > 0 && matches!(e, Expr::Name(n) if n == head)
     }
 
     pub(super) fn is_nullary_action_type(ty: &Ty) -> bool {
@@ -945,7 +1006,16 @@ impl CodeGen {
                         // until used, so eagerly evaluating one that can
                         // raise/diverge changes program behaviour.
                         let strict_ok = strict_binding_safe(binds, i);
-                        if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind
+                        if Self::is_nullary_action_type(&bind.body.ty) {
+                            // First-class action binding — the same action
+                            // value as the value-position and where-binding
+                            // emitters (action_binding_ast), tested before
+                            // the `if` fast path below, whose eager branch
+                            // values carry no WHNF guarantee for an action.
+                            let action = self.action_binding_ast(&bind.body, strict_ok);
+                            stmts.push(Stmt::Assign(lval, action));
+                            self.concrete_vars.insert(bname.clone());
+                        } else if let TExprKind::If { cond, then_branch, else_branch } = &bind.body.kind
                             && strict_ok
                             && (self.is_cheap_to_force(&bind.body) || demanded.contains(&bind.name)) {
                             self.concrete_vars.insert(bname.clone());
@@ -953,14 +1023,6 @@ impl CodeGen {
                             let then_e = self.expr_ast(then_branch);
                             let else_e = self.expr_ast(else_branch);
                             stmts.push(Stmt::AssignIf { lhs: lval, cond: cond_e, then_e, else_e });
-                        } else if Self::is_nullary_action_type(&bind.body.ty) {
-                            // First-class action binding — its result is not
-                            // the function's result (see cur_result_demand).
-                            let saved_rd = std::mem::replace(
-                                &mut self.cur_result_demand, crate::demand::Demand::Head);
-                            let action = self.action_run_ast(&bind.body, false);
-                            stmts.push(Stmt::Assign(lval, Expr::inline_fn0(action)));
-                            self.cur_result_demand = saved_rd;
                         } else {
                             let saved_rd = std::mem::replace(
                                 &mut self.cur_result_demand, crate::demand::Demand::Head);

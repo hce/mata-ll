@@ -99,7 +99,7 @@
 //! the runner's ARGUMENT position pinned one frame per step. The emitter
 //! no longer produces that shape: a saturated tail call to any
 //! direct-perform function — self or another — is a bare `return
-//! callee(…)`, Lua's own tail call (action.rs / direct_perform_fns), which
+//! performer(…)`, Lua's own tail call (action.rs / direct_perform_fns), which
 //! runs in constant stack with no pass, and which tailloop loops when it is
 //! self-recursive. Retired 2026-08-17 after two corpus sweeps found zero
 //! conversions on the new emission — see doc/articles/TODO.md.)

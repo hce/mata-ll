@@ -44,6 +44,33 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **An IO action is a value: evaluating it never performs it, and every
+  run performs it again** (silent miscompile). An application at IO type
+  in a value position — a function argument, a constructor, record, list
+  or tuple field, a `pure`/`return` payload, an IORef contents, a `seq` or
+  `$!` operand — performed its effect when the expression was evaluated,
+  and the result was memoized: `twice (print n)` printed once,
+  `swap a b = b >> a` applied to two computed actions ran them in argument
+  order, `sequence_ acts` run twice performed the list once, an action
+  written to an IORef, stored in a record or bound by `a <- pure (print
+  n)` ran once however often it was run, and `print n \`seq\` …` printed.
+  A function value passed to a higher-order function (`map print xs`, a
+  partial application, a lambda, a `where`-bound function, a class
+  method) had the same defect. The cause was the calling convention: a
+  single-clause IO function's Lua function performed when called, and
+  every Lua function value standing for it was that function. Such a
+  function now compiles to two: the PERFORMER, called only by a saturated
+  call in a do-block statement or bind (so the hot path keeps its direct
+  call and Lua tail calls), and the ACTION BUILDER, which the function's
+  name denotes everywhere else and which returns the action closure over
+  its unevaluated arguments. A LuaTry import in value position is an
+  action closure too. GHC's sharing follows: the arguments of an action
+  value are evaluated at most once however often it runs. Measured cost:
+  none on the benchmark suite and the perf canary; a `mapM_ (\i -> step
+  r i)` loop over a single-clause IO function allocates one action
+  closure more per element (about 15% slower on that microbenchmark).
+  (GHC-goldened case `action_value_positions`; FFI case
+  `ffi_action_values`.)
 - **No two names of a program share a Lua name, and no name of a
   program is taken for one of the compiler's** (silent miscompiles,
   load failures, one rejection). The mapping from mata-ll names to Lua
