@@ -222,10 +222,8 @@ The same holds for names of Lua's standard globals (\texttt{select},
 \texttt{table}) and for names that look like the compiler's own
 (\texttt{show\_Int}, \texttt{show\_Color}): each is a name of its own,
 and two names never share one in the generated code (\texttt{y'} and
-\texttt{y\_prime} are two variables).  The exception: a record field or
-class method cannot be named like a function of MATA-LL's runtime library
-such as \texttt{show\_Int}, because fields and methods are program-wide
-names.
+\texttt{y\_prime} are two variables). This holds for record fields and
+class methods as well as for functions and variables.
 
 %======================================================================
 \section{Types and Data}
@@ -894,8 +892,15 @@ two modules may each have a \texttt{helper} function or a
   \texttt{\&\&}, \texttt{error} and \texttt{>>=}, whatever the module
   defines, imports, hides or binds locally under those names.
 \item Data constructors, record fields, classes and class methods are
-  \emph{program-wide} names: import lists do not hide them, and two
-  modules cannot declare the same one.
+  scoped like functions and types: two modules may each declare a
+  constructor \texttt{Node}, a field \texttt{name} or a class
+  \texttt{Pretty}, and import lists select them as in Haskell ---
+  \texttt{T(..)} brings a type with its constructors and fields,
+  \texttt{C(..)} a class with its methods, a bare \texttt{T} or
+  \texttt{C} the type or class alone. Instances are global: every
+  instance is in force in the whole program. What the program shows at
+  run time (\texttt{show}, JSON tags and keys, LuaDict keys) is the name
+  as its module wrote it.
 \end{itemize}
 
 \subsection{Export Lists}
@@ -1635,8 +1640,8 @@ cannot collide on one Lua string.
 \subsubsection{Renaming Keys with \texttt{as}}
 \label{sec:asrename}
 
-By default the Lua key is the field name.  Since record accessors share
-a single global function namespace (as in Haskell), fields are
+By default the Lua key is the field name.  Since the record fields of a
+module share its namespace with its functions (as in Haskell), fields are
 conventionally prefixed (\texttt{cfgWidth}, \texttt{cfgHeight}) --- but
 a Lua API will expect \texttt{width}, not \texttt{cfgWidth}.  The
 \texttt{as} annotation renames the Lua table key:

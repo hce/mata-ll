@@ -1,0 +1,16 @@
+x
+P {name = "y", age = 2}
+(7,2)
+Q {name = 2, head = 0}
+Person {fullName = "Ada", tag = 3}
+("Bo",2,"Di")
+Person {fullName = "Ed", tag = 6}
+Opts {error = 1, either = 2}
+(1,2)
+Opts {error = 1, either = 20}
+(7,34)
+(5,6)
+Rec {either = 1, other = 2}
+(2,9,Dot {width = 5})
+(43,102,[6,8])
+(2,4)

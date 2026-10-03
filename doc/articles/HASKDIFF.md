@@ -225,26 +225,40 @@ declared alias.
 
 `import Prelude hiding (lookup)`, `import Prelude (print, (+))` and
 `import qualified Prelude as P` work as in Haskell 2010 §5.6.1: they
-say which Prelude names the module sees. Data constructors, classes and
-class methods cannot be hidden (see the next section).
+say which Prelude names the module sees, constructors, classes and
+methods included (`import Prelude hiding (Bool(..))` lets a module
+declare a `Bool` of its own, whose `True` is not the literal `if`
+tests).
+
+Import and export lists select a type's constructors and fields and a
+class's methods as in Haskell 2010: `T(..)` names all of them, a type or
+class written bare names it alone, a field or method may be named as a
+value, and a constructor cannot be imported by itself. An export list
+also takes an explicit `T(C, f)`; an import list takes `T(..)` only.
 
 ## Every module has its own scope; four rules differ from GHC
 
 A bare name means what the module that wrote it has in scope: the
 module's own declaration, else what its imports make visible, else the
-Prelude's. Two modules may define functions or types of the same name
-(at the same or at different types) without affecting each other, the
-Prelude's own code always uses the Prelude's definitions, and a name
-that two imports both provide is an "Ambiguous occurrence" error where
-it is used — all as in GHC. The differences:
+Prelude's. Two modules may define functions, types, constructors,
+record fields, classes or class methods of the same name (at the same
+or at different types) without affecting each other, the Prelude's own
+code always uses the Prelude's definitions, and a name that two imports
+both provide is an "Ambiguous occurrence" error where it is used — all
+as in GHC. Instances are not names: every instance is in force
+everywhere, and two modules' private classes `Pretty` are two classes
+with an `instance Pretty Int` each. What a program shows at run time
+(`show`, a JSON tag or key, a LuaDict key, Generic metadata) is the
+name as its module wrote it. The differences:
 
 - **A module's own definition wins without `hiding`.** A top-level
-  definition named like an imported or a Prelude function is what the
-  module's own references mean. GHC accepts the definition and reports
+  declaration — a function, type, constructor, record field, class or
+  class method — named like an imported or a Prelude one is what the
+  module's own references mean. GHC accepts the declaration and reports
   each bare use as ambiguous until the other one is hidden. The entry
-  module keeps two rejections: a definition of a name the Prelude's own
-  functions use (`map`, `error`, …) and a definition at exactly the
-  Prelude's type are errors unless the module says
+  module keeps two rejections: a function, field or method of a name the
+  Prelude's own functions use (`map`, `error`, `elem`, …) and a function
+  at exactly the Prelude's type are errors unless the module says
   `import Prelude hiding (name)` — with that line the program is plain
   Haskell and compiles.
 - **An import shadows the Prelude only at the same type.** An
@@ -253,24 +267,25 @@ it is used — all as in GHC. The differences:
   silently wins in the importing module. At a different type the import
   itself is rejected with the qualified form spelled out — `import
   Data.Map` unqualified, whose `null` and `lookup` are not the
-  Prelude's. GHC accepts both imports and reports the use.
+  Prelude's. GHC accepts both imports and reports the use. A record
+  field or class method has no signature of its own to compare and
+  wins like a same-type import.
 - **A module without an export list passes its imports on.** Its
   importers see the names it imports as well as its own. GHC exports
   the own declarations only. When such a passed-on name is one side of
   an ambiguity the error says so; an export list stops it.
-- **Constructors, record fields, classes and class methods are
-  program-wide names.** They are not scoped per module, an import list
-  does not hide them, and two modules cannot both declare a constructor
-  `Node`, a field `name` or a class `Pretty`, even privately. A
-  constructor declared in the entry module may shadow an imported one;
-  a record field named like a Prelude function or like a function of
-  mata-ll's runtime library (`show_Int`, `eq_Int`, `hashmap_insert`, …)
-  is rejected, and so is a class method named like the implementation
-  of a builtin instance (`show_Int`). A top-level function or a local
-  variable may carry any of these names.
-  A qualified reference that resolves to such a plain name (or to a
-  Prelude function) cannot be written under a local binding of the same
-  name: `f maybe = M.maybe …` is rejected; rename the local.
+- **A qualified Prelude name under a local of its spelling.** A
+  qualified reference that resolves to a Prelude name cannot be written
+  under a local binding of the same name: `f maybe = P.maybe …` (with
+  `import qualified Prelude as P`) is rejected; rename the local.
+
+A record field selection `r.f` (`OverloadedRecordDot`) names the field
+`f` the module has in scope — unqualified, else through the one alias
+that offers a field `f` — and a local variable `f` does not capture it.
+GHC chooses among the fields `f` in scope by the type of `r`
+(`HasField`); where two fields `f` are in scope, mata-ll takes the
+unqualified one, and a selection on a record of the other type is a
+type error. Write the selector qualified there (`B.f r`).
 
 What syntax stands for is not subject to any of this, as in GHC: a list
 comprehension, a range (`[a .. b]`), a comma between guard conditions,
@@ -281,8 +296,9 @@ the Prelude's `concatMap`, `enumFromTo` (and its three siblings), `&&`,
 names. A parameter may be called `error` or `concatMap`. (In the emitted
 Lua such a local is spelled `__local_error`.)
 
-Every other name is a name of its own as well, as in GHC: a function or
-variable spelled like a Lua reserved word or global (`end`, `select`),
+Every other name is a name of its own as well, as in GHC: a function,
+record field, class method or variable spelled like a Lua reserved word
+or global (`end`, `select`),
 like a function of the runtime library (`show_Int`, `hashmap_insert`),
 or like a definition the compiler generates (`show_Color` next to a
 derived `Show Color`, a specialization's name) is the program's own and
@@ -306,9 +322,6 @@ may stand and what can carry one:
   method goes next to the class, not inside its body; `let` and `where`
   groups take no fixity declarations (and cannot define symbolic
   operators), so a locally bound operator is always `infixl 9`.
-- Class methods and record fields are program-wide names (see above),
-  so a method operator's fixity reaches every module that uses the
-  method, whatever its import list says.
 - A chain of infix type operators is grouped without the conflict
   check value operators get: an `infix` type operator nests rightward
   where GHC rejects the chain.

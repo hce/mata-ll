@@ -730,7 +730,7 @@ impl CodeGen {
                 Expr::Table(items)
             }
             TExprKind::DictAccess { dict_param, method_name } => {
-                Expr::name(format!("{}.{}", sanitize_name(dict_param), dict_field_name(method_name)))
+                Expr::name(format!("{}.{}", sanitize_name(dict_param), self.dict_field(method_name)))
             }
             TExprKind::DictMethod { dict, method_name } => {
                 // A method of a CONSTRUCTED dictionary (e.g. the `[a]`
@@ -738,7 +738,7 @@ impl CodeGen {
                 // because the dictionary may be a table literal, which Lua
                 // cannot index directly.
                 let d = self.expr_ast(dict);
-                Expr::index(Expr::paren(d), format!(".{}", dict_field_name(method_name)))
+                Expr::index(Expr::paren(d), format!(".{}", self.dict_field(method_name)))
             }
             TExprKind::DictCall { func_name, dict_args, value_args } => {
                 let sfn = sanitize_name(func_name);
@@ -1959,6 +1959,15 @@ impl CodeGen {
         )
     }
 
+    /// The field of class method `method` (its canonical name) in a
+    /// dictionary table. A dictionary holds the methods of ONE class, which
+    /// its module declares under distinct source names, so the field is
+    /// named after the method's source spelling (`gFields`, not
+    /// `JSON.gFields`; see `dict_field_name`).
+    fn dict_field(&self, method: &str) -> String {
+        dict_field_name(self.source_names.get(method).map_or(method, String::as_str))
+    }
+
     /// The SpecCall arms of the expression walk, split out only to keep
     /// `expr_ast_inner` readable — one arm per `SpecKind` variant (the
     /// former `helper:payload` string protocol, now typed in tir.rs).
@@ -1988,7 +1997,7 @@ impl CodeGen {
                             Expr::name(self.lua_ref(&sv))
                         }
                     };
-                    items.push(Item::KV(format!("{} = ", dict_field_name(m)), value));
+                    items.push(Item::KV(format!("{} = ", self.dict_field(m)), value));
                 }
                 Expr::TableSpaced(items)
             }
@@ -2020,14 +2029,14 @@ impl CodeGen {
                         dict_params.iter().map(|p| Expr::name(p.clone())).collect();
                     if *arity == 0 {
                         items.push(Item::KV(
-                            format!("{} = ", dict_field_name(m)),
+                            format!("{} = ", self.dict_field(m)),
                             Expr::call_named(&impl_ref, impl_args),
                         ));
                         continue;
                     }
                     impl_args.push(Expr::name("..."));
                     items.push(Item::KV(
-                        format!("{} = ", dict_field_name(m)),
+                        format!("{} = ", self.dict_field(m)),
                         Expr::Func(
                             vec!["...".into()],
                             FuncBody::Inline(vec![Stmt::Return(Expr::call_named(

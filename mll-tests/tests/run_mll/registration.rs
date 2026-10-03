@@ -316,6 +316,19 @@ mll_test!(names_operators, "names_operators.mll");
 mll_test!(names_modules, "names_modules.mll");
 mll_lib_test!(names_lua_globals, "names_lua_globals.mll");
 mll_lib_test!(names_generic_metadata, "names_generic_metadata.mll");
+// Constructors, classes, class methods and record fields are entities of
+// the module that declares them, like functions and types: two modules'
+// private `Node`, `Pretty` or `name` are different entities, every
+// reference is bound in its own module's scope (import and export lists,
+// `T(..)`, `hiding`, qualified names included), instances are global, and
+// what the program shows at run time (show, JSON tags and keys, LuaDict
+// keys, Generic metadata) is the source spelling.
+mll_test!(entities_constructors, "entities_constructors.mll");
+mll_test!(entities_classes, "entities_classes.mll");
+mll_test!(entities_fields, "entities_fields.mll");
+mll_test!(entities_prelude_names, "entities_prelude_names.mll");
+mll_test!(entities_import_lists, "entities_import_lists.mll");
+mll_lib_test!(entities_runtime_spellings, "entities_runtime_spellings.mll");
 // A fixity belongs to the operator entity that declares it: an occurrence
 // groups by the fixity of what it denotes in its own scope — a local
 // binder, the module's own operator, an imported one, the Prelude's —
@@ -877,6 +890,16 @@ fn mll_case_registry_is_complete() {
         "AliasCtor.mll",
         "DupConEast.mll",
         "DupConWest.mll",
+        "EntConA.mll",
+        "EntConB.mll",
+        "EntClassA.mll",
+        "EntClassB.mll",
+        "EntFieldA.mll",
+        "EntFieldB.mll",
+        "EntListA.mll",
+        "EntListB.mll",
+        "EntWireA.mll",
+        "EntWireB.mll",
         "DualForms.mll",
         "ReexInner.mll",
         "ReexJson.mll",

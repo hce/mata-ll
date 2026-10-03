@@ -566,11 +566,9 @@ impl Checker {
             let ctx_str = format!("instance {} {}", class_name, ty_str);
             if !self.classes.contains_key(&c.class_name) {
                 if report {
-                    self.push_error_ctx(
-                        DiagnosticKind::Other(format!(
-                            "Unknown typeclass '{}' in instance context", c.class_name)),
-                        ctx_str,
-                    );
+                    let kind = self.scope_error(&c.class_name).unwrap_or_else(|| DiagnosticKind::Other(format!(
+                        "Unknown typeclass '{}' in instance context", c.class_name)));
+                    self.push_error_ctx(kind, ctx_str);
                 }
                 continue;
             }
@@ -767,7 +765,7 @@ impl Checker {
         // catches a user adding a rogue instance for a class and type they own
         // neither of. `local_classes`/`local_types` are the main module's own
         // declarations (see `check_module_with_local_start`).
-        if self.orphan_check_enabled && self.checking_local {
+        if self.orphan_check_enabled && self.checking_local && self.scope_error(class_name).is_none() {
             let type_head = Self::type_head_name(target_type);
             let class_is_local = self.local_classes.contains(class_name);
             let type_is_local = type_head.as_ref().is_some_and(|t| self.local_types.contains(t));
@@ -786,7 +784,7 @@ impl Checker {
             Some(ci) => ci.clone(),
             None => {
                 self.push_error_ctx(
-                    DiagnosticKind::Other(format!("Unknown typeclass '{}'", class_name)),
+                    self.unknown_class(class_name),
                     format!("instance {} {}", class_name, ty_str),
                 );
                 return vec![];

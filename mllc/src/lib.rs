@@ -225,13 +225,24 @@ fn prelude_scope(
     checker: &typechecker::Checker,
 ) -> modules::PreludeScope {
     let (values, types, constructors) = checker.builtin_names();
+    let (builtin_classes, builtin_con_types) = checker.builtin_members();
     let mut scope = modules::PreludeScope {
         values: values.into_iter().collect(),
         types: types.into_iter().collect(),
+        classes: std::collections::HashSet::new(),
+        fields: std::collections::HashSet::new(),
         constructors: constructors.into_iter().collect(),
+        parents: builtin_con_types.into_iter().collect(),
         shapes,
         claimed: checker.claimed_names().clone(),
     };
+    for (class, methods) in builtin_classes {
+        for m in methods {
+            scope.parents.insert(m, class.clone());
+        }
+        scope.types.insert(class.clone());
+        scope.classes.insert(class);
+    }
     for d in prelude_decls {
         match d {
             ast::Decl::FunDef { name, .. }
@@ -243,21 +254,35 @@ fn prelude_scope(
                 scope.types.insert(name.clone());
                 for c in constructors {
                     scope.constructors.insert(c.name.clone());
+                    scope.parents.insert(c.name.clone(), name.clone());
                     if let ast::ConstructorFields::Named(fields) = &c.fields {
-                        scope.values.extend(fields.iter().map(|f| f.name.clone()));
+                        for f in fields {
+                            scope.values.insert(f.name.clone());
+                            scope.fields.insert(f.name.clone());
+                            scope.parents.insert(f.name.clone(), name.clone());
+                        }
                     }
                 }
             }
             ast::Decl::NewtypeDef { name, con_name, field, .. } => {
                 scope.types.insert(name.clone());
+                for n in con_name.iter().chain(field.iter()) {
+                    scope.parents.insert(n.clone(), name.clone());
+                }
                 scope.constructors.extend(con_name.iter().cloned());
                 scope.values.extend(field.iter().cloned());
+                scope.fields.extend(field.iter().cloned());
             }
             ast::Decl::TypeAlias { name, .. } | ast::Decl::TypeFamily { name, .. } => {
                 scope.types.insert(name.clone());
             }
-            ast::Decl::ClassDecl { methods, .. } => {
-                scope.values.extend(methods.iter().map(|m| m.name.clone()));
+            ast::Decl::ClassDecl { name, methods, .. } => {
+                scope.types.insert(name.clone());
+                scope.classes.insert(name.clone());
+                for m in methods {
+                    scope.values.insert(m.name.clone());
+                    scope.parents.insert(m.name.clone(), name.clone());
+                }
             }
             ast::Decl::InstanceDecl { .. }
             | ast::Decl::Import { .. }
@@ -358,7 +383,8 @@ fn compile_impl(
     for m in typechecker::builtin_method_names() {
         prelude_shapes.entry(m).or_insert_with(|| "<builtin class method>".to_string());
     }
-    loader.set_prelude(prelude_scope(&prelude_decls, prelude_shapes, &checker));
+    let prelude = prelude_scope(&prelude_decls, prelude_shapes, &checker);
+    loader.set_prelude(prelude.clone());
     let module = loader.resolve_imports(&parsed).map_err(|e| match e {
         modules::ResolveError::Import(message) => CompileError::Import(message),
         modules::ResolveError::Syntax(diags) => CompileError::Parse(diags),
@@ -454,10 +480,9 @@ fn compile_impl(
     //
     // A name the module explicitly keeps out of its Prelude import
     // (`import Prelude hiding (lookup)`) is no redefinition at all — that
-    // program is plain Haskell — and is not rejected. A record field named
-    // like a Prelude function is rejected whatever the module hides: a
-    // field's accessor is a program-wide name and cannot be given a
-    // canonical name of its own.
+    // program is plain Haskell — and is not rejected. A record field and a
+    // class method are top-level value definitions like a function, under
+    // the same two rules.
     let own_decls: Vec<ast::Decl> = parsed.decls.iter()
         .filter(|d| !matches!(d, ast::Decl::Import { .. }))
         .cloned()
@@ -468,7 +493,7 @@ fn compile_impl(
         &checker,
     )
         .into_iter()
-        .filter(|r| r.record_field_of.is_some() || modules::prelude_name_visible(&parsed, &r.name))
+        .filter(|r| modules::prelude_name_visible(&parsed, &prelude, &r.name))
         .collect();
     // Every CompileError::Type below goes out through this: source-line
     // excerpts attached centrally (see attach_excerpts), never at the
@@ -482,7 +507,7 @@ fn compile_impl(
     };
 
     let early: Vec<types::Diagnostic> = redefined.iter()
-        .filter(|r| r.load_bearing || r.duplicate || r.record_field_of.is_some())
+        .filter(|r| r.load_bearing || r.duplicate)
         .map(|r| redefinition_diagnostic(r, options.source_name.as_deref()))
         .collect();
     if !early.is_empty() {
@@ -724,14 +749,10 @@ struct BaselineRedefinition {
     /// the same type shape (or no signature): a duplicate of the same
     /// function at the same type rather than an overload at a different one.
     duplicate: bool,
-    /// The user's "definition" is a record field of this data type: a field
-    /// defines a module-level accessor of its own name, so it collides like
-    /// a top-level function does — but the checker registers accessors in
-    /// its data-type pass, BEFORE the Prelude's signatures, so without this
-    /// rejection the Prelude name silently won and the program failed later
-    /// with a unification error at the field's use site (found when the
-    /// Prelude gained `until` and a case with a field of that name broke).
-    record_field_of: Option<String>,
+    /// The user's definition is a record field or a class method: `field`
+    /// or `method`, the keyword of the declaration it belongs to, and that
+    /// type's or class's name (`field`, `data`, `R`).
+    member_of: Option<(&'static str, &'static str, String)>,
 }
 
 /// Scan the user's own top-level declarations for value names the baseline
@@ -798,17 +819,18 @@ fn collect_baseline_redefinitions(
                     (None, _) => true,
                     (Some(_), None) => false,
                 },
-            record_field_of: None,
+            member_of: None,
         })
         .collect();
 
-    // Record fields: each named field is a module-level accessor function of
-    // that name (the record-form newtype selector too). Reported once per
-    // field name, in source order, after the value definitions.
-    let mut field_seen: HashSet<&str> = HashSet::new();
+    // Record fields (the record-form newtype selector too) and class
+    // methods: each is a top-level value of that name. Reported once per
+    // name, in source order, after the functions.
+    let mut member_seen: HashSet<&str> = HashSet::new();
     for d in own_decls {
-        let (ty_name, fields): (&str, Vec<&str>) = match d {
+        let (what, owner, names): ((&'static str, &'static str), &String, Vec<&str>) = match d {
             ast::Decl::DataDef { name, constructors, .. } => (
+                ("field", "data"),
                 name,
                 constructors.iter()
                     .flat_map(|c| match &c.fields {
@@ -817,20 +839,26 @@ fn collect_baseline_redefinitions(
                     })
                     .collect(),
             ),
-            ast::Decl::NewtypeDef { name, field: Some(f), .. } => (name, vec![f.as_str()]),
+            ast::Decl::NewtypeDef { name, field: Some(f), .. } =>
+                (("field", "newtype"), name, vec![f.as_str()]),
+            ast::Decl::ClassDecl { name, methods, .. } => (
+                ("method", "class"),
+                name,
+                methods.iter().map(|m| m.name.as_str()).collect(),
+            ),
             _ => continue,
         };
-        for f in fields {
-            if (prelude_named.contains(f) || checker.is_builtin(f))
-                && !seen.contains(f)
-                && field_seen.insert(f)
+        for n in names {
+            if (prelude_named.contains(n) || checker.is_builtin(n))
+                && !seen.contains(n)
+                && member_seen.insert(n)
             {
                 out.push(BaselineRedefinition {
-                    name: f.to_string(),
+                    name: n.to_string(),
                     span: None,
-                    load_bearing: prelude_used.contains(f),
+                    load_bearing: prelude_used.contains(n),
                     duplicate: false,
-                    record_field_of: Some(ty_name.to_string()),
+                    member_of: Some((what.0, what.1, owner.clone())),
                 });
             }
         }
@@ -917,23 +945,23 @@ fn redefinition_diagnostic(
     )));
     d.span = r.span;
     d.file = source_name.map(str::to_string);
-    if let Some(ty) = &r.record_field_of {
-        d.context = Some(format!("data {}", ty));
-        d.notes.push(format!(
-            "a record field defines an accessor function of the same name, so the \
-             field '{}' of '{}' is a definition of '{}'. Accessors are program-wide \
-             names in mata-ll — unlike a top-level function, a field cannot be kept \
-             to its own module — so this one would take the place of the Prelude's \
-             '{}' everywhere, where GHC would scope it to this module — \
-             rename the field.",
-            r.name, ty, r.name, r.name
-        ));
-        return d;
-    }
+    let what = match &r.member_of {
+        Some((what, keyword, owner)) => {
+            d.context = Some(format!("{keyword} {owner}"));
+            let kind = if *what == "field" { "a record field" } else { "a class method" };
+            d.notes.push(format!(
+                "{kind} is a top-level value of its module, so the {what} '{}' of \
+                 '{owner}' is a definition of '{}'.",
+                r.name, r.name
+            ));
+            *what
+        }
+        None => "function",
+    };
     d.notes.push(format!(
         "the Prelude's names (error, map, head, …) are in scope in every module. GHC \
          accepts such a definition but reports each bare use of the name as \
-         ambiguous unless the module hides the Prelude's — rename your function, or \
+         ambiguous unless the module hides the Prelude's — rename your {what}, or \
          hide the Prelude's with 'import Prelude hiding ({})'.",
         r.name
     ));
@@ -1022,7 +1050,7 @@ mod wired_in_tests {
     /// Import resolution binds a compiler-written reference to the bare
     /// name of its entity and relies on that name being the Prelude's:
     /// the entry module's own declaration of a Prelude name gets a
-    /// qualified canonical name (`modules::ModuleLoader::canon_val`), and
+    /// qualified canonical name (`modules::ModuleLoader::canon`), and
     /// that only happens for names the Prelude scope holds. So every
     /// wired-in entity must be a Prelude value, and neither of its
     /// reserved spellings may be something the lexer hands out as a name.

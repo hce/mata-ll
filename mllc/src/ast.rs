@@ -27,6 +27,12 @@ pub struct ModuleExports {
     /// declaration; naming an import passes that module's names on to
     /// this module's importers.
     pub reexports: Vec<String>,
+    /// The parenthesized part of a type or class entry, by the entry's
+    /// name: `T(..)` exports every constructor and field of `T` (every
+    /// method of a class) — `None` —, `T(C, f)` the ones listed. A type or
+    /// class named without parentheses exports the type or class alone
+    /// (Haskell 2010 §5.2).
+    pub subs: std::collections::HashMap<String, Option<Vec<String>>>,
 }
 
 /// The by-products of import resolution (modules.rs). After resolution
@@ -68,6 +74,10 @@ pub enum ScopeError {
     Unbound(String),
     /// A type name with no declaration in scope.
     UnknownType(String),
+    /// A class name with no declaration in scope.
+    UnknownClass(String),
+    /// A data constructor with no declaration in scope.
+    UnboundConstructor(String),
     /// Anything that needs its own explanation: `message`, then `notes`
     /// rendered as `note:` lines. `name` is the reference as written.
     Explained { name: String, message: String, notes: Vec<String> },
@@ -79,6 +89,8 @@ impl ScopeError {
         match self {
             ScopeError::Unbound(name)
             | ScopeError::UnknownType(name)
+            | ScopeError::UnknownClass(name)
+            | ScopeError::UnboundConstructor(name)
             | ScopeError::Explained { name, .. } => name,
         }
     }
@@ -238,6 +250,27 @@ impl WiredIn {
     pub fn local_binder(self) -> String {
         local_binder(self.name())
     }
+}
+
+/// What a record field selection's label spelling starts with
+/// (`field_selection`). `<` and the space are in no source name.
+const FIELD_SELECTION_PREFIX: &str = "<field ";
+
+/// The reference the parser writes for the label of a record field
+/// selection — `r.label`, `(.label)` (OverloadedRecordDot) — which it
+/// otherwise builds as the application `label r`. A selection names a
+/// FIELD: import resolution binds the label to a record field in scope,
+/// unqualified or through an alias (GHC solves `HasField` for any field in
+/// scope), and no local binder of the label's spelling captures it
+/// (`modules::Rename::v`). A label that names no field is resolved like an
+/// ordinary reference. No stage after resolution sees this spelling.
+pub fn field_selection(label: &str) -> String {
+    format!("{FIELD_SELECTION_PREFIX}{label}>")
+}
+
+/// The label a `field_selection` spelling stands for.
+pub fn of_field_selection(spelling: &str) -> Option<&str> {
+    spelling.strip_prefix(FIELD_SELECTION_PREFIX)?.strip_suffix('>')
 }
 
 /// An mll module corresponds to a single .mll file.
@@ -961,6 +994,11 @@ pub struct Constraint {
 /// externally — at the Lua boundary a constructor is a positional integer
 /// tag, not a name — so the rename affects only the JSON codec. Show,
 /// construction, pattern matching and the runtime tag keep `name`.
+///
+/// After import resolution `name` is the constructor's canonical name
+/// (`A.Node`); the spelling its module wrote, which `show` prints and
+/// every external boundary presents, is its `Resolution::source_names`
+/// entry. The same holds for a `RecordField`'s `name`.
 #[derive(Debug, Clone)]
 pub struct Constructor {
     pub name: String,
@@ -998,23 +1036,7 @@ pub struct RecordField {
     pub ty: Type,
 }
 
-impl RecordField {
-    /// The name this field presents at external boundaries (Lua table key,
-    /// JSON object key): the `as "key"` rename when present, the field name
-    /// otherwise.
-    pub fn effective_key(&self) -> &str {
-        self.external_key.as_deref().unwrap_or(&self.name)
-    }
-}
-
 impl Constructor {
-    /// The tag this constructor presents at the JSON boundary: the
-    /// `as "name"` rename when present, the constructor name otherwise —
-    /// the constructor-level twin of `RecordField::effective_key`.
-    pub fn effective_tag(&self) -> &str {
-        self.external_name.as_deref().unwrap_or(&self.name)
-    }
-
     /// The number of fields as PARSED (positional or named). Empty for a
     /// GADT-syntax constructor, whose fields live in `gadt_type` until the
     /// typechecker registers it — after registration, read

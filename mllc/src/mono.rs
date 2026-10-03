@@ -422,11 +422,8 @@ impl Monomorphizer {
                     }
                     TConFields::Named(fs) => {
                         for (i, (cls, var)) in ex.captures.iter().enumerate() {
-                            fs.push(TRecordField {
-                                name: format!("__exdict_{}_{}_{}", cls, var, i),
-                                external_key: None,
-                                ty: Ty::Unit,
-                            });
+                            let name = format!("__exdict_{}_{}_{}", cls, var, i);
+                            fs.push(TRecordField { key: name.clone(), name, ty: Ty::Unit });
                         }
                     }
                 }

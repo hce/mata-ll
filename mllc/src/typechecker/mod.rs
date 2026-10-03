@@ -680,23 +680,9 @@ pub struct Checker {
     /// to fall back to the DERIVING type's own fmap, which destructured the
     /// inner container with the outer type's patterns.
     functor_fmap_futures: HashMap<String, String>,
-    /// Constructor keys (into `constructors`/`env`) declared by the *local*
-    /// module (decl index >= `local_decl_start`), as opposed to builtins, the
-    /// Prelude and imports. Drives duplicate-vs-shadowing decisions.
-    local_con_keys: HashSet<String>,
-    /// Source name -> mangled key, for local constructors that shadow a
-    /// non-local (builtin/Prelude/import) constructor of the same name.
-    /// The non-local constructor keeps its plain name — codegen relies on the
-    /// builtin names (`Just`, `Nothing`, `:`, `[]`) for the Maybe/list
-    /// representations — and the local one is registered, referenced and
-    /// emitted under the mangled key instead. `resolve_con_name` applies the
-    /// rename to every constructor reference in local code, so the local
-    /// definition consistently shadows the imported one (as in GHC, where a
-    /// local declaration shadows an implicitly imported name).
-    local_con_renames: HashMap<String, String>,
     /// True while the declaration currently being processed is local (its decl
     /// index is >= `local_decl_start`). Set by every decl-processing pass;
-    /// determines how `resolve_con_name` resolves constructor references.
+    /// the orphan-instance check applies to local declarations only.
     checking_local: bool,
     /// Skolems minted for existential type variables while checking the
     /// current function, as (name, id). `check_pattern` appends; the escape
@@ -720,10 +706,6 @@ pub struct Checker {
     existential_fields: HashMap<String, String>,
     /// See `claimed_names`.
     claimed: HashSet<String>,
-    /// The implementation name of every method of every builtin instance
-    /// (`eq_Int`, `fmap_Maybe`, `map` for the list Functor): the part of
-    /// `claimed` that instance resolution writes in place of a method.
-    builtin_impls: HashSet<String>,
     /// The default method bodies of the builtin classes as registered
     /// (class, method, source), until `install_builtin_defaults` parses
     /// them: their binders are respelled like every program's
@@ -732,10 +714,11 @@ pub struct Checker {
     pub(super) pending_builtin_defaults: Vec<(String, String, String)>,
 }
 
-/// Suffix appended to a local constructor's key when it shadows a non-local
-/// constructor of the same name. Never shown to users: diagnostics strip it,
-/// derived Show prints the source name, and JSON codecs key by the source name.
-pub(crate) const SHADOW_SUFFIX: &str = "__mll_shadow";
+/// The constructors of the builtin `Bool`. They have no entry in the
+/// constructor table: import resolution turns every reference to them into
+/// a Boolean literal (`modules::Rename`), which is how the checker and
+/// everything after it see them.
+const BOOL_CONSTRUCTORS: [&str; 2] = ["True", "False"];
 
 impl Default for Checker {
     fn default() -> Self {
@@ -792,23 +775,20 @@ impl Checker {
             fromjson_types: HashSet::new(),
             functor_fmap_futures: HashMap::new(),
             tojson_types: HashSet::new(),
-            local_con_keys: HashSet::new(),
-            local_con_renames: HashMap::new(),
             checking_local: false,
             pattern_skolems: Vec::new(),
             existential_skolems: HashMap::new(),
             existential_fields: HashMap::new(),
             claimed: HashSet::new(),
-            builtin_impls: HashSet::new(),
             pending_builtin_defaults: Vec::new(),
         };
         checker.init_prelude();
-        checker.builtin_impls = checker.instances.values()
+        let builtin_impls: Vec<String> = checker.instances.values()
             .flat_map(|inst| inst.method_fns.values().cloned())
             .collect();
         checker.claimed = crate::codegen::runtime_spellings()
             .map(str::to_string)
-            .chain(checker.builtin_impls.iter().cloned())
+            .chain(builtin_impls)
             .collect();
         checker.install_builtin_defaults();
         checker.init_kinds();
@@ -823,9 +803,8 @@ impl Checker {
     /// instance resolution and monomorphization write into a function
     /// body in place of a method. Later stages recognize these entities
     /// by spelling, so import resolution lets no declaration and no
-    /// binder of a program keep one (`modules::PreludeScope::claimed`),
-    /// and `reject_claimed_globals` refuses the two kinds of declaration
-    /// it cannot rename. Only meaningful on a fresh checker.
+    /// binder of a program keep one (`modules::PreludeScope::claimed`).
+    /// Only meaningful on a fresh checker.
     pub fn claimed_names(&self) -> &HashSet<String> {
         &self.claimed
     }
@@ -1447,7 +1426,7 @@ impl Checker {
     }
 
     /// Record which declaration a decl-processing pass is standing on:
-    /// `checking_local` / `checking_prelude` (scoping and baseline
+    /// `checking_local` / `checking_prelude` (orphan check and baseline
     /// attribution) and `cur_file` (diagnostic file attribution). Every pass
     /// that iterates `module.decls` calls this at the top of its loop, so
     /// the three cannot drift apart.
@@ -1819,46 +1798,20 @@ impl Checker {
 
     // --- Data types ---
 
-    /// Resolve a constructor reference (from a pattern, expression, derived
-    /// instance or data-def conversion) to the key it is registered under.
-    /// In local code a name that shadows a non-local constructor resolves to
-    /// the local (mangled) key; everywhere else — non-local code, or names the
-    /// local module does not redefine — the source name is the key. This is
-    /// the single point that keeps the typechecker, the derived instances and
-    /// codegen's tag table all agreeing on which constructor a name means.
-    pub(super) fn resolve_con_name<'a>(&'a self, name: &'a str) -> &'a str {
-        if self.checking_local
-            && let Some(key) = self.local_con_renames.get(name) {
-                return key;
-            }
-        name
-    }
-
     /// Claim `con_name` (constructor `variant_index` of `total_variants` of
-    /// `type_name`, being registered by the declaration currently processed —
-    /// local iff `checking_local`) in the flat constructor namespace. Returns
-    /// the key to register it under, or `None` (with a diagnostic pushed) when
-    /// the name genuinely duplicates an existing same-scope constructor.
+    /// `type_name`) in the constructor table. Returns the key to register
+    /// it under, or `None` (with a diagnostic pushed) when the name is
+    /// already taken.
     ///
-    /// Constructor names are program-wide: import resolution gives values
-    /// and types a canonical name per module, but not constructors (their
-    /// names are visible at runtime — `show`, JSON tags). Policy, mirroring
-    /// GHC's scoping as closely as that allows:
-    /// - two constructors of the same name in the same scope: error (GHC:
-    ///   "Multiple declarations of ...") — except that a *non-local*
-    ///   re-registration of the identical constructor (same type, same
-    ///   position) is benign and accepted;
-    /// - a local constructor whose name a builtin/Prelude/import already uses:
-    ///   the local one shadows it (GHC: a local definition shadows an
-    ///   implicitly imported name) — it gets a mangled key, and
-    ///   `resolve_con_name` routes local references to it;
-    /// - two non-local constructors (an import against the Prelude or another
-    ///   import): error — there is no scope to tell them apart by.
-    ///
+    /// Import resolution gives every module's constructors canonical names
+    /// of their own (`A.Node`, and the entry module's `Main.Just` where it
+    /// would meet a Prelude constructor), so two declarations can meet
+    /// here only within one module — GHC's "Multiple declarations" — or as
+    /// the identical constructor registered twice, which is benign.
     /// Silently keeping both under one name is never an option: the
     /// typechecker's map is last-writer-wins but codegen's tag table scans
-    /// first-match, so the two phases would disagree on the constructor's tag
-    /// and the program would misbehave at runtime with no diagnostic.
+    /// first-match, so the two phases would disagree on the constructor's
+    /// tag and the program would misbehave at runtime with no diagnostic.
     fn claim_constructor_name(
         &mut self,
         con_name: &str,
@@ -1866,74 +1819,25 @@ impl Checker {
         variant_index: usize,
         total_variants: usize,
     ) -> Option<String> {
-        let duplicate_of = |checker: &mut Self, other_type: &str, other_is_local: bool| {
-            let where_other = if other_is_local { "in this module" } else { "by the Prelude or an import" };
-            let note = if other_is_local {
-                "GHC rejects this too (\"Multiple declarations\"): all constructors declared in one module share a single namespace, so a use of the name would be ambiguous. Rename one of the constructors.".to_string()
-            } else {
-                format!(
-                    "data constructor names are program-wide in mata-ll (unlike functions and types, which each module keeps to itself), so two imported types cannot both declare a constructor named '{}'; GHC accepts that. (A constructor declared in your own file may shadow an imported one — this error is only for two imported/Prelude declarations.) Rename the constructor in one of the imported modules.",
-                    con_name,
-                )
-            };
-            checker.push_error_ctx_note(
-                DiagnosticKind::Other(format!(
-                    "Duplicate data constructor '{}': it is already declared by '{}' {}",
-                    con_name, other_type, where_other,
-                )),
-                format!("data {}", type_name),
-                note,
-            );
+        let Some(existing) = self.constructors.get(con_name) else {
+            return Some(con_name.to_string());
         };
-
-        if self.checking_local {
-            // A previous local declaration already shadows a non-local `con_name`.
-            if let Some(key) = self.local_con_renames.get(con_name).cloned() {
-                let other = self.constructors.get(&key).map(|c| c.type_name.clone()).unwrap_or_default();
-                duplicate_of(self, &other, true);
-                return None;
-            }
-            let existing_type = self.constructors.get(con_name).map(|c| c.type_name.clone());
-            match existing_type {
-                Some(other) if self.local_con_keys.contains(con_name) => {
-                    duplicate_of(self, &other, true);
-                    None
-                }
-                Some(_) => {
-                    // Shadow the non-local constructor: the local one lives
-                    // under a mangled key, the non-local keeps its name.
-                    let key = format!("{}{}", con_name, SHADOW_SUFFIX);
-                    if let Some(clash) = self.constructors.get(&key).map(|c| c.type_name.clone()) {
-                        // Pathological: a constructor was literally named like
-                        // the mangled key. Refuse loudly rather than alias.
-                        let clash_local = self.local_con_keys.contains(&key);
-                        duplicate_of(self, &clash, clash_local);
-                        return None;
-                    }
-                    self.local_con_renames.insert(con_name.to_string(), key.clone());
-                    self.local_con_keys.insert(key.clone());
-                    Some(key)
-                }
-                None => {
-                    self.local_con_keys.insert(con_name.to_string());
-                    Some(con_name.to_string())
-                }
-            }
-        } else if let Some(existing) = self.constructors.get(con_name) {
-            if existing.type_name == type_name
-                && existing.variant_index == variant_index
-                && existing.total_variants == total_variants {
-                // The identical constructor registered again: a diamond import
-                // merges the same module's declarations more than once.
-                Some(con_name.to_string())
-            } else {
-                let other = existing.type_name.clone();
-                duplicate_of(self, &other, false);
-                None
-            }
-        } else {
-            Some(con_name.to_string())
+        if existing.type_name == type_name
+            && existing.variant_index == variant_index
+            && existing.total_variants == total_variants
+        {
+            return Some(con_name.to_string());
         }
+        let other = existing.type_name.clone();
+        self.push_error_ctx_note(
+            DiagnosticKind::Other(format!(
+                "Multiple declarations of data constructor '{}': it is already declared by '{}'",
+                con_name, other,
+            )),
+            format!("data {}", type_name),
+            "all constructors declared in one module share a single namespace, so a use of the name would be ambiguous (GHC rejects this too). Rename one of the constructors.",
+        );
+        None
     }
 
     /// Validate the constraints of one constructor's existential context
@@ -1957,12 +1861,10 @@ impl Checker {
             match &c.type_arg {
                 Type::Var(v) if is_existential(v) => {
                     if !self.classes.contains_key(&c.class_name) {
-                        self.push_error_ctx(
-                            DiagnosticKind::Other(format!(
-                                "Unknown typeclass '{}' in the context of constructor '{}': the constraint names the class the packed value must have an instance of, so it must be a class that is in scope",
-                                c.class_name, con_name)),
-                            ctx.to_string(),
-                        );
+                        let kind = self.scope_error(&c.class_name).unwrap_or_else(|| DiagnosticKind::Other(format!(
+                            "Unknown typeclass '{}' in the context of constructor '{}': the constraint names the class the packed value must have an instance of, so it must be a class that is in scope",
+                            c.class_name, con_name)));
+                        self.push_error_ctx(kind, ctx.to_string());
                     }
                 }
                 Type::Var(v) => {
@@ -2074,11 +1976,8 @@ impl Checker {
         }
 
         for (i, con) in constructors.iter().enumerate() {
-            // Claim the name in the flat constructor namespace: `con_key` is
-            // the key the constructor is registered (and code-generated)
-            // under — the plain name, or a mangled key when a local
-            // constructor shadows a Prelude/import one. A genuine same-scope
-            // duplicate was reported by the claim; skip it so it cannot
+            // Claim the constructor's canonical name. A duplicate within
+            // one module was reported by the claim; skip it so it cannot
             // clobber the existing registration with conflicting tags.
             let Some(con_key) = self.claim_constructor_name(&con.name, name, i + 1, constructors.len()) else { continue };
 
@@ -2174,8 +2073,10 @@ impl Checker {
                     fields.iter().map(|f| f.name.clone()).collect(),
                 );
                 for (fi, field) in fields.iter().enumerate() {
-                    // A field name already registered by ANOTHER type would
-                    // silently overwrite that type's accessor and
+                    // A field name already registered by ANOTHER type (of
+                    // the same module: every module's fields have canonical
+                    // names of their own) would silently overwrite that
+                    // type's accessor and
                     // record_fields entry (last-writer-wins): the earlier
                     // type's record construction then failed with
                     // "Unknown field" and its accessor returned the wrong
@@ -2193,11 +2094,9 @@ impl Checker {
                                 )),
                                 format!("data {}", name),
                                 "a record field defines an accessor function of \
-                                 the same name, and accessors are program-wide \
-                                 names in mata-ll, so two types cannot share a \
-                                 field name; rename one field (GHC rejects this \
-                                 as 'Multiple declarations' when both types are \
-                                 in one module, and accepts it across modules)",
+                                 the same name, so two types of one module cannot \
+                                 share a field name; rename one field (GHC rejects \
+                                 this as 'Multiple declarations' too)",
                             );
                             continue;
                         }
@@ -2367,9 +2266,8 @@ impl Checker {
         let inner_ty = self.ast_type_to_ty(inner);
 
         // Register the constructor: Con :: InnerType -> Name.
-        // It shares the program-wide constructor namespace with data
-        // constructors, so it goes through the same duplicate/shadowing
-        // claim.
+        // It shares the constructor namespace with data constructors, so
+        // it goes through the same duplicate claim.
         let Some(con_key) = self.claim_constructor_name(&con_name, name, 1, 1) else { return };
         // The resolved shape, keyed by type name: the TModule newtype list
         // (codegen's transparency test is by CONSTRUCTOR key), the selector
@@ -2403,15 +2301,11 @@ impl Checker {
             is_luadict: self.luadict_types.contains(name),
             constructors: constructors.iter().map(|c| {
                 TConstructor {
-                    // The TIR (and thus codegen) name is the registered key:
-                    // mangled when this local constructor shadows a non-local
-                    // one, the plain name otherwise. Every reference site
-                    // resolves the same way, so tags stay consistent.
-                    name: self.resolve_con_name(&c.name).to_string(),
-                    external_name: c.external_name.clone(),
+                    name: c.name.clone(),
+                    tag: self.con_tag(c),
                     fields: if c.gadt_type.is_some() {
                         // GADT: field types come from the registered ConInfo
-                        let con_info = self.constructors.get(self.resolve_con_name(&c.name)).unwrap();
+                        let con_info = self.constructors.get(&c.name).unwrap();
                         TConFields::Positional(con_info.field_types.clone())
                     } else {
                         match &c.fields {
@@ -2420,7 +2314,7 @@ impl Checker {
                             ConstructorFields::Named(fields) =>
                                 TConFields::Named(fields.iter().map(|f| TRecordField {
                                     name: f.name.clone(),
-                                    external_key: f.external_key.clone(),
+                                    key: self.field_key(f),
                                     ty: self.ast_type_to_ty(&f.ty),
                                 }).collect()),
                         }
@@ -2437,11 +2331,28 @@ impl Checker {
         Some(match self.resolution.scope_errors.get(name)? {
             ScopeError::Unbound(n) => DiagnosticKind::UnboundVariable(n.clone()),
             ScopeError::UnknownType(n) => DiagnosticKind::UnknownType(n.clone()),
+            ScopeError::UnknownClass(n) => DiagnosticKind::Other(format!("Unknown typeclass '{n}'")),
+            ScopeError::UnboundConstructor(n) => DiagnosticKind::UnboundConstructor(n.clone()),
             ScopeError::Explained { message, notes, .. } => DiagnosticKind::Scope {
                 message: message.clone(),
                 notes: notes.clone(),
             },
         })
+    }
+
+    /// The error for a constructor reference `name` with no registered
+    /// constructor: import resolution's explanation when `name` is one of
+    /// its placeholders, plain "unknown constructor" otherwise.
+    pub(super) fn unbound_constructor(&self, name: &str) -> DiagnosticKind {
+        self.scope_error(name).unwrap_or_else(|| DiagnosticKind::UnboundConstructor(name.to_string()))
+    }
+
+    /// The error for a class reference `name` naming no class: import
+    /// resolution's explanation when `name` is one of its placeholders,
+    /// plain "unknown typeclass" otherwise.
+    pub(super) fn unknown_class(&self, name: &str) -> DiagnosticKind {
+        self.scope_error(name)
+            .unwrap_or_else(|| DiagnosticKind::Other(format!("Unknown typeclass '{name}'")))
     }
 
     /// The name `canonical` has in its own module's source (see
@@ -2466,10 +2377,13 @@ impl Checker {
     /// scope (import resolution needs the whole Prelude scope by name).
     /// Only meaningful on a fresh checker, like `is_builtin`.
     pub fn builtin_names(&self) -> (Vec<String>, Vec<String>, Vec<String>) {
-        let constructors: Vec<String> = self.constructors.keys().cloned().collect();
+        let constructors: Vec<String> = self.constructors.keys().cloned()
+            .chain(BOOL_CONSTRUCTORS.iter().map(|c| c.to_string()))
+            .collect();
         let values: Vec<String> = self.env.iter()
             .map(|(name, _)| name.clone())
-            .filter(|name| !self.constructors.contains_key(name))
+            .filter(|name| !self.constructors.contains_key(name)
+                && !BOOL_CONSTRUCTORS.contains(&name.as_str()))
             .collect();
         let types: Vec<String> = self.kinds.keys()
             .chain(self.type_aliases.keys())
@@ -2478,6 +2392,22 @@ impl Checker {
             .cloned()
             .collect();
         (values, types, constructors)
+    }
+
+    /// The builtin classes with their methods, and the type of each
+    /// builtin constructor: what import resolution needs to know of the
+    /// builtin environment to select a class's methods or a type's
+    /// constructors by `C(..)` / `T(..)` in an `import Prelude` form. Only
+    /// meaningful on a fresh checker, like `is_builtin`.
+    pub fn builtin_members(&self) -> (Vec<(String, Vec<String>)>, Vec<(String, String)>) {
+        let classes = self.classes.iter()
+            .map(|(name, ci)| (name.clone(), ci.methods.iter().map(|(m, _)| m.clone()).collect()))
+            .collect();
+        let constructors = self.constructors.iter()
+            .map(|(name, ci)| (name.clone(), ci.type_name.clone()))
+            .chain(BOOL_CONSTRUCTORS.iter().map(|c| (c.to_string(), "Bool".to_string())))
+            .collect();
+        (classes, constructors)
     }
 
     /// Declare how many leading declarations of the module about to be checked
@@ -2527,7 +2457,6 @@ impl Checker {
         // Silent — ill-kinded declarations are reported by pass 2b.
         self.infer_declared_kinds(&module.decls);
 
-        self.reject_claimed_globals(module);
         self.register_type_declarations(module);
 
         // Pass 1b: infer the type-variable kind of every class the module
@@ -2642,91 +2571,6 @@ impl Checker {
         }
     }
 
-    /// The two kinds of declaration import resolution does not rename are
-    /// refused where they are spelled like one of the compiler's own
-    /// entities; every other declaration and every binder of a program is
-    /// moved off those spellings (`claimed_names`).
-    ///
-    ///   * A record field of a claimed spelling: its accessor is a
-    ///     program-wide function of that name and would take the slot of
-    ///     the runtime function (a field `show_Int`, and every `show` at
-    ///     Int reads the field).
-    ///   * A class method spelled like the implementation of a builtin
-    ///     instance: instance resolution writes that name wherever the
-    ///     builtin method is used at its type, and monomorphization would
-    ///     resolve it a second time, as the new class's method.
-    ///
-    /// The Prelude's own declarations are the entities themselves and are
-    /// not checked; a method a builtin class already has is left to
-    /// `register_class`, which reports the duplicate.
-    fn reject_claimed_globals(&mut self, module: &Module) {
-        for (decl_idx, decl) in module.decls.iter().enumerate() {
-            if decl_idx < self.prelude_decl_count {
-                continue;
-            }
-            self.set_decl_position(decl_idx);
-            let (ctx, field, names): (String, bool, Vec<&String>) = match decl {
-                Decl::DataDef { name, constructors, .. } => (
-                    format!("data {}", name),
-                    true,
-                    constructors.iter()
-                        .flat_map(|c| match &c.fields {
-                            ConstructorFields::Named(fs) => fs.iter().map(|f| &f.name).collect(),
-                            ConstructorFields::Positional(_) => Vec::new(),
-                        })
-                        .filter(|n| self.claimed.contains(*n))
-                        .collect(),
-                ),
-                Decl::NewtypeDef { name, field: Some(f), .. } => (
-                    format!("newtype {}", name),
-                    true,
-                    Some(f).into_iter().filter(|n| self.claimed.contains(*n)).collect(),
-                ),
-                Decl::ClassDecl { name, methods, .. } => (
-                    format!("declaration of class '{}'", name),
-                    false,
-                    methods.iter().map(|m| &m.name)
-                        .filter(|m| self.builtin_impls.contains(*m)
-                            && !self.classes.values()
-                                .any(|ci| ci.methods.iter().any(|(n, _)| n == *m)))
-                        .collect(),
-                ),
-                _ => continue,
-            };
-            let mut seen: HashSet<&String> = HashSet::new();
-            for n in names {
-                if !seen.insert(n) {
-                    continue;
-                }
-                let (what, why) = if field {
-                    ("record field",
-                     "a record field defines an accessor function of the same name, and \
-                      accessors are program-wide names in mata-ll, so this one would take \
-                      the runtime function's place")
-                } else {
-                    ("class method",
-                     "the compiler writes this name wherever the builtin method it \
-                      implements is used, and a class method is a program-wide name in \
-                      mata-ll, so those uses would be taken for uses of this method")
-                };
-                self.push_error_ctx_note(
-                    DiagnosticKind::Other(format!(
-                        "'{}' cannot be declared as a {}: the name belongs to mata-ll's \
-                         runtime library", n, what)),
-                    ctx.clone(),
-                    format!(
-                        "the compiler refers to the functions of its runtime library and \
-                         to the implementations of the builtin instances by fixed names, \
-                         and '{}' is one of them; {}. A top-level function or a local \
-                         variable can be called '{}'; GHC accepts the {} as well — \
-                         rename it.",
-                        n, why, n, what),
-                );
-            }
-        }
-        self.clear_decl_position();
-    }
-
     /// Pass 1: register type aliases, data types, and newtypes.
     /// Type aliases must be registered first so that data constructors
     /// referencing aliases (e.g. `data Foo = Foo MyAlias`) expand correctly.
@@ -2775,8 +2619,6 @@ impl Checker {
             }
         }
         for (decl_idx, decl) in module.decls.iter().enumerate() {
-            // Constructor names claimed by a local declaration shadow
-            // non-local (Prelude/import) ones; same-scope duplicates error.
             self.set_decl_position(decl_idx);
             match decl {
                 Decl::DataDef { name, type_vars, constructors, .. } => {
@@ -2990,10 +2832,10 @@ impl Checker {
         for decl in &module.decls {
             match decl {
                 Decl::DataDef { name, deriving, .. } => {
-                    if deriving.iter().any(|c| c == "FromJSON") {
+                    if deriving.iter().any(|c| self.derivable(c) == Some("FromJSON")) {
                         self.fromjson_types.insert(name.clone());
                     }
-                    if deriving.iter().any(|c| c == "ToJSON") {
+                    if deriving.iter().any(|c| self.derivable(c) == Some("ToJSON")) {
                         self.tojson_types.insert(name.clone());
                     }
                     if deriving.iter().any(|c| c == "Functor") {
@@ -3003,9 +2845,9 @@ impl Checker {
                     }
                 }
                 Decl::InstanceDecl { class_name, target_type, .. }
-                    if class_name == "FromJSON" || class_name == "ToJSON" => {
+                    if matches!(self.derivable(class_name), Some("FromJSON" | "ToJSON")) => {
                     if let Some(head) = Self::type_head_name(target_type) {
-                        if class_name == "FromJSON" {
+                        if self.derivable(class_name) == Some("FromJSON") {
                             self.fromjson_types.insert(head);
                         } else {
                             self.tojson_types.insert(head);
@@ -3038,9 +2880,6 @@ impl Checker {
     fn process_deriving(&mut self, module: &Module) -> Vec<TFunction> {
         let mut instance_fns = Vec::new();
         for (decl_idx, decl) in module.decls.iter().enumerate() {
-            // Derived instances build TIR directly; constructor references in
-            // them must resolve in the scope of the data type they derive for
-            // (a local shadowing constructor resolves to its mangled key).
             self.set_decl_position(decl_idx);
             if let Decl::DataDef { name, type_vars, constructors, deriving } = decl {
                 // A field-key rename (`field as "key" :: T`) gives the field
@@ -3052,7 +2891,9 @@ impl Checker {
                 // derivings the record never crosses a boundary that keys by
                 // name, so the rename would be silently meaningless. Reject
                 // it instead.
-                if !deriving.iter().any(|c| c == "LuaDict" || c == "ToJSON" || c == "FromJSON" || c == "Generic") {
+                let derives = |checker: &Self, classes: &[&str]| deriving.iter()
+                    .any(|c| checker.derivable(c).is_some_and(|d| classes.contains(&d)));
+                if !derives(self, &["LuaDict", "ToJSON", "FromJSON", "Generic"]) {
                     for con in constructors {
                         if let ConstructorFields::Named(fields) = &con.fields {
                             for field in fields {
@@ -3081,9 +2922,9 @@ impl Checker {
                 // constructor externally (an ADT with fields is a positional
                 // integer tag, not a name), so the rename would be silently
                 // meaningless — reject it instead.
-                let is_luadict_enum = deriving.iter().any(|c| c == "LuaDict")
+                let is_luadict_enum = derives(self, &["LuaDict"])
                     && constructors.iter().all(|c| c.is_nullary());
-                if !deriving.iter().any(|c| c == "ToJSON" || c == "FromJSON" || c == "Generic") && !is_luadict_enum {
+                if !derives(self, &["ToJSON", "FromJSON", "Generic"]) && !is_luadict_enum {
                     for con in constructors {
                         if let Some(ext) = &con.external_name {
                             self.push_error_ctx_note(
@@ -3163,19 +3004,12 @@ impl Checker {
                                 }]),
                                 None => ConstructorFields::Positional(vec![inner.clone()]),
                             };
-                            // The synthetic Constructor carries the SOURCE
-                            // name: derive_instance resolves the registry
-                            // key itself (resolve_con_name) for its
-                            // patterns and DISPLAYS the name as written.
-                            // Passing the registry key made a shadowing
-                            // constructor's derived Show print the mangled
-                            // key (`Err__mll_shadow 5`).
-                            let source_name = con_key
-                                .strip_suffix(SHADOW_SUFFIX)
-                                .unwrap_or(&con_key)
-                                .to_string();
+                            // The synthetic Constructor carries the
+                            // registered key, like a data declaration's
+                            // after resolution; the derivings display its
+                            // source name.
                             let con = Constructor {
-                                name: source_name,
+                                name: con_key.clone(),
                                 external_name: None,
                                 fields,
                                 gadt_type: None,
@@ -3220,8 +3054,6 @@ impl Checker {
             }
         }
         for (decl_idx, decl) in module.decls.iter().enumerate() {
-            // Instance method bodies reference constructors; resolve them in
-            // the scope of the declaring module (shadowing, see pass 1).
             self.set_decl_position(decl_idx);
             if let Decl::InstanceDecl { class_name, target_type, context, methods } = decl {
                 let ifns = self.check_instance(class_name, target_type, context, methods);

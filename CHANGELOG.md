@@ -134,8 +134,52 @@ API of the `mllc` library crate.)
   replaced the Prelude's type inside the Prelude, so `compare 1 2`
   printed `Small`. Type names are scoped per module like values. Cases
   `scope_same_type_name_imports`, `scope_own_type_names` (GHC-goldened).
-  Constructors, record fields, classes and class methods are still
-  program-wide names.
+- **Constructors, record fields, classes and class methods are scoped per
+  module like functions and types** (rejections of valid programs and
+  silent miscompiles). They were program-wide names:
+  - Two modules could not keep a private constructor, field or class of
+    one name: `data T = Leaf | Node T Int T` in one and
+    `data L = Nil | Node Int L` in another were "Duplicate data
+    constructor 'Node'"; a private field `name` in two modules was a
+    "Duplicate record field"; two private `class Pretty` with an
+    `instance Pretty Int` each were a "Duplicate instance"; a private
+    `class Shape` next to the root's own `class Shape` merged into one
+    class and failed with a type error inside the imported file.
+  - A record field or class method named like a Prelude function
+    replaced the Prelude's for the whole program: a field `error` or
+    `either` in an imported module broke the Prelude's own code, a
+    class method `concatMap` declared after
+    `import Prelude hiding (concatMap)` was not the one a use named.
+  - `import Prelude hiding (Bool(..))` with a `data Bool = False | True`
+    of the module's own kept `True` and `False` the builtin literals
+    ("Cannot unify 'Bool' with 'Main.Bool'").
+  - Import and export lists did not select constructors, fields or
+    methods: `import A (f)` brought all of A's constructors into scope,
+    `module A (T)` exported T's constructors, and a qualified-only import
+    left its constructors visible unqualified.
+  - A record field selection `r.x` was the application `x r`, so a local
+    variable `x` captured it (`let px = 100 in p.px + px` was a type
+    error); it now selects the field `x` in scope, unqualified or through
+    an alias (`p.px` under `import qualified Geo as G`).
+
+  Every constructor, field, class and method now has a canonical name of
+  its module, and every reference — in expressions and patterns, record
+  construction, update and selection, instance heads, class contexts,
+  `deriving` clauses, import and export lists, qualified names — is bound
+  in the scope of the module that wrote it, as in GHC: `T(..)` and `C(..)`
+  carry the constructors, fields and methods, a bare `T` or `C` does not,
+  `hiding (T(..))` hides them, and two imports offering one name make a
+  bare use ambiguous. Instances stay global. What the program shows at
+  run time is the source spelling: `show`, JSON tags and keys, LuaDict
+  keys and enum strings, Generic `conName`/`selName`/`datatypeName`.
+  Emitted Lua is unchanged for programs that compiled before, except
+  the names of dictionary parameters of classes declared in imported
+  modules. A record field or class method may carry a name of the
+  runtime library (`show_Int`), like a function; one named like a
+  Prelude function follows the rules of a function of that name. GHC-goldened cases `entities_constructors`,
+  `entities_classes`, `entities_fields`, `entities_prelude_names`,
+  `entities_import_lists`, `superclass`; self-asserting case
+  `entities_runtime_spellings`.
 - **An operator groups by the fixity of what it denotes, not of its
   spelling** (silent miscompiles). Fixity declarations were collected
   from the tokens of every module an import chain reaches and applied to
@@ -289,18 +333,21 @@ API of the `mllc` library crate.)
 
 ### Changed
 
-- **A record field or a class method cannot be named like a function
-  of the runtime library** (breaking for programs that declared one;
-  GHC accepts them). Fields and class methods are program-wide names in
-  mata-ll, so a field `show_Int` became the accessor every `show` at
-  `Int` called (a run-time crash), and a class method `show_Int` was
-  taken for every use of the builtin `show` at `Int`. Such a field (any
-  runtime-library name: `show_Int`, `eq_Int`, `hashmap_insert`, …) or
-  class method (a builtin instance's implementation name) is now
-  rejected with the reason and a `note:`; a top-level function or a
-  local variable of the same name is accepted. This extends the
-  existing rule for fields named like Prelude functions. To migrate,
-  rename the field or method.
+- **Import and export lists select constructors, record fields and class
+  methods as in Haskell 2010** (breaking for programs that relied on the
+  old program-wide names). `module A (T)` exports the type without its
+  constructors and fields, `module A (C)` the class without its methods;
+  write `T(..)`, `C(..)` or an explicit `T(C1, f)`. An import list brings
+  a type's constructors and fields only with `T(..)` and a class's
+  methods only with `C(..)` or by naming them; a constructor cannot be
+  imported by itself ("module 'A' does not export 'C1' by itself: 'C1' is
+  a data constructor of 'T'"). A qualified-only import keeps its
+  constructors qualified (`Q.Circle`). A module's own declaration of a
+  constructor named like the Prelude's no longer replaces it in the
+  Prelude's own code, and a class declared in the entry module under the
+  name of a Prelude class (`class Eq`) is a class of its own: `deriving
+  (Eq)` then names it, and fails, as in GHC — hide the Prelude's class
+  first to use the name.
 - **A fixity declaration for an operator its module does not define is
   rejected** (breaking for programs that wrote one), as in GHC ("The
   fixity signature … lacks an accompanying binding"). `infixl 6 +` in a

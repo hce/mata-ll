@@ -584,7 +584,7 @@ impl CodeGen {
 
         if Self::emission_single_clause(func) {
             let clause = &clauses[0];
-            let dict_param_names: Vec<String> = func.dict_params.iter().map(|(_, p)| p.clone()).collect();
+            let dict_param_names: Vec<String> = func.dict_params.iter().map(|(_, p)| sanitize_name(p)).collect();
             let mut params: Vec<String> = (0..clause.patterns.len()).map(|i| format!("_arg{}", i)).collect();
             let eta_params: Vec<String> = (0..eta_count).map(|i| format!("_eta{}", i)).collect();
             params.extend(eta_params.iter().cloned());
@@ -721,7 +721,7 @@ impl CodeGen {
         }
 
         // Multiple clauses or guards
-        let dict_param_names: Vec<String> = func.dict_params.iter().map(|(_, p)| p.clone()).collect();
+        let dict_param_names: Vec<String> = func.dict_params.iter().map(|(_, p)| sanitize_name(p)).collect();
         let num_params = clauses.iter().map(|c| c.patterns.len()).max().unwrap_or(0);
         let mut params: Vec<String> = (0..num_params).map(|i| format!("_arg{}", i)).collect();
         let eta_params_multi: Vec<String> = (0..eta_count).map(|i| format!("_eta{}", i)).collect();

@@ -475,14 +475,30 @@ impl Parser {
     /// explicit constructor list) — `T(..)`, `(:+:)(..)`. The contents are
     /// not recorded: mata-ll's export lists control visibility per name,
     /// and the sub-spec's constructors travel with the type.
-    fn skip_export_subspec(&mut self) {
-        if self.at(&Token::LeftParen) {
-            self.advance();
-            while !self.at(&Token::RightParen) && !self.at_eof() {
-                self.advance();
-            }
-            if self.at(&Token::RightParen) { self.advance(); }
+    /// The parenthesized part of a type or class export entry, if any:
+    /// `Some(None)` for `(..)`, `Some(Some(names))` for an explicit list of
+    /// constructors, fields or methods (an operator written in
+    /// parentheses), `None` when the entry has no parentheses.
+    fn parse_export_subspec(&mut self) -> Option<Option<Vec<String>>> {
+        if !self.at(&Token::LeftParen) {
+            return None;
         }
+        self.advance();
+        let mut names = Vec::new();
+        let mut all = false;
+        let mut depth = 0usize;
+        while !(depth == 0 && self.at(&Token::RightParen)) && !self.at_eof() {
+            match self.peek().clone() {
+                Token::LeftParen => depth += 1,
+                Token::RightParen => depth -= 1,
+                Token::Operator(op) if op == ".." => all = true,
+                Token::Ident(n) | Token::UpperIdent(n) | Token::Operator(n) => names.push(n),
+                _ => {}
+            }
+            self.advance();
+        }
+        if self.at(&Token::RightParen) { self.advance(); }
+        Some(if all { None } else { Some(names) })
     }
 
     fn at_eof(&self) -> bool {
@@ -611,15 +627,18 @@ impl Parser {
                 self.advance();
                 let mut exports = Vec::new();
                 let mut reexports = Vec::new();
+                let mut subs = std::collections::HashMap::new();
                 loop {
                     self.skip_newlines_and_indent();
                     if self.at(&Token::RightParen) { break; }
                     match self.peek().clone() {
                         Token::Ident(n) => { exports.push(n); self.advance(); }
                         Token::UpperIdent(n) => {
-                            exports.push(n); self.advance();
-                            // Skip optional (..) for Type(..)
-                            self.skip_export_subspec();
+                            self.advance();
+                            if let Some(sub) = self.parse_export_subspec() {
+                                subs.insert(n.clone(), sub);
+                            }
+                            exports.push(n);
                         }
                         // Module re-export: `module X` (Haskell 2010 §5.2),
                         // X possibly dotted. Which names that passes on is
@@ -641,15 +660,21 @@ impl Parser {
                         // `module M ((-.), (~=~)) where`.
                         Token::LeftParen => {
                             self.advance();
+                            let mut op_name = None;
                             if let Token::Operator(op) = self.peek().clone() {
-                                exports.push(op);
+                                exports.push(op.clone());
+                                op_name = Some(op);
                                 self.advance();
                             }
                             if self.at(&Token::RightParen) { self.advance(); }
                             // A type operator can carry its constructors:
                             // `(:+:)(..)` exports the type and everything it
                             // declares, exactly like `T(..)`.
-                            self.skip_export_subspec();
+                            if let Some(sub) = self.parse_export_subspec()
+                                && let Some(op) = op_name
+                            {
+                                subs.insert(op, sub);
+                            }
                         }
                         other => {
                             let diag = self.err_here(format!(
@@ -668,7 +693,7 @@ impl Parser {
                 }
                 self.skip_newlines_and_indent();
                 if self.at(&Token::RightParen) { self.advance(); }
-                module_exports = Some(ModuleExports { names: exports, reexports });
+                module_exports = Some(ModuleExports { names: exports, reexports, subs });
             }
             if self.at(&Token::Where) {
                 self.advance();
@@ -1940,17 +1965,13 @@ impl Parser {
         let mut patterns = Vec::new();
         while self.is_pattern_atom_start() || matches!(self.peek(), Token::UpperIdent(_)) {
             if let Token::UpperIdent(_) = self.peek() {
-                // Constructor or True/False at clause level — parse as full pattern
+                // A constructor at clause level — parse as full pattern
                 // but don't consume args (they're separate clause patterns)
                 let pat = match self.peek().clone() {
                     Token::UpperIdent(name) => {
                         self.advance();
                         let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
-                        match name.as_str() {
-                            "True" => Pattern::LitPat(Literal::Bool(true)),
-                            "False" => Pattern::LitPat(Literal::Bool(false)),
-                            _ => Pattern::Constructor { name, args: vec![] },
-                        }
+                        Pattern::Constructor { name, args: vec![] }
                     }
                     _ => unreachable!(),
                 };
@@ -3240,7 +3261,9 @@ impl Parser {
     }
 
     /// Parse an atom optionally followed by one or more `.field` accesses.
-    /// `expr.field` desugars to `(field expr)`. Only applies when the `.` is
+    /// `expr.field` desugars to `(field expr)`, the label written as a
+    /// field selection (`ast::field_selection`), which import resolution
+    /// binds to the field. Only applies when the `.` is
     /// adjacent to the preceding token (no space) and followed by an
     /// identifier, to distinguish it from function composition `f . g`.
     fn parse_expr_atom_dotted(&mut self) -> PResult<Expr> {
@@ -3272,7 +3295,10 @@ impl Parser {
                     self.advance(); // consume '.'
                     if let Token::Ident(field) = self.peek().clone() {
                         self.advance(); // consume field name
-                        expr = Expr::App(Box::new(Expr::Var(field)), Box::new(expr));
+                        expr = Expr::App(
+                            Box::new(Expr::Var(crate::ast::field_selection(&field))),
+                            Box::new(expr),
+                        );
                         continue;
                     }
                 }
@@ -3483,7 +3509,10 @@ impl Parser {
         {
             let mut body = Expr::Var("__sec".into());
             for field in chain {
-                body = Expr::App(Box::new(Expr::Var(field)), Box::new(body));
+                body = Expr::App(
+                    Box::new(Expr::Var(crate::ast::field_selection(&field))),
+                    Box::new(body),
+                );
             }
             return Ok(Expr::Lambda { params: vec!["__sec".into()], body: Box::new(body) });
         }
@@ -4381,11 +4410,7 @@ impl Parser {
                 self.advance();
                 // A module-qualified constructor: `M.Just`, `M.Rect`.
                 let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
-                match name.as_str() {
-                    "True" => Ok(Expr::Lit(Literal::Bool(true))),
-                    "False" => Ok(Expr::Lit(Literal::Bool(false))),
-                    _ => self.parse_con_atom(name),
-                }
+                self.parse_con_atom(name)
             }
             Token::LeftParen => self.parse_paren_expr(),
             Token::LeftBracket => self.parse_list_expr(),
@@ -4436,10 +4461,12 @@ impl Parser {
         let lhs = if let Token::UpperIdent(name) = self.peek().clone() {
             self.advance();
             let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
-            // True/False are literal patterns, not constructors
+            // `True` and `False` take no arguments here (as they always
+            // have): a following atom is the next pattern. Which entity
+            // they denote is decided by import resolution, which turns the
+            // Prelude's into Boolean literal patterns.
             match name.as_str() {
-                "True" => Pattern::LitPat(Literal::Bool(true)),
-                "False" => Pattern::LitPat(Literal::Bool(false)),
+                "True" | "False" => Pattern::Constructor { name, args: vec![] },
                 _ => {
                     let mut args = Vec::new();
                     while self.is_pattern_atom_start() {
@@ -4612,17 +4639,12 @@ impl Parser {
                 }
                 Ok(pat)
             }
-            // A constructor in atom position is nullary; True/False are literal
-            // patterns. Constructors with arguments must be parenthesized to
+            // A constructor in atom position is nullary. Constructors with arguments must be parenthesized to
             // appear in argument position, e.g. `(T R a x b)`.
             Token::UpperIdent(name) => {
                 self.advance();
                 let name = self.try_parse_qualified_tail(&name).unwrap_or(name);
-                match name.as_str() {
-                    "True" => Ok(Pattern::LitPat(Literal::Bool(true))),
-                    "False" => Ok(Pattern::LitPat(Literal::Bool(false))),
-                    _ => Ok(Pattern::Constructor { name, args: vec![] }),
-                }
+                Ok(Pattern::Constructor { name, args: vec![] })
             }
             _ => {
                 Err(self.err_here(format!("Expected pattern, found {}", self.peek())))

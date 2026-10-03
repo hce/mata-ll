@@ -293,51 +293,24 @@ fn names_that_differ_only_in_an_escaped_character_are_accepted() {
         .expect("names that differ in an escaped character are distinct definitions");
 }
 
-/// A record field is a program-wide accessor function that import
-/// resolution does not rename, so it cannot carry a name of the runtime
-/// library: the accessor would take the runtime function's slot (a field
-/// `show_Int`, and `print [1]` read the field). A top-level function and a
-/// local variable of the same name are accepted; they get names of their
-/// own.
+/// A record field or class method may carry a name of the runtime library
+/// or of a builtin instance's implementation (`show_Int`, `eq_Int`), as
+/// in GHC: it is an entity of its module with a canonical name of its own
+/// (`Main.show_Int`), so neither the runtime's function nor the builtin
+/// instance is replaced. Their behaviour is pinned against GHC by
+/// cases/names_claimed_members.mll.
 #[test]
-fn a_record_field_cannot_take_a_runtime_library_name() {
-    for (decl, name, ctx) in [
-        ("data R = R { show_Int :: Int }", "show_Int", "in data R"),
-        ("data R = R { ok :: Int, ord_lt__Int :: Int }", "ord_lt__Int", "in data R"),
-        ("newtype N = N { eq_Int :: Int }", "eq_Int", "in newtype N"),
+fn record_fields_and_methods_may_take_runtime_library_names() {
+    for decl in [
+        "data R = R { show_Int :: Int }",
+        "data R = R { ok :: Int, ord_lt__Int :: Int }",
+        "newtype N = N { eq_Int :: Int }",
+        "class C a where\n    show_Int :: a -> Int\n\ninstance C Int where\n    show_Int x = x + 1",
     ] {
-        let source = format!("{decl}\n\nmain :: IO ()\nmain = print (1 :: Int)\n");
-        expect_compile_error(&source, &[], &[
-            &format!("'{name}' cannot be declared as a record field: the name belongs to mata-ll's runtime library"),
-            ctx,
-            "note: the compiler refers to the functions of its runtime library",
-            "accessors are program-wide names in mata-ll",
-            "GHC accepts the record field as well",
-        ]);
+        let source = format!("{decl}\n\nmain :: IO ()\nmain = print [1 :: Int]\n");
+        compile(&source, Path::new("."), &[])
+            .unwrap_or_else(|e| panic!("`{decl}` should compile, got: {e}"));
     }
-    let accepted = "show_Int :: Int -> String\nshow_Int _ = \"mine\"\n\n\
-                    f :: Int -> Int -> Int\nf eq_Int hmInsert = eq_Int + hmInsert\n\n\
-                    main :: IO ()\nmain = putStrLn (show_Int (f 1 2) <> show (3 :: Int))\n";
-    compile(accepted, Path::new("."), &[])
-        .expect("a function and a variable may carry a runtime library's name");
-}
-
-/// A class method spelled like the implementation of a builtin instance
-/// is refused: instance resolution writes that name wherever the builtin
-/// method is used at its type, and the monomorphizer would resolve it
-/// again as the new class's method.
-#[test]
-fn a_class_method_cannot_take_the_name_of_a_builtin_instance_implementation() {
-    let source = "class C a where\n    show_Int :: a -> Int\n\n\
-                  instance C Int where\n    show_Int x = x + 1\n\n\
-                  main :: IO ()\nmain = print [show_Int (3 :: Int)]\n";
-    expect_compile_error(source, &[], &[
-        "'show_Int' cannot be declared as a class method: the name belongs to mata-ll's runtime library",
-        "in declaration of class 'C'",
-        "note: the compiler refers to the functions of its runtime library",
-        "those uses would be taken for uses of this method",
-        "GHC accepts the class method as well",
-    ]);
 }
 
 /// The name of a generated definition — an instance method, a
@@ -1086,7 +1059,7 @@ main :: IO ()
 main = putStrLn "should not compile"
 "#;
     expect_compile_error(source, &[], &[
-        "Duplicate data constructor 'Ok'",
+        "Multiple declarations of data constructor 'Ok'",
         "'A'",
         "data B",
         "note:",
@@ -1104,7 +1077,7 @@ newtype Wrap = Int
 main :: IO ()
 main = putStrLn "should not compile"
 "#;
-    expect_compile_error(source, &[], &["Duplicate data constructor 'Wrap'"]);
+    expect_compile_error(source, &[], &["Multiple declarations of data constructor 'Wrap'"]);
 }
 
 #[test]
@@ -3455,28 +3428,33 @@ main = print broken
     );
 }
 
+/// Two imported modules may each declare a constructor `Shared`: they are
+/// two constructors, as in GHC. Importing both is accepted; a bare use
+/// where both are in scope is an ambiguous occurrence (GHC reports the
+/// same), and a qualified one names the alias's.
 #[test]
-fn duplicate_imported_constructor_rejected() {
-    // Two IMPORTED types claiming one constructor name — the non-local arm
-    // of claim_constructor_name, previously untested. A LOCAL declaration
-    // may shadow an imported constructor (GHC scoping, see
-    // shadowed_prelude_constructor_stays_shadowed), but two imports have no
-    // shadowing order: constructor names are program-wide (unlike functions
-    // and types, which are scoped per module), so the name would silently
-    // go to one of them — a hard error instead. (The same-module arm is
-    // duplicate_local_constructor_rejected; this file once carried a
-    // tolerant duplicate_constructor_rejected written to pass whether or
-    // not the compiler rejected — a test that cannot fail pins nothing.)
-    let source = r#"
+fn two_imported_constructors_of_one_name_are_ambiguous_only_where_used() {
+    let accepted = r#"
+import qualified DupConEast as E
+import DupConWest
+
+main :: IO ()
+main = do
+    print (E.eastGet (E.Shared 1))
+    putStrLn (westGet (Shared "w"))
+"#;
+    compile(accepted, Path::new("tests/cases"), &[])
+        .expect("two modules' constructors of one name are two constructors");
+    let ambiguous = r#"
 import DupConEast
 import DupConWest
 
 main :: IO ()
-main = putStrLn "should not compile"
+main = print (eastGet (Shared 1))
 "#;
-    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
-        "Duplicate data constructor 'Shared'",
-        "by the Prelude or an import",
+    expect_compile_error_in(ambiguous, Path::new("tests/cases"), &[], &[
+        "Ambiguous occurrence 'Shared'",
+        "the 'Shared' of module 'DupConEast' or to the 'Shared' of module 'DupConWest'",
     ]);
 }
 
@@ -4277,35 +4255,51 @@ fn prelude_builtin_redefinition_reports_user_site_not_prelude() {
     );
 }
 
+/// A record field or class method named like a Prelude function is a
+/// top-level value of the entry module, under the rules a function of
+/// that name follows: with the Prelude's name hidden the program is plain
+/// Haskell and compiles (the field is `Main.either`, the Prelude's own
+/// code keeps its `either`); a name the Prelude's own functions use must
+/// be hidden first, and the report names the field's type or the
+/// method's class.
 #[test]
-fn prelude_name_as_record_field_rejected_up_front() {
-    // A record field defines a module-level accessor of its own name. The
-    // checker registers accessors in its data-type pass, before the Prelude's
-    // signatures, so a field named after a Prelude function used to lose
-    // silently: `either (R 1 2)` then failed with "Cannot unify 'a -> b'
-    // with 'R'" at the use site, blaming nothing the user could see. It must
-    // be the same clear redefinition report, naming the field's type.
+fn prelude_name_as_record_field_or_method_follows_the_function_rules() {
+    for source in [
+        "import Prelude hiding (either)\n\ndata R = R { either :: Int, other :: Int }\n\n\
+         main :: IO ()\nmain = print (either (R 1 2) + other (R 1 2))\n",
+        "import Prelude hiding (head)\n\ndata R = R { head :: Int }\n\n\
+         main :: IO ()\nmain = print (head (R 1))\n",
+        "import Prelude hiding (maybe)\n\nnewtype W = W { maybe :: Int }\n\n\
+         main :: IO ()\nmain = print (maybe (W 1))\n",
+        "import Prelude hiding (concatMap)\n\nclass Weird a where\n    concatMap :: a -> a\n\n\
+         instance Weird Int where\n    concatMap x = x + 1\n\n\
+         main :: IO ()\nmain = print (concatMap (1 :: Int), [x | x <- [1, 2 :: Int]])\n",
+    ] {
+        compile(source, Path::new("."), &[])
+            .unwrap_or_else(|e| panic!("should compile:\n{source}\ngot: {e}"));
+    }
     let e = expect_compile_error(
-        "data R = R { either :: Int, other :: Int }\n\nmain :: IO ()\nmain = print (either (R 1 2))\n",
+        "data R = R { error :: Int }\n\nmain :: IO ()\nmain = print (error (R 1))\n",
         &[],
         &[
-            "'either' is already provided by the Prelude and cannot be redefined",
-            "the field 'either' of 'R'",
-            "rename the field",
+            "'error' is already provided by the Prelude and cannot be redefined",
+            "in data R",
+            "a record field is a top-level value of its module, so the field 'error' of 'R'",
+            "rename your field, or hide the Prelude's with 'import Prelude hiding (error)'",
+            "the Prelude's own functions use 'error'",
         ],
     );
     assert!(!e.contains("Cannot unify"), "use-site cascade leaked through, got: {e}");
-    // A builtin (no Prelude source definition) is caught the same way, and
-    // so is the record-form newtype selector.
     expect_compile_error(
-        "data R = R { head :: Int }\n\nmain :: IO ()\nmain = print (head (R 1))\n",
+        "class Has a where\n    elem :: a -> a -> Bool\n\ninstance Has Int where\n    elem x y = x == y\n\n\
+         main :: IO ()\nmain = print (elem (3 :: Int) 3)\n",
         &[],
-        &["'head' is already provided by the Prelude and cannot be redefined", "the field 'head' of 'R'"],
-    );
-    expect_compile_error(
-        "newtype W = W { maybe :: Int }\n\nmain :: IO ()\nmain = print (maybe (W 1))\n",
-        &[],
-        &["'maybe' is already provided by the Prelude and cannot be redefined", "the field 'maybe' of 'W'"],
+        &[
+            "'elem' is already provided by the Prelude and cannot be redefined",
+            "in class Has",
+            "a class method is a top-level value of its module, so the method 'elem' of 'Has'",
+            "hide the Prelude's with 'import Prelude hiding (elem)'",
+        ],
     );
 }
 
@@ -4622,12 +4616,12 @@ main = putStrLn (show (gateFn 5))
 }
 
 /// The surface the check accepts: listed own names, names passed on by
-/// `module X` re-exports, and constructors (global — they travel with
-/// their type). All three import and compile.
+/// `module X` re-exports, and a type with its constructors (`T(..)`). All
+/// three import and compile.
 #[test]
 fn import_list_of_exported_surface_compiles() {
     let source = r#"
-import ReexUmbrella (outerFn, innerFn, MkInnerT)
+import ReexUmbrella (outerFn, innerFn, InnerT(..))
 
 main :: IO ()
 main = do
@@ -4636,6 +4630,23 @@ main = do
 "#;
     compile(source, Path::new("tests/cases"), &[])
         .expect("listed, re-exported and constructor names are all importable");
+}
+
+/// A data constructor is imported with its type, never by itself (Haskell
+/// 2010 §5.3.1); GHC rejects `import M (Con)` as well. The message names
+/// the type to import instead.
+#[test]
+fn import_list_naming_a_constructor_by_itself_is_rejected() {
+    let source = r#"
+import ReexUmbrella (outerFn, MkInnerT)
+
+main :: IO ()
+main = print (MkInnerT 1)
+"#;
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
+        "module 'ReexUmbrella' does not export 'MkInnerT' by itself: 'MkInnerT' is a data constructor of 'InnerT'",
+        "write 'InnerT(..)'",
+    ]);
 }
 
 /// `module X` covering only a qualified import exports nothing (H2010
@@ -6598,4 +6609,73 @@ main = print (double 21)
         "each pragma warns separately: {}", rendered[2]);
     assert!(rendered[0].contains("at 1:1"),
         "the warning carries the pragma's location: {}", rendered[0]);
+}
+
+/// A constructor, field or class method is in scope only where an import
+/// makes it visible, exactly like a function: through its type's or
+/// class's entry with `(..)` (or an explicit list) in the exporting
+/// module's export list and in the import list. GHC rejects each of these
+/// uses as "not in scope".
+#[test]
+fn constructors_fields_and_methods_follow_export_and_import_lists() {
+    let dir = Path::new("tests/cases");
+    for (body, name, note) in [
+        ("print (unU (MkU 1))", "MkU", "its export list does not pass it on"),
+        ("putStrLn (showV (V2 1))", "V2", "its export list does not pass it on"),
+        ("print (dm (1 :: Int))", "dm", "its export list does not pass it on"),
+        ("print (ry (mkR 1 2))", "ry", "its export list does not pass it on"),
+    ] {
+        let source = format!(
+            "import EntListA (T(..), U, mkU, unU, V(..), showV, R, mkR, D, useD)\n\n\
+             main :: IO ()\nmain = {body}\n");
+        expect_compile_error_in(&source, dir, &[], &[
+            &format!("'{name}' is not exported by its module"),
+            note,
+        ]);
+    }
+    let hidden = "import EntListB hiding (Color(..))\n\n\
+                  main :: IO ()\nmain = putStrLn (paint Green)\n";
+    expect_compile_error_in(hidden, dir, &[], &[
+        "'Green' is not exported by its module",
+        "the import of 'EntListB' in this module leaves it out",
+    ]);
+    let class_only = "import EntListA (C)\n\nmain :: IO ()\nmain = putStrLn (cm (1 :: Int))\n";
+    expect_compile_error_in(class_only, dir, &[], &[
+        "'cm' is not exported by its module",
+        "the import of 'EntListA' in this module leaves it out",
+    ]);
+    let alias = "import qualified EntListB as LB\n\nmain :: IO ()\nmain = print LB.Blue\n";
+    expect_compile_error_in(alias, dir, &[], &["Unknown constructor: LB.Blue"]);
+}
+
+/// Two imports that both offer a class of one spelling make a bare use of
+/// it ambiguous (GHC reports the same); each module's own uses keep
+/// meaning its own class.
+#[test]
+fn a_class_two_imports_offer_is_ambiguous_where_used() {
+    let source = "import EntClassA\nimport EntClassB\n\n\
+                  data Q = Q\n\ninstance Sized Q where\n    size _ = 1\n\n\
+                  main :: IO ()\nmain = print (measureAll [Box 1])\n";
+    expect_compile_error_in(source, Path::new("tests/cases"), &[], &[
+        "Ambiguous occurrence 'Sized'",
+        "the 'Sized' of module 'EntClassA' or to the 'Sized' of module 'EntClassB'",
+    ]);
+}
+
+/// A constructor an explicit `import Prelude` form leaves out is out of
+/// scope, as in GHC; the list syntax (`:`, `[]`) and tuples are not names
+/// the Prelude exports and stay available.
+#[test]
+fn prelude_constructors_follow_the_prelude_import() {
+    expect_compile_error(
+        "import Prelude hiding (Maybe(..))\n\nmain :: IO ()\nmain = print (Just (1 :: Int))\n",
+        &[],
+        &["'Just' is not in scope", "this module's explicit 'import Prelude' leaves it out"],
+    );
+    compile(
+        "import Prelude (print, IO, Int)\n\nmain :: IO ()\nmain = print ([1, 2 :: Int], (3 :: Int, [] :: [Int]))\n",
+        Path::new("."),
+        &[],
+    )
+    .expect("list and tuple syntax needs no Prelude name");
 }

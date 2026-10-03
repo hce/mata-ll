@@ -380,7 +380,7 @@ impl Checker {
                     let sub = self.missing_witnesses(&sub_rows, &sub_tys, cap - out.len(), open_lits);
                     out.extend(sub.into_iter().map(|mut w| {
                         let args: Vec<Witness> = w.drain(..arity).collect();
-                        let mut row = vec![Witness::of_con(source_con_name(ckey), &args)];
+                        let mut row = vec![Witness::of_con(ckey, &args)];
                         row.append(&mut w);
                         row
                     }));
@@ -395,7 +395,7 @@ impl Checker {
                     let sub = self.missing_witnesses(&sub_rows, rest_tys, cap - out.len(), open_lits);
                     out.extend(sub.into_iter().map(|mut w| {
                         let args = vec![Witness::atomic("_"); arity];
-                        let mut row = vec![Witness::of_con(source_con_name(ckey), &args)];
+                        let mut row = vec![Witness::of_con(ckey, &args)];
                         row.append(&mut w);
                         row
                     }));
@@ -428,14 +428,11 @@ impl Checker {
                 Pattern::Paren(inner) | Pattern::As(_, inner) => p = inner.as_ref(),
                 Pattern::Var(_) | Pattern::Wildcard => return Head::Wild,
                 Pattern::Constructor { name, args } => {
-                    // Track by registered key so a shadowing local
-                    // constructor is compared against its own type's
-                    // variants, not the shadowed one. An unregistered name
-                    // is an error reported elsewhere; count it as a
-                    // catch-all so no spurious second error follows.
-                    let key = self.resolve_con_name(name);
-                    return if self.constructors.contains_key(key) {
-                        Head::Con(key.to_string(), args)
+                    // An unregistered name is an error reported
+                    // elsewhere; count it as a catch-all so no spurious
+                    // second error follows.
+                    return if self.constructors.contains_key(name) {
+                        Head::Con(name.to_string(), args)
                     } else {
                         Head::Wild
                     };
@@ -567,13 +564,6 @@ fn prepend_witness(rows: Vec<Vec<Witness>>, w: Witness) -> Vec<Vec<Witness>> {
             row
         })
         .collect()
-}
-
-/// Constructor keys are internal (a shadowing local constructor is
-/// registered under a mangled key); witnesses report the source name the
-/// user wrote.
-fn source_con_name(key: &str) -> &str {
-    key.strip_suffix(SHADOW_SUFFIX).unwrap_or(key)
 }
 
 /// Literal identity for coverage: two literal patterns cover the same
@@ -1977,12 +1967,9 @@ impl Checker {
                 }
             }
             Pattern::Constructor { name, args } => {
-                // Resolve the source name to its registered key (a local
-                // constructor shadowing a Prelude/import one lives under a
-                // mangled key); diagnostics keep the source name.
-                let con_key = self.resolve_con_name(name).to_string();
+                let con_key = name.to_string();
                 let con_info = self.constructors.get(&con_key)
-                    .ok_or_else(|| DiagnosticKind::UnboundConstructor(name.clone()))?.clone();
+                    .ok_or_else(|| self.unbound_constructor(name))?.clone();
 
                 if args.len() != con_info.field_types.len() {
                     return Err(DiagnosticKind::PatternArgCount {
@@ -2137,9 +2124,7 @@ impl Checker {
                 }
             }
             Expr::Con(name) => {
-                // Resolve to the registered key (shadowing, see check_pattern);
-                // the TIR carries the key so codegen picks the right tag.
-                let con_key = self.resolve_con_name(name).to_string();
+                let con_key = name.to_string();
                 if let Some(scheme) = env.lookup(&con_key) {
                     let scheme = scheme.clone();
                     let (ty, inst_map) = self.instantiate_with_map(&scheme);
@@ -2161,7 +2146,7 @@ impl Checker {
                     }
                     Ok((TExpr::new(TExprKind::Con(con_key), ty.clone()), ty, Subst::empty()))
                 } else {
-                    Err(DiagnosticKind::UnboundConstructor(name.clone()))
+                    Err(self.unbound_constructor(name))
                 }
             }
             Expr::Lit(lit) => {
@@ -2610,8 +2595,8 @@ impl Checker {
             Expr::RecordCon { constructor, fields } => {
                 // Desugar to positional application by reordering fields
                 // to match the data declaration order
-                if !self.constructors.contains_key(self.resolve_con_name(constructor)) {
-                    return Err(DiagnosticKind::UnboundConstructor(constructor.clone()));
+                if !self.constructors.contains_key(constructor) {
+                    return Err(self.unbound_constructor(constructor));
                 }
 
                 // The CONSTRUCTOR's own fields in declaration order. (The
@@ -2620,7 +2605,7 @@ impl Checker {
                 // demanded A's field of a `B { y = 1 }` construction —
                 // "Missing field 'x' in constructor 'B'" — a valid program
                 // rejected.)
-                let con_key = self.resolve_con_name(constructor).to_string();
+                let con_key = constructor.to_string();
                 let field_order: Vec<(String, usize)> = self
                     .con_record_fields
                     .get(&con_key)

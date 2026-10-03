@@ -1,21 +1,30 @@
-class Eq a where
-    (==) :: a -> a -> Bool
+class Same a where
+    same :: a -> a -> Bool
 
-class Eq a => Ord a where
-    compare :: a -> a -> Int
+class Same a => Ranked a where
+    rank :: a -> a -> Int
 
 data Prio = Low | High
-    deriving Eq
 
-instance Ord Prio where
-    compare Low Low = 0
-    compare Low High = -1
-    compare High Low = 1
-    compare High High = 0
+instance Same Prio where
+    same Low Low = True
+    same High High = True
+    same _ _ = False
+
+instance Ranked Prio where
+    rank Low Low = 0
+    rank Low High = -1
+    rank High Low = 1
+    rank High High = 0
+
+atMost :: Ranked a => a -> a -> Bool
+atMost x y = same x y || rank x y < 0
 
 main :: IO ()
 main = do
-    assert (compare Low High == -1) "Low < High"
-    assert (compare High High == 0) "High == High"
-    assert (Low == Low) "Eq Low Low"
-    assert (not (Low == High)) "Eq Low High"
+    assert (rank Low High == -1) "Low < High"
+    assert (rank High High == 0) "High == High"
+    assert (same Low Low) "Same Low Low"
+    assert (not (same Low High)) "Same Low High"
+    assert (atMost Low High) "superclass method through the subclass constraint"
+    assert (not (atMost High Low)) "superclass method, other order"

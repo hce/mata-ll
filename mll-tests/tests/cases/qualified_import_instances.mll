@@ -19,18 +19,18 @@ instance Measured Q.Shape where
 
 main :: IO ()
 main = do
-    let c = Circle 2
-    let r = Rect 2 3
+    let c = Q.Circle 2
+    let r = Q.Rect 2 3
     -- Show instance (method body calls the sibling `render`)
     assert (show c == "shape of area 12.0") "Show instance body calls prefixed sibling"
     assert (show r == "shape of area 6.0") "Show instance on the second constructor"
     -- Eq instance on the qualified type
-    assert (c == Circle 2) "Eq instance attached to the prefixed type"
+    assert (c == Q.Circle 2) "Eq instance attached to the prefixed type"
     assert (not (r == Q.unit)) "Eq instance distinguishes values"
-    -- class default method (body calls the sibling `label` and `render`);
-    -- class names and methods stay global, like constructors
-    assert (describe r == "described: shape of area 6.0") "class default calls prefixed sibling"
-    assert (label Q.unit == "shape of area 1.0") "instance method of the imported class"
+    -- class default method (body calls the sibling `label` and `render`),
+    -- reached through the alias like every name of the module
+    assert (Q.describe r == "described: shape of area 6.0") "class default calls prefixed sibling"
+    assert (Q.label Q.unit == "shape of area 1.0") "instance method of the imported class"
     -- qualified value + type in a signature
     assert (Q.area r == 6) "qualified value"
     -- class default body using a qualified sibling

@@ -44,11 +44,10 @@ Two ordering facts that are easy to get wrong and matter:
 
 - **"Declared twice" is decided in the parser, per source file.** Stages 3
   and 4 merge the Prelude, every import and the user's file into ONE
-  declaration list. Stage 3 gives each imported module's values and types
-  canonical names of their own, but constructors, record fields, classes
-  and class methods stay program-wide, so after the parser a second
-  declaration of such a name cannot be told from a cross-module one.
-  `parser.rs` therefore keeps
+  declaration list. Stage 3 gives every module's declarations canonical
+  names of their own, so two modules never meet in that list; but the
+  checks that one module declares a name once are easiest where the
+  file is read. `parser.rs` therefore keeps
   two logs while it reads one file: the declaration table
   (`Parser::declared`, checked once by `check_declarations` at the end of
   `parse_module`: one declaration per name and namespace, and equations of
@@ -61,7 +60,8 @@ Two ordering facts that are easy to get wrong and matter:
   every construct that binds a list of patterns: each variable once). The
   typechecker's own duplicate checks (constructors, a field in two types,
   a method in two classes, data/newtype/synonym names) work on the merged
-  list and stay responsible for those clashes.
+  list; with canonical names they can only fire for two declarations of
+  one module.
 
 ### The prelude / `local_start` trick
 
@@ -280,22 +280,34 @@ list and resolve names by plain string lookup. What keeps two modules' `helper`
 apart is done entirely in `modules.rs`, before the merge
 (`ModuleLoader::resolve_module`, one call per module, cached):
 
-- **Entities and canonical names.** Every top-level value and type declaration
-  is an entity with one canonical name, fixed by its defining module alone
-  (`canon_val` / `canon_ty`): `Module.name` for an imported module — a
+- **Entities and canonical names.** Every name a top-level declaration
+  introduces is an entity with one canonical name, fixed by its defining
+  module alone (`canon`): functions, types, data constructors, record
+  fields, classes and class methods alike. There are three namespaces —
+  values (functions, fields, methods), types and classes, constructors —
+  and a constructor, field or method belongs to its type or class
+  (`Entity::parent`), which is what `T(..)` in an import or export list
+  selects. The canonical name is `Module.name` for an imported module — a
   spelling no source identifier can have — and the bare name for the entry
-  module and the Prelude. An entry-module declaration whose bare name is
-  already taken program-wide (a Prelude name, or an imported module's record
-  field or class method) is `Main.name` instead; `main` is always bare. A
-  program without imports therefore has exactly the names it is written with.
-- **Scopes.** A module's scope maps the bare names it may write to entities:
-  its own declarations; then what each unqualified import edge makes visible
-  (the imported module's export *surface*, filtered by the edge's import list
-  or `hiding`); then the Prelude (`PreludeScope`: the Prelude source plus the
-  checker's builtin environment, narrowed by explicit `import Prelude` forms).
-  Own wins over imported, imported over Prelude; two different imported
-  entities under one name are ambiguous. An alias has a table of its own: the
-  surfaces of the modules imported under it.
+  module and the Prelude. An entry-module declaration whose bare name the
+  Prelude already has in its namespace (or, for a value, the runtime
+  library: `PreludeScope::claimed`) is `Main.name` instead (`Main.Bool`,
+  `Main.True`, `Main.concatMap`); `main` is always bare. A program without
+  imports therefore has exactly the names it is written with, except for
+  such clashes.
+- **Scopes.** A module's scope maps the bare names it may write to entities,
+  one table per namespace: its own declarations; then what each unqualified
+  import edge makes visible (the imported module's export *surface*,
+  filtered by the edge's import list or `hiding`: `hidden_by_forms`); then
+  the Prelude (`PreludeScope`: the Prelude source plus the checker's
+  builtin environment, narrowed by explicit `import Prelude` forms; `:`,
+  `[]` and tuples are syntax, always in scope). Own wins over imported,
+  imported over Prelude; two different imported entities under one name
+  are ambiguous. An alias has a table of its own: the surfaces of the
+  modules imported under it. A surface follows the export list
+  (Haskell 2010 §5.2): a type or class listed bare is exported without its
+  constructors, fields or methods; `T(..)` exports all of them, `T(C, f)`
+  the ones named, and a field or method may be listed as a value.
 - **Binding happens once, in the resolver.** `Rename` rewrites the module's
   own declarations: declared names become canonical, and every reference not
   shadowed by a local binder is replaced by the canonical name of the entity
@@ -333,8 +345,28 @@ apart is done entirely in `modules.rs`, before the merge
   modules `resolve_module` sees; `modules::group_baseline` runs the same
   `Rename` over them with empty tables. After stage 3 no chain node
   exists (the checker's arms for them are `unreachable!`).
-- **What is not scoped.** Constructors, record fields, classes and class
-  methods are global names and are not renamed.
+- **Names bound through their owner, and instances.** Two kinds of
+  reference are not looked up in the module's scope: the methods an
+  instance declaration defines are the methods of its class
+  (`ModuleLoader::class_methods`, `Rename::method_of`), and the field
+  labels of a record construction `C { f = e }` are the fields of `C`
+  (`ModuleLoader::con_fields`, `Rename::field_of`); a record update's
+  labels are fields in scope. The label of a field selection `r.f` /
+  `(.f)` is written by the parser as a reserved spelling
+  (`ast::field_selection`) and bound to a field in scope — unqualified,
+  else through the one alias offering a field `f` — past any local binder
+  of that spelling (`Rename::field_selection`); `M.f` with `M` an alias
+  is the same shape and becomes the qualified reference. Instances have no names: every instance of
+  the program is in force everywhere, and two modules' private classes
+  `Pretty` are two classes, each with its own `instance Pretty Int`. The
+  constructor of an unsettled `newtype N = <type>` is settled here too
+  (resolution phase 4): the head of the right-hand side when it names no
+  type in scope and takes one argument (`newtype Rad = MkRad Double`),
+  otherwise the type's own name. A reference that binds to the Prelude's
+  `True` or `False` becomes the Boolean literal (`Rename::boolean`); the
+  parser writes both as ordinary constructors, so a program's own `True`
+  (after `import Prelude hiding (Bool(..))`) is a constructor of its own
+  type.
 - **References the compiler writes (`ast::WiredIn`).** A desugaring is
   spelled with Prelude functions: a list comprehension with `concatMap`, a
   range with an `enumFrom…` method, a partial match with `error`, a guard
@@ -369,11 +401,9 @@ apart is done entirely in `modules.rs`, before the merge
   `fold.rs`, `demand.rs` and the emitter key tables on these names.
   `Checker::claimed_names` lists them, and resolution keeps every program
   entity off them the way it keeps locals off wired-in names: an
-  entry-module declaration of such a name gets the qualified canonical
-  name (`Main.show_Int`, `canon_val`), a local binder the `__local_`
-  spelling. Record fields and class methods are not renamed (see above),
-  so `Checker::reject_claimed_globals` refuses a field of a claimed name
-  and a class method named like a builtin implementation. Everything the
+  entry-module declaration of such a name — a function, a record field, a
+  class method — gets the qualified canonical name (`Main.show_Int`,
+  `canon`), a local binder the `__local_` spelling. Everything the
   compiler generates per program — instance methods (`show·Color`),
   derived helpers, specializations and dictionary forms (`count·IntTInt`,
   `show·Color·dictform` via `Monomorphizer::mangle_name`), Generic
@@ -382,14 +412,26 @@ apart is done entirely in `modules.rs`, before the merge
   `ast::shown` prints it as `_` in messages.
 - **Canonical names downstream.** The checker refers to the bundled library
   by canonical name where it has built-in knowledge of it
-  (`Checker::json_fn`, `Checker::library_type`: `JSON.jField`,
-  `Data.Generics.K1`). Diagnostics are rendered through
+  (`Checker::json_fn`, `library_type`, `library_class`, `library_con`,
+  `library_value`: `JSON.jField`, `Data.Generics.K1`, `JSON.ToJSON`,
+  `Data.Generics.L1`, `JSON.toJSON`); which derivable class a `deriving`
+  entry denotes is decided on the canonical name (`Checker::derivable`),
+  so a program's own class `Show` or `ToJSON` is never taken for the
+  Prelude's or the library's. Diagnostics are rendered through
   `types::DisplayNames`, which spells canonical names the way their module
-  wrote them (`Resolution::display_names`). The Lua host key of an `export`
-  and runtime-visible type names (`datatypeName`, JSON error contexts) use
-  the source spelling (`Resolution::source_names`, `TModule::export_keys`).
-  Emitted Lua refers to functions by slot, so canonical names do not appear
-  in it.
+  wrote them (`Resolution::display_names`; a type, class or constructor
+  whose spelling another of its namespace shares keeps its qualified
+  form). Everything the program shows at run time uses the source
+  spelling (`Resolution::source_names`): the Lua host key of an `export`,
+  derived `show` for constructors and fields, a JSON tag or key, a
+  LuaDict key or enum string, Generic `datatypeName`/`conName`/`selName`
+  (`Checker::con_tag`, `Checker::field_key`, `TConstructor::tag`,
+  `TRecordField::key`), JSON error contexts and FFI decode errors. Emitted
+  Lua refers to functions and constructors by slot and integer tag, a
+  dictionary's fields by the methods' source names (one class per
+  dictionary, `CodeGen::dict_field`); canonical names reach it only in
+  the spelling of a dictionary parameter (`__dict_` plus the class's
+  canonical name, through `sanitize_name`).
 
 ---
 

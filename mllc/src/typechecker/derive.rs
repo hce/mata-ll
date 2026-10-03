@@ -25,12 +25,17 @@ impl Checker {
         type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
+        if let Some(kind) = self.scope_error(class) {
+            self.push_error_ctx(kind, format!("data {}", type_name));
+            return vec![];
+        }
+        let derivable = self.derivable(class);
         // The six structural derives walk every constructor's fields by
         // arity and match on the constructor's own type; a constructor with
         // existential variables or a refined (GADT) result type has neither
         // a plain arity nor an instance head that covers it — GHC rejects
         // these too ("has existentials or constraints in its type").
-        if matches!(class, "Show" | "Eq" | "Ord" | "Enum" | "Bounded" | "Functor")
+        if matches!(derivable, Some("Show" | "Eq" | "Ord" | "Enum" | "Bounded" | "Functor"))
             && let Some((con, why)) = self.non_vanilla_constructor(type_vars, constructors)
         {
             self.reject_derive(
@@ -42,20 +47,20 @@ impl Checker {
             );
             return vec![];
         }
-        match class {
-            "Show" => self.derive_show(type_name, type_vars, constructors),
-            "Eq" => self.derive_eq(type_name, type_vars, constructors),
-            "Ord" => self.derive_ord(type_name, type_vars, constructors),
-            "Enum" => self.derive_enum(type_name, type_vars, constructors),
-            "Bounded" => self.derive_bounded(type_name, type_vars, constructors),
-            "Functor" => self.derive_functor(type_name, type_vars, constructors),
-            "ToJSON" => self.derive_tojson(type_name, type_vars, constructors),
-            "FromJSON" => self.derive_fromjson(type_name, type_vars, constructors),
-            "Generic" => self.ensure_generic(type_name, type_vars, constructors),
-            "LuaDict" => { self.derive_luadict(type_name, type_vars, constructors); vec![] }
-            other => {
+        match derivable {
+            Some("Show") => self.derive_show(type_name, type_vars, constructors),
+            Some("Eq") => self.derive_eq(type_name, type_vars, constructors),
+            Some("Ord") => self.derive_ord(type_name, type_vars, constructors),
+            Some("Enum") => self.derive_enum(type_name, type_vars, constructors),
+            Some("Bounded") => self.derive_bounded(type_name, type_vars, constructors),
+            Some("Functor") => self.derive_functor(type_name, type_vars, constructors),
+            Some("ToJSON") => self.derive_tojson(type_name, type_vars, constructors),
+            Some("FromJSON") => self.derive_fromjson(type_name, type_vars, constructors),
+            Some("Generic") => self.ensure_generic(type_name, type_vars, constructors),
+            Some("LuaDict") => { self.derive_luadict(type_name, type_vars, constructors); vec![] }
+            _ => {
                 self.push_error_ctx(
-                    DiagnosticKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor, Generic, ToJSON, FromJSON and LuaDict are supported", other)),
+                    DiagnosticKind::Other(format!("Cannot derive '{}' — only Show, Eq, Ord, Enum, Bounded, Functor, Generic, ToJSON, FromJSON and LuaDict are supported", class)),
                     format!("data {}", type_name),
                 );
                 vec![]
@@ -81,7 +86,7 @@ impl Checker {
     /// reading it made the derived Eq/Show/Ord of such a type ignore every
     /// field. Empty for a constructor that failed to register.
     fn derived_field_tys(&self, con: &Constructor) -> Vec<Ty> {
-        let key = self.resolve_con_name(&con.name);
+        let key = &con.name;
         self.constructors.get(key).map(|ci| ci.field_types.clone()).unwrap_or_default()
     }
 
@@ -100,7 +105,7 @@ impl Checker {
         constructors: &[Constructor],
     ) -> Option<(String, &'static str)> {
         for con in constructors {
-            let key = self.resolve_con_name(&con.name);
+            let key = &con.name;
             let Some(ci) = self.constructors.get(key) else { continue };
             if !ci.existential_vars.is_empty() {
                 return Some((con.name.clone(), "has existential type variables"));
@@ -166,16 +171,16 @@ impl Checker {
             // record field keys below — each must be a non-empty string and no
             // two may collide, else two constructors would be indistinguishable
             // at the Lua boundary.
-            let mut seen: HashMap<&str, &str> = HashMap::new();
+            let mut seen: HashMap<String, &str> = HashMap::new();
             for con in constructors {
-                let tag = con.effective_tag();
+                let tag = self.con_tag(con);
                 if tag.is_empty() {
                     reject(self,
                         format!("constructor '{}' renames its Lua tag to the empty string", con.name),
                         "the constructor becomes a string at the Lua boundary, and an empty tag names nothing a Lua host could tell apart; give `as` a non-empty string.");
                     return;
                 }
-                if let Some(prev) = seen.insert(tag, &con.name) {
+                if let Some(prev) = seen.insert(tag.clone(), &con.name) {
                     reject(self,
                         format!("constructors '{}' and '{}' both map to the Lua tag \"{}\"", prev, con.name, tag),
                         "each constructor becomes one string at the Lua boundary, so two sharing a tag would be indistinguishable there; rename one with `as \"otherTag\"`.");
@@ -204,16 +209,16 @@ impl Checker {
                 // present, the field name otherwise): each must be a non-empty
                 // string, and no two fields may share one — they become the keys
                 // of a single Lua table.
-                let mut seen: HashMap<&str, &str> = HashMap::new();
+                let mut seen: HashMap<String, &str> = HashMap::new();
                 for field in fields {
-                    let key = field.effective_key();
+                    let key = self.field_key(field);
                     if key.is_empty() {
                         reject(self,
                             format!("field '{}' renames its Lua key to the empty string", field.name),
                             "the field name becomes a key in the runtime Lua table, and an empty key names nothing a Lua host could sensibly read; give `as` a non-empty string.");
                         return;
                     }
-                    if let Some(prev) = seen.insert(key, &field.name) {
+                    if let Some(prev) = seen.insert(key.clone(), &field.name) {
                         reject(self,
                             format!("fields '{}' and '{}' both map to the Lua key \"{}\"", prev, field.name, key),
                             "each record field becomes one key in the runtime Lua table, so two fields sharing a key would silently overwrite each other; rename one with `as \"otherKey\"`.");
@@ -250,10 +255,9 @@ impl Checker {
 
         let mut clauses = Vec::new();
         for con in constructors {
-            // TIR references use the registered key (mangled when this local
-            // constructor shadows a Prelude/import one); the *displayed* name
-            // stays the source name the user wrote.
-            let con_key = self.resolve_con_name(&con.name).to_string();
+            // TIR references use the constructor's canonical name; the
+            // *displayed* name is the source name the user wrote.
+            let con_key = con.name.clone();
             let field_tys = self.derived_field_tys(con);
             let field_count = field_tys.len();
 
@@ -342,7 +346,7 @@ impl Checker {
 
             let named_fields: Option<Vec<String>> = match &con.fields {
                 ConstructorFields::Named(fs) if !fs.is_empty() =>
-                    Some(fs.iter().map(|f| f.name.clone()).collect()),
+                    Some(fs.iter().map(|f| self.source_name(&f.name).to_string()).collect()),
                 _ => None,
             };
 
@@ -351,7 +355,7 @@ impl Checker {
                 // with ", " between fields and each value at precedence 0
                 // (never parenthesized — `P {px = -1}` has no inner parens).
                 Some(fnames) => {
-                    let mut body = lit(&format!("{} {{", con.name));
+                    let mut body = lit(&format!("{} {{", self.source_name(&con.name)));
                     for (i, (pname, fname)) in
                         param_names.iter().zip(fnames.iter()).enumerate()
                     {
@@ -366,7 +370,7 @@ impl Checker {
                 // Positional: "ConName" ++ " " ++ show p0 ++ " " ++ show p1 …
                 // with each field at argument precedence (showsPrec 11).
                 None => {
-                    let mut body = lit(&con.name);
+                    let mut body = lit(self.source_name(&con.name));
                     for (i, pname) in param_names.iter().enumerate() {
                         body = concat(body, lit(" "));
                         body = concat(body, show_field(i, pname, true));
@@ -477,7 +481,7 @@ impl Checker {
         let mut clauses = Vec::new();
 
         for con in constructors {
-            let con_key = self.resolve_con_name(&con.name).to_string();
+            let con_key = con.name.clone();
             let field_tys = self.derived_field_tys(con);
             let field_count = field_tys.len();
 
@@ -667,8 +671,8 @@ impl Checker {
                     compare_clauses.push(TClause {
                         span: None,
                         patterns: vec![
-                            TPattern::Constructor { name: self.resolve_con_name(&con_a.name).to_string(), args: a_args },
-                            TPattern::Constructor { name: self.resolve_con_name(&con_b.name).to_string(), args: b_args },
+                            TPattern::Constructor { name: con_a.name.clone(), args: a_args },
+                            TPattern::Constructor { name: con_b.name.clone(), args: b_args },
                         ],
                         guards: vec![],
                         body: Some(TExpr::new(TExprKind::Con(ord_con.to_string()), ordering_ty.clone())),
@@ -680,7 +684,7 @@ impl Checker {
                 // Same constructor: bind fields with their real types (as
                 // derive_eq does) so the monomorphizer can resolve `compare`
                 // per field type.
-                let con_key = self.resolve_con_name(&con_a.name).to_string();
+                let con_key = con_a.name.clone();
                 let field_tys: Vec<Ty> = self.constructors.get(&con_key)
                     .map(|ci| ci.field_types.clone())
                     .unwrap_or_default();
@@ -793,8 +797,8 @@ impl Checker {
                         cls.push(TClause {
                             span: None,
                             patterns: vec![
-                                TPattern::Constructor { name: self.resolve_con_name(&con_a.name).to_string(), args: vec![] },
-                                TPattern::Constructor { name: self.resolve_con_name(&con_b.name).to_string(), args: vec![] },
+                                TPattern::Constructor { name: con_a.name.clone(), args: vec![] },
+                                TPattern::Constructor { name: con_b.name.clone(), args: vec![] },
                             ],
                             guards: vec![],
                             body: Some(TExpr::new(TExprKind::Lit(TLiteral::Bool(result)), bool_ty.clone())),
@@ -993,7 +997,7 @@ impl Checker {
             let clauses: Vec<TClause> = constructors.iter().enumerate().map(|(i, con)| {
                 TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args: vec![] }],
+                    patterns: vec![TPattern::Constructor { name: con.name.clone(), args: vec![] }],
                     guards: vec![],
                     body: Some(TExpr::new(TExprKind::Lit(TLiteral::Integer(i as i64)), int_ty.clone())),
                     where_binds: vec![],
@@ -1018,7 +1022,7 @@ impl Checker {
                     span: None,
                     patterns: vec![TPattern::LitPat(TLiteral::Integer(i as i64), Ty::Con("Int".into()))],
                     guards: vec![],
-                    body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&con.name).to_string()), result_type.clone())),
+                    body: Some(TExpr::new(TExprKind::Con(con.name.clone()), result_type.clone())),
                     where_binds: vec![],
                 }
             }).collect();
@@ -1056,9 +1060,9 @@ impl Checker {
             for i in 0..n.saturating_sub(1) {
                 clauses.push(TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&constructors[i].name).to_string(), args: vec![] }],
+                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
                     guards: vec![],
-                    body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i+1].name).to_string()), result_type.clone())),
+                    body: Some(TExpr::new(TExprKind::Con(constructors[i+1].name.clone()), result_type.clone())),
                     where_binds: vec![],
                 });
             }
@@ -1096,9 +1100,9 @@ impl Checker {
             for i in 1..n {
                 clauses.push(TClause {
                     span: None,
-                    patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&constructors[i].name).to_string(), args: vec![] }],
+                    patterns: vec![TPattern::Constructor { name: constructors[i].name.clone(), args: vec![] }],
                     guards: vec![],
-                    body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors[i-1].name).to_string()), result_type.clone())),
+                    body: Some(TExpr::new(TExprKind::Con(constructors[i-1].name.clone()), result_type.clone())),
                     where_binds: vec![],
                 });
             }
@@ -1221,7 +1225,7 @@ impl Checker {
         {
             let a_var = TExpr::new(TExprKind::Var("_a".into()), result_type.clone());
             let last_con = TExpr::new(
-                TExprKind::Con(self.resolve_con_name(&constructors.last().unwrap().name).to_string()),
+                TExprKind::Con(constructors.last().unwrap().name.clone()),
                 result_type.clone(),
             );
             let body = TExpr::new(TExprKind::App(
@@ -1429,7 +1433,7 @@ impl Checker {
         if constructors.len() == 1 && !is_enum {
             let con = &constructors[0];
             let field_tys = self.derived_field_tys(con);
-            let con_key = self.resolve_con_name(&con.name).to_string();
+            let con_key = con.name.clone();
             let result_type = Ty::Con(type_name.to_string());
             let mut functions = Vec::new();
             for (method, mangled) in [("minBound", minted("minBound", type_name)),
@@ -1497,7 +1501,7 @@ impl Checker {
                 span: None,
                 patterns: vec![],
                 guards: vec![],
-                body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.first().unwrap().name).to_string()), result_type.clone())),
+                body: Some(TExpr::new(TExprKind::Con(constructors.first().unwrap().name.clone()), result_type.clone())),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -1515,7 +1519,7 @@ impl Checker {
                 span: None,
                 patterns: vec![],
                 guards: vec![],
-                body: Some(TExpr::new(TExprKind::Con(self.resolve_con_name(&constructors.last().unwrap().name).to_string()), result_type.clone())),
+                body: Some(TExpr::new(TExprKind::Con(constructors.last().unwrap().name.clone()), result_type.clone())),
                 where_binds: vec![],
             }],
             specialized: false,
@@ -1834,7 +1838,7 @@ impl Checker {
 
         let mut clauses = Vec::new();
         for con in constructors {
-            let con_key = self.resolve_con_name(&con.name).to_string();
+            let con_key = con.name.clone();
             let field_tys = self.derived_field_tys(con);
             let field_count = field_tys.len();
 
@@ -1973,7 +1977,8 @@ impl Checker {
         type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
-        if self.instances.contains_key(&("Generic".to_string(), InstHead::Con(type_name.to_string()))) {
+        let generic = self.library_class("Data.Generics", "Generic");
+        if self.instances.contains_key(&(generic, InstHead::Con(type_name.to_string()))) {
             return vec![];
         }
         self.derive_generic(type_name, type_vars, constructors)
@@ -1990,7 +1995,7 @@ impl Checker {
         type_vars: &[String],
         constructors: &[Constructor],
     ) -> Vec<TFunction> {
-        if !self.classes.contains_key("Generic") {
+        if !self.classes.contains_key(&self.library_class("Data.Generics", "Generic")) {
             self.push_error_ctx(
                 DiagnosticKind::Other(format!(
                     "Cannot derive 'Generic' for '{}': the Generic class is not in scope — add `import Data.Generics`",
@@ -2058,8 +2063,14 @@ impl Checker {
         let u1_t = rep_con("U1");
         let rep_family = self.library_type("Data.Generics", "Rep");
 
-        // Value/pattern helpers.
-        let con_e = |name: &str, ty: Ty| TExpr::new(TExprKind::Con(name.into()), ty);
+        // Value/pattern helpers. The representation's constructors are the
+        // library's, by their names in the program (`library_con`).
+        let gcon: HashMap<&str, String> = ["U1", "K1", "S1", "Prod", "C1", "D1", "L1", "R1"]
+            .into_iter()
+            .map(|n| (n, self.library_con("Data.Generics", n)))
+            .collect();
+        let gname = |n: &str| -> String { gcon[n].clone() };
+        let con_e = |name: &str, ty: Ty| TExpr::new(TExprKind::Con(gname(name)), ty);
         let app_e = |f: TExpr, a: TExpr, ty: Ty|
             TExpr::new(TExprKind::App(Box::new(f), Box::new(a)), ty);
 
@@ -2074,12 +2085,13 @@ impl Checker {
         // the canonical (module-qualified) one import resolution gave it.
         out_fns.push(self.meta_string_fn(&dt_fn, self.source_name(type_name)));
         out_fns.push(self.meta_int_fn(&dc_fn, constructors.len() as i64));
+        let gmethod = |checker: &Self, n: &str| checker.library_value("Data.Generics", n);
         self.register_instance(InstanceInfo {
-            class_name: "Datatype".to_string(),
+            class_name: self.library_class("Data.Generics", "Datatype"),
             target_type: Ty::Con(d_marker.clone()),
             method_fns: HashMap::from([
-                ("datatypeName".to_string(), dt_fn),
-                ("datatypeConCount".to_string(), dc_fn),
+                (gmethod(self, "datatypeName"), dt_fn),
+                (gmethod(self, "datatypeConCount"), dc_fn),
             ]),
             context: None,
         });
@@ -2090,11 +2102,11 @@ impl Checker {
         let mut cons: Vec<ConRep> = Vec::new();
 
         for con in constructors {
-            let con_key = self.resolve_con_name(&con.name).to_string();
+            let con_key = con.name.clone();
             let field_tys: Vec<Ty> = self.constructors.get(&con_key)
                 .map(|c| c.field_types.clone()).unwrap_or_default();
             let field_names: Vec<String> = match &con.fields {
-                ConstructorFields::Named(fs) => fs.iter().map(|f| f.effective_key().to_string()).collect(),
+                ConstructorFields::Named(fs) => fs.iter().map(|f| self.field_key(f)).collect(),
                 ConstructorFields::Positional(_) => vec![String::new(); field_tys.len()],
             };
 
@@ -2109,16 +2121,16 @@ impl Checker {
             // a GADT-syntax constructor (its signature lives in gadt_type),
             // and conArity metadata must reflect the real field count.
             let arity = field_tys.len();
-            out_fns.push(self.meta_string_fn(&cn_fn, con.effective_tag()));
+            out_fns.push(self.meta_string_fn(&cn_fn, &self.con_tag(con)));
             out_fns.push(self.meta_int_fn(&ca_fn, arity as i64));
             out_fns.push(self.meta_bool_fn(&cr_fn, is_record));
             self.register_instance(InstanceInfo {
-                class_name: "Constructor".to_string(),
+                class_name: self.library_class("Data.Generics", "Constructor"),
                 target_type: Ty::Con(c_marker.clone()),
                 method_fns: HashMap::from([
-                    ("conName".to_string(), cn_fn),
-                    ("conArity".to_string(), ca_fn),
-                    ("conIsRecord".to_string(), cr_fn),
+                    (gmethod(self, "conName"), cn_fn),
+                    (gmethod(self, "conArity"), ca_fn),
+                    (gmethod(self, "conIsRecord"), cr_fn),
                 ]),
                 context: None,
             });
@@ -2132,9 +2144,9 @@ impl Checker {
                 let sn_fn = meta_name("__meta_selName", &[type_name, &con.name, &fi.to_string()]);
                 out_fns.push(self.meta_string_fn(&sn_fn, &field_names[fi]));
                 self.register_instance(InstanceInfo {
-                    class_name: "Selector".to_string(),
+                    class_name: self.library_class("Data.Generics", "Selector"),
                     target_type: Ty::Con(s_marker.clone()),
-                    method_fns: HashMap::from([("selName".to_string(), sn_fn)]),
+                    method_fns: HashMap::from([(gmethod(self, "selName"), sn_fn)]),
                     context: None,
                 });
                 field_reps.push(s1_t(Ty::Con(s_marker.clone()), k1_t(fty.clone())));
@@ -2210,22 +2222,22 @@ impl Checker {
 
             // ---- to: pattern the wrapped rep, body `Con p0 p1 …` ----
             let prod_pat = if fc == 0 {
-                TPattern::Constructor { name: "U1".into(), args: vec![] }
+                TPattern::Constructor { name: gname("U1"), args: vec![] }
             } else {
                 let field_pats: Vec<TPattern> = params.iter().map(|nm| {
-                    TPattern::Constructor { name: "S1".into(), args: vec![
-                        TPattern::Constructor { name: "K1".into(), args: vec![
+                    TPattern::Constructor { name: gname("S1"), args: vec![
+                        TPattern::Constructor { name: gname("K1"), args: vec![
                             TPattern::Var(nm.clone(), Ty::Unit),
                         ]},
                     ]}
                 }).collect();
                 field_pats.into_iter().rev().reduce(|acc, p|
-                    TPattern::Constructor { name: "Prod".into(), args: vec![p, acc] }
+                    TPattern::Constructor { name: gname("Prod"), args: vec![p, acc] }
                 ).unwrap()
             };
-            let c1_pat = TPattern::Constructor { name: "C1".into(), args: vec![prod_pat] };
-            let inj_pat = Self::inject_sum_pat(ci, n, c1_pat);
-            let to_pat = TPattern::Constructor { name: "D1".into(), args: vec![inj_pat] };
+            let c1_pat = TPattern::Constructor { name: gname("C1"), args: vec![prod_pat] };
+            let inj_pat = Self::inject_sum_pat(ci, n, c1_pat, &gname);
+            let to_pat = TPattern::Constructor { name: gname("D1"), args: vec![inj_pat] };
             // body: Con p0 p1 …
             let mut to_body = TExpr::new(TExprKind::Con(cr.con_key.clone()),
                 Ty::fun(&cr.field_tys, result_type.clone()));
@@ -2255,11 +2267,11 @@ impl Checker {
             dict_params: vec![], derived_strict: false,
         });
         self.register_instance(InstanceInfo {
-            class_name: "Generic".to_string(),
+            class_name: self.library_class("Data.Generics", "Generic"),
             target_type: result_type,
             method_fns: HashMap::from([
-                ("from".to_string(), from_fn),
-                ("to".to_string(), to_fn),
+                (gmethod(self, "from"), from_fn),
+                (gmethod(self, "to"), to_fn),
             ]),
             context: None,
         });
@@ -2297,19 +2309,19 @@ impl Checker {
     }
 
     /// The `to`-side pattern mirror of `inject_sum`.
-    fn inject_sum_pat(ci: usize, n: usize, inner: TPattern) -> TPattern {
+    fn inject_sum_pat(ci: usize, n: usize, inner: TPattern, gname: &dyn Fn(&str) -> String) -> TPattern {
         if n == 1 {
             return inner;
         }
         let mut p = inner;
         if ci < n - 1 {
-            p = TPattern::Constructor { name: "L1".into(), args: vec![p] };
+            p = TPattern::Constructor { name: gname("L1"), args: vec![p] };
             for _ in 0..ci {
-                p = TPattern::Constructor { name: "R1".into(), args: vec![p] };
+                p = TPattern::Constructor { name: gname("R1"), args: vec![p] };
             }
         } else {
             for _ in 0..n - 1 {
-                p = TPattern::Constructor { name: "R1".into(), args: vec![p] };
+                p = TPattern::Constructor { name: gname("R1"), args: vec![p] };
             }
         }
         p
@@ -2328,7 +2340,71 @@ impl Checker {
         if self.type_name_defined(&canonical) { canonical } else { name.to_string() }
     }
 
+    /// The name of class `name` of the bundled library module `module`
+    /// (see `library_type`).
+    pub(super) fn library_class(&self, module: &str, name: &str) -> String {
+        let canonical = format!("{module}.{name}");
+        if self.classes.contains_key(&canonical) { canonical } else { name.to_string() }
+    }
+
+    /// The name of constructor `name` of the bundled library module
+    /// `module` (see `library_type`).
+    pub(super) fn library_con(&self, module: &str, name: &str) -> String {
+        let canonical = format!("{module}.{name}");
+        if self.constructors.contains_key(&canonical) { canonical } else { name.to_string() }
+    }
+
+    /// The name of value `name` — a function or a class method — of the
+    /// bundled library module `module` (see `library_type`).
+    pub(super) fn library_value(&self, module: &str, name: &str) -> String {
+        let canonical = format!("{module}.{name}");
+        if self.env.lookup(&canonical).is_some() { canonical } else { name.to_string() }
+    }
+
+    /// Which of the derivable classes the class `class` (as resolution
+    /// bound it in the deriving module) is: the Prelude's `Show`, `Eq`,
+    /// `Ord`, `Enum`, `Bounded`, `Functor`; the library's `ToJSON`,
+    /// `FromJSON` (module `JSON`) and `Generic` (`Data.Generics`); the
+    /// intrinsic `LuaDict`. `None` for any other class, a program's own
+    /// class of one of these spellings included.
+    pub(super) fn derivable(&self, class: &str) -> Option<&'static str> {
+        const PRELUDE: [&str; 7] = ["Show", "Eq", "Ord", "Enum", "Bounded", "Functor", "LuaDict"];
+        if let Some(k) = PRELUDE.iter().find(|k| **k == class) {
+            return Some(k);
+        }
+        [("JSON", "ToJSON"), ("JSON", "FromJSON"), ("Data.Generics", "Generic")]
+            .into_iter()
+            .find(|(module, name)| self.library_class(module, name) == class)
+            .map(|(_, name)| name)
+    }
+
     pub(super) fn json_ty(&self) -> Ty { Ty::Con(self.library_type("JSON", "Json")) }
+
+    /// The name of the codec method implementation of type `type_name` in
+    /// direction `dir` — the `fromJSON`/`toJSON` of its FromJSON/ToJSON
+    /// instance, derived or written: an instance method is named after
+    /// the class method it implements (`minted`), and the library's method
+    /// is `JSON.toJSON` in a program that imports the library.
+    fn json_codec_name(&self, dir: JsonDir, type_name: &str) -> String {
+        minted(&self.library_value("JSON", dir.prefix()), type_name)
+    }
+
+    /// The tag constructor `con` presents at an external boundary — the
+    /// string a derived JSON codec writes and reads for it, the runtime
+    /// value of a LuaDict enum constructor, its Generic `conName`: the
+    /// `as "tag"` rename when present, the name its module declares it
+    /// under otherwise (never the canonical name import resolution gave
+    /// it).
+    pub(super) fn con_tag(&self, con: &Constructor) -> String {
+        con.external_name.clone().unwrap_or_else(|| self.source_name(&con.name).to_string())
+    }
+
+    /// The key record field `field` presents at an external boundary — the
+    /// LuaDict table key, the JSON object key, its Generic `selName`: the
+    /// `as "key"` rename when present, the field's source name otherwise.
+    pub(super) fn field_key(&self, field: &RecordField) -> String {
+        field.external_key.clone().unwrap_or_else(|| self.source_name(&field.name).to_string())
+    }
 
     /// `Either String t`
     pub(super) fn estr_ty(t: &Ty) -> Ty {
@@ -2490,8 +2566,8 @@ impl Checker {
                     JsonDir::Encode => self.tojson_types.contains(n),
                 };
                 if derived_here
-                    || self.instances.contains_key(&(dir.class().to_string(), InstHead::Con(n.clone()))) {
-                    Ok(Self::jx_var(&minted(dir.prefix(), n), codec_ty))
+                    || self.instances.contains_key(&(self.library_class("JSON", dir.class()), InstHead::Con(n.clone()))) {
+                    Ok(Self::jx_var(&self.json_codec_name(dir, n), codec_ty))
                 } else {
                     Err((
                         format!("the type '{}' has no {} instance", n, dir.class()),
@@ -2543,16 +2619,17 @@ impl Checker {
         result_ty: &Ty,
     ) -> Result<TExpr, (String, String)> {
         let json = self.json_ty();
-        // The constructed value uses the registered key (a shadowing local
-        // constructor is mangled); every *string* below keeps the source name.
-        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
+        // The constructed value uses the constructor's canonical name; every
+        // *string* below is a source name.
+        let mut body = Self::jx_ok_con(con_name, field_tys, result_ty, estr);
         for i in (0..fields.len()).rev() {
             let fty = &field_tys[i];
             let fname = &fields[i].name;
             // Derive-time errors name the Haskell field; runtime decode
             // errors name the JSON key, because that is what the document
             // actually contains.
-            let key = fields[i].effective_key();
+            let key = self.field_key(&fields[i]);
+            let key = key.as_str();
             let err_what = || format!("field '{}' of constructor '{}' cannot be decoded", fname, con_name);
             let step = if let Some(inner) = Self::ty_maybe_inner(fty) {
                 // Maybe field: a missing key and an explicit null both → Nothing.
@@ -2592,7 +2669,7 @@ impl Checker {
         estr: &Ty,
         result_ty: &Ty,
     ) -> Result<TExpr, (String, String)> {
-        let mut body = Self::jx_ok_con(self.resolve_con_name(con_name), field_tys, result_ty, estr);
+        let mut body = Self::jx_ok_con(con_name, field_tys, result_ty, estr);
         for i in (0..field_tys.len()).rev() {
             let fty = &field_tys[i];
             let dec = self.fromjson_field_decoder(fty).map_err(|e| Self::fromjson_field_err(
@@ -2628,7 +2705,7 @@ impl Checker {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
                 self.fromjson_named_body(&con.name, fields, field_tys, estr, result_ty)
             }
-            _ if field_tys.is_empty() => Ok(Self::jx_ok_con(self.resolve_con_name(&con.name), &[], result_ty, estr)),
+            _ if field_tys.is_empty() => Ok(Self::jx_ok_con(&con.name, &[], result_ty, estr)),
             _ => {
                 let contents = Self::jx_call(
                     &self.json_fn("jField"),
@@ -2637,7 +2714,7 @@ impl Checker {
                 );
                 let inner = if field_tys.len() == 1 {
                     self.fromjson_positional_chain(
-                        &con.name, con.effective_tag(), field_tys,
+                        &con.name, &self.con_tag(con), field_tys,
                         vec![Self::jx_var("_c", json.clone())],
                         estr, result_ty,
                     )?
@@ -2650,11 +2727,11 @@ impl Checker {
                             json.clone(),
                         )
                     }).collect();
-                    let chain = self.fromjson_positional_chain(&con.name, con.effective_tag(), field_tys, elems, estr, result_ty)?;
+                    let chain = self.fromjson_positional_chain(&con.name, &self.con_tag(con), field_tys, elems, estr, result_ty)?;
                     let arrn = Self::jx_call(
                         &self.json_fn("jExpectArrN"),
                         vec![
-                            Self::jx_str(con.effective_tag()),
+                            Self::jx_str(&self.con_tag(con)),
                             Self::jx_int(field_tys.len() as i64),
                             Self::jx_var("_c", json.clone()),
                         ],
@@ -2698,16 +2775,16 @@ impl Checker {
             checker.reject_derive(class, type_name, &reason, note);
         };
         if tagged {
-            let mut seen_tags: HashMap<&str, &str> = HashMap::new();
+            let mut seen_tags: HashMap<String, &str> = HashMap::new();
             for con in constructors {
-                let tag = con.effective_tag();
+                let tag = self.con_tag(con);
                 if tag.is_empty() {
                     reject(self,
                         format!("constructor '{}' renames its JSON tag to the empty string", con.name),
                         "the tag is the string the codec writes and reads to tell the constructors apart, and an empty one identifies nothing; give `as` a non-empty string.");
                     return false;
                 }
-                if let Some(prev) = seen_tags.insert(tag, &con.name) {
+                if let Some(prev) = seen_tags.insert(tag.clone(), &con.name) {
                     reject(self,
                         format!("constructors '{}' and '{}' both map to the JSON tag \"{}\"", prev, con.name, tag),
                         "the tag is the only thing the decoder has to tell the constructors apart, so two constructors sharing one would encode identically and decode ambiguously; rename one with `as \"otherName\"`.");
@@ -2726,9 +2803,9 @@ impl Checker {
         }
         for con in constructors {
             let ConstructorFields::Named(fields) = &con.fields else { continue };
-            let mut seen: HashMap<&str, &str> = HashMap::new();
+            let mut seen: HashMap<String, &str> = HashMap::new();
             for field in fields {
-                let key = field.effective_key();
+                let key = self.field_key(field);
                 if key.is_empty() {
                     reject(self,
                         format!("field '{}' of constructor '{}' renames its JSON key to the empty string", field.name, con.name),
@@ -2741,7 +2818,7 @@ impl Checker {
                         "a multi-constructor type maps to {\"tag\":\"Con\", …} with record fields inline in the same object; rename the field, or rename its key with `as \"otherKey\"`.");
                     return false;
                 }
-                if let Some(prev) = seen.insert(key, &field.name) {
+                if let Some(prev) = seen.insert(key.clone(), &field.name) {
                     reject(self,
                         format!("fields '{}' and '{}' of constructor '{}' both map to the JSON key \"{}\"", prev, field.name, con.name, key),
                         "each record field becomes one key in the JSON object, so two fields sharing a key would silently overwrite each other; rename one with `as \"otherKey\"`.");
@@ -2773,7 +2850,7 @@ impl Checker {
         // canonical `JSON.<name>` whenever some module of the program
         // imports JSON (bare when the program IS the JSON module).
         let probe = self.json_fn(dir.scope_probe());
-        if !self.classes.contains_key(class) || self.env.lookup(&probe).is_none() {
+        if !self.classes.contains_key(&self.library_class("JSON", class)) || self.env.lookup(&probe).is_none() {
             self.reject_derive(class, type_name,
                 &format!("the {} class and its {} combinators are not in scope", class, dir.noun()),
                 &format!("the {} class and the codec combinators the derived {} calls ({}) live in the JSON library module; add `import JSON` at the top of this file.",
@@ -2852,14 +2929,14 @@ impl Checker {
         let json = self.json_ty();
         let str_ty = Ty::Con("String".into());
         let bool_ty = Ty::Con("Bool".into());
-        let mangled = minted("fromJSON", type_name);
+        let mangled = self.json_codec_name(JsonDir::Decode, type_name);
 
         let body_inner: TExpr = if tagged {
             // "'A', 'B' or 'C'" for the unknown-tag message — the effective
             // tags (the `as "name"` rename when present): a runtime decode
             // error names what the document must contain, and the document
             // carries the external tag, not the source constructor name.
-            let names: Vec<String> = constructors.iter().map(|c| format!("'{}'", c.effective_tag())).collect();
+            let names: Vec<String> = constructors.iter().map(|c| format!("'{}'", self.con_tag(c))).collect();
             let expected = match names.len() {
                 1 => names[0].clone(),
                 _ => format!("{} or {}", names[..names.len() - 1].join(", "), names[names.len() - 1]),
@@ -2888,18 +2965,18 @@ impl Checker {
             );
             for (con, ftys) in constructors.iter().zip(&con_field_tys).rev() {
                 let then_branch = if ftys.is_empty() {
-                    // TIR construction uses the registered key; the compared
+                    // TIR construction uses the canonical name; the compared
                     // JSON tag strings are the effective tags (the `as
                     // "name"` rename when present, the source name otherwise).
-                    Self::jx_ok_con(self.resolve_con_name(&con.name), &[], &result_ty, &estr)
+                    Self::jx_ok_con(&con.name, &[], &result_ty, &estr)
                 } else {
-                    Self::jx_call(&self.json_fn("jTagNeedsObject"), vec![Self::jx_str(con.effective_tag())], estr.clone())
+                    Self::jx_call(&self.json_fn("jTagNeedsObject"), vec![Self::jx_str(&self.con_tag(con))], estr.clone())
                 };
                 str_chain = TExpr::new(TExprKind::If {
                     cond: Box::new(TExpr::new(TExprKind::InfixApp {
                         op: "==".into(),
                         lhs: Box::new(Self::jx_var("_s", str_ty.clone())),
-                        rhs: Box::new(Self::jx_str(con.effective_tag())),
+                        rhs: Box::new(Self::jx_str(&self.con_tag(con))),
                     }, bool_ty.clone())),
                     then_branch: Box::new(then_branch),
                     else_branch: Box::new(str_chain),
@@ -2917,7 +2994,7 @@ impl Checker {
                     cond: Box::new(TExpr::new(TExprKind::InfixApp {
                         op: "==".into(),
                         lhs: Box::new(Self::jx_var("_tag", str_ty.clone())),
-                        rhs: Box::new(Self::jx_str(con.effective_tag())),
+                        rhs: Box::new(Self::jx_str(&self.con_tag(con))),
                     }, bool_ty.clone())),
                     then_branch: Box::new(con_body),
                     else_branch: Box::new(tag_chain),
@@ -2941,7 +3018,7 @@ impl Checker {
                 branches: vec![
                     TCaseBranch {
                         pattern: TPattern::Constructor {
-                            name: "JStr".into(),
+                            name: self.library_con("JSON", "JStr"),
                             args: vec![TPattern::Var("_s".into(), str_ty.clone())],
                         },
                         guards: vec![],
@@ -2949,7 +3026,7 @@ impl Checker {
                     },
                     TCaseBranch {
                         pattern: TPattern::Constructor {
-                            name: "JObj".into(),
+                            name: self.library_con("JSON", "JObj"),
                             args: vec![TPattern::Wildcard],
                         },
                         guards: vec![],
@@ -2976,7 +3053,7 @@ impl Checker {
                 }
                 _ if ftys.len() == 1 => {
                     self.fromjson_positional_chain(
-                        &con.name, &con.name, ftys,
+                        &con.name, self.source_name(&con.name), ftys,
                         vec![Self::jx_var("_j", json.clone())],
                         &estr, &result_ty,
                     )
@@ -2990,12 +3067,12 @@ impl Checker {
                             json.clone(),
                         )
                     }).collect();
-                    self.fromjson_positional_chain(&con.name, &con.name, ftys, elems, &estr, &result_ty)
+                    self.fromjson_positional_chain(&con.name, self.source_name(&con.name), ftys, elems, &estr, &result_ty)
                         .map(|chain| {
                             let arrn = Self::jx_call(
                                 &self.json_fn("jExpectArrN"),
                                 vec![
-                                    Self::jx_str(&con.name),
+                                    Self::jx_str(self.source_name(&con.name)),
                                     Self::jx_int(ftys.len() as i64),
                                     Self::jx_var("_j", json.clone()),
                                 ],
@@ -3026,7 +3103,7 @@ impl Checker {
         // source instances get, so the derive must provide it itself — the
         // generic decoder (genericFromJSON) reads every record field through
         // fromJSONField, including fields of natively-derived types.
-        let field_fn = minted("fromJSONField", type_name);
+        let field_fn = minted(&self.library_value("JSON", "fromJSONField"), type_name);
         let dec_ty = Ty::arrow(json.clone(), estr.clone());
         let field_body = Self::jx_call(
             &self.json_fn("jFieldWith"),
@@ -3040,10 +3117,10 @@ impl Checker {
 
         // Register the instance
         let mut method_fns = HashMap::new();
-        method_fns.insert("fromJSON".to_string(), mangled.clone());
-        method_fns.insert("fromJSONField".to_string(), field_fn.clone());
+        method_fns.insert(self.library_value("JSON", "fromJSON"), mangled.clone());
+        method_fns.insert(self.library_value("JSON", "fromJSONField"), field_fn.clone());
         self.register_instance(InstanceInfo {
-            class_name: "FromJSON".to_string(),
+            class_name: self.library_class("JSON", "FromJSON"),
             target_type: result_ty.clone(),
             method_fns,
             context: None,
@@ -3111,20 +3188,20 @@ impl Checker {
         let pair_ty = Ty::Tuple(vec![Ty::Con("String".into()), self.json_ty()]);
         let list = Self::jx_list(pairs, pair_ty);
         let con_ty = Ty::arrow(list.ty.clone(), self.json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JObj".into()), con_ty), list, self.json_ty())
+        Self::jx_app(TExpr::new(TExprKind::Con(self.library_con("JSON", "JObj")), con_ty), list, self.json_ty())
     }
 
     /// `JStr "s"`
     pub(super) fn jx_jstr(&self, s: &str) -> TExpr {
         let con_ty = Ty::arrow(Ty::Con("String".into()), self.json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JStr".into()), con_ty), Self::jx_str(s), self.json_ty())
+        Self::jx_app(TExpr::new(TExprKind::Con(self.library_con("JSON", "JStr")), con_ty), Self::jx_str(s), self.json_ty())
     }
 
     /// `JArr [e0, e1, …]`
     pub(super) fn jx_jarr(&self, elems: Vec<TExpr>) -> TExpr {
         let list = Self::jx_list(elems, self.json_ty());
         let con_ty = Ty::arrow(list.ty.clone(), self.json_ty());
-        Self::jx_app(TExpr::new(TExprKind::Con("JArr".into()), con_ty), list, self.json_ty())
+        Self::jx_app(TExpr::new(TExprKind::Con(self.library_con("JSON", "JArr")), con_ty), list, self.json_ty())
     }
 
     /// Encode constructor argument #i: the resolved encoder applied to the
@@ -3150,7 +3227,7 @@ impl Checker {
         for (i, field) in fields.iter().enumerate() {
             let val = self.tojson_arg(i, &field_tys[i]).map_err(|e| Self::fromjson_field_err(
                 format!("field '{}' of constructor '{}' cannot be encoded", field.name, con_name), e))?;
-            pairs.push(self.jx_pair(field.effective_key(), val));
+            pairs.push(self.jx_pair(&self.field_key(field), val));
         }
         Ok(pairs)
     }
@@ -3177,11 +3254,11 @@ impl Checker {
             ConstructorFields::Named(fields) if !fields.is_empty() => {
                 let mut pairs = self.tojson_named_pairs(&con.name, fields, field_tys)?;
                 if tagged {
-                    pairs.insert(0, self.jx_pair("tag", self.jx_jstr(con.effective_tag())));
+                    pairs.insert(0, self.jx_pair("tag", self.jx_jstr(&self.con_tag(con))));
                 }
                 Ok(self.jx_obj(pairs))
             }
-            _ if field_tys.is_empty() => Ok(self.jx_jstr(con.effective_tag())),
+            _ if field_tys.is_empty() => Ok(self.jx_jstr(&self.con_tag(con))),
             _ => {
                 let args: Vec<TExpr> = field_tys.iter().enumerate().map(|(i, fty)| {
                     self.tojson_arg(i, fty).map_err(|e| Self::fromjson_field_err(
@@ -3194,7 +3271,7 @@ impl Checker {
                 };
                 if tagged {
                     Ok(self.jx_obj(vec![
-                        self.jx_pair("tag", self.jx_jstr(con.effective_tag())),
+                        self.jx_pair("tag", self.jx_jstr(&self.con_tag(con))),
                         self.jx_pair("contents", contents),
                     ]))
                 } else {
@@ -3244,7 +3321,7 @@ impl Checker {
 
         let result_ty = Ty::Con(type_name.to_string());
         let json = self.json_ty();
-        let mangled = minted("toJSON", type_name);
+        let mangled = self.json_codec_name(JsonDir::Encode, type_name);
 
         // One clause per constructor; report every unsupported field before
         // bailing out.
@@ -3258,7 +3335,7 @@ impl Checker {
                         .collect();
                     clauses.push(TClause {
                         span: None,
-                        patterns: vec![TPattern::Constructor { name: self.resolve_con_name(&con.name).to_string(), args }],
+                        patterns: vec![TPattern::Constructor { name: con.name.clone(), args }],
                         guards: vec![],
                         body: Some(body),
                         where_binds: vec![],
@@ -3274,9 +3351,9 @@ impl Checker {
 
         // Register the instance
         let mut method_fns = HashMap::new();
-        method_fns.insert("toJSON".to_string(), mangled.clone());
+        method_fns.insert(self.library_value("JSON", "toJSON"), mangled.clone());
         self.register_instance(InstanceInfo {
-            class_name: "ToJSON".to_string(),
+            class_name: self.library_class("JSON", "ToJSON"),
             target_type: result_ty.clone(),
             method_fns,
             context: None,
@@ -3307,7 +3384,8 @@ impl JsonDir {
     fn class(self) -> &'static str {
         match self { JsonDir::Decode => "FromJSON", JsonDir::Encode => "ToJSON" }
     }
-    /// The combinator/function prefix: `fromJSONInt`, `toJSON_T`, ….
+    /// The combinator/function prefix — `fromJSONInt`, … — and the name of
+    /// the class's codec method.
     fn prefix(self) -> &'static str {
         match self { JsonDir::Decode => "fromJSON", JsonDir::Encode => "toJSON" }
     }

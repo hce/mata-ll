@@ -1,0 +1,9 @@
+(True,False)
+yes no
+(Just 3,Nothing)
+[LT,EQ,GT]
+(True,LT)
+(2,False,True)
+[10,20,30]
+(5,W {maybe = 6})
+"builtin Bool"

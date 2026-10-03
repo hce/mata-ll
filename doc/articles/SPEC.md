@@ -1342,19 +1342,15 @@ The README says each file is a module. But how do you import one?
 That will look for Data/Tree.mll in the project's and the compiler's
 default library directory.
 
-Two caveats on the forms above:
-
-- **Constructors are not scoped by imports.** After
-  `import qualified Data.Tree as T`, a function is reachable only as
-  `T.depth`; a constructor may be written qualified (`T.Leaf`, in
-  expressions and patterns) but also stays visible unqualified (`Leaf`),
-  because constructor names are program-wide.
-- **The `(..)` constructor-list on an import is currently
-  decorative.** `import Data.Tree (depth, Tree(..))` and
-  `import Data.Tree (depth)` behave identically: the selective list
-  restricts which *functions* are brought into scope, but a type's
-  constructors are always exposed regardless of whether `Tree(..)` is
-  written. `hiding (...)` is enforced for functions.
+The forms select constructors, record fields and class methods as in
+Haskell 2010: `import Data.Tree (depth, Tree(..))` brings `Tree`, its
+constructors and its fields into scope, `import Data.Tree (depth, Tree)`
+the type alone, and `hiding (Tree(..))` keeps all of them out. After
+`import qualified Data.Tree as T` a constructor is reachable only as
+`T.Leaf` (in expressions and patterns), like a function as `T.depth`. A
+constructor cannot be named in an import list by itself, and an import
+list names a type's constructors with `(..)` only (an export list also
+takes an explicit `Tree(Leaf, Node)`).
 
 Every module has its own scope. A bare name refers to the module's own
 top-level declaration of that name if it has one, else to the one
@@ -1368,9 +1364,11 @@ unqualified import that provides a Prelude name at a different type is
 rejected at the import. `M.name` names what the modules imported as `M`
 export. `import Prelude hiding (…)`, `import Prelude (…)` and
 `import qualified Prelude as P` restrict or alias the implicit Prelude
-import. Data constructors, record fields, classes and class methods are
-outside this rule: they are program-wide names (see HASKDIFF.md, "Every
-module has its own scope").
+import. The rule covers every kind of name: functions, types, data
+constructors, record fields, classes and class methods (see HASKDIFF.md,
+"Every module has its own scope"). Instances have no names; each one is
+in force in the whole program, and two modules' classes of one name are
+two classes.
 
 A module-header export list — `module M (foo, Bar(..)) where` —
 controls which of the module's names *other .mll modules* may import:

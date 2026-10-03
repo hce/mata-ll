@@ -58,7 +58,7 @@ pub struct TDataDef {
     ///   name (`{width = …, height = …}`) instead of a positional array; or
     /// - an all-nullary sum type (every constructor has zero fields), whose
     ///   runtime value at the Lua boundary is a *string* — the constructor's
-    ///   `external_name` tag when present, its name otherwise — instead of the
+    ///   `tag` (`TConstructor::tag`) — instead of the
     ///   usual positional integer.
     ///
     /// Both exist for interop with Lua APIs that speak dictionaries / string
@@ -68,20 +68,20 @@ pub struct TDataDef {
 
 #[derive(Debug, Clone)]
 pub struct TConstructor {
+    /// The canonical name (`A.Node`): the key of every reference.
     pub name: String,
-    /// The `as "tag"` constructor rename, threaded through from the AST. Used
-    /// by a derived JSON codec and, for a LuaDict all-nullary sum type, as the
-    /// constructor's runtime string value at the Lua boundary.
-    pub external_name: Option<String>,
+    /// The tag the constructor presents at external boundaries — the
+    /// runtime string of a LuaDict enum constructor (and a derived JSON
+    /// codec's tag): the `as "tag"` rename when present, the name its
+    /// module declares it under otherwise. Never the canonical name.
+    pub tag: String,
     pub fields: TConFields,
 }
 
 impl TConstructor {
-    /// The tag this constructor presents at external boundaries (JSON tag, and
-    /// the runtime string of a LuaDict enum): the `as "tag"` rename when
-    /// present, the constructor name otherwise.
+    /// The tag this constructor presents at external boundaries.
     pub fn effective_tag(&self) -> &str {
-        self.external_name.as_deref().unwrap_or(&self.name)
+        &self.tag
     }
 }
 
@@ -91,15 +91,15 @@ pub enum TConFields {
     Named(Vec<TRecordField>),
 }
 
-/// A typed named record field. `external_key`, when present, is the shared
-/// external rename from `name as "key" :: T`: codegen uses
-/// `external_key.unwrap_or(name)` as the runtime Lua table key of a LuaDict
-/// type, and the derived ToJSON/FromJSON codecs use it as the JSON object
-/// key, while the Haskell-side accessor keeps `name`.
+/// A typed named record field: its canonical name (the accessor's), and
+/// the key it presents at external boundaries — the runtime Lua table key
+/// of a LuaDict record (and a derived JSON codec's object key): the
+/// `name as "key"` rename when present, the field's source name otherwise.
+/// Never the canonical name.
 #[derive(Debug, Clone)]
 pub struct TRecordField {
     pub name: String,
-    pub external_key: Option<String>,
+    pub key: String,
     pub ty: Ty,
 }
 
@@ -107,7 +107,7 @@ impl TRecordField {
     /// The name this field presents at external boundaries (Lua table key,
     /// JSON object key).
     pub fn effective_key(&self) -> &str {
-        self.external_key.as_deref().unwrap_or(&self.name)
+        &self.key
     }
 }
 
@@ -125,7 +125,10 @@ pub struct TFunction {
     /// this instead of parsing the mangled spelling.
     pub spec_origin: Option<String>,
     /// Dictionary parameters for polymorphic-recursive functions
-    /// Each entry is (class_name, param_name), e.g. ("Show", "__dict_Show")
+    /// Each entry is (class_name, param_name), e.g. ("Show", "__dict_Show").
+    /// The parameter is a variable of the function's body like any other,
+    /// spelled in Lua through `sanitize_name` (a class's canonical name may
+    /// carry a module prefix: `__dict_JSON.GFields`).
     pub dict_params: Vec<(String, String)>,
     /// True only for compiler-DERIVED Eq/Ord instance methods (`eq_T`,
     /// `ord_compare__T`, `ord_lt__T`, …) from a `deriving` clause. Their

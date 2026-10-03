@@ -1,0 +1,13 @@
+(6,3,2)
+Node Leaf 7 Leaf
+Node 7 (Node 8 Nil)
+(Leaf "mine",Node 3)
+x node 4
+Pair (Circle 1) (Circle 2)
+A square 2; B rect 6
+(12,20)
+(True,True,False)
+(MkNode 9,True)
+[Red,Green,Blue]
+(Red,[Red,Green,Blue],Green)
+["A circle 3","A square 4"]

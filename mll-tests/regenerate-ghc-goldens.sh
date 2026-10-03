@@ -117,7 +117,6 @@ excluded_reason() {
         cases/linear_mult_poly)          echo "GHC's -XLinearTypes rejects unrestricted use of a %1-bound scalar";;
         # -- mata-ll-only grammar / name shadowing ----------------------------
         cases/newtypes)                  echo "'newtype Age = Int' implicit-constructor sugar is not Haskell";;
-        cases/superclass)                echo "redefines the Eq/Ord classes (mata-ll builtin shadowing)";;
         cases/constructor_shadowing)     echo "redefines Just/Nothing constructors (Prelude shadowing)";;
 
         # -- helper modules, not runnable cases -------------------------------
@@ -126,6 +125,17 @@ excluded_reason() {
         cases/DiamondShared)             echo "helper module (twinned for import, no main)";;
         cases/DiamondWest)               echo "helper module (twinned for import, no main)";;
         cases/DiamondEast)               echo "helper module (twinned for import, no main)";;
+        cases/EntConA)                   echo "helper module (twinned for import, no main)";;
+        cases/EntConB)                   echo "helper module (twinned for import, no main)";;
+        cases/EntClassA)                 echo "helper module (twinned for import, no main)";;
+        cases/EntClassB)                 echo "helper module (twinned for import, no main)";;
+        cases/EntFieldA)                 echo "helper module (twinned for import, no main)";;
+        cases/EntFieldB)                 echo "helper module (twinned for import, no main)";;
+        cases/EntListA)                  echo "helper module (twinned for import, no main)";;
+        cases/EntListB)                  echo "helper module (twinned for import, no main)";;
+        cases/EntWireA)                  echo "helper module of entities_runtime_spellings (JSON FFI library, Generics substrate, LuaDict)";;
+        cases/EntWireB)                  echo "helper module of entities_runtime_spellings (JSON FFI library, Generics substrate, LuaDict)";;
+        cases/entities_runtime_spellings) echo "JSON FFI library, Generics substrate and LuaDict FFI (runtime spellings)";;
         cases/DupConEast)                echo "helper module (twinned for import, no main)";;
         cases/DupConWest)                echo "helper module (twinned for import, no main)";;
         cases/do_pattern_bind_failure)   echo "MonadFail/partial-pattern failure messages: mata-ll error strings vs GHC IOException rendering (same semantics, different formatting)";;
@@ -299,7 +309,7 @@ make_twin() { # $1 = source .mll, $2 = output .hs
 }
 
 # Helper modules must be importable by name from the twin directory.
-for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack DesugarOwn NamesA NamesA_b FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps; do
+for helper in DiamondLeaf DiamondMid DiamondShared DiamondWest DiamondEast ExportHelper FixityOps OpsExports ReexInner ReexUmbrella ReexSelf ReexOuter ReexAlias PrivateHelperLib ScopeInner ScopeLeak ScopeMid ScopeLeft ScopeRight ScopeTake ScopeCfgA ScopeCfgB ScopeStack DesugarOwn NamesA NamesA_b FixityInner FixityOuter FixityPrivate FixityListed FixityHidden FixityQual FixityClass FixityUmbrella FixityByName FixityPow FixityTypeOps EntConA EntConB EntClassA EntClassB EntFieldA EntFieldB EntListA EntListB; do
     make_twin "$tests/cases/$helper.mll" "$gen/$helper.hs"
 done
 

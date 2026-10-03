@@ -368,11 +368,18 @@ impl Checker {
                 // Each constraint uses its argument at the class variable's
                 // kind: `Foldable t => …` forces `t : Type -> Type` even
                 // before the body of the signature is walked. Unknown classes
-                // are skipped — they are reported by the constraint checks.
+                // are skipped — they are reported by the constraint checks —
+                // except a class name import resolution found nothing for in
+                // its module's scope, which is reported here, where the
+                // signature is.
                 for c in constraints {
                     if self.classes.contains_key(&c.class_name) {
                         let ck = self.class_kind_of(&c.class_name);
                         self.expect_type_kind(&c.type_arg, &ck, kctx, ctx);
+                    } else if kctx.report
+                        && let Some(kind) = self.scope_error(&c.class_name)
+                    {
+                        self.push_error_ctx(kind, ctx.to_string());
                     }
                 }
                 self.infer_type_kind(ty, kctx, ctx)

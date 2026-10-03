@@ -1,7 +1,7 @@
--- The other half of the imported-constructor collision pair — see
--- DupConEast.mll and duplicate_imported_constructor_rejected
--- (compile_errors.rs). The payload type differs on purpose: the collision
--- is on the constructor NAME, not its shape.
+-- The other half of the constructor-name pair — see DupConEast.mll and
+-- two_imported_constructors_of_one_name_are_ambiguous_only_where_used
+-- (compile_errors.rs). The payload type differs on purpose: the shared
+-- part is the constructor NAME, not its shape.
 module DupConWest where
 
 data WestBox = Shared String
