@@ -513,17 +513,23 @@ impl CodeGen {
                     // yields that, callee_ast only adds the parens a bare fn
                     // literal needs to be called.
                     let arity = self.known_callee_arity(inner_body);
-                    let callee = if self.expr_yields_whnf(inner_body) {
+                    let eta_args: Vec<Expr> =
+                        eta_params.iter().map(|p| Expr::name(p.clone())).collect();
+                    // In callee position the eta params land in the body's
+                    // own parameters: adapted where the body is a runtime
+                    // definition taking them as callbacks. The expr_ast
+                    // spelling of a reference adapts inside its own
+                    // eta-expansion (widened_ref_ast).
+                    let (callee, eta_args) = if self.expr_yields_whnf(inner_body) {
                         let c = self.callee_ast(inner_body);
-                        self.whnf_claim_checked(inner_body, c)
+                        let lam_params = Self::arrow_params(&expr.ty);
+                        let eta_tys = lam_params.get(ps.len()..).unwrap_or(&[]);
+                        let eta_args = self.adapt_runtime_args(inner_body, eta_args, eta_tys);
+                        (self.whnf_claim_checked(inner_body, c), eta_args)
                     } else {
-                        Expr::force(self.expr_ast(inner_body))
+                        (Expr::force(self.expr_ast(inner_body)), eta_args)
                     };
-                    Self::split_call_ast(
-                        callee,
-                        eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
-                        arity,
-                    )
+                    Self::split_call_ast(callee, eta_args, arity)
                 } else {
                     // Lambda body is in tail position — strip parens for PTC.
                     self.tail_ast(inner_body, false)
@@ -859,7 +865,19 @@ impl CodeGen {
                     // FFI edge passes for the same type.
                     "false".to_string()
                 };
+                // The wrapper calls the callback with the host's `arity`
+                // arguments in one call. A declared result variable
+                // instantiated at a function type (an accumulator of type
+                // `Int -> Int`) gives the callback more parameters than
+                // that, so it is adapted to the declared arity: the host's
+                // call returns the function of the rest, as a compiled
+                // partial application would.
                 let callee_e = self.expr_ast(callee);
+                let callee_e = if count_arrows(&callee.ty) > *arity {
+                    Self::curry_adapter_ast(*arity, callee_e)
+                } else {
+                    callee_e
+                };
                 Expr::call_named(
                     "__mll_wrap_callback_out",
                     vec![
@@ -1121,25 +1139,40 @@ impl CodeGen {
     /// as many arguments as its type has arrows, and the callee would drop
     /// the excess (see known_callee_arity for why the two can differ).
     ///
+    /// The same holds for a reference to a runtime definition that calls a
+    /// function parameter (intrinsics::RUNTIME_CALLBACKS) at a use whose
+    /// type widens that parameter (`flip modifyIORef twice r` at `IORef
+    /// (Int -> Int)`, `flip map xs (\n x -> …)`): whoever applies the value
+    /// delivers the function unadapted.
+    ///
     /// Eta-expand it here instead, into a closure of exactly the arity the
-    /// type promises, which saturates the real function and applies its
-    /// result to the rest. Callee positions do NOT come through here (they
-    /// emit through `callee_ast`/`expr_raw_ast` and split the call in place),
-    /// so a saturated call never pays for the closure.
-    fn widened_ref_ast(&mut self, expr: &TExpr, emitted: Expr) -> Expr {
-        let Some(arity) = self.known_callee_arity(expr) else { return emitted };
-        let total = count_arrows(&expr.ty);
-        if arity == 0 || total <= arity {
+    /// type promises, which saturates the real function — its callback
+    /// parameters adapted (adapt_runtime_args) — and applies its result to
+    /// the rest. Callee positions do NOT come through here (they emit
+    /// through `callee_ast`/`expr_raw_ast`, split the call and adapt the
+    /// arguments in place), so a saturated call never pays for the closure.
+    pub(super) fn widened_ref_ast(&mut self, expr: &TExpr, emitted: Expr) -> Expr {
+        if !self.ref_needs_eta(expr) {
             return emitted;
         }
+        let arity = self.known_callee_arity(expr);
+        let total = count_arrows(&expr.ty);
         let params: Vec<String> = (0..total).map(|i| format!("_ea{}", i)).collect();
         let args: Vec<Expr> = params.iter().map(|p| Expr::name(p.clone())).collect();
+        let args = self.adapt_runtime_args(expr, args, &Self::arrow_params(&expr.ty));
         Expr::paren(Expr::Func(
             params,
             FuncBody::Inline(vec![Stmt::Return(
-                Self::split_call_ast(emitted, args, Some(arity)),
+                Self::split_call_ast(emitted, args, arity),
             )]),
         ))
+    }
+
+    /// Must the reference `expr` travel eta-expanded (widened_ref_ast)?
+    pub(super) fn ref_needs_eta(&self, expr: &TExpr) -> bool {
+        let total = count_arrows(&expr.ty);
+        self.known_callee_arity(expr).is_some_and(|n| n > 0 && total > n)
+            || self.runtime_callback_widened(expr)
     }
 
     /// Collect all applied arguments of a (possibly curried) application,
@@ -1407,8 +1440,8 @@ impl CodeGen {
 
     /// The general call path of the App arm, split out only to keep
     /// `expr_ast_inner` readable: call-site strictness from the callee's
-    /// demand row, the runtime-generic function-argument adapter, and the
-    /// partial-application closure vs. the flat full call.
+    /// demand row, the runtime-callback adapters (adapt_runtime_args), and
+    /// the partial-application closure vs. the flat full call.
     fn general_call_ast(&mut self, expr: &TExpr, f: &TExpr, args: &[&TExpr]) -> Expr {
         // Look up callee's demand info for call-site strictness
         // decisions. A where-bound local function shadows a
@@ -1431,11 +1464,6 @@ impl CodeGen {
         } else {
             None
         };
-
-        // The function argument of a runtime generic (map/zipWith) may
-        // need a currying adapter — see runtime_generic_adapter.
-        let arg0_adapter = args.first()
-            .and_then(|a| self.runtime_generic_adapter(f, 0, &a.ty));
 
         // A callee whose emitted parameter list is shorter than this spine
         // must be saturated first and its result applied to the rest — see
@@ -1473,11 +1501,6 @@ impl CodeGen {
                 } else {
                     self.arg_ast(a, is_strict)
                 };
-                let arg_e = if i == 0 && let Some(adapter) = arg0_adapter {
-                    Expr::call_named(adapter, vec![arg_e])
-                } else {
-                    arg_e
-                };
                 let arg_e = if matches!(&arg_e, Expr::Call(h, _)
                     if matches!(h.as_ref(), Expr::Name(n) if n == "__thunk"))
                 {
@@ -1492,6 +1515,13 @@ impl CodeGen {
             for p in &extra_params {
                 cargs.push(Expr::name(p.clone()));
             }
+            // The closure's own parameters land in the callee's later
+            // positions: a runtime callback position among them is adapted
+            // here, at the call the closure makes (see adapt_runtime_args).
+            let tys: Vec<&Ty> = args.iter().map(|a| &a.ty)
+                .chain(Self::arrow_params(&expr.ty))
+                .collect();
+            let cargs = self.adapt_runtime_args(f, cargs, &tys);
             let closure = Expr::Func(
                 extra_params,
                 FuncBody::Block(Block(vec![Stmt::Return(
@@ -1525,12 +1555,10 @@ impl CodeGen {
                 } else {
                     self.arg_ast(a, is_strict)
                 };
-                if i == 0 && let Some(adapter) = arg0_adapter {
-                    cargs.push(Expr::call_named(adapter, vec![arg_e]));
-                } else {
-                    cargs.push(arg_e);
-                }
+                cargs.push(arg_e);
             }
+            let tys: Vec<&Ty> = args.iter().map(|a| &a.ty).collect();
+            let cargs = self.adapt_runtime_args(f, cargs, &tys);
             Self::split_call_ast(callee, cargs, arity)
         }
     }
@@ -1645,10 +1673,6 @@ impl CodeGen {
     /// nil.
     fn dollar_infix_ast(&mut self, expr: &TExpr, lhs: &TExpr, rhs: &TExpr) -> Expr {
         let remaining = count_arrows(&expr.ty);
-        // `map $ f` puts f straight into a runtime generic's
-        // function-parameter position (see
-        // runtime_generic_adapter).
-        let adapter = self.runtime_generic_adapter(lhs, 0, &rhs.ty);
         // x occupies f's NEXT argument position: f is often a
         // partial application (`(const 5) $ undefined` is
         // `const 5 undefined`), so strip the applied spine off
@@ -1679,10 +1703,10 @@ impl CodeGen {
         let arity = self.known_callee_arity(lhs);
         let callee = self.callee_ast(lhs);
         let arg = self.arg_ast(rhs, rhs_strict);
-        let arg = match adapter {
-            Some(a) => Expr::call_named(a, vec![arg]),
-            None => arg,
-        };
+        // A bare runtime head (`map $ f`, `modifyIORef $ r`) receives x and
+        // the closure's parameters in its own positions, adapted where they
+        // are runtime callbacks (adapt_runtime_args). A partially applied
+        // head is a closure that adapts its own parameters already.
         if remaining > 0 {
             let extra: Vec<String> =
                 (0..remaining).map(|i| format!("_pa{}", i)).collect();
@@ -1690,6 +1714,10 @@ impl CodeGen {
             for p in &extra {
                 cargs.push(Expr::name(p.clone()));
             }
+            let tys: Vec<&Ty> = std::iter::once(&rhs.ty)
+                .chain(Self::arrow_params(&expr.ty))
+                .collect();
+            let cargs = self.adapt_runtime_args(lhs, cargs, &tys);
             Expr::paren(Expr::Func(
                 extra,
                 FuncBody::Inline(vec![Stmt::Return(
@@ -1697,7 +1725,8 @@ impl CodeGen {
                 )]),
             ))
         } else {
-            Self::split_call_ast(callee, vec![arg], arity)
+            let cargs = self.adapt_runtime_args(lhs, vec![arg], &[&rhs.ty]);
+            Self::split_call_ast(callee, cargs, arity)
         }
     }
 
@@ -1732,18 +1761,23 @@ impl CodeGen {
             // and calls an action closure; calling the
             // application result unconditionally crashed ("attempt
             // to call a nil value") on the bare-value shape.
-            let f_e = if self.expr_yields_whnf(rhs) {
+            let (f_e, bare) = if self.expr_yields_whnf(rhs) {
                 let c = self.callee_ast(rhs);
-                self.whnf_claim_checked(rhs, c)
+                (self.whnf_claim_checked(rhs, c), true)
             } else {
                 // A thunk-valued continuation (a lazily bound
                 // local) must be forced to a callable first.
-                Expr::force(self.expr_ast(rhs))
+                (Expr::force(self.expr_ast(rhs)), false)
             };
             let m_e = self.action_run_ast(lhs, false);
+            let args = if bare {
+                self.adapt_runtime_args(rhs, vec![m_e], &Self::arrow_params(&rhs.ty))
+            } else {
+                vec![m_e]
+            };
             Expr::inline_fn0(Expr::call_named(
                 "__mll_run_tail",
-                vec![Expr::call(f_e, vec![m_e])],
+                vec![Expr::call(f_e, args)],
             ))
         }
     }
@@ -1763,33 +1797,30 @@ impl CodeGen {
     fn compose_infix_ast(&mut self, expr: &TExpr, lhs: &TExpr, rhs: &TExpr) -> Expr {
         let extras = count_arrows(&expr.ty).saturating_sub(1);
         let g_extras = count_arrows(&rhs.ty).saturating_sub(1);
-        // `map . g` feeds g's result straight into a runtime
-        // generic's function-parameter position (see
-        // runtime_generic_adapter).
-        let adapter = match &rhs.ty {
-            Ty::Arrow(_, res, _) => self.runtime_generic_adapter(lhs, 0, res),
-            _ => None,
-        };
         // `(f . g) x` is `f (g x)`. A non-strict `f` must not
         // force `g x` — doing so would force `x` and run any
         // bottom in `g x` that `f` never demands (e.g.
         // `(ignore . add1) (error "boom")` must return, not
         // raise). Suspend the inner application in that case.
-        // Only the actual call form (`g_extras == 0`, no runtime
-        // adapter) can be bottom; a partial application yields a
-        // closure value, and a runtime generic (map/zipWith)
-        // forces its function argument itself, so both are safe
-        // to pass eagerly.
+        // Only the actual call form (`g_extras == 0`) can be bottom;
+        // a partial application yields a closure value, safe to pass
+        // eagerly. When `f` is a runtime definition taking `g x` in a
+        // callback position (`map . g`), the currying adapter
+        // adapt_runtime_args wraps around the suspension forces it
+        // only when the runtime applies it — `map ⊥` stays lazy in its
+        // function, as GHC's is.
         let f_strict = matches!(&lhs.kind, TExprKind::Var(n)
             if self.callee_strict_row(n)
                 .and_then(|v| v.first().copied()).unwrap_or(false));
-        let suspend = !f_strict && g_extras == 0 && adapter.is_none();
+        let suspend = !f_strict && g_extras == 0;
         let f_arity = self.known_callee_arity(lhs);
         let g_arity = self.known_callee_arity(rhs);
         let f_callee = self.callee_ast(lhs);
         let inner = if g_extras == 0 {
             let g_callee = self.callee_ast(rhs);
-            Self::split_call_ast(g_callee, vec![Expr::name("_x")], g_arity)
+            let gargs = self.adapt_runtime_args(
+                rhs, vec![Expr::name("_x")], &Self::arrow_params(&rhs.ty));
+            Self::split_call_ast(g_callee, gargs, g_arity)
         } else {
             let pb_params: Vec<String> =
                 (0..g_extras).map(|i| format!("_pb{}", i)).collect();
@@ -1798,16 +1829,13 @@ impl CodeGen {
             for p in &pb_params {
                 gargs.push(Expr::name(p.clone()));
             }
+            let gargs = self.adapt_runtime_args(rhs, gargs, &Self::arrow_params(&rhs.ty));
             Expr::paren(Expr::Func(
                 pb_params,
                 FuncBody::Inline(vec![Stmt::Return(
                     Self::split_call_ast(g_callee, gargs, g_arity),
                 )]),
             ))
-        };
-        let inner = match adapter {
-            Some(a) => Expr::call_named(a, vec![inner]),
-            None => inner,
         };
         let inner = if suspend { Expr::thunk(inner) } else { inner };
         let mut outer_params = vec!["_x".to_string()];
@@ -1816,6 +1844,17 @@ impl CodeGen {
             outer_params.push(format!("_pa{}", i));
             fargs.push(Expr::name(format!("_pa{}", i)));
         }
+        // f receives `g x` (g's result type) and then the composition's
+        // own parameters past the first.
+        let g_result = match &rhs.ty {
+            Ty::Arrow(_, res, _) => Some(res.as_ref()),
+            _ => None,
+        };
+        let outer = Self::arrow_params(&expr.ty);
+        let ftys: Vec<&Ty> = g_result.into_iter()
+            .chain(outer.into_iter().skip(1))
+            .collect();
+        let fargs = self.adapt_runtime_args(lhs, fargs, &ftys);
         Expr::paren(Expr::Func(
             outer_params,
             FuncBody::Inline(vec![Stmt::Return(

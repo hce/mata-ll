@@ -183,6 +183,7 @@ macro_rules! for_each_ghc_oracle_case {
         (ghc_oracle_where_polymorphism, "cases", "where_polymorphism.mll"),
         (ghc_oracle_ioref_basic, "cases", "ioref_basic.mll"),
         (ghc_oracle_ioref_laziness, "cases", "ioref_laziness.mll"),
+        (ghc_oracle_runtime_callback_arity, "cases", "runtime_callback_arity.mll"),
         (ghc_oracle_let_seq_pure_function, "cases", "let_seq_pure_function.mll"),
         (ghc_oracle_integer_smallpath_bounds, "cases", "integer_smallpath_bounds.mll"),
         (ghc_oracle_integer_bigdiv, "cases", "integer_bigdiv.mll"),

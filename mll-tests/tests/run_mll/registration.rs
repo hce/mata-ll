@@ -56,6 +56,7 @@ mll_test!(where_clause_order_laziness, "where_clause_order_laziness.mll");
 mll_test!(inline_compose_non_strict, "inline_compose_non_strict.mll");
 mll_test!(st_modify_repeated_action, "st_modify_repeated_action.mll");
 mll_test!(bytestring_fold_nil_result, "bytestring_fold_nil_result.mll");
+mll_test!(bytestring_fold_function_accumulator, "bytestring_fold_function_accumulator.mll");
 mll_test!(num_polymorphic, "num_polymorphic.mll");
 mll_test!(num_user_instance, "num_user_instance.mll");
 mll_test!(integral_semantics, "integral_semantics.mll");
@@ -671,6 +672,7 @@ mll_test!(foldable_generic, "foldable_generic.mll");
 // (lazy writes, suspended modifyIORef, WHNF-only modifyIORef').
 mll_test!(ioref_basic, "ioref_basic.mll");
 mll_test!(ioref_laziness, "ioref_laziness.mll");
+mll_test!(runtime_callback_arity, "runtime_callback_arity.mll");
 mll_test!(let_seq_pure_function, "let_seq_pure_function.mll");
 mll_test!(integer_smallpath_bounds, "integer_smallpath_bounds.mll");
 mll_test!(integer_bigdiv, "integer_bigdiv.mll");

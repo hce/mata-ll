@@ -269,6 +269,18 @@ Responsibilities beyond the obvious translation:
   run of the action — a second run, a retry after a raise, a run nested
   inside its own — starts whole. `main` is skipped when the module is
   loaded via `require` (library use).
+- **Calling convention:** a function value of type `T` is a Lua function
+  of `count_arrows(T)` parameters, applied to all of them in one call;
+  monomorphization gives each instantiation its own copy, so compiled
+  code meets the convention at every call site. The runtime's definitions
+  have no mata-ll body and exist once: their parameter lists fix their
+  arity (`known_callee_arity` splits a call that over-applies one), and a
+  function they are handed is called with the arguments of its declared
+  parameter type (`intrinsics::RUNTIME_CALLBACKS`). Where an
+  instantiation gives that function more parameters (`modifyIORef` on an
+  `IORef (Int -> Int)`), the code generator wraps it in a currying
+  adapter (`__mll_curry1`/`2`/`_n`) at every place it reaches the
+  runtime (`adapt_runtime_args`).
 - **Names:** `names::sanitize_name` is the one mapping from mata-ll names
   to Lua names, and it is injective: a runtime entity has its fixed Lua
   name; an identifier keeps its spelling with `'` as `_prime`, moved by

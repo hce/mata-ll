@@ -33,7 +33,7 @@ enum ActionShape<'a> {
     MaybeAction,
     HostCall { host: &'a String, args: &'a [TExpr] },
     HostTry { host: &'a String, args: &'a [TExpr] },
-    Fused { fused: &'static str, args: Vec<&'a TExpr> },
+    Fused { fused: &'static str, head: &'a TExpr, args: Vec<&'a TExpr> },
     Runner,
 }
 
@@ -155,8 +155,8 @@ impl CodeGen {
         if let TExprKind::SpecCall { specialized: SpecKind::Try(host), args, .. } = &a.kind {
             return ActionShape::HostTry { host, args };
         }
-        if let Some((fused, args)) = Self::st_intrinsic_fused(a) {
-            return ActionShape::Fused { fused, args };
+        if let Some((fused, head, args)) = Self::st_intrinsic_fused(a) {
+            return ActionShape::Fused { fused, head, args };
         }
         ActionShape::Runner
     }
@@ -333,7 +333,7 @@ impl CodeGen {
             // the __mll_run dispatch. This path is only reached where an
             // action runs exactly once, in order, so this is safe by
             // construction. See st_intrinsic_fused.
-            ActionShape::Fused { fused, args: fargs } => {
+            ActionShape::Fused { fused, head, args: fargs } => {
                 // Per-argument strictness of the intrinsic, from the family's
                 // one table (crate::intrinsics). An array/ref and an index
                 // are ALWAYS forced — you cannot allocate, read, or write
@@ -355,6 +355,10 @@ impl CodeGen {
                     let strict = strict_mask.get(i).copied().unwrap_or(false);
                     cargs.push(self.arg_ast(a, strict));
                 }
+                // The fused helper calls a modifier with the runtime's arity,
+                // exactly like the closure form (adapt_runtime_args).
+                let tys: Vec<&Ty> = fargs.iter().map(|a| &a.ty).collect();
+                let cargs = self.adapt_runtime_args(head, cargs, &tys);
                 Expr::call_named(fused, cargs)
             }
             ActionShape::Runner => {
@@ -533,7 +537,8 @@ impl CodeGen {
     }
 
     /// If `expr` is a *fully applied* call to a known ST array intrinsic,
-    /// return the closure-free runtime function name and the argument list.
+    /// return the closure-free runtime function name, the head reference
+    /// (the intrinsic's Var, at its use-site type) and the argument list.
     ///
     /// In run-once position (a do-block bind chain), `readSTArray arr i`
     /// compiles to `__mll_run(__mll_ma_read(arr, i))`, where `__mll_ma_read`
@@ -546,7 +551,7 @@ impl CodeGen {
     /// Returns None for partial applications (an Arrow, never in action
     /// position), first-class action references (`__mll_run(<var>)`), and
     /// non-intrinsics — all of which keep the closure form.
-    pub(super) fn st_intrinsic_fused(expr: &TExpr) -> Option<(&'static str, Vec<&TExpr>)> {
+    pub(super) fn st_intrinsic_fused(expr: &TExpr) -> Option<(&'static str, &TExpr, Vec<&TExpr>)> {
         let mut args: Vec<&TExpr> = Vec::new();
         let mut f = expr;
         while let TExprKind::App(inner_f, inner_arg) = &f.kind {
@@ -565,7 +570,7 @@ impl CodeGen {
         let i = crate::intrinsics::st_intrinsic(name)?;
         let (fused, arity) = (i.fused, i.mask.len());
         if args.len() == arity {
-            Some((fused, args))
+            Some((fused, f, args))
         } else {
             None
         }
@@ -655,7 +660,7 @@ impl CodeGen {
     /// later statements; `__mll_mc` cannot collide with user locals (the
     /// `__mll_` namespace is reserved by the name-collision check).
     fn try_fused_ioref_modify_stmts(&mut self, expr: &TExpr) -> Option<Vec<Stmt>> {
-        let (fused, fargs) = Self::st_intrinsic_fused(expr)?;
+        let (fused, _, fargs) = Self::st_intrinsic_fused(expr)?;
         if fused != "__mll_ioref_modify_strict" || fargs.len() != 2 {
             return None;
         }
@@ -728,7 +733,7 @@ impl CodeGen {
         while let TExprKind::Paren(inner) = &a.kind {
             a = inner.as_ref();
         }
-        let (fused, fargs) = Self::st_intrinsic_fused(a)?;
+        let (fused, _, fargs) = Self::st_intrinsic_fused(a)?;
         if fused != "__mll_st_read" || fargs.len() != 2 {
             return None;
         }

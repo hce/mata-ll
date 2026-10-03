@@ -498,7 +498,7 @@ impl CodeGen {
     /// candidates, primitive-method inlining): emission must then go through
     /// the ordinary variable path, exactly as `lua_ref` resolves references.
     /// TIR keeps source binder names, so shadowing is real at this stage
-    /// (runtime_generic_adapter and direct_perform_callee_arity already
+    /// (runtime_callback_row and direct_perform_callee_arity already
     /// gate on the same membership).
     fn is_local_shadowed(&self, name: &str) -> bool {
         self.local_vars.contains(&names::sanitize_name(name))
@@ -902,6 +902,75 @@ mod contract_tests {
             missing.is_empty(),
             "runtime names mirrored by a compiler table but bound nowhere in the prelude:\n  {}",
             missing.join("\n  ")
+        );
+    }
+
+    /// `intrinsics::RUNTIME_CALLBACKS` states, for every function-typed
+    /// parameter of every name the Lua runtime implements, how many
+    /// arguments the runtime passes that function — the facts the currying
+    /// adapters (`adapt_runtime_args`) are emitted from. Derived here from
+    /// the builtin signatures themselves, so a runtime higher-order function
+    /// added without its row, a row whose arity disagrees with the declared
+    /// parameter type, and a row for a parameter that no longer exists all
+    /// fail. A name counts as runtime-implemented when the runtime text
+    /// binds its Lua spelling and no Prelude.mll definition supplies it.
+    #[test]
+    fn runtime_callbacks_cover_every_function_parameter() {
+        use std::collections::HashSet;
+        let prelude_mll_defines = |name: &str| {
+            crate::stdlib::PRELUDE
+                .lines()
+                .any(|l| l.strip_prefix(name).is_some_and(|r| r.starts_with(" ::")))
+        };
+        let mut problems: Vec<String> = Vec::new();
+        let mut covered: HashSet<(String, usize)> = HashSet::new();
+        let mut checked: HashSet<String> = HashSet::new();
+        for (name, ty) in crate::typechecker::builtin_signatures() {
+            if prelude_mll_defines(&name) || !runtime::prelude_binds(&sanitize_name(&name)) {
+                continue;
+            }
+            checked.insert(name.clone());
+            for (i, p) in CodeGen::arrow_params(&ty).into_iter().enumerate() {
+                if !matches!(p, Ty::Arrow(..)) {
+                    continue;
+                }
+                let declared = util::count_arrows(p);
+                match crate::intrinsics::runtime_callback(&name, i) {
+                    Some(row) if row.arity == declared => {
+                        covered.insert((name.clone(), i));
+                    }
+                    Some(row) => problems.push(format!(
+                        "'{name}' parameter {i} ({p}): the row says arity {}, the declared \
+                         type passes {declared}",
+                        row.arity
+                    )),
+                    None => problems.push(format!(
+                        "'{name}' parameter {i} ({p}): no RUNTIME_CALLBACKS row"
+                    )),
+                }
+            }
+        }
+        for row in crate::intrinsics::RUNTIME_CALLBACKS {
+            if !covered.contains(&(row.source.to_string(), row.param)) {
+                problems.push(format!(
+                    "row ('{}', {}): no function-typed parameter of a runtime-implemented \
+                     builtin matches it{}",
+                    row.source,
+                    row.param,
+                    if checked.contains(row.source) { "" } else { " (the name is not one)" },
+                ));
+            }
+            let (adapter, _) = crate::intrinsics::curry_adapter(row.arity);
+            if !runtime::prelude_binds(adapter) {
+                problems.push(format!("adapter '{adapter}' for arity {} is not in the runtime", row.arity));
+            }
+        }
+        let (general, fixed) = crate::intrinsics::curry_adapter(usize::MAX);
+        assert!(!fixed && runtime::prelude_binds(general), "the general adapter '{general}' is bound");
+        assert!(
+            problems.is_empty(),
+            "intrinsics::RUNTIME_CALLBACKS disagrees with the builtin signatures:\n  {}",
+            problems.join("\n  ")
         );
     }
 

@@ -1730,16 +1730,19 @@ local function foldl_prime(f, z, t)
     end
     return acc
 end
--- Currying adapters for the hand-written generic builtins above. Compiled
--- mata-ll functions are N-ary (all count_arrows(type) arguments in one call),
--- and compiled generic code is specialized per instantiation so its call
--- sites always match. map/zipWith, however, exist as ONE erased copy and call
--- their function argument with its GENERIC arity (map: 1, zipWith: 2). When
--- the result type variable is itself instantiated to a function — e.g.
--- `map (\n -> \x -> x + n) ns` builds a list of adders — the argument's real
--- arity exceeds that view, so the compiler wraps it: absorb the builtin's
--- call, then return a closure over the remaining arguments (the same shape a
--- compiled partial application has).
+-- Currying adapters. Compiled mata-ll functions are N-ary (all
+-- count_arrows(type) arguments in one call), and compiled generic code is
+-- specialized per instantiation so its call sites always match. Every runtime
+-- definition that calls a function value it was handed (map, zipWith, the
+-- erased folds, the IORef/ST modifiers, the ByteString traversals, catch, the
+-- FFI callback wrapper) exists ONCE and calls it with its GENERIC arity — the
+-- arity intrinsics.rs RUNTIME_CALLBACKS records for that parameter. When a
+-- result type variable is instantiated to a function — `map (\n -> \x -> x +
+-- n) ns` builds a list of adders, `modifyIORef r (\h x -> h x * 2)` updates a
+-- stored function — the argument's real arity exceeds that view, so the
+-- compiler wraps it: absorb the runtime's call, then return a closure over
+-- the remaining arguments (the same shape a compiled partial application
+-- has). __mll_curry_n is the general form for an FFI callback of any arity.
 local function __mll_curry1(f)
     return function(x)
         return function(...) return __force(f)(x, ...) end
@@ -1748,6 +1751,18 @@ end
 local function __mll_curry2(f)
     return function(x, y)
         return function(...) return __force(f)(x, y, ...) end
+    end
+end
+local function __mll_curry_n(f, n)
+    return function(...)
+        local pre = {...}
+        return function(...)
+            local args = {}
+            for i = 1, n do args[i] = pre[i] end
+            local m = select('#', ...)
+            for i = 1, m do args[n + i] = (select(i, ...)) end
+            return __force(f)(__unpack(args, 1, n + m))
+        end
     end
 end
 -- Hash helper

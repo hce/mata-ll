@@ -44,6 +44,31 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **The runtime calls a function it is handed at the arity the function
+  was compiled at** (crash). A function stored in an IORef could not be
+  modified: `modifyIORef r (\h -> \x -> h x * 2)` on an `IORef (Int ->
+  Int)` stopped with `attempt to perform arithmetic on a nil value`, as
+  did `modifyIORef'`, a named modifier (`modifyIORef r twiceF`), and a
+  ByteString fold or FFI callback whose accumulator is a function
+  (`bsFoldl (\g b x -> …) id bs`, `foldHost xs (\x g y -> …) id`).
+  Compiled functions take every argument their type has in one call; the
+  runtime's definitions exist once and call the function they are handed
+  with the arguments of its declared type, one for `modifyIORef`'s `a ->
+  a`, so at `a = Int -> Int` the second parameter was nil. The code
+  generator now wraps such a function in a currying adapter wherever it
+  reaches the runtime — a saturated or partial call, `$`, `.`, a
+  first-class reference such as `flip modifyIORef f r` or `flip map xs
+  f`, an eta-reduced definition (`bump = modifyIORef`), a fused
+  do-statement, an FFI callback — as it already did for the direct
+  argument of `map` and `zipWith`. The runtime's function-typed
+  parameters and the arity it calls each with are one table
+  (`RUNTIME_CALLBACKS` in `intrinsics.rs`), checked against the builtin
+  signatures by a unit test. `bsFoldl` applied to more arguments than it
+  takes (a function accumulator applied to its argument in the same call)
+  now applies its result to the rest, as every other runtime function
+  does. (GHC-goldened case `runtime_callback_arity`; cases
+  `bytestring_fold_function_accumulator` and FFI
+  `outgoing_callback_function_accumulator`.)
 - **A looping IO or ST action runs whole every time it is run** (silent
   miscompile). A self-recursive IO/ST function with pattern dispatch
   (`countdown 0 = …; countdown n = do { print n; countdown (n - 1) }`)

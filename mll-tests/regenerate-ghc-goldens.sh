@@ -54,6 +54,7 @@ excluded_reason() {
         cases/int_subtype_keys)          echo "ffi_tonumber_float integer-subtype leak (Lua-only number subtype)";;
         cases/any_ffi_marshal)           echo "LuaPure FFI declarations marshalling the builtin Any";;
         cases/bytestring)                echo "ByteString builtins (Lua byte strings)";;
+        cases/bytestring_fold_function_accumulator) echo "ByteString builtins (Lua byte strings)";;
         cases/bytestring_fold_nil_result) echo "ByteString builtins (Lua byte strings)";;
         cases/pure_scalar_bare_escape)   echo "ByteString builtins (Lua byte strings)";;
         cases/bytestring_u64_sign_bit)   echo "ByteString + Lua 64-bit wrap-around semantics";;

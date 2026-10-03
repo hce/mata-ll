@@ -60,6 +60,7 @@ cases/alias_ctor_collision	alias/constructor collision: documented deviation + Q
 cases/any_ffi_marshal	LuaPure FFI declarations marshalling the builtin Any
 cases/any_type	builtin Any (Lua dynamic value carrier)
 cases/bytestring	ByteString builtins (Lua byte strings)
+cases/bytestring_fold_function_accumulator	ByteString builtins (Lua byte strings)
 cases/bytestring_fold_nil_result	ByteString builtins (Lua byte strings)
 cases/bytestring_u64_sign_bit	ByteString + Lua 64-bit wrap-around semantics
 cases/caf_forward_reference	imports LString (Lua string FFI)

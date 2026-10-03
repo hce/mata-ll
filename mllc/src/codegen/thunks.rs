@@ -9,8 +9,9 @@
 //! the single point of truth for "wrapping this emission in `__force` is
 //! redundant", consulted by `forced_ast` / `forced_prefix_ast`.
 //! `flatten_lambda` / `lambda_param_names` implement the N-ary calling
-//! convention for curried lambdas; `runtime_generic_adapter` curries
-//! arguments handed to the erased runtime generics (map, zipWith);
+//! convention for curried lambdas; `adapt_runtime_args` curries the
+//! function arguments handed to the runtime's higher-order definitions
+//! (intrinsics.rs `RUNTIME_CALLBACKS`);
 //! `callee_ast` parenthesizes bare function literals in Lua call position,
 //! and `known_callee_arity` / `split_call_ast` keep a flat call from handing
 //! a fixed-arity callee more arguments than it has parameters.
@@ -139,50 +140,122 @@ impl CodeGen {
         names
     }
 
-    /// Currying adapter for the hand-written runtime generics.
-    ///
-    /// map and zipWith exist as ONE erased Lua copy and call their function
-    /// parameter with its GENERIC arity (map's `f : a -> b` gets exactly one
-    /// argument, zipWith's `f : a -> b -> c` exactly two). Compiled generic
-    /// code is monomorphized per instantiation, so its call sites always match
-    /// the N-ary convention — but these builtins cannot. When the result type
-    /// variable is itself instantiated to a function (`map (\n -> \x -> ...)`
-    /// building a list of adders), the argument's real arity exceeds the
-    /// builtin's view and the plain call would silently drop arguments.
-    ///
-    /// Returns the runtime adapter (`__mll_curry1`/`__mll_curry2`) to wrap the
-    /// argument in when `callee` (paren-stripped) is a bare reference to such
-    /// a builtin, the argument lands in its function-parameter position
-    /// (`args_before == 0`), and `arg_ty` has more arrows than the builtin's
-    /// generic view. A same-named local or compiled (user/specialized)
-    /// function is NOT the runtime builtin and needs no adapter.
-    pub(super) fn runtime_generic_adapter(
+    /// The runtime callback row for parameter `param` of `callee`, when
+    /// `callee` (paren-stripped) is a bare reference that resolves to the
+    /// RUNTIME's definition of a name in `intrinsics::RUNTIME_CALLBACKS`.
+    /// A local binder, a where-local function, a module definition or a
+    /// `__mll_fn` slot under the same name is not the runtime's definition:
+    /// it is compiled code, whose parameters follow the N-ary convention at
+    /// every instantiation, and needs no adapter.
+    fn runtime_callback_row(
         &self,
         callee: &TExpr,
-        args_before: usize,
-        arg_ty: &Ty,
-    ) -> Option<&'static str> {
-        if args_before != 0 {
-            return None;
-        }
+        param: usize,
+    ) -> Option<&'static crate::intrinsics::RuntimeCallback> {
         let mut c = callee;
         while let TExprKind::Paren(p) = &c.kind {
             c = p.as_ref();
         }
         let TExprKind::Var(name) = &c.kind else { return None };
-        let k = match name.as_str() {
-            "map" => 1,
-            "zipWith" => 2,
-            _ => return None,
-        };
-        if self.local_vars.contains(name.as_str()) || self.fn_table.contains_key(name.as_str()) {
+        let row = crate::intrinsics::runtime_callback(name, param)?;
+        if self.local_fn_arity.contains_key(name.as_str())
+            || self.is_local_shadowed(name)
+            || self.module_fn_names.contains(name.as_str())
+            || self.fn_table.contains_key(&sanitize_name(name))
+        {
             return None;
         }
-        if count_arrows(arg_ty) > k {
-            Some(if k == 1 { "__mll_curry1" } else { "__mll_curry2" })
-        } else {
-            None
+        Some(row)
+    }
+
+    /// The arity to adapt a function of type `param_ty` to, when it is
+    /// delivered to parameter `param` of `callee` (see
+    /// `runtime_callback_row`): the row's arity when `param_ty` has more
+    /// arrows than the runtime passes, `None` when the runtime's call
+    /// already saturates it (every instantiation that keeps the declared
+    /// result non-function).
+    pub(super) fn runtime_callback_adapter(
+        &self,
+        callee: &TExpr,
+        param: usize,
+        param_ty: &Ty,
+    ) -> Option<usize> {
+        let row = self.runtime_callback_row(callee, param)?;
+        (count_arrows(param_ty) > row.arity).then_some(row.arity)
+    }
+
+    /// Wrap the emitted function `f` in the currying adapter that presents
+    /// it as a function of `arity` arguments returning the function of the
+    /// rest (intrinsics::curry_adapter).
+    pub(super) fn curry_adapter_ast(arity: usize, f: Expr) -> Expr {
+        match crate::intrinsics::curry_adapter(arity) {
+            (name, true) => Expr::call_named(name, vec![f]),
+            (name, false) => Expr::call_named(name, vec![f, Expr::lit(arity.to_string())]),
         }
+    }
+
+    /// Adapt the arguments of a call whose callee is `callee`, the i-th
+    /// argument landing in parameter i: each argument in a runtime callback
+    /// position whose type (`tys[i]`, the delivered value's type at this
+    /// use) has more arrows than the runtime passes is wrapped in its
+    /// currying adapter. Every emitter that pairs a callee expression with
+    /// arguments — a saturated call, a partial-application closure's
+    /// parameters, an eta-expanded reference's parameters, `$`, `.`, an
+    /// eta-padding application, a fused intrinsic — routes its argument list
+    /// through here, so a function reaches the runtime's call at the arity
+    /// the runtime calls it with however the call was spelled. Callees that
+    /// are not a runtime definition pass their arguments through unchanged.
+    ///
+    /// The types come from the delivered values (the argument expressions,
+    /// the arrows of the closure's own type for its parameters), not from
+    /// `callee.ty`: a head the monomorphizer synthesizes (a resolved infix
+    /// method such as `<$>` at lists, which becomes `map`) carries no type.
+    /// `tys` pairs with `args` by position; an argument past its end has no
+    /// known type and passes unchanged.
+    pub(super) fn adapt_runtime_args(
+        &self,
+        callee: &TExpr,
+        mut args: Vec<Expr>,
+        tys: &[&Ty],
+    ) -> Vec<Expr> {
+        let mut c = callee;
+        while let TExprKind::Paren(p) = &c.kind {
+            c = p.as_ref();
+        }
+        let TExprKind::Var(name) = &c.kind else { return args };
+        if !crate::intrinsics::has_runtime_callback(name) {
+            return args;
+        }
+        for (i, (a, ty)) in args.iter_mut().zip(tys).enumerate() {
+            if let Some(k) = self.runtime_callback_adapter(c, i, ty) {
+                let e = std::mem::replace(a, Expr::lit("nil"));
+                *a = Self::curry_adapter_ast(k, e);
+            }
+        }
+        args
+    }
+
+    /// The parameter types of a function type, outermost first: the types
+    /// of the values a closure of that type receives.
+    pub(super) fn arrow_params(ty: &Ty) -> Vec<&Ty> {
+        let mut out = Vec::new();
+        let mut t = ty;
+        while let Ty::Arrow(p, rest, _) = t {
+            out.push(p.as_ref());
+            t = rest.as_ref();
+        }
+        out
+    }
+
+    /// Does the reference `callee` (a bare Var at its use-site type) take a
+    /// function in a runtime callback position that this type widens past
+    /// the runtime's arity? Such a reference cannot be handed out bare as a
+    /// value: whoever applies it would deliver the unadapted function.
+    pub(super) fn runtime_callback_widened(&self, callee: &TExpr) -> bool {
+        Self::arrow_params(&callee.ty)
+            .into_iter()
+            .enumerate()
+            .any(|(i, p)| self.runtime_callback_adapter(callee, i, p).is_some())
     }
 
     /// True when expr_ast builds this expression as a bare, unparenthesized
@@ -557,6 +630,20 @@ impl CodeGen {
             TExprKind::Var(name) if name == "mod" => Expr::name("__mll_mod_fn"),
             TExprKind::Var(name) if name == "quot" => Expr::name("__mll_quot_fn"),
             TExprKind::Var(name) if name == "rem" => Expr::name("__mll_rem_fn"),
+            // A reference that cannot travel bare (a fixed-arity or
+            // runtime-callback definition at a widening type) gets the same
+            // eta-expansion as in expr_ast; the closure forces nothing until
+            // it is applied, so the position stays lazy.
+            TExprKind::Var(name) if self.ref_needs_eta(expr) => {
+                let sname = sanitize_name(name);
+                let lref = self.lua_ref(&sname);
+                let callee = if self.concrete_vars.contains(&sname) || self.runtime_fn_ref(&sname) {
+                    Expr::name(lref)
+                } else {
+                    Expr::force(Expr::name(lref))
+                };
+                self.widened_ref_ast(expr, callee)
+            }
             TExprKind::Var(name) => {
                 Expr::name(self.lua_ref(&sanitize_name(name)))
             }

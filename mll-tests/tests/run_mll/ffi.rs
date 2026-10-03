@@ -2257,6 +2257,60 @@ main = pure ()
 }
 
 #[test]
+fn outgoing_callback_function_accumulator() {
+    // A polymorphic FFI callback whose accumulator is instantiated at a
+    // function type has more parameters than the host passes it: the
+    // compiled `\x g y -> …` at `acc = Int -> Int` takes three. The
+    // wrapper calls it with the host's two (three) arguments, so the
+    // callback must be adapted to that arity and hand back the function of
+    // the rest — the old wrapper bound the missing parameter to nil.
+    let source = r#"
+foldHost :: [Int] -> (Int -> acc -> acc) -> acc -> LuaPure "fold_host" acc
+foldIxHost :: [Int] -> (Int -> Int -> acc -> acc) -> acc -> LuaPure "fold_ix_host" acc
+
+export digits :: Int -> Int
+digits n =
+    let k = foldHost (enumFromTo 1 n) (\x g y -> g y * 10 + x) (\y -> y)
+    in k 0
+
+export weighted :: Int -> Int
+weighted n =
+    let k = foldIxHost (enumFromTo 1 n) (\x i g y -> g y + x * i) (\y -> y)
+    in k 100
+
+export plain :: Int -> Int
+plain n = foldHost (enumFromTo 1 n) (\x c -> c + x) 0
+
+main :: IO ()
+main = pure ()
+"#;
+    let (lua, module) = compile_ffi_module(source);
+    lua.load(
+        r#"
+        function fold_host(xs, f, st)
+            for _, x in ipairs(xs) do st = f(x, st) end
+            return st
+        end
+        function fold_ix_host(xs, f, st)
+            for i, x in ipairs(xs) do st = f(x, i, st) end
+            return st
+        end
+    "#,
+    )
+    .exec()
+    .unwrap();
+    let digits: mlua::Function = module.get("digits").unwrap();
+    let v: i64 = digits.call(3).expect("function accumulator through a two-argument host call");
+    assert_eq!(v, 123);
+    let weighted: mlua::Function = module.get("weighted").unwrap();
+    let v: i64 = weighted.call(3).expect("function accumulator through a three-argument host call");
+    assert_eq!(v, 100 + 1 + 4 + 9);
+    let plain: mlua::Function = module.get("plain").unwrap();
+    let v: i64 = plain.call(4).unwrap();
+    assert_eq!(v, 10);
+}
+
+#[test]
 fn ffi_outgoing_callback_rejects_bad_signatures() {
     // Effectful callbacks must use `LuaIO s acc`, not `IO acc`.
     expect_compile_error(

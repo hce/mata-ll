@@ -352,8 +352,37 @@ static PRELUDE_ARITY: std::sync::LazyLock<std::collections::HashMap<&'static str
 /// `sanitize_name` output: `not_`, `error_`, …), or `None` when the prelude
 /// has no such fixed-arity definition. See [`PRELUDE_ARITY`].
 pub(super) fn prelude_arity(lua_name: &str) -> Option<usize> {
+    if let Some(k) = lua_name.strip_prefix("__mll_bs[").and_then(|r| r.strip_suffix(']')) {
+        return k.parse::<usize>().ok().and_then(|k| BS_ARITY.get(&k).copied());
+    }
     PRELUDE_ARITY.get(lua_name).copied()
 }
+
+/// The Lua parameter count of every entry of the prelude's `__mll_bs`
+/// table (the ByteString primitives, reached as `__mll_bs[k]`), read off
+/// the entry lines: each entry opens with `function(…)` and carries its
+/// `-- [k]` marker on that line. Same role as [`PRELUDE_ARITY`] — the
+/// entries are runtime definitions whose parameter list, not the use-site
+/// type, fixes their arity (`bsFoldl` at a function accumulator is applied
+/// to one argument more than it takes).
+static BS_ARITY: std::sync::LazyLock<std::collections::HashMap<usize, usize>> =
+    std::sync::LazyLock::new(|| {
+        let mut m = std::collections::HashMap::new();
+        for line in PRELUDE.lines() {
+            let Some(rest) = line.trim_start().strip_prefix("function(") else { continue };
+            let Some((params, tail)) = rest.split_once(')') else { continue };
+            let Some((_, tag)) = tail.split_once("-- [") else { continue };
+            let Some((k, _)) = tag.split_once(']') else { continue };
+            let Ok(k) = k.parse::<usize>() else { continue };
+            let params = params.trim();
+            if params.contains("...") {
+                continue;
+            }
+            let arity = if params.is_empty() { 0 } else { params.split(',').count() };
+            m.insert(k, arity);
+        }
+        m
+    });
 
 /// Every prelude name bound to a plain Lua function value at the chunk's
 /// top level, READ OFF the runtime text like [`PRELUDE_ARITY`] — the
@@ -492,6 +521,14 @@ mod tests {
             );
         }
         assert_eq!(prelude_arity("no_such_runtime_function"), None);
+        // The ByteString table entries, by their `-- [k]` markers: every
+        // entry has an arity, and the higher-order ones read right.
+        for k in 1..=*BS_ENTRY_COUNT {
+            assert!(prelude_arity(&format!("__mll_bs[{k}]")).is_some(), "arity of __mll_bs[{k}]");
+        }
+        for (k, arity) in [(14, 2), (15, 3), (17, 3), (3, 3)] {
+            assert_eq!(prelude_arity(&format!("__mll_bs[{k}]")), Some(arity), "arity of __mll_bs[{k}]");
+        }
     }
 
     /// `code_idents` cuts each line at its first `--`, which is only right

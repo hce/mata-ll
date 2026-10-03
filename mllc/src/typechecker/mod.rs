@@ -3233,6 +3233,33 @@ pub fn builtin_method_names() -> Vec<String> {
     names
 }
 
+/// Every BUILTIN value the compiler registers in Rust, with its declared
+/// type: the environment schemes (`map`, `modifyIORef`, `bsFoldl`, the
+/// builtin class methods) and each builtin instance's implementation name
+/// at its class method's type (`map` for `fmap` at lists, with the class
+/// variable left abstract). Prelude.mll definitions are not among them —
+/// they are ordinary source. Read by codegen's runtime-callback coverage
+/// test: a builtin the Lua runtime implements under these names calls its
+/// function-typed parameters with the arity intrinsics.rs states.
+pub fn builtin_signatures() -> Vec<(String, Ty)> {
+    let checker = Checker::new();
+    let mut out: Vec<(String, Ty)> = checker
+        .env
+        .iter()
+        .map(|(name, scheme)| (name.clone(), scheme.ty.clone()))
+        .collect();
+    for inst in checker.instances.values() {
+        let Some(class) = checker.classes.get(&inst.class_name) else { continue };
+        for (method, impl_name) in &inst.method_fns {
+            if let Some((_, ty)) = class.methods.iter().find(|(m, _)| m == method) {
+                out.push((impl_name.clone(), ty.clone()));
+            }
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
 /// Classes whose list/tuple/Maybe instances mata-ll synthesizes structurally
 /// (mono generates them from the element instances). Ord is excluded — there is
 /// no list/tuple/Maybe ordering — as are Read and user classes.
@@ -3309,8 +3336,10 @@ fn is_maybe_ty(ty: &Ty) -> bool {
 /// decided here: it is derived at codegen time from the callback's
 /// monomorphized type, so a polymorphic accumulator instantiated at a
 /// structured type is converted identically at the FFI edge and the callback
-/// edge (see TExprKind::OutgoingCallback). Arity and IO-ness never change
-/// under instantiation, so they may safely be read off the declared type.
+/// edge (see TExprKind::OutgoingCallback). The host's arity and the
+/// IO-ness are fixed by the declared type, so they are read off it;
+/// instantiation can only give the callback itself MORE parameters (a
+/// result variable at a function type), which codegen adapts to this arity.
 fn outgoing_cb_flags(cb_ty: &Ty) -> (usize, bool) {
     let (args, ret) = cb_ty.peel_arrows();
     let run_io = matches!(ret, Ty::IO(_) | Ty::LuaIO(_, _));

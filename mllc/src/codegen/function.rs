@@ -866,11 +866,12 @@ impl CodeGen {
             }
             e => Expr::force(e),
         };
-        Self::split_call_ast(
-            callee,
-            eta_params.iter().map(|p| Expr::name(p.clone())).collect(),
-            arity,
-        )
+        // The padding lands in the body's own parameters: a runtime
+        // definition taking one as a callback gets it adapted, exactly as at
+        // any other call site (adapt_runtime_args).
+        let eta_args: Vec<Expr> = eta_params.iter().map(|p| Expr::name(p.clone())).collect();
+        let eta_args = self.adapt_runtime_args(body, eta_args, &Self::arrow_params(&body.ty));
+        Self::split_call_ast(callee, eta_args, arity)
     }
 
     /// The two Lua functions of a performer / action-builder pair (see
