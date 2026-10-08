@@ -6682,3 +6682,78 @@ fn prelude_constructors_follow_the_prelude_import() {
     )
     .expect("list and tuple syntax needs no Prelude name");
 }
+
+// A local binding group (`let`, do-`let`, `where`) defines each name once,
+// per Haskell 2010 §4.4.3.1: the equations of one function are adjacent
+// and take arguments, so a repeated value binding or a function whose
+// equations are separated by another binding is GHC's "Conflicting
+// definitions" — reported with both locations (GHC: "Bound at: … / …").
+// Such groups used to compile, keeping only the LAST binding of the name.
+#[test]
+fn duplicate_let_binding_is_conflicting_definitions() {
+    let source = "main :: IO ()\nmain = print (let x = 1; x = 2 in x :: Int)\n";
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'x'",
+        "bound at 2:19 and again at 2:26",
+        "note:",
+        "Equations form ONE function only when they follow each other directly",
+    ]);
+}
+
+#[test]
+fn duplicate_where_binding_is_conflicting_definitions() {
+    let source = "g :: Int\ng = y\n  where\n    y = 10\n    y = 20\n\nmain :: IO ()\nmain = print g\n";
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'y'",
+        "bound at 4:5 and again at 5:5",
+    ]);
+}
+
+#[test]
+fn separated_let_equations_are_conflicting_definitions() {
+    let source = "main :: IO ()\nmain = do\n    let f 0 = 1\n        g = 2\n        f n = n + g\n    print (f (3 :: Int) :: Int)\n";
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'f'",
+        "bound at 3:9 and again at 5:9",
+    ]);
+}
+
+#[test]
+fn separated_where_equations_are_conflicting_definitions() {
+    let source = "k :: Int -> Int\nk = go\n  where\n    go 0 = 1\n    base = 2\n    go n = n + base\n\nmain :: IO ()\nmain = print (k 3)\n";
+    expect_compile_error(source, &[], &[
+        "Conflicting definitions for 'go'",
+        "bound at 4:5 and again at 6:5",
+    ]);
+}
+
+#[test]
+fn pattern_binding_and_equation_of_one_name_conflict() {
+    let source = "main :: IO ()\nmain = print (let (a, b) = (1, 2); a = 3 in a + b :: Int)\n";
+    expect_compile_error(source, &[], &["Conflicting definitions for 'a'", "bound at 2:19 and again at 2:36"]);
+}
+
+/// The equations of one local function take the same number of arguments
+/// (GHC: "Equations for 'f' have different numbers of arguments"); a
+/// trailing argument-less equation is such an equation, not a value
+/// binding, exactly as at the top level.
+#[test]
+fn local_equations_with_different_arities_are_rejected() {
+    let source = "main :: IO ()\nmain = print (let f 0 = 1; f n m = n in f (3 :: Int) :: Int)\n";
+    expect_compile_error(source, &[], &[
+        "Equations for 'f' have different numbers of arguments",
+        "the first equation (at 2:19) binds 1 argument, this one binds 2 arguments",
+    ]);
+    let source = "main :: IO ()\nmain = print (let f x = 1; f = 2 in f (3 :: Int) :: Int)\n";
+    expect_compile_error(source, &[], &["Equations for 'f' have different numbers of arguments"]);
+}
+
+/// The accept side of the grouping rule: adjacent equations of one local
+/// function (with guards falling through to the next equation), a local
+/// signature line between a function's equations and a sibling binding,
+/// and the same names in two separate groups all stay legal.
+#[test]
+fn adjacent_local_equations_stay_accepted() {
+    let source = "main :: IO ()\nmain = do\n    let f :: Int -> Int\n        f 0 = 1\n        f n | n > 5 = 2\n        f n = n\n        g = f 2\n    print (f 0 + f 7 + f 3 + g)\n    let f = 10 :: Int\n    print f\n";
+    compile(source, Path::new("."), &[]).expect("adjacent equations are one function");
+}

@@ -1048,6 +1048,20 @@ pub fn local_fn_strict_params(
     local_fn_demand(clause_view(clause), env, shadowed).rows
 }
 
+/// `local_fn_strict_params` for a `let` group (a let-expression, a
+/// do-`let`, a guard or comprehension `let`): its function bindings are
+/// the same adjacent-equation groups a where block has, analyzed through
+/// the same view (`let_group_view`) under the same scope filter, with the
+/// let body in the clause-body position.
+pub fn let_fn_strict_params(
+    binds: &[TLocalDef],
+    body: &TExpr,
+    env: &HashMap<String, Vec<bool>>,
+    shadowed: Shadowed,
+) -> HashMap<String, Vec<bool>> {
+    local_fn_demand(let_group_view(binds, body), env, shadowed).rows
+}
+
 /// What `local_fn_demand` computes for one clause: the strictness rows of
 /// its where-bound local functions, their captured-demand sets, and — when
 /// there are any local functions — the outer environment extended by those
@@ -1185,12 +1199,13 @@ fn local_fn_demand(
         return LocalFnDemand::empty();
     }
 
-    // Borrowed equation views of each group. Guards on where-binds were
-    // desugared to if/else by the parser, and a TLocalDef carries no nested
-    // where, so these equations are guard- and where-free (which also
-    // bounds the analyze_equation -> local_fn_demand recursion at one
-    // level). Arity follows the FIRST equation, matching codegen's
-    // num_params in gen_where_func_group_body.
+    // Borrowed equation views of each group. The parser lowers a local
+    // equation's guards into its body (an if/else spine, or the join-point
+    // match of a collapsed group) and its own where block into a `let`
+    // around it, and a TLocalDef carries neither, so these equations are
+    // guard- and where-free (which also bounds the analyze_equation ->
+    // local_fn_demand recursion at one level). Arity follows the FIRST
+    // equation, matching codegen's num_params in gen_where_func_group_body.
     let group_clauses: Vec<(String, usize, Vec<TLocalDefLike<'_>>)> = groups
         .iter()
         .map(|(name, defs)| {
@@ -2606,6 +2621,19 @@ fn local_def_view(d: &TLocalDef) -> TLocalDefLike<'_> {
     }
 }
 
+/// A `let` group as a clause: no parameters, no guards, the let body as
+/// the body and the group's bindings as the where bindings. A let group
+/// and a where block share one binding-group representation, so the
+/// local-function analyses run over this view unchanged.
+fn let_group_view<'a>(binds: &'a [TLocalDef], body: &'a TExpr) -> TLocalDefLike<'a> {
+    TLocalDefLike {
+        patterns: &[],
+        guards: &[],
+        body: Some(body),
+        where_binds: binds,
+    }
+}
+
 /// Compute run/deep rows for a group of equations (a function) under the
 /// current environment.
 fn equations_rows<'t>(
@@ -2641,10 +2669,18 @@ fn equations_rows<'t>(
 /// `demanded_map_guards` (via its scoped `local_demand_rows` map), so the
 /// demanded-binding decision sees exactly what the rows analysis saw.
 pub fn local_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, shadowed: Shadowed, clause: &TClause) -> HashMap<String, LocalRows> {
+    local_fn_rows_view(cx_rows, inlined, shadowed, clause_view(clause))
+}
+
+/// `local_fn_rows` for a `let` group (see `let_fn_strict_params`).
+pub fn let_fn_rows(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, shadowed: Shadowed, binds: &[TLocalDef], body: &TExpr) -> HashMap<String, LocalRows> {
+    local_fn_rows_view(cx_rows, inlined, shadowed, let_group_view(binds, body))
+}
+
+fn local_fn_rows_view(cx_rows: &Rows, inlined: &dyn Fn(&str) -> bool, shadowed: Shadowed, view: TLocalDefLike<'_>) -> HashMap<String, LocalRows> {
     // The same scope filter the boolean twin applies (see
     // clean_where_fn_groups): a row keyed by a rebound or ambiguous name
     // would be applied at call sites that resolve to a DIFFERENT binder.
-    let view = clause_view(clause);
     let groups = clean_where_fn_groups(&view).groups;
     if groups.is_empty() {
         return HashMap::new();

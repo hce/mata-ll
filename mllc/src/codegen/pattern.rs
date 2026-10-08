@@ -27,12 +27,22 @@ use super::lua::{Block, Expr, Stmt};
 use super::names::{lua_field_index, lua_number_literal, lua_quoted_string, sanitize_name};
 
 impl CodeGen {
-    /// The `error("Non-exhaustive patterns")` fall-off statement.
-    fn non_exhaustive_stmt() -> Stmt {
-        Stmt::Expr(Expr::call_named(
-            "error",
-            vec![Expr::lit(lua_quoted_string(b"Non-exhaustive patterns"))],
-        ))
+    /// The match fall-off statement: inside a local function group, the
+    /// named Haskell `error` (see `local_fn_fall_off`); otherwise the plain
+    /// `error("Non-exhaustive patterns")`.
+    fn non_exhaustive_stmt(&self) -> Stmt {
+        match &self.local_fn_fall_off {
+            Some(name) => Stmt::Expr(Expr::call_named(
+                "error_",
+                vec![Expr::lit(lua_quoted_string(
+                    format!("Non-exhaustive patterns in {}", name).as_bytes(),
+                ))],
+            )),
+            None => Stmt::Expr(Expr::call_named(
+                "error",
+                vec![Expr::lit(lua_quoted_string(b"Non-exhaustive patterns"))],
+            )),
+        }
     }
 
     /// A clause's bindings (`local x = <path>`) plus its where bindings.
@@ -226,7 +236,7 @@ impl CodeGen {
                 // and basic's fn200 on bare TCO instead of a loop.
                 let else_b = if fell_through {
                     debug_assert!(else_b.is_none(), "fall-off with an else arm");
-                    Some(Block(vec![Self::non_exhaustive_stmt()]))
+                    Some(Block(vec![self.non_exhaustive_stmt()]))
                 } else {
                     else_b
                 };
@@ -368,7 +378,7 @@ impl CodeGen {
             }
             scope.restore(self);
         }
-        stmts.push(Self::non_exhaustive_stmt());
+        stmts.push(self.non_exhaustive_stmt());
         Block(stmts)
     }
 

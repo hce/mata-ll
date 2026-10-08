@@ -47,6 +47,53 @@ impl GuardChain {
     }
 }
 
+/// One equation of a local binding group — a `where` block, a
+/// let-expression, a do-`let`, a guard or comprehension `let` — as parsed:
+/// its name, parameter patterns, right-hand side, its own `where` block
+/// and the location of its head. Equations are collected first and lowered
+/// to `LocalDef`s only when the group closes (`close_local_group`): the
+/// equations of one function are grouped by Haskell 2010 §4.4.3.1, and a
+/// guarded equation's fall-through target is the NEXT equation, which is
+/// not known while the equation itself is parsed.
+struct LocalEquation {
+    name: String,
+    patterns: Vec<Pattern>,
+    rhs: LocalRhs,
+    where_binds: Vec<LocalDef>,
+    span: Span,
+}
+
+/// The right-hand side of a local equation: `= body`, or a guard chain.
+enum LocalRhs {
+    Body(Expr),
+    Guards(GuardChain),
+}
+
+/// An entry of a local binding group in source order: an equation, or a
+/// pattern binding (`(a, b) = e`) already lowered to its scrutinee and
+/// selector bindings, with the names it binds (for the
+/// conflicting-definitions check) and where it binds them.
+enum LocalEntry {
+    Equation(LocalEquation),
+    Lowered { defs: Vec<LocalDef>, bound: Vec<(String, Span)> },
+}
+
+/// One clause of a clause group being collapsed into a single match over
+/// fresh parameters (`collapse_match_rows`): its patterns, right-hand side
+/// and `where` block. A top-level function clause and a local equation
+/// both reduce to this.
+struct MatchRow {
+    patterns: Vec<Pattern>,
+    rhs: RowRhs,
+    where_binds: Vec<LocalDef>,
+}
+
+enum RowRhs {
+    Body(Expr),
+    Plain(Vec<Guard>),
+    Raw(Vec<RawGuard>),
+}
+
 /// What a module's source declares a top-level name as: the kind of one
 /// entry of the parser's declaration table (`Parser::declared`). The table
 /// exists to enforce that one module's source declares each name at most
@@ -778,8 +825,7 @@ impl Parser {
     fn push_decl(&mut self, decls: &mut Vec<Decl>, decl: Decl, started_at: usize) {
         if let Decl::FunDef { name, clauses } = decl {
             if let Some(Decl::FunDef { name: prev, clauses: prev_clauses }) = decls.last_mut()
-                && *prev == name
-                && prev_clauses.first().is_some_and(|c| !c.patterns.is_empty())
+                && prev_clauses.first().is_some_and(|c| Self::continues_function(prev, &c.patterns, &name))
             {
                 prev_clauses.extend(clauses);
             } else {
@@ -2141,36 +2187,234 @@ impl Parser {
         Ok((name, patterns))
     }
 
-    /// Build the `LocalDef` for a binding-group entry: a function binding
-    /// `f x y = e` desugars to the value binding `f = \x y -> e`, so the
-    /// whole group stays a uniform value-binding group and is inferred and
-    /// generated as one mutually recursive scope (patterns on group
-    /// bindings are otherwise not handled by the let pipeline). Where
-    /// blocks do NOT use this — a where binding keeps its patterns and the
-    /// where pipeline handles the function form itself.
-    fn group_binding(&mut self, name: String, patterns: Vec<Pattern>, body: Expr) -> PResult<LocalDef> {
-        let body = if patterns.is_empty() {
+    /// Does an equation of `name` continue the function binding whose first
+    /// equation is `first`? Haskell 2010 §4.4.3.1 as GHC implements it: the
+    /// equations of one function are adjacent, and only a first equation
+    /// that takes arguments opens a group (`k = 1` is complete on its own,
+    /// so a second `k = 2` is a second binding, not a second equation).
+    /// Shared by the top-level declaration list (`push_decl`) and the
+    /// local binding groups (`close_local_group`).
+    fn continues_function(first_name: &str, first_patterns: &[Pattern], name: &str) -> bool {
+        first_name == name && !first_patterns.is_empty()
+    }
+
+    /// Close a local binding group: the entries in source order become the
+    /// group's `LocalDef`s. This is the ONE representation every local
+    /// binding group (`where`, let-expression, do-`let`, guard and
+    /// comprehension `let`) takes downstream, the same for all of them:
+    /// a value binding is a patternless `LocalDef`; a function binding is
+    /// its equations as ADJACENT `LocalDef`s of one name, each carrying
+    /// that equation's parameter patterns and body (the typechecker types
+    /// them at one shared type, codegen compiles the run as one clause
+    /// matrix). Three things happen here, in this order:
+    ///
+    /// 1. equations are grouped per §4.4.3.1 (`continues_function`);
+    /// 2. the group is checked: a name bound by two groups, or by a group
+    ///    and a pattern binding, is GHC's "Conflicting definitions" (an
+    ///    equation separated from its function by another binding is such
+    ///    a second definition, exactly as at the top level); the equations
+    ///    of one function take the same number of arguments;
+    /// 3. each function's equations are lowered (`lower_local_equations`):
+    ///    guards fall through to the next equation, and only past the last
+    ///    equation to the match-failure error.
+    fn close_local_group(
+        &mut self,
+        entries: Vec<LocalEntry>,
+        sigs: Vec<(String, Type, Span)>,
+    ) -> PResult<Vec<LocalDef>> {
+        enum Group {
+            Function(Vec<LocalEquation>),
+            Lowered { defs: Vec<LocalDef>, bound: Vec<(String, Span)> },
+        }
+        let mut groups: Vec<Group> = Vec::new();
+        for entry in entries {
+            match entry {
+                LocalEntry::Equation(eq) => {
+                    if let Some(Group::Function(eqs)) = groups.last_mut()
+                        && Self::continues_function(&eqs[0].name, &eqs[0].patterns, &eq.name)
+                    {
+                        eqs.push(eq);
+                    } else {
+                        groups.push(Group::Function(vec![eq]));
+                    }
+                }
+                LocalEntry::Lowered { defs, bound } => groups.push(Group::Lowered { defs, bound }),
+            }
+        }
+
+        let mut first_bound: HashMap<&str, Span> = HashMap::new();
+        for group in &groups {
+            let bound: Vec<(&str, Span)> = match group {
+                Group::Function(eqs) => vec![(eqs[0].name.as_str(), eqs[0].span)],
+                Group::Lowered { bound, .. } => bound.iter().map(|(n, s)| (n.as_str(), *s)).collect(),
+            };
+            for (name, span) in bound {
+                if let Some(prev) = first_bound.get(name) {
+                    let mut diag = Diagnostic::parse_at(
+                        format!(
+                            "Conflicting definitions for '{}': bound at {} and again at {}",
+                            name, prev, span
+                        ),
+                        span,
+                    );
+                    diag.notes.push(format!(
+                        "a binding group defines each name once. Equations form ONE function \
+                         only when they follow each other directly and the first takes \
+                         arguments; anything between them — another binding, or the type \
+                         signature of '{}' itself — ends the function, and the next equation \
+                         starts a second definition. Write the equations of '{}' together, or \
+                         rename one definition.",
+                        name, name,
+                    ));
+                    return Err(Box::new(diag));
+                }
+                first_bound.insert(name, span);
+            }
+            if let Group::Function(eqs) = group {
+                let n = eqs[0].patterns.len();
+                if let Some(odd) = eqs.iter().find(|e| e.patterns.len() != n) {
+                    let plural = |k: usize| if k == 1 { "argument" } else { "arguments" };
+                    let mut diag = Diagnostic::parse_at(
+                        format!(
+                            "Equations for '{}' have different numbers of arguments: \
+                             the first equation (at {}) binds {} {}, this one binds {} {}",
+                            eqs[0].name, eqs[0].span, n, plural(n),
+                            odd.patterns.len(), plural(odd.patterns.len()),
+                        ),
+                        odd.span,
+                    );
+                    diag.notes.push(
+                        "every equation of one function matches the same number of \
+                         arguments; a different count is a different function."
+                            .to_string(),
+                    );
+                    return Err(Box::new(diag));
+                }
+            }
+        }
+
+        let mut binds = Vec::new();
+        for group in groups {
+            match group {
+                Group::Function(eqs) => binds.extend(self.lower_local_equations(eqs)),
+                Group::Lowered { defs, .. } => binds.extend(defs),
+            }
+        }
+        Self::attach_local_sigs(&mut binds, sigs)?;
+        Ok(binds)
+    }
+
+    /// Lower the equations of one local function (or the one equation of a
+    /// value binding) to `LocalDef`s. An equation whose guards can fall
+    /// through to a LATER equation cannot stand alone: from the first such
+    /// equation on, the equations collapse into one final equation over
+    /// fresh parameters whose body re-matches each of them with join-point
+    /// fall-through (`collapse_match_rows`, the lowering top-level clause
+    /// groups with pattern guards take). Every earlier equation, and a
+    /// guarded equation that is the LAST one, keeps its own patterns and
+    /// body — the shape codegen's clause matrix compiles directly — with
+    /// the guard chain folded over the match-failure error.
+    fn lower_local_equations(&mut self, eqs: Vec<LocalEquation>) -> Vec<LocalDef> {
+        let name = eqs[0].name.clone();
+        let n = eqs.len();
+        let collapse_from = eqs
+            .iter()
+            .position(|e| matches!(e.rhs, LocalRhs::Guards(_)))
+            .filter(|&k| k + 1 < n);
+        let mut eqs = eqs;
+        let tail = collapse_from.map(|k| eqs.split_off(k));
+        let mut defs: Vec<LocalDef> = eqs
+            .into_iter()
+            .map(|eq| {
+                let fallback = Expr::App(
+                    Box::new(WiredIn::Error.var()),
+                    Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec()))),
+                );
+                let body = match eq.rhs {
+                    LocalRhs::Body(body) => body,
+                    LocalRhs::Guards(GuardChain::Plain(guards)) => Self::pg_plain_guards(guards, &fallback),
+                    LocalRhs::Guards(GuardChain::Raw(raws)) => self.guard_chain_expr(raws, fallback),
+                };
+                let body = Self::wrap_where(eq.where_binds, body);
+                LocalDef { name: eq.name, patterns: eq.patterns, body, sig: None }
+            })
+            .collect();
+        if let Some(tail) = tail {
+            let arity = tail[0].patterns.len();
+            let rows = tail
+                .into_iter()
+                .map(|eq| MatchRow {
+                    patterns: eq.patterns,
+                    rhs: match eq.rhs {
+                        LocalRhs::Body(b) => RowRhs::Body(b),
+                        LocalRhs::Guards(GuardChain::Plain(g)) => RowRhs::Plain(g),
+                        LocalRhs::Guards(GuardChain::Raw(r)) => RowRhs::Raw(r),
+                    },
+                    where_binds: eq.where_binds,
+                })
+                .collect();
+            let (params, body) = self.collapse_match_rows(&name, arity, rows);
+            defs.push(LocalDef {
+                name,
+                patterns: params.into_iter().map(Pattern::Var).collect(),
+                body,
+                sig: None,
+            });
+        }
+        defs
+    }
+
+    /// An equation's own `where` block scopes over its guards and body.
+    fn wrap_where(where_binds: Vec<LocalDef>, body: Expr) -> Expr {
+        if where_binds.is_empty() {
             body
         } else {
-            // Pattern parameters (`let f (a, b) = e`, `where g (Just x) = …`)
-            // desugar exactly like a pattern lambda (A14): fresh parameter +
-            // case, with GHC's partial-function fallback for a refutable
-            // pattern.
-            Self::lambda_from_patterns(
-                patterns.clone(),
-                body,
-                &format!("Non-exhaustive patterns in {}", name),
-            )
-        };
-        // The patterns are KEPT on the LocalDef (the body is still the
-        // desugared lambda): they are the syntactic function-binding
-        // marker. Inference deliberately does NOT use it to exempt
-        // function bindings from the monomorphism restriction — see the
-        // HASKDIFF.md section and the comment in infer_let_group — but
-        // the module rewriter scopes their names, and the marker is the
-        // honest record of what the user wrote. The emitted TIR bind
-        // stays patternless.
-        Ok(LocalDef { name, patterns, body, sig: None })
+            Expr::Let { binds: where_binds, body: Box::new(body) }
+        }
+    }
+
+    /// The `where` block of a LOCAL equation (a binding inside a `let` or
+    /// `where` group), if the next token is one. On the equation's own
+    /// line it always belongs to the equation; on a new line only when it
+    /// is indented past the group's binding column — a `where` at or
+    /// before that column closes the group (and whatever encloses it) and
+    /// belongs to the enclosing function clause, as in
+    /// `main = do { let x = 1; … } where helper = …`.
+    fn parse_local_where(&mut self, group_indent: usize) -> PResult<Vec<LocalDef>> {
+        let before = self.checkpoint();
+        let last_line = self.tokens[self.pos.saturating_sub(1)].line;
+        self.skip_newlines_and_indent();
+        let own = self.at(&Token::Where)
+            && (self.peek_loc().line == last_line || self.current_indent > group_indent);
+        self.rewind(before);
+        if own { self.parse_where() } else { Ok(vec![]) }
+    }
+
+    /// The bindings a pattern binding `pat = rhs` lowers to, in the SAME
+    /// recursive group as its siblings: one fresh binding for the scrutinee
+    /// plus one lazy SELECTOR binding per pattern variable
+    /// (`a = case __tup of (a, b) -> a`), so — as in Haskell — the
+    /// pattern's variables are in scope for the right-hand side itself and
+    /// for sibling bindings, and the match happens on first demand (never
+    /// eagerly, the way wrapping the body in a case would).
+    fn pattern_binding_defs(pat: Pattern, rhs: Expr, fresh: String) -> Vec<LocalDef> {
+        let mut defs = vec![LocalDef { name: fresh.clone(), patterns: vec![], body: rhs, sig: None }];
+        for v in pat.var_names() {
+            defs.push(LocalDef {
+                name: v.clone(),
+                patterns: vec![],
+                body: Expr::Case {
+                    scrutinee: Box::new(Expr::Var(fresh.clone())),
+                    branches: vec![CaseBranch {
+                        pattern: pat.clone(),
+                        guards: vec![],
+                        body: Some(Expr::Var(v)),
+                    }],
+                },
+                sig: None,
+            });
+        }
+        defs
     }
 
     /// The tail of a binding-group SIGNATURE line, once `parse_binding_head`
@@ -2262,29 +2506,26 @@ impl Parser {
         // The clause's column (`block_indent`, set by parse_clause) is the
         // enclosing layout context: bindings must be indented past it, or
         // the `where` is empty and the next line is the next definition.
-        let mut binds = Vec::new();
         let saved_block = self.block_indent;
         let Some(where_indent) = self.open_layout_block(where_line, self.block_indent) else {
-            return Ok(binds);
+            return Ok(Vec::new());
         };
         self.block_indent = where_indent;
 
         let mut fresh_counter = 0usize;
         let mut sigs: Vec<(String, Type, Span)> = Vec::new();
+        let mut entries: Vec<LocalEntry> = Vec::new();
         loop {
             self.skip_newlines_and_indent();
             if self.at_eof() || self.current_indent < where_indent {
                 break;
             }
-            // Tuple pattern binding `(a, b) = expr`: the same lazy-selector
-            // desugar as parse_let_binds — one fresh binding for the
-            // scrutinee plus one selector binding per pattern variable, all
-            // in the same recursive group, so the variables are in scope
-            // for siblings and the match happens on first demand. A where
-            // block used to break out of its loop on the '(' and the
-            // binding died far away as "Expected operator".
+            // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
+            // A where block used to break out of its loop on the '(' and
+            // the binding died far away as "Expected operator".
             if matches!(self.peek(), Token::LeftParen) {
                 let save = self.checkpoint();
+                let span = self.span_of(save.pos);
                 match self.parse_pattern_atom() {
                     Ok(pat @ Pattern::Tuple(_)) if self.at(&Token::Eq) => {
                         self.check_linear(save.pos, "a pattern binding")?;
@@ -2292,22 +2533,9 @@ impl Parser {
                         let rhs = self.parse_stmt_expr()?;
                         let fresh = format!("__wtup_{}", fresh_counter);
                         fresh_counter += 1;
-                        binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs, sig: None });
-                        for v in pat.var_names() {
-                            binds.push(LocalDef {
-                                name: v.clone(),
-                                patterns: vec![],
-                                body: Expr::Case {
-                                    scrutinee: Box::new(Expr::Var(fresh.clone())),
-                                    branches: vec![CaseBranch {
-                                        pattern: pat.clone(),
-                                        guards: vec![],
-                                        body: Some(Expr::Var(v)),
-                                    }],
-                                },
-                                sig: None,
-                            });
-                        }
+                        let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
+                        let defs = Self::pattern_binding_defs(pat, rhs, fresh);
+                        entries.push(LocalEntry::Lowered { defs, bound });
                         continue;
                     }
                     _ => {
@@ -2327,42 +2555,36 @@ impl Parser {
                 self.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
                 continue;
             }
-
-            // Handle guards: go acc i | i <= 0 = acc | otherwise = ...
-            self.skip_newlines_and_indent();
-            if self.at(&Token::Pipe) {
-                // Guarded where binding: parse the shared chain, then
-                // desugar it in place (a where binding is one equation —
-                // no next-clause fall-through to preserve). A plain chain
-                // keeps its historical if/else spine; a chain with binding
-                // qualifiers (§3.13) takes the pattern-guard lowering with
-                // the same error fall-through.
-                let fallback = Expr::App(
-                    Box::new(WiredIn::Error.var()),
-                    Box::new(Expr::Lit(Literal::Str(b"non-exhaustive guards".to_vec()))),
-                );
-                let body = match self.parse_guard_chain(&Token::Eq, 0)? {
-                    GuardChain::Plain(guards) => guards.into_iter().rev().fold(
-                        fallback,
-                        |else_branch, g| Expr::If {
-                            cond: Box::new(g.condition),
-                            then_branch: Box::new(g.body),
-                            else_branch: Box::new(else_branch),
-                        },
-                    ),
-                    GuardChain::Raw(raws) => self.guard_chain_expr(raws, fallback),
-                };
-                binds.push(LocalDef { name, patterns, body, sig: None });
-            } else {
-                self.expect(&Token::Eq)?;
-                let body = self.parse_stmt_expr()?;
-                binds.push(LocalDef { name, patterns, body, sig: None });
-            }
+            entries.push(LocalEntry::Equation(
+                self.parse_local_equation_tail(name, patterns, &head_loc, where_indent)?,
+            ));
         }
         self.block_indent = saved_block;
-        Self::attach_local_sigs(&mut binds, sigs)?;
+        self.close_local_group(entries, sigs)
+    }
 
-        Ok(binds)
+    /// The rest of a local equation after its head: `= body` or a guard
+    /// chain (`go acc i | i <= 0 = acc | otherwise = …`), then the
+    /// equation's own optional `where` block. Shared by where blocks and
+    /// let groups; the guard chain is kept raw for `close_local_group`,
+    /// which knows the next equation to fall through to.
+    fn parse_local_equation_tail(
+        &mut self,
+        name: String,
+        patterns: Vec<Pattern>,
+        head_loc: &Located,
+        group_indent: usize,
+    ) -> PResult<LocalEquation> {
+        let span = Span::new(head_loc.line, head_loc.col);
+        self.skip_newlines_and_indent();
+        let rhs = if self.at(&Token::Pipe) {
+            LocalRhs::Guards(self.parse_guard_chain(&Token::Eq, 0)?)
+        } else {
+            self.expect(&Token::Eq)?;
+            LocalRhs::Body(self.parse_stmt_expr()?)
+        };
+        let where_binds = self.parse_local_where(group_indent)?;
+        Ok(LocalEquation { name, patterns, rhs, where_binds, span })
     }
 
     // --- Type parsing ---
@@ -3044,21 +3266,22 @@ impl Parser {
     /// consumed — up to but NOT consuming the following `in` (a let-expression)
     /// or `,`/`]` (a list-comprehension `let` qualifier). Bindings are
     /// layout-separated exactly as in a let-expression: simple `x = e`,
-    /// function `f x = e` (desugared to `x = \... -> e`), and tuple-pattern
-    /// `(a, b) = e` binds, all in one mutually recursive group. Shared by the
-    /// let-expression atom and the comprehension qualifier so they bind
+    /// function `f x = e` (one or more equations, guards allowed), and
+    /// tuple-pattern `(a, b) = e` binds, all in one mutually recursive
+    /// group that closes through `close_local_group` exactly like a where
+    /// block. Shared by the let-expression atom, the do-`let` statement,
+    /// the guard qualifier and the comprehension qualifier so they bind
     /// identically.
     fn parse_let_binds(&mut self) -> PResult<Vec<LocalDef>> {
-        let mut binds = Vec::new();
         // The first binding's column is the group's layout block: a later
         // line at that column is the next binding, a line indented less
         // closes the group (so a do-block's next statement, at the `let`
         // line's own indent, is never read as a binding).
         let saved_block = self.block_indent;
         let let_indent = self.open_item_block();
-        // Tuple pattern binds: (fresh_name, pattern) pairs to wrap body in case
         let mut fresh_counter = 0usize;
         let mut sigs: Vec<(String, Type, Span)> = Vec::new();
+        let mut entries: Vec<LocalEntry> = Vec::new();
 
         loop {
             self.skip_newlines_and_indent();
@@ -3074,16 +3297,10 @@ impl Parser {
                 self.advance();
                 continue;
             }
-            // Tuple pattern: let (a, b) = expr. Desugared into the
-            // SAME recursive binding group as one fresh binding for
-            // the scrutinee plus one lazy SELECTOR binding per
-            // pattern variable (`a = case __tup of (a, b) -> a`), so
-            // — as in Haskell — the pattern's variables are in scope
-            // for the right-hand side itself, for sibling bindings,
-            // and the match happens lazily on first demand (never
-            // eagerly, the way wrapping the body in a case would).
+            // Tuple pattern binding `(a, b) = expr` (pattern_binding_defs).
             if matches!(self.peek(), Token::LeftParen) {
                 let binders_from = self.pos;
+                let span = self.span_of(binders_from);
                 let pat = self.parse_pattern_atom()?;
                 if matches!(pat, Pattern::Tuple(_)) {
                     self.check_linear(binders_from, "a pattern binding")?;
@@ -3091,22 +3308,9 @@ impl Parser {
                     let rhs = self.parse_expr()?;
                     let fresh = format!("__tup_{}", fresh_counter);
                     fresh_counter += 1;
-                    binds.push(LocalDef { name: fresh.clone(), patterns: vec![], body: rhs, sig: None });
-                    for v in pat.var_names() {
-                        binds.push(LocalDef {
-                            name: v.clone(),
-                            patterns: vec![],
-                            body: Expr::Case {
-                                scrutinee: Box::new(Expr::Var(fresh.clone())),
-                                branches: vec![CaseBranch {
-                                    pattern: pat.clone(),
-                                    guards: vec![],
-                                    body: Some(Expr::Var(v)),
-                                }],
-                            },
-                            sig: None,
-                        });
-                    }
+                    let bound = pat.var_names().into_iter().map(|v| (v, span)).collect();
+                    let defs = Self::pattern_binding_defs(pat, rhs, fresh);
+                    entries.push(LocalEntry::Lowered { defs, bound });
                     continue;
                 }
                 return Err(self.err_here("Expected tuple pattern or identifier in let binding".to_string()));
@@ -3121,15 +3325,14 @@ impl Parser {
                 self.parse_local_sig_tail(name, &patterns, &head_loc, &mut sigs)?;
                 continue;
             }
-            self.expect(&Token::Eq)?;
-            let body = self.parse_stmt_expr()?;
-            binds.push(self.group_binding(name, patterns, body)?);
+            entries.push(LocalEntry::Equation(
+                self.parse_local_equation_tail(name, patterns, &head_loc, let_indent)?,
+            ));
         }
 
         self.skip_newlines_and_indent();
         self.block_indent = saved_block;
-        Self::attach_local_sigs(&mut binds, sigs)?;
-        Ok(binds)
+        self.close_local_group(entries, sigs)
     }
 
     /// Parse list comprehension qualifiers: `x <- xs, pred, y <- ys, …`.
@@ -4051,9 +4254,9 @@ impl Parser {
     /// wildcards become parameters directly; every other pattern gets a
     /// fresh parameter matched by a `case` wrapped around the body, with a
     /// wildcard fallback raising `fallback_msg` for a partial pattern —
-    /// GHC's semantics for a refutable pattern in a lambda or a local
-    /// function binding. Shared by `parse_lambda` and `group_binding`
-    /// (`let f (a, b) = e`, where-bindings), so the two desugar identically.
+    /// GHC's semantics for a refutable pattern in a lambda. (A local
+    /// function binding with pattern parameters is no longer lowered this
+    /// way: its equations stay a clause group, see `close_local_group`.)
     fn lambda_from_patterns(pats: Vec<Pattern>, mut body: Expr, fallback_msg: &str) -> Expr {
         let mut params = Vec::with_capacity(pats.len());
         let mut matched = Vec::new(); // (parameter name, pattern), in source order
@@ -4221,6 +4424,36 @@ impl Parser {
         }
     }
 
+    /// Collapse `rows` — the clauses of one function from some clause on —
+    /// into one match over fresh parameters: each row re-matches its
+    /// patterns against the parameters and runs its guards, and every
+    /// "this row failed" edge (a pattern mismatch, an exhausted guard
+    /// chain) jumps to a lazily let-bound JOIN POINT holding the rows after
+    /// it; past the last row stands the match-failure error. Returns the
+    /// parameter names and the body. Shared by the top-level clause groups
+    /// with pattern guards (`desugar_pattern_guard_clauses`) and the local
+    /// binding groups whose guards fall through to a later equation
+    /// (`lower_local_equations`).
+    fn collapse_match_rows(&mut self, name: &str, arity: usize, rows: Vec<MatchRow>) -> (Vec<String>, Expr) {
+        let params: Vec<String> = (0..arity).map(|_| self.pg_fresh_name("a")).collect();
+        let mut acc = Self::pg_error(&format!("Non-exhaustive patterns in {}", name));
+        for row in rows.into_iter().rev() {
+            let (bind, fail) = self.pg_join(acc);
+            let inner = match row.rhs {
+                RowRhs::Raw(raws) => self.guard_chain_expr(raws, fail.clone()),
+                RowRhs::Plain(guards) => Self::pg_plain_guards(guards, &fail),
+                RowRhs::Body(body) => body,
+            };
+            let mut inner = Self::wrap_where(row.where_binds, inner);
+            let pats: Vec<(String, Pattern)> = params.iter().cloned().zip(row.patterns).collect();
+            for (param, pat) in pats.into_iter().rev() {
+                inner = Self::pg_match_var(&param, pat, inner, &fail);
+            }
+            acc = Self::pg_wrap_join(bind, inner);
+        }
+        (params, acc)
+    }
+
     /// End-of-parse lowering for a function clause group in which some
     /// clause carries a raw (binding-qualifier) guard chain. The clauses
     /// from the first such chain on collapse into one clause over fresh
@@ -4243,28 +4476,22 @@ impl Parser {
             }
         }
         let span = clauses[k].span;
-        let params: Vec<String> = (0..arity).map(|_| self.pg_fresh_name("a")).collect();
-        let tail = clauses.split_off(k);
-        let mut acc = Self::pg_error(&format!("Non-exhaustive patterns in {}", name));
-        for c in tail.into_iter().rev() {
-            let (bind, fail) = self.pg_join(acc);
-            let mut inner = if let Some(raws) = c.raw_guards {
-                self.guard_chain_expr(raws, fail.clone())
-            } else if !c.guards.is_empty() {
-                Self::pg_plain_guards(c.guards, &fail)
-            } else {
-                c.body.expect("clause with neither guards nor body")
-            };
-            if !c.where_binds.is_empty() {
-                inner = Expr::Let { binds: c.where_binds, body: Box::new(inner) };
-            }
-            let pats: Vec<(String, Pattern)> =
-                params.iter().cloned().zip(c.patterns).collect();
-            for (param, pat) in pats.into_iter().rev() {
-                inner = Self::pg_match_var(&param, pat, inner, &fail);
-            }
-            acc = Self::pg_wrap_join(bind, inner);
-        }
+        let rows = clauses
+            .split_off(k)
+            .into_iter()
+            .map(|c| MatchRow {
+                patterns: c.patterns,
+                rhs: if let Some(raws) = c.raw_guards {
+                    RowRhs::Raw(raws)
+                } else if !c.guards.is_empty() {
+                    RowRhs::Plain(c.guards)
+                } else {
+                    RowRhs::Body(c.body.expect("clause with neither guards nor body"))
+                },
+                where_binds: c.where_binds,
+            })
+            .collect();
+        let (params, acc) = self.collapse_match_rows(name, arity, rows);
         clauses.push(Clause {
             patterns: params.into_iter().map(Pattern::Var).collect(),
             guards: vec![],

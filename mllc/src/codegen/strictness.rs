@@ -485,6 +485,29 @@ impl CodeGen {
         env
     }
 
+    /// `clause_local_rows` for a `let` group: the current scope's rows with
+    /// every let-bound NAME shadowed first, extended with the rows of the
+    /// group's own function groups (see demand::let_fn_rows).
+    pub(super) fn let_local_rows(
+        &self,
+        binds: &[TLocalDef],
+        body: &TExpr,
+    ) -> std::collections::HashMap<String, crate::demand::LocalRows> {
+        let inlined = |n: &str| self.inline_fns.contains_key(n);
+        let mut env = self.local_demand_rows.clone();
+        for b in binds {
+            env.remove(&b.name);
+        }
+        env.extend(crate::demand::let_fn_rows(
+            &self.demand_info.rows,
+            &inlined,
+            &|n| self.is_local_shadowed(n),
+            binds,
+            body,
+        ));
+        env
+    }
+
     /// Demand seed for a clause's where bindings: the variables the emitted
     /// code for the clause body (or its guards) forces when evaluated. The
     /// result demand is the current function's (deep only when the

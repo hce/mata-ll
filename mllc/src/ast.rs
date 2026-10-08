@@ -467,6 +467,12 @@ pub enum GuardQual {
 #[derive(Debug, Clone)]
 pub struct LocalDef {
     pub name: String,
+    /// The equation's parameter patterns — empty for a value binding. A
+    /// local FUNCTION is one or more adjacent LocalDefs of one name, one
+    /// per equation, in `let`, do-`let` and `where` groups alike (the
+    /// parser's `close_local_group` builds every group this way); the
+    /// typechecker types the equations at one shared type and codegen
+    /// compiles the run as one clause matrix.
     pub patterns: Vec<Pattern>,
     pub body: Expr,
     /// The binding's declared type, when its `where`/`let` group carries a

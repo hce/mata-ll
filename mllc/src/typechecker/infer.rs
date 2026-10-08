@@ -1611,9 +1611,11 @@ impl Checker {
     ///
     /// Returns the typed bindings, the environment extended with the
     /// generalized schemes (for the body / subsequent statements), and the
-    /// accumulated substitution. Only value bindings (no parameters) are
-    /// supported, matching the rest of the `let` pipeline; bindings with
-    /// parameters are inferred as-is and will surface the same errors as before.
+    /// accumulated substitution. A function binding is its equations as
+    /// adjacent `LocalDef`s of one name, each with its parameter patterns
+    /// (the binding-group representation shared with where blocks); the
+    /// name is registered once and every equation is typed at that one
+    /// type (`infer_local_equation`).
     ///
     /// The environment is taken BY VALUE and threaded in place: a long
     /// do-block calls this once per `let` statement, and rebuilding the whole
@@ -1630,18 +1632,30 @@ impl Checker {
         mut subst: AccSubst,
     ) -> Result<(Vec<TLocalDef>, TypeEnv, AccSubst), DiagnosticKind> {
         // Pre-register fresh monomorphic vars for the whole group so bindings
-        // can see themselves and each other during inference. A shadowed outer
-        // scheme is saved so it can come back for the generalization step —
-        // generalization is over the OUTER environment, which still contains
-        // it.
-        let mut fresh_tys: Vec<Ty> = Vec::with_capacity(binds.len());
-        let mut shadowed: Vec<Option<Scheme>> = Vec::with_capacity(binds.len());
-        let mut sigs: Vec<Option<LocalSig>> = Vec::with_capacity(binds.len());
+        // can see themselves and each other during inference. ONE
+        // registration per NAME: a multi-equation local function is several
+        // adjacent LocalDefs of one name (the binding-group representation
+        // shared with where blocks; the parser has grouped and checked
+        // them), and every equation is typed at the name's one shared
+        // variable. A shadowed outer scheme is saved so it can come back
+        // for the generalization step — generalization is over the OUTER
+        // environment, which still contains it.
+        let mut names: Vec<String> = Vec::new();
+        let mut slot_of: HashMap<&str, usize> = HashMap::new();
+        let mut fresh_tys: Vec<Ty> = Vec::new();
+        let mut shadowed: Vec<Option<Scheme>> = Vec::new();
+        let mut sigs: Vec<Option<LocalSig>> = Vec::new();
         for bind in binds {
+            if slot_of.contains_key(bind.name.as_str()) {
+                continue;
+            }
+            slot_of.insert(bind.name.as_str(), names.len());
+            names.push(bind.name.clone());
             // A binding with a signature (C6) is registered at its declared
             // type, generalized over the signature's own variables (a sibling
             // uses it polymorphically from the start); its body is checked
-            // rigidly against the signature below.
+            // rigidly against the signature below. A multi-equation function
+            // carries the signature on each equation; it is read once.
             let sig = self.local_sig(bind)?;
             let fv = match &sig {
                 Some(sig) => sig.ty.clone(),
@@ -1656,17 +1670,25 @@ impl Checker {
             env.insert(bind.name.clone(), scheme);
             sigs.push(sig);
         }
-        let group: Vec<String> = binds.iter().map(|b| b.name.clone()).collect();
+        let group: Vec<String> = names.clone();
 
-        // Infer each body in the recursive environment and unify its type with
-        // the pre-registered variable, keeping the environment substituted as
-        // bindings resolve (`apply_subst_mut` touches only affected schemes).
+        // Infer each equation in the recursive environment and unify its type
+        // with its name's pre-registered variable, keeping the environment
+        // substituted as bindings resolve (`apply_subst_mut` touches only
+        // affected schemes). A function equation's parameter patterns bind
+        // over its body alone (`infer_local_equation`).
         let mut tbinds = Vec::new();
-        for (i, bind) in binds.iter().enumerate() {
-            let (te, bind_ty, s) = self.infer_expr(&bind.body, &env)?;
+        for bind in binds {
+            let slot = slot_of[bind.name.as_str()];
+            let (te, tpatterns, bind_ty, s) = if bind.patterns.is_empty() {
+                let (te, ty, s) = self.infer_expr(&bind.body, &env)?;
+                (te, Vec::new(), ty, s)
+            } else {
+                self.infer_local_equation(bind, &env)?
+            };
             subst.compose_with(&s);
             env.apply_subst_mut(&s);
-            if let Some(sig) = &sigs[i] {
+            if let Some(sig) = &sigs[slot] {
                 // Rigid check against the declared type (see
                 // check_local_sig); the unifier comes back demoted, so the
                 // pre-registered unification below is then the identity.
@@ -1674,10 +1696,10 @@ impl Checker {
                 subst.compose_with(&us);
                 env.apply_subst_mut(&us);
             }
-            let us = self.unify(&fresh_tys[i].apply_subst(&subst), &bind_ty.apply_subst(&subst))?;
+            let us = self.unify(&fresh_tys[slot].apply_subst(&subst), &bind_ty.apply_subst(&subst))?;
             subst.compose_with(&us);
             env.apply_subst_mut(&us);
-            tbinds.push(TLocalDef { name: bind.name.clone(), patterns: vec![], body: te });
+            tbinds.push(TLocalDef { name: bind.name.clone(), patterns: tpatterns, body: te });
         }
 
         // Take the group's monomorphic pre-registrations back out, restoring
@@ -1687,10 +1709,10 @@ impl Checker {
         // substitution here (applying the already-seen prefix again is a
         // no-op: applications resolve variables fully, so they are
         // idempotent).
-        for (bind, old) in binds.iter().zip(shadowed) {
-            env.remove(&bind.name);
+        for (name, old) in names.iter().zip(shadowed) {
+            env.remove(name);
             if let Some(old_scheme) = old {
-                env.insert(bind.name.clone(), old_scheme.apply_subst(&subst));
+                env.insert(name.clone(), old_scheme.apply_subst(&subst));
             }
         }
 
@@ -1720,7 +1742,7 @@ impl Checker {
         // Generalize ALL binds against the outer environment BEFORE inserting
         // any of the new schemes: a sibling's scheme is not part of the outer
         // environment and must not influence what a binding may quantify.
-        let mut schemes: Vec<Scheme> = Vec::with_capacity(binds.len());
+        let mut schemes: Vec<Scheme> = Vec::with_capacity(names.len());
         for fresh in &fresh_tys {
             let bind_ty = fresh.apply_subst(&subst);
             let mut scheme = self.generalize(&env, &bind_ty);
@@ -1738,11 +1760,46 @@ impl Checker {
             scheme.vars.retain(|v| !is_constrained(self, v));
             schemes.push(scheme);
         }
-        for (bind, scheme) in binds.iter().zip(schemes) {
-            env.insert(bind.name.clone(), scheme);
+        for (name, scheme) in names.iter().zip(schemes) {
+            env.insert(name.clone(), scheme);
         }
 
         Ok((tbinds, env, subst))
+    }
+
+    /// Infer one FUNCTION equation of a let group (`f (Just x) y = e`):
+    /// each parameter pattern is checked at a fresh type and binds over the
+    /// body, and the equation's type is the arrows over the parameters to
+    /// the body's type — the twin of `check_where_binding`'s function case,
+    /// minus that path's per-binding error recovery. Each arrow takes a
+    /// fresh multiplicity variable, as a lambda's does, so the function can
+    /// be used at a `%1` type. An existential a parameter pattern unpacks
+    /// must not escape into the equation's own type.
+    fn infer_local_equation(
+        &mut self,
+        bind: &LocalDef,
+        env: &TypeEnv,
+    ) -> Result<(TExpr, Vec<TPattern>, Ty, Subst), DiagnosticKind> {
+        let mut local_env = env.clone();
+        let mut s = Subst::empty();
+        let mut params: Vec<(Ty, Mult)> = Vec::with_capacity(bind.patterns.len());
+        let mut tpatterns = Vec::with_capacity(bind.patterns.len());
+        let skolems_before = self.pattern_skolems.len();
+        for pat in &bind.patterns {
+            let param_ty = self.fresh_var("_lp");
+            let (tp, ps) = self.check_pattern(pat, &param_ty, &mut local_env)?;
+            s = s.compose(&ps);
+            params.push((param_ty, self.fresh_mult()));
+            tpatterns.push(tp);
+        }
+        let body_env = local_env.applied(&s);
+        let (te, body_ty, bs) = self.infer_expr(&bind.body, &body_env)?;
+        s = s.compose(&bs);
+        let fn_ty = params.iter().rev().fold(body_ty.apply_subst(&s), |acc, (pt, m)| {
+            Ty::arrow_m(pt.apply_subst(&s), acc, *m)
+        });
+        self.check_existential_escape(&fn_ty, skolems_before)?;
+        Ok((te, tpatterns, fn_ty, s))
     }
 
     /// A `where`/`let` binding's declared type (C6), converted and

@@ -304,6 +304,15 @@ struct CodeGen {
     /// first-class action closures, value-position lets) must reset it to
     /// `Head` around the nested generation.
     cur_result_demand: crate::demand::Demand,
+    /// The LOCAL function group (a where- or let-bound function) whose
+    /// clause matrix is being emitted, if any: its match fall-off raises
+    /// Haskell's `error` with the function's name ("Non-exhaustive
+    /// patterns in go"), the catchable, position-free message GHC's
+    /// partial-function semantics give — a local function is not
+    /// exhaustiveness-checked at compile time, so its fall-off is live.
+    /// A top-level clause matrix (`None`) keeps the plain Lua `error`
+    /// fall-off its compile-time exhaustiveness check makes unreachable.
+    local_fn_fall_off: Option<String>,
     /// The module's DIRECT-PERFORM functions — source name → saturating
     /// argument count — computed by `module_stmts` from
     /// `direct_perform_arity` BEFORE any function body is emitted, so a
@@ -432,6 +441,7 @@ impl CodeGen {
             local_demand_rows: std::collections::HashMap::new(),
             local_inline_fns: std::collections::HashMap::new(),
             cur_result_demand: crate::demand::Demand::Head,
+            local_fn_fall_off: None,
             direct_perform_fns: std::collections::HashMap::new(),
             performer_slots: std::collections::HashMap::new(),
             fixed_arity: std::collections::HashMap::new(),

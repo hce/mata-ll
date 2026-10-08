@@ -288,12 +288,25 @@ including self-referential lazy values:
     let f x = x + 1 in f 10                                         -- 11
     let fib = [1, 1] ++ zipWith (+) fib (drop 1 fib) in fib !! 11   -- 144
 
-A binding may take PATTERN parameters (`let dist (a, b) = a + b`), which
-desugar exactly like pattern lambdas. A refutable pattern parameter
-(`let fromJust' (Just v) = v`) is accepted with GHC's partial-function
-semantics: a mismatch raises `Non-exhaustive patterns in <name>` at run
-time. Local bindings are single-equation; multi-clause local functions
-belong in a `where` clause.
+A binding may take PATTERN parameters (`let dist (a, b) = a + b`). A
+local function is defined by one or more equations with guards, exactly
+like a top-level one, in `let`, do-`let` and `where` alike: the
+equations of one name follow each other directly, a guard chain that
+runs out falls through to the NEXT equation, and only past the last
+equation does a mismatch raise `Non-exhaustive patterns in <name>` at
+run time (GHC's partial-function semantics):
+
+    let classify x | x > 10 = "big"
+        classify 0 = "zero"
+        classify _ = "other"
+    in map classify [11, 0, 5]                     -- ["big","zero","other"]
+
+An equation may carry its own `where` block (`step n | odd n = rest
+where rest = …`), scoping over that equation's guards and body. A name
+bound twice in one group — a repeated value binding, or equations of
+one function separated by another binding — is a compile error
+("Conflicting definitions for 'x'"), with both locations named, as in
+GHC.
 
 ## Do-block `<-` binds any pattern
 

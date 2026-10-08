@@ -20,7 +20,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
-use super::function::{FnSpillScope, LocalVarsSnapshot, VarsSnapshot};
+use super::function::{FnSpillScope, LocalRowsSnapshot, LocalVarsSnapshot, VarsSnapshot};
 use super::lua::{Block, Expr, FuncBody, Item, Stmt};
 use super::names::{dict_field_name, is_builtin_op, lua_field_index, lua_number_literal, lua_quoted_string, primitive_method_lua_op, sanitize_name};
 use super::util::{count_arrows};
@@ -404,6 +404,15 @@ impl CodeGen {
                         }
                     }
                 }
+                // The group's function bindings (adjacent same-name
+                // equations, exactly as in a where block) open their
+                // local-function scope here — concreteness, arity,
+                // strictness/demand rows — restored at the let's exit.
+                let rows_scope = LocalRowsSnapshot::capture(self);
+                let strict_rows = crate::demand::let_fn_strict_params(
+                    binds, body, &self.demand_info.strict_params, &|n| self.is_local_shadowed(n));
+                let demand_rows = self.let_local_rows(binds, body);
+                self.register_local_fn_groups(binds, strict_rows, demand_rows);
                 // Bindings demanded by the let body may be evaluated eagerly
                 // even when they read suspended values (see demanded_bindings).
                 // Value position: this let's result is not the function's
@@ -424,7 +433,18 @@ impl CodeGen {
                 // lazy program runs the same computation at the same point
                 // (see exact_demanded_bindings).
                 let exact = self.exact_demanded_bindings(binds, body);
-                for (i, bind) in binds.iter().enumerate() {
+                let mut i = 0;
+                while i < binds.len() {
+                    let bind = &binds[i];
+                    if !bind.patterns.is_empty() {
+                        // A function group: one Lua function over the
+                        // group's equations (the where emitter's).
+                        stmts.extend(self.where_func_group_assign_stmts(binds, i));
+                        while i < binds.len() && binds[i].name == bind.name && !binds[i].patterns.is_empty() {
+                            i += 1;
+                        }
+                        continue;
+                    }
                     let sname = sanitize_name(&bind.name);
                     // The assignment target may be a spill slot (`_vN[k]`)
                     // when the group overflowed the local budget.
@@ -464,6 +484,7 @@ impl CodeGen {
                             stmts.push(Stmt::Assign(lval, Expr::thunk(rhs)));
                         }
                     }
+                    i += 1;
                 }
                 stmts.push(Stmt::Return(self.tail_ast(body, false)));
                 let out = Expr::call(
@@ -471,6 +492,7 @@ impl CodeGen {
                     vec![],
                 );
                 spill.exit(self);
+                rows_scope.restore(self);
                 scope.restore(self);
                 out
             }

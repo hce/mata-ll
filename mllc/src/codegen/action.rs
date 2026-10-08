@@ -19,7 +19,7 @@
 use crate::tir::*;
 use crate::types::Ty;
 use super::CodeGen;
-use super::function::VarsSnapshot;
+use super::function::{LocalRowsSnapshot, VarsSnapshot};
 use super::lua::{Block, Expr, Stmt};
 use super::names::{sanitize_name};
 use super::strictness::{bare_var_alias, strict_binding_safe};
@@ -828,6 +828,12 @@ impl CodeGen {
         // the `Let` arm checks before use.
         let mut spine_maps: Option<(crate::demand::Demand,
             crate::demand::NodeMap<'_, crate::demand::DemandMap>)> = None;
+        // The local-function maps as they were before this chain's first
+        // do-`let` opened a function scope (see the Let arm), restored
+        // when the block closes: a do-`let` function's registrations are
+        // keyed by source name and must not outlive the chain they belong
+        // to (a lambda's body is a chain without a clause scope around it).
+        let mut rows_scope: Option<LocalRowsSnapshot> = None;
         loop {
             match &expr.kind {
                 TExprKind::InfixApp { op, lhs, rhs } if op == ">>=" => {
@@ -948,6 +954,17 @@ impl CodeGen {
                             }
                         }
                     }
+                    // The group's function bindings open their local-
+                    // function scope (see register_local_fn_groups); a
+                    // do-`let` scopes over the rest of the chain, so the
+                    // maps are restored when the chain's block closes.
+                    if rows_scope.is_none() {
+                        rows_scope = Some(LocalRowsSnapshot::capture(self));
+                    }
+                    let strict_rows = crate::demand::let_fn_strict_params(
+                        binds, body, &self.demand_info.strict_params, &|n| self.is_local_shadowed(n));
+                    let demand_rows = self.let_local_rows(binds, body);
+                    self.register_local_fn_groups(binds, strict_rows, demand_rows);
                     // Bindings demanded by the rest of the chain may be
                     // evaluated eagerly even when they read suspended values —
                     // the force happens regardless (see demanded_bindings).
@@ -999,7 +1016,18 @@ impl CodeGen {
                     // anchor argument holds here exactly as in the value
                     // Let arm).
                     let exact = self.exact_demanded_bindings(binds, body);
-                    for (i, bind) in binds.iter().enumerate() {
+                    let mut i = 0;
+                    while i < binds.len() {
+                        let bind = &binds[i];
+                        if !bind.patterns.is_empty() {
+                            // A function group: one Lua function over the
+                            // group's equations (the where emitter's).
+                            stmts.extend(self.where_func_group_assign_stmts(binds, i));
+                            while i < binds.len() && binds[i].name == bind.name && !binds[i].patterns.is_empty() {
+                                i += 1;
+                            }
+                            continue;
+                        }
                         let bname = sanitize_name(&bind.name);
                         let lval = self.local_lvalue(&bname);
                         // Both the if-fast-path and the cheap-path evaluate the
@@ -1059,6 +1087,7 @@ impl CodeGen {
                             }
                             self.cur_result_demand = saved_rd;
                         }
+                        i += 1;
                     }
                     expr = body;
                     continue;
@@ -1141,6 +1170,9 @@ impl CodeGen {
                 }
             }
             break;
+        }
+        if let Some(rows) = rows_scope {
+            rows.restore(self);
         }
         Block(stmts)
     }

@@ -980,8 +980,9 @@ Pattern matching is supported for function definitions, case blocks,
 and assignments. A monadic bind `pat <- action` accepts any pattern; a
 refutable one desugars with GHC's MonadFail-style fallback ("Pattern
 match failure in do expression at line:col"). Local-binding PARAMETERS
-(`let f (a, b) = e`, where-bindings) accept any pattern too, desugaring
-like pattern lambdas with the partial-function fallback. What remains
+(`let f (a, b) = e`, where-bindings) accept any pattern too, and a local
+function has as many equations as a top-level one, matched top to
+bottom with the partial-function fallback past the last. What remains
 out: a constructor pattern as the assignment LHS itself (`let Just x =
 m` — bind the value and match it with `case`, or use `Just x <- return
 m` in do). Constructor patterns in function definitions, case
@@ -1001,7 +1002,15 @@ The equations of one function follow each other directly. Another
 declaration between them, the function's own type signature included,
 ends the function, and a later equation for the same name is then a
 second definition — a compile error ("Multiple declarations"), like
-every other name a module declares twice in one namespace.
+every other name a module declares twice in one namespace. The same
+rule (Haskell 2010 §4.4.3.1) governs every local binding group — a
+`where` block, a let-expression, a do-`let`, a guard or comprehension
+`let`: adjacent equations of one name are one local function (its
+guards fall through to the next equation, and a mismatch past the last
+equation raises "Non-exhaustive patterns in <name>"), while a name a
+group binds twice, by two value bindings or by equations another
+binding separates, is "Conflicting definitions for 'x'" with both
+locations named.
 
 NOTE: The following distinction for assignments is aspirational and
 not yet implemented. We want to distinguish between "single-case
@@ -1126,10 +1135,12 @@ non-monadic one requires exhaustive pattern matching. The monadic one
 requires a single path, and will raise an exception if that path
 doesn't match.
 
-Note: as stated under Pattern matching, `let`/`where` bindings today
-accept only variable and tuple patterns, so the refutable-binding
+Note: as stated under Pattern matching, `let`/`where` pattern BINDINGS
+today accept only variable and tuple patterns, so the refutable-binding
 semantics above apply to those forms; constructor-pattern bindings are
-not yet parsed.
+not yet parsed. Local FUNCTIONS take any pattern, in as many equations
+as needed, with guards and a per-equation `where`, in `let` and `where`
+alike (see Pattern matching).
 
 # Lambda syntax
 

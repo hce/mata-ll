@@ -44,6 +44,45 @@ API of the `mllc` library crate.)
 
 ### Fixed
 
+- **A local function has all its equations, in `let` as in `where`**
+  (silent wrong output). A multi-equation function in a `let` or a
+  do-`let` kept only its LAST equation: `let f 0 = "zero"; f _ =
+  "other"` answered `other` for `f 0`, `let g True = "yes"; g False =
+  "no" in g True` raised "Non-exhaustive patterns in g", and a recursive
+  `let go 0 acc = acc; go n acc = go (n-1) (acc+n)` looped forever. GHC
+  gives `zero`, `yes` and the sum. Each equation was its own value
+  binding (one lambda with its own match-failure fallback), nothing
+  grouped the equations of one name, and the let group's inference
+  registered the name once per equation, so the last one won. Every
+  local binding group — `where`, let-expression, do-`let`, guard and
+  comprehension `let` — now takes one representation: equations are
+  grouped by name per Haskell 2010 §4.4.3.1 (adjacent, first takes
+  arguments), typed at one shared type and compiled as one clause
+  matrix, the where block's path; let-bound functions get the same
+  strictness rows and direct calls where-bound ones have.
+- **A guarded `where` (or `let`) equation falls through to the next
+  equation** (crash). `go x | x > 10 = "big"; go 0 = "zero"; go _ =
+  "other"` raised "non-exhaustive guards" for `go 0`: a guarded local
+  equation was lowered on its own, with the error as its fall-through,
+  before the following equations were read. Guards in local equations
+  now fall through exactly like top-level clauses (the join-point
+  lowering pattern-guard clause groups use), and only past the last
+  equation to the match-failure error. A local equation also takes its
+  own `where` block, scoping over its guards and body, as in Haskell.
+- **A `where`-bound FUNCTION is usable from a pattern guard** (rejected
+  valid program). `f m | Just x <- m = go x | otherwise = 0 where go y =
+  y + 1` failed with "Unbound variable: y": the pattern-guard lowering
+  placed the clause's where bindings in a `let`, whose pipeline ignored
+  a binding's parameters and typed `go` as the VALUE `y + 1`. The let
+  pipeline now handles parameters (the shared representation above).
+- **A name bound twice in one local group is rejected** (breaking for
+  programs that relied on it), as GHC does ("Conflicting definitions
+  for 'x'", both locations named): `let x = 1; x = 2 in x` and `where y
+  = 10; y = 20` used to compile and take the last binding, and so did
+  the equations of one function separated by another binding (the first
+  equations were dropped). Equations of one local function must also
+  take the same number of arguments ("Equations for 'f' have different
+  numbers of arguments"). The top-level rule, applied to local groups.
 - **Library traversals of long lists run in bounded Lua stack** (crash).
   `mapM (\x -> pure (x + 1)) [1 .. 5000]` overflowed the stack on LuaJIT
   (about 1.5e5 elements on Lua 5.5), and so did `sequence`, `traverse`

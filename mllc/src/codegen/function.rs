@@ -133,6 +133,35 @@ impl VarsSnapshot {
     }
 }
 
+/// Snapshot of the four scope-managed local-function maps alone, for a
+/// `let` group emitted inside an expression or a bind chain: the group's
+/// registrations (register_local_fn_groups) must not outlive the let's
+/// scope, while the enclosing Lua function scope — its locals, slots and
+/// concreteness — is managed by the enclosing emitter's own snapshot.
+pub(super) struct LocalRowsSnapshot {
+    local_strict_params: std::collections::HashMap<String, Vec<bool>>,
+    local_demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
+    local_inline_fns: std::collections::HashMap<String, (Vec<String>, crate::tir::TExpr)>,
+    local_fn_arity: std::collections::HashMap<String, usize>,
+}
+
+impl LocalRowsSnapshot {
+    pub(super) fn capture(cg: &CodeGen) -> Self {
+        LocalRowsSnapshot {
+            local_strict_params: cg.local_strict_params.clone(),
+            local_demand_rows: cg.local_demand_rows.clone(),
+            local_inline_fns: cg.local_inline_fns.clone(),
+            local_fn_arity: cg.local_fn_arity.clone(),
+        }
+    }
+    pub(super) fn restore(self, cg: &mut CodeGen) {
+        cg.local_strict_params = self.local_strict_params;
+        cg.local_demand_rows = self.local_demand_rows;
+        cg.local_inline_fns = self.local_inline_fns;
+        cg.local_fn_arity = self.local_fn_arity;
+    }
+}
+
 /// Narrow snapshot for the per-BRANCH loop of the plain (guard-free)
 /// value-position `case` emission, which registers pattern-bound names for
 /// reference resolution but makes no concreteness claims of its own. A
@@ -991,126 +1020,16 @@ impl CodeGen {
         // name first, then assigning, makes self- and mutual references resolve
         // to the locals.
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-        {
-            let mut i = 0;
-            while i < binds.len() {
-                let is_func = !binds[i].patterns.is_empty();
-                let sname = sanitize_name(&binds[i].name);
-                if !self.local_vars.contains(&sname) && seen.insert(sname.clone()) {
-                    stmts.extend(self.declare_local_fwd_stmts(&sname));
-                }
-                if is_func {
-                    // A where-bound function-group name holds a Lua function
-                    // from its group assignment on — never a thunk. Marking
-                    // it concrete here (before any body is emitted) lets
-                    // every call in the clause, including the group's own
-                    // mutually recursive bodies, skip the __force. Any
-                    // same-named VALUE binding in an inner scope re-decides
-                    // its own concreteness at assignment (where_value_stmt).
-                    self.concrete_vars.insert(sname);
-                    let name = &binds[i].name;
-                    while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
-                        i += 1;
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-        }
-
-        // Local functions in this where group get real strictness rows so
-        // every call site emitted within the clause — inside the group's own
-        // (mutually) recursive bodies, in sibling value bindings, and in the
-        // clause body/guards generated after this returns — passes strict
-        // arguments eagerly instead of allocating a thunk per call. Any
-        // where-bound NAME first shadows an outer row of the same name (a
-        // sibling value binding must not inherit an enclosing scope's row);
-        // the enclosing clause emitter restores the map at scope exit.
         for b in binds {
-            self.local_strict_params.remove(&b.name);
-            self.local_fn_arity.remove(&b.name);
-            self.local_inline_fns.remove(&b.name);
-        }
-        // Register each function group's emitted arity — patterns plus eta
-        // padding, the formula where_func_group_body_stmts emits — AFTER the
-        // shadow-removal loop above (which would otherwise delete these very
-        // entries) and before any body, so calls inside the group's own
-        // recursive bodies split correctly too (see `local_fn_arity`).
-        {
-            let mut i = 0;
-            while i < binds.len() {
-                if !binds[i].patterns.is_empty() {
-                    self.local_fn_arity.insert(
-                        binds[i].name.clone(),
-                        binds[i].patterns.len() + count_arrows(&binds[i].body.ty),
-                    );
-                    let name = &binds[i].name;
-                    while i < binds.len() && binds[i].name == *name && !binds[i].patterns.is_empty() {
-                        i += 1;
-                    }
-                } else {
-                    i += 1;
-                }
+            let sname = sanitize_name(&b.name);
+            if !self.local_vars.contains(&sname) && seen.insert(sname.clone()) {
+                stmts.extend(self.declare_local_fwd_stmts(&sname));
             }
         }
-        let local_rows =
-            crate::demand::local_fn_strict_params(clause, &self.demand_info.strict_params, &|n| self.is_local_shadowed(n));
-        self.local_strict_params.extend(local_rows);
-        // Where-local inline candidates for the fused-pipeline inliner:
-        // the same shape find_inline_candidates admits at module level
-        // (single definition, simple parameters, cheap non-recursive
-        // body, no remaining arrows), plus a no-environment gate — the
-        // body may reference only its parameters and names that are NOT
-        // local here (module-level resolution survives relocation into
-        // the loop; module names are re-checked against site shadowing
-        // at the use). The forward declarations above have already
-        // registered every where name and the clause's own parameters
-        // are locals too, so a reference to a sibling binding or an
-        // enclosing local declines by this one membership test.
-        {
-            let mut i = 0;
-            while i < binds.len() {
-                if binds[i].patterns.is_empty() {
-                    i += 1;
-                    continue;
-                }
-                let name = binds[i].name.clone();
-                let gstart = i;
-                while i < binds.len() && binds[i].name == name && !binds[i].patterns.is_empty() {
-                    i += 1;
-                }
-                if i - gstart != 1 {
-                    continue;
-                }
-                let b = &binds[gstart];
-                if !b.patterns.iter().all(|p| matches!(p, TPattern::Var(_, _)))
-                    || count_arrows(&b.body.ty) != 0
-                    || !Self::is_cheap(&b.body)
-                    || expr_references_name(&b.body, &name)
-                {
-                    continue;
-                }
-                let params: Vec<String> = b
-                    .patterns
-                    .iter()
-                    .map(|p| {
-                        if let TPattern::Var(n, _) = p { n.clone() } else { unreachable!() }
-                    })
-                    .collect();
-                let mut fv = std::collections::HashSet::new();
-                Self::collect_var_refs(&b.body, &mut fv);
-                if fv.iter().any(|v| {
-                    !params.contains(v) && self.local_vars.contains(&sanitize_name(v))
-                }) {
-                    continue;
-                }
-                self.local_inline_fns.insert(name, (params, b.body.clone()));
-            }
-        }
-        // Structured twin: install the clause's demand rows before the
-        // demanded_bindings closure below, so a sibling RHS that routes
-        // demand through a local function is seen (see local_demand_rows).
-        self.local_demand_rows = self.clause_local_rows(clause);
+        let strict_rows = crate::demand::local_fn_strict_params(
+            clause, &self.demand_info.strict_params, &|n| self.is_local_shadowed(n));
+        let demand_rows = self.clause_local_rows(clause);
+        self.register_local_fn_groups(binds, strict_rows, demand_rows);
 
         // Close the demand seed over sibling RHSes: if the body demands z and
         // z's RHS demands y, y is demanded too (see demanded_bindings).
@@ -1143,6 +1062,100 @@ impl CodeGen {
             }
         }
         stmts
+    }
+
+    /// Open a binding group's local-FUNCTION scope: the registrations every
+    /// call site emitted within the scope relies on, shared by the where
+    /// emitter and the two let emitters (a let group's function bindings
+    /// are the same adjacent-equation groups a where block has — one
+    /// representation, one emitter). Runs after the group's names are
+    /// forward-declared and before any body is emitted, so the group's own
+    /// (mutually) recursive bodies, sibling value bindings and the scope's
+    /// body all see the same facts:
+    ///
+    /// * a function-group name holds a Lua function from its group
+    ///   assignment on — never a thunk — so it is marked concrete and
+    ///   every call skips the __force (a same-named VALUE binding in an
+    ///   inner scope re-decides its own concreteness at assignment);
+    /// * every bound NAME first shadows an enclosing scope's rows of the
+    ///   same name (a sibling value binding must not inherit them);
+    /// * each group's emitted arity — patterns plus eta padding, the
+    ///   formula where_func_group_body_stmts emits — is registered so
+    ///   calls split correctly (see `local_fn_arity`), including the
+    ///   calls inside the group's own recursive bodies;
+    /// * `strict_rows` / `demand_rows` (demand::local_fn_strict_params and
+    ///   its structured twin, computed by the caller over its own scope
+    ///   shape) are installed, so every call emitted in the scope passes
+    ///   strict arguments eagerly instead of allocating a thunk per call;
+    /// * single-definition, simple-parameter, cheap, non-recursive groups
+    ///   whose body references only their parameters and module-level
+    ///   names become fused-pipeline inline candidates (the shape
+    ///   find_inline_candidates admits at module level, plus the
+    ///   no-environment gate: a body that reads a sibling binding or an
+    ///   enclosing local would need scope tracking its consumer does not
+    ///   have; the forward declarations have registered every group name
+    ///   and the enclosing locals are registered too, so one membership
+    ///   test in `local_vars` declines them).
+    ///
+    /// The caller restores the four maps at its scope exit (ScopeSnapshot
+    /// or LocalRowsSnapshot), so nothing registered here outlives the
+    /// group's lexical scope.
+    pub(super) fn register_local_fn_groups(
+        &mut self,
+        binds: &[TLocalDef],
+        strict_rows: std::collections::HashMap<String, Vec<bool>>,
+        demand_rows: std::collections::HashMap<String, crate::demand::LocalRows>,
+    ) {
+        for b in binds {
+            self.local_strict_params.remove(&b.name);
+            self.local_fn_arity.remove(&b.name);
+            self.local_inline_fns.remove(&b.name);
+        }
+        let mut i = 0;
+        while i < binds.len() {
+            if binds[i].patterns.is_empty() {
+                i += 1;
+                continue;
+            }
+            let name = binds[i].name.clone();
+            let gstart = i;
+            while i < binds.len() && binds[i].name == name && !binds[i].patterns.is_empty() {
+                i += 1;
+            }
+            self.concrete_vars.insert(sanitize_name(&name));
+            self.local_fn_arity.insert(
+                name.clone(),
+                binds[gstart].patterns.len() + count_arrows(&binds[gstart].body.ty),
+            );
+            if i - gstart != 1 {
+                continue;
+            }
+            let b = &binds[gstart];
+            if !b.patterns.iter().all(|p| matches!(p, TPattern::Var(_, _)))
+                || count_arrows(&b.body.ty) != 0
+                || !Self::is_cheap(&b.body)
+                || expr_references_name(&b.body, &name)
+            {
+                continue;
+            }
+            let params: Vec<String> = b
+                .patterns
+                .iter()
+                .map(|p| {
+                    if let TPattern::Var(n, _) = p { n.clone() } else { unreachable!() }
+                })
+                .collect();
+            let mut fv = std::collections::HashSet::new();
+            Self::collect_var_refs(&b.body, &mut fv);
+            if fv.iter().any(|v| {
+                !params.contains(v) && self.local_vars.contains(&sanitize_name(v))
+            }) {
+                continue;
+            }
+            self.local_inline_fns.insert(name, (params, b.body.clone()));
+        }
+        self.local_strict_params.extend(strict_rows);
+        self.local_demand_rows = demand_rows;
     }
 
     pub(super) fn where_value_stmt(
@@ -1263,6 +1276,11 @@ impl CodeGen {
         // every where-group, so the marks — and the parameter locals the
         // body registers — must not outlive this one.
         let scope = VarsSnapshot::capture(self);
+        // This group's match fall-off names the function (see
+        // `local_fn_fall_off`); saved and restored because the group's
+        // matrix may itself sit inside an enclosing clause matrix.
+        let saved_fall_off =
+            std::mem::replace(&mut self.local_fn_fall_off, Some(name.clone()));
         // The where-group function is its own Lua function scope: its
         // locals must spill into its OWN per-invocation table, never the
         // enclosing function's (a recursive call would clobber its
@@ -1347,6 +1365,7 @@ impl CodeGen {
             body.extend(self.pattern_match_block(&params, &clauses).0);
             self.clause_eta_params = saved_eta;
         }
+        self.local_fn_fall_off = saved_fall_off;
         spill.exit(self);
         scope.restore(self);
 
